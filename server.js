@@ -1,7 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const dns = require('dns');
 require('dotenv').config();
+
+// Forçar DNS para IPv4
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 const port = process.env.PORT || 3001;
