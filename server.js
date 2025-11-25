@@ -132,6 +132,30 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+// Resetar senha de usuário (apenas admin)
+app.post('/api/users/reset-password', async (req, res) => {
+  try {
+    const { codProfissional, newPassword } = req.body;
+
+    console.log('🔑 Resetando senha para:', codProfissional);
+
+    const result = await pool.query(
+      'UPDATE users SET password = $1 WHERE LOWER(cod_profissional) = LOWER($2) RETURNING id, cod_profissional, full_name',
+      [newPassword, codProfissional]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    console.log('✅ Senha resetada:', result.rows[0]);
+    res.json({ message: 'Senha alterada com sucesso', user: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao resetar senha:', error);
+    res.status(500).json({ error: 'Erro ao resetar senha: ' + error.message });
+  }
+});
+
 // SUBMISSÕES
 // Criar submissão
 app.post('/api/submissions', async (req, res) => {
