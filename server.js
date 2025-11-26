@@ -261,3 +261,4 @@ app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`🔗 API: http://localhost:${port}/api/health`);
 });
+
