@@ -161,14 +161,30 @@ app.post('/api/users/reset-password', async (req, res) => {
 // Criar submissão
 app.post('/api/submissions', async (req, res) => {
   try {
-    const { ordemServico, motivo, userId, userCod, userName, imagemComprovante, coordenadas } = req.body;
+    const { ordemServico, motivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas } = req.body;
+
+    console.log('📝 Criando submissão:', {
+      ordemServico,
+      userId,
+      temImagemAntiga: !!imagemComprovante,
+      temImagensNovas: !!imagens,
+      tamanhoImagens: imagens ? imagens.length : 0
+    });
 
     const result = await pool.query(
-      `INSERT INTO submissions (ordem_servico, motivo, status, user_id, user_cod, user_name, imagem_comprovante, coordenadas, created_at) 
-       VALUES ($1, $2, 'pendente', $3, $4, $5, $6, $7, NOW()) 
+      `INSERT INTO submissions 
+       (ordem_servico, motivo, status, user_id, user_cod, user_name, 
+        imagem_comprovante, imagens, coordenadas, created_at) 
+       VALUES ($1, $2, 'pendente', $3, $4, $5, $6, $7, $8, NOW()) 
        RETURNING *`,
-      [ordemServico, motivo, userId, userCod, userName, imagemComprovante, coordenadas]
+      [ordemServico, motivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas]
     );
+
+    console.log('✅ Submissão criada:', {
+      id: result.rows[0].id,
+      ordem_servico: result.rows[0].ordem_servico,
+      temImagens: !!result.rows[0].imagens
+    });
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -182,15 +198,41 @@ app.get('/api/submissions', async (req, res) => {
   try {
     const { userId, userCod } = req.query;
 
-    let query = 'SELECT * FROM submissions ORDER BY created_at DESC';
+    let query = `
+      SELECT 
+        id, ordem_servico, motivo, status, 
+        user_id, user_cod, user_name,
+        imagem_comprovante, imagens,
+        coordenadas, observacao, 
+        created_at, updated_at
+      FROM submissions 
+      ORDER BY created_at DESC
+    `;
     let params = [];
 
     if (userId && userId !== '0') {
-      query = 'SELECT * FROM submissions WHERE user_cod = $1 ORDER BY created_at DESC';
+      query = `
+        SELECT 
+          id, ordem_servico, motivo, status, 
+          user_id, user_cod, user_name,
+          imagem_comprovante, imagens,
+          coordenadas, observacao, 
+          created_at, updated_at
+        FROM submissions 
+        WHERE user_cod = $1 
+        ORDER BY created_at DESC
+      `;
       params = [userCod];
     }
 
     const result = await pool.query(query, params);
+    
+    console.log('📋 Listando submissões:', {
+      total: result.rows.length,
+      comImagens: result.rows.filter(r => r.imagens).length,
+      comImagemAntiga: result.rows.filter(r => r.imagem_comprovante).length
+    });
+
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar submissões:', error);
@@ -262,4 +304,3 @@ app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`🔗 API: http://localhost:${port}/api/health`);
 });
-
