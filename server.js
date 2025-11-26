@@ -157,6 +157,30 @@ app.post('/api/users/reset-password', async (req, res) => {
   }
 });
 
+// Deletar usuário (apenas admin)
+app.delete('/api/users/:codProfissional', async (req, res) => {
+  try {
+    const { codProfissional } = req.params;
+
+    console.log('🗑️ Deletando usuário:', codProfissional);
+
+    const result = await pool.query(
+      'DELETE FROM users WHERE LOWER(cod_profissional) = LOWER($1) RETURNING *',
+      [codProfissional]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    console.log('✅ Usuário deletado:', result.rows[0].full_name);
+    res.json({ message: 'Usuário excluído com sucesso', deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao deletar usuário:', error);
+    res.status(500).json({ error: 'Erro ao deletar usuário: ' + error.message });
+  }
+});
+
 // SUBMISSÕES
 // Criar submissão
 app.post('/api/submissions', async (req, res) => {
@@ -259,6 +283,30 @@ app.patch('/api/submissions/:id', async (req, res) => {
   } catch (error) {
     console.error('❌ Erro ao atualizar submissão:', error);
     res.status(500).json({ error: 'Erro ao atualizar submissão: ' + error.message });
+  }
+});
+
+// Deletar submissão
+app.delete('/api/submissions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log('🗑️ Deletando submissão:', id);
+
+    const result = await pool.query(
+      'DELETE FROM submissions WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Submissão não encontrada' });
+    }
+
+    console.log('✅ Submissão deletada:', result.rows[0].ordem_servico);
+    res.json({ message: 'Submissão excluída com sucesso', deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao deletar submissão:', error);
+    res.status(500).json({ error: 'Erro ao deletar submissão: ' + error.message });
   }
 });
 
