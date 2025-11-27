@@ -49,9 +49,9 @@ app.get('/api/health', (req, res) => {
 // Registrar novo usuário
 app.post('/api/users/register', async (req, res) => {
   try {
-    const { codProfissional, password, fullName } = req.body;
+    const { codProfissional, password, fullName, role } = req.body;
 
-    console.log('📝 Tentando registrar:', { codProfissional, fullName });
+    console.log('📝 Tentando registrar:', { codProfissional, fullName, role });
 
     // Verificar se usuário já existe
     const existingUser = await pool.query(
@@ -64,12 +64,13 @@ app.post('/api/users/register', async (req, res) => {
       return res.status(400).json({ error: 'Código profissional já cadastrado' });
     }
 
-    // Inserir novo usuário
+    // Inserir novo usuário (role pode ser 'user' ou 'admin')
+    const userRole = role === 'admin' ? 'admin' : 'user';
     const result = await pool.query(
       `INSERT INTO users (cod_profissional, password, full_name, role, created_at) 
-       VALUES ($1, $2, $3, 'user', NOW()) 
+       VALUES ($1, $2, $3, $4, NOW()) 
        RETURNING id, cod_profissional, full_name, role, created_at`,
-      [codProfissional, password, fullName]
+      [codProfissional, password, fullName, userRole]
     );
 
     console.log('✅ Usuário registrado:', result.rows[0]);
@@ -124,7 +125,7 @@ app.post('/api/users/login', async (req, res) => {
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, created_at FROM users ORDER BY created_at DESC'
+      'SELECT id, cod_profissional, full_name, role, created_at FROM users ORDER BY created_at DESC'
     );
     res.json(result.rows);
   } catch (error) {
@@ -227,7 +228,8 @@ app.get('/api/submissions', async (req, res) => {
         id, ordem_servico, motivo, status, 
         user_id, user_cod, user_name,
         imagem_comprovante, imagens,
-        coordenadas, observacao, 
+        coordenadas, observacao,
+        validated_by, validated_by_name,
         created_at, updated_at
       FROM submissions 
       ORDER BY created_at DESC
@@ -240,7 +242,8 @@ app.get('/api/submissions', async (req, res) => {
           id, ordem_servico, motivo, status, 
           user_id, user_cod, user_name,
           imagem_comprovante, imagens,
-          coordenadas, observacao, 
+          coordenadas, observacao,
+          validated_by, validated_by_name,
           created_at, updated_at
         FROM submissions 
         WHERE user_cod = $1 
@@ -268,16 +271,31 @@ app.get('/api/submissions', async (req, res) => {
 app.patch('/api/submissions/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, observacao } = req.body;
+    const { status, observacao, validatedBy, validatedByName } = req.body;
+
+    console.log('✏️ Atualizando submissão:', { id, status, validatedBy, validatedByName });
 
     const result = await pool.query(
-      'UPDATE submissions SET status = $1, observacao = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
-      [status, observacao || '', id]
+      `UPDATE submissions 
+       SET status = $1, 
+           observacao = $2, 
+           validated_by = $3, 
+           validated_by_name = $4, 
+           updated_at = NOW() 
+       WHERE id = $5 
+       RETURNING *`,
+      [status, observacao || '', validatedBy || null, validatedByName || null, id]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Submissão não encontrada' });
     }
+
+    console.log('✅ Submissão atualizada:', {
+      id: result.rows[0].id,
+      status: result.rows[0].status,
+      validatedBy: result.rows[0].validated_by_name
+    });
 
     res.json(result.rows[0]);
   } catch (error) {
