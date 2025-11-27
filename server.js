@@ -227,7 +227,6 @@ app.get('/api/submissions', async (req, res) => {
       SELECT 
         id, ordem_servico, motivo, status, 
         user_id, user_cod, user_name,
-        imagem_comprovante, imagens,
         coordenadas, observacao,
         validated_by, validated_by_name,
         created_at, updated_at
@@ -241,7 +240,6 @@ app.get('/api/submissions', async (req, res) => {
         SELECT 
           id, ordem_servico, motivo, status, 
           user_id, user_cod, user_name,
-          imagem_comprovante, imagens,
           coordenadas, observacao,
           validated_by, validated_by_name,
           created_at, updated_at
@@ -264,6 +262,33 @@ app.get('/api/submissions', async (req, res) => {
   } catch (error) {
     console.error('❌ Erro ao listar submissões:', error);
     res.status(500).json({ error: 'Erro ao listar submissões: ' + error.message });
+  }
+});
+
+// Buscar imagens de uma submissão específica (otimização de banda)
+app.get('/api/submissions/:id/images', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log('📸 Buscando imagens da OS:', id);
+    
+    const result = await pool.query(
+      'SELECT imagens, imagem_comprovante FROM submissions WHERE id = $1',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Submissão não encontrada' });
+    }
+    
+    console.log('✅ Imagens encontradas');
+    res.json({
+      imagens: result.rows[0].imagens || [],
+      imagemComprovante: result.rows[0].imagem_comprovante
+    });
+  } catch (error) {
+    console.error('❌ Erro ao buscar imagens:', error);
+    res.status(500).json({ error: 'Erro ao buscar imagens: ' + error.message });
   }
 });
 
