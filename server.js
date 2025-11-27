@@ -265,75 +265,8 @@ app.get('/api/submissions', async (req, res) => {
   }
 });
 
-// Buscar imagens de uma submissão específica (otimização de banda)
-app.get('/api/submissions/:id/images', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    console.log('\n========================================');
-    console.log('📸 REQUISIÇÃO DE IMAGENS - OS:', id);
-    console.log('========================================');
-    
-    const result = await pool.query(
-      'SELECT imagens, imagem_comprovante FROM submissions WHERE id = $1',
-      [id]
-    );
-    
-    if (result.rows.length === 0) {
-      console.log('❌ OS não encontrada');
-      return res.status(404).json({ error: 'Submissão não encontrada' });
-    }
-    
-    const row = result.rows[0];
-    
-    console.log('\n📋 DADOS BRUTOS DO BANCO:');
-    console.log('- Tipo de imagens:', typeof row.imagens);
-    console.log('- É null?', row.imagens === null);
-    console.log('- É undefined?', row.imagens === undefined);
-    console.log('- É array?', Array.isArray(row.imagens));
-    console.log('- É string?', typeof row.imagens === 'string');
-    
-    if (row.imagens) {
-      console.log('\n🔍 CONTEÚDO:');
-      const preview = String(row.imagens).substring(0, 100);
-      console.log('- Primeiros 100 chars:', preview);
-      console.log('- Length total:', String(row.imagens).length);
-      
-      if (typeof row.imagens === 'string') {
-        console.log('- Contém vírgula?', row.imagens.includes(','));
-        const parts = row.imagens.split(',');
-        console.log('- Split por vírgula:', parts.length, 'partes');
-        console.log('- Primeira parte length:', parts[0] ? parts[0].length : 0);
-        console.log('- Primeira parte preview:', parts[0] ? parts[0].substring(0, 50) : 'N/A');
-      }
-    }
-    
-    // SEM FILTROS - retornar EXATAMENTE o que vem do banco
-    let imagensArray = [];
-    
-    if (row.imagens) {
-      if (typeof row.imagens === 'string') {
-        // String → Array (SEM filtros)
-        imagensArray = row.imagens.split(',').map(img => img.trim());
-        console.log('\n✅ Convertido para array:', imagensArray.length, 'elementos');
-      } else if (Array.isArray(row.imagens)) {
-        imagensArray = row.imagens;
-        console.log('\n✅ Já era array:', imagensArray.length, 'elementos');
-      }
-    }
-    
-    console.log('\n📤 RETORNANDO:', imagensArray.length, 'imagens');
-    console.log('========================================\n');
-    
-    res.json({
-      imagens: imagensArray,
-      imagemComprovante: row.imagem_comprovante || null
-    });
-  } catch (error) {
-    console.error('❌ Erro ao buscar imagens:', error);
-    res.status(500).json({ error: 'Erro ao buscar imagens: ' + error.message });
-  }
-});
+// ❌ ENDPOINT REMOVIDO - Imagens agora são carregadas inline na listagem
+// Não é mais necessário endpoint separado pois voltamos ao modelo simples
 
 // Atualizar status da submissão
 app.patch('/api/submissions/:id', async (req, res) => {
