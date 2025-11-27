@@ -284,21 +284,33 @@ app.get('/api/submissions/:id/images', async (req, res) => {
     const row = result.rows[0];
     let imagensArray = [];
     
-    // Converter string CSV em array (se necessário)
+    // Converter string CSV em array
     if (row.imagens) {
       if (typeof row.imagens === 'string') {
-        // Se for string, split por vírgula
-        imagensArray = row.imagens.split(',').filter(img => img.trim());
+        // String CSV → Array
+        // Remove espaços e filtra strings vazias
+        imagensArray = row.imagens
+          .split(',')
+          .map(img => img.trim())
+          .filter(img => img.length > 0 && img.startsWith('data:image'));
+        
+        console.log('🔄 Convertido string→array:', imagensArray.length, 'imagens');
       } else if (Array.isArray(row.imagens)) {
-        // Se já for array, usar direto
-        imagensArray = row.imagens;
+        // Já é array
+        imagensArray = row.imagens.filter(img => img && img.startsWith('data:image'));
+        console.log('✅ Já era array:', imagensArray.length, 'imagens');
+      } else {
+        console.log('⚠️ Tipo desconhecido:', typeof row.imagens);
       }
+    } else {
+      console.log('⚠️ Nenhuma imagem encontrada (null/undefined)');
     }
     
-    console.log('✅ Imagens encontradas:', imagensArray.length);
+    console.log('📤 Retornando:', imagensArray.length, 'imagens válidas');
+    
     res.json({
       imagens: imagensArray,
-      imagemComprovante: row.imagem_comprovante
+      imagemComprovante: row.imagem_comprovante || null
     });
   } catch (error) {
     console.error('❌ Erro ao buscar imagens:', error);
