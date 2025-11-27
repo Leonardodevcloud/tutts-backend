@@ -284,20 +284,24 @@ app.get('/api/submissions/:id/images', async (req, res) => {
     const row = result.rows[0];
     let imagensArray = [];
     
+    console.log('🔍 DEBUG - Tipo de imagens:', typeof row.imagens);
+    console.log('🔍 DEBUG - Primeiros 200 chars:', row.imagens ? String(row.imagens).substring(0, 200) : 'null');
+    
     // Converter string CSV em array
     if (row.imagens) {
       if (typeof row.imagens === 'string') {
         // String CSV → Array
-        // Remove espaços e filtra strings vazias
-        imagensArray = row.imagens
-          .split(',')
+        const parts = row.imagens.split(',');
+        console.log('🔍 DEBUG - Split resultou em', parts.length, 'partes');
+        
+        imagensArray = parts
           .map(img => img.trim())
-          .filter(img => img.length > 0 && img.startsWith('data:image'));
+          .filter(img => img.length > 50); // Imagens base64 são grandes
         
         console.log('🔄 Convertido string→array:', imagensArray.length, 'imagens');
       } else if (Array.isArray(row.imagens)) {
         // Já é array
-        imagensArray = row.imagens.filter(img => img && img.startsWith('data:image'));
+        imagensArray = row.imagens.filter(img => img && img.length > 50);
         console.log('✅ Já era array:', imagensArray.length, 'imagens');
       } else {
         console.log('⚠️ Tipo desconhecido:', typeof row.imagens);
@@ -306,7 +310,7 @@ app.get('/api/submissions/:id/images', async (req, res) => {
       console.log('⚠️ Nenhuma imagem encontrada (null/undefined)');
     }
     
-    console.log('📤 Retornando:', imagensArray.length, 'imagens válidas');
+    console.log('📤 Retornando:', imagensArray.length, 'imagens');
     
     res.json({
       imagens: imagensArray,
