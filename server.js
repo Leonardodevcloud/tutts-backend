@@ -281,10 +281,24 @@ app.get('/api/submissions/:id/images', async (req, res) => {
       return res.status(404).json({ error: 'Submissão não encontrada' });
     }
     
-    console.log('✅ Imagens encontradas');
+    const row = result.rows[0];
+    let imagensArray = [];
+    
+    // Converter string CSV em array (se necessário)
+    if (row.imagens) {
+      if (typeof row.imagens === 'string') {
+        // Se for string, split por vírgula
+        imagensArray = row.imagens.split(',').filter(img => img.trim());
+      } else if (Array.isArray(row.imagens)) {
+        // Se já for array, usar direto
+        imagensArray = row.imagens;
+      }
+    }
+    
+    console.log('✅ Imagens encontradas:', imagensArray.length);
     res.json({
-      imagens: result.rows[0].imagens || [],
-      imagemComprovante: result.rows[0].imagem_comprovante
+      imagens: imagensArray,
+      imagemComprovante: row.imagem_comprovante
     });
   } catch (error) {
     console.error('❌ Erro ao buscar imagens:', error);
