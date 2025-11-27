@@ -35,8 +35,18 @@ pool.query('SELECT NOW()', (err, res) => {
   }
 });
 
-// Middlewares
-app.use(cors());
+// Middlewares - CORS configurado
+const corsOptions = {
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://tutts.vercel.app',
+    'https://tutts-frontend.vercel.app'
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
