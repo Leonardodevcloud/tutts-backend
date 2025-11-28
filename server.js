@@ -237,6 +237,7 @@ app.get('/api/submissions', async (req, res) => {
       SELECT 
         id, ordem_servico, motivo, status, 
         user_id, user_cod, user_name,
+        imagem_comprovante,
         coordenadas, observacao,
         validated_by, validated_by_name,
         created_at, updated_at
@@ -250,6 +251,7 @@ app.get('/api/submissions', async (req, res) => {
         SELECT 
           id, ordem_servico, motivo, status, 
           user_id, user_cod, user_name,
+          imagem_comprovante,
           coordenadas, observacao,
           validated_by, validated_by_name,
           created_at, updated_at
