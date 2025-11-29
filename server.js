@@ -101,6 +101,14 @@ async function createTables() {
       // Coluna já existe ou outro erro
     }
 
+    // Garantir que a coluna reject_reason existe (migração)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS reject_reason TEXT`);
+      console.log('✅ Coluna reject_reason verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Tabela de gratuidades
     await pool.query(`
       CREATE TABLE IF NOT EXISTS gratuities (
@@ -732,14 +740,14 @@ app.get('/api/withdrawals', async (req, res) => {
 app.patch('/api/withdrawals/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, adminId, adminName } = req.body;
+    const { status, adminId, adminName, rejectReason } = req.body;
 
     const result = await pool.query(
       `UPDATE withdrawal_requests 
-       SET status = $1, admin_id = $2, admin_name = $3, updated_at = NOW() 
-       WHERE id = $4 
+       SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, updated_at = NOW() 
+       WHERE id = $5 
        RETURNING *`,
-      [status, adminId, adminName, id]
+      [status, adminId, adminName, rejectReason || null, id]
     );
 
     if (result.rows.length === 0) {
