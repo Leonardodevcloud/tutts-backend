@@ -109,6 +109,14 @@ async function createTables() {
       // Coluna já existe ou outro erro
     }
 
+    // Garantir que a coluna debito_at existe (migração)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS debito_at TIMESTAMP`);
+      console.log('✅ Coluna debito_at verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Tabela de gratuidades
     await pool.query(`
       CREATE TABLE IF NOT EXISTS gratuities (
@@ -802,6 +810,32 @@ app.patch('/api/withdrawals/:id/conciliacao', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar conciliação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar débito com data/hora
+app.patch('/api/withdrawals/:id/debito', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { debito, debitoAt } = req.body;
+
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET debito = $1, debito_at = $2, updated_at = NOW() 
+       WHERE id = $3 
+       RETURNING *`,
+      [debito, debitoAt, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Saque não encontrado' });
+    }
+
+    console.log('💳 Débito atualizado:', id, debito, debitoAt);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar débito:', error);
     res.status(500).json({ error: error.message });
   }
 });
