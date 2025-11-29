@@ -93,6 +93,14 @@ async function createTables() {
     `);
     console.log('✅ Tabela withdrawal_requests verificada');
 
+    // Garantir que a coluna admin_name existe (migração)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS admin_name VARCHAR(255)`);
+      console.log('✅ Coluna admin_name verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Tabela de gratuidades
     await pool.query(`
       CREATE TABLE IF NOT EXISTS gratuities (
