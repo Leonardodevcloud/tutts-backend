@@ -761,6 +761,28 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
   }
 });
 
+// Excluir saque
+app.delete('/api/withdrawals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Saque não encontrado' });
+    }
+
+    console.log('🗑️ Saque excluído:', id);
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao excluir saque:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Atualizar conciliação/débito
 app.patch('/api/withdrawals/:id/conciliacao', async (req, res) => {
   try {
