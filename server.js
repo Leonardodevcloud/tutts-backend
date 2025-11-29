@@ -228,7 +228,7 @@ app.post('/api/submissions', async (req, res) => {
   }
 });
 
-// Listar todas as submissões
+// Listar todas as submissões (SEM imagens para otimizar performance)
 app.get('/api/submissions', async (req, res) => {
   try {
     const { userId, userCod } = req.query;
@@ -237,7 +237,8 @@ app.get('/api/submissions', async (req, res) => {
       SELECT 
         id, ordem_servico, motivo, status, 
         user_id, user_cod, user_name,
-        imagem_comprovante,
+        CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
+        LENGTH(imagem_comprovante) as tamanho_imagem,
         coordenadas, observacao,
         validated_by, validated_by_name,
         created_at, updated_at
@@ -251,7 +252,8 @@ app.get('/api/submissions', async (req, res) => {
         SELECT 
           id, ordem_servico, motivo, status, 
           user_id, user_cod, user_name,
-          imagem_comprovante,
+          CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
+          LENGTH(imagem_comprovante) as tamanho_imagem,
           coordenadas, observacao,
           validated_by, validated_by_name,
           created_at, updated_at
@@ -264,10 +266,9 @@ app.get('/api/submissions', async (req, res) => {
 
     const result = await pool.query(query, params);
     
-    console.log('📋 Listando submissões:', {
+    console.log('📋 Listando submissões (otimizado):', {
       total: result.rows.length,
-      comImagens: result.rows.filter(r => r.imagens).length,
-      comImagemAntiga: result.rows.filter(r => r.imagem_comprovante).length
+      comImagens: result.rows.filter(r => r.tem_imagem).length
     });
 
     res.json(result.rows);
@@ -277,8 +278,28 @@ app.get('/api/submissions', async (req, res) => {
   }
 });
 
-// ❌ ENDPOINT REMOVIDO - Imagens agora são carregadas inline na listagem
-// Não é mais necessário endpoint separado pois voltamos ao modelo simples
+// Buscar imagem de uma submissão específica (lazy loading)
+app.get('/api/submissions/:id/imagem', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log('🖼️ Buscando imagem da submissão:', id);
+
+    const result = await pool.query(
+      'SELECT imagem_comprovante FROM submissions WHERE id = $1',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Submissão não encontrada' });
+    }
+
+    res.json({ imagem: result.rows[0].imagem_comprovante });
+  } catch (error) {
+    console.error('❌ Erro ao buscar imagem:', error);
+    res.status(500).json({ error: 'Erro ao buscar imagem: ' + error.message });
+  }
+});
 
 // Atualizar status da submissão
 app.patch('/api/submissions/:id', async (req, res) => {
