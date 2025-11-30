@@ -48,6 +48,7 @@ async function createTables() {
         full_name VARCHAR(255) NOT NULL,
         cpf VARCHAR(14) NOT NULL,
         pix_key VARCHAR(255) NOT NULL,
+        pix_tipo VARCHAR(20) DEFAULT 'cpf',
         terms_accepted BOOLEAN DEFAULT FALSE,
         terms_accepted_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW(),
@@ -55,6 +56,11 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela user_financial_data verificada');
+    
+    // Adicionar coluna pix_tipo se não existir
+    await pool.query(`
+      ALTER TABLE user_financial_data ADD COLUMN IF NOT EXISTS pix_tipo VARCHAR(20) DEFAULT 'cpf'
+    `).catch(() => {});
 
     // Tabela de logs de alterações financeiras
     await pool.query(`
@@ -780,7 +786,7 @@ app.get('/api/financial/data/:userCod', async (req, res) => {
 // Salvar/Atualizar dados financeiros
 app.post('/api/financial/data', async (req, res) => {
   try {
-    const { userCod, fullName, cpf, pixKey } = req.body;
+    const { userCod, fullName, cpf, pixKey, pixTipo } = req.body;
     
     // Verificar se já existe
     const existing = await pool.query(
@@ -793,9 +799,9 @@ app.post('/api/financial/data', async (req, res) => {
       
       await pool.query(
         `UPDATE user_financial_data 
-         SET full_name = $1, cpf = $2, pix_key = $3, updated_at = NOW() 
-         WHERE user_cod = $4`,
-        [fullName, cpf, pixKey, userCod]
+         SET full_name = $1, cpf = $2, pix_key = $3, pix_tipo = $4, updated_at = NOW() 
+         WHERE user_cod = $5`,
+        [fullName, cpf, pixKey, pixTipo || 'cpf', userCod]
       );
 
       // Log de alterações
@@ -819,9 +825,9 @@ app.post('/api/financial/data', async (req, res) => {
       }
     } else {
       await pool.query(
-        `INSERT INTO user_financial_data (user_cod, full_name, cpf, pix_key, terms_accepted) 
-         VALUES ($1, $2, $3, $4, true)`,
-        [userCod, fullName, cpf, pixKey]
+        `INSERT INTO user_financial_data (user_cod, full_name, cpf, pix_key, pix_tipo, terms_accepted) 
+         VALUES ($1, $2, $3, $4, $5, true)`,
+        [userCod, fullName, cpf, pixKey, pixTipo || 'cpf']
       );
 
       await pool.query(
