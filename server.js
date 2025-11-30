@@ -147,6 +147,66 @@ async function createTables() {
     `);
     console.log('✅ Tabela restricted_professionals verificada');
 
+    // Tabela de solicitações de recuperação de senha
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_recovery (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        status VARCHAR(20) DEFAULT 'pendente',
+        new_password VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        resolved_at TIMESTAMP,
+        resolved_by VARCHAR(255)
+      )
+    `);
+    console.log('✅ Tabela password_recovery verificada');
+
+    // Tabela de promoções de indicação
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS promocoes_indicacao (
+        id SERIAL PRIMARY KEY,
+        regiao VARCHAR(255) NOT NULL,
+        valor_bonus DECIMAL(10,2) NOT NULL,
+        detalhes TEXT,
+        status VARCHAR(20) DEFAULT 'ativa',
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela promocoes_indicacao verificada');
+
+    // Migração: adicionar coluna detalhes se não existir
+    try {
+      await pool.query(`ALTER TABLE promocoes_indicacao ADD COLUMN IF NOT EXISTS detalhes TEXT`);
+      console.log('✅ Coluna detalhes verificada');
+    } catch (e) {
+      // Coluna já existe
+    }
+
+    // Tabela de indicações dos usuários
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS indicacoes (
+        id SERIAL PRIMARY KEY,
+        promocao_id INTEGER REFERENCES promocoes_indicacao(id),
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        indicado_nome VARCHAR(255) NOT NULL,
+        indicado_cpf VARCHAR(14),
+        indicado_contato VARCHAR(20) NOT NULL,
+        status VARCHAR(20) DEFAULT 'pendente',
+        valor_bonus DECIMAL(10,2),
+        regiao VARCHAR(255),
+        motivo_rejeicao TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        expires_at TIMESTAMP,
+        resolved_at TIMESTAMP,
+        resolved_by VARCHAR(255)
+      )
+    `);
+    console.log('✅ Tabela indicacoes verificada');
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -1078,6 +1138,360 @@ app.get('/api/notifications/:userCod', async (req, res) => {
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar notificações:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// RECUPERAÇÃO DE SENHA
+// ============================================
+
+// Solicitar recuperação de senha
+app.post('/api/password-recovery', async (req, res) => {
+  try {
+    const { cod, name } = req.body;
+
+    console.log('🔐 Solicitação de recuperação:', { cod, name });
+
+    // Verificar se usuário existe
+    const userResult = await pool.query(
+      'SELECT * FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      [cod]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Código profissional não encontrado' });
+    }
+
+    const user = userResult.rows[0];
+
+    // Verificar se o nome confere (para segurança)
+    if (user.full_name.toLowerCase().trim() !== name.toLowerCase().trim()) {
+      return res.status(400).json({ error: 'Nome não confere com o cadastro' });
+    }
+
+    // Verificar se já existe solicitação pendente
+    const existingRequest = await pool.query(
+      "SELECT * FROM password_recovery WHERE LOWER(user_cod) = LOWER($1) AND status = 'pendente'",
+      [cod]
+    );
+
+    if (existingRequest.rows.length > 0) {
+      return res.status(400).json({ error: 'Já existe uma solicitação pendente para este código' });
+    }
+
+    // Criar solicitação
+    const result = await pool.query(
+      `INSERT INTO password_recovery (user_cod, user_name, status, created_at) 
+       VALUES ($1, $2, 'pendente', NOW()) 
+       RETURNING *`,
+      [cod, name]
+    );
+
+    console.log('✅ Solicitação de recuperação criada:', result.rows[0]);
+    res.status(201).json({ success: true, message: 'Solicitação enviada com sucesso' });
+  } catch (error) {
+    console.error('❌ Erro na recuperação de senha:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar solicitações de recuperação (admin)
+app.get('/api/password-recovery', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM password_recovery ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar recuperações:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Resetar senha (admin)
+app.patch('/api/password-recovery/:id/reset', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newPassword, adminName } = req.body;
+
+    console.log('🔐 Resetando senha, ID:', id);
+
+    // Buscar solicitação
+    const requestResult = await pool.query(
+      'SELECT * FROM password_recovery WHERE id = $1',
+      [id]
+    );
+
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitação não encontrada' });
+    }
+
+    const request = requestResult.rows[0];
+
+    // Atualizar senha do usuário
+    await pool.query(
+      'UPDATE users SET password = $1, updated_at = NOW() WHERE LOWER(cod_profissional) = LOWER($2)',
+      [newPassword, request.user_cod]
+    );
+
+    // Marcar solicitação como resolvida
+    const result = await pool.query(
+      `UPDATE password_recovery 
+       SET status = 'resolvido', new_password = $1, resolved_at = NOW(), resolved_by = $2 
+       WHERE id = $3 
+       RETURNING *`,
+      [newPassword, adminName, id]
+    );
+
+    console.log('✅ Senha resetada com sucesso');
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao resetar senha:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cancelar solicitação (admin)
+app.delete('/api/password-recovery/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM password_recovery WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitação não encontrada' });
+    }
+
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao deletar solicitação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// PROMOÇÕES DE INDICAÇÃO
+// ============================================
+
+// Listar promoções
+app.get('/api/promocoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM promocoes_indicacao ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar promoções:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar promoções ativas (para usuário)
+app.get('/api/promocoes/ativas', async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM promocoes_indicacao WHERE status = 'ativa' ORDER BY created_at DESC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar promoções ativas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Criar promoção
+app.post('/api/promocoes', async (req, res) => {
+  try {
+    const { regiao, valor_bonus, detalhes, created_by } = req.body;
+
+    console.log('📣 Criando promoção:', { regiao, valor_bonus, detalhes });
+
+    const result = await pool.query(
+      `INSERT INTO promocoes_indicacao (regiao, valor_bonus, detalhes, status, created_by, created_at) 
+       VALUES ($1, $2, $3, 'ativa', $4, NOW()) 
+       RETURNING *`,
+      [regiao, valor_bonus, detalhes || null, created_by]
+    );
+
+    console.log('✅ Promoção criada:', result.rows[0]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao criar promoção:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar status da promoção
+app.patch('/api/promocoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const result = await pool.query(
+      'UPDATE promocoes_indicacao SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      [status, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Promoção não encontrada' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar promoção:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Excluir promoção
+app.delete('/api/promocoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM promocoes_indicacao WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Promoção não encontrada' });
+    }
+
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao excluir promoção:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// INDICAÇÕES
+// ============================================
+
+// Listar todas as indicações (admin)
+app.get('/api/indicacoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM indicacoes ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar indicações:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar indicações do usuário
+app.get('/api/indicacoes/usuario/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC',
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar indicações do usuário:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Criar indicação
+app.post('/api/indicacoes', async (req, res) => {
+  try {
+    const { promocao_id, user_cod, user_name, indicado_nome, indicado_cpf, indicado_contato, valor_bonus, regiao } = req.body;
+
+    console.log('👥 Criando indicação:', { user_cod, indicado_nome });
+
+    // Calcular data de expiração (30 dias)
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+
+    const result = await pool.query(
+      `INSERT INTO indicacoes (promocao_id, user_cod, user_name, indicado_nome, indicado_cpf, indicado_contato, valor_bonus, regiao, status, created_at, expires_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pendente', NOW(), $9) 
+       RETURNING *`,
+      [promocao_id, user_cod, user_name, indicado_nome, indicado_cpf || null, indicado_contato, valor_bonus, regiao, expiresAt]
+    );
+
+    console.log('✅ Indicação criada:', result.rows[0]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao criar indicação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Aprovar indicação
+app.patch('/api/indicacoes/:id/aprovar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { resolved_by } = req.body;
+
+    const result = await pool.query(
+      `UPDATE indicacoes 
+       SET status = 'aprovada', resolved_at = NOW(), resolved_by = $1 
+       WHERE id = $2 
+       RETURNING *`,
+      [resolved_by, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Indicação não encontrada' });
+    }
+
+    console.log('✅ Indicação aprovada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao aprovar indicação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rejeitar indicação
+app.patch('/api/indicacoes/:id/rejeitar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { motivo_rejeicao, resolved_by } = req.body;
+
+    const result = await pool.query(
+      `UPDATE indicacoes 
+       SET status = 'rejeitada', motivo_rejeicao = $1, resolved_at = NOW(), resolved_by = $2 
+       WHERE id = $3 
+       RETURNING *`,
+      [motivo_rejeicao, resolved_by, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Indicação não encontrada' });
+    }
+
+    console.log('❌ Indicação rejeitada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao rejeitar indicação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verificar e expirar indicações antigas (pode ser chamado periodicamente)
+app.post('/api/indicacoes/verificar-expiradas', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE indicacoes 
+       SET status = 'expirada' 
+       WHERE status = 'pendente' AND expires_at < NOW() 
+       RETURNING *`
+    );
+
+    console.log(`⏰ ${result.rows.length} indicações expiradas`);
+    res.json({ expiradas: result.rows.length, indicacoes: result.rows });
+  } catch (error) {
+    console.error('❌ Erro ao verificar expiradas:', error);
     res.status(500).json({ error: error.message });
   }
 });
