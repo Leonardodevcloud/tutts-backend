@@ -281,6 +281,47 @@ async function createTables() {
       // Colunas já existem
     }
 
+    // Tabela de configuração do Quiz de Procedimentos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS quiz_procedimentos_config (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(500) DEFAULT 'Acerte os procedimentos e ganhe saque gratuito de R$ 5,00',
+        imagem1 TEXT,
+        imagem2 TEXT,
+        imagem3 TEXT,
+        imagem4 TEXT,
+        pergunta1 TEXT,
+        resposta1 BOOLEAN,
+        pergunta2 TEXT,
+        resposta2 BOOLEAN,
+        pergunta3 TEXT,
+        resposta3 BOOLEAN,
+        pergunta4 TEXT,
+        resposta4 BOOLEAN,
+        pergunta5 TEXT,
+        resposta5 BOOLEAN,
+        valor_gratuidade DECIMAL(10,2) DEFAULT 500.00,
+        ativo BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela quiz_procedimentos_config verificada');
+
+    // Tabela de respostas do quiz (para controlar quem já respondeu)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS quiz_procedimentos_respostas (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL UNIQUE,
+        user_name VARCHAR(255),
+        acertos INTEGER,
+        passou BOOLEAN,
+        gratuidade_criada BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela quiz_procedimentos_respostas verificada');
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -1881,6 +1922,207 @@ app.patch('/api/inscricoes-novatos/:id/debito', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar débito novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// QUIZ DE PROCEDIMENTOS (Promoção Novato)
+// ============================================
+
+// Obter configuração do quiz
+app.get('/api/quiz-procedimentos/config', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1');
+    if (result.rows.length === 0) {
+      // Retorna config padrão vazia
+      return res.json({
+        titulo: 'Acerte os procedimentos e ganhe saque gratuito de R$ 5,00',
+        imagens: [null, null, null, null],
+        perguntas: [
+          { texto: '', resposta: true },
+          { texto: '', resposta: true },
+          { texto: '', resposta: true },
+          { texto: '', resposta: true },
+          { texto: '', resposta: true }
+        ],
+        valor_gratuidade: 5.00,
+        ativo: false
+      });
+    }
+    const config = result.rows[0];
+    res.json({
+      id: config.id,
+      titulo: config.titulo,
+      imagens: [config.imagem1, config.imagem2, config.imagem3, config.imagem4],
+      perguntas: [
+        { texto: config.pergunta1, resposta: config.resposta1 },
+        { texto: config.pergunta2, resposta: config.resposta2 },
+        { texto: config.pergunta3, resposta: config.resposta3 },
+        { texto: config.pergunta4, resposta: config.resposta4 },
+        { texto: config.pergunta5, resposta: config.resposta5 }
+      ],
+      valor_gratuidade: parseFloat(config.valor_gratuidade),
+      ativo: config.ativo
+    });
+  } catch (error) {
+    console.error('❌ Erro ao obter config quiz:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Salvar configuração do quiz
+app.post('/api/quiz-procedimentos/config', async (req, res) => {
+  try {
+    const { titulo, imagens, perguntas, valor_gratuidade, ativo } = req.body;
+    
+    // Verificar se já existe config
+    const existing = await pool.query('SELECT id FROM quiz_procedimentos_config LIMIT 1');
+    
+    if (existing.rows.length > 0) {
+      // Atualizar
+      await pool.query(
+        `UPDATE quiz_procedimentos_config SET 
+          titulo = $1,
+          imagem1 = $2, imagem2 = $3, imagem3 = $4, imagem4 = $5,
+          pergunta1 = $6, resposta1 = $7,
+          pergunta2 = $8, resposta2 = $9,
+          pergunta3 = $10, resposta3 = $11,
+          pergunta4 = $12, resposta4 = $13,
+          pergunta5 = $14, resposta5 = $15,
+          valor_gratuidade = $16, ativo = $17, updated_at = NOW()
+        WHERE id = $18`,
+        [
+          titulo,
+          imagens[0], imagens[1], imagens[2], imagens[3],
+          perguntas[0].texto, perguntas[0].resposta,
+          perguntas[1].texto, perguntas[1].resposta,
+          perguntas[2].texto, perguntas[2].resposta,
+          perguntas[3].texto, perguntas[3].resposta,
+          perguntas[4].texto, perguntas[4].resposta,
+          valor_gratuidade, ativo,
+          existing.rows[0].id
+        ]
+      );
+    } else {
+      // Inserir
+      await pool.query(
+        `INSERT INTO quiz_procedimentos_config 
+          (titulo, imagem1, imagem2, imagem3, imagem4, 
+           pergunta1, resposta1, pergunta2, resposta2, pergunta3, resposta3,
+           pergunta4, resposta4, pergunta5, resposta5, valor_gratuidade, ativo)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+        [
+          titulo,
+          imagens[0], imagens[1], imagens[2], imagens[3],
+          perguntas[0].texto, perguntas[0].resposta,
+          perguntas[1].texto, perguntas[1].resposta,
+          perguntas[2].texto, perguntas[2].resposta,
+          perguntas[3].texto, perguntas[3].resposta,
+          perguntas[4].texto, perguntas[4].resposta,
+          valor_gratuidade, ativo
+        ]
+      );
+    }
+    
+    console.log('✅ Config quiz salva');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Erro ao salvar config quiz:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verificar se usuário já respondeu o quiz
+app.get('/api/quiz-procedimentos/verificar/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM quiz_procedimentos_respostas WHERE LOWER(user_cod) = LOWER($1)',
+      [userCod]
+    );
+    res.json({ 
+      ja_respondeu: result.rows.length > 0,
+      dados: result.rows[0] || null
+    });
+  } catch (error) {
+    console.error('❌ Erro ao verificar quiz:', error);
+    res.json({ ja_respondeu: false });
+  }
+});
+
+// Responder o quiz
+app.post('/api/quiz-procedimentos/responder', async (req, res) => {
+  try {
+    const { user_cod, user_name, respostas } = req.body;
+    
+    // Verificar se já respondeu
+    const existing = await pool.query(
+      'SELECT * FROM quiz_procedimentos_respostas WHERE LOWER(user_cod) = LOWER($1)',
+      [user_cod]
+    );
+    
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Você já respondeu este quiz' });
+    }
+    
+    // Buscar config para verificar respostas corretas
+    const configResult = await pool.query('SELECT * FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1');
+    if (configResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Quiz não configurado' });
+    }
+    
+    const config = configResult.rows[0];
+    const respostasCorretas = [
+      config.resposta1, config.resposta2, config.resposta3, config.resposta4, config.resposta5
+    ];
+    
+    // Contar acertos
+    let acertos = 0;
+    for (let i = 0; i < 5; i++) {
+      if (respostas[i] === respostasCorretas[i]) acertos++;
+    }
+    
+    const passou = acertos === 5;
+    
+    // Registrar resposta
+    await pool.query(
+      `INSERT INTO quiz_procedimentos_respostas (user_cod, user_name, acertos, passou, gratuidade_criada)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [user_cod, user_name, acertos, passou, passou]
+    );
+    
+    // Se passou, criar gratuidade automaticamente
+    if (passou) {
+      await pool.query(
+        `INSERT INTO gratuities (user_cod, quantity, remaining, value, reason, status, created_at)
+         VALUES ($1, 1, 1, $2, 'Promoção Novato', 'ativa', NOW())`,
+        [user_cod, config.valor_gratuidade]
+      );
+      console.log(`🎉 Gratuidade criada para ${user_name} (${user_cod}): R$ ${config.valor_gratuidade}`);
+    }
+    
+    res.json({ 
+      success: true, 
+      acertos, 
+      passou,
+      valor_gratuidade: passou ? parseFloat(config.valor_gratuidade) : 0
+    });
+  } catch (error) {
+    console.error('❌ Erro ao responder quiz:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar quem respondeu o quiz (admin)
+app.get('/api/quiz-procedimentos/respostas', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM quiz_procedimentos_respostas ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar respostas:', error);
     res.status(500).json({ error: error.message });
   }
 });
