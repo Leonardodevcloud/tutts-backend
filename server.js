@@ -1246,7 +1246,7 @@ app.post('/api/restricted', async (req, res) => {
   try {
     const { userCod, userName, reason, createdBy } = req.body;
 
-    // Verificar se já existe
+    // Verificar se já existe e está ativo
     const existing = await pool.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
       [userCod]
@@ -1256,12 +1256,31 @@ app.post('/api/restricted', async (req, res) => {
       return res.status(400).json({ error: 'Profissional já está restrito' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO restricted_professionals (user_cod, user_name, reason, status, created_by) 
-       VALUES ($1, $2, $3, 'ativo', $4) 
-       RETURNING *`,
-      [userCod, userName || null, reason, createdBy || null]
+    // Verificar se existe registro inativo (para reativar)
+    const inactive = await pool.query(
+      "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status != 'ativo'",
+      [userCod]
     );
+
+    let result;
+    if (inactive.rows.length > 0) {
+      // Reativar registro existente
+      result = await pool.query(
+        `UPDATE restricted_professionals 
+         SET user_name = $2, reason = $3, status = 'ativo', created_by = $4, created_at = NOW(), removed_at = NULL, removed_reason = NULL
+         WHERE user_cod = $1
+         RETURNING *`,
+        [userCod, userName || null, reason, createdBy || null]
+      );
+    } else {
+      // Criar novo registro
+      result = await pool.query(
+        `INSERT INTO restricted_professionals (user_cod, user_name, reason, status, created_by) 
+         VALUES ($1, $2, $3, 'ativo', $4) 
+         RETURNING *`,
+        [userCod, userName || null, reason, createdBy || null]
+      );
+    }
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
