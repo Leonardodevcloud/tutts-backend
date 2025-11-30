@@ -138,6 +138,7 @@ async function createTables() {
       CREATE TABLE IF NOT EXISTS restricted_professionals (
         id SERIAL PRIMARY KEY,
         user_cod VARCHAR(50) UNIQUE NOT NULL,
+        user_name VARCHAR(255),
         reason TEXT NOT NULL,
         status VARCHAR(20) DEFAULT 'ativo',
         created_at TIMESTAMP DEFAULT NOW(),
@@ -146,6 +147,14 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela restricted_professionals verificada');
+
+    // Migração: adicionar coluna user_name se não existir
+    try {
+      await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS user_name VARCHAR(255)`);
+      console.log('✅ Coluna user_name em restricted_professionals verificada');
+    } catch (e) {
+      // Coluna já existe
+    }
 
     // Tabela de solicitações de recuperação de senha
     await pool.query(`
@@ -1066,7 +1075,7 @@ app.get('/api/restricted/check/:userCod', async (req, res) => {
 // Adicionar restrição
 app.post('/api/restricted', async (req, res) => {
   try {
-    const { userCod, reason } = req.body;
+    const { userCod, userName, reason } = req.body;
 
     // Verificar se já existe
     const existing = await pool.query(
@@ -1079,10 +1088,10 @@ app.post('/api/restricted', async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO restricted_professionals (user_cod, reason, status) 
-       VALUES ($1, $2, 'ativo') 
+      `INSERT INTO restricted_professionals (user_cod, user_name, reason, status) 
+       VALUES ($1, $2, $3, 'ativo') 
        RETURNING *`,
-      [userCod, reason]
+      [userCod, userName || null, reason]
     );
 
     res.status(201).json(result.rows[0]);
