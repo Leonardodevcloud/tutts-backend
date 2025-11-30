@@ -260,6 +260,9 @@ async function createTables() {
         credito_lancado BOOLEAN DEFAULT FALSE,
         lancado_por VARCHAR(255),
         lancado_at TIMESTAMP,
+        debito BOOLEAN DEFAULT FALSE,
+        debitado_por VARCHAR(255),
+        debitado_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW(),
         expires_at TIMESTAMP,
         resolved_at TIMESTAMP,
@@ -267,6 +270,16 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela inscricoes_novatos verificada');
+
+    // Migração: adicionar colunas de débito se não existirem
+    try {
+      await pool.query(`ALTER TABLE inscricoes_novatos ADD COLUMN IF NOT EXISTS debito BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE inscricoes_novatos ADD COLUMN IF NOT EXISTS debitado_por VARCHAR(255)`);
+      await pool.query(`ALTER TABLE inscricoes_novatos ADD COLUMN IF NOT EXISTS debitado_at TIMESTAMP`);
+      console.log('✅ Colunas de débito verificadas');
+    } catch (e) {
+      // Colunas já existem
+    }
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -1846,6 +1859,28 @@ app.post('/api/inscricoes-novatos/verificar-expiradas', async (req, res) => {
     res.json({ expiradas: result.rows.length, inscricoes: result.rows });
   } catch (error) {
     console.error('❌ Erro ao verificar expiradas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar débito para inscrição novatos
+app.patch('/api/inscricoes-novatos/:id/debito', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { debito, debitado_por } = req.body;
+
+    const result = await pool.query(
+      `UPDATE inscricoes_novatos 
+       SET debito = $1, debitado_por = $2, debitado_at = $3 
+       WHERE id = $4 
+       RETURNING *`,
+      [debito, debitado_por, debito ? new Date() : null, id]
+    );
+
+    console.log('💳 Débito novatos atualizado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar débito novatos:', error);
     res.status(500).json({ error: error.message });
   }
 });
