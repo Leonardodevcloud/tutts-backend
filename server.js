@@ -229,6 +229,45 @@ async function createTables() {
       // Colunas já existem
     }
 
+    // Tabela de promoções para novatos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS promocoes_novatos (
+        id SERIAL PRIMARY KEY,
+        regiao VARCHAR(255) NOT NULL,
+        cliente VARCHAR(255) NOT NULL,
+        valor_bonus DECIMAL(10,2) NOT NULL,
+        detalhes TEXT,
+        status VARCHAR(20) DEFAULT 'ativa',
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela promocoes_novatos verificada');
+
+    // Tabela de inscrições dos novatos nas promoções
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS inscricoes_novatos (
+        id SERIAL PRIMARY KEY,
+        promocao_id INTEGER REFERENCES promocoes_novatos(id),
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        status VARCHAR(20) DEFAULT 'pendente',
+        valor_bonus DECIMAL(10,2),
+        regiao VARCHAR(255),
+        cliente VARCHAR(255),
+        motivo_rejeicao TEXT,
+        credito_lancado BOOLEAN DEFAULT FALSE,
+        lancado_por VARCHAR(255),
+        lancado_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        expires_at TIMESTAMP,
+        resolved_at TIMESTAMP,
+        resolved_by VARCHAR(255)
+      )
+    `);
+    console.log('✅ Tabela inscricoes_novatos verificada');
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -1551,6 +1590,260 @@ app.post('/api/indicacoes/verificar-expiradas', async (req, res) => {
 
     console.log(`⏰ ${result.rows.length} indicações expiradas`);
     res.json({ expiradas: result.rows.length, indicacoes: result.rows });
+  } catch (error) {
+    console.error('❌ Erro ao verificar expiradas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// PROMOÇÕES NOVATOS
+// ============================================
+
+// Listar todas as promoções de novatos
+app.get('/api/promocoes-novatos', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM promocoes_novatos ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar promoções novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar promoções ativas (para usuários)
+app.get('/api/promocoes-novatos/ativas', async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM promocoes_novatos WHERE status = 'ativa' ORDER BY created_at DESC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar promoções ativas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Criar nova promoção novatos
+app.post('/api/promocoes-novatos', async (req, res) => {
+  try {
+    const { regiao, cliente, valor_bonus, detalhes, created_by } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO promocoes_novatos (regiao, cliente, valor_bonus, detalhes, status, created_by, created_at) 
+       VALUES ($1, $2, $3, $4, 'ativa', $5, NOW()) 
+       RETURNING *`,
+      [regiao, cliente, valor_bonus, detalhes || null, created_by || 'Admin']
+    );
+
+    console.log('✅ Promoção novatos criada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao criar promoção novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar promoção novatos (status ou dados)
+app.patch('/api/promocoes-novatos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, regiao, cliente, valor_bonus, detalhes } = req.body;
+
+    let result;
+    if (status && !regiao) {
+      // Apenas atualizar status
+      result = await pool.query(
+        'UPDATE promocoes_novatos SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        [status, id]
+      );
+    } else {
+      // Atualizar todos os campos
+      result = await pool.query(
+        'UPDATE promocoes_novatos SET regiao = COALESCE($1, regiao), cliente = COALESCE($2, cliente), valor_bonus = COALESCE($3, valor_bonus), detalhes = $4, updated_at = NOW() WHERE id = $5 RETURNING *',
+        [regiao, cliente, valor_bonus, detalhes, id]
+      );
+    }
+
+    console.log('✅ Promoção novatos atualizada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar promoção novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deletar promoção novatos
+app.delete('/api/promocoes-novatos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verificar se tem inscrições pendentes
+    const inscricoes = await pool.query(
+      "SELECT COUNT(*) FROM inscricoes_novatos WHERE promocao_id = $1 AND status = 'pendente'",
+      [id]
+    );
+    
+    if (parseInt(inscricoes.rows[0].count) > 0) {
+      return res.status(400).json({ error: 'Não é possível deletar promoção com inscrições pendentes' });
+    }
+
+    const result = await pool.query(
+      'DELETE FROM promocoes_novatos WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    console.log('🗑️ Promoção novatos deletada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao deletar promoção novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// INSCRIÇÕES NOVATOS
+// ============================================
+
+// Listar todas as inscrições (admin)
+app.get('/api/inscricoes-novatos', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM inscricoes_novatos ORDER BY created_at DESC'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar inscrições novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar inscrições de um usuário
+app.get('/api/inscricoes-novatos/usuario/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM inscricoes_novatos WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC',
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar inscrições do usuário:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Criar inscrição novatos (usuário se inscreve)
+app.post('/api/inscricoes-novatos', async (req, res) => {
+  try {
+    const { promocao_id, user_cod, user_name, valor_bonus, regiao, cliente } = req.body;
+
+    // Verificar se já está inscrito nesta promoção
+    const existing = await pool.query(
+      'SELECT * FROM inscricoes_novatos WHERE promocao_id = $1 AND LOWER(user_cod) = LOWER($2)',
+      [promocao_id, user_cod]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Você já está inscrito nesta promoção' });
+    }
+
+    // Criar inscrição com expiração em 10 dias
+    const result = await pool.query(
+      `INSERT INTO inscricoes_novatos (promocao_id, user_cod, user_name, valor_bonus, regiao, cliente, status, created_at, expires_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, 'pendente', NOW(), NOW() + INTERVAL '10 days') 
+       RETURNING *`,
+      [promocao_id, user_cod, user_name, valor_bonus, regiao, cliente]
+    );
+
+    console.log('✅ Inscrição novatos criada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao criar inscrição novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Aprovar inscrição novatos
+app.patch('/api/inscricoes-novatos/:id/aprovar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { resolved_by } = req.body;
+
+    const result = await pool.query(
+      `UPDATE inscricoes_novatos 
+       SET status = 'aprovada', resolved_at = NOW(), resolved_by = $1 
+       WHERE id = $2 
+       RETURNING *`,
+      [resolved_by || 'Admin', id]
+    );
+
+    console.log('✅ Inscrição novatos aprovada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao aprovar inscrição novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rejeitar inscrição novatos
+app.patch('/api/inscricoes-novatos/:id/rejeitar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { motivo_rejeicao, resolved_by } = req.body;
+
+    const result = await pool.query(
+      `UPDATE inscricoes_novatos 
+       SET status = 'rejeitada', motivo_rejeicao = $1, resolved_at = NOW(), resolved_by = $2 
+       WHERE id = $3 
+       RETURNING *`,
+      [motivo_rejeicao, resolved_by || 'Admin', id]
+    );
+
+    console.log('❌ Inscrição novatos rejeitada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao rejeitar inscrição novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar crédito lançado para inscrição novatos
+app.patch('/api/inscricoes-novatos/:id/credito', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { credito_lancado, lancado_por } = req.body;
+
+    const result = await pool.query(
+      `UPDATE inscricoes_novatos 
+       SET credito_lancado = $1, lancado_por = $2, lancado_at = $3 
+       WHERE id = $4 
+       RETURNING *`,
+      [credito_lancado, lancado_por, credito_lancado ? new Date() : null, id]
+    );
+
+    console.log('💰 Crédito novatos atualizado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar crédito novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verificar e expirar inscrições novatos antigas (chamado periodicamente)
+app.post('/api/inscricoes-novatos/verificar-expiradas', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE inscricoes_novatos 
+       SET status = 'expirada' 
+       WHERE status = 'pendente' AND expires_at < NOW() 
+       RETURNING *`
+    );
+
+    console.log(`⏰ ${result.rows.length} inscrições novatos expiradas`);
+    res.json({ expiradas: result.rows.length, inscricoes: result.rows });
   } catch (error) {
     console.error('❌ Erro ao verificar expiradas:', error);
     res.status(500).json({ error: error.message });
