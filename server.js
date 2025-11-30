@@ -517,9 +517,9 @@ app.delete('/api/users/:codProfissional', async (req, res) => {
       [codProfissional]
     );
     
-    // 4. Deletar indicações (onde é indicador ou indicado)
+    // 4. Deletar indicações (onde é o indicador)
     deletedData.indicacoes = await safeDelete(
-      'DELETE FROM indicacoes WHERE LOWER(indicador_cod) = LOWER($1) OR LOWER(indicado_cod) = LOWER($1)',
+      'DELETE FROM indicacoes WHERE LOWER(user_cod) = LOWER($1)',
       [codProfissional]
     );
     
