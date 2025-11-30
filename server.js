@@ -476,17 +476,94 @@ app.post('/api/users/reset-password', async (req, res) => {
 app.delete('/api/users/:codProfissional', async (req, res) => {
   try {
     const { codProfissional } = req.params;
-
-    const result = await pool.query(
-      'DELETE FROM users WHERE LOWER(cod_profissional) = LOWER($1) RETURNING *',
-      [codProfissional]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
+    
+    // Iniciar transação para garantir que tudo seja deletado ou nada
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      const deletedData = {
+        user: null,
+        submissions: 0,
+        withdrawals: 0,
+        gratuities: 0,
+        indicacoes: 0,
+        inscricoesNovatos: 0,
+        quizRespostas: 0
+      };
+      
+      // 1. Deletar submissões (solicitações de saque)
+      const subResult = await client.query(
+        'DELETE FROM submissions WHERE LOWER(user_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.submissions = subResult.rowCount;
+      
+      // 2. Deletar saques (withdrawals)
+      const withResult = await client.query(
+        'DELETE FROM withdrawals WHERE LOWER(user_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.withdrawals = withResult.rowCount;
+      
+      // 3. Deletar gratuidades
+      const gratResult = await client.query(
+        'DELETE FROM gratuities WHERE LOWER(user_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.gratuities = gratResult.rowCount;
+      
+      // 4. Deletar indicações (onde é indicador ou indicado)
+      const indResult = await client.query(
+        'DELETE FROM indicacoes WHERE LOWER(indicador_cod) = LOWER($1) OR LOWER(indicado_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.indicacoes = indResult.rowCount;
+      
+      // 5. Deletar inscrições em promoções novatos
+      const inscResult = await client.query(
+        'DELETE FROM inscricoes_novatos WHERE LOWER(user_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.inscricoesNovatos = inscResult.rowCount;
+      
+      // 6. Deletar respostas do quiz de procedimentos
+      const quizResult = await client.query(
+        'DELETE FROM quiz_procedimentos_respostas WHERE LOWER(user_cod) = LOWER($1)',
+        [codProfissional]
+      );
+      deletedData.quizRespostas = quizResult.rowCount;
+      
+      // 7. Por fim, deletar o usuário
+      const userResult = await client.query(
+        'DELETE FROM users WHERE LOWER(cod_profissional) = LOWER($1) RETURNING *',
+        [codProfissional]
+      );
+      
+      if (userResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Usuário não encontrado' });
+      }
+      
+      deletedData.user = userResult.rows[0];
+      
+      await client.query('COMMIT');
+      
+      console.log(`🗑️ Usuário ${codProfissional} e todos os dados associados foram excluídos:`, deletedData);
+      
+      res.json({ 
+        message: 'Usuário e todos os dados associados excluídos com sucesso', 
+        deleted: deletedData 
+      });
+      
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.json({ message: 'Usuário excluído com sucesso', deleted: result.rows[0] });
+    
   } catch (error) {
     console.error('❌ Erro ao deletar usuário:', error);
     res.status(500).json({ error: 'Erro ao deletar usuário: ' + error.message });
