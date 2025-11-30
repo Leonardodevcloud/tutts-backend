@@ -1163,9 +1163,9 @@ app.post('/api/gratuities', async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by) 
-       VALUES ($1, $2, $3, $3, $4, $5, 'ativa', $6) 
+       VALUES ($1, $2, $3, $4, $5, $6, 'ativa', $7) 
        RETURNING *`,
-      [userCod, userName || null, quantity, value, reason, createdBy || null]
+      [userCod, userName || null, quantity, quantity, value, reason || null, createdBy || null]
     );
 
     res.status(201).json(result.rows[0]);
