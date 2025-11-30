@@ -128,16 +128,22 @@ async function createTables() {
       CREATE TABLE IF NOT EXISTS gratuities (
         id SERIAL PRIMARY KEY,
         user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255),
         quantity INTEGER NOT NULL,
         remaining INTEGER NOT NULL,
         value DECIMAL(10,2) NOT NULL,
         reason TEXT,
         status VARCHAR(20) DEFAULT 'ativa',
+        created_by VARCHAR(255),
         created_at TIMESTAMP DEFAULT NOW(),
         expired_at TIMESTAMP
       )
     `);
     console.log('✅ Tabela gratuities verificada');
+    
+    // Migração: adicionar colunas user_name e created_by em gratuities
+    await pool.query(`ALTER TABLE gratuities ADD COLUMN IF NOT EXISTS user_name VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE gratuities ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)`).catch(() => {});
 
     // Tabela de profissionais restritos
     await pool.query(`
@@ -147,6 +153,7 @@ async function createTables() {
         user_name VARCHAR(255),
         reason TEXT NOT NULL,
         status VARCHAR(20) DEFAULT 'ativo',
+        created_by VARCHAR(255),
         created_at TIMESTAMP DEFAULT NOW(),
         removed_at TIMESTAMP,
         removed_reason TEXT
@@ -154,13 +161,9 @@ async function createTables() {
     `);
     console.log('✅ Tabela restricted_professionals verificada');
 
-    // Migração: adicionar coluna user_name se não existir
-    try {
-      await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS user_name VARCHAR(255)`);
-      console.log('✅ Coluna user_name em restricted_professionals verificada');
-    } catch (e) {
-      // Coluna já existe
-    }
+    // Migração: adicionar colunas em restricted_professionals
+    await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS user_name VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)`).catch(() => {});
 
     // Tabela de solicitações de recuperação de senha
     await pool.query(`
@@ -1156,13 +1159,13 @@ app.get('/api/gratuities/user/:userCod', async (req, res) => {
 // Criar gratuidade
 app.post('/api/gratuities', async (req, res) => {
   try {
-    const { userCod, quantity, value, reason } = req.body;
+    const { userCod, userName, quantity, value, reason, createdBy } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO gratuities (user_cod, quantity, remaining, value, reason, status) 
-       VALUES ($1, $2, $2, $3, $4, 'ativa') 
+      `INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by) 
+       VALUES ($1, $2, $3, $3, $4, $5, 'ativa', $6) 
        RETURNING *`,
-      [userCod, quantity, value, reason]
+      [userCod, userName || null, quantity, value, reason, createdBy || null]
     );
 
     res.status(201).json(result.rows[0]);
@@ -1241,7 +1244,7 @@ app.get('/api/restricted/check/:userCod', async (req, res) => {
 // Adicionar restrição
 app.post('/api/restricted', async (req, res) => {
   try {
-    const { userCod, userName, reason } = req.body;
+    const { userCod, userName, reason, createdBy } = req.body;
 
     // Verificar se já existe
     const existing = await pool.query(
@@ -1254,10 +1257,10 @@ app.post('/api/restricted', async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO restricted_professionals (user_cod, user_name, reason, status) 
-       VALUES ($1, $2, $3, 'ativo') 
+      `INSERT INTO restricted_professionals (user_cod, user_name, reason, status, created_by) 
+       VALUES ($1, $2, $3, 'ativo', $4) 
        RETURNING *`,
-      [userCod, userName || null, reason]
+      [userCod, userName || null, reason, createdBy || null]
     );
 
     res.status(201).json(result.rows[0]);
