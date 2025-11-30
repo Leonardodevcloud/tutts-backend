@@ -199,6 +199,9 @@ async function createTables() {
         valor_bonus DECIMAL(10,2),
         regiao VARCHAR(255),
         motivo_rejeicao TEXT,
+        credito_lancado BOOLEAN DEFAULT FALSE,
+        lancado_por VARCHAR(255),
+        lancado_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW(),
         expires_at TIMESTAMP,
         resolved_at TIMESTAMP,
@@ -206,6 +209,16 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela indicacoes verificada');
+
+    // Migração: adicionar colunas de crédito lançado se não existirem
+    try {
+      await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS credito_lancado BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS lancado_por VARCHAR(255)`);
+      await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS lancado_at TIMESTAMP`);
+      console.log('✅ Colunas de crédito verificadas');
+    } catch (e) {
+      // Colunas já existem
+    }
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -1325,16 +1338,27 @@ app.post('/api/promocoes', async (req, res) => {
   }
 });
 
-// Atualizar status da promoção
+// Atualizar promoção (status ou dados completos)
 app.patch('/api/promocoes/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, regiao, valor_bonus, detalhes } = req.body;
 
-    const result = await pool.query(
-      'UPDATE promocoes_indicacao SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-      [status, id]
-    );
+    let result;
+    
+    // Se só veio status, atualiza só o status
+    if (status && !regiao && !valor_bonus) {
+      result = await pool.query(
+        'UPDATE promocoes_indicacao SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        [status, id]
+      );
+    } else {
+      // Atualização completa
+      result = await pool.query(
+        'UPDATE promocoes_indicacao SET regiao = COALESCE($1, regiao), valor_bonus = COALESCE($2, valor_bonus), detalhes = $3, updated_at = NOW() WHERE id = $4 RETURNING *',
+        [regiao, valor_bonus, detalhes, id]
+      );
+    }
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Promoção não encontrada' });
@@ -1474,6 +1498,34 @@ app.patch('/api/indicacoes/:id/rejeitar', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao rejeitar indicação:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar crédito lançado
+app.patch('/api/indicacoes/:id/credito', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { credito_lancado, lancado_por } = req.body;
+
+    console.log('💰 Atualizando crédito:', { id, credito_lancado, lancado_por });
+
+    const result = await pool.query(
+      `UPDATE indicacoes 
+       SET credito_lancado = $1, lancado_por = $2, lancado_at = $3 
+       WHERE id = $4 
+       RETURNING *`,
+      [credito_lancado, credito_lancado ? lancado_por : null, credito_lancado ? new Date() : null, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Indicação não encontrada' });
+    }
+
+    console.log('✅ Crédito atualizado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar crédito:', error);
     res.status(500).json({ error: error.message });
   }
 });
