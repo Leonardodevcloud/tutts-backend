@@ -285,7 +285,7 @@ async function createTables() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS quiz_procedimentos_config (
         id SERIAL PRIMARY KEY,
-        titulo VARCHAR(500) DEFAULT 'Acerte os procedimentos e ganhe saque gratuito de R$ 5,00',
+        titulo VARCHAR(500) DEFAULT 'Acerte os procedimentos e ganhe saque gratuito de R$ 500,00',
         imagem1 TEXT,
         imagem2 TEXT,
         imagem3 TEXT,
@@ -1937,7 +1937,7 @@ app.get('/api/quiz-procedimentos/config', async (req, res) => {
     if (result.rows.length === 0) {
       // Retorna config padrão vazia
       return res.json({
-        titulo: 'Acerte os procedimentos e ganhe saque gratuito de R$ 5,00',
+        titulo: 'Acerte os procedimentos e ganhe saque gratuito de R$ 500,00',
         imagens: [null, null, null, null],
         perguntas: [
           { texto: '', resposta: true },
@@ -1946,7 +1946,7 @@ app.get('/api/quiz-procedimentos/config', async (req, res) => {
           { texto: '', resposta: true },
           { texto: '', resposta: true }
         ],
-        valor_gratuidade: 5.00,
+        valor_gratuidade: 500.00,
         ativo: false
       });
     }
