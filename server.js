@@ -481,6 +481,35 @@ app.post('/api/users/reset-password', async (req, res) => {
   }
 });
 
+// Atualizar role do usuário (Admin Master)
+app.patch('/api/users/:codProfissional/role', async (req, res) => {
+  try {
+    const { codProfissional } = req.params;
+    const { role } = req.body;
+    
+    // Validar roles permitidos
+    const rolesPermitidos = ['user', 'admin', 'admin_financeiro', 'admin_master'];
+    if (!rolesPermitidos.includes(role)) {
+      return res.status(400).json({ error: 'Role inválido' });
+    }
+    
+    const result = await pool.query(
+      'UPDATE users SET role = $1 WHERE LOWER(cod_profissional) = LOWER($2) RETURNING id, cod_profissional, full_name, role',
+      [role, codProfissional]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    console.log(`👑 Role atualizado: ${codProfissional} -> ${role}`);
+    res.json({ message: 'Role atualizado com sucesso', user: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao atualizar role:', error);
+    res.status(500).json({ error: 'Erro ao atualizar role: ' + error.message });
+  }
+});
+
 // Deletar usuário
 app.delete('/api/users/:codProfissional', async (req, res) => {
   try {
