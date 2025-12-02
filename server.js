@@ -415,6 +415,8 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_lojas_regiao ON disponibilidade_lojas(regiao_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_loja ON disponibilidade_linhas(loja_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_cod ON disponibilidade_linhas(cod_profissional)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_espelho_data ON disponibilidade_espelho(data_registro)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_faltosos_data ON disponibilidade_faltosos(data_falta)`).catch(() => {});
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -2811,38 +2813,41 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
       [hoje]
     );
     
+    let espelhoSalvo = false;
     if (existing.rows.length > 0) {
       await pool.query(
-        'UPDATE disponibilidade_espelho SET dados = $1 WHERE data_registro = $2',
+        'UPDATE disponibilidade_espelho SET dados = $1, created_at = CURRENT_TIMESTAMP WHERE data_registro = $2',
         [JSON.stringify(dados), hoje]
       );
+      espelhoSalvo = true;
     } else {
       await pool.query(
         'INSERT INTO disponibilidade_espelho (data_registro, dados) VALUES ($1, $2)',
         [hoje, JSON.stringify(dados)]
       );
+      espelhoSalvo = true;
     }
-    console.log('📸 Espelho salvo antes do reset');
+    console.log('📸 Espelho salvo antes do reset:', hoje, '- Linhas:', linhas.rows.length);
     
     // 2. Converter linhas de reposição em excedentes
-    await pool.query(
+    const reposicaoResult = await pool.query(
       `UPDATE disponibilidade_linhas 
        SET is_excedente = true, is_reposicao = false 
-       WHERE is_reposicao = true`
+       WHERE is_reposicao = true
+       RETURNING id`
     );
+    console.log('🔄 Linhas de reposição convertidas:', reposicaoResult.rows.length);
     
-    // 3. Resetar todas as linhas
+    // 3. Resetar APENAS status e observação (manter cod e nome!)
     await pool.query(
       `UPDATE disponibilidade_linhas 
-       SET cod_profissional = NULL, 
-           nome_profissional = NULL, 
-           status = 'A CONFIRMAR', 
+       SET status = 'A CONFIRMAR', 
            observacao = NULL,
            updated_at = CURRENT_TIMESTAMP`
     );
     
-    console.log('🔄 Status resetado com sucesso');
-    res.json({ success: true, espelho_data: hoje });
+    console.log('🔄 Status resetado com sucesso (códigos e nomes mantidos)');
+    res.json({ success: true, espelho_data: hoje, espelho_salvo: espelhoSalvo });
   } catch (err) {
     console.error('❌ Erro ao resetar:', err);
     res.status(500).json({ error: 'Erro ao resetar status' });
