@@ -331,6 +331,56 @@ async function createTables() {
     `);
     console.log('✅ Tabela quiz_procedimentos_respostas verificada');
 
+    // ============================================
+    // TABELAS DE DISPONIBILIDADE
+    // ============================================
+    
+    // Tabela de Regiões de Disponibilidade
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_regioes (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL UNIQUE,
+        ordem INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_regioes verificada');
+
+    // Tabela de Lojas de Disponibilidade
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_lojas (
+        id SERIAL PRIMARY KEY,
+        regiao_id INT NOT NULL REFERENCES disponibilidade_regioes(id) ON DELETE CASCADE,
+        codigo VARCHAR(20) NOT NULL,
+        nome VARCHAR(200) NOT NULL,
+        ordem INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_lojas verificada');
+
+    // Tabela de Linhas de Disponibilidade (Entregadores)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_linhas (
+        id SERIAL PRIMARY KEY,
+        loja_id INT NOT NULL REFERENCES disponibilidade_lojas(id) ON DELETE CASCADE,
+        cod_profissional VARCHAR(50),
+        nome_profissional VARCHAR(200),
+        status VARCHAR(20) DEFAULT 'A CONFIRMAR',
+        observacao TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_linhas verificada');
+
+    // Índices para performance
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_lojas_regiao ON disponibilidade_lojas(regiao_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_loja ON disponibilidade_linhas(loja_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_cod ON disponibilidade_linhas(cod_profissional)`).catch(() => {});
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -2248,6 +2298,273 @@ app.get('/api/quiz-procedimentos/respostas', async (req, res) => {
   } catch (error) {
     console.error('❌ Erro ao listar respostas:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// DISPONIBILIDADE - ROTAS
+// ============================================
+
+// GET /api/disponibilidade - Lista todas as regiões, lojas e linhas
+app.get('/api/disponibilidade', async (req, res) => {
+  try {
+    const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
+    const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
+    const linhas = await pool.query('SELECT * FROM disponibilidade_linhas ORDER BY id');
+    
+    res.json({
+      regioes: regioes.rows,
+      lojas: lojas.rows,
+      linhas: linhas.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar disponibilidade:', err);
+    res.status(500).json({ error: 'Erro ao buscar dados' });
+  }
+});
+
+// POST /api/disponibilidade/regioes - Criar região
+app.post('/api/disponibilidade/regioes', async (req, res) => {
+  try {
+    const { nome } = req.body;
+    if (!nome) return res.status(400).json({ error: 'Nome é obrigatório' });
+    
+    const result = await pool.query(
+      'INSERT INTO disponibilidade_regioes (nome) VALUES ($1) RETURNING *',
+      [nome.toUpperCase().trim()]
+    );
+    console.log('✅ Região criada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'Região já existe' });
+    }
+    console.error('❌ Erro ao criar região:', err);
+    res.status(500).json({ error: 'Erro ao criar região' });
+  }
+});
+
+// PUT /api/disponibilidade/regioes/:id - Atualizar região
+app.put('/api/disponibilidade/regioes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, ordem } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE disponibilidade_regioes 
+       SET nome = COALESCE($1, nome), ordem = COALESCE($2, ordem), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3 RETURNING *`,
+      [nome ? nome.toUpperCase().trim() : null, ordem, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Região não encontrada' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar região:', err);
+    res.status(500).json({ error: 'Erro ao atualizar região' });
+  }
+});
+
+// DELETE /api/disponibilidade/regioes/:id - Deletar região
+app.delete('/api/disponibilidade/regioes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM disponibilidade_regioes WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Região não encontrada' });
+    }
+    console.log('🗑️ Região deletada:', result.rows[0]);
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao deletar região:', err);
+    res.status(500).json({ error: 'Erro ao deletar região' });
+  }
+});
+
+// POST /api/disponibilidade/lojas - Criar loja com linhas
+app.post('/api/disponibilidade/lojas', async (req, res) => {
+  try {
+    const { regiao_id, codigo, nome, qtd_linhas } = req.body;
+    
+    if (!regiao_id || !codigo || !nome) {
+      return res.status(400).json({ error: 'Campos obrigatórios: regiao_id, codigo, nome' });
+    }
+    
+    // Verificar se região existe
+    const regiaoCheck = await pool.query('SELECT id FROM disponibilidade_regioes WHERE id = $1', [regiao_id]);
+    if (regiaoCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Região não encontrada' });
+    }
+    
+    // Criar loja
+    const lojaResult = await pool.query(
+      'INSERT INTO disponibilidade_lojas (regiao_id, codigo, nome) VALUES ($1, $2, $3) RETURNING *',
+      [regiao_id, codigo.trim(), nome.toUpperCase().trim()]
+    );
+    const loja = lojaResult.rows[0];
+    
+    // Criar linhas vazias
+    const linhas = [];
+    const qtd = Math.min(parseInt(qtd_linhas) || 1, 50);
+    
+    for (let i = 0; i < qtd; i++) {
+      const linhaResult = await pool.query(
+        'INSERT INTO disponibilidade_linhas (loja_id, status) VALUES ($1, $2) RETURNING *',
+        [loja.id, 'A CONFIRMAR']
+      );
+      linhas.push(linhaResult.rows[0]);
+    }
+    
+    console.log('✅ Loja criada:', loja.nome, 'com', qtd, 'linhas');
+    res.json({ loja, linhas });
+  } catch (err) {
+    console.error('❌ Erro ao criar loja:', err);
+    res.status(500).json({ error: 'Erro ao criar loja' });
+  }
+});
+
+// PUT /api/disponibilidade/lojas/:id - Atualizar loja
+app.put('/api/disponibilidade/lojas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { codigo, nome, ordem } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE disponibilidade_lojas 
+       SET codigo = COALESCE($1, codigo), nome = COALESCE($2, nome), ordem = COALESCE($3, ordem), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4 RETURNING *`,
+      [codigo, nome ? nome.toUpperCase().trim() : null, ordem, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Loja não encontrada' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar loja:', err);
+    res.status(500).json({ error: 'Erro ao atualizar loja' });
+  }
+});
+
+// DELETE /api/disponibilidade/lojas/:id - Deletar loja
+app.delete('/api/disponibilidade/lojas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM disponibilidade_lojas WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Loja não encontrada' });
+    }
+    console.log('🗑️ Loja deletada:', result.rows[0]);
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao deletar loja:', err);
+    res.status(500).json({ error: 'Erro ao deletar loja' });
+  }
+});
+
+// POST /api/disponibilidade/linhas - Adicionar linhas a uma loja
+app.post('/api/disponibilidade/linhas', async (req, res) => {
+  try {
+    const { loja_id, quantidade } = req.body;
+    
+    if (!loja_id) {
+      return res.status(400).json({ error: 'loja_id é obrigatório' });
+    }
+    
+    // Verificar se loja existe
+    const lojaCheck = await pool.query('SELECT id FROM disponibilidade_lojas WHERE id = $1', [loja_id]);
+    if (lojaCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Loja não encontrada' });
+    }
+    
+    const qtd = Math.min(parseInt(quantidade) || 1, 50);
+    const linhas = [];
+    
+    for (let i = 0; i < qtd; i++) {
+      const result = await pool.query(
+        'INSERT INTO disponibilidade_linhas (loja_id, status) VALUES ($1, $2) RETURNING *',
+        [loja_id, 'A CONFIRMAR']
+      );
+      linhas.push(result.rows[0]);
+    }
+    
+    console.log('✅', qtd, 'linha(s) adicionada(s) à loja', loja_id);
+    res.json(linhas);
+  } catch (err) {
+    console.error('❌ Erro ao criar linhas:', err);
+    res.status(500).json({ error: 'Erro ao criar linhas' });
+  }
+});
+
+// PUT /api/disponibilidade/linhas/:id - Atualizar linha
+app.put('/api/disponibilidade/linhas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cod_profissional, nome_profissional, status, observacao } = req.body;
+    
+    // Validar status
+    const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'EM LOJA', 'FALTANDO'];
+    const statusFinal = statusValidos.includes(status) ? status : 'A CONFIRMAR';
+    
+    const result = await pool.query(
+      `UPDATE disponibilidade_linhas 
+       SET cod_profissional = $1, 
+           nome_profissional = $2, 
+           status = $3, 
+           observacao = $4, 
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5 RETURNING *`,
+      [
+        cod_profissional || null, 
+        nome_profissional || null, 
+        statusFinal, 
+        observacao || null, 
+        id
+      ]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Linha não encontrada' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar linha:', err);
+    res.status(500).json({ error: 'Erro ao atualizar linha' });
+  }
+});
+
+// DELETE /api/disponibilidade/linhas/:id - Deletar linha
+app.delete('/api/disponibilidade/linhas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Linha não encontrada' });
+    }
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao deletar linha:', err);
+    res.status(500).json({ error: 'Erro ao deletar linha' });
+  }
+});
+
+// DELETE /api/disponibilidade/limpar-linhas - Limpa todas as linhas (mantém estrutura)
+app.delete('/api/disponibilidade/limpar-linhas', async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE disponibilidade_linhas 
+       SET cod_profissional = NULL, nome_profissional = NULL, status = 'A CONFIRMAR', observacao = NULL, updated_at = CURRENT_TIMESTAMP`
+    );
+    console.log('🧹 Todas as linhas de disponibilidade foram resetadas');
+    res.json({ success: true, message: 'Todas as linhas foram resetadas' });
+  } catch (err) {
+    console.error('❌ Erro ao limpar linhas:', err);
+    res.status(500).json({ error: 'Erro ao limpar linhas' });
   }
 });
 
