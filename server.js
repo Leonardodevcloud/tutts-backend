@@ -2836,14 +2836,63 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     }
     console.log('📸 Espelho salvo antes do reset:', dataEspelho, '- Linhas:', linhas.rows.length);
     
-    // 2. Converter linhas de reposição em excedentes
-    const reposicaoResult = await pool.query(
-      `UPDATE disponibilidade_linhas 
-       SET is_excedente = true, is_reposicao = false 
-       WHERE is_reposicao = true
-       RETURNING id`
+    // 2. Processar linhas de reposição
+    // Regra: Se há excedente vazio disponível, migra o usuário para lá. Senão, reposição vira nova linha excedente.
+    
+    // Buscar todas as linhas de reposição que têm usuário preenchido
+    const reposicoesPreenchidas = await pool.query(
+      `SELECT * FROM disponibilidade_linhas 
+       WHERE is_reposicao = true AND cod_profissional IS NOT NULL AND cod_profissional != ''`
     );
-    console.log('🔄 Linhas de reposição convertidas:', reposicaoResult.rows.length);
+    
+    // Buscar todas as linhas de reposição vazias
+    const reposicoesVazias = await pool.query(
+      `SELECT * FROM disponibilidade_linhas 
+       WHERE is_reposicao = true AND (cod_profissional IS NULL OR cod_profissional = '')`
+    );
+    
+    console.log('📊 Reposições preenchidas:', reposicoesPreenchidas.rows.length);
+    console.log('📊 Reposições vazias:', reposicoesVazias.rows.length);
+    
+    // Para cada reposição preenchida, tentar migrar para excedente vazio da mesma loja
+    for (const reposicao of reposicoesPreenchidas.rows) {
+      // Buscar excedente vazio na mesma loja
+      const excedenteVazio = await pool.query(
+        `SELECT id FROM disponibilidade_linhas 
+         WHERE loja_id = $1 AND is_excedente = true 
+         AND (cod_profissional IS NULL OR cod_profissional = '')
+         LIMIT 1`,
+        [reposicao.loja_id]
+      );
+      
+      if (excedenteVazio.rows.length > 0) {
+        // Migrar usuário para o excedente vazio
+        await pool.query(
+          `UPDATE disponibilidade_linhas 
+           SET cod_profissional = $1, nome_profissional = $2
+           WHERE id = $3`,
+          [reposicao.cod_profissional, reposicao.nome_profissional, excedenteVazio.rows[0].id]
+        );
+        // Deletar a linha de reposição (já migrou o usuário)
+        await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1', [reposicao.id]);
+        console.log('✅ Usuário migrado de reposição para excedente vazio:', reposicao.cod_profissional);
+      } else {
+        // Não há excedente vazio, converter reposição em nova linha excedente (mantém o usuário)
+        await pool.query(
+          `UPDATE disponibilidade_linhas 
+           SET is_excedente = true, is_reposicao = false 
+           WHERE id = $1`,
+          [reposicao.id]
+        );
+        console.log('✅ Reposição convertida em excedente adicional:', reposicao.cod_profissional);
+      }
+    }
+    
+    // Deletar reposições vazias (não precisam virar excedente)
+    await pool.query(
+      `DELETE FROM disponibilidade_linhas WHERE is_reposicao = true`
+    );
+    console.log('🗑️ Reposições vazias removidas');
     
     // 3. Resetar APENAS status e observação (manter cod e nome!)
     await pool.query(
