@@ -376,13 +376,40 @@ async function createTables() {
         status VARCHAR(20) DEFAULT 'A CONFIRMAR',
         observacao TEXT,
         is_excedente BOOLEAN DEFAULT FALSE,
+        is_reposicao BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    // Migração: adicionar coluna se não existir
+    // Migração: adicionar colunas se não existirem
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_excedente BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_reposicao BOOLEAN DEFAULT FALSE`).catch(() => {});
     console.log('✅ Tabela disponibilidade_linhas verificada');
+
+    // Tabela de Faltosos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_faltosos (
+        id SERIAL PRIMARY KEY,
+        loja_id INT NOT NULL REFERENCES disponibilidade_lojas(id) ON DELETE CASCADE,
+        cod_profissional VARCHAR(50),
+        nome_profissional VARCHAR(200),
+        motivo TEXT NOT NULL,
+        data_falta DATE DEFAULT CURRENT_DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_faltosos verificada');
+
+    // Tabela de Espelho (histórico diário)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_espelho (
+        id SERIAL PRIMARY KEY,
+        data_registro DATE DEFAULT CURRENT_DATE,
+        dados JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_espelho verificada');
 
     // Índices para performance
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_lojas_regiao ON disponibilidade_lojas(regiao_id)`).catch(() => {});
@@ -2592,6 +2619,233 @@ app.delete('/api/disponibilidade/limpar-linhas', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao limpar linhas:', err);
     res.status(500).json({ error: 'Erro ao limpar linhas' });
+  }
+});
+
+// ============================================
+// FALTOSOS
+// ============================================
+
+// POST /api/disponibilidade/faltosos - Registrar faltoso
+app.post('/api/disponibilidade/faltosos', async (req, res) => {
+  try {
+    const { loja_id, cod_profissional, nome_profissional, motivo } = req.body;
+    
+    if (!loja_id || !motivo) {
+      return res.status(400).json({ error: 'Campos obrigatórios: loja_id, motivo' });
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO disponibilidade_faltosos (loja_id, cod_profissional, nome_profissional, motivo)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [loja_id, cod_profissional || null, nome_profissional || null, motivo]
+    );
+    
+    console.log('⚠️ Faltoso registrado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao registrar faltoso:', err);
+    res.status(500).json({ error: 'Erro ao registrar faltoso' });
+  }
+});
+
+// GET /api/disponibilidade/faltosos - Listar faltosos com filtros
+app.get('/api/disponibilidade/faltosos', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, loja_id } = req.query;
+    
+    let query = `
+      SELECT f.*, l.codigo as loja_codigo, l.nome as loja_nome, r.nome as regiao_nome
+      FROM disponibilidade_faltosos f
+      JOIN disponibilidade_lojas l ON f.loja_id = l.id
+      JOIN disponibilidade_regioes r ON l.regiao_id = r.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND f.data_falta >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND f.data_falta <= $${params.length}`;
+    }
+    if (loja_id) {
+      params.push(loja_id);
+      query += ` AND f.loja_id = $${params.length}`;
+    }
+    
+    query += ' ORDER BY f.data_falta DESC, f.created_at DESC';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar faltosos:', err);
+    res.status(500).json({ error: 'Erro ao listar faltosos' });
+  }
+});
+
+// POST /api/disponibilidade/linha-reposicao - Criar linha de reposição
+app.post('/api/disponibilidade/linha-reposicao', async (req, res) => {
+  try {
+    const { loja_id, after_linha_id } = req.body;
+    
+    if (!loja_id) {
+      return res.status(400).json({ error: 'loja_id é obrigatório' });
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO disponibilidade_linhas (loja_id, status, is_reposicao)
+       VALUES ($1, 'A CONFIRMAR', true) RETURNING *`,
+      [loja_id]
+    );
+    
+    console.log('🔄 Linha de reposição criada:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar linha de reposição:', err);
+    res.status(500).json({ error: 'Erro ao criar linha de reposição' });
+  }
+});
+
+// ============================================
+// ESPELHO (Histórico)
+// ============================================
+
+// POST /api/disponibilidade/espelho - Salvar snapshot antes do reset
+app.post('/api/disponibilidade/espelho', async (req, res) => {
+  try {
+    // Buscar todos os dados atuais
+    const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
+    const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
+    const linhas = await pool.query('SELECT * FROM disponibilidade_linhas ORDER BY id');
+    
+    const dados = {
+      regioes: regioes.rows,
+      lojas: lojas.rows,
+      linhas: linhas.rows,
+      salvo_em: new Date().toISOString()
+    };
+    
+    // Verificar se já existe espelho para hoje
+    const hoje = new Date().toISOString().split('T')[0];
+    const existing = await pool.query(
+      'SELECT id FROM disponibilidade_espelho WHERE data_registro = $1',
+      [hoje]
+    );
+    
+    if (existing.rows.length > 0) {
+      // Atualizar o existente
+      await pool.query(
+        'UPDATE disponibilidade_espelho SET dados = $1 WHERE data_registro = $2',
+        [JSON.stringify(dados), hoje]
+      );
+    } else {
+      // Criar novo
+      await pool.query(
+        'INSERT INTO disponibilidade_espelho (data_registro, dados) VALUES ($1, $2)',
+        [hoje, JSON.stringify(dados)]
+      );
+    }
+    
+    console.log('📸 Espelho salvo para', hoje);
+    res.json({ success: true, data: hoje });
+  } catch (err) {
+    console.error('❌ Erro ao salvar espelho:', err);
+    res.status(500).json({ error: 'Erro ao salvar espelho' });
+  }
+});
+
+// GET /api/disponibilidade/espelho - Listar datas disponíveis
+app.get('/api/disponibilidade/espelho', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, data_registro, created_at FROM disponibilidade_espelho ORDER BY data_registro DESC'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar espelhos:', err);
+    res.status(500).json({ error: 'Erro ao listar espelhos' });
+  }
+});
+
+// GET /api/disponibilidade/espelho/:data - Buscar espelho por data
+app.get('/api/disponibilidade/espelho/:data', async (req, res) => {
+  try {
+    const { data } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM disponibilidade_espelho WHERE data_registro = $1',
+      [data]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Espelho não encontrado para esta data' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao buscar espelho:', err);
+    res.status(500).json({ error: 'Erro ao buscar espelho' });
+  }
+});
+
+// POST /api/disponibilidade/resetar - Resetar status (com salvamento de espelho)
+app.post('/api/disponibilidade/resetar', async (req, res) => {
+  try {
+    // 1. Salvar espelho antes de resetar
+    const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
+    const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
+    const linhas = await pool.query('SELECT * FROM disponibilidade_linhas ORDER BY id');
+    
+    const dados = {
+      regioes: regioes.rows,
+      lojas: lojas.rows,
+      linhas: linhas.rows,
+      salvo_em: new Date().toISOString()
+    };
+    
+    const hoje = new Date().toISOString().split('T')[0];
+    const existing = await pool.query(
+      'SELECT id FROM disponibilidade_espelho WHERE data_registro = $1',
+      [hoje]
+    );
+    
+    if (existing.rows.length > 0) {
+      await pool.query(
+        'UPDATE disponibilidade_espelho SET dados = $1 WHERE data_registro = $2',
+        [JSON.stringify(dados), hoje]
+      );
+    } else {
+      await pool.query(
+        'INSERT INTO disponibilidade_espelho (data_registro, dados) VALUES ($1, $2)',
+        [hoje, JSON.stringify(dados)]
+      );
+    }
+    console.log('📸 Espelho salvo antes do reset');
+    
+    // 2. Converter linhas de reposição em excedentes
+    await pool.query(
+      `UPDATE disponibilidade_linhas 
+       SET is_excedente = true, is_reposicao = false 
+       WHERE is_reposicao = true`
+    );
+    
+    // 3. Resetar todas as linhas
+    await pool.query(
+      `UPDATE disponibilidade_linhas 
+       SET cod_profissional = NULL, 
+           nome_profissional = NULL, 
+           status = 'A CONFIRMAR', 
+           observacao = NULL,
+           updated_at = CURRENT_TIMESTAMP`
+    );
+    
+    console.log('🔄 Status resetado com sucesso');
+    res.json({ success: true, espelho_data: hoje });
+  } catch (err) {
+    console.error('❌ Erro ao resetar:', err);
+    res.status(500).json({ error: 'Erro ao resetar status' });
   }
 });
 
