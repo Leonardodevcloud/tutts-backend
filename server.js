@@ -2631,16 +2631,19 @@ app.delete('/api/disponibilidade/limpar-linhas', async (req, res) => {
 // POST /api/disponibilidade/faltosos - Registrar faltoso
 app.post('/api/disponibilidade/faltosos', async (req, res) => {
   try {
-    const { loja_id, cod_profissional, nome_profissional, motivo } = req.body;
+    const { loja_id, cod_profissional, nome_profissional, motivo, data_falta } = req.body;
     
     if (!loja_id || !motivo) {
       return res.status(400).json({ error: 'Campos obrigatórios: loja_id, motivo' });
     }
     
+    // Usar data_falta enviada ou data atual
+    const dataFalta = data_falta || new Date().toISOString().split('T')[0];
+    
     const result = await pool.query(
-      `INSERT INTO disponibilidade_faltosos (loja_id, cod_profissional, nome_profissional, motivo)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [loja_id, cod_profissional || null, nome_profissional || null, motivo]
+      `INSERT INTO disponibilidade_faltosos (loja_id, cod_profissional, nome_profissional, motivo, data_falta)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [loja_id, cod_profissional || null, nome_profissional || null, motivo, dataFalta]
     );
     
     console.log('⚠️ Faltoso registrado:', result.rows[0]);
@@ -2795,6 +2798,10 @@ app.get('/api/disponibilidade/espelho/:data', async (req, res) => {
 // POST /api/disponibilidade/resetar - Resetar status (com salvamento de espelho)
 app.post('/api/disponibilidade/resetar', async (req, res) => {
   try {
+    // Pegar a data da planilha (enviada pelo frontend) ou usar hoje
+    const { data_planilha } = req.body || {};
+    const dataEspelho = data_planilha || new Date().toISOString().split('T')[0];
+    
     // 1. Salvar espelho antes de resetar
     const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
     const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
@@ -2804,30 +2811,30 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
       regioes: regioes.rows,
       lojas: lojas.rows,
       linhas: linhas.rows,
+      data_planilha: dataEspelho,
       salvo_em: new Date().toISOString()
     };
     
-    const hoje = new Date().toISOString().split('T')[0];
     const existing = await pool.query(
       'SELECT id FROM disponibilidade_espelho WHERE data_registro = $1',
-      [hoje]
+      [dataEspelho]
     );
     
     let espelhoSalvo = false;
     if (existing.rows.length > 0) {
       await pool.query(
         'UPDATE disponibilidade_espelho SET dados = $1, created_at = CURRENT_TIMESTAMP WHERE data_registro = $2',
-        [JSON.stringify(dados), hoje]
+        [JSON.stringify(dados), dataEspelho]
       );
       espelhoSalvo = true;
     } else {
       await pool.query(
         'INSERT INTO disponibilidade_espelho (data_registro, dados) VALUES ($1, $2)',
-        [hoje, JSON.stringify(dados)]
+        [dataEspelho, JSON.stringify(dados)]
       );
       espelhoSalvo = true;
     }
-    console.log('📸 Espelho salvo antes do reset:', hoje, '- Linhas:', linhas.rows.length);
+    console.log('📸 Espelho salvo antes do reset:', dataEspelho, '- Linhas:', linhas.rows.length);
     
     // 2. Converter linhas de reposição em excedentes
     const reposicaoResult = await pool.query(
@@ -2847,7 +2854,7 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     );
     
     console.log('🔄 Status resetado com sucesso (códigos e nomes mantidos)');
-    res.json({ success: true, espelho_data: hoje, espelho_salvo: espelhoSalvo });
+    res.json({ success: true, espelho_data: dataEspelho, espelho_salvo: espelhoSalvo });
   } catch (err) {
     console.error('❌ Erro ao resetar:', err);
     res.status(500).json({ error: 'Erro ao resetar status' });
