@@ -354,11 +354,16 @@ async function createTables() {
         regiao_id INT NOT NULL REFERENCES disponibilidade_regioes(id) ON DELETE CASCADE,
         codigo VARCHAR(20) NOT NULL,
         nome VARCHAR(200) NOT NULL,
+        qtd_titulares INT DEFAULT 0,
+        qtd_excedentes INT DEFAULT 0,
         ordem INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migração: adicionar colunas se não existirem
+    await pool.query(`ALTER TABLE disponibilidade_lojas ADD COLUMN IF NOT EXISTS qtd_titulares INT DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_lojas ADD COLUMN IF NOT EXISTS qtd_excedentes INT DEFAULT 0`).catch(() => {});
     console.log('✅ Tabela disponibilidade_lojas verificada');
 
     // Tabela de Linhas de Disponibilidade (Entregadores)
@@ -370,10 +375,13 @@ async function createTables() {
         nome_profissional VARCHAR(200),
         status VARCHAR(20) DEFAULT 'A CONFIRMAR',
         observacao TEXT,
+        is_excedente BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migração: adicionar coluna se não existir
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_excedente BOOLEAN DEFAULT FALSE`).catch(() => {});
     console.log('✅ Tabela disponibilidade_linhas verificada');
 
     // Índices para performance
@@ -2387,7 +2395,7 @@ app.delete('/api/disponibilidade/regioes/:id', async (req, res) => {
 // POST /api/disponibilidade/lojas - Criar loja com linhas
 app.post('/api/disponibilidade/lojas', async (req, res) => {
   try {
-    const { regiao_id, codigo, nome, qtd_linhas } = req.body;
+    const { regiao_id, codigo, nome, qtd_titulares, qtd_excedentes } = req.body;
     
     if (!regiao_id || !codigo || !nome) {
       return res.status(400).json({ error: 'Campos obrigatórios: regiao_id, codigo, nome' });
@@ -2399,26 +2407,38 @@ app.post('/api/disponibilidade/lojas', async (req, res) => {
       return res.status(400).json({ error: 'Região não encontrada' });
     }
     
+    const titulares = Math.min(parseInt(qtd_titulares) || 0, 50);
+    const excedentes = Math.min(parseInt(qtd_excedentes) || 0, 50);
+    
     // Criar loja
     const lojaResult = await pool.query(
-      'INSERT INTO disponibilidade_lojas (regiao_id, codigo, nome) VALUES ($1, $2, $3) RETURNING *',
-      [regiao_id, codigo.trim(), nome.toUpperCase().trim()]
+      'INSERT INTO disponibilidade_lojas (regiao_id, codigo, nome, qtd_titulares, qtd_excedentes) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [regiao_id, codigo.trim(), nome.toUpperCase().trim(), titulares, excedentes]
     );
     const loja = lojaResult.rows[0];
     
     // Criar linhas vazias
     const linhas = [];
-    const qtd = Math.min(parseInt(qtd_linhas) || 1, 50);
     
-    for (let i = 0; i < qtd; i++) {
+    // Criar linhas de titulares
+    for (let i = 0; i < titulares; i++) {
       const linhaResult = await pool.query(
-        'INSERT INTO disponibilidade_linhas (loja_id, status) VALUES ($1, $2) RETURNING *',
-        [loja.id, 'A CONFIRMAR']
+        'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
+        [loja.id, 'A CONFIRMAR', false]
       );
       linhas.push(linhaResult.rows[0]);
     }
     
-    console.log('✅ Loja criada:', loja.nome, 'com', qtd, 'linhas');
+    // Criar linhas de excedentes
+    for (let i = 0; i < excedentes; i++) {
+      const linhaResult = await pool.query(
+        'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
+        [loja.id, 'A CONFIRMAR', true]
+      );
+      linhas.push(linhaResult.rows[0]);
+    }
+    
+    console.log('✅ Loja criada:', loja.nome, 'com', titulares, 'titulares e', excedentes, 'excedentes');
     res.json({ loja, linhas });
   } catch (err) {
     console.error('❌ Erro ao criar loja:', err);
@@ -2430,18 +2450,24 @@ app.post('/api/disponibilidade/lojas', async (req, res) => {
 app.put('/api/disponibilidade/lojas/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { codigo, nome, ordem } = req.body;
+    const { codigo, nome, qtd_titulares, qtd_excedentes, ordem } = req.body;
     
     const result = await pool.query(
       `UPDATE disponibilidade_lojas 
-       SET codigo = COALESCE($1, codigo), nome = COALESCE($2, nome), ordem = COALESCE($3, ordem), updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4 RETURNING *`,
-      [codigo, nome ? nome.toUpperCase().trim() : null, ordem, id]
+       SET codigo = COALESCE($1, codigo), 
+           nome = COALESCE($2, nome), 
+           qtd_titulares = COALESCE($3, qtd_titulares),
+           qtd_excedentes = COALESCE($4, qtd_excedentes),
+           ordem = COALESCE($5, ordem), 
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $6 RETURNING *`,
+      [codigo, nome ? nome.toUpperCase().trim() : null, qtd_titulares, qtd_excedentes, ordem, id]
     );
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Loja não encontrada' });
     }
+    console.log('✅ Loja atualizada:', result.rows[0]);
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar loja:', err);
@@ -2469,7 +2495,7 @@ app.delete('/api/disponibilidade/lojas/:id', async (req, res) => {
 // POST /api/disponibilidade/linhas - Adicionar linhas a uma loja
 app.post('/api/disponibilidade/linhas', async (req, res) => {
   try {
-    const { loja_id, quantidade } = req.body;
+    const { loja_id, quantidade, is_excedente } = req.body;
     
     if (!loja_id) {
       return res.status(400).json({ error: 'loja_id é obrigatório' });
@@ -2482,17 +2508,18 @@ app.post('/api/disponibilidade/linhas', async (req, res) => {
     }
     
     const qtd = Math.min(parseInt(quantidade) || 1, 50);
+    const excedente = is_excedente === true;
     const linhas = [];
     
     for (let i = 0; i < qtd; i++) {
       const result = await pool.query(
-        'INSERT INTO disponibilidade_linhas (loja_id, status) VALUES ($1, $2) RETURNING *',
-        [loja_id, 'A CONFIRMAR']
+        'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
+        [loja_id, 'A CONFIRMAR', excedente]
       );
       linhas.push(result.rows[0]);
     }
     
-    console.log('✅', qtd, 'linha(s) adicionada(s) à loja', loja_id);
+    console.log('✅', qtd, excedente ? 'excedente(s)' : 'titular(es)', 'adicionado(s) à loja', loja_id);
     res.json(linhas);
   } catch (err) {
     console.error('❌ Erro ao criar linhas:', err);
