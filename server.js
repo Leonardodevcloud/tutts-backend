@@ -3167,6 +3167,191 @@ app.get('/api/disponibilidade/relatorios/heatmap', async (req, res) => {
   }
 });
 
+// ============================================
+// LINK PÚBLICO (SOMENTE LEITURA)
+// ============================================
+
+// GET /api/disponibilidade/publico - Retorna página HTML com panorama somente leitura
+app.get('/api/disponibilidade/publico', async (req, res) => {
+  try {
+    const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
+    const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY nome');
+    const linhas = await pool.query('SELECT * FROM disponibilidade_linhas');
+    
+    // Calcular dados de cada loja
+    const lojasComDados = lojas.rows.map(loja => {
+      const linhasLoja = linhas.rows.filter(l => l.loja_id === loja.id);
+      const titulares = linhasLoja.filter(l => !l.is_excedente && !l.is_reposicao).length;
+      const aCaminho = linhasLoja.filter(l => l.status === 'A CAMINHO').length;
+      const confirmado = linhasLoja.filter(l => l.status === 'CONFIRMADO').length;
+      const emLoja = linhasLoja.filter(l => l.status === 'EM LOJA').length;
+      const semContato = linhasLoja.filter(l => l.status === 'SEM CONTATO').length;
+      const emOperacao = aCaminho + confirmado + emLoja;
+      const falta = Math.max(0, titulares - emOperacao);
+      const perc = titulares > 0 ? ((emOperacao / titulares) * 100) : 0;
+      const regiao = regioes.rows.find(r => r.id === loja.regiao_id);
+      return { ...loja, titulares, aCaminho, confirmado, emLoja, semContato, emOperacao, falta, perc, regiao };
+    });
+    
+    // Totais
+    let totalGeral = { aCaminho: 0, confirmado: 0, emLoja: 0, titulares: 0, falta: 0, semContato: 0, emOperacao: 0 };
+    lojasComDados.forEach(l => {
+      totalGeral.aCaminho += l.aCaminho;
+      totalGeral.confirmado += l.confirmado;
+      totalGeral.emLoja += l.emLoja;
+      totalGeral.titulares += l.titulares;
+      totalGeral.falta += l.falta;
+      totalGeral.semContato += l.semContato;
+      totalGeral.emOperacao += l.emOperacao;
+    });
+    const percGeral = totalGeral.titulares > 0 ? ((totalGeral.emOperacao / totalGeral.titulares) * 100) : 0;
+    
+    // Gerar HTML
+    let html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panorama - Disponibilidade</title>
+  <meta http-equiv="refresh" content="120">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; background: #f3f4f6; padding: 10px; }
+    .header { background: #1f2937; color: white; padding: 12px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 16px; }
+    .header .info { font-size: 11px; color: #9ca3af; }
+    .badge { padding: 4px 10px; border-radius: 20px; font-weight: bold; font-size: 12px; }
+    .badge-green { background: #22c55e; color: white; }
+    .badge-yellow { background: #facc15; color: #000; }
+    .badge-red { background: #ef4444; color: white; }
+    table { width: 100%; border-collapse: collapse; font-size: 10px; background: white; border-radius: 8px; overflow: hidden; }
+    th { background: #374151; color: white; padding: 6px 4px; text-align: center; }
+    th.lojas { text-align: left; }
+    td { padding: 4px; border: 1px solid #ddd; text-align: center; }
+    td.loja { text-align: left; background: #f9fafb; font-weight: 500; }
+    tr.regiao td { background: #facc15; font-weight: bold; text-align: center; }
+    tr.subtotal td { background: #e5e7eb; font-size: 9px; font-weight: bold; }
+    tr.total td { background: #1f2937; color: white; font-weight: bold; }
+    .critico { background: #fee2e2 !important; }
+    .cell-green { background: #bbf7d0; color: #166534; }
+    .cell-blue { background: #bfdbfe; color: #1e40af; }
+    .cell-orange { background: #fed7aa; color: #9a3412; }
+    .cell-purple { background: #f3e8ff; color: #7e22ce; }
+    .cell-red { background: #ef4444; color: white; }
+    .cell-yellow { background: #fef08a; color: #854d0e; }
+    .perc-100 { background: #22c55e; color: white; }
+    .perc-80 { background: #facc15; color: #000; }
+    .perc-50 { background: #fb923c; color: white; }
+    .perc-0 { background: #ef4444; color: white; }
+    .footer { margin-top: 10px; text-align: center; font-size: 10px; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>📊 PANORAMA DIÁRIO OPERACIONAL</h1>
+      <div class="info">Atualizado: ${new Date().toLocaleString('pt-BR')} | Auto-refresh: 2min</div>
+    </div>
+    <div>
+      <span class="badge ${percGeral >= 80 ? 'badge-green' : percGeral >= 50 ? 'badge-yellow' : 'badge-red'}">
+        ${percGeral.toFixed(0)}% GERAL
+      </span>
+      ${totalGeral.falta > 0 ? `<span class="badge badge-red" style="margin-left:5px">⚠️ FALTAM ${totalGeral.falta}</span>` : ''}
+    </div>
+  </div>
+  
+  <table>
+    <thead>
+      <tr>
+        <th class="lojas">LOJAS</th>
+        <th style="background:#ea580c">A CAMINHO</th>
+        <th style="background:#16a34a">CONFIR.</th>
+        <th style="background:#2563eb">EM LOJA</th>
+        <th style="background:#9333ea">IDEAL</th>
+        <th style="background:#dc2626">FALTA</th>
+        <th style="background:#6b7280">S/ CONTATO</th>
+        <th style="background:#0d9488">% OPERAÇÃO</th>
+      </tr>
+    </thead>
+    <tbody>`;
+    
+    // Renderizar por região
+    regioes.rows.forEach(regiao => {
+      const lojasReg = lojasComDados.filter(l => l.regiao_id === regiao.id);
+      if (lojasReg.length === 0) return;
+      
+      // Header região
+      html += `<tr class="regiao"><td colspan="8">${regiao.nome}${regiao.gestores ? ` (${regiao.gestores})` : ''}</td></tr>`;
+      
+      // Lojas
+      lojasReg.forEach(loja => {
+        const critico = loja.perc < 50 ? 'critico' : '';
+        const percClass = loja.perc >= 100 ? 'perc-100' : loja.perc >= 80 ? 'perc-80' : loja.perc >= 50 ? 'perc-50' : 'perc-0';
+        html += `<tr class="${critico}">
+          <td class="loja">${loja.perc < 50 ? '🔴 ' : ''}${loja.nome}</td>
+          <td class="${loja.aCaminho > 0 ? 'cell-orange' : ''}">${loja.aCaminho}</td>
+          <td class="${loja.confirmado > 0 ? 'cell-green' : ''}">${loja.confirmado}</td>
+          <td class="${loja.emLoja > 0 ? 'cell-blue' : ''}">${loja.emLoja}</td>
+          <td class="cell-purple">${loja.titulares}</td>
+          <td class="${loja.falta > 0 ? 'cell-red' : ''}">${loja.falta > 0 ? -loja.falta : 0}</td>
+          <td class="${loja.semContato > 0 ? 'cell-yellow' : ''}">${loja.semContato}</td>
+          <td class="${percClass}">${loja.perc.toFixed(0)}%</td>
+        </tr>`;
+      });
+      
+      // Subtotal região
+      const subTotal = lojasReg.reduce((acc, l) => ({
+        aCaminho: acc.aCaminho + l.aCaminho,
+        confirmado: acc.confirmado + l.confirmado,
+        emLoja: acc.emLoja + l.emLoja,
+        titulares: acc.titulares + l.titulares,
+        falta: acc.falta + l.falta,
+        semContato: acc.semContato + l.semContato,
+        emOperacao: acc.emOperacao + l.emOperacao
+      }), { aCaminho: 0, confirmado: 0, emLoja: 0, titulares: 0, falta: 0, semContato: 0, emOperacao: 0 });
+      const subPerc = subTotal.titulares > 0 ? ((subTotal.emOperacao / subTotal.titulares) * 100) : 0;
+      const subPercClass = subPerc >= 100 ? 'perc-100' : subPerc >= 80 ? 'perc-80' : 'perc-0';
+      
+      html += `<tr class="subtotal">
+        <td style="text-align:right">SUBTOTAL ${regiao.nome}:</td>
+        <td>${subTotal.aCaminho}</td>
+        <td>${subTotal.confirmado}</td>
+        <td>${subTotal.emLoja}</td>
+        <td>${subTotal.titulares}</td>
+        <td style="color:#dc2626">${subTotal.falta > 0 ? -subTotal.falta : 0}</td>
+        <td>${subTotal.semContato}</td>
+        <td class="${subPercClass}">${subPerc.toFixed(0)}%</td>
+      </tr>`;
+    });
+    
+    // Total geral
+    const totalPercClass = percGeral >= 100 ? 'perc-100' : percGeral >= 80 ? 'perc-80' : 'perc-0';
+    html += `<tr class="total">
+      <td style="text-align:left">TOTAL GERAL</td>
+      <td>${totalGeral.aCaminho}</td>
+      <td>${totalGeral.confirmado}</td>
+      <td>${totalGeral.emLoja}</td>
+      <td>${totalGeral.titulares}</td>
+      <td style="color:#fca5a5">${totalGeral.falta > 0 ? -totalGeral.falta : 0}</td>
+      <td>${totalGeral.semContato}</td>
+      <td class="${totalPercClass}">${percGeral.toFixed(0)}%</td>
+    </tr>`;
+    
+    html += `</tbody></table>
+  <div class="footer">
+    Esta página atualiza automaticamente a cada 2 minutos | Sistema Tutts
+  </div>
+</body>
+</html>`;
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  } catch (err) {
+    console.error('❌ Erro ao gerar página pública:', err);
+    res.status(500).send('Erro ao gerar página');
+  }
+});
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
