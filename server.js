@@ -3230,7 +3230,6 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
     td { padding: 4px; border: 1px solid #ddd; text-align: center; }
     td.loja { text-align: left; background: #f9fafb; font-weight: 500; }
     tr.regiao td { background: #facc15; font-weight: bold; text-align: center; }
-    tr.subtotal td { background: #e5e7eb; font-size: 9px; font-weight: bold; }
     tr.total td { background: #1f2937; color: white; font-weight: bold; }
     .critico { background: #fee2e2 !important; }
     .cell-green { background: #bbf7d0; color: #166534; }
@@ -3298,30 +3297,6 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
           <td class="${percClass}">${loja.perc.toFixed(0)}%</td>
         </tr>`;
       });
-      
-      // Subtotal região
-      const subTotal = lojasReg.reduce((acc, l) => ({
-        aCaminho: acc.aCaminho + l.aCaminho,
-        confirmado: acc.confirmado + l.confirmado,
-        emLoja: acc.emLoja + l.emLoja,
-        titulares: acc.titulares + l.titulares,
-        falta: acc.falta + l.falta,
-        semContato: acc.semContato + l.semContato,
-        emOperacao: acc.emOperacao + l.emOperacao
-      }), { aCaminho: 0, confirmado: 0, emLoja: 0, titulares: 0, falta: 0, semContato: 0, emOperacao: 0 });
-      const subPerc = subTotal.titulares > 0 ? ((subTotal.emOperacao / subTotal.titulares) * 100) : 0;
-      const subPercClass = subPerc >= 100 ? 'perc-100' : subPerc >= 80 ? 'perc-80' : 'perc-0';
-      
-      html += `<tr class="subtotal">
-        <td style="text-align:right">SUBTOTAL ${regiao.nome}:</td>
-        <td>${subTotal.aCaminho}</td>
-        <td>${subTotal.confirmado}</td>
-        <td>${subTotal.emLoja}</td>
-        <td>${subTotal.titulares}</td>
-        <td style="color:#dc2626">${subTotal.falta > 0 ? -subTotal.falta : 0}</td>
-        <td>${subTotal.semContato}</td>
-        <td class="${subPercClass}">${subPerc.toFixed(0)}%</td>
-      </tr>`;
     });
     
     // Total geral
