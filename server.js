@@ -3206,7 +3206,7 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
     });
     const percGeral = totalGeral.titulares > 0 ? ((totalGeral.emOperacao / totalGeral.titulares) * 100) : 0;
     
-    // Gerar HTML
+    // Gerar HTML - Design Clean
     let html = `<!DOCTYPE html>
 <html>
 <head>
@@ -3216,33 +3216,36 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
   <meta http-equiv="refresh" content="120">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; background: #f3f4f6; padding: 10px; }
-    .header { background: #1f2937; color: white; padding: 12px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-    .header h1 { font-size: 16px; }
-    .header .info { font-size: 11px; color: #9ca3af; }
-    .badge { padding: 4px 10px; border-radius: 20px; font-weight: bold; font-size: 12px; }
-    .badge-green { background: #22c55e; color: white; }
-    .badge-yellow { background: #facc15; color: #000; }
-    .badge-red { background: #ef4444; color: white; }
-    table { width: 100%; border-collapse: collapse; font-size: 10px; background: white; border-radius: 8px; overflow: hidden; }
-    th { background: #374151; color: white; padding: 6px 4px; text-align: center; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; padding: 12px; }
+    .header { background: white; padding: 16px; border-radius: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .header h1 { font-size: 15px; color: #1e293b; font-weight: 600; }
+    .header .info { font-size: 11px; color: #64748b; margin-top: 4px; }
+    .badge { padding: 4px 12px; border-radius: 20px; font-weight: 700; font-size: 12px; }
+    .badge-green { background: #dcfce7; color: #15803d; }
+    .badge-yellow { background: #fef3c7; color: #a16207; }
+    .badge-red { background: #fee2e2; color: #b91c1c; }
+    table { width: 100%; border-collapse: collapse; font-size: 9px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    th { background: #f8fafc; color: #475569; padding: 8px 6px; text-align: center; font-weight: 600; border-bottom: 2px solid #e2e8f0; }
     th.lojas { text-align: left; }
-    td { padding: 4px; border: 1px solid #ddd; text-align: center; }
-    td.loja { text-align: left; background: #f9fafb; font-weight: 500; }
-    tr.regiao td { background: #facc15; font-weight: bold; text-align: center; }
-    tr.total td { background: #1f2937; color: white; font-weight: bold; }
-    .critico { background: #fee2e2 !important; }
-    .cell-green { background: #bbf7d0; color: #166534; }
-    .cell-blue { background: #bfdbfe; color: #1e40af; }
-    .cell-orange { background: #fed7aa; color: #9a3412; }
-    .cell-purple { background: #f3e8ff; color: #7e22ce; }
-    .cell-red { background: #ef4444; color: white; }
-    .cell-yellow { background: #fef08a; color: #854d0e; }
-    .perc-100 { background: #22c55e; color: white; }
-    .perc-80 { background: #facc15; color: #000; }
-    .perc-50 { background: #fb923c; color: white; }
-    .perc-0 { background: #ef4444; color: white; }
-    .footer { margin-top: 10px; text-align: center; font-size: 10px; color: #6b7280; }
+    td { padding: 4px 6px; border: 1px solid #e2e8f0; text-align: center; }
+    td.loja { text-align: left; background: #fafafa; font-weight: 500; }
+    tr.regiao td { background: #e2e8f0; font-weight: 700; text-align: center; color: #1e293b; }
+    tr.total td { background: #f8fafc; font-weight: 700; border-top: 2px solid #cbd5e1; }
+    tr.critico { background: #fef2f2; }
+    tr.critico td.loja { background: #fef2f2; }
+    .num-zero { color: #cbd5e1; }
+    .num-acaminho { color: #ea580c; }
+    .num-confirmado { color: #16a34a; }
+    .num-emloja { color: #2563eb; font-weight: 700; }
+    .num-ideal { color: #64748b; }
+    .num-falta { color: #dc2626; font-weight: 600; }
+    .num-semcontato { color: #d97706; }
+    .perc { font-weight: 700; }
+    .perc-ok { background: #bbf7d0; color: #15803d; }
+    .perc-warn { background: #fde68a; color: #a16207; }
+    .perc-danger { background: #fecaca; color: #b91c1c; }
+    .perc-neutral { background: #f1f5f9; color: #475569; }
+    .footer { margin-top: 12px; text-align: center; font-size: 10px; color: #94a3b8; }
   </style>
 </head>
 <body>
@@ -3252,7 +3255,7 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
       <div class="info">Atualizado: ${new Date().toLocaleString('pt-BR')} | Auto-refresh: 2min</div>
     </div>
     <div>
-      <span class="badge ${percGeral >= 80 ? 'badge-green' : percGeral >= 50 ? 'badge-yellow' : 'badge-red'}">
+      <span class="badge ${percGeral >= 100 ? 'badge-green' : percGeral >= 80 ? 'badge-yellow' : 'badge-red'}">
         ${percGeral.toFixed(0)}% GERAL
       </span>
       ${totalGeral.falta > 0 ? `<span class="badge badge-red" style="margin-left:5px">⚠️ FALTAM ${totalGeral.falta}</span>` : ''}
@@ -3263,13 +3266,13 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
     <thead>
       <tr>
         <th class="lojas">LOJAS</th>
-        <th style="background:#ea580c">A CAMINHO</th>
-        <th style="background:#16a34a">CONFIR.</th>
-        <th style="background:#2563eb">EM LOJA</th>
-        <th style="background:#9333ea">IDEAL</th>
-        <th style="background:#dc2626">FALTA</th>
-        <th style="background:#6b7280">S/ CONTATO</th>
-        <th style="background:#0d9488">% OPERAÇÃO</th>
+        <th>A CAMINHO</th>
+        <th>CONFIR.</th>
+        <th>EM LOJA</th>
+        <th>IDEAL</th>
+        <th>FALTA</th>
+        <th>S/ CONTATO</th>
+        <th>%</th>
       </tr>
     </thead>
     <tbody>`;
@@ -3285,31 +3288,31 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
       // Lojas
       lojasReg.forEach(loja => {
         const critico = loja.perc < 50 ? 'critico' : '';
-        const percClass = loja.perc >= 100 ? 'perc-100' : loja.perc >= 80 ? 'perc-80' : loja.perc >= 50 ? 'perc-50' : 'perc-0';
+        const percClass = loja.perc >= 100 ? 'perc-ok' : loja.perc >= 80 ? 'perc-neutral' : loja.perc >= 50 ? 'perc-warn' : 'perc-danger';
         html += `<tr class="${critico}">
           <td class="loja">${loja.perc < 50 ? '🔴 ' : ''}${loja.nome}</td>
-          <td class="${loja.aCaminho > 0 ? 'cell-orange' : ''}">${loja.aCaminho}</td>
-          <td class="${loja.confirmado > 0 ? 'cell-green' : ''}">${loja.confirmado}</td>
-          <td class="${loja.emLoja > 0 ? 'cell-blue' : ''}">${loja.emLoja}</td>
-          <td class="cell-purple">${loja.titulares}</td>
-          <td class="${loja.falta > 0 ? 'cell-red' : ''}">${loja.falta > 0 ? -loja.falta : 0}</td>
-          <td class="${loja.semContato > 0 ? 'cell-yellow' : ''}">${loja.semContato}</td>
-          <td class="${percClass}">${loja.perc.toFixed(0)}%</td>
+          <td class="${loja.aCaminho > 0 ? 'num-acaminho' : 'num-zero'}">${loja.aCaminho}</td>
+          <td class="${loja.confirmado > 0 ? 'num-confirmado' : 'num-zero'}">${loja.confirmado}</td>
+          <td class="${loja.emLoja > 0 ? 'num-emloja' : 'num-zero'}">${loja.emLoja}</td>
+          <td class="num-ideal">${loja.titulares}</td>
+          <td class="${loja.falta > 0 ? 'num-falta' : 'num-zero'}">${loja.falta > 0 ? -loja.falta : 0}</td>
+          <td class="${loja.semContato > 0 ? 'num-semcontato' : 'num-zero'}">${loja.semContato}</td>
+          <td class="perc ${percClass}">${loja.perc.toFixed(0)}%</td>
         </tr>`;
       });
     });
     
     // Total geral
-    const totalPercClass = percGeral >= 100 ? 'perc-100' : percGeral >= 80 ? 'perc-80' : 'perc-0';
+    const totalPercClass = percGeral >= 100 ? 'perc-ok' : percGeral >= 80 ? 'perc-neutral' : percGeral >= 50 ? 'perc-warn' : 'perc-danger';
     html += `<tr class="total">
-      <td style="text-align:left">TOTAL GERAL</td>
-      <td>${totalGeral.aCaminho}</td>
-      <td>${totalGeral.confirmado}</td>
-      <td>${totalGeral.emLoja}</td>
-      <td>${totalGeral.titulares}</td>
-      <td style="color:#fca5a5">${totalGeral.falta > 0 ? -totalGeral.falta : 0}</td>
-      <td>${totalGeral.semContato}</td>
-      <td class="${totalPercClass}">${percGeral.toFixed(0)}%</td>
+      <td style="text-align:left;color:#1e293b">TOTAL GERAL</td>
+      <td class="num-acaminho">${totalGeral.aCaminho}</td>
+      <td class="num-confirmado">${totalGeral.confirmado}</td>
+      <td class="num-emloja">${totalGeral.emLoja}</td>
+      <td class="num-ideal">${totalGeral.titulares}</td>
+      <td class="${totalGeral.falta > 0 ? 'num-falta' : 'num-zero'}">${totalGeral.falta > 0 ? -totalGeral.falta : 0}</td>
+      <td class="${totalGeral.semContato > 0 ? 'num-semcontato' : 'num-zero'}">${totalGeral.semContato}</td>
+      <td class="perc ${totalPercClass}" style="font-weight:800">${percGeral.toFixed(0)}%</td>
     </tr>`;
     
     html += `</tbody></table>
