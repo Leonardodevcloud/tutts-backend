@@ -2913,6 +2913,260 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
   }
 });
 
+// ============================================
+// RELATÓRIOS E HISTÓRICO
+// ============================================
+
+// GET /api/disponibilidade/relatorios/metricas - Métricas dos últimos 7 dias
+app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
+  try {
+    // Buscar dados do espelho dos últimos 7 dias
+    const espelhos = await pool.query(`
+      SELECT * FROM disponibilidade_espelho 
+      WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
+      ORDER BY data_registro DESC
+    `);
+    
+    // Processar métricas por dia
+    const metricas = [];
+    const datasUnicas = [...new Set(espelhos.rows.map(e => e.data_registro))];
+    
+    for (const data of datasUnicas) {
+      const linhasDia = espelhos.rows.filter(e => e.data_registro === data);
+      const totalTitulares = linhasDia.filter(l => !l.is_excedente && !l.is_reposicao).length;
+      const emOperacao = linhasDia.filter(l => ['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(l.status)).length;
+      const faltando = linhasDia.filter(l => l.status === 'FALTANDO').length;
+      const semContato = linhasDia.filter(l => l.status === 'SEM CONTATO').length;
+      const percOperacao = totalTitulares > 0 ? ((emOperacao / totalTitulares) * 100).toFixed(1) : 0;
+      
+      metricas.push({
+        data: data,
+        totalTitulares,
+        emOperacao,
+        faltando,
+        semContato,
+        percOperacao: parseFloat(percOperacao)
+      });
+    }
+    
+    res.json(metricas);
+  } catch (err) {
+    console.error('❌ Erro ao buscar métricas:', err);
+    res.status(500).json({ error: 'Erro ao buscar métricas' });
+  }
+});
+
+// GET /api/disponibilidade/relatorios/ranking-lojas - Ranking de lojas por % operação
+app.get('/api/disponibilidade/relatorios/ranking-lojas', async (req, res) => {
+  try {
+    const { periodo = '7' } = req.query;
+    
+    // Buscar dados do espelho
+    const espelhos = await pool.query(`
+      SELECT e.*, l.nome as loja_nome, r.nome as regiao_nome
+      FROM disponibilidade_espelho e
+      LEFT JOIN disponibilidade_lojas l ON e.loja_id = l.id
+      LEFT JOIN disponibilidade_regioes r ON l.regiao_id = r.id
+      WHERE e.data_registro >= CURRENT_DATE - INTERVAL '${parseInt(periodo)} days'
+    `);
+    
+    // Agrupar por loja
+    const lojasMap = {};
+    espelhos.rows.forEach(linha => {
+      if (!linha.loja_id) return;
+      if (!lojasMap[linha.loja_id]) {
+        lojasMap[linha.loja_id] = {
+          loja_id: linha.loja_id,
+          loja_nome: linha.loja_nome,
+          regiao_nome: linha.regiao_nome,
+          totalDias: 0,
+          somaPerc: 0,
+          totalFaltas: 0,
+          linhasPorDia: {}
+        };
+      }
+      
+      const dataKey = linha.data_registro;
+      if (!lojasMap[linha.loja_id].linhasPorDia[dataKey]) {
+        lojasMap[linha.loja_id].linhasPorDia[dataKey] = { titulares: 0, emOperacao: 0, faltas: 0 };
+      }
+      
+      if (!linha.is_excedente && !linha.is_reposicao) {
+        lojasMap[linha.loja_id].linhasPorDia[dataKey].titulares++;
+      }
+      if (['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(linha.status)) {
+        lojasMap[linha.loja_id].linhasPorDia[dataKey].emOperacao++;
+      }
+      if (linha.status === 'FALTANDO') {
+        lojasMap[linha.loja_id].linhasPorDia[dataKey].faltas++;
+      }
+    });
+    
+    // Calcular médias
+    const ranking = Object.values(lojasMap).map(loja => {
+      const dias = Object.values(loja.linhasPorDia);
+      let somaPerc = 0;
+      let totalFaltas = 0;
+      
+      dias.forEach(dia => {
+        const perc = dia.titulares > 0 ? (dia.emOperacao / dia.titulares) * 100 : 0;
+        somaPerc += perc;
+        totalFaltas += dia.faltas;
+      });
+      
+      return {
+        loja_id: loja.loja_id,
+        loja_nome: loja.loja_nome,
+        regiao_nome: loja.regiao_nome,
+        mediaPerc: dias.length > 0 ? (somaPerc / dias.length).toFixed(1) : 0,
+        totalFaltas,
+        diasAnalisados: dias.length
+      };
+    });
+    
+    // Ordenar por média (melhores primeiro)
+    ranking.sort((a, b) => parseFloat(b.mediaPerc) - parseFloat(a.mediaPerc));
+    
+    res.json(ranking);
+  } catch (err) {
+    console.error('❌ Erro ao buscar ranking lojas:', err);
+    res.status(500).json({ error: 'Erro ao buscar ranking' });
+  }
+});
+
+// GET /api/disponibilidade/relatorios/ranking-faltosos - Ranking de entregadores que mais faltam
+app.get('/api/disponibilidade/relatorios/ranking-faltosos', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    
+    // Buscar faltosos do período
+    const faltosos = await pool.query(`
+      SELECT f.*, l.nome as loja_nome
+      FROM disponibilidade_faltosos f
+      LEFT JOIN disponibilidade_lojas l ON f.loja_id = l.id
+      WHERE f.data_falta >= CURRENT_DATE - INTERVAL '${parseInt(periodo)} days'
+      ORDER BY f.data_falta DESC
+    `);
+    
+    // Agrupar por profissional
+    const profissionaisMap = {};
+    faltosos.rows.forEach(falta => {
+      const key = falta.cod_profissional || falta.nome_profissional;
+      if (!key) return;
+      
+      if (!profissionaisMap[key]) {
+        profissionaisMap[key] = {
+          cod: falta.cod_profissional,
+          nome: falta.nome_profissional,
+          loja_nome: falta.loja_nome,
+          totalFaltas: 0,
+          motivos: [],
+          ultimaFalta: falta.data_falta
+        };
+      }
+      profissionaisMap[key].totalFaltas++;
+      if (falta.motivo && !profissionaisMap[key].motivos.includes(falta.motivo)) {
+        profissionaisMap[key].motivos.push(falta.motivo);
+      }
+    });
+    
+    // Converter para array e ordenar
+    const ranking = Object.values(profissionaisMap);
+    ranking.sort((a, b) => b.totalFaltas - a.totalFaltas);
+    
+    res.json(ranking.slice(0, 20)); // Top 20
+  } catch (err) {
+    console.error('❌ Erro ao buscar ranking faltosos:', err);
+    res.status(500).json({ error: 'Erro ao buscar ranking' });
+  }
+});
+
+// GET /api/disponibilidade/relatorios/comparativo - Comparar hoje vs ontem vs semana
+app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
+  try {
+    // Dados de HOJE (ao vivo)
+    const hoje = await pool.query(`
+      SELECT l.*, lj.nome as loja_nome, r.nome as regiao_nome
+      FROM disponibilidade_linhas l
+      LEFT JOIN disponibilidade_lojas lj ON l.loja_id = lj.id
+      LEFT JOIN disponibilidade_regioes r ON lj.regiao_id = r.id
+    `);
+    
+    // Dados de ONTEM (espelho)
+    const ontem = await pool.query(`
+      SELECT * FROM disponibilidade_espelho 
+      WHERE data_registro = CURRENT_DATE - INTERVAL '1 day'
+    `);
+    
+    // Dados de 7 DIAS ATRÁS (espelho)
+    const semanaPassada = await pool.query(`
+      SELECT * FROM disponibilidade_espelho 
+      WHERE data_registro = CURRENT_DATE - INTERVAL '7 days'
+    `);
+    
+    const calcularMetricas = (linhas, isTitular = (l) => !l.is_excedente && !l.is_reposicao) => {
+      const titulares = linhas.filter(isTitular).length;
+      const emOperacao = linhas.filter(l => ['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(l.status)).length;
+      const faltando = linhas.filter(l => l.status === 'FALTANDO').length;
+      const semContato = linhas.filter(l => l.status === 'SEM CONTATO').length;
+      const perc = titulares > 0 ? ((emOperacao / titulares) * 100).toFixed(1) : 0;
+      return { titulares, emOperacao, faltando, semContato, perc: parseFloat(perc) };
+    };
+    
+    res.json({
+      hoje: calcularMetricas(hoje.rows),
+      ontem: calcularMetricas(ontem.rows),
+      semanaPassada: calcularMetricas(semanaPassada.rows)
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar comparativo:', err);
+    res.status(500).json({ error: 'Erro ao buscar comparativo' });
+  }
+});
+
+// GET /api/disponibilidade/relatorios/heatmap - Heatmap de faltas por dia da semana e loja
+app.get('/api/disponibilidade/relatorios/heatmap', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    
+    // Buscar faltas com dia da semana
+    const faltas = await pool.query(`
+      SELECT 
+        f.loja_id,
+        l.nome as loja_nome,
+        EXTRACT(DOW FROM f.data_falta) as dia_semana,
+        COUNT(*) as total_faltas
+      FROM disponibilidade_faltosos f
+      LEFT JOIN disponibilidade_lojas l ON f.loja_id = l.id
+      WHERE f.data_falta >= CURRENT_DATE - INTERVAL '${parseInt(periodo)} days'
+      GROUP BY f.loja_id, l.nome, EXTRACT(DOW FROM f.data_falta)
+      ORDER BY l.nome, dia_semana
+    `);
+    
+    // Organizar em formato de heatmap
+    const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    const lojasMap = {};
+    
+    faltas.rows.forEach(row => {
+      if (!lojasMap[row.loja_id]) {
+        lojasMap[row.loja_id] = {
+          loja_nome: row.loja_nome,
+          dias: [0, 0, 0, 0, 0, 0, 0]
+        };
+      }
+      lojasMap[row.loja_id].dias[parseInt(row.dia_semana)] = parseInt(row.total_faltas);
+    });
+    
+    res.json({
+      diasSemana,
+      lojas: Object.values(lojasMap)
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar heatmap:', err);
+    res.status(500).json({ error: 'Erro ao buscar heatmap' });
+  }
+});
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
