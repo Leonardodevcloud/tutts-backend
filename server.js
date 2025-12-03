@@ -2724,6 +2724,19 @@ app.get('/api/disponibilidade/faltosos', async (req, res) => {
   }
 });
 
+// DELETE /api/disponibilidade/faltosos/:id - Excluir registro de falta
+app.delete('/api/disponibilidade/faltosos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM disponibilidade_faltosos WHERE id = $1', [id]);
+    console.log('🗑️ Falta excluída:', id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir falta:', err);
+    res.status(500).json({ error: 'Erro ao excluir falta' });
+  }
+});
+
 // POST /api/disponibilidade/linha-reposicao - Criar linha de reposição
 app.post('/api/disponibilidade/linha-reposicao', async (req, res) => {
   try {
@@ -2927,6 +2940,37 @@ app.get('/api/disponibilidade/espelho/:data', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao buscar espelho:', err);
     res.status(500).json({ error: 'Erro ao buscar espelho' });
+  }
+});
+
+// DELETE /api/disponibilidade/espelho/:id - Excluir espelho por ID
+app.delete('/api/disponibilidade/espelho/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM disponibilidade_espelho WHERE id = $1 RETURNING data_registro', [id]);
+    if (result.rows.length > 0) {
+      console.log('🗑️ Espelho excluído:', result.rows[0].data_registro);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir espelho:', err);
+    res.status(500).json({ error: 'Erro ao excluir espelho' });
+  }
+});
+
+// PATCH /api/disponibilidade/faltosos/corrigir-datas - Corrigir datas erradas
+app.patch('/api/disponibilidade/faltosos/corrigir-datas', async (req, res) => {
+  try {
+    const { data_errada, data_correta } = req.body;
+    const result = await pool.query(
+      'UPDATE disponibilidade_faltosos SET data_falta = $1 WHERE data_falta = $2 RETURNING *',
+      [data_correta, data_errada]
+    );
+    console.log(`📅 Datas corrigidas: ${data_errada} → ${data_correta} (${result.rowCount} registros)`);
+    res.json({ success: true, corrigidos: result.rowCount });
+  } catch (err) {
+    console.error('❌ Erro ao corrigir datas:', err);
+    res.status(500).json({ error: 'Erro ao corrigir datas' });
   }
 });
 
