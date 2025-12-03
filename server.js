@@ -403,6 +403,33 @@ async function createTables() {
     `);
     console.log('✅ Tabela disponibilidade_faltosos verificada');
 
+    // Tabela de EM LOJA (registro diário)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_em_loja (
+        id SERIAL PRIMARY KEY,
+        loja_id INT NOT NULL REFERENCES disponibilidade_lojas(id) ON DELETE CASCADE,
+        cod_profissional VARCHAR(50),
+        nome_profissional VARCHAR(200),
+        data_registro DATE DEFAULT CURRENT_DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_em_loja verificada');
+
+    // Tabela de SEM CONTATO (com tracking de dias consecutivos)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_sem_contato (
+        id SERIAL PRIMARY KEY,
+        loja_id INT NOT NULL REFERENCES disponibilidade_lojas(id) ON DELETE CASCADE,
+        cod_profissional VARCHAR(50),
+        nome_profissional VARCHAR(200),
+        data_registro DATE DEFAULT CURRENT_DATE,
+        dias_consecutivos INT DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_sem_contato verificada');
+
     // Tabela de Espelho (histórico diário)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS disponibilidade_espelho (
@@ -420,6 +447,9 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_cod ON disponibilidade_linhas(cod_profissional)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_espelho_data ON disponibilidade_espelho(data_registro)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_faltosos_data ON disponibilidade_faltosos(data_falta)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_em_loja_data ON disponibilidade_em_loja(data_registro)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_sem_contato_data ON disponibilidade_sem_contato(data_registro)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_sem_contato_cod ON disponibilidade_sem_contato(cod_profissional)`).catch(() => {});
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -2717,6 +2747,108 @@ app.post('/api/disponibilidade/linha-reposicao', async (req, res) => {
   }
 });
 
+// GET /api/disponibilidade/em-loja - Listar registros de motoboys EM LOJA
+app.get('/api/disponibilidade/em-loja', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, loja_id } = req.query;
+    
+    let query = `
+      SELECT e.*, l.nome as loja_nome
+      FROM disponibilidade_em_loja e
+      LEFT JOIN disponibilidade_lojas l ON e.loja_id = l.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND e.data_registro >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND e.data_registro <= $${params.length}`;
+    }
+    if (loja_id) {
+      params.push(loja_id);
+      query += ` AND e.loja_id = $${params.length}`;
+    }
+    
+    query += ' ORDER BY e.data_registro DESC, e.created_at DESC';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar em loja:', err);
+    res.status(500).json({ error: 'Erro ao listar em loja' });
+  }
+});
+
+// GET /api/disponibilidade/sem-contato - Listar registros de motoboys SEM CONTATO
+app.get('/api/disponibilidade/sem-contato', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, loja_id, apenas_risco } = req.query;
+    
+    let query = `
+      SELECT s.*, l.nome as loja_nome
+      FROM disponibilidade_sem_contato s
+      LEFT JOIN disponibilidade_lojas l ON s.loja_id = l.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND s.data_registro >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND s.data_registro <= $${params.length}`;
+    }
+    if (loja_id) {
+      params.push(loja_id);
+      query += ` AND s.loja_id = $${params.length}`;
+    }
+    if (apenas_risco === 'true') {
+      // Apenas motoboys com 2+ dias (risco de remoção)
+      query += ` AND s.dias_consecutivos >= 2`;
+    }
+    
+    query += ' ORDER BY s.dias_consecutivos DESC, s.data_registro DESC';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar sem contato:', err);
+    res.status(500).json({ error: 'Erro ao listar sem contato' });
+  }
+});
+
+// GET /api/disponibilidade/ranking-em-loja - Ranking de motoboys que mais trabalharam
+app.get('/api/disponibilidade/ranking-em-loja', async (req, res) => {
+  try {
+    const { dias = 30 } = req.query;
+    
+    const result = await pool.query(`
+      SELECT 
+        cod_profissional,
+        nome_profissional,
+        COUNT(*) as total_dias,
+        MAX(data_registro) as ultimo_dia
+      FROM disponibilidade_em_loja
+      WHERE data_registro >= CURRENT_DATE - $1::int
+      AND cod_profissional IS NOT NULL
+      GROUP BY cod_profissional, nome_profissional
+      ORDER BY total_dias DESC
+      LIMIT 20
+    `, [dias]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar ranking em loja:', err);
+    res.status(500).json({ error: 'Erro ao buscar ranking em loja' });
+  }
+});
+
 // ============================================
 // ESPELHO (Histórico)
 // ============================================
@@ -2839,7 +2971,74 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     }
     console.log('📸 Espelho salvo antes do reset:', dataEspelho, '- Linhas:', linhas.rows.length);
     
-    // 2. Processar linhas de reposição
+    // 2. REGISTRAR MOTOBOYS "EM LOJA" antes de resetar
+    const emLojaLinhas = linhas.rows.filter(l => l.status === 'EM LOJA' && l.cod_profissional);
+    for (const linha of emLojaLinhas) {
+      await pool.query(
+        `INSERT INTO disponibilidade_em_loja (loja_id, cod_profissional, nome_profissional, data_registro)
+         VALUES ($1, $2, $3, $4)`,
+        [linha.loja_id, linha.cod_profissional, linha.nome_profissional, dataEspelho]
+      );
+    }
+    console.log('🏪 Motoboys EM LOJA registrados:', emLojaLinhas.length);
+    
+    // 3. REGISTRAR MOTOBOYS "SEM CONTATO" e verificar dias consecutivos
+    const semContatoLinhas = linhas.rows.filter(l => l.status === 'SEM CONTATO' && l.cod_profissional);
+    const removidos = [];
+    
+    for (const linha of semContatoLinhas) {
+      // Verificar se já tem registro recente (ontem ou antes)
+      const ultimoRegistro = await pool.query(
+        `SELECT * FROM disponibilidade_sem_contato 
+         WHERE cod_profissional = $1 AND loja_id = $2
+         ORDER BY data_registro DESC LIMIT 1`,
+        [linha.cod_profissional, linha.loja_id]
+      );
+      
+      let diasConsecutivos = 1;
+      
+      if (ultimoRegistro.rows.length > 0) {
+        const ultimaData = new Date(ultimoRegistro.rows[0].data_registro);
+        const dataAtual = new Date(dataEspelho);
+        const diffDias = Math.floor((dataAtual - ultimaData) / (1000 * 60 * 60 * 24));
+        
+        // Se o último registro foi ontem (ou há 1 dia), incrementa contador
+        if (diffDias === 1) {
+          diasConsecutivos = ultimoRegistro.rows[0].dias_consecutivos + 1;
+        }
+        // Se foi no mesmo dia, mantém o mesmo contador
+        else if (diffDias === 0) {
+          diasConsecutivos = ultimoRegistro.rows[0].dias_consecutivos;
+        }
+        // Se foi há mais de 1 dia, reseta contador
+      }
+      
+      // Inserir novo registro
+      await pool.query(
+        `INSERT INTO disponibilidade_sem_contato (loja_id, cod_profissional, nome_profissional, data_registro, dias_consecutivos)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [linha.loja_id, linha.cod_profissional, linha.nome_profissional, dataEspelho, diasConsecutivos]
+      );
+      
+      // AUTO-REMOÇÃO: Se chegou a 3 dias consecutivos, remove da planilha
+      if (diasConsecutivos >= 3) {
+        await pool.query(
+          `UPDATE disponibilidade_linhas 
+           SET cod_profissional = NULL, nome_profissional = NULL, status = 'A CONFIRMAR', observacao = NULL
+           WHERE id = $1`,
+          [linha.id]
+        );
+        removidos.push({
+          cod: linha.cod_profissional,
+          nome: linha.nome_profissional,
+          dias: diasConsecutivos
+        });
+        console.log('🚫 Auto-removido por 3 dias SEM CONTATO:', linha.cod_profissional, linha.nome_profissional);
+      }
+    }
+    console.log('📵 Motoboys SEM CONTATO registrados:', semContatoLinhas.length, '- Removidos:', removidos.length);
+    
+    // 4. Processar linhas de reposição
     // Regra: Se há excedente vazio disponível, migra o usuário para lá. Senão, reposição vira nova linha excedente.
     
     // Buscar todas as linhas de reposição que têm usuário preenchido
@@ -2897,7 +3096,7 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     );
     console.log('🗑️ Reposições vazias removidas');
     
-    // 3. Resetar APENAS status e observação (manter cod e nome!)
+    // 5. Resetar APENAS status e observação (manter cod e nome!)
     await pool.query(
       `UPDATE disponibilidade_linhas 
        SET status = 'A CONFIRMAR', 
@@ -2906,7 +3105,14 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     );
     
     console.log('🔄 Status resetado com sucesso (códigos e nomes mantidos)');
-    res.json({ success: true, espelho_data: dataEspelho, espelho_salvo: espelhoSalvo });
+    res.json({ 
+      success: true, 
+      espelho_data: dataEspelho, 
+      espelho_salvo: espelhoSalvo,
+      em_loja_registrados: emLojaLinhas.length,
+      sem_contato_registrados: semContatoLinhas.length,
+      removidos_por_sem_contato: removidos
+    });
   } catch (err) {
     console.error('❌ Erro ao resetar:', err);
     res.status(500).json({ error: 'Erro ao resetar status' });
