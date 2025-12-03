@@ -340,11 +340,14 @@ async function createTables() {
       CREATE TABLE IF NOT EXISTS disponibilidade_regioes (
         id SERIAL PRIMARY KEY,
         nome VARCHAR(100) NOT NULL UNIQUE,
+        gestores VARCHAR(255),
         ordem INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migração: adicionar coluna gestores se não existir
+    await pool.query(`ALTER TABLE disponibilidade_regioes ADD COLUMN IF NOT EXISTS gestores VARCHAR(255)`).catch(() => {});
     console.log('✅ Tabela disponibilidade_regioes verificada');
 
     // Tabela de Lojas de Disponibilidade
@@ -2385,13 +2388,13 @@ app.post('/api/disponibilidade/regioes', async (req, res) => {
 app.put('/api/disponibilidade/regioes/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { nome, ordem } = req.body;
+    const { nome, gestores, ordem } = req.body;
     
     const result = await pool.query(
       `UPDATE disponibilidade_regioes 
-       SET nome = COALESCE($1, nome), ordem = COALESCE($2, ordem), updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3 RETURNING *`,
-      [nome ? nome.toUpperCase().trim() : null, ordem, id]
+       SET nome = COALESCE($1, nome), gestores = COALESCE($2, gestores), ordem = COALESCE($3, ordem), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4 RETURNING *`,
+      [nome ? nome.toUpperCase().trim() : null, gestores !== undefined ? gestores : null, ordem, id]
     );
     
     if (result.rows.length === 0) {
