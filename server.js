@@ -2595,8 +2595,8 @@ app.put('/api/disponibilidade/linhas/:id', async (req, res) => {
     const { id } = req.params;
     const { cod_profissional, nome_profissional, status, observacao } = req.body;
     
-    // Validar status
-    const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'EM LOJA', 'FALTANDO'];
+    // Validar status - incluindo SEM CONTATO e A CAMINHO
+    const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'A CAMINHO', 'EM LOJA', 'FALTANDO', 'SEM CONTATO'];
     const statusFinal = statusValidos.includes(status) ? status : 'A CONFIRMAR';
     
     const result = await pool.query(
