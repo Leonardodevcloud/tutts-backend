@@ -3186,9 +3186,6 @@ app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
       
       const totalTitulares = linhas.filter(l => !l.is_excedente && !l.is_reposicao).length;
       const emLoja = linhas.filter(l => l.status === 'EM LOJA').length;
-      const aCaminho = linhas.filter(l => l.status === 'A CAMINHO').length;
-      const confirmado = linhas.filter(l => l.status === 'CONFIRMADO').length;
-      const emOperacao = aCaminho + confirmado + emLoja;
       const faltando = linhas.filter(l => l.status === 'FALTANDO').length;
       const semContato = linhas.filter(l => l.status === 'SEM CONTATO').length;
       
@@ -3202,7 +3199,6 @@ app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
         data: espelho.data_registro,
         totalTitulares,
         emLoja,
-        emOperacao,
         faltando,
         semContato,
         percOperacao: parseFloat(percOperacao.toFixed(1))
@@ -3368,14 +3364,11 @@ app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
     // % = (emLoja / titulares) * 100, limitado a 100% (excedentes não contam extra)
     const calcularMetricas = (linhas) => {
       if (!linhas || linhas.length === 0) {
-        return { titulares: 0, emLoja: 0, emOperacao: 0, faltando: 0, semContato: 0, perc: 0 };
+        return { titulares: 0, emLoja: 0, faltando: 0, semContato: 0, perc: 0 };
       }
       
       const titulares = linhas.filter(l => !l.is_excedente && !l.is_reposicao).length;
       const emLoja = linhas.filter(l => l.status === 'EM LOJA').length;
-      const aCaminho = linhas.filter(l => l.status === 'A CAMINHO').length;
-      const confirmado = linhas.filter(l => l.status === 'CONFIRMADO').length;
-      const emOperacao = aCaminho + confirmado + emLoja;
       const faltando = linhas.filter(l => l.status === 'FALTANDO').length;
       const semContato = linhas.filter(l => l.status === 'SEM CONTATO').length;
       
@@ -3388,7 +3381,6 @@ app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
       return { 
         titulares, 
         emLoja,
-        emOperacao, 
         faltando, 
         semContato, 
         perc: parseFloat(perc.toFixed(1)) 
@@ -3405,8 +3397,20 @@ app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
       return dadosParsed?.linhas || [];
     };
     
+    // HOJE = espelho de hoje (se existir), senão dados ao vivo
+    // ONTEM = espelho de ontem
+    // 7 DIAS = espelho de 7 dias atrás
+    const hojeEspelho = await pool.query(`
+      SELECT * FROM disponibilidade_espelho 
+      WHERE data_registro = CURRENT_DATE
+    `);
+    
+    const hojeLinhas = hojeEspelho.rows.length > 0 
+      ? extrairLinhasEspelho(hojeEspelho)
+      : hoje.rows;
+    
     res.json({
-      hoje: calcularMetricas(hoje.rows),
+      hoje: calcularMetricas(hojeLinhas),
       ontem: calcularMetricas(extrairLinhasEspelho(ontemResult)),
       semanaPassada: calcularMetricas(extrairLinhasEspelho(semanaPassadaResult))
     });
