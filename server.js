@@ -3228,76 +3228,80 @@ app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
   }
 });
 
-// GET /api/disponibilidade/relatorios/ranking-lojas - Ranking de lojas por % operação
+// GET /api/disponibilidade/relatorios/ranking-lojas - Ranking de lojas por % EM LOJA
 app.get('/api/disponibilidade/relatorios/ranking-lojas', async (req, res) => {
   try {
-    const { periodo = '7' } = req.query;
-    
-    // Buscar dados do espelho
+    // Buscar últimos 7 espelhos
     const espelhos = await pool.query(`
-      SELECT e.*, l.nome as loja_nome, r.nome as regiao_nome
-      FROM disponibilidade_espelho e
-      LEFT JOIN disponibilidade_lojas l ON e.loja_id = l.id
-      LEFT JOIN disponibilidade_regioes r ON l.regiao_id = r.id
-      WHERE e.data_registro >= CURRENT_DATE - INTERVAL '${parseInt(periodo)} days'
+      SELECT * FROM disponibilidade_espelho 
+      ORDER BY data_registro DESC
+      LIMIT 7
     `);
     
-    // Agrupar por loja
-    const lojasMap = {};
-    espelhos.rows.forEach(linha => {
-      if (!linha.loja_id) return;
-      if (!lojasMap[linha.loja_id]) {
-        lojasMap[linha.loja_id] = {
-          loja_id: linha.loja_id,
-          loja_nome: linha.loja_nome,
-          regiao_nome: linha.regiao_nome,
-          totalDias: 0,
-          somaPerc: 0,
-          totalFaltas: 0,
-          linhasPorDia: {}
-        };
-      }
-      
-      const dataKey = linha.data_registro;
-      if (!lojasMap[linha.loja_id].linhasPorDia[dataKey]) {
-        lojasMap[linha.loja_id].linhasPorDia[dataKey] = { titulares: 0, emOperacao: 0, faltas: 0 };
-      }
-      
-      if (!linha.is_excedente && !linha.is_reposicao) {
-        lojasMap[linha.loja_id].linhasPorDia[dataKey].titulares++;
-      }
-      if (['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(linha.status)) {
-        lojasMap[linha.loja_id].linhasPorDia[dataKey].emOperacao++;
-      }
-      if (linha.status === 'FALTANDO') {
-        lojasMap[linha.loja_id].linhasPorDia[dataKey].faltas++;
-      }
+    // Buscar lojas para ter os nomes
+    const lojasResult = await pool.query(`
+      SELECT l.*, r.nome as regiao_nome 
+      FROM disponibilidade_lojas l
+      LEFT JOIN disponibilidade_regioes r ON l.regiao_id = r.id
+    `);
+    const lojasInfo = {};
+    lojasResult.rows.forEach(l => {
+      lojasInfo[l.id] = { nome: l.nome, regiao: l.regiao_nome };
     });
     
-    // Calcular médias
-    const ranking = Object.values(lojasMap).map(loja => {
-      const dias = Object.values(loja.linhasPorDia);
-      let somaPerc = 0;
-      let totalFaltas = 0;
+    // Agrupar dados por loja
+    const lojasMap = {};
+    
+    for (const espelho of espelhos.rows) {
+      const dados = typeof espelho.dados === 'string' ? JSON.parse(espelho.dados) : espelho.dados;
+      const linhas = dados?.linhas || [];
       
-      dias.forEach(dia => {
-        const perc = dia.titulares > 0 ? (dia.emOperacao / dia.titulares) * 100 : 0;
-        somaPerc += perc;
-        totalFaltas += dia.faltas;
+      // Agrupar linhas por loja
+      const linhasPorLoja = {};
+      linhas.forEach(linha => {
+        if (!linha.loja_id) return;
+        if (!linhasPorLoja[linha.loja_id]) {
+          linhasPorLoja[linha.loja_id] = [];
+        }
+        linhasPorLoja[linha.loja_id].push(linha);
       });
       
+      // Calcular métricas por loja neste dia
+      Object.entries(linhasPorLoja).forEach(([lojaId, linhasLoja]) => {
+        if (!lojasMap[lojaId]) {
+          lojasMap[lojaId] = {
+            loja_id: lojaId,
+            loja_nome: lojasInfo[lojaId]?.nome || 'Desconhecida',
+            regiao_nome: lojasInfo[lojaId]?.regiao || '',
+            dias: []
+          };
+        }
+        
+        const titulares = linhasLoja.filter(l => !l.is_excedente && !l.is_reposicao).length;
+        const emLoja = linhasLoja.filter(l => l.status === 'EM LOJA').length;
+        // % baseado em EM LOJA vs TITULARES, limitado a 100%
+        const perc = titulares > 0 ? Math.min((emLoja / titulares) * 100, 100) : 0;
+        
+        lojasMap[lojaId].dias.push(perc);
+      });
+    }
+    
+    // Calcular média por loja
+    const ranking = Object.values(lojasMap).map(loja => {
+      const mediaPerc = loja.dias.length > 0 
+        ? (loja.dias.reduce((a, b) => a + b, 0) / loja.dias.length).toFixed(1)
+        : 0;
       return {
         loja_id: loja.loja_id,
         loja_nome: loja.loja_nome,
         regiao_nome: loja.regiao_nome,
-        mediaPerc: dias.length > 0 ? (somaPerc / dias.length).toFixed(1) : 0,
-        totalFaltas,
-        diasAnalisados: dias.length
+        mediaPerc: parseFloat(mediaPerc),
+        diasAnalisados: loja.dias.length
       };
     });
     
     // Ordenar por média (melhores primeiro)
-    ranking.sort((a, b) => parseFloat(b.mediaPerc) - parseFloat(a.mediaPerc));
+    ranking.sort((a, b) => b.mediaPerc - a.mediaPerc);
     
     res.json(ranking);
   } catch (err) {
