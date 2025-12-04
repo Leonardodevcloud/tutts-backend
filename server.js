@@ -2862,6 +2862,129 @@ app.get('/api/disponibilidade/ranking-em-loja', async (req, res) => {
   }
 });
 
+// GET /api/disponibilidade/motoboys - Listar todos os motoboys com histórico completo
+app.get('/api/disponibilidade/motoboys', async (req, res) => {
+  try {
+    const { loja_id, busca, dias = 30 } = req.query;
+    
+    // 1. Buscar todos os motoboys únicos das linhas (atuais e históricos)
+    let motoboyQuery = `
+      SELECT DISTINCT 
+        cod_profissional,
+        nome_profissional,
+        loja_id
+      FROM disponibilidade_linhas
+      WHERE cod_profissional IS NOT NULL AND cod_profissional != ''
+    `;
+    
+    const params = [];
+    
+    if (loja_id) {
+      params.push(loja_id);
+      motoboyQuery += ` AND loja_id = $${params.length}`;
+    }
+    
+    if (busca) {
+      params.push(`%${busca}%`);
+      motoboyQuery += ` AND (cod_profissional ILIKE $${params.length} OR nome_profissional ILIKE $${params.length})`;
+    }
+    
+    const motoboysResult = await pool.query(motoboyQuery, params);
+    
+    // 2. Para cada motoboy, buscar estatísticas
+    const motoboys = [];
+    
+    for (const mb of motoboysResult.rows) {
+      // Buscar contagem de EM LOJA
+      const emLojaResult = await pool.query(`
+        SELECT COUNT(*) as total, MAX(data_registro) as ultima_vez
+        FROM disponibilidade_em_loja
+        WHERE cod_profissional = $1
+        AND data_registro >= CURRENT_DATE - $2::int
+      `, [mb.cod_profissional, parseInt(dias)]);
+      
+      // Buscar contagem de SEM CONTATO
+      const semContatoResult = await pool.query(`
+        SELECT COUNT(*) as total, MAX(data_registro) as ultima_vez, MAX(dias_consecutivos) as max_dias
+        FROM disponibilidade_sem_contato
+        WHERE cod_profissional = $1
+        AND data_registro >= CURRENT_DATE - $2::int
+      `, [mb.cod_profissional, parseInt(dias)]);
+      
+      // Buscar contagem de FALTAS
+      const faltasResult = await pool.query(`
+        SELECT COUNT(*) as total, MAX(data_falta) as ultima_falta
+        FROM disponibilidade_faltosos
+        WHERE cod_profissional = $1
+        AND data_falta >= CURRENT_DATE - $2::int
+      `, [mb.cod_profissional, parseInt(dias)]);
+      
+      // Buscar lojas onde rodou
+      const lojasResult = await pool.query(`
+        SELECT DISTINCT l.id, l.nome, l.codigo
+        FROM disponibilidade_em_loja el
+        JOIN disponibilidade_lojas l ON el.loja_id = l.id
+        WHERE el.cod_profissional = $1
+        AND el.data_registro >= CURRENT_DATE - $2::int
+      `, [mb.cod_profissional, parseInt(dias)]);
+      
+      // Buscar info da loja atual
+      const lojaAtualResult = await pool.query(`
+        SELECT l.id, l.nome, l.codigo, r.nome as regiao_nome
+        FROM disponibilidade_lojas l
+        LEFT JOIN disponibilidade_regioes r ON l.regiao_id = r.id
+        WHERE l.id = $1
+      `, [mb.loja_id]);
+      
+      // Buscar status atual
+      const statusAtualResult = await pool.query(`
+        SELECT status, observacao
+        FROM disponibilidade_linhas
+        WHERE cod_profissional = $1
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `, [mb.cod_profissional]);
+      
+      motoboys.push({
+        cod: mb.cod_profissional,
+        nome: mb.nome_profissional,
+        loja_id: mb.loja_id,
+        loja_atual: lojaAtualResult.rows[0] || null,
+        status_atual: statusAtualResult.rows[0]?.status || 'A CONFIRMAR',
+        observacao: statusAtualResult.rows[0]?.observacao || null,
+        estatisticas: {
+          em_loja: {
+            total: parseInt(emLojaResult.rows[0]?.total) || 0,
+            ultima_vez: emLojaResult.rows[0]?.ultima_vez || null
+          },
+          sem_contato: {
+            total: parseInt(semContatoResult.rows[0]?.total) || 0,
+            ultima_vez: semContatoResult.rows[0]?.ultima_vez || null,
+            max_dias_consecutivos: parseInt(semContatoResult.rows[0]?.max_dias) || 0
+          },
+          faltas: {
+            total: parseInt(faltasResult.rows[0]?.total) || 0,
+            ultima_falta: faltasResult.rows[0]?.ultima_falta || null
+          }
+        },
+        lojas_rodou: lojasResult.rows
+      });
+    }
+    
+    // Ordenar por nome
+    motoboys.sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+    
+    res.json({
+      total: motoboys.length,
+      periodo_dias: parseInt(dias),
+      motoboys
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar motoboys:', err);
+    res.status(500).json({ error: 'Erro ao buscar motoboys' });
+  }
+});
+
 // ============================================
 // ESPELHO (Histórico)
 // ============================================
