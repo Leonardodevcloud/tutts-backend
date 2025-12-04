@@ -3167,14 +3167,14 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
 // RELATÓRIOS E HISTÓRICO
 // ============================================
 
-// GET /api/disponibilidade/relatorios/metricas - Métricas dos últimos 7 dias
+// GET /api/disponibilidade/relatorios/metricas - Métricas dos últimos 7 espelhos salvos
 app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
   try {
-    // Buscar dados do espelho dos últimos 7 dias
+    // Buscar os últimos 7 espelhos salvos (independente da data)
     const espelhos = await pool.query(`
       SELECT * FROM disponibilidade_espelho 
-      WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
       ORDER BY data_registro DESC
+      LIMIT 7
     `);
     
     // Processar métricas por dia
