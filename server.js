@@ -3179,23 +3179,33 @@ app.get('/api/disponibilidade/relatorios/metricas', async (req, res) => {
     
     // Processar métricas por dia
     const metricas = [];
-    const datasUnicas = [...new Set(espelhos.rows.map(e => e.data_registro))];
     
-    for (const data of datasUnicas) {
-      const linhasDia = espelhos.rows.filter(e => e.data_registro === data);
-      const totalTitulares = linhasDia.filter(l => !l.is_excedente && !l.is_reposicao).length;
-      const emOperacao = linhasDia.filter(l => ['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(l.status)).length;
-      const faltando = linhasDia.filter(l => l.status === 'FALTANDO').length;
-      const semContato = linhasDia.filter(l => l.status === 'SEM CONTATO').length;
-      const percOperacao = totalTitulares > 0 ? ((emOperacao / totalTitulares) * 100).toFixed(1) : 0;
+    for (const espelho of espelhos.rows) {
+      const dados = typeof espelho.dados === 'string' ? JSON.parse(espelho.dados) : espelho.dados;
+      const linhas = dados?.linhas || [];
+      
+      const totalTitulares = linhas.filter(l => !l.is_excedente && !l.is_reposicao).length;
+      const emLoja = linhas.filter(l => l.status === 'EM LOJA').length;
+      const aCaminho = linhas.filter(l => l.status === 'A CAMINHO').length;
+      const confirmado = linhas.filter(l => l.status === 'CONFIRMADO').length;
+      const emOperacao = aCaminho + confirmado + emLoja;
+      const faltando = linhas.filter(l => l.status === 'FALTANDO').length;
+      const semContato = linhas.filter(l => l.status === 'SEM CONTATO').length;
+      
+      // % baseado em EM LOJA vs TITULARES, limitado a 100%
+      let percOperacao = 0;
+      if (totalTitulares > 0) {
+        percOperacao = Math.min((emLoja / totalTitulares) * 100, 100);
+      }
       
       metricas.push({
-        data: data,
+        data: espelho.data_registro,
         totalTitulares,
+        emLoja,
         emOperacao,
         faltando,
         semContato,
-        percOperacao: parseFloat(percOperacao)
+        percOperacao: parseFloat(percOperacao.toFixed(1))
       });
     }
     
@@ -3343,30 +3353,62 @@ app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
     `);
     
     // Dados de ONTEM (espelho)
-    const ontem = await pool.query(`
+    const ontemResult = await pool.query(`
       SELECT * FROM disponibilidade_espelho 
       WHERE data_registro = CURRENT_DATE - INTERVAL '1 day'
     `);
     
     // Dados de 7 DIAS ATRÁS (espelho)
-    const semanaPassada = await pool.query(`
+    const semanaPassadaResult = await pool.query(`
       SELECT * FROM disponibilidade_espelho 
       WHERE data_registro = CURRENT_DATE - INTERVAL '7 days'
     `);
     
-    const calcularMetricas = (linhas, isTitular = (l) => !l.is_excedente && !l.is_reposicao) => {
-      const titulares = linhas.filter(isTitular).length;
-      const emOperacao = linhas.filter(l => ['A CAMINHO', 'CONFIRMADO', 'EM LOJA'].includes(l.status)).length;
+    // Função para calcular métricas com lógica correta de %
+    // % = (emLoja / titulares) * 100, limitado a 100% (excedentes não contam extra)
+    const calcularMetricas = (linhas) => {
+      if (!linhas || linhas.length === 0) {
+        return { titulares: 0, emLoja: 0, emOperacao: 0, faltando: 0, semContato: 0, perc: 0 };
+      }
+      
+      const titulares = linhas.filter(l => !l.is_excedente && !l.is_reposicao).length;
+      const emLoja = linhas.filter(l => l.status === 'EM LOJA').length;
+      const aCaminho = linhas.filter(l => l.status === 'A CAMINHO').length;
+      const confirmado = linhas.filter(l => l.status === 'CONFIRMADO').length;
+      const emOperacao = aCaminho + confirmado + emLoja;
       const faltando = linhas.filter(l => l.status === 'FALTANDO').length;
       const semContato = linhas.filter(l => l.status === 'SEM CONTATO').length;
-      const perc = titulares > 0 ? ((emOperacao / titulares) * 100).toFixed(1) : 0;
-      return { titulares, emOperacao, faltando, semContato, perc: parseFloat(perc) };
+      
+      // % baseado em EM LOJA vs TITULARES, limitado a 100%
+      let perc = 0;
+      if (titulares > 0) {
+        perc = Math.min((emLoja / titulares) * 100, 100);
+      }
+      
+      return { 
+        titulares, 
+        emLoja,
+        emOperacao, 
+        faltando, 
+        semContato, 
+        perc: parseFloat(perc.toFixed(1)) 
+      };
+    };
+    
+    // Extrair linhas do espelho (campo dados é JSON)
+    const extrairLinhasEspelho = (espelhoResult) => {
+      if (!espelhoResult.rows || espelhoResult.rows.length === 0) {
+        return [];
+      }
+      const dados = espelhoResult.rows[0].dados;
+      const dadosParsed = typeof dados === 'string' ? JSON.parse(dados) : dados;
+      return dadosParsed?.linhas || [];
     };
     
     res.json({
       hoje: calcularMetricas(hoje.rows),
-      ontem: calcularMetricas(ontem.rows),
-      semanaPassada: calcularMetricas(semanaPassada.rows)
+      ontem: calcularMetricas(extrairLinhasEspelho(ontemResult)),
+      semanaPassada: calcularMetricas(extrairLinhasEspelho(semanaPassadaResult))
     });
   } catch (err) {
     console.error('❌ Erro ao buscar comparativo:', err);
@@ -3429,6 +3471,7 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
     const linhas = await pool.query('SELECT * FROM disponibilidade_linhas');
     
     // Calcular dados de cada loja
+    // % = (emLoja / titulares) * 100, limitado a 100% (excedentes não contam extra)
     const lojasComDados = lojas.rows.map(loja => {
       const linhasLoja = linhas.rows.filter(l => l.loja_id === loja.id);
       const titulares = linhasLoja.filter(l => !l.is_excedente && !l.is_reposicao).length;
@@ -3438,7 +3481,8 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
       const semContato = linhasLoja.filter(l => l.status === 'SEM CONTATO').length;
       const emOperacao = aCaminho + confirmado + emLoja;
       const falta = Math.max(0, titulares - emOperacao);
-      const perc = titulares > 0 ? ((emOperacao / titulares) * 100) : 0;
+      // % baseado em EM LOJA vs TITULARES, limitado a 100%
+      const perc = titulares > 0 ? Math.min((emLoja / titulares) * 100, 100) : 0;
       const regiao = regioes.rows.find(r => r.id === loja.regiao_id);
       return { ...loja, titulares, aCaminho, confirmado, emLoja, semContato, emOperacao, falta, perc, regiao };
     });
@@ -3454,7 +3498,8 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
       totalGeral.semContato += l.semContato;
       totalGeral.emOperacao += l.emOperacao;
     });
-    const percGeral = totalGeral.titulares > 0 ? ((totalGeral.emOperacao / totalGeral.titulares) * 100) : 0;
+    // % geral baseado em EM LOJA vs TITULARES, limitado a 100%
+    const percGeral = totalGeral.titulares > 0 ? Math.min((totalGeral.emLoja / totalGeral.titulares) * 100, 100) : 0;
     
     // Gerar HTML - Design Clean
     let html = `<!DOCTYPE html>
