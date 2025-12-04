@@ -3337,34 +3337,21 @@ app.get('/api/disponibilidade/relatorios/ranking-faltosos', async (req, res) => 
   }
 });
 
-// GET /api/disponibilidade/relatorios/comparativo - Comparar hoje vs ontem vs semana
+// GET /api/disponibilidade/relatorios/comparativo - Comparar últimos 3 espelhos salvos
 app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
   try {
-    // Dados de HOJE (ao vivo)
-    const hoje = await pool.query(`
-      SELECT l.*, lj.nome as loja_nome, r.nome as regiao_nome
-      FROM disponibilidade_linhas l
-      LEFT JOIN disponibilidade_lojas lj ON l.loja_id = lj.id
-      LEFT JOIN disponibilidade_regioes r ON lj.regiao_id = r.id
-    `);
-    
-    // Dados de ONTEM (espelho)
-    const ontemResult = await pool.query(`
+    // Buscar os 3 últimos espelhos salvos (ordenados por data_registro DESC)
+    const espelhosResult = await pool.query(`
       SELECT * FROM disponibilidade_espelho 
-      WHERE data_registro = CURRENT_DATE - INTERVAL '1 day'
-    `);
-    
-    // Dados de 7 DIAS ATRÁS (espelho)
-    const semanaPassadaResult = await pool.query(`
-      SELECT * FROM disponibilidade_espelho 
-      WHERE data_registro = CURRENT_DATE - INTERVAL '7 days'
+      ORDER BY data_registro DESC
+      LIMIT 3
     `);
     
     // Função para calcular métricas com lógica correta de %
     // % = (emLoja / titulares) * 100, limitado a 100% (excedentes não contam extra)
-    const calcularMetricas = (linhas) => {
+    const calcularMetricas = (linhas, dataRegistro) => {
       if (!linhas || linhas.length === 0) {
-        return { titulares: 0, emLoja: 0, faltando: 0, semContato: 0, perc: 0 };
+        return null;
       }
       
       const titulares = linhas.filter(l => !l.is_excedente && !l.is_reposicao).length;
@@ -3383,37 +3370,43 @@ app.get('/api/disponibilidade/relatorios/comparativo', async (req, res) => {
         emLoja,
         faltando, 
         semContato, 
-        perc: parseFloat(perc.toFixed(1)) 
+        perc: parseFloat(perc.toFixed(1)),
+        data: dataRegistro
       };
     };
     
     // Extrair linhas do espelho (campo dados é JSON)
-    const extrairLinhasEspelho = (espelhoResult) => {
-      if (!espelhoResult.rows || espelhoResult.rows.length === 0) {
-        return [];
-      }
-      const dados = espelhoResult.rows[0].dados;
-      const dadosParsed = typeof dados === 'string' ? JSON.parse(dados) : dados;
-      return dadosParsed?.linhas || [];
+    const extrairLinhasEspelho = (espelho) => {
+      if (!espelho) return [];
+      const dados = typeof espelho.dados === 'string' ? JSON.parse(espelho.dados) : espelho.dados;
+      return dados?.linhas || [];
     };
     
-    // HOJE = espelho de hoje (se existir), senão dados ao vivo
-    // ONTEM = espelho de ontem
-    // 7 DIAS = espelho de 7 dias atrás
-    const hojeEspelho = await pool.query(`
-      SELECT * FROM disponibilidade_espelho 
-      WHERE data_registro = CURRENT_DATE
-    `);
+    // Formatar data para exibição
+    const formatarData = (data) => {
+      if (!data) return '';
+      const d = new Date(data);
+      return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    };
     
-    const hojeLinhas = hojeEspelho.rows.length > 0 
-      ? extrairLinhasEspelho(hojeEspelho)
-      : hoje.rows;
+    const espelhos = espelhosResult.rows;
     
-    res.json({
-      hoje: calcularMetricas(hojeLinhas),
-      ontem: calcularMetricas(extrairLinhasEspelho(ontemResult)),
-      semanaPassada: calcularMetricas(extrairLinhasEspelho(semanaPassadaResult))
-    });
+    // Mais recente = "HOJE" (ou último salvo)
+    // Segundo = "ONTEM" (ou penúltimo salvo)  
+    // Terceiro = "ANTERIOR" (ou antepenúltimo salvo)
+    const resultado = {
+      hoje: espelhos[0] ? calcularMetricas(extrairLinhasEspelho(espelhos[0]), espelhos[0].data_registro) : null,
+      ontem: espelhos[1] ? calcularMetricas(extrairLinhasEspelho(espelhos[1]), espelhos[1].data_registro) : null,
+      semanaPassada: espelhos[2] ? calcularMetricas(extrairLinhasEspelho(espelhos[2]), espelhos[2].data_registro) : null,
+      // Labels dinâmicos baseados nas datas reais
+      labels: {
+        hoje: espelhos[0] ? formatarData(espelhos[0].data_registro) : 'MAIS RECENTE',
+        ontem: espelhos[1] ? formatarData(espelhos[1].data_registro) : 'ANTERIOR',
+        semanaPassada: espelhos[2] ? formatarData(espelhos[2].data_registro) : '3º ANTERIOR'
+      }
+    };
+    
+    res.json(resultado);
   } catch (err) {
     console.error('❌ Erro ao buscar comparativo:', err);
     res.status(500).json({ error: 'Erro ao buscar comparativo' });
