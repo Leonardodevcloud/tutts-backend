@@ -2974,6 +2974,22 @@ app.patch('/api/disponibilidade/faltosos/corrigir-datas', async (req, res) => {
   }
 });
 
+// PATCH /api/disponibilidade/espelho/corrigir-data - Corrigir data do espelho
+app.patch('/api/disponibilidade/espelho/corrigir-data', async (req, res) => {
+  try {
+    const { data_errada, data_correta } = req.body;
+    const result = await pool.query(
+      'UPDATE disponibilidade_espelho SET data_registro = $1 WHERE data_registro = $2 RETURNING *',
+      [data_correta, data_errada]
+    );
+    console.log(`📅 Data do espelho corrigida: ${data_errada} → ${data_correta} (${result.rowCount} registros)`);
+    res.json({ success: true, corrigidos: result.rowCount });
+  } catch (err) {
+    console.error('❌ Erro ao corrigir data do espelho:', err);
+    res.status(500).json({ error: 'Erro ao corrigir data do espelho' });
+  }
+});
+
 // POST /api/disponibilidade/resetar - Resetar status (com salvamento de espelho)
 app.post('/api/disponibilidade/resetar', async (req, res) => {
   try {
