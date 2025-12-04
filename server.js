@@ -441,6 +441,23 @@ async function createTables() {
     `);
     console.log('✅ Tabela disponibilidade_espelho verificada');
 
+    // Tabela de Restrições de Motoboys
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_restricoes (
+        id SERIAL PRIMARY KEY,
+        cod_profissional VARCHAR(50) NOT NULL,
+        nome_profissional VARCHAR(200),
+        loja_id INT REFERENCES disponibilidade_lojas(id) ON DELETE CASCADE,
+        todas_lojas BOOLEAN DEFAULT false,
+        motivo TEXT NOT NULL,
+        ativo BOOLEAN DEFAULT true,
+        criado_por VARCHAR(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela disponibilidade_restricoes verificada');
+
     // Índices para performance
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_lojas_regiao ON disponibilidade_lojas(regiao_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_linhas_loja ON disponibilidade_linhas(loja_id)`).catch(() => {});
@@ -450,6 +467,8 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_em_loja_data ON disponibilidade_em_loja(data_registro)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_sem_contato_data ON disponibilidade_sem_contato(data_registro)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_sem_contato_cod ON disponibilidade_sem_contato(cod_profissional)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_cod ON disponibilidade_restricoes(cod_profissional)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_loja ON disponibilidade_restricoes(loja_id)`).catch(() => {});
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -2982,6 +3001,172 @@ app.get('/api/disponibilidade/motoboys', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao buscar motoboys:', err);
     res.status(500).json({ error: 'Erro ao buscar motoboys' });
+  }
+});
+
+// ============================================
+// RESTRIÇÕES DE MOTOBOYS
+// ============================================
+
+// GET /api/disponibilidade/restricoes - Listar todas as restrições
+app.get('/api/disponibilidade/restricoes', async (req, res) => {
+  try {
+    const { ativo = 'true' } = req.query;
+    
+    let query = `
+      SELECT r.*, l.nome as loja_nome, l.codigo as loja_codigo
+      FROM disponibilidade_restricoes r
+      LEFT JOIN disponibilidade_lojas l ON r.loja_id = l.id
+    `;
+    
+    if (ativo === 'true') {
+      query += ' WHERE r.ativo = true';
+    }
+    
+    query += ' ORDER BY r.created_at DESC';
+    
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar restrições:', err);
+    res.status(500).json({ error: 'Erro ao buscar restrições' });
+  }
+});
+
+// GET /api/disponibilidade/restricoes/verificar - Verificar se um motoboy está restrito em uma loja
+app.get('/api/disponibilidade/restricoes/verificar', async (req, res) => {
+  try {
+    const { cod_profissional, loja_id } = req.query;
+    
+    if (!cod_profissional) {
+      return res.json({ restrito: false });
+    }
+    
+    // Verifica se está restrito em TODAS as lojas ou na loja específica
+    const result = await pool.query(`
+      SELECT r.*, l.nome as loja_nome, l.codigo as loja_codigo
+      FROM disponibilidade_restricoes r
+      LEFT JOIN disponibilidade_lojas l ON r.loja_id = l.id
+      WHERE r.cod_profissional = $1 
+      AND r.ativo = true
+      AND (r.todas_lojas = true OR r.loja_id = $2)
+      LIMIT 1
+    `, [cod_profissional, loja_id || null]);
+    
+    if (result.rows.length > 0) {
+      const restricao = result.rows[0];
+      res.json({
+        restrito: true,
+        motivo: restricao.motivo,
+        todas_lojas: restricao.todas_lojas,
+        loja_nome: restricao.loja_nome,
+        loja_codigo: restricao.loja_codigo,
+        criado_em: restricao.created_at
+      });
+    } else {
+      res.json({ restrito: false });
+    }
+  } catch (err) {
+    console.error('❌ Erro ao verificar restrição:', err);
+    res.status(500).json({ error: 'Erro ao verificar restrição' });
+  }
+});
+
+// POST /api/disponibilidade/restricoes - Criar nova restrição
+app.post('/api/disponibilidade/restricoes', async (req, res) => {
+  try {
+    const { cod_profissional, nome_profissional, loja_id, todas_lojas, motivo, criado_por } = req.body;
+    
+    if (!cod_profissional || !motivo) {
+      return res.status(400).json({ error: 'Código e motivo são obrigatórios' });
+    }
+    
+    // Verificar se já existe restrição ativa para este motoboy nesta loja
+    const existente = await pool.query(`
+      SELECT id FROM disponibilidade_restricoes 
+      WHERE cod_profissional = $1 
+      AND ativo = true
+      AND (todas_lojas = true OR loja_id = $2 OR $3 = true)
+    `, [cod_profissional, loja_id || null, todas_lojas || false]);
+    
+    if (existente.rows.length > 0) {
+      return res.status(400).json({ error: 'Já existe uma restrição ativa para este motoboy nesta loja' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO disponibilidade_restricoes 
+      (cod_profissional, nome_profissional, loja_id, todas_lojas, motivo, criado_por)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [
+      cod_profissional,
+      nome_profissional || null,
+      todas_lojas ? null : (loja_id || null),
+      todas_lojas || false,
+      motivo,
+      criado_por || null
+    ]);
+    
+    console.log(`🚫 Nova restrição criada: ${cod_profissional} - ${nome_profissional}`);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar restrição:', err);
+    res.status(500).json({ error: 'Erro ao criar restrição' });
+  }
+});
+
+// PUT /api/disponibilidade/restricoes/:id - Atualizar restrição
+app.put('/api/disponibilidade/restricoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { loja_id, todas_lojas, motivo, ativo } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE disponibilidade_restricoes 
+      SET loja_id = $1, todas_lojas = $2, motivo = $3, ativo = $4, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $5
+      RETURNING *
+    `, [
+      todas_lojas ? null : (loja_id || null),
+      todas_lojas || false,
+      motivo,
+      ativo !== undefined ? ativo : true,
+      id
+    ]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Restrição não encontrada' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar restrição:', err);
+    res.status(500).json({ error: 'Erro ao atualizar restrição' });
+  }
+});
+
+// DELETE /api/disponibilidade/restricoes/:id - Remover restrição (desativar)
+app.delete('/api/disponibilidade/restricoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Ao invés de deletar, desativa
+    const result = await pool.query(`
+      UPDATE disponibilidade_restricoes 
+      SET ativo = false, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Restrição não encontrada' });
+    }
+    
+    console.log(`✅ Restrição ${id} desativada`);
+    res.json({ success: true, message: 'Restrição removida' });
+  } catch (err) {
+    console.error('❌ Erro ao remover restrição:', err);
+    res.status(500).json({ error: 'Erro ao remover restrição' });
   }
 });
 
