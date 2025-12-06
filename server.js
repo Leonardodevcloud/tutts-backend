@@ -94,6 +94,7 @@ async function createTables() {
         conciliacao_omie BOOLEAN DEFAULT FALSE,
         debito BOOLEAN DEFAULT FALSE,
         approved_at TIMESTAMP,
+        saldo_status VARCHAR(20),
         reject_reason VARCHAR(500),
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -129,6 +130,14 @@ async function createTables() {
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP`);
       console.log('✅ Coluna approved_at verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
+    // Garantir que a coluna saldo_status existe (migração)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS saldo_status VARCHAR(20)`);
+      console.log('✅ Coluna saldo_status verificada');
     } catch (e) {
       // Coluna já existe ou outro erro
     }
@@ -1641,6 +1650,32 @@ app.patch('/api/withdrawals/:id/debito', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar débito:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Atualizar status do saldo
+app.patch('/api/withdrawals/:id/saldo', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { saldoStatus } = req.body;
+
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET saldo_status = $1, updated_at = NOW() 
+       WHERE id = $2 
+       RETURNING *`,
+      [saldoStatus, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Saque não encontrado' });
+    }
+
+    console.log('💰 Saldo status atualizado:', id, saldoStatus);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao atualizar saldo:', error);
     res.status(500).json({ error: error.message });
   }
 });
