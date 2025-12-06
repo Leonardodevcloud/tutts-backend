@@ -555,6 +555,94 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_cod ON disponibilidade_restricoes(cod_profissional)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_loja ON disponibilidade_restricoes(loja_id)`).catch(() => {});
 
+    // ============================================
+    // TABELAS DA LOJA
+    // ============================================
+
+    // Tabela de estoque da loja
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(255) NOT NULL,
+        marca VARCHAR(255),
+        valor DECIMAL(10,2) NOT NULL,
+        quantidade INTEGER DEFAULT 0,
+        tem_tamanho BOOLEAN DEFAULT FALSE,
+        imagem_url TEXT,
+        status VARCHAR(20) DEFAULT 'ativo',
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque verificada');
+
+    // Tabela de tamanhos do estoque
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque_tamanhos (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id) ON DELETE CASCADE,
+        tamanho VARCHAR(20) NOT NULL,
+        quantidade INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque_tamanhos verificada');
+
+    // Tabela de produtos à venda
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_produtos (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id),
+        nome VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        marca VARCHAR(255),
+        valor DECIMAL(10,2) NOT NULL,
+        imagem_url TEXT,
+        abatimento_avista DECIMAL(5,2) DEFAULT 0,
+        abatimento_2semanas DECIMAL(5,2) DEFAULT 0,
+        abatimento_3semanas DECIMAL(5,2) DEFAULT 0,
+        abatimento_4semanas DECIMAL(5,2) DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'ativo',
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_produtos verificada');
+
+    // Tabela de pedidos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_pedidos (
+        id SERIAL PRIMARY KEY,
+        produto_id INTEGER REFERENCES loja_produtos(id),
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        produto_nome VARCHAR(255) NOT NULL,
+        tamanho VARCHAR(20),
+        marca VARCHAR(255),
+        valor_original DECIMAL(10,2) NOT NULL,
+        tipo_abatimento VARCHAR(50) NOT NULL,
+        valor_abatimento DECIMAL(10,2) DEFAULT 0,
+        valor_final DECIMAL(10,2) NOT NULL,
+        parcelas INTEGER DEFAULT 1,
+        valor_parcela DECIMAL(10,2),
+        status VARCHAR(20) DEFAULT 'pendente',
+        admin_id VARCHAR(255),
+        admin_name VARCHAR(255),
+        observacao TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_pedidos verificada');
+
+    // Índices da loja
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_produtos_status ON loja_produtos(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_user ON loja_pedidos(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_status ON loja_pedidos(status)`).catch(() => {});
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -4368,6 +4456,304 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao gerar página pública:', err);
     res.status(500).send('Erro ao gerar página');
+  }
+});
+
+// ============================================
+// LOJA - ENDPOINTS
+// ============================================
+
+// === ESTOQUE ===
+
+// GET - Listar estoque
+app.get('/api/loja/estoque', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT e.*, 
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL), '[]') as tamanhos
+      FROM loja_estoque e
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      GROUP BY e.id
+      ORDER BY e.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar estoque:', err);
+    res.status(500).json({ error: 'Erro ao listar estoque' });
+  }
+});
+
+// POST - Adicionar item ao estoque
+app.post('/api/loja/estoque', async (req, res) => {
+  try {
+    const { nome, marca, valor, quantidade, tem_tamanho, tamanhos, imagem_url, created_by } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_estoque (nome, marca, valor, quantidade, tem_tamanho, imagem_url, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [nome, marca, valor, quantidade || 0, tem_tamanho || false, imagem_url, created_by]
+    );
+    
+    const estoqueId = result.rows[0].id;
+    
+    // Se tem tamanhos, inserir na tabela de tamanhos
+    if (tem_tamanho && tamanhos && tamanhos.length > 0) {
+      for (const t of tamanhos) {
+        await pool.query(
+          `INSERT INTO loja_estoque_tamanhos (estoque_id, tamanho, quantidade) VALUES ($1, $2, $3)`,
+          [estoqueId, t.tamanho, t.quantidade || 0]
+        );
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar estoque:', err);
+    res.status(500).json({ error: 'Erro ao adicionar estoque' });
+  }
+});
+
+// PUT - Atualizar item do estoque
+app.put('/api/loja/estoque/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, marca, valor, quantidade, tem_tamanho, tamanhos, imagem_url, status } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_estoque SET nome=$1, marca=$2, valor=$3, quantidade=$4, tem_tamanho=$5, imagem_url=$6, status=$7, updated_at=NOW()
+       WHERE id=$8 RETURNING *`,
+      [nome, marca, valor, quantidade, tem_tamanho, imagem_url, status || 'ativo', id]
+    );
+    
+    // Atualizar tamanhos
+    if (tem_tamanho) {
+      // Remover tamanhos antigos
+      await pool.query(`DELETE FROM loja_estoque_tamanhos WHERE estoque_id = $1`, [id]);
+      
+      // Inserir novos
+      if (tamanhos && tamanhos.length > 0) {
+        for (const t of tamanhos) {
+          await pool.query(
+            `INSERT INTO loja_estoque_tamanhos (estoque_id, tamanho, quantidade) VALUES ($1, $2, $3)`,
+            [id, t.tamanho, t.quantidade || 0]
+          );
+        }
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar estoque:', err);
+    res.status(500).json({ error: 'Erro ao atualizar estoque' });
+  }
+});
+
+// DELETE - Remover item do estoque
+app.delete('/api/loja/estoque/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_estoque WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover estoque:', err);
+    res.status(500).json({ error: 'Erro ao remover estoque' });
+  }
+});
+
+// === PRODUTOS À VENDA ===
+
+// GET - Listar produtos
+app.get('/api/loja/produtos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.*, e.tem_tamanho,
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL), '[]') as tamanhos
+      FROM loja_produtos p
+      LEFT JOIN loja_estoque e ON e.id = p.estoque_id
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      GROUP BY p.id, e.tem_tamanho
+      ORDER BY p.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar produtos:', err);
+    res.status(500).json({ error: 'Erro ao listar produtos' });
+  }
+});
+
+// GET - Produtos ativos (para usuário)
+app.get('/api/loja/produtos/ativos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.*, e.tem_tamanho, e.quantidade as estoque_total,
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL AND t.quantidade > 0), '[]') as tamanhos
+      FROM loja_produtos p
+      LEFT JOIN loja_estoque e ON e.id = p.estoque_id
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      WHERE p.status = 'ativo'
+      GROUP BY p.id, e.tem_tamanho, e.quantidade
+      ORDER BY p.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar produtos ativos:', err);
+    res.status(500).json({ error: 'Erro ao listar produtos' });
+  }
+});
+
+// POST - Adicionar produto à venda
+app.post('/api/loja/produtos', async (req, res) => {
+  try {
+    const { estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, created_by } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_produtos (estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista || 0, abatimento_2semanas || 0, abatimento_3semanas || 0, abatimento_4semanas || 0, created_by]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar produto:', err);
+    res.status(500).json({ error: 'Erro ao adicionar produto' });
+  }
+});
+
+// PUT - Atualizar produto
+app.put('/api/loja/produtos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, status } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_produtos SET nome=$1, descricao=$2, marca=$3, valor=$4, imagem_url=$5, abatimento_avista=$6, abatimento_2semanas=$7, abatimento_3semanas=$8, abatimento_4semanas=$9, status=$10, updated_at=NOW()
+       WHERE id=$11 RETURNING *`,
+      [nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, status, id]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar produto:', err);
+    res.status(500).json({ error: 'Erro ao atualizar produto' });
+  }
+});
+
+// DELETE - Remover produto
+app.delete('/api/loja/produtos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_produtos WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover produto:', err);
+    res.status(500).json({ error: 'Erro ao remover produto' });
+  }
+});
+
+// === PEDIDOS ===
+
+// GET - Listar todos os pedidos (admin)
+app.get('/api/loja/pedidos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM loja_pedidos ORDER BY created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar pedidos:', err);
+    res.status(500).json({ error: 'Erro ao listar pedidos' });
+  }
+});
+
+// GET - Pedidos do usuário
+app.get('/api/loja/pedidos/user/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_pedidos WHERE user_cod = $1 ORDER BY created_at DESC`,
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar pedidos do usuário:', err);
+    res.status(500).json({ error: 'Erro ao listar pedidos' });
+  }
+});
+
+// POST - Criar pedido
+app.post('/api/loja/pedidos', async (req, res) => {
+  try {
+    const { produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_pedidos (produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar pedido:', err);
+    res.status(500).json({ error: 'Erro ao criar pedido' });
+  }
+});
+
+// PATCH - Atualizar status do pedido
+app.patch('/api/loja/pedidos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_id, admin_name, observacao } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_pedidos SET status=$1, admin_id=$2, admin_name=$3, observacao=$4, updated_at=NOW()
+       WHERE id=$5 RETURNING *`,
+      [status, admin_id, admin_name, observacao, id]
+    );
+    
+    // Se aprovado, decrementar estoque
+    if (status === 'aprovado') {
+      const pedido = result.rows[0];
+      if (pedido.tamanho) {
+        // Decrementar do tamanho específico
+        await pool.query(`
+          UPDATE loja_estoque_tamanhos 
+          SET quantidade = quantidade - 1 
+          WHERE estoque_id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+          AND tamanho = $2 AND quantidade > 0
+        `, [pedido.produto_id, pedido.tamanho]);
+      } else {
+        // Decrementar do estoque geral
+        await pool.query(`
+          UPDATE loja_estoque 
+          SET quantidade = quantidade - 1 
+          WHERE id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+          AND quantidade > 0
+        `, [pedido.produto_id]);
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar pedido:', err);
+    res.status(500).json({ error: 'Erro ao atualizar pedido' });
+  }
+});
+
+// DELETE - Remover pedido
+app.delete('/api/loja/pedidos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_pedidos WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover pedido:', err);
+    res.status(500).json({ error: 'Erro ao remover pedido' });
   }
 });
 
