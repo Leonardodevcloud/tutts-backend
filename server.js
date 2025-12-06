@@ -93,6 +93,8 @@ async function createTables() {
         admin_name VARCHAR(255),
         conciliacao_omie BOOLEAN DEFAULT FALSE,
         debito BOOLEAN DEFAULT FALSE,
+        approved_at TIMESTAMP,
+        reject_reason VARCHAR(500),
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )
@@ -119,6 +121,14 @@ async function createTables() {
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS debito_at TIMESTAMP`);
       console.log('✅ Coluna debito_at verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
+    // Garantir que a coluna approved_at existe (migração)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP`);
+      console.log('✅ Coluna approved_at verificada');
     } catch (e) {
       // Coluna já existe ou outro erro
     }
@@ -1540,12 +1550,17 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
     const { id } = req.params;
     const { status, adminId, adminName, rejectReason } = req.body;
 
+    // Se status for aprovado ou aprovado_gratuidade, salvar a data de aprovação
+    const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
+    
     const result = await pool.query(
       `UPDATE withdrawal_requests 
-       SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, updated_at = NOW() 
-       WHERE id = $5 
+       SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, 
+           approved_at = CASE WHEN $5 THEN NOW() ELSE approved_at END,
+           updated_at = NOW() 
+       WHERE id = $6 
        RETURNING *`,
-      [status, adminId, adminName, rejectReason || null, id]
+      [status, adminId, adminName, rejectReason || null, isAprovado, id]
     );
 
     if (result.rows.length === 0) {
