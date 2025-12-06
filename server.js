@@ -599,6 +599,7 @@ async function createTables() {
         marca VARCHAR(255),
         valor DECIMAL(10,2) NOT NULL,
         imagem_url TEXT,
+        parcelas_config JSONB DEFAULT '[]',
         abatimento_avista DECIMAL(5,2) DEFAULT 0,
         abatimento_2semanas DECIMAL(5,2) DEFAULT 0,
         abatimento_3semanas DECIMAL(5,2) DEFAULT 0,
@@ -610,6 +611,12 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela loja_produtos verificada');
+
+    // Migração: adicionar coluna parcelas_config se não existir
+    try {
+      await pool.query(`ALTER TABLE loja_produtos ADD COLUMN IF NOT EXISTS parcelas_config JSONB DEFAULT '[]'`);
+      console.log('✅ Coluna parcelas_config verificada');
+    } catch (e) {}
 
     // Tabela de pedidos
     await pool.query(`
@@ -4610,12 +4617,12 @@ app.get('/api/loja/produtos/ativos', async (req, res) => {
 // POST - Adicionar produto à venda
 app.post('/api/loja/produtos', async (req, res) => {
   try {
-    const { estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, created_by } = req.body;
+    const { estoque_id, nome, descricao, marca, valor, imagem_url, parcelas_config, created_by } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO loja_produtos (estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [estoque_id, nome, descricao, marca, valor, imagem_url, abatimento_avista || 0, abatimento_2semanas || 0, abatimento_3semanas || 0, abatimento_4semanas || 0, created_by]
+      `INSERT INTO loja_produtos (estoque_id, nome, descricao, marca, valor, imagem_url, parcelas_config, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [estoque_id, nome, descricao, marca, valor, imagem_url, JSON.stringify(parcelas_config || []), created_by]
     );
     
     res.json(result.rows[0]);
@@ -4629,12 +4636,12 @@ app.post('/api/loja/produtos', async (req, res) => {
 app.put('/api/loja/produtos/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, status } = req.body;
+    const { nome, descricao, marca, valor, imagem_url, parcelas_config, status } = req.body;
     
     const result = await pool.query(
-      `UPDATE loja_produtos SET nome=$1, descricao=$2, marca=$3, valor=$4, imagem_url=$5, abatimento_avista=$6, abatimento_2semanas=$7, abatimento_3semanas=$8, abatimento_4semanas=$9, status=$10, updated_at=NOW()
-       WHERE id=$11 RETURNING *`,
-      [nome, descricao, marca, valor, imagem_url, abatimento_avista, abatimento_2semanas, abatimento_3semanas, abatimento_4semanas, status, id]
+      `UPDATE loja_produtos SET nome=$1, descricao=$2, marca=$3, valor=$4, imagem_url=$5, parcelas_config=$6, status=$7, updated_at=NOW()
+       WHERE id=$8 RETURNING *`,
+      [nome, descricao, marca, valor, imagem_url, JSON.stringify(parcelas_config || []), status, id]
     );
     
     res.json(result.rows[0]);
