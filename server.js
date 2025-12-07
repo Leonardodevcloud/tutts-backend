@@ -589,6 +589,23 @@ async function createTables() {
     `);
     console.log('✅ Tabela loja_estoque_tamanhos verificada');
 
+    // Tabela de movimentações de estoque (entradas e saídas)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque_movimentacoes (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id) ON DELETE CASCADE,
+        tipo VARCHAR(20) NOT NULL,
+        quantidade INTEGER NOT NULL,
+        tamanho VARCHAR(20),
+        motivo TEXT,
+        pedido_id INTEGER REFERENCES loja_pedidos(id),
+        user_name VARCHAR(255),
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque_movimentacoes verificada');
+
     // Tabela de produtos à venda
     await pool.query(`
       CREATE TABLE IF NOT EXISTS loja_produtos (
@@ -4782,6 +4799,106 @@ app.delete('/api/loja/pedidos/:id', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao remover pedido:', err);
     res.status(500).json({ error: 'Erro ao remover pedido' });
+  }
+});
+
+// ==================== MOVIMENTAÇÕES DE ESTOQUE ====================
+
+// GET - Listar movimentações de um item
+app.get('/api/loja/estoque/:id/movimentacoes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_estoque_movimentacoes WHERE estoque_id = $1 ORDER BY created_at DESC LIMIT 100`,
+      [id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar movimentações:', err);
+    res.status(500).json({ error: 'Erro ao listar movimentações' });
+  }
+});
+
+// GET - Listar todas movimentações
+app.get('/api/loja/movimentacoes', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, e.nome as produto_nome, e.marca
+      FROM loja_estoque_movimentacoes m
+      LEFT JOIN loja_estoque e ON m.estoque_id = e.id
+      ORDER BY m.created_at DESC
+      LIMIT 500
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar movimentações:', err);
+    res.status(500).json({ error: 'Erro ao listar movimentações' });
+  }
+});
+
+// POST - Registrar entrada de estoque
+app.post('/api/loja/estoque/:id/entrada', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantidade, tamanho, motivo, created_by } = req.body;
+    
+    // Registrar movimentação
+    await pool.query(
+      `INSERT INTO loja_estoque_movimentacoes (estoque_id, tipo, quantidade, tamanho, motivo, created_by)
+       VALUES ($1, 'entrada', $2, $3, $4, $5)`,
+      [id, quantidade, tamanho || null, motivo || 'Entrada manual', created_by]
+    );
+    
+    // Atualizar quantidade
+    if (tamanho) {
+      await pool.query(
+        `UPDATE loja_estoque_tamanhos SET quantidade = quantidade + $1 WHERE estoque_id = $2 AND tamanho = $3`,
+        [quantidade, id, tamanho]
+      );
+    } else {
+      await pool.query(
+        `UPDATE loja_estoque SET quantidade = quantidade + $1 WHERE id = $2`,
+        [quantidade, id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar entrada:', err);
+    res.status(500).json({ error: 'Erro ao registrar entrada' });
+  }
+});
+
+// POST - Registrar saída de estoque
+app.post('/api/loja/estoque/:id/saida', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantidade, tamanho, motivo, created_by } = req.body;
+    
+    // Registrar movimentação
+    await pool.query(
+      `INSERT INTO loja_estoque_movimentacoes (estoque_id, tipo, quantidade, tamanho, motivo, created_by)
+       VALUES ($1, 'saida', $2, $3, $4, $5)`,
+      [id, quantidade, tamanho || null, motivo || 'Saída manual', created_by]
+    );
+    
+    // Atualizar quantidade
+    if (tamanho) {
+      await pool.query(
+        `UPDATE loja_estoque_tamanhos SET quantidade = GREATEST(0, quantidade - $1) WHERE estoque_id = $2 AND tamanho = $3`,
+        [quantidade, id, tamanho]
+      );
+    } else {
+      await pool.query(
+        `UPDATE loja_estoque SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2`,
+        [quantidade, id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar saída:', err);
+    res.status(500).json({ error: 'Erro ao registrar saída' });
   }
 });
 
