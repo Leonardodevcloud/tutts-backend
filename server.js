@@ -670,11 +670,28 @@ async function createTables() {
     await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado_por VARCHAR(255)`).catch(() => {});
     await pool.query(`ALTER TABLE loja_estoque ADD COLUMN IF NOT EXISTS tipo_tamanho VARCHAR(20) DEFAULT 'letras'`).catch(() => {});
 
+    // Tabela de sugestões de produtos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_sugestoes (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        sugestao TEXT NOT NULL,
+        status VARCHAR(20) DEFAULT 'pendente',
+        resposta TEXT,
+        respondido_por VARCHAR(255),
+        respondido_em TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_sugestoes verificada');
+
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_produtos_status ON loja_produtos(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_user ON loja_pedidos(user_cod)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_status ON loja_pedidos(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_sugestoes_status ON loja_sugestoes(status)`).catch(() => {});
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -4872,6 +4889,81 @@ app.post('/api/loja/estoque/:id/saida', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao registrar saída:', err);
     res.status(500).json({ error: 'Erro ao registrar saída' });
+  }
+});
+
+// ==================== SUGESTÕES DE PRODUTOS ====================
+
+// GET - Listar todas sugestões (admin)
+app.get('/api/loja/sugestoes', async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM loja_sugestoes ORDER BY created_at DESC`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar sugestões:', err);
+    res.status(500).json({ error: 'Erro ao listar sugestões' });
+  }
+});
+
+// GET - Listar sugestões do usuário
+app.get('/api/loja/sugestoes/user/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_sugestoes WHERE user_cod = $1 ORDER BY created_at DESC`,
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar sugestões:', err);
+    res.status(500).json({ error: 'Erro ao listar sugestões' });
+  }
+});
+
+// POST - Criar sugestão
+app.post('/api/loja/sugestoes', async (req, res) => {
+  try {
+    const { user_cod, user_name, sugestao } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_sugestoes (user_cod, user_name, sugestao) VALUES ($1, $2, $3) RETURNING *`,
+      [user_cod, user_name, sugestao]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar sugestão:', err);
+    res.status(500).json({ error: 'Erro ao criar sugestão' });
+  }
+});
+
+// PATCH - Responder sugestão (admin)
+app.patch('/api/loja/sugestoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, resposta, respondido_por } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_sugestoes SET status=$1, resposta=$2, respondido_por=$3, respondido_em=NOW() WHERE id=$4 RETURNING *`,
+      [status, resposta, respondido_por, id]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao responder sugestão:', err);
+    res.status(500).json({ error: 'Erro ao responder sugestão' });
+  }
+});
+
+// DELETE - Remover sugestão
+app.delete('/api/loja/sugestoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_sugestoes WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover sugestão:', err);
+    res.status(500).json({ error: 'Erro ao remover sugestão' });
   }
 });
 
