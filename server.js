@@ -638,11 +638,20 @@ async function createTables() {
         admin_id VARCHAR(255),
         admin_name VARCHAR(255),
         observacao TEXT,
+        debito_lancado BOOLEAN DEFAULT FALSE,
+        debito_lancado_em TIMESTAMP,
+        debito_lancado_por VARCHAR(255),
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
     console.log('✅ Tabela loja_pedidos verificada');
+    
+    // Adicionar colunas que podem não existir
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado_em TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado_por VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_estoque ADD COLUMN IF NOT EXISTS tipo_tamanho VARCHAR(20) DEFAULT 'letras'`).catch(() => {});
 
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
@@ -4495,12 +4504,12 @@ app.get('/api/loja/estoque', async (req, res) => {
 // POST - Adicionar item ao estoque
 app.post('/api/loja/estoque', async (req, res) => {
   try {
-    const { nome, marca, valor, quantidade, tem_tamanho, tamanhos, imagem_url, created_by } = req.body;
+    const { nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, tamanhos, imagem_url, created_by } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO loja_estoque (nome, marca, valor, quantidade, tem_tamanho, imagem_url, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [nome, marca, valor, quantidade || 0, tem_tamanho || false, imagem_url, created_by]
+      `INSERT INTO loja_estoque (nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, imagem_url, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [nome, marca, valor, quantidade || 0, tem_tamanho || false, tipo_tamanho || 'letras', imagem_url, created_by]
     );
     
     const estoqueId = result.rows[0].id;
@@ -4526,12 +4535,12 @@ app.post('/api/loja/estoque', async (req, res) => {
 app.put('/api/loja/estoque/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { nome, marca, valor, quantidade, tem_tamanho, tamanhos, imagem_url, status } = req.body;
+    const { nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, tamanhos, imagem_url, status } = req.body;
     
     const result = await pool.query(
-      `UPDATE loja_estoque SET nome=$1, marca=$2, valor=$3, quantidade=$4, tem_tamanho=$5, imagem_url=$6, status=$7, updated_at=NOW()
-       WHERE id=$8 RETURNING *`,
-      [nome, marca, valor, quantidade, tem_tamanho, imagem_url, status || 'ativo', id]
+      `UPDATE loja_estoque SET nome=$1, marca=$2, valor=$3, quantidade=$4, tem_tamanho=$5, tipo_tamanho=$6, imagem_url=$7, status=$8, updated_at=NOW()
+       WHERE id=$9 RETURNING *`,
+      [nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho || 'letras', imagem_url, status || 'ativo', id]
     );
     
     // Atualizar tamanhos
@@ -4715,33 +4724,45 @@ app.post('/api/loja/pedidos', async (req, res) => {
 app.patch('/api/loja/pedidos/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, admin_id, admin_name, observacao } = req.body;
+    const { status, admin_id, admin_name, observacao, debito_lancado, debito_lancado_em, debito_lancado_por } = req.body;
     
-    const result = await pool.query(
-      `UPDATE loja_pedidos SET status=$1, admin_id=$2, admin_name=$3, observacao=$4, updated_at=NOW()
-       WHERE id=$5 RETURNING *`,
-      [status, admin_id, admin_name, observacao, id]
-    );
+    let result;
     
-    // Se aprovado, decrementar estoque
-    if (status === 'aprovado') {
-      const pedido = result.rows[0];
-      if (pedido.tamanho) {
-        // Decrementar do tamanho específico
-        await pool.query(`
-          UPDATE loja_estoque_tamanhos 
-          SET quantidade = quantidade - 1 
-          WHERE estoque_id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
-          AND tamanho = $2 AND quantidade > 0
-        `, [pedido.produto_id, pedido.tamanho]);
-      } else {
-        // Decrementar do estoque geral
-        await pool.query(`
-          UPDATE loja_estoque 
-          SET quantidade = quantidade - 1 
-          WHERE id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
-          AND quantidade > 0
-        `, [pedido.produto_id]);
+    // Se for atualização de débito lançado
+    if (debito_lancado !== undefined) {
+      result = await pool.query(
+        `UPDATE loja_pedidos SET debito_lancado=$1, debito_lancado_em=$2, debito_lancado_por=$3, updated_at=NOW()
+         WHERE id=$4 RETURNING *`,
+        [debito_lancado, debito_lancado_em, debito_lancado_por, id]
+      );
+    } else {
+      // Atualização de status
+      result = await pool.query(
+        `UPDATE loja_pedidos SET status=$1, admin_id=$2, admin_name=$3, observacao=$4, updated_at=NOW()
+         WHERE id=$5 RETURNING *`,
+        [status, admin_id, admin_name, observacao, id]
+      );
+      
+      // Se aprovado, decrementar estoque
+      if (status === 'aprovado') {
+        const pedido = result.rows[0];
+        if (pedido.tamanho) {
+          // Decrementar do tamanho específico
+          await pool.query(`
+            UPDATE loja_estoque_tamanhos 
+            SET quantidade = quantidade - 1 
+            WHERE estoque_id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+            AND tamanho = $2 AND quantidade > 0
+          `, [pedido.produto_id, pedido.tamanho]);
+        } else {
+          // Decrementar do estoque geral
+          await pool.query(`
+            UPDATE loja_estoque 
+            SET quantidade = quantidade - 1 
+            WHERE id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+            AND quantidade > 0
+          `, [pedido.produto_id]);
+        }
       }
     }
     
