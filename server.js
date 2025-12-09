@@ -5775,7 +5775,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const dadosQuery = await pool.query(`
       SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
         cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
-        valor, valor_prof, distancia, ocorrencia, centro_custo
+        valor, valor_prof, distancia, ocorrencia, centro_custo, motivo, finalizado
       FROM bi_entregas ${where}
     `, params);
     
@@ -5826,6 +5826,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
     let profissionais = new Set();
     let totalRetornos = 0;
+    let ultimaEntrega = null;
     
     // Processar por cliente/OS
     Object.keys(osPorCliente).forEach(codCliente => {
@@ -5839,10 +5840,20 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const entregasOS = calcularEntregasOS(linhasOS);
         totalEntregas += entregasOS;
         
-        // Contagem de profissionais e retornos
+        // Contagem de profissionais e retornos (motivo = 'erro')
         linhasOS.forEach((row) => {
           profissionais.add(row.cod_prof);
-          if (row.ocorrencia === 'Retorno') totalRetornos++;
+          // RETORNO = motivo contém "erro" (case insensitive)
+          if (row.motivo && row.motivo.toLowerCase().includes('erro')) {
+            totalRetornos++;
+          }
+          // Última entrega
+          if (row.finalizado) {
+            const dataFin = new Date(row.finalizado);
+            if (!ultimaEntrega || dataFin > ultimaEntrega) {
+              ultimaEntrega = dataFin;
+            }
+          }
         });
         
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
@@ -5898,7 +5909,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
       total_profissionais: profissionais.size,
       media_entregas_por_prof: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
-      total_retornos: totalRetornos
+      total_retornos: totalRetornos,
+      incentivo: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
+      ultima_entrega: ultimaEntrega ? ultimaEntrega.toISOString() : null
     };
     
     // Agrupar por cliente - usando mesma lógica
@@ -5914,9 +5927,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           nome_display: mapMascaras[codCliente] || primeiraLinha.nome_cliente,
           tem_mascara: !!mapMascaras[codCliente],
           os_set: new Set(),
+          profissionais_set: new Set(),
           centros_custo_map: {}, // Mapa de centros de custo com dados
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
-          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0,
+          total_retornos: 0, ultima_entrega: null
         };
       }
       
@@ -5925,6 +5940,20 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       Object.keys(osDoCliente).forEach(os => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
+        
+        // Coletar profissionais e retornos do cliente
+        linhasOS.forEach(l => {
+          c.profissionais_set.add(l.cod_prof);
+          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
+            c.total_retornos++;
+          }
+          if (l.finalizado) {
+            const dataFin = new Date(l.finalizado);
+            if (!c.ultima_entrega || dataFin > c.ultima_entrega) {
+              c.ultima_entrega = dataFin;
+            }
+          }
+        });
         
         const entregasOS = calcularEntregasOS(linhasOS);
         c.total_entregas += entregasOS;
@@ -5951,7 +5980,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             c.centros_custo_map[cc] = {
               centro_custo: cc,
               os_set: new Set(),
-              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, total_retornos: 0,
               soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
             };
           }
@@ -5960,6 +5989,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           ccData.total_entregas++;
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
+          // Retorno = motivo contém "erro"
+          if (l.motivo && l.motivo.toLowerCase().includes('erro')) ccData.total_retornos++;
           ccData.soma_valor += parseFloat(l.valor) || 0;
           ccData.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
@@ -5976,12 +6007,17 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         centro_custo: cc.centro_custo,
         total_os: cc.os_set.size,
         total_entregas: cc.total_entregas,
+        total_retornos: cc.total_retornos,
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         tempo_medio: cc.count_tempo > 0 ? (cc.soma_tempo / cc.count_tempo).toFixed(2) : null,
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
       })).sort((a, b) => b.total_entregas - a.total_entregas);
+      
+      const totalProfs = c.profissionais_set.size;
+      const ticketMedio = c.total_entregas > 0 ? (c.soma_valor / c.total_entregas) : 0;
+      const incentivo = totalProfs > 0 ? (c.total_entregas / totalProfs) : 0;
       
       return {
         cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
@@ -5990,7 +6026,14 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         centros_custo: centros_custo_dados, // Agora é array com dados completos
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
         tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
-        valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
+        valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
+        // Novas métricas
+        ticket_medio: ticketMedio.toFixed(2),
+        total_profissionais: totalProfs,
+        entregas_por_prof: incentivo.toFixed(2),
+        incentivo: incentivo.toFixed(2),
+        total_retornos: c.total_retornos,
+        ultima_entrega: c.ultima_entrega ? c.ultima_entrega.toISOString() : null
       };
     }).sort((a, b) => b.total_entregas - a.total_entregas);
     
@@ -6044,8 +6087,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const entregasOS = calcularEntregasOS(linhas);
         p.total_entregas += entregasOS;
         
+        // Contagem de retornos (motivo = 'erro')
         linhas.forEach(l => {
-          if (l.ocorrencia === 'Retorno') p.retornos++;
+          if (l.motivo && l.motivo.toLowerCase().includes('erro')) p.retornos++;
         });
         
         // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
