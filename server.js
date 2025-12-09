@@ -5378,13 +5378,13 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         const dados = {
           os,
           ponto,
-          num_pedido: e.num_pedido || null,
-          cod_cliente: parseInt(e.cod_cliente) || null,
-          nome_cliente: e.nome_cliente || null,
-          empresa: e.empresa || null,
-          nome_fantasia: e.nome_fantasia || null,
-          centro_custo: e.centro_custo || null,
-          cidade_p1: e.cidade_p1 || null,
+          num_pedido: e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'] || null,
+          cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
+          nome_cliente: e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'] || null,
+          empresa: e.empresa || e.Empresa || null,
+          nome_fantasia: e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'] || null,
+          centro_custo: e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto || null,
+          cidade_p1: e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'] || null,
           endereco: e.endereco || null,
           bairro: e.bairro || null,
           cidade: e.cidade || null,
@@ -5902,6 +5902,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           nome_display: mapMascaras[codCliente] || primeiraLinha.nome_cliente,
           tem_mascara: !!mapMascaras[codCliente],
           os_set: new Set(),
+          centros_custo: new Set(), // Centros de custo deste cliente
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
           soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
         };
@@ -5912,6 +5913,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       Object.keys(osDoCliente).forEach(os => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
+        
+        // Coletar centros de custo
+        linhasOS.forEach(l => {
+          if (l.centro_custo) c.centros_custo.add(l.centro_custo);
+        });
         
         const entregasOS = calcularEntregasOS(linhasOS);
         c.total_entregas += entregasOS;
@@ -5959,6 +5965,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
       nome_display: c.nome_display, tem_mascara: c.tem_mascara,
       total_os: c.os_set.size, total_entregas: c.total_entregas,
+      centros_custo: [...c.centros_custo], // Array de centros de custo
       dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
       tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
       valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
