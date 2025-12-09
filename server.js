@@ -5607,6 +5607,54 @@ app.get('/api/bi/profissionais', async (req, res) => {
   }
 });
 
+// Listar datas disponíveis (apenas datas com dados)
+app.get('/api/bi/datas', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT data_solicitado as data, COUNT(*) as total
+      FROM bi_entregas 
+      WHERE data_solicitado IS NOT NULL
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar datas:', err);
+    res.status(500).json({ error: 'Erro ao listar datas' });
+  }
+});
+
+// Listar uploads realizados
+app.get('/api/bi/uploads', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT data_upload, COUNT(*) as total_registros, 
+             MIN(data_solicitado) as data_inicial,
+             MAX(data_solicitado) as data_final
+      FROM bi_entregas 
+      WHERE data_upload IS NOT NULL
+      GROUP BY data_upload
+      ORDER BY data_upload DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar uploads:', err);
+    res.status(500).json({ error: 'Erro ao listar uploads' });
+  }
+});
+
+// Excluir upload por data
+app.delete('/api/bi/uploads/:data', async (req, res) => {
+  try {
+    const { data } = req.params;
+    const result = await pool.query(`DELETE FROM bi_entregas WHERE data_upload = $1`, [data]);
+    res.json({ success: true, deletados: result.rowCount });
+  } catch (err) {
+    console.error('❌ Erro ao excluir upload:', err);
+    res.status(500).json({ error: 'Erro ao excluir upload' });
+  }
+});
+
 // Limpar entregas por período
 app.delete('/api/bi/entregas', async (req, res) => {
   try {
