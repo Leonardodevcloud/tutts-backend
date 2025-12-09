@@ -5690,8 +5690,17 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const params = [];
     let paramIndex = 1;
     
-    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
-    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    // Converter datas ISO para YYYY-MM-DD
+    if (data_inicio) { 
+      const dataIni = data_inicio.split('T')[0]; // Pega só a parte da data
+      where += ` AND data_solicitado >= $${paramIndex++}`; 
+      params.push(dataIni); 
+    }
+    if (data_fim) { 
+      const dataFim = data_fim.split('T')[0]; // Pega só a parte da data
+      where += ` AND data_solicitado <= $${paramIndex++}`; 
+      params.push(dataFim); 
+    }
     if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
     if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
     if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
@@ -5859,8 +5868,17 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
     const params = [];
     let paramIndex = 1;
     
-    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
-    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    // Converter datas ISO para YYYY-MM-DD
+    if (data_inicio) { 
+      const dataIni = data_inicio.split('T')[0];
+      where += ` AND data_solicitado >= $${paramIndex++}`; 
+      params.push(dataIni); 
+    }
+    if (data_fim) { 
+      const dataFim = data_fim.split('T')[0];
+      where += ` AND data_solicitado <= $${paramIndex++}`; 
+      params.push(dataFim); 
+    }
     if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
     if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
     if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
