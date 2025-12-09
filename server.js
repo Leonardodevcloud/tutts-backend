@@ -6614,3 +6614,73 @@ app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`📡 API: http://localhost:${port}/api/health`);
 });
+
+// ===== REGIÕES =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_regioes (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    clientes JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_regioes já existe ou erro:', err.message));
+
+// Listar regiões
+app.get('/api/bi/regioes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_regioes ORDER BY nome');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar regiões:', err);
+    res.json([]);
+  }
+});
+
+// Criar região
+app.post('/api/bi/regioes', async (req, res) => {
+  try {
+    const { nome, clientes } = req.body;
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO bi_regioes (nome, clientes) 
+      VALUES ($1, $2)
+      RETURNING *
+    `, [nome, JSON.stringify(clientes || [])]);
+    
+    res.json({ success: true, regiao: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar região:', err);
+    res.status(500).json({ error: 'Erro ao salvar região' });
+  }
+});
+
+// Excluir região
+app.delete('/api/bi/regioes/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_regioes WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir região:', err);
+    res.status(500).json({ error: 'Erro ao excluir região' });
+  }
+});
+
+// ===== CATEGORIAS (da planilha) =====
+app.get('/api/bi/categorias', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT categoria
+      FROM bi_entregas
+      WHERE categoria IS NOT NULL AND categoria != ''
+      ORDER BY categoria
+    `);
+    res.json(result.rows.map(r => r.categoria));
+  } catch (err) {
+    console.error('❌ Erro ao listar categorias:', err);
+    res.json([]);
+  }
+});
