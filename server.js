@@ -5168,31 +5168,30 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
   try {
     const { entregas, data_referencia } = req.body;
     
+    console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
+    
+    if (!entregas || entregas.length === 0) {
+      return res.status(400).json({ error: 'Nenhuma entrega recebida' });
+    }
+    
     // Buscar configurações de prazo
     const prazosCliente = await pool.query(`
       SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
       FROM bi_prazos_cliente pc
       JOIN bi_faixas_prazo fp ON pc.id = fp.prazo_cliente_id
-    `);
+    `).catch(() => ({ rows: [] }));
     
-    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
     
     // Função para encontrar prazo
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
-      // Primeiro tenta por código do cliente
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
-      
-      // Se não encontrou, tenta por centro de custo
       if (faixas.length === 0) {
         faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
       }
-      
-      // Se não encontrou, usa padrão
       if (faixas.length === 0) {
         faixas = prazoPadrao.rows;
       }
-      
-      // Encontrar faixa correspondente à distância
       for (const faixa of faixas) {
         const kmMin = parseFloat(faixa.km_min) || 0;
         const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
@@ -5200,14 +5199,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           return faixa.prazo_minutos;
         }
       }
-      
-      return null; // Sem prazo configurado
+      return null;
     };
     
     // Função para converter tempo HH:MM:SS em minutos
     const tempoParaMinutos = (tempo) => {
       if (!tempo) return null;
-      const partes = tempo.split(':');
+      if (typeof tempo === 'number') {
+        // Excel armazena tempo como fração do dia
+        return Math.round(tempo * 24 * 60);
+      }
+      const str = String(tempo);
+      const partes = str.split(':');
       if (partes.length >= 2) {
         const horas = parseInt(partes[0]) || 0;
         const minutos = parseInt(partes[1]) || 0;
@@ -5216,76 +5219,164 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
+    // Função para converter data do Excel para formato ISO
+    const parseData = (valor) => {
+      if (!valor) return null;
+      // Se for número (serial date do Excel)
+      if (typeof valor === 'number') {
+        const data = new Date((valor - 25569) * 86400 * 1000);
+        return data.toISOString().split('T')[0];
+      }
+      // Se já for string no formato DD/MM/YYYY
+      if (typeof valor === 'string' && valor.includes('/')) {
+        const partes = valor.split('/');
+        if (partes.length === 3) {
+          return `${partes[2]}-${partes[1].padStart(2,'0')}-${partes[0].padStart(2,'0')}`;
+        }
+      }
+      return valor;
+    };
+    
+    // Função para converter hora do Excel
+    const parseHora = (valor) => {
+      if (!valor) return null;
+      if (typeof valor === 'number') {
+        const totalMinutos = Math.round(valor * 24 * 60);
+        const horas = Math.floor(totalMinutos / 60);
+        const minutos = totalMinutos % 60;
+        return `${String(horas).padStart(2,'0')}:${String(minutos).padStart(2,'0')}:00`;
+      }
+      return String(valor);
+    };
+    
+    // Função para limpar número
+    const parseNum = (valor) => {
+      if (!valor) return null;
+      if (typeof valor === 'number') return valor;
+      const str = String(valor).replace(',', '.').replace(/[^\d.-]/g, '');
+      const num = parseFloat(str);
+      return isNaN(num) ? null : num;
+    };
+    
     let inseridos = 0;
     let atualizados = 0;
+    let erros = 0;
     
     for (const e of entregas) {
-      const distancia = parseFloat(e.distancia) || 0;
-      const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-      const tempoExecucao = tempoParaMinutos(e.execucao_comp);
-      const dentroPrazo = prazoMinutos && tempoExecucao ? tempoExecucao <= prazoMinutos : null;
-      
-      // Verificar se já existe (mesmo OS)
-      const existe = await pool.query(`SELECT id FROM bi_entregas WHERE os = $1`, [e.os]);
-      
-      if (existe.rows.length > 0) {
-        // Atualizar
-        await pool.query(`
-          UPDATE bi_entregas SET
-            num_pedido = $2, cod_cliente = $3, nome_cliente = $4, empresa = $5,
-            nome_fantasia = $6, centro_custo = $7, cidade_p1 = $8, endereco = $9,
-            bairro = $10, cidade = $11, estado = $12, cod_prof = $13, nome_prof = $14,
-            data_hora = $15, data_hora_alocado = $16, data_solicitado = $17, hora_solicitado = $18,
-            data_chegada = $19, hora_chegada = $20, data_saida = $21, hora_saida = $22,
-            categoria = $23, valor = $24, distancia = $25, valor_prof = $26,
-            finalizado = $27, execucao_comp = $28, execucao_espera = $29,
-            status = $30, motivo = $31, ocorrencia = $32, velocidade_media = $33,
-            dentro_prazo = $34, prazo_minutos = $35, tempo_execucao_minutos = $36
-          WHERE os = $1
-        `, [
-          e.os, e.num_pedido, e.cod_cliente, e.nome_cliente, e.empresa,
-          e.nome_fantasia, e.centro_custo, e.cidade_p1, e.endereco,
-          e.bairro, e.cidade, e.estado, e.cod_prof, e.nome_prof,
-          e.data_hora, e.data_hora_alocado, e.data_solicitado, e.hora_solicitado,
-          e.data_chegada, e.hora_chegada, e.data_saida, e.hora_saida,
-          e.categoria, e.valor, e.distancia, e.valor_prof,
-          e.finalizado, e.execucao_comp, e.execucao_espera,
-          e.status, e.motivo, e.ocorrencia, e.velocidade_media,
-          dentroPrazo, prazoMinutos, tempoExecucao
-        ]);
-        atualizados++;
-      } else {
-        // Inserir
-        await pool.query(`
-          INSERT INTO bi_entregas (
-            os, num_pedido, cod_cliente, nome_cliente, empresa,
-            nome_fantasia, centro_custo, cidade_p1, endereco,
-            bairro, cidade, estado, cod_prof, nome_prof,
-            data_hora, data_hora_alocado, data_solicitado, hora_solicitado,
-            data_chegada, hora_chegada, data_saida, hora_saida,
-            categoria, valor, distancia, valor_prof,
-            finalizado, execucao_comp, execucao_espera,
-            status, motivo, ocorrencia, velocidade_media,
-            dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
-        `, [
-          e.os, e.num_pedido, e.cod_cliente, e.nome_cliente, e.empresa,
-          e.nome_fantasia, e.centro_custo, e.cidade_p1, e.endereco,
-          e.bairro, e.cidade, e.estado, e.cod_prof, e.nome_prof,
-          e.data_hora, e.data_hora_alocado, e.data_solicitado, e.hora_solicitado,
-          e.data_chegada, e.hora_chegada, e.data_saida, e.hora_saida,
-          e.categoria, e.valor, e.distancia, e.valor_prof,
-          e.finalizado, e.execucao_comp, e.execucao_espera,
-          e.status, e.motivo, e.ocorrencia, e.velocidade_media,
-          dentroPrazo, prazoMinutos, tempoExecucao, data_referencia || new Date().toISOString().split('T')[0]
-        ]);
-        inseridos++;
+      try {
+        const os = parseInt(e.os);
+        if (!os) {
+          erros++;
+          continue;
+        }
+        
+        const distancia = parseNum(e.distancia) || 0;
+        const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
+        const tempoExecucao = tempoParaMinutos(e.execucao_comp);
+        const dentroPrazo = prazoMinutos && tempoExecucao ? tempoExecucao <= prazoMinutos : null;
+        
+        // Preparar dados
+        const dados = {
+          os,
+          num_pedido: e.num_pedido || null,
+          cod_cliente: parseInt(e.cod_cliente) || null,
+          nome_cliente: e.nome_cliente || null,
+          empresa: e.empresa || null,
+          nome_fantasia: e.nome_fantasia || null,
+          centro_custo: e.centro_custo || null,
+          cidade_p1: e.cidade_p1 || null,
+          endereco: e.endereco || null,
+          bairro: e.bairro || null,
+          cidade: e.cidade || null,
+          estado: e.estado || null,
+          cod_prof: parseInt(e.cod_prof) || null,
+          nome_prof: e.nome_prof || null,
+          data_solicitado: parseData(e.data_solicitado),
+          hora_solicitado: parseHora(e.hora_solicitado),
+          data_chegada: parseData(e.data_chegada),
+          hora_chegada: parseHora(e.hora_chegada),
+          data_saida: parseData(e.data_saida),
+          hora_saida: parseHora(e.hora_saida),
+          categoria: e.categoria || null,
+          valor: parseNum(e.valor),
+          distancia: distancia,
+          valor_prof: parseNum(e.valor_prof),
+          execucao_comp: e.execucao_comp ? String(e.execucao_comp) : null,
+          execucao_espera: e.execucao_espera ? String(e.execucao_espera) : null,
+          status: e.status || null,
+          motivo: e.motivo || null,
+          ocorrencia: e.ocorrencia || null,
+          velocidade_media: parseNum(e.velocidade_media),
+          dentro_prazo: dentroPrazo,
+          prazo_minutos: prazoMinutos,
+          tempo_execucao_minutos: tempoExecucao
+        };
+        
+        // Verificar se já existe (mesmo OS)
+        const existe = await pool.query(`SELECT id FROM bi_entregas WHERE os = $1`, [os]);
+        
+        if (existe.rows.length > 0) {
+          await pool.query(`
+            UPDATE bi_entregas SET
+              num_pedido = $2, cod_cliente = $3, nome_cliente = $4, empresa = $5,
+              nome_fantasia = $6, centro_custo = $7, cidade_p1 = $8, endereco = $9,
+              bairro = $10, cidade = $11, estado = $12, cod_prof = $13, nome_prof = $14,
+              data_solicitado = $15, hora_solicitado = $16,
+              data_chegada = $17, hora_chegada = $18, data_saida = $19, hora_saida = $20,
+              categoria = $21, valor = $22, distancia = $23, valor_prof = $24,
+              execucao_comp = $25, execucao_espera = $26,
+              status = $27, motivo = $28, ocorrencia = $29, velocidade_media = $30,
+              dentro_prazo = $31, prazo_minutos = $32, tempo_execucao_minutos = $33
+            WHERE os = $1
+          `, [
+            dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
+            dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
+            dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
+            dados.data_solicitado, dados.hora_solicitado,
+            dados.data_chegada, dados.hora_chegada, dados.data_saida, dados.hora_saida,
+            dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
+            dados.execucao_comp, dados.execucao_espera,
+            dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
+            dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos
+          ]);
+          atualizados++;
+        } else {
+          await pool.query(`
+            INSERT INTO bi_entregas (
+              os, num_pedido, cod_cliente, nome_cliente, empresa,
+              nome_fantasia, centro_custo, cidade_p1, endereco,
+              bairro, cidade, estado, cod_prof, nome_prof,
+              data_solicitado, hora_solicitado,
+              data_chegada, hora_chegada, data_saida, hora_saida,
+              categoria, valor, distancia, valor_prof,
+              execucao_comp, execucao_espera,
+              status, motivo, ocorrencia, velocidade_media,
+              dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+          `, [
+            dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
+            dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
+            dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
+            dados.data_solicitado, dados.hora_solicitado,
+            dados.data_chegada, dados.hora_chegada, dados.data_saida, dados.hora_saida,
+            dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
+            dados.execucao_comp, dados.execucao_espera,
+            dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
+            dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos, 
+            data_referencia || new Date().toISOString().split('T')[0]
+          ]);
+          inseridos++;
+        }
+      } catch (err) {
+        console.error('Erro ao processar entrega:', e.os, err.message);
+        erros++;
       }
     }
     
-    res.json({ success: true, inseridos, atualizados, total: entregas.length });
+    console.log(`✅ Upload concluído: ${inseridos} inseridos, ${atualizados} atualizados, ${erros} erros`);
+    res.json({ success: true, inseridos, atualizados, erros, total: entregas.length });
   } catch (err) {
-    console.error('❌ Erro ao fazer upload:', err);
+    console.error('❌ Erro no upload:', err);
     res.status(500).json({ error: 'Erro ao fazer upload: ' + err.message });
   }
 });
