@@ -5233,14 +5233,34 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
-    // Função para calcular tempo de execução em minutos (Finalizado - Data/Hora)
-    const calcularTempoExecucao = (dataHora, finalizado) => {
-      const inicio = parseDataHora(dataHora);
-      const fim = parseDataHora(finalizado);
-      if (!inicio || !fim) return null;
-      const diffMs = fim.getTime() - inicio.getTime();
-      if (diffMs < 0) return null; // Finalizado antes de criar?
-      return Math.round(diffMs / 60000); // Converter ms para minutos
+    // Função para calcular tempo de execução em minutos
+    // Usa o campo Execução Comp. que já é a diferença em fração de dia
+    // OU calcula (Finalizado - Data/Hora) se não tiver Execução Comp.
+    const calcularTempoExecucao = (execucaoComp, dataHora, finalizado) => {
+      // Se tiver Execução Comp. (fração do dia), usa direto
+      if (execucaoComp !== null && execucaoComp !== undefined && execucaoComp !== '') {
+        if (typeof execucaoComp === 'number') {
+          // Fração do dia -> minutos (0.5 = 12h = 720min)
+          return Math.round(execucaoComp * 24 * 60);
+        }
+        // Se for string HH:MM:SS
+        if (typeof execucaoComp === 'string' && execucaoComp.includes(':')) {
+          const partes = execucaoComp.split(':');
+          if (partes.length >= 2) {
+            return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+          }
+        }
+      }
+      
+      // Fallback: calcular a partir de Data/Hora e Finalizado
+      if (dataHora && finalizado && typeof dataHora === 'number' && typeof finalizado === 'number') {
+        const diff = finalizado - dataHora; // diferença em dias
+        if (diff >= 0) {
+          return Math.round(diff * 24 * 60); // converter para minutos
+        }
+      }
+      
+      return null;
     };
     
     // Função para converter data do Excel para formato ISO (só data)
@@ -5292,17 +5312,17 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         const distancia = parseNum(e.distancia) || 0;
         const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
         
-        // NOVO: Calcular tempo de execução como Finalizado - Data/Hora
-        const tempoExecucao = calcularTempoExecucao(e.data_hora, e.finalizado);
+        // Calcular tempo de execução usando Execução Comp. ou (Finalizado - Data/Hora)
+        const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
         
         const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
         
         if (dentroPrazo === true) dentroPrazoCount++;
         if (dentroPrazo === false) foraPrazoCount++;
         
-        // Log para debug (primeiras 5 entregas)
-        if (inseridos + atualizados < 5) {
-          console.log(`📊 OS ${os}: dist=${distancia}km, data_hora="${e.data_hora}", finalizado="${e.finalizado}", tempoExec=${tempoExecucao}min, prazo=${prazoMinutos}min, dentroPrazo=${dentroPrazo}`);
+        // Log para debug (primeiras 10 entregas)
+        if (inseridos + atualizados < 10) {
+          console.log(`📊 OS ${os}: dist=${distancia}km, execComp=${e.execucao_comp} (tipo: ${typeof e.execucao_comp}), tempo=${tempoExecucao}min, prazo=${prazoMinutos}min, dentro=${dentroPrazo}`);
         }
         
         // Preparar dados
@@ -5392,7 +5412,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     }
     
     console.log(`✅ Upload concluído: ${inseridos} inseridos, ${atualizados} atualizados, ${erros} erros`);
-    res.json({ success: true, inseridos, atualizados, erros, total: entregas.length });
+    console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
+    res.json({ success: true, inseridos, atualizados, erros, total: entregas.length, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount });
   } catch (err) {
     console.error('❌ Erro no upload:', err);
     res.status(500).json({ error: 'Erro ao fazer upload: ' + err.message });
@@ -5414,10 +5435,13 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     console.log(`🔄 Recalculando - Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
     if (prazoPadrao.rows.length > 0) {
       console.log(`🔄 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    } else {
+      console.log(`⚠️ ATENÇÃO: Nenhum prazo padrão configurado! Configure na aba Prazos.`);
     }
     
-    // Buscar todas as entregas COM data_hora e finalizado
-    const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, data_hora, finalizado FROM bi_entregas`);
+    // Buscar todas as entregas
+    const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp FROM bi_entregas`);
+    console.log(`🔄 Total de entregas: ${entregas.rows.length}`);
     
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
@@ -5437,8 +5461,17 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
       return null;
     };
     
-    // Calcular tempo em minutos entre data_hora e finalizado
-    const calcularTempoExecucao = (dataHora, finalizado) => {
+    // Calcular tempo em minutos
+    const calcularTempoExecucao = (execucaoComp, dataHora, finalizado) => {
+      // Se tiver execucao_comp como string HH:MM:SS
+      if (execucaoComp && typeof execucaoComp === 'string' && execucaoComp.includes(':')) {
+        const partes = execucaoComp.split(':');
+        if (partes.length >= 2) {
+          return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+        }
+      }
+      
+      // Calcular a partir dos timestamps
       if (!dataHora || !finalizado) return null;
       const inicio = new Date(dataHora);
       const fim = new Date(finalizado);
@@ -5451,19 +5484,21 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     let atualizados = 0;
     let dentroPrazoCount = 0;
     let foraPrazoCount = 0;
+    let semPrazoCount = 0;
     
     for (const e of entregas.rows) {
       const distancia = parseFloat(e.distancia) || 0;
       const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-      const tempoExecucao = calcularTempoExecucao(e.data_hora, e.finalizado);
+      const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
       const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
       
       if (dentroPrazo === true) dentroPrazoCount++;
-      if (dentroPrazo === false) foraPrazoCount++;
+      else if (dentroPrazo === false) foraPrazoCount++;
+      else semPrazoCount++;
       
-      // Log para debug (primeiras 3)
-      if (atualizados < 3) {
-        console.log(`🔄 ID ${e.id}: dist=${distancia}km, prazo=${prazoMinutos}min, tempo=${tempoExecucao}min, dentro=${dentroPrazo}`);
+      // Log para debug (primeiras 5)
+      if (atualizados < 5) {
+        console.log(`🔄 ID ${e.id}: dist=${distancia}km, execComp="${e.execucao_comp}", data_hora=${e.data_hora}, finalizado=${e.finalizado}, prazo=${prazoMinutos}min, tempo=${tempoExecucao}min, dentro=${dentroPrazo}`);
       }
       
       await pool.query(`
@@ -5472,8 +5507,9 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
       atualizados++;
     }
     
-    console.log(`✅ Recalculado: ${atualizados} entregas, ${dentroPrazoCount} dentro, ${foraPrazoCount} fora`);
-    res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount });
+    console.log(`✅ Recalculado: ${atualizados} entregas`);
+    console.log(`   ✅ Dentro: ${dentroPrazoCount} | ❌ Fora: ${foraPrazoCount} | ⚠️ Sem dados: ${semPrazoCount}`);
+    res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount, semDados: semPrazoCount });
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
     res.status(500).json({ error: 'Erro ao recalcular' });
