@@ -6684,3 +6684,18 @@ app.get('/api/bi/categorias', async (req, res) => {
     res.json([]);
   }
 });
+
+// ===== DADOS PARA FILTROS INTELIGENTES =====
+app.get('/api/bi/dados-filtro', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cod_cliente, centro_custo, categoria
+      FROM bi_entregas
+      WHERE cod_cliente IS NOT NULL
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar dados de filtro:', err);
+    res.json([]);
+  }
+});
