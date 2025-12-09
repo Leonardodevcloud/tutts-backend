@@ -5788,18 +5788,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         return 1;
       }
       
-      // Cliente COM regra: conta pontos > 1
-      // Verificar se tem ponto preenchido > 1
-      const temPontoPreenchido = linhasOS.some(l => l.ponto != null && parseInt(l.ponto) > 1);
-      
-      if (temPontoPreenchido) {
-        // Tem dados de ponto: conta linhas com ponto > 1
-        const count = linhasOS.filter(l => parseInt(l.ponto) > 1).length;
-        return count;
-      } else {
-        // Não tem dados de ponto: total de linhas - 1 (desconta coleta)
-        return Math.max(0, linhasOS.length - 1);
-      }
+      // Cliente COM regra: cada OS tem 1 coleta (ponto 1) + N entregas
+      // Então: entregas = total de linhas da OS - 1 (desconta a coleta)
+      // Mínimo 1 entrega se só tem 1 linha
+      const entregas = Math.max(1, linhasOS.length - 1);
+      return entregas;
     };
     
     // Calcular métricas gerais - usando a lógica por OS
