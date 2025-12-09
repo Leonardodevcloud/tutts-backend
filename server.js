@@ -5163,6 +5163,35 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
   }
 });
 
+// DIAGNÓSTICO - verificar dados do BI
+app.get('/api/bi/diagnostico', async (req, res) => {
+  try {
+    // Verificar prazo padrão
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
+    
+    // Verificar entregas
+    const entregas = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas`);
+    const amostra = await pool.query(`SELECT id, os, distancia, data_hora, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
+    
+    // Verificar quantos têm prazo calculado
+    const comPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo IS NOT NULL`);
+    const dentroPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = true`);
+    const foraPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = false`);
+    
+    res.json({
+      prazoPadrao: prazoPadrao.rows,
+      totalEntregas: entregas.rows[0].total,
+      comPrazoCalculado: comPrazo.rows[0].total,
+      dentroPrazo: dentroPrazo.rows[0].total,
+      foraPrazo: foraPrazo.rows[0].total,
+      amostraEntregas: amostra.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro no diagnóstico:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Upload de entregas (recebe JSON do Excel processado no frontend)
 app.post('/api/bi/entregas/upload', async (req, res) => {
   try {
