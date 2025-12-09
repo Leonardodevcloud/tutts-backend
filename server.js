@@ -5792,26 +5792,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     });
     
     // Função para calcular entregas de uma OS
-    const calcularEntregasOS = (linhasOS, codCliente) => {
-      const codStr = String(codCliente);
-      
-      if (!clientesComRegra.has(codStr)) {
-        // Cliente SEM regra: 1 OS = 1 entrega
-        return 1;
-      }
-      
-      // Cliente COM regra: conta apenas pontos >= 2 (ponto 1 é coleta, não conta)
+    // REGRA UNIVERSAL: conta apenas pontos >= 2 (ponto 1 é coleta, não conta)
+    const calcularEntregasOS = (linhasOS) => {
       const entregasCount = linhasOS.filter(l => {
         const pontoNum = parseInt(l.ponto) || 1;
         return pontoNum >= 2;
       }).length;
       
-      // Se não encontrou pontos >= 2, usa a fórmula: linhas - 1 (desconta coleta)
-      // Isso serve como fallback caso o ponto não tenha sido extraído
+      // Se não encontrou pontos >= 2, usa fallback: linhas - 1
       if (entregasCount === 0 && linhasOS.length > 1) {
         return linhasOS.length - 1;
       }
       
+      // Mínimo 1 entrega se só tem 1 linha
       return entregasCount > 0 ? entregasCount : 1;
     };
     
@@ -5830,47 +5823,45 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasOS = osDoCliente[os];
         totalOS.add(os);
         
-        // Contar entregas desta OS
-        const entregasOS = calcularEntregasOS(linhasOS, codCliente);
+        // Contar entregas desta OS (pontos >= 2)
+        const entregasOS = calcularEntregasOS(linhasOS);
         totalEntregas += entregasOS;
         
-        // Para métricas de prazo/valor, usar proporção ou primeira linha
-        linhasOS.forEach((row, idx) => {
+        // Contagem de profissionais e retornos
+        linhasOS.forEach((row) => {
           profissionais.add(row.cod_prof);
           if (row.ocorrencia === 'Retorno') totalRetornos++;
         });
         
-        // Calcular prazo baseado nas linhas que contam como entrega
-        if (clientesComRegra.has(codCliente)) {
-          // Cliente COM regra: apenas linhas com ponto >= 2 (exclui coleta)
-          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
-          if (linhasEntrega.length > 0) {
-            linhasEntrega.forEach(l => {
-              if (l.dentro_prazo === true) dentroPrazo++;
-              else if (l.dentro_prazo === false) foraPrazo++;
-              somaValor += parseFloat(l.valor) || 0;
-              somaValorProf += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                somaTempoExec += parseFloat(l.tempo_execucao_minutos);
-                countTempoExec++;
-              }
-            });
-          } else if (entregasOS > 0) {
-            // Fallback: Sem ponto preenchido mas tem entregas calculadas
-            // Usar dados das linhas (exceto primeira que é coleta)
-            linhasOS.slice(1).forEach(l => {
-              if (l.dentro_prazo === true) dentroPrazo++;
-              else if (l.dentro_prazo === false) foraPrazo++;
-              somaValor += parseFloat(l.valor) || 0;
-              somaValorProf += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                somaTempoExec += parseFloat(l.tempo_execucao_minutos);
-                countTempoExec++;
-              }
-            });
-          }
+        // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
+        const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
+        
+        if (linhasEntrega.length > 0) {
+          // Tem pontos de entrega identificados
+          linhasEntrega.forEach(l => {
+            if (l.dentro_prazo === true) dentroPrazo++;
+            else if (l.dentro_prazo === false) foraPrazo++;
+            somaValor += parseFloat(l.valor) || 0;
+            somaValorProf += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              somaTempoExec += parseFloat(l.tempo_execucao_minutos);
+              countTempoExec++;
+            }
+          });
+        } else if (linhasOS.length > 1) {
+          // Fallback: não tem ponto identificado, usa linhas exceto primeira (coleta)
+          linhasOS.slice(1).forEach(l => {
+            if (l.dentro_prazo === true) dentroPrazo++;
+            else if (l.dentro_prazo === false) foraPrazo++;
+            somaValor += parseFloat(l.valor) || 0;
+            somaValorProf += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              somaTempoExec += parseFloat(l.tempo_execucao_minutos);
+              countTempoExec++;
+            }
+          });
         } else {
-          // Cliente SEM regra: 1 OS = 1 entrega, usar primeira linha para métricas
+          // Só tem 1 linha, usa ela
           const l = linhasOS[0];
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
@@ -5922,37 +5913,35 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
         
-        const entregasOS = calcularEntregasOS(linhasOS, codCliente);
+        const entregasOS = calcularEntregasOS(linhasOS);
         c.total_entregas += entregasOS;
         
-        // Métricas de prazo/valor
-        if (clientesComRegra.has(codCliente)) {
-          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
-          if (linhasEntrega.length > 0) {
-            linhasEntrega.forEach(l => {
-              if (l.dentro_prazo === true) c.dentro_prazo++;
-              else if (l.dentro_prazo === false) c.fora_prazo++;
-              c.soma_valor += parseFloat(l.valor) || 0;
-              c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-                c.count_tempo++;
-              }
-            });
-          } else if (entregasOS > 0) {
-            linhasOS.slice(1).forEach(l => {
-              if (l.dentro_prazo === true) c.dentro_prazo++;
-              else if (l.dentro_prazo === false) c.fora_prazo++;
-              c.soma_valor += parseFloat(l.valor) || 0;
-              c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-                c.count_tempo++;
-              }
-            });
-          }
+        // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
+        const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
+        
+        if (linhasEntrega.length > 0) {
+          linhasEntrega.forEach(l => {
+            if (l.dentro_prazo === true) c.dentro_prazo++;
+            else if (l.dentro_prazo === false) c.fora_prazo++;
+            c.soma_valor += parseFloat(l.valor) || 0;
+            c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              c.count_tempo++;
+            }
+          });
+        } else if (linhasOS.length > 1) {
+          linhasOS.slice(1).forEach(l => {
+            if (l.dentro_prazo === true) c.dentro_prazo++;
+            else if (l.dentro_prazo === false) c.fora_prazo++;
+            c.soma_valor += parseFloat(l.valor) || 0;
+            c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              c.count_tempo++;
+            }
+          });
         } else {
-          // Cliente SEM regra: 1 OS = 1 entrega, usar primeira linha
           const l = linhasOS[0];
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
@@ -6016,41 +6005,39 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       Object.keys(osDoProf).forEach(os => {
         const { codCliente, linhas } = osDoProf[os];
-        const entregasOS = calcularEntregasOS(linhas, codCliente);
+        const entregasOS = calcularEntregasOS(linhas);
         p.total_entregas += entregasOS;
         
         linhas.forEach(l => {
           if (l.ocorrencia === 'Retorno') p.retornos++;
         });
         
-        // Métricas
-        if (clientesComRegra.has(codCliente)) {
-          const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
-          if (linhasEntrega.length > 0) {
-            linhasEntrega.forEach(l => {
-              if (l.dentro_prazo === true) p.dentro_prazo++;
-              else if (l.dentro_prazo === false) p.fora_prazo++;
-              p.soma_dist += parseFloat(l.distancia) || 0;
-              p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-                p.count_tempo++;
-              }
-            });
-          } else if (entregasOS > 0) {
-            linhas.slice(1).forEach(l => {
-              if (l.dentro_prazo === true) p.dentro_prazo++;
-              else if (l.dentro_prazo === false) p.fora_prazo++;
-              p.soma_dist += parseFloat(l.distancia) || 0;
-              p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-              if (l.tempo_execucao_minutos != null) {
-                p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-                p.count_tempo++;
-              }
-            });
-          }
+        // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
+        const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
+        
+        if (linhasEntrega.length > 0) {
+          linhasEntrega.forEach(l => {
+            if (l.dentro_prazo === true) p.dentro_prazo++;
+            else if (l.dentro_prazo === false) p.fora_prazo++;
+            p.soma_dist += parseFloat(l.distancia) || 0;
+            p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              p.count_tempo++;
+            }
+          });
+        } else if (linhas.length > 1) {
+          linhas.slice(1).forEach(l => {
+            if (l.dentro_prazo === true) p.dentro_prazo++;
+            else if (l.dentro_prazo === false) p.fora_prazo++;
+            p.soma_dist += parseFloat(l.distancia) || 0;
+            p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              p.count_tempo++;
+            }
+          });
         } else {
-          // Cliente SEM regra: 1 OS = 1 entrega, usar primeira linha
           const l = linhas[0];
           if (l.dentro_prazo === true) p.dentro_prazo++;
           else if (l.dentro_prazo === false) p.fora_prazo++;
