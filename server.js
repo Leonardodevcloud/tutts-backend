@@ -5775,7 +5775,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const dadosQuery = await pool.query(`
       SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
         cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
-        valor, valor_prof, distancia, ocorrencia
+        valor, valor_prof, distancia, ocorrencia, centro_custo
       FROM bi_entregas ${where}
     `, params);
     
@@ -5982,6 +5982,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
       valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
     })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Log centros de custo encontrados
+    console.log('📁 CENTROS DE CUSTO POR CLIENTE:');
+    porCliente.forEach(c => {
+      console.log(`   - ${c.cod_cliente}: ${c.centros_custo.length} centros -> [${c.centros_custo.join(', ')}]`);
+    });
     
     // Log resultado por cliente
     console.log('📊 RESULTADO POR CLIENTE:');
