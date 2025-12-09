@@ -5914,7 +5914,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           nome_display: mapMascaras[codCliente] || primeiraLinha.nome_cliente,
           tem_mascara: !!mapMascaras[codCliente],
           os_set: new Set(),
-          centros_custo: new Set(), // Centros de custo deste cliente
+          centros_custo_map: {}, // Mapa de centros de custo com dados
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
           soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
         };
@@ -5926,41 +5926,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
         
-        // Coletar centros de custo
-        linhasOS.forEach(l => {
-          if (l.centro_custo) c.centros_custo.add(l.centro_custo);
-        });
-        
         const entregasOS = calcularEntregasOS(linhasOS);
         c.total_entregas += entregasOS;
         
         // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
+        const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
+          (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
         
-        if (linhasEntrega.length > 0) {
-          linhasEntrega.forEach(l => {
-            if (l.dentro_prazo === true) c.dentro_prazo++;
-            else if (l.dentro_prazo === false) c.fora_prazo++;
-            c.soma_valor += parseFloat(l.valor) || 0;
-            c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-            if (l.tempo_execucao_minutos != null) {
-              c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-              c.count_tempo++;
-            }
-          });
-        } else if (linhasOS.length > 1) {
-          linhasOS.slice(1).forEach(l => {
-            if (l.dentro_prazo === true) c.dentro_prazo++;
-            else if (l.dentro_prazo === false) c.fora_prazo++;
-            c.soma_valor += parseFloat(l.valor) || 0;
-            c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
-            if (l.tempo_execucao_minutos != null) {
-              c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
-              c.count_tempo++;
-            }
-          });
-        } else {
-          const l = linhasOS[0];
+        linhasParaProcessar.forEach(l => {
+          // Métricas do cliente total
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
           c.soma_valor += parseFloat(l.valor) || 0;
@@ -5969,19 +5944,55 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
             c.count_tempo++;
           }
-        }
+          
+          // Agrupar por centro de custo
+          const cc = l.centro_custo || 'Sem Centro';
+          if (!c.centros_custo_map[cc]) {
+            c.centros_custo_map[cc] = {
+              centro_custo: cc,
+              os_set: new Set(),
+              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+              soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+            };
+          }
+          const ccData = c.centros_custo_map[cc];
+          ccData.os_set.add(os);
+          ccData.total_entregas++;
+          if (l.dentro_prazo === true) ccData.dentro_prazo++;
+          else if (l.dentro_prazo === false) ccData.fora_prazo++;
+          ccData.soma_valor += parseFloat(l.valor) || 0;
+          ccData.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+          if (l.tempo_execucao_minutos != null) {
+            ccData.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+            ccData.count_tempo++;
+          }
+        });
       });
     });
     
-    const porCliente = Object.values(porClienteMap).map(c => ({
-      cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
-      nome_display: c.nome_display, tem_mascara: c.tem_mascara,
-      total_os: c.os_set.size, total_entregas: c.total_entregas,
-      centros_custo: [...c.centros_custo], // Array de centros de custo
-      dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
-      tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
-      valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
-    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    const porCliente = Object.values(porClienteMap).map(c => {
+      // Converter centros_custo_map em array com dados
+      const centros_custo_dados = Object.values(c.centros_custo_map).map(cc => ({
+        centro_custo: cc.centro_custo,
+        total_os: cc.os_set.size,
+        total_entregas: cc.total_entregas,
+        dentro_prazo: cc.dentro_prazo,
+        fora_prazo: cc.fora_prazo,
+        tempo_medio: cc.count_tempo > 0 ? (cc.soma_tempo / cc.count_tempo).toFixed(2) : null,
+        valor_total: cc.soma_valor.toFixed(2),
+        valor_prof: cc.soma_valor_prof.toFixed(2)
+      })).sort((a, b) => b.total_entregas - a.total_entregas);
+      
+      return {
+        cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
+        nome_display: c.nome_display, tem_mascara: c.tem_mascara,
+        total_os: c.os_set.size, total_entregas: c.total_entregas,
+        centros_custo: centros_custo_dados, // Agora é array com dados completos
+        dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
+        tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
+        valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
+      };
+    }).sort((a, b) => b.total_entregas - a.total_entregas);
     
     // Log centros de custo encontrados
     console.log('📁 CENTROS DE CUSTO POR CLIENTE:');
