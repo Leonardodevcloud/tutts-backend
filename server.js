@@ -5176,12 +5176,16 @@ app.get('/api/bi/diagnostico', async (req, res) => {
     
     // Verificar entregas
     const entregas = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas`);
-    const amostra = await pool.query(`SELECT id, os, distancia, data_hora, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
+    const amostra = await pool.query(`SELECT id, os, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
     
     // Verificar quantos têm prazo calculado
     const comPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo IS NOT NULL`);
     const dentroPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = true`);
     const foraPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = false`);
+    
+    // Verificar centros de custo
+    const comCentroCusto = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != ''`);
+    const centrosUnicos = await pool.query(`SELECT DISTINCT centro_custo, cod_cliente FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' LIMIT 20`);
     
     res.json({
       prazoPadrao: prazoPadrao.rows,
@@ -5189,6 +5193,8 @@ app.get('/api/bi/diagnostico', async (req, res) => {
       comPrazoCalculado: comPrazo.rows[0].total,
       dentroPrazo: dentroPrazo.rows[0].total,
       foraPrazo: foraPrazo.rows[0].total,
+      comCentroCusto: comCentroCusto.rows[0].total,
+      centrosUnicos: centrosUnicos.rows,
       amostraEntregas: amostra.rows
     });
   } catch (err) {
@@ -5203,6 +5209,12 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     const { entregas, data_referencia } = req.body;
     
     console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
+    
+    // Log para debug - verificar se centro_custo está vindo
+    if (entregas && entregas.length > 0) {
+      console.log('📋 Amostra primeira entrega:', JSON.stringify(entregas[0], null, 2));
+      console.log('📋 Centro custo da primeira:', entregas[0].centro_custo);
+    }
     
     if (!entregas || entregas.length === 0) {
       return res.status(400).json({ error: 'Nenhuma entrega recebida' });
