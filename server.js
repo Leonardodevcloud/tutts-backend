@@ -5689,11 +5689,19 @@ app.get('/api/bi/dashboard', async (req, res) => {
 });
 
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
+// Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, cidade } = req.query;
+    // Suporte a múltiplos clientes e centros de custo
+    let cod_cliente = req.query.cod_cliente;
+    let centro_custo = req.query.centro_custo;
     
-    console.log('📊 Dashboard-completo chamado com:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade });
+    // Converter para array se necessário
+    if (cod_cliente && !Array.isArray(cod_cliente)) cod_cliente = [cod_cliente];
+    if (centro_custo && !Array.isArray(centro_custo)) centro_custo = [centro_custo];
+    
+    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof });
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -5702,239 +5710,201 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // Converter datas ISO para YYYY-MM-DD
     if (data_inicio) { 
       const dataIni = data_inicio.includes('T') ? data_inicio.split('T')[0] : data_inicio;
-      where += ` AND e.data_solicitado >= $${paramIndex++}`; 
+      where += ` AND data_solicitado >= $${paramIndex++}`; 
       params.push(dataIni); 
     }
     if (data_fim) { 
       const dataFim = data_fim.includes('T') ? data_fim.split('T')[0] : data_fim;
-      where += ` AND e.data_solicitado <= $${paramIndex++}`; 
+      where += ` AND data_solicitado <= $${paramIndex++}`; 
       params.push(dataFim); 
     }
-    if (cod_cliente) { where += ` AND e.cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
-    if (centro_custo) { where += ` AND e.centro_custo = $${paramIndex++}`; params.push(centro_custo); }
-    if (cod_prof) { where += ` AND e.cod_prof = $${paramIndex++}`; params.push(cod_prof); }
-    if (categoria) { where += ` AND e.categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
-    if (status_prazo === 'dentro') { where += ` AND e.dentro_prazo = true`; }
-    else if (status_prazo === 'fora') { where += ` AND e.dentro_prazo = false`; }
-    if (cidade) { where += ` AND e.cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    // Múltiplos clientes
+    if (cod_cliente && cod_cliente.length > 0) { 
+      where += ` AND cod_cliente = ANY($${paramIndex++}::int[])`; 
+      params.push(cod_cliente.map(c => parseInt(c))); 
+    }
+    // Múltiplos centros de custo
+    if (centro_custo && centro_custo.length > 0) { 
+      where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
+      params.push(centro_custo); 
+    }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
     
-    console.log('📊 Query WHERE:', where, 'Params:', params);
+    console.log('📊 WHERE:', where, 'Params:', params);
     
-    // Buscar regras de contagem (clientes que contam pontos como entregas)
+    // Buscar regras de contagem
     const regrasContagem = await pool.query('SELECT cod_cliente FROM bi_regras_contagem');
-    const clientesComRegra = regrasContagem.rows.map(r => r.cod_cliente);
-    console.log('📊 Clientes com regra de contagem:', clientesComRegra);
+    const clientesComRegra = new Set(regrasContagem.rows.map(r => String(r.cod_cliente)));
+    console.log('📊 Clientes com regra:', [...clientesComRegra]);
     
     // Buscar máscaras
     const mascaras = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
     const mapMascaras = {};
-    mascaras.rows.forEach(m => { mapMascaras[m.cod_cliente] = m.mascara; });
+    mascaras.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
     
-    // 1. Métricas gerais COM REGRA DE CONTAGEM
-    // Para clientes SEM regra: conta 1 entrega por OS (ponto 1 ou qualquer)
-    // Para clientes COM regra: conta apenas pontos > 1 (pontos de entrega, não coleta)
-    const metricas = await pool.query(`
-      SELECT 
-        COUNT(DISTINCT e.os) as total_os,
-        -- Total de entregas considerando regras
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
-          END
-        ) as total_entregas,
-        -- Dentro do prazo
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
-          END
-        ) as dentro_prazo,
-        -- Fora do prazo
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
-          END
-        ) as fora_prazo,
-        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(e.valor)::numeric, 2) as valor_total,
-        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof_total,
-        ROUND(AVG(e.valor)::numeric, 2) as ticket_medio,
-        COUNT(DISTINCT e.cod_prof) as total_profissionais,
-        COUNT(*) FILTER (WHERE e.ocorrencia = 'Retorno') as total_retornos
-      FROM bi_entregas e ${where}
-    `, [...params, clientesComRegra]);
-    
-    // Calcular média entregas por profissional
-    const metricasData = metricas.rows[0] || {};
-    metricasData.media_entregas_por_prof = metricasData.total_profissionais > 0 
-      ? (parseFloat(metricasData.total_entregas) / parseFloat(metricasData.total_profissionais)).toFixed(2) 
-      : 0;
-    
-    console.log('📊 Métricas OK:', metricasData);
-    
-    // 2. Resumo por Cliente COM REGRA DE CONTAGEM
-    const porCliente = await pool.query(`
-      SELECT 
-        e.cod_cliente,
-        e.nome_cliente,
-        COUNT(DISTINCT e.os) as total_os,
-        -- Total entregas por cliente
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
-          END
-        ) as total_entregas,
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
-          END
-        ) as dentro_prazo,
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
-          END
-        ) as fora_prazo,
-        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(e.valor)::numeric, 2) as valor_total,
-        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof
-      FROM bi_entregas e ${where}
-      GROUP BY e.cod_cliente, e.nome_cliente
-      ORDER BY SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
-          END
-        ) DESC
-    `, [...params, clientesComRegra]);
-    
-    // Aplicar máscaras nos nomes dos clientes
-    const porClienteComMascara = porCliente.rows.map(c => ({
-      ...c,
-      nome_display: mapMascaras[c.cod_cliente] || c.nome_cliente,
-      tem_mascara: !!mapMascaras[c.cod_cliente]
-    }));
-    
-    console.log('📊 porCliente OK:', porClienteComMascara.length, 'registros');
-    
-    // 3. Resumo por Profissional COM REGRA DE CONTAGEM
-    const porProfissional = await pool.query(`
-      SELECT 
-        e.cod_prof,
-        e.nome_prof,
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
-          END
-        ) as total_entregas,
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
-          END
-        ) as dentro_prazo,
-        SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
-          END
-        ) as fora_prazo,
-        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(e.distancia)::numeric, 2) as distancia_total,
-        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof,
-        COUNT(*) FILTER (WHERE e.ocorrencia = 'Retorno') as retornos
-      FROM bi_entregas e ${where}
-      GROUP BY e.cod_prof, e.nome_prof
-      ORDER BY SUM(
-          CASE 
-            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
-              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
-            ELSE 
-              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
-          END
-        ) DESC
-    `, [...params, clientesComRegra]);
-    
-    console.log('📊 porProfissional OK:', porProfissional.rows.length, 'registros');
-    
-    // 4. Distribuição por faixa de tempo (simplificado)
-    const porTempo = await pool.query(`
-      SELECT 
-        CASE 
-          WHEN e.tempo_execucao_minutos IS NULL THEN 'Sem dados'
-          WHEN e.tempo_execucao_minutos <= 45 THEN '0-45 min'
-          WHEN e.tempo_execucao_minutos <= 60 THEN '45-60 min'
-          WHEN e.tempo_execucao_minutos <= 75 THEN '60-75 min'
-          WHEN e.tempo_execucao_minutos <= 90 THEN '75-90 min'
-          WHEN e.tempo_execucao_minutos <= 120 THEN '90-120 min'
-          ELSE '> 120 min'
-        END as faixa,
-        COUNT(*) as total
-      FROM bi_entregas e ${where}
-      GROUP BY 1
-      ORDER BY MIN(COALESCE(e.tempo_execucao_minutos, 0))
+    // Buscar todos os dados filtrados
+    const dadosQuery = await pool.query(`
+      SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
+        cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
+        valor, valor_prof, distancia, ocorrencia
+      FROM bi_entregas ${where}
     `, params);
     
-    console.log('📊 porTempo OK:', porTempo.rows.length, 'faixas');
+    const dados = dadosQuery.rows;
+    console.log('📊 Total registros:', dados.length);
     
-    // 5. Distribuição por faixa de KM (simplificado)
-    const porKm = await pool.query(`
-      SELECT 
-        CASE 
-          WHEN e.distancia IS NULL THEN 'Sem dados'
-          WHEN e.distancia <= 10 THEN '0-10 km'
-          WHEN e.distancia <= 20 THEN '11-20 km'
-          WHEN e.distancia <= 30 THEN '21-30 km'
-          WHEN e.distancia <= 40 THEN '31-40 km'
-          WHEN e.distancia <= 50 THEN '41-50 km'
-          ELSE '> 50 km'
-        END as faixa,
-        COUNT(*) as total
-      FROM bi_entregas e ${where}
-      GROUP BY 1
-      ORDER BY MIN(COALESCE(e.distancia, 0))
-    `, params);
+    // Função para verificar se deve contar como entrega
+    const contaComoEntrega = (row) => {
+      const codStr = String(row.cod_cliente);
+      const ponto = parseInt(row.ponto) || 1;
+      if (clientesComRegra.has(codStr)) {
+        return ponto > 1; // Cliente com regra: só conta ponto > 1
+      } else {
+        return ponto === 1; // Cliente sem regra: só conta ponto 1
+      }
+    };
     
-    console.log('📊 porKm OK:', porKm.rows.length, 'faixas');
+    // Calcular métricas gerais
+    let totalOS = new Set();
+    let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0;
+    let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
+    let profissionais = new Set();
+    let totalRetornos = 0;
     
-    res.json({
-      metricas: metricasData,
-      porCliente: porClienteComMascara,
-      porProfissional: porProfissional.rows,
-      porTempo: porTempo.rows,
-      porKm: porKm.rows
+    dados.forEach(row => {
+      totalOS.add(row.os);
+      profissionais.add(row.cod_prof);
+      if (row.ocorrencia === 'Retorno') totalRetornos++;
+      
+      if (contaComoEntrega(row)) {
+        totalEntregas++;
+        if (row.dentro_prazo === true) dentroPrazo++;
+        else if (row.dentro_prazo === false) foraPrazo++;
+        somaValor += parseFloat(row.valor) || 0;
+        somaValorProf += parseFloat(row.valor_prof) || 0;
+        if (row.tempo_execucao_minutos != null) {
+          somaTempoExec += parseFloat(row.tempo_execucao_minutos);
+          countTempoExec++;
+        }
+      }
     });
+    
+    const metricas = {
+      total_os: totalOS.size,
+      total_entregas: totalEntregas,
+      dentro_prazo: dentroPrazo,
+      fora_prazo: foraPrazo,
+      tempo_medio: countTempoExec > 0 ? (somaTempoExec / countTempoExec).toFixed(2) : 0,
+      valor_total: somaValor.toFixed(2),
+      valor_prof_total: somaValorProf.toFixed(2),
+      ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
+      total_profissionais: profissionais.size,
+      media_entregas_por_prof: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
+      total_retornos: totalRetornos
+    };
+    
+    // Agrupar por cliente
+    const porClienteMap = {};
+    dados.forEach(row => {
+      const cod = String(row.cod_cliente);
+      if (!porClienteMap[cod]) {
+        porClienteMap[cod] = {
+          cod_cliente: row.cod_cliente, nome_cliente: row.nome_cliente,
+          nome_display: mapMascaras[cod] || row.nome_cliente,
+          tem_mascara: !!mapMascaras[cod], os_set: new Set(),
+          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+        };
+      }
+      const c = porClienteMap[cod];
+      c.os_set.add(row.os);
+      if (contaComoEntrega(row)) {
+        c.total_entregas++;
+        if (row.dentro_prazo === true) c.dentro_prazo++;
+        else if (row.dentro_prazo === false) c.fora_prazo++;
+        c.soma_valor += parseFloat(row.valor) || 0;
+        c.soma_valor_prof += parseFloat(row.valor_prof) || 0;
+        if (row.tempo_execucao_minutos != null) {
+          c.soma_tempo += parseFloat(row.tempo_execucao_minutos);
+          c.count_tempo++;
+        }
+      }
+    });
+    
+    const porCliente = Object.values(porClienteMap).map(c => ({
+      cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
+      nome_display: c.nome_display, tem_mascara: c.tem_mascara,
+      total_os: c.os_set.size, total_entregas: c.total_entregas,
+      dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
+      tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
+      valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
+    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Agrupar por profissional
+    const porProfMap = {};
+    dados.forEach(row => {
+      const cod = String(row.cod_prof);
+      if (!porProfMap[cod]) {
+        porProfMap[cod] = {
+          cod_prof: row.cod_prof, nome_prof: row.nome_prof,
+          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+          soma_tempo: 0, count_tempo: 0, soma_dist: 0, soma_valor_prof: 0, retornos: 0
+        };
+      }
+      const p = porProfMap[cod];
+      if (row.ocorrencia === 'Retorno') p.retornos++;
+      if (contaComoEntrega(row)) {
+        p.total_entregas++;
+        if (row.dentro_prazo === true) p.dentro_prazo++;
+        else if (row.dentro_prazo === false) p.fora_prazo++;
+        p.soma_dist += parseFloat(row.distancia) || 0;
+        p.soma_valor_prof += parseFloat(row.valor_prof) || 0;
+        if (row.tempo_execucao_minutos != null) {
+          p.soma_tempo += parseFloat(row.tempo_execucao_minutos);
+          p.count_tempo++;
+        }
+      }
+    });
+    
+    const porProfissional = Object.values(porProfMap).map(p => ({
+      cod_prof: p.cod_prof, nome_prof: p.nome_prof,
+      total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
+      tempo_medio: p.count_tempo > 0 ? (p.soma_tempo / p.count_tempo).toFixed(2) : null,
+      distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
+      retornos: p.retornos
+    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Gráficos
+    const porTempo = await pool.query(`
+      SELECT CASE WHEN tempo_execucao_minutos IS NULL THEN 'Sem dados'
+        WHEN tempo_execucao_minutos <= 45 THEN '0-45 min'
+        WHEN tempo_execucao_minutos <= 60 THEN '45-60 min'
+        WHEN tempo_execucao_minutos <= 75 THEN '60-75 min'
+        WHEN tempo_execucao_minutos <= 90 THEN '75-90 min'
+        WHEN tempo_execucao_minutos <= 120 THEN '90-120 min'
+        ELSE '> 120 min' END as faixa, COUNT(*) as total
+      FROM bi_entregas ${where} GROUP BY 1 ORDER BY MIN(COALESCE(tempo_execucao_minutos, 0))
+    `, params);
+    
+    const porKm = await pool.query(`
+      SELECT CASE WHEN distancia IS NULL THEN 'Sem dados'
+        WHEN distancia <= 10 THEN '0-10 km' WHEN distancia <= 20 THEN '11-20 km'
+        WHEN distancia <= 30 THEN '21-30 km' WHEN distancia <= 40 THEN '31-40 km'
+        WHEN distancia <= 50 THEN '41-50 km' ELSE '> 50 km' END as faixa, COUNT(*) as total
+      FROM bi_entregas ${where} GROUP BY 1 ORDER BY MIN(COALESCE(distancia, 0))
+    `, params);
+    
+    res.json({ metricas, porCliente, porProfissional, porTempo: porTempo.rows, porKm: porKm.rows });
   } catch (err) {
-    console.error('❌ Erro no dashboard-completo:', err.message);
-    console.error('❌ Stack:', err.stack);
+    console.error('❌ Erro dashboard-completo:', err.message);
     res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
   }
 });
+
 
 // Lista de entregas detalhada (para análise por OS)
 app.get('/api/bi/entregas-lista', async (req, res) => {
@@ -6008,6 +5978,30 @@ app.get('/api/bi/cidades', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao listar cidades:', err);
     res.json([]);
+  }
+});
+
+// Relação Cliente -> Centros de Custo
+app.get('/api/bi/cliente-centros', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cod_cliente, centro_custo
+      FROM bi_entregas
+      WHERE cod_cliente IS NOT NULL AND centro_custo IS NOT NULL AND centro_custo != ''
+      GROUP BY cod_cliente, centro_custo
+      ORDER BY cod_cliente, centro_custo
+    `);
+    // Agrupa por cliente
+    const mapa = {};
+    result.rows.forEach(r => {
+      const cod = String(r.cod_cliente);
+      if (!mapa[cod]) mapa[cod] = [];
+      mapa[cod].push(r.centro_custo);
+    });
+    res.json(mapa);
+  } catch (err) {
+    console.error('❌ Erro ao listar cliente-centros:', err);
+    res.json({});
   }
 });
 
