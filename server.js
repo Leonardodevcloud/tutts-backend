@@ -5758,13 +5758,18 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     console.log('📊 Total registros:', dados.length);
     
     // Função para verificar se deve contar como entrega
+    // Cliente SEM regra: conta TODAS as linhas (comportamento padrão)
+    // Cliente COM regra: conta apenas pontos > 1 (exclui ponto 1 que é coleta)
     const contaComoEntrega = (row) => {
       const codStr = String(row.cod_cliente);
       const ponto = parseInt(row.ponto) || 1;
+      
       if (clientesComRegra.has(codStr)) {
-        return ponto > 1; // Cliente com regra: só conta ponto > 1
+        // Cliente COM regra: só conta se ponto > 1
+        return ponto > 1;
       } else {
-        return ponto === 1; // Cliente sem regra: só conta ponto 1
+        // Cliente SEM regra: conta TUDO (cada linha = 1 entrega)
+        return true;
       }
     };
     
