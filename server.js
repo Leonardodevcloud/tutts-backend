@@ -5692,12 +5692,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     // Converter datas ISO para YYYY-MM-DD
     if (data_inicio) { 
-      const dataIni = data_inicio.split('T')[0]; // Pega só a parte da data
+      const dataIni = data_inicio.includes('T') ? data_inicio.split('T')[0] : data_inicio;
       where += ` AND data_solicitado >= $${paramIndex++}`; 
       params.push(dataIni); 
     }
     if (data_fim) { 
-      const dataFim = data_fim.split('T')[0]; // Pega só a parte da data
+      const dataFim = data_fim.includes('T') ? data_fim.split('T')[0] : data_fim;
       where += ` AND data_solicitado <= $${paramIndex++}`; 
       params.push(dataFim); 
     }
@@ -5711,7 +5711,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     console.log('📊 Query WHERE:', where, 'Params:', params);
     
-    // 1. Métricas gerais
+    // 1. Métricas gerais (simplificado)
     const metricas = await pool.query(`
       SELECT 
         COUNT(DISTINCT os) as total_os,
@@ -5724,11 +5724,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         ROUND(AVG(valor)::numeric, 2) as ticket_medio,
         COUNT(DISTINCT cod_prof) as total_profissionais,
         ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_por_prof,
-        COUNT(*) FILTER (WHERE ocorrencia ILIKE '%retorno%') as total_retornos
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as total_retornos
       FROM bi_entregas ${where}
     `, params);
     
-    console.log('📊 Métricas:', metricas.rows[0]);
+    console.log('📊 Métricas OK:', metricas.rows[0]);
     
     // 2. Resumo por Cliente
     const porCliente = await pool.query(`
@@ -5744,8 +5744,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         ROUND(SUM(valor_prof)::numeric, 2) as valor_prof
       FROM bi_entregas ${where}
       GROUP BY cod_cliente, nome_cliente
-      ORDER BY total_entregas DESC
+      ORDER BY COUNT(*) DESC
     `, params);
+    
+    console.log('📊 porCliente OK:', porCliente.rows.length, 'registros');
     
     // 3. Resumo por Profissional
     const porProfissional = await pool.query(`
@@ -5758,13 +5760,15 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
         ROUND(SUM(distancia)::numeric, 2) as distancia_total,
         ROUND(SUM(valor_prof)::numeric, 2) as valor_prof,
-        COUNT(*) FILTER (WHERE ocorrencia ILIKE '%retorno%') as retornos
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
       FROM bi_entregas ${where}
       GROUP BY cod_prof, nome_prof
-      ORDER BY total_entregas DESC
+      ORDER BY COUNT(*) DESC
     `, params);
     
-    // 4. Distribuição por faixa de tempo
+    console.log('📊 porProfissional OK:', porProfissional.rows.length, 'registros');
+    
+    // 4. Distribuição por faixa de tempo (simplificado)
     const porTempo = await pool.query(`
       SELECT 
         CASE 
@@ -5779,72 +5783,30 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         COUNT(*) as total
       FROM bi_entregas ${where}
       GROUP BY 1
-      ORDER BY 
-        CASE 
-          WHEN tempo_execucao_minutos IS NULL THEN 0
-          WHEN tempo_execucao_minutos <= 45 THEN 1
-          WHEN tempo_execucao_minutos <= 60 THEN 2
-          WHEN tempo_execucao_minutos <= 75 THEN 3
-          WHEN tempo_execucao_minutos <= 90 THEN 4
-          WHEN tempo_execucao_minutos <= 120 THEN 5
-          ELSE 6
-        END
+      ORDER BY MIN(COALESCE(tempo_execucao_minutos, 0))
     `, params);
     
-    // 5. Distribuição por faixa de KM
+    console.log('📊 porTempo OK:', porTempo.rows.length, 'faixas');
+    
+    // 5. Distribuição por faixa de KM (simplificado)
     const porKm = await pool.query(`
       SELECT 
         CASE 
           WHEN distancia IS NULL THEN 'Sem dados'
-          WHEN distancia <= 10 THEN '0-10'
-          WHEN distancia <= 15 THEN '11-15'
-          WHEN distancia <= 20 THEN '16-20'
-          WHEN distancia <= 25 THEN '21-25'
-          WHEN distancia <= 30 THEN '26-30'
-          WHEN distancia <= 35 THEN '31-35'
-          WHEN distancia <= 40 THEN '36-40'
-          WHEN distancia <= 45 THEN '41-45'
-          WHEN distancia <= 50 THEN '46-50'
-          WHEN distancia <= 55 THEN '51-55'
-          WHEN distancia <= 60 THEN '56-60'
-          WHEN distancia <= 65 THEN '61-65'
-          WHEN distancia <= 70 THEN '66-70'
-          WHEN distancia <= 75 THEN '71-75'
-          WHEN distancia <= 80 THEN '76-80'
-          WHEN distancia <= 85 THEN '81-85'
-          WHEN distancia <= 90 THEN '86-90'
-          WHEN distancia <= 95 THEN '91-95'
-          WHEN distancia <= 100 THEN '96-100'
-          ELSE '>100'
+          WHEN distancia <= 10 THEN '0-10 km'
+          WHEN distancia <= 20 THEN '11-20 km'
+          WHEN distancia <= 30 THEN '21-30 km'
+          WHEN distancia <= 40 THEN '31-40 km'
+          WHEN distancia <= 50 THEN '41-50 km'
+          ELSE '> 50 km'
         END as faixa,
         COUNT(*) as total
       FROM bi_entregas ${where}
       GROUP BY 1
-      ORDER BY 
-        CASE 
-          WHEN distancia IS NULL THEN 0
-          WHEN distancia <= 10 THEN 1
-          WHEN distancia <= 15 THEN 2
-          WHEN distancia <= 20 THEN 3
-          WHEN distancia <= 25 THEN 4
-          WHEN distancia <= 30 THEN 5
-          WHEN distancia <= 35 THEN 6
-          WHEN distancia <= 40 THEN 7
-          WHEN distancia <= 45 THEN 8
-          WHEN distancia <= 50 THEN 9
-          WHEN distancia <= 55 THEN 10
-          WHEN distancia <= 60 THEN 11
-          WHEN distancia <= 65 THEN 12
-          WHEN distancia <= 70 THEN 13
-          WHEN distancia <= 75 THEN 14
-          WHEN distancia <= 80 THEN 15
-          WHEN distancia <= 85 THEN 16
-          WHEN distancia <= 90 THEN 17
-          WHEN distancia <= 95 THEN 18
-          WHEN distancia <= 100 THEN 19
-          ELSE 20
-        END
+      ORDER BY MIN(COALESCE(distancia, 0))
     `, params);
+    
+    console.log('📊 porKm OK:', porKm.rows.length, 'faixas');
     
     res.json({
       metricas: metricas.rows[0] || {},
@@ -5854,8 +5816,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       porKm: porKm.rows
     });
   } catch (err) {
-    console.error('❌ Erro no dashboard-completo:', err);
-    res.status(500).json({ error: 'Erro ao carregar dashboard' });
+    console.error('❌ Erro no dashboard-completo:', err.message);
+    console.error('❌ Stack:', err.stack);
+    res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
   }
 });
 
