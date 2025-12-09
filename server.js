@@ -5188,7 +5188,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       console.log(`📊 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
     }
     
-    // Função para encontrar prazo
+    // Função para encontrar prazo baseado na distância
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
       if (faixas.length === 0) {
@@ -5207,51 +5207,63 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
-    // Função para converter tempo HH:MM:SS em minutos
-    const tempoParaMinutos = (tempo) => {
-      if (!tempo) return null;
-      if (typeof tempo === 'number') {
-        // Excel armazena tempo como fração do dia
-        return Math.round(tempo * 24 * 60);
+    // Função para converter data/hora do Excel para Date
+    const parseDataHora = (valor) => {
+      if (!valor) return null;
+      // Se for número (serial date do Excel - dias desde 1900)
+      if (typeof valor === 'number') {
+        // Excel serial date: dias desde 1/1/1900 (com bug do ano 1900)
+        const excelEpoch = new Date(1899, 11, 30); // 30/12/1899
+        const date = new Date(excelEpoch.getTime() + valor * 86400000);
+        return date;
       }
-      const str = String(tempo);
-      const partes = str.split(':');
-      if (partes.length >= 2) {
-        const horas = parseInt(partes[0]) || 0;
-        const minutos = parseInt(partes[1]) || 0;
-        return horas * 60 + minutos;
+      // Se for string no formato DD/MM/YYYY HH:MM:SS ou DD/MM/YYYY HH:MM
+      if (typeof valor === 'string') {
+        // Tentar formato DD/MM/YYYY HH:MM:SS
+        const regex = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/;
+        const match = valor.match(regex);
+        if (match) {
+          const [_, dia, mes, ano, hora, min, seg] = match;
+          return new Date(ano, mes - 1, dia, hora, min, seg || 0);
+        }
+        // Tentar ISO
+        const d = new Date(valor);
+        if (!isNaN(d.getTime())) return d;
       }
       return null;
     };
     
-    // Função para converter data do Excel para formato ISO
+    // Função para calcular tempo de execução em minutos (Finalizado - Data/Hora)
+    const calcularTempoExecucao = (dataHora, finalizado) => {
+      const inicio = parseDataHora(dataHora);
+      const fim = parseDataHora(finalizado);
+      if (!inicio || !fim) return null;
+      const diffMs = fim.getTime() - inicio.getTime();
+      if (diffMs < 0) return null; // Finalizado antes de criar?
+      return Math.round(diffMs / 60000); // Converter ms para minutos
+    };
+    
+    // Função para converter data do Excel para formato ISO (só data)
     const parseData = (valor) => {
       if (!valor) return null;
-      // Se for número (serial date do Excel)
       if (typeof valor === 'number') {
-        const data = new Date((valor - 25569) * 86400 * 1000);
-        return data.toISOString().split('T')[0];
+        const excelEpoch = new Date(1899, 11, 30);
+        const date = new Date(excelEpoch.getTime() + valor * 86400000);
+        return date.toISOString().split('T')[0];
       }
-      // Se já for string no formato DD/MM/YYYY
       if (typeof valor === 'string' && valor.includes('/')) {
-        const partes = valor.split('/');
-        if (partes.length === 3) {
+        const partes = valor.split(/[\s\/]/);
+        if (partes.length >= 3) {
           return `${partes[2]}-${partes[1].padStart(2,'0')}-${partes[0].padStart(2,'0')}`;
         }
       }
       return valor;
     };
     
-    // Função para converter hora do Excel
-    const parseHora = (valor) => {
-      if (!valor) return null;
-      if (typeof valor === 'number') {
-        const totalMinutos = Math.round(valor * 24 * 60);
-        const horas = Math.floor(totalMinutos / 60);
-        const minutos = totalMinutos % 60;
-        return `${String(horas).padStart(2,'0')}:${String(minutos).padStart(2,'0')}:00`;
-      }
-      return String(valor);
+    // Função para converter timestamp para formato ISO
+    const parseTimestamp = (valor) => {
+      const d = parseDataHora(valor);
+      return d ? d.toISOString() : null;
     };
     
     // Função para limpar número
@@ -5266,6 +5278,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     let inseridos = 0;
     let atualizados = 0;
     let erros = 0;
+    let dentroPrazoCount = 0;
+    let foraPrazoCount = 0;
     
     for (const e of entregas) {
       try {
@@ -5277,12 +5291,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         
         const distancia = parseNum(e.distancia) || 0;
         const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-        const tempoExecucao = tempoParaMinutos(e.execucao_comp);
+        
+        // NOVO: Calcular tempo de execução como Finalizado - Data/Hora
+        const tempoExecucao = calcularTempoExecucao(e.data_hora, e.finalizado);
+        
         const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
         
-        // Log para debug (primeiras 3 entregas)
-        if (inseridos + atualizados < 3) {
-          console.log(`📊 OS ${os}: dist=${distancia}km, execucao="${e.execucao_comp}" (${tempoExecucao}min), prazo=${prazoMinutos}min, dentroPrazo=${dentroPrazo}`);
+        if (dentroPrazo === true) dentroPrazoCount++;
+        if (dentroPrazo === false) foraPrazoCount++;
+        
+        // Log para debug (primeiras 5 entregas)
+        if (inseridos + atualizados < 5) {
+          console.log(`📊 OS ${os}: dist=${distancia}km, data_hora="${e.data_hora}", finalizado="${e.finalizado}", tempoExec=${tempoExecucao}min, prazo=${prazoMinutos}min, dentroPrazo=${dentroPrazo}`);
         }
         
         // Preparar dados
@@ -5301,18 +5321,14 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           estado: e.estado || null,
           cod_prof: parseInt(e.cod_prof) || null,
           nome_prof: e.nome_prof || null,
-          data_solicitado: parseData(e.data_solicitado),
-          hora_solicitado: parseHora(e.hora_solicitado),
-          data_chegada: parseData(e.data_chegada),
-          hora_chegada: parseHora(e.hora_chegada),
-          data_saida: parseData(e.data_saida),
-          hora_saida: parseHora(e.hora_saida),
+          data_hora: parseTimestamp(e.data_hora),
+          finalizado: parseTimestamp(e.finalizado),
+          data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
           categoria: e.categoria || null,
           valor: parseNum(e.valor),
           distancia: distancia,
           valor_prof: parseNum(e.valor_prof),
           execucao_comp: e.execucao_comp ? String(e.execucao_comp) : null,
-          execucao_espera: e.execucao_espera ? String(e.execucao_espera) : null,
           status: e.status || null,
           motivo: e.motivo || null,
           ocorrencia: e.ocorrencia || null,
@@ -5331,22 +5347,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               num_pedido = $2, cod_cliente = $3, nome_cliente = $4, empresa = $5,
               nome_fantasia = $6, centro_custo = $7, cidade_p1 = $8, endereco = $9,
               bairro = $10, cidade = $11, estado = $12, cod_prof = $13, nome_prof = $14,
-              data_solicitado = $15, hora_solicitado = $16,
-              data_chegada = $17, hora_chegada = $18, data_saida = $19, hora_saida = $20,
-              categoria = $21, valor = $22, distancia = $23, valor_prof = $24,
-              execucao_comp = $25, execucao_espera = $26,
-              status = $27, motivo = $28, ocorrencia = $29, velocidade_media = $30,
-              dentro_prazo = $31, prazo_minutos = $32, tempo_execucao_minutos = $33
+              data_hora = $15, finalizado = $16, data_solicitado = $17,
+              categoria = $18, valor = $19, distancia = $20, valor_prof = $21,
+              execucao_comp = $22, status = $23, motivo = $24, ocorrencia = $25, velocidade_media = $26,
+              dentro_prazo = $27, prazo_minutos = $28, tempo_execucao_minutos = $29
             WHERE os = $1
           `, [
             dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
             dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
             dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
-            dados.data_solicitado, dados.hora_solicitado,
-            dados.data_chegada, dados.hora_chegada, dados.data_saida, dados.hora_saida,
+            dados.data_hora, dados.finalizado, dados.data_solicitado,
             dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
-            dados.execucao_comp, dados.execucao_espera,
-            dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
+            dados.execucao_comp, dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
             dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos
           ]);
           atualizados++;
@@ -5356,22 +5368,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               os, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
               bairro, cidade, estado, cod_prof, nome_prof,
-              data_solicitado, hora_solicitado,
-              data_chegada, hora_chegada, data_saida, hora_saida,
+              data_hora, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
-              execucao_comp, execucao_espera,
-              status, motivo, ocorrencia, velocidade_media,
+              execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
           `, [
             dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
             dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
             dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
-            dados.data_solicitado, dados.hora_solicitado,
-            dados.data_chegada, dados.hora_chegada, dados.data_saida, dados.hora_saida,
+            dados.data_hora, dados.finalizado, dados.data_solicitado,
             dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
-            dados.execucao_comp, dados.execucao_espera,
-            dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
+            dados.execucao_comp, dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
             dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos, 
             data_referencia || new Date().toISOString().split('T')[0]
           ]);
@@ -5408,8 +5416,8 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
       console.log(`🔄 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
     }
     
-    // Buscar todas as entregas
-    const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, execucao_comp FROM bi_entregas`);
+    // Buscar todas as entregas COM data_hora e finalizado
+    const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, data_hora, finalizado FROM bi_entregas`);
     
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
@@ -5429,14 +5437,15 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
       return null;
     };
     
-    const tempoParaMinutos = (tempo) => {
-      if (!tempo) return null;
-      const str = String(tempo);
-      const partes = str.split(':');
-      if (partes.length >= 2) {
-        return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
-      }
-      return null;
+    // Calcular tempo em minutos entre data_hora e finalizado
+    const calcularTempoExecucao = (dataHora, finalizado) => {
+      if (!dataHora || !finalizado) return null;
+      const inicio = new Date(dataHora);
+      const fim = new Date(finalizado);
+      if (isNaN(inicio.getTime()) || isNaN(fim.getTime())) return null;
+      const diffMs = fim.getTime() - inicio.getTime();
+      if (diffMs < 0) return null;
+      return Math.round(diffMs / 60000); // ms para minutos
     };
     
     let atualizados = 0;
@@ -5446,11 +5455,16 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     for (const e of entregas.rows) {
       const distancia = parseFloat(e.distancia) || 0;
       const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-      const tempoExecucao = tempoParaMinutos(e.execucao_comp);
+      const tempoExecucao = calcularTempoExecucao(e.data_hora, e.finalizado);
       const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
       
       if (dentroPrazo === true) dentroPrazoCount++;
       if (dentroPrazo === false) foraPrazoCount++;
+      
+      // Log para debug (primeiras 3)
+      if (atualizados < 3) {
+        console.log(`🔄 ID ${e.id}: dist=${distancia}km, prazo=${prazoMinutos}min, tempo=${tempoExecucao}min, dentro=${dentroPrazo}`);
+      }
       
       await pool.query(`
         UPDATE bi_entregas SET dentro_prazo = $1, prazo_minutos = $2, tempo_execucao_minutos = $3 WHERE id = $4
