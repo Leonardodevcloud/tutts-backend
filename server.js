@@ -5354,8 +5354,20 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         if (dentroPrazo === true) dentroPrazoCount++;
         if (dentroPrazo === false) foraPrazoCount++;
         
-        // Extrair número do ponto (pode vir como 'ponto', 'Ponto', 'seq', 'Seq', 'sequencia', etc.)
-        const ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 1) || 1;
+        // Extrair número do ponto
+        // Primeiro tenta campos específicos, depois extrai do endereço (ex: "Ponto 1 - Rua...")
+        let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
+        
+        // Se não encontrou ponto, tenta extrair do endereço
+        if (ponto === 0 && e.endereco) {
+          const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
+          if (matchPonto) {
+            ponto = parseInt(matchPonto[1]) || 1;
+          }
+        }
+        
+        // Se ainda não tem ponto, usa 1 como padrão
+        if (ponto === 0) ponto = 1;
         
         // Log para debug (primeiras 10 entregas)
         if (inseridos + atualizados < 10) {
@@ -5788,11 +5800,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         return 1;
       }
       
-      // Cliente COM regra: cada OS tem 1 coleta (ponto 1) + N entregas
-      // Então: entregas = total de linhas da OS - 1 (desconta a coleta)
-      // Mínimo 1 entrega se só tem 1 linha
-      const entregas = Math.max(1, linhasOS.length - 1);
-      return entregas;
+      // Cliente COM regra: conta apenas pontos >= 2 (ponto 1 é coleta, não conta)
+      const entregasCount = linhasOS.filter(l => {
+        const pontoNum = parseInt(l.ponto) || 1;
+        return pontoNum >= 2;
+      }).length;
+      
+      // Se não encontrou pontos >= 2, usa a fórmula: linhas - 1 (desconta coleta)
+      // Isso serve como fallback caso o ponto não tenha sido extraído
+      if (entregasCount === 0 && linhasOS.length > 1) {
+        return linhasOS.length - 1;
+      }
+      
+      return entregasCount > 0 ? entregasCount : 1;
     };
     
     // Calcular métricas gerais - usando a lógica por OS
@@ -5822,8 +5842,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         
         // Calcular prazo baseado nas linhas que contam como entrega
         if (clientesComRegra.has(codCliente)) {
-          // Cliente COM regra: verificar linhas de entrega
-          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) > 1);
+          // Cliente COM regra: apenas linhas com ponto >= 2 (exclui coleta)
+          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
           if (linhasEntrega.length > 0) {
             linhasEntrega.forEach(l => {
               if (l.dentro_prazo === true) dentroPrazo++;
@@ -5836,7 +5856,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               }
             });
           } else if (entregasOS > 0) {
-            // Sem ponto preenchido mas tem entregas calculadas
+            // Fallback: Sem ponto preenchido mas tem entregas calculadas
             // Usar dados das linhas (exceto primeira que é coleta)
             linhasOS.slice(1).forEach(l => {
               if (l.dentro_prazo === true) dentroPrazo++;
@@ -5907,7 +5927,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         
         // Métricas de prazo/valor
         if (clientesComRegra.has(codCliente)) {
-          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) > 1);
+          const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
           if (linhasEntrega.length > 0) {
             linhasEntrega.forEach(l => {
               if (l.dentro_prazo === true) c.dentro_prazo++;
@@ -6005,7 +6025,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         
         // Métricas
         if (clientesComRegra.has(codCliente)) {
-          const linhasEntrega = linhas.filter(l => parseInt(l.ponto) > 1);
+          const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
           if (linhasEntrega.length > 0) {
             linhasEntrega.forEach(l => {
               if (l.dentro_prazo === true) p.dentro_prazo++;
