@@ -732,6 +732,7 @@ async function createTables() {
       CREATE TABLE IF NOT EXISTS bi_entregas (
         id SERIAL PRIMARY KEY,
         os INTEGER NOT NULL,
+        ponto INTEGER DEFAULT 1,
         num_pedido VARCHAR(100),
         cod_cliente INTEGER,
         nome_cliente VARCHAR(255),
@@ -773,12 +774,16 @@ async function createTables() {
     `);
     console.log('✅ Tabela bi_entregas verificada');
 
+    // Migration: Adicionar coluna ponto se não existir
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
+    
     // Índices do BI
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_data ON bi_entregas(data_solicitado)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_cliente ON bi_entregas(cod_cliente)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_centro ON bi_entregas(centro_custo)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prof ON bi_entregas(cod_prof)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prazo ON bi_entregas(dentro_prazo)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto ON bi_entregas(os, ponto)`).catch(() => {});
 
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
@@ -5349,14 +5354,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         if (dentroPrazo === true) dentroPrazoCount++;
         if (dentroPrazo === false) foraPrazoCount++;
         
+        // Extrair número do ponto (pode vir como 'ponto', 'Ponto', 'seq', 'Seq', 'sequencia', etc.)
+        const ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 1) || 1;
+        
         // Log para debug (primeiras 10 entregas)
         if (inseridos + atualizados < 10) {
-          console.log(`📊 OS ${os}: dist=${distancia}km, execComp=${e.execucao_comp} (tipo: ${typeof e.execucao_comp}), tempo=${tempoExecucao}min, prazo=${prazoMinutos}min, dentro=${dentroPrazo}`);
+          console.log(`📊 OS ${os} Ponto ${ponto}: dist=${distancia}km, execComp=${e.execucao_comp} (tipo: ${typeof e.execucao_comp}), tempo=${tempoExecucao}min, prazo=${prazoMinutos}min, dentro=${dentroPrazo}`);
         }
         
         // Preparar dados
         const dados = {
           os,
+          ponto,
           num_pedido: e.num_pedido || null,
           cod_cliente: parseInt(e.cod_cliente) || null,
           nome_cliente: e.nome_cliente || null,
@@ -5387,22 +5396,22 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           tempo_execucao_minutos: tempoExecucao
         };
         
-        // Verificar se já existe (mesmo OS)
-        const existe = await pool.query(`SELECT id FROM bi_entregas WHERE os = $1`, [os]);
+        // Verificar se já existe (mesmo OS + Ponto)
+        const existe = await pool.query(`SELECT id FROM bi_entregas WHERE os = $1 AND ponto = $2`, [os, ponto]);
         
         if (existe.rows.length > 0) {
           await pool.query(`
             UPDATE bi_entregas SET
-              num_pedido = $2, cod_cliente = $3, nome_cliente = $4, empresa = $5,
-              nome_fantasia = $6, centro_custo = $7, cidade_p1 = $8, endereco = $9,
-              bairro = $10, cidade = $11, estado = $12, cod_prof = $13, nome_prof = $14,
-              data_hora = $15, finalizado = $16, data_solicitado = $17,
-              categoria = $18, valor = $19, distancia = $20, valor_prof = $21,
-              execucao_comp = $22, status = $23, motivo = $24, ocorrencia = $25, velocidade_media = $26,
-              dentro_prazo = $27, prazo_minutos = $28, tempo_execucao_minutos = $29
-            WHERE os = $1
+              num_pedido = $3, cod_cliente = $4, nome_cliente = $5, empresa = $6,
+              nome_fantasia = $7, centro_custo = $8, cidade_p1 = $9, endereco = $10,
+              bairro = $11, cidade = $12, estado = $13, cod_prof = $14, nome_prof = $15,
+              data_hora = $16, finalizado = $17, data_solicitado = $18,
+              categoria = $19, valor = $20, distancia = $21, valor_prof = $22,
+              execucao_comp = $23, status = $24, motivo = $25, ocorrencia = $26, velocidade_media = $27,
+              dentro_prazo = $28, prazo_minutos = $29, tempo_execucao_minutos = $30
+            WHERE os = $1 AND ponto = $2
           `, [
-            dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
+            dados.os, dados.ponto, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
             dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
             dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
             dados.data_hora, dados.finalizado, dados.data_solicitado,
@@ -5414,16 +5423,16 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         } else {
           await pool.query(`
             INSERT INTO bi_entregas (
-              os, num_pedido, cod_cliente, nome_cliente, empresa,
+              os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
               bairro, cidade, estado, cod_prof, nome_prof,
               data_hora, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
           `, [
-            dados.os, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
+            dados.os, dados.ponto, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
             dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
             dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
             dados.data_hora, dados.finalizado, dados.data_solicitado,
@@ -5693,78 +5702,183 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // Converter datas ISO para YYYY-MM-DD
     if (data_inicio) { 
       const dataIni = data_inicio.includes('T') ? data_inicio.split('T')[0] : data_inicio;
-      where += ` AND data_solicitado >= $${paramIndex++}`; 
+      where += ` AND e.data_solicitado >= $${paramIndex++}`; 
       params.push(dataIni); 
     }
     if (data_fim) { 
       const dataFim = data_fim.includes('T') ? data_fim.split('T')[0] : data_fim;
-      where += ` AND data_solicitado <= $${paramIndex++}`; 
+      where += ` AND e.data_solicitado <= $${paramIndex++}`; 
       params.push(dataFim); 
     }
-    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
-    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
-    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
-    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
-    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
-    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
-    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    if (cod_cliente) { where += ` AND e.cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND e.centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND e.cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND e.categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND e.dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND e.dentro_prazo = false`; }
+    if (cidade) { where += ` AND e.cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
     
     console.log('📊 Query WHERE:', where, 'Params:', params);
     
-    // 1. Métricas gerais (simplificado)
+    // Buscar regras de contagem (clientes que contam pontos como entregas)
+    const regrasContagem = await pool.query('SELECT cod_cliente FROM bi_regras_contagem');
+    const clientesComRegra = regrasContagem.rows.map(r => r.cod_cliente);
+    console.log('📊 Clientes com regra de contagem:', clientesComRegra);
+    
+    // Buscar máscaras
+    const mascaras = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mapMascaras = {};
+    mascaras.rows.forEach(m => { mapMascaras[m.cod_cliente] = m.mascara; });
+    
+    // 1. Métricas gerais COM REGRA DE CONTAGEM
+    // Para clientes SEM regra: conta 1 entrega por OS (ponto 1 ou qualquer)
+    // Para clientes COM regra: conta apenas pontos > 1 (pontos de entrega, não coleta)
     const metricas = await pool.query(`
       SELECT 
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
-        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
-        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(valor)::numeric, 2) as valor_total,
-        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof_total,
-        ROUND(AVG(valor)::numeric, 2) as ticket_medio,
-        COUNT(DISTINCT cod_prof) as total_profissionais,
-        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_por_prof,
-        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as total_retornos
-      FROM bi_entregas ${where}
-    `, params);
+        COUNT(DISTINCT e.os) as total_os,
+        -- Total de entregas considerando regras
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
+          END
+        ) as total_entregas,
+        -- Dentro do prazo
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
+          END
+        ) as dentro_prazo,
+        -- Fora do prazo
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
+          END
+        ) as fora_prazo,
+        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(e.valor)::numeric, 2) as valor_total,
+        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof_total,
+        ROUND(AVG(e.valor)::numeric, 2) as ticket_medio,
+        COUNT(DISTINCT e.cod_prof) as total_profissionais,
+        COUNT(*) FILTER (WHERE e.ocorrencia = 'Retorno') as total_retornos
+      FROM bi_entregas e ${where}
+    `, [...params, clientesComRegra]);
     
-    console.log('📊 Métricas OK:', metricas.rows[0]);
+    // Calcular média entregas por profissional
+    const metricasData = metricas.rows[0] || {};
+    metricasData.media_entregas_por_prof = metricasData.total_profissionais > 0 
+      ? (parseFloat(metricasData.total_entregas) / parseFloat(metricasData.total_profissionais)).toFixed(2) 
+      : 0;
     
-    // 2. Resumo por Cliente
+    console.log('📊 Métricas OK:', metricasData);
+    
+    // 2. Resumo por Cliente COM REGRA DE CONTAGEM
     const porCliente = await pool.query(`
       SELECT 
-        cod_cliente,
-        nome_cliente,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
-        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
-        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(valor)::numeric, 2) as valor_total,
-        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof
-      FROM bi_entregas ${where}
-      GROUP BY cod_cliente, nome_cliente
-      ORDER BY COUNT(*) DESC
-    `, params);
+        e.cod_cliente,
+        e.nome_cliente,
+        COUNT(DISTINCT e.os) as total_os,
+        -- Total entregas por cliente
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
+          END
+        ) as total_entregas,
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
+          END
+        ) as dentro_prazo,
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
+          END
+        ) as fora_prazo,
+        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(e.valor)::numeric, 2) as valor_total,
+        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof
+      FROM bi_entregas e ${where}
+      GROUP BY e.cod_cliente, e.nome_cliente
+      ORDER BY SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
+          END
+        ) DESC
+    `, [...params, clientesComRegra]);
     
-    console.log('📊 porCliente OK:', porCliente.rows.length, 'registros');
+    // Aplicar máscaras nos nomes dos clientes
+    const porClienteComMascara = porCliente.rows.map(c => ({
+      ...c,
+      nome_display: mapMascaras[c.cod_cliente] || c.nome_cliente,
+      tem_mascara: !!mapMascaras[c.cod_cliente]
+    }));
     
-    // 3. Resumo por Profissional
+    console.log('📊 porCliente OK:', porClienteComMascara.length, 'registros');
+    
+    // 3. Resumo por Profissional COM REGRA DE CONTAGEM
     const porProfissional = await pool.query(`
       SELECT 
-        cod_prof,
-        nome_prof,
-        COUNT(*) as total_entregas,
-        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
-        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
-        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
-        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof,
-        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
-      FROM bi_entregas ${where}
-      GROUP BY cod_prof, nome_prof
-      ORDER BY COUNT(*) DESC
-    `, params);
+        e.cod_prof,
+        e.nome_prof,
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
+          END
+        ) as total_entregas,
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = true THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = true THEN 1 ELSE 0 END
+          END
+        ) as dentro_prazo,
+        SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 AND e.dentro_prazo = false THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN (COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL) AND e.dentro_prazo = false THEN 1 ELSE 0 END
+          END
+        ) as fora_prazo,
+        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(e.distancia)::numeric, 2) as distancia_total,
+        ROUND(SUM(e.valor_prof)::numeric, 2) as valor_prof,
+        COUNT(*) FILTER (WHERE e.ocorrencia = 'Retorno') as retornos
+      FROM bi_entregas e ${where}
+      GROUP BY e.cod_prof, e.nome_prof
+      ORDER BY SUM(
+          CASE 
+            WHEN e.cod_cliente::text = ANY($${paramIndex}::text[]) THEN 
+              CASE WHEN COALESCE(e.ponto, 1) > 1 THEN 1 ELSE 0 END
+            ELSE 
+              CASE WHEN COALESCE(e.ponto, 1) = 1 OR e.ponto IS NULL THEN 1 ELSE 0 END
+          END
+        ) DESC
+    `, [...params, clientesComRegra]);
     
     console.log('📊 porProfissional OK:', porProfissional.rows.length, 'registros');
     
@@ -5772,18 +5886,18 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const porTempo = await pool.query(`
       SELECT 
         CASE 
-          WHEN tempo_execucao_minutos IS NULL THEN 'Sem dados'
-          WHEN tempo_execucao_minutos <= 45 THEN '0-45 min'
-          WHEN tempo_execucao_minutos <= 60 THEN '45-60 min'
-          WHEN tempo_execucao_minutos <= 75 THEN '60-75 min'
-          WHEN tempo_execucao_minutos <= 90 THEN '75-90 min'
-          WHEN tempo_execucao_minutos <= 120 THEN '90-120 min'
+          WHEN e.tempo_execucao_minutos IS NULL THEN 'Sem dados'
+          WHEN e.tempo_execucao_minutos <= 45 THEN '0-45 min'
+          WHEN e.tempo_execucao_minutos <= 60 THEN '45-60 min'
+          WHEN e.tempo_execucao_minutos <= 75 THEN '60-75 min'
+          WHEN e.tempo_execucao_minutos <= 90 THEN '75-90 min'
+          WHEN e.tempo_execucao_minutos <= 120 THEN '90-120 min'
           ELSE '> 120 min'
         END as faixa,
         COUNT(*) as total
-      FROM bi_entregas ${where}
+      FROM bi_entregas e ${where}
       GROUP BY 1
-      ORDER BY MIN(COALESCE(tempo_execucao_minutos, 0))
+      ORDER BY MIN(COALESCE(e.tempo_execucao_minutos, 0))
     `, params);
     
     console.log('📊 porTempo OK:', porTempo.rows.length, 'faixas');
@@ -5792,25 +5906,25 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const porKm = await pool.query(`
       SELECT 
         CASE 
-          WHEN distancia IS NULL THEN 'Sem dados'
-          WHEN distancia <= 10 THEN '0-10 km'
-          WHEN distancia <= 20 THEN '11-20 km'
-          WHEN distancia <= 30 THEN '21-30 km'
-          WHEN distancia <= 40 THEN '31-40 km'
-          WHEN distancia <= 50 THEN '41-50 km'
+          WHEN e.distancia IS NULL THEN 'Sem dados'
+          WHEN e.distancia <= 10 THEN '0-10 km'
+          WHEN e.distancia <= 20 THEN '11-20 km'
+          WHEN e.distancia <= 30 THEN '21-30 km'
+          WHEN e.distancia <= 40 THEN '31-40 km'
+          WHEN e.distancia <= 50 THEN '41-50 km'
           ELSE '> 50 km'
         END as faixa,
         COUNT(*) as total
-      FROM bi_entregas ${where}
+      FROM bi_entregas e ${where}
       GROUP BY 1
-      ORDER BY MIN(COALESCE(distancia, 0))
+      ORDER BY MIN(COALESCE(e.distancia, 0))
     `, params);
     
     console.log('📊 porKm OK:', porKm.rows.length, 'faixas');
     
     res.json({
-      metricas: metricas.rows[0] || {},
-      porCliente: porCliente.rows,
+      metricas: metricasData,
+      porCliente: porClienteComMascara,
       porProfissional: porProfissional.rows,
       porTempo: porTempo.rows,
       porKm: porKm.rows
@@ -5894,6 +6008,121 @@ app.get('/api/bi/cidades', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao listar cidades:', err);
     res.json([]);
+  }
+});
+
+// ===== MÁSCARAS DE CLIENTES =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_mascaras (
+    id SERIAL PRIMARY KEY,
+    cod_cliente VARCHAR(50) NOT NULL UNIQUE,
+    mascara VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_mascaras já existe ou erro:', err.message));
+
+// Listar máscaras
+app.get('/api/bi/mascaras', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_mascaras ORDER BY cod_cliente');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar máscaras:', err);
+    res.json([]);
+  }
+});
+
+// Criar/Atualizar máscara
+app.post('/api/bi/mascaras', async (req, res) => {
+  try {
+    const { cod_cliente, mascara } = req.body;
+    if (!cod_cliente || !mascara) {
+      return res.status(400).json({ error: 'cod_cliente e mascara são obrigatórios' });
+    }
+    
+    // Upsert - atualiza se existir, insere se não
+    const result = await pool.query(`
+      INSERT INTO bi_mascaras (cod_cliente, mascara) 
+      VALUES ($1, $2)
+      ON CONFLICT (cod_cliente) DO UPDATE SET mascara = $2
+      RETURNING *
+    `, [cod_cliente, mascara]);
+    
+    res.json({ success: true, mascara: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar máscara:', err);
+    res.status(500).json({ error: 'Erro ao salvar máscara' });
+  }
+});
+
+// Excluir máscara
+app.delete('/api/bi/mascaras/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_mascaras WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir máscara:', err);
+    res.status(500).json({ error: 'Erro ao excluir máscara' });
+  }
+});
+
+// ===== REGRAS DE CONTAGEM DE ENTREGAS =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_regras_contagem (
+    id SERIAL PRIMARY KEY,
+    cod_cliente VARCHAR(50) NOT NULL UNIQUE,
+    nome_cliente VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_regras_contagem já existe ou erro:', err.message));
+
+// Listar regras de contagem
+app.get('/api/bi/regras-contagem', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_regras_contagem ORDER BY cod_cliente');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar regras de contagem:', err);
+    res.json([]);
+  }
+});
+
+// Criar regra de contagem
+app.post('/api/bi/regras-contagem', async (req, res) => {
+  try {
+    const { cod_cliente, nome_cliente } = req.body;
+    if (!cod_cliente) {
+      return res.status(400).json({ error: 'cod_cliente é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO bi_regras_contagem (cod_cliente, nome_cliente) 
+      VALUES ($1, $2)
+      ON CONFLICT (cod_cliente) DO NOTHING
+      RETURNING *
+    `, [cod_cliente, nome_cliente || null]);
+    
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Cliente já possui regra de contagem' });
+    }
+    
+    res.json({ success: true, regra: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar regra de contagem:', err);
+    res.status(500).json({ error: 'Erro ao salvar regra' });
+  }
+});
+
+// Excluir regra de contagem
+app.delete('/api/bi/regras-contagem/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_regras_contagem WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir regra:', err);
+    res.status(500).json({ error: 'Erro ao excluir regra' });
   }
 });
 
