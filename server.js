@@ -5822,7 +5822,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     // Calcular métricas gerais - usando a lógica por OS
     let totalOS = new Set();
-    let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0;
+    let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0, semPrazo = 0;
     let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
     let profissionais = new Set();
     let totalRetornos = 0;
@@ -5840,13 +5840,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const entregasOS = calcularEntregasOS(linhasOS);
         totalEntregas += entregasOS;
         
-        // Contagem de profissionais e retornos (motivo = 'erro')
+        // Contagem de profissionais
         linhasOS.forEach((row) => {
           profissionais.add(row.cod_prof);
-          // RETORNO = motivo contém "erro" (case insensitive)
-          if (row.motivo && row.motivo.toLowerCase().includes('erro')) {
-            totalRetornos++;
-          }
           // Última entrega
           if (row.finalizado) {
             const dataFin = new Date(row.finalizado);
@@ -5859,41 +5855,31 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
         
-        if (linhasEntrega.length > 0) {
-          // Tem pontos de entrega identificados
-          linhasEntrega.forEach(l => {
-            if (l.dentro_prazo === true) dentroPrazo++;
-            else if (l.dentro_prazo === false) foraPrazo++;
-            somaValor += parseFloat(l.valor) || 0;
-            somaValorProf += parseFloat(l.valor_prof) || 0;
-            if (l.tempo_execucao_minutos != null) {
-              somaTempoExec += parseFloat(l.tempo_execucao_minutos);
-              countTempoExec++;
-            }
-          });
-        } else if (linhasOS.length > 1) {
-          // Fallback: não tem ponto identificado, usa linhas exceto primeira (coleta)
-          linhasOS.slice(1).forEach(l => {
-            if (l.dentro_prazo === true) dentroPrazo++;
-            else if (l.dentro_prazo === false) foraPrazo++;
-            somaValor += parseFloat(l.valor) || 0;
-            somaValorProf += parseFloat(l.valor_prof) || 0;
-            if (l.tempo_execucao_minutos != null) {
-              somaTempoExec += parseFloat(l.tempo_execucao_minutos);
-              countTempoExec++;
-            }
-          });
-        } else {
-          // Só tem 1 linha, usa ela
-          const l = linhasOS[0];
+        // Função para processar métricas de uma linha
+        const processarLinha = (l) => {
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
+          else semPrazo++; // null ou undefined
+          
+          // RETORNO = motivo contém "erro" (conta apenas nas linhas de entrega)
+          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
+            totalRetornos++;
+          }
+          
           somaValor += parseFloat(l.valor) || 0;
           somaValorProf += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
             somaTempoExec += parseFloat(l.tempo_execucao_minutos);
             countTempoExec++;
           }
+        };
+        
+        if (linhasEntrega.length > 0) {
+          linhasEntrega.forEach(processarLinha);
+        } else if (linhasOS.length > 1) {
+          linhasOS.slice(1).forEach(processarLinha);
+        } else {
+          processarLinha(linhasOS[0]);
         }
       });
     });
@@ -5903,6 +5889,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
+      sem_prazo: semPrazo,
       tempo_medio: countTempoExec > 0 ? (somaTempoExec / countTempoExec).toFixed(2) : 0,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
@@ -5929,7 +5916,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           os_set: new Set(),
           profissionais_set: new Set(),
           centros_custo_map: {}, // Mapa de centros de custo com dados
-          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0,
           soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0,
           total_retornos: 0, ultima_entrega: null
         };
@@ -5941,12 +5928,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
         
-        // Coletar profissionais e retornos do cliente
+        // Coletar profissionais e última entrega
         linhasOS.forEach(l => {
           c.profissionais_set.add(l.cod_prof);
-          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
-            c.total_retornos++;
-          }
           if (l.finalizado) {
             const dataFin = new Date(l.finalizado);
             if (!c.ultima_entrega || dataFin > c.ultima_entrega) {
@@ -5967,6 +5951,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           // Métricas do cliente total
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
+          else c.sem_prazo++;
+          
+          // Retorno = motivo contém "erro" (apenas nas linhas de entrega)
+          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
+            c.total_retornos++;
+          }
+          
           c.soma_valor += parseFloat(l.valor) || 0;
           c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
@@ -5980,7 +5971,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             c.centros_custo_map[cc] = {
               centro_custo: cc,
               os_set: new Set(),
-              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, total_retornos: 0,
+              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
               soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
             };
           }
@@ -5989,6 +5980,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           ccData.total_entregas++;
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
+          else ccData.sem_prazo++;
           // Retorno = motivo contém "erro"
           if (l.motivo && l.motivo.toLowerCase().includes('erro')) ccData.total_retornos++;
           ccData.soma_valor += parseFloat(l.valor) || 0;
@@ -6010,6 +6002,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         total_retornos: cc.total_retornos,
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
+        sem_prazo: cc.sem_prazo,
         tempo_medio: cc.count_tempo > 0 ? (cc.soma_tempo / cc.count_tempo).toFixed(2) : null,
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
@@ -6024,7 +6017,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         nome_display: c.nome_display, tem_mascara: c.tem_mascara,
         total_os: c.os_set.size, total_entregas: c.total_entregas,
         centros_custo: centros_custo_dados, // Agora é array com dados completos
-        dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo,
+        dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
         tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
         // Novas métricas
