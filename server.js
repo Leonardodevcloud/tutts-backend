@@ -5183,6 +5183,11 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
     
+    console.log(`📊 Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
+    if (prazoPadrao.rows.length > 0) {
+      console.log(`📊 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    }
+    
     // Função para encontrar prazo
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
@@ -5196,7 +5201,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         const kmMin = parseFloat(faixa.km_min) || 0;
         const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
         if (distancia >= kmMin && distancia < kmMax) {
-          return faixa.prazo_minutos;
+          return parseInt(faixa.prazo_minutos);
         }
       }
       return null;
@@ -5273,7 +5278,12 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
         const distancia = parseNum(e.distancia) || 0;
         const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
         const tempoExecucao = tempoParaMinutos(e.execucao_comp);
-        const dentroPrazo = prazoMinutos && tempoExecucao ? tempoExecucao <= prazoMinutos : null;
+        const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+        
+        // Log para debug (primeiras 3 entregas)
+        if (inseridos + atualizados < 3) {
+          console.log(`📊 OS ${os}: dist=${distancia}km, execucao="${e.execucao_comp}" (${tempoExecucao}min), prazo=${prazoMinutos}min, dentroPrazo=${dentroPrazo}`);
+        }
         
         // Preparar dados
         const dados = {
@@ -5393,6 +5403,11 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
     
+    console.log(`🔄 Recalculando - Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
+    if (prazoPadrao.rows.length > 0) {
+      console.log(`🔄 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    }
+    
     // Buscar todas as entregas
     const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, execucao_comp FROM bi_entregas`);
     
@@ -5408,7 +5423,7 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
         const kmMin = parseFloat(faixa.km_min) || 0;
         const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
         if (distancia >= kmMin && distancia < kmMax) {
-          return faixa.prazo_minutos;
+          return parseInt(faixa.prazo_minutos);
         }
       }
       return null;
@@ -5416,7 +5431,8 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     
     const tempoParaMinutos = (tempo) => {
       if (!tempo) return null;
-      const partes = tempo.split(':');
+      const str = String(tempo);
+      const partes = str.split(':');
       if (partes.length >= 2) {
         return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
       }
@@ -5424,11 +5440,17 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     };
     
     let atualizados = 0;
+    let dentroPrazoCount = 0;
+    let foraPrazoCount = 0;
+    
     for (const e of entregas.rows) {
       const distancia = parseFloat(e.distancia) || 0;
       const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
       const tempoExecucao = tempoParaMinutos(e.execucao_comp);
-      const dentroPrazo = prazoMinutos && tempoExecucao ? tempoExecucao <= prazoMinutos : null;
+      const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+      
+      if (dentroPrazo === true) dentroPrazoCount++;
+      if (dentroPrazo === false) foraPrazoCount++;
       
       await pool.query(`
         UPDATE bi_entregas SET dentro_prazo = $1, prazo_minutos = $2, tempo_execucao_minutos = $3 WHERE id = $4
@@ -5436,7 +5458,8 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
       atualizados++;
     }
     
-    res.json({ success: true, atualizados });
+    console.log(`✅ Recalculado: ${atualizados} entregas, ${dentroPrazoCount} dentro, ${foraPrazoCount} fora`);
+    res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount });
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
     res.status(500).json({ error: 'Erro ao recalcular' });
