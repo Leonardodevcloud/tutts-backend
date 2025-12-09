@@ -5684,6 +5684,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
     
+    console.log('📊 Dashboard-completo chamado com:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade });
+    
     let where = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
@@ -5697,6 +5699,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
     else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
     if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    console.log('📊 Query WHERE:', where, 'Params:', params);
     
     // 1. Métricas gerais
     const metricas = await pool.query(`
@@ -5714,6 +5718,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         COUNT(*) FILTER (WHERE ocorrencia ILIKE '%retorno%') as total_retornos
       FROM bi_entregas ${where}
     `, params);
+    
+    console.log('📊 Métricas:', metricas.rows[0]);
     
     // 2. Resumo por Cliente
     const porCliente = await pool.query(`
