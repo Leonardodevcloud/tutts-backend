@@ -5739,7 +5739,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // Buscar regras de contagem
     const regrasContagem = await pool.query('SELECT cod_cliente FROM bi_regras_contagem');
     const clientesComRegra = new Set(regrasContagem.rows.map(r => String(r.cod_cliente)));
-    console.log('📊 Clientes com regra:', [...clientesComRegra]);
+    console.log('📊 Clientes COM regra de contagem:', [...clientesComRegra]);
+    console.log('📊 Total de clientes com regra:', clientesComRegra.size);
     
     // Buscar máscaras
     const mascaras = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
@@ -5755,7 +5756,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     `, params);
     
     const dados = dadosQuery.rows;
-    console.log('📊 Total registros:', dados.length);
+    console.log('📊 Total registros retornados:', dados.length);
     
     // LÓGICA DE CONTAGEM:
     // Cliente SEM regra: 1 OS = 1 entrega (conta OS únicas)
@@ -5771,6 +5772,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       osPorCliente[codStr][os].push(row);
     });
     
+    // Log de debug por cliente
+    Object.keys(osPorCliente).forEach(codCliente => {
+      const totalOS = Object.keys(osPorCliente[codCliente]).length;
+      const temRegra = clientesComRegra.has(codCliente);
+      console.log(`📊 Cliente ${codCliente}: ${totalOS} OS distintas, tem regra: ${temRegra}`);
+    });
+    
     // Função para calcular entregas de uma OS
     const calcularEntregasOS = (linhasOS, codCliente) => {
       const codStr = String(codCliente);
@@ -5781,12 +5789,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       }
       
       // Cliente COM regra: conta pontos > 1
-      // Verificar se tem ponto preenchido
+      // Verificar se tem ponto preenchido > 1
       const temPontoPreenchido = linhasOS.some(l => l.ponto != null && parseInt(l.ponto) > 1);
       
       if (temPontoPreenchido) {
         // Tem dados de ponto: conta linhas com ponto > 1
-        return linhasOS.filter(l => parseInt(l.ponto) > 1).length;
+        const count = linhasOS.filter(l => parseInt(l.ponto) > 1).length;
+        return count;
       } else {
         // Não tem dados de ponto: total de linhas - 1 (desconta coleta)
         return Math.max(0, linhasOS.length - 1);
@@ -5952,6 +5961,14 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
       valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2)
     })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Log resultado por cliente
+    console.log('📊 RESULTADO POR CLIENTE:');
+    porCliente.forEach(c => {
+      const temRegra = clientesComRegra.has(String(c.cod_cliente));
+      console.log(`   - ${c.cod_cliente} (${c.nome_display}): ${c.total_os} OS, ${c.total_entregas} entregas, regra: ${temRegra}`);
+    });
+    console.log('📊 TOTAL GERAL: ', metricas.total_os, 'OS,', metricas.total_entregas, 'entregas');
     
     // Agrupar por profissional - também precisa respeitar a regra
     const porProfMap = {};
