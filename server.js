@@ -5545,10 +5545,10 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
   }
 });
 
-// Dashboard BI - Métricas gerais
+// Dashboard BI - Métricas gerais COMPLETO
 app.get('/api/bi/dashboard', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria } = req.query;
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -5575,22 +5575,40 @@ app.get('/api/bi/dashboard', async (req, res) => {
       params.push(cod_prof);
     }
     if (categoria) {
-      where += ` AND categoria = $${paramIndex++}`;
-      params.push(categoria);
+      where += ` AND categoria ILIKE $${paramIndex++}`;
+      params.push(`%${categoria}%`);
+    }
+    if (status_prazo === 'dentro') {
+      where += ` AND dentro_prazo = true`;
+    } else if (status_prazo === 'fora') {
+      where += ` AND dentro_prazo = false`;
+    }
+    if (cidade) {
+      where += ` AND cidade = $${paramIndex++}`;
+      params.push(cidade);
     }
     
-    // Métricas gerais
+    // Métricas gerais completas
     const metricas = await pool.query(`
       SELECT 
+        COUNT(DISTINCT os) as total_os,
         COUNT(*) as total_entregas,
         COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
         COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
         COUNT(*) FILTER (WHERE dentro_prazo IS NULL) as sem_prazo,
-        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
         ROUND(AVG(distancia)::numeric, 2) as distancia_media,
+        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
         ROUND(SUM(valor)::numeric, 2) as valor_total,
-        COUNT(DISTINCT cod_prof) as total_profissionais,
-        COUNT(DISTINCT cod_cliente) as total_clientes
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_profissional,
+        ROUND(SUM(valor)::numeric - COALESCE(SUM(valor_prof)::numeric, 0), 2) as faturamento,
+        ROUND(AVG(valor)::numeric, 2) as ticket_medio,
+        COUNT(DISTINCT cod_prof) as total_entregadores,
+        COUNT(DISTINCT cod_cliente) as total_clientes,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_entregador,
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
       FROM bi_entregas ${where}
     `, params);
     
@@ -5658,6 +5676,424 @@ app.get('/api/bi/dashboard', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro no dashboard:', err);
     res.status(500).json({ error: 'Erro ao carregar dashboard' });
+  }
+});
+
+// Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
+app.get('/api/bi/dashboard-completo', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    // 1. Métricas gerais
+    const metricas = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as valor_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof_total,
+        ROUND(AVG(valor)::numeric, 2) as ticket_medio,
+        COUNT(DISTINCT cod_prof) as total_profissionais,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_por_prof,
+        COUNT(*) FILTER (WHERE ocorrencia ILIKE '%retorno%') as total_retornos
+      FROM bi_entregas ${where}
+    `, params);
+    
+    // 2. Resumo por Cliente
+    const porCliente = await pool.query(`
+      SELECT 
+        cod_cliente,
+        nome_cliente,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as valor_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof
+      FROM bi_entregas ${where}
+      GROUP BY cod_cliente, nome_cliente
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    // 3. Resumo por Profissional
+    const porProfissional = await pool.query(`
+      SELECT 
+        cod_prof,
+        nome_prof,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof,
+        COUNT(*) FILTER (WHERE ocorrencia ILIKE '%retorno%') as retornos
+      FROM bi_entregas ${where}
+      GROUP BY cod_prof, nome_prof
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    // 4. Distribuição por faixa de tempo
+    const porTempo = await pool.query(`
+      SELECT 
+        CASE 
+          WHEN tempo_execucao_minutos IS NULL THEN 'Sem dados'
+          WHEN tempo_execucao_minutos <= 45 THEN '0-45 min'
+          WHEN tempo_execucao_minutos <= 60 THEN '45-60 min'
+          WHEN tempo_execucao_minutos <= 75 THEN '60-75 min'
+          WHEN tempo_execucao_minutos <= 90 THEN '75-90 min'
+          WHEN tempo_execucao_minutos <= 120 THEN '90-120 min'
+          ELSE '> 120 min'
+        END as faixa,
+        COUNT(*) as total
+      FROM bi_entregas ${where}
+      GROUP BY 1
+      ORDER BY 
+        CASE 
+          WHEN tempo_execucao_minutos IS NULL THEN 0
+          WHEN tempo_execucao_minutos <= 45 THEN 1
+          WHEN tempo_execucao_minutos <= 60 THEN 2
+          WHEN tempo_execucao_minutos <= 75 THEN 3
+          WHEN tempo_execucao_minutos <= 90 THEN 4
+          WHEN tempo_execucao_minutos <= 120 THEN 5
+          ELSE 6
+        END
+    `, params);
+    
+    // 5. Distribuição por faixa de KM
+    const porKm = await pool.query(`
+      SELECT 
+        CASE 
+          WHEN distancia IS NULL THEN 'Sem dados'
+          WHEN distancia <= 10 THEN '0-10'
+          WHEN distancia <= 15 THEN '11-15'
+          WHEN distancia <= 20 THEN '16-20'
+          WHEN distancia <= 25 THEN '21-25'
+          WHEN distancia <= 30 THEN '26-30'
+          WHEN distancia <= 35 THEN '31-35'
+          WHEN distancia <= 40 THEN '36-40'
+          WHEN distancia <= 45 THEN '41-45'
+          WHEN distancia <= 50 THEN '46-50'
+          WHEN distancia <= 55 THEN '51-55'
+          WHEN distancia <= 60 THEN '56-60'
+          WHEN distancia <= 65 THEN '61-65'
+          WHEN distancia <= 70 THEN '66-70'
+          WHEN distancia <= 75 THEN '71-75'
+          WHEN distancia <= 80 THEN '76-80'
+          WHEN distancia <= 85 THEN '81-85'
+          WHEN distancia <= 90 THEN '86-90'
+          WHEN distancia <= 95 THEN '91-95'
+          WHEN distancia <= 100 THEN '96-100'
+          ELSE '>100'
+        END as faixa,
+        COUNT(*) as total
+      FROM bi_entregas ${where}
+      GROUP BY 1
+      ORDER BY 
+        CASE 
+          WHEN distancia IS NULL THEN 0
+          WHEN distancia <= 10 THEN 1
+          WHEN distancia <= 15 THEN 2
+          WHEN distancia <= 20 THEN 3
+          WHEN distancia <= 25 THEN 4
+          WHEN distancia <= 30 THEN 5
+          WHEN distancia <= 35 THEN 6
+          WHEN distancia <= 40 THEN 7
+          WHEN distancia <= 45 THEN 8
+          WHEN distancia <= 50 THEN 9
+          WHEN distancia <= 55 THEN 10
+          WHEN distancia <= 60 THEN 11
+          WHEN distancia <= 65 THEN 12
+          WHEN distancia <= 70 THEN 13
+          WHEN distancia <= 75 THEN 14
+          WHEN distancia <= 80 THEN 15
+          WHEN distancia <= 85 THEN 16
+          WHEN distancia <= 90 THEN 17
+          WHEN distancia <= 95 THEN 18
+          WHEN distancia <= 100 THEN 19
+          ELSE 20
+        END
+    `, params);
+    
+    res.json({
+      metricas: metricas.rows[0] || {},
+      porCliente: porCliente.rows,
+      porProfissional: porProfissional.rows,
+      porTempo: porTempo.rows,
+      porKm: porKm.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro no dashboard-completo:', err);
+    res.status(500).json({ error: 'Erro ao carregar dashboard' });
+  }
+});
+
+// Lista de entregas detalhada (para análise por OS)
+app.get('/api/bi/entregas-lista', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    const result = await pool.query(`
+      SELECT 
+        os,
+        nome_prof,
+        endereco,
+        cidade,
+        data_solicitado,
+        data_hora,
+        finalizado,
+        distancia,
+        dentro_prazo,
+        tempo_execucao_minutos,
+        prazo_minutos,
+        valor,
+        valor_prof,
+        categoria,
+        ocorrencia,
+        status
+      FROM bi_entregas ${where}
+      ORDER BY data_hora DESC
+      LIMIT 500
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar entregas:', err);
+    res.status(500).json({ error: 'Erro ao listar entregas' });
+  }
+});
+
+// Lista de cidades disponíveis
+app.get('/api/bi/cidades', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cidade, COUNT(*) as total
+      FROM bi_entregas
+      WHERE cidade IS NOT NULL AND cidade != ''
+      GROUP BY cidade
+      ORDER BY total DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar cidades:', err);
+    res.json([]);
+  }
+});
+
+// Resumo por Cliente (tabela detalhada)
+app.get('/api/bi/resumo-clientes', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    const result = await pool.query(`
+      SELECT 
+        cod_cliente,
+        nome_cliente,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as valor_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof,
+        ROUND(SUM(valor)::numeric - COALESCE(SUM(valor_prof)::numeric, 0), 2) as faturamento
+      FROM bi_entregas ${where}
+      GROUP BY cod_cliente, nome_cliente
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro resumo clientes:', err);
+    res.status(500).json({ error: 'Erro ao carregar resumo por cliente' });
+  }
+});
+
+// Resumo por Profissional (tabela detalhada)
+app.get('/api/bi/resumo-profissionais', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    const result = await pool.query(`
+      SELECT 
+        cod_prof,
+        nome_prof,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_entrega,
+        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_total,
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
+      FROM bi_entregas ${where}
+      GROUP BY cod_prof, nome_prof
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro resumo profissionais:', err);
+    res.status(500).json({ error: 'Erro ao carregar resumo por profissional' });
+  }
+});
+
+// Análise por OS (detalhamento)
+app.get('/api/bi/analise-os', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, os } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (os) { where += ` AND os = $${paramIndex++}`; params.push(os); }
+    
+    const result = await pool.query(`
+      SELECT 
+        os, nome_prof, endereco, cidade, 
+        data_solicitado, hora_solicitado,
+        hora_chegada, hora_saida,
+        tempo_execucao_minutos, distancia, 
+        dentro_prazo, prazo_minutos,
+        finalizado, status, ocorrencia, categoria
+      FROM bi_entregas ${where}
+      ORDER BY data_solicitado DESC, os DESC
+      LIMIT 500
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro análise OS:', err);
+    res.status(500).json({ error: 'Erro ao carregar análise por OS' });
+  }
+});
+
+// Gráficos - Faixas de tempo e KM
+app.get('/api/bi/graficos', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    // Faixas de tempo
+    const faixasTempo = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos IS NULL) as nao_atribuida,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 45) as ate_45,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 45 AND tempo_execucao_minutos <= 60) as ate_60,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 60 AND tempo_execucao_minutos <= 75) as ate_75,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 75 AND tempo_execucao_minutos <= 90) as ate_90,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 90 AND tempo_execucao_minutos <= 120) as ate_120,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 120) as mais_120
+      FROM bi_entregas ${where}
+    `, params);
+    
+    // Faixas de KM
+    const faixasKm = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE distancia > 100) as mais_100,
+        COUNT(*) FILTER (WHERE distancia >= 0 AND distancia <= 10) as km_0_10,
+        COUNT(*) FILTER (WHERE distancia > 10 AND distancia <= 15) as km_11_15,
+        COUNT(*) FILTER (WHERE distancia > 15 AND distancia <= 20) as km_16_20,
+        COUNT(*) FILTER (WHERE distancia > 20 AND distancia <= 25) as km_21_25,
+        COUNT(*) FILTER (WHERE distancia > 25 AND distancia <= 30) as km_26_30,
+        COUNT(*) FILTER (WHERE distancia > 30 AND distancia <= 35) as km_31_35,
+        COUNT(*) FILTER (WHERE distancia > 35 AND distancia <= 40) as km_36_40,
+        COUNT(*) FILTER (WHERE distancia > 40 AND distancia <= 50) as km_41_50,
+        COUNT(*) FILTER (WHERE distancia > 50 AND distancia <= 60) as km_51_60,
+        COUNT(*) FILTER (WHERE distancia > 60 AND distancia <= 70) as km_61_70,
+        COUNT(*) FILTER (WHERE distancia > 70 AND distancia <= 80) as km_71_80,
+        COUNT(*) FILTER (WHERE distancia > 80 AND distancia <= 90) as km_81_90,
+        COUNT(*) FILTER (WHERE distancia > 90 AND distancia <= 100) as km_91_100
+      FROM bi_entregas ${where}
+    `, params);
+    
+    res.json({
+      faixasTempo: faixasTempo.rows[0] || {},
+      faixasKm: faixasKm.rows[0] || {}
+    });
+  } catch (err) {
+    console.error('❌ Erro gráficos:', err);
+    res.status(500).json({ error: 'Erro ao carregar gráficos' });
   }
 });
 
