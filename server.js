@@ -6046,26 +6046,34 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
         
-        // Função para processar métricas de uma linha
-        const processarLinha = (l) => {
+        // Para prazo: processa todas as linhas de entrega
+        const processarPrazo = (l) => {
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
           else semPrazo++; // null ou undefined
           
-          somaValor += parseFloat(l.valor) || 0;
-          somaValorProf += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
             somaTempoExec += parseFloat(l.tempo_execucao_minutos);
             countTempoExec++;
           }
         };
         
+        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
+        const linhaValor = linhasOS.reduce((maior, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 0;
+          const pontoMaior = parseInt(maior?.ponto) || 0;
+          return pontoAtual > pontoMaior ? atual : maior;
+        }, linhasOS[0]);
+        
+        somaValor += parseFloat(linhaValor?.valor) || 0;
+        somaValorProf += parseFloat(linhaValor?.valor_prof) || 0;
+        
         if (linhasEntrega.length > 0) {
-          linhasEntrega.forEach(processarLinha);
+          linhasEntrega.forEach(processarPrazo);
         } else if (linhasOS.length > 1) {
-          linhasOS.slice(1).forEach(processarLinha);
+          linhasOS.slice(1).forEach(processarPrazo);
         } else {
-          processarLinha(linhasOS[0]);
+          processarPrazo(linhasOS[0]);
         }
       });
     });
@@ -6150,20 +6158,42 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
           (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
         
+        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto)
+        const linhaValor = linhasOS.reduce((maior, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 0;
+          const pontoMaior = parseInt(maior?.ponto) || 0;
+          return pontoAtual > pontoMaior ? atual : maior;
+        }, linhasOS[0]);
+        
+        c.soma_valor += parseFloat(linhaValor?.valor) || 0;
+        c.soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+        
+        // Centro de custo para valores - pega do linhaValor
+        const ccValor = linhaValor?.centro_custo || 'Sem Centro';
+        if (!c.centros_custo_map[ccValor]) {
+          c.centros_custo_map[ccValor] = {
+            centro_custo: ccValor,
+            os_set: new Set(),
+            total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
+            soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+          };
+        }
+        c.centros_custo_map[ccValor].soma_valor += parseFloat(linhaValor?.valor) || 0;
+        c.centros_custo_map[ccValor].soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+        c.centros_custo_map[ccValor].os_set.add(os);
+        
         linhasParaProcessar.forEach(l => {
-          // Métricas do cliente total
+          // Métricas do cliente total (prazo e tempo)
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
           else c.sem_prazo++;
           
-          c.soma_valor += parseFloat(l.valor) || 0;
-          c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
             c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
             c.count_tempo++;
           }
           
-          // Agrupar por centro de custo
+          // Agrupar por centro de custo (prazo e entregas)
           const cc = l.centro_custo || 'Sem Centro';
           if (!c.centros_custo_map[cc]) {
             c.centros_custo_map[cc] = {
@@ -6174,13 +6204,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             };
           }
           const ccData = c.centros_custo_map[cc];
-          ccData.os_set.add(os);
           ccData.total_entregas++;
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
           else ccData.sem_prazo++;
-          ccData.soma_valor += parseFloat(l.valor) || 0;
-          ccData.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
             ccData.soma_tempo += parseFloat(l.tempo_execucao_minutos);
             ccData.count_tempo++;
