@@ -777,6 +777,14 @@ async function createTables() {
     // Migration: Adicionar coluna ponto se não existir
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
     
+    // Migration: Aumentar tamanho de campos VARCHAR que podem ser pequenos demais
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN estado TYPE VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN status TYPE VARCHAR(100)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN motivo TYPE VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN ocorrencia TYPE VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN execucao_comp TYPE VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN execucao_espera TYPE VARCHAR(50)`).catch(() => {});
+    
     // Índices do BI
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_data ON bi_entregas(data_solicitado)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_cliente ON bi_entregas(cod_cliente)`).catch(() => {});
@@ -5174,7 +5182,7 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-09-v3-melhor-deteccao-datas';
+    const versao = '2025-12-09-v4-varchar-aumentado';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -5509,33 +5517,36 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           // Se ainda não tem ponto, usa 1 como padrão
           if (ponto === 0) ponto = 1;
           
+          // Função para truncar strings (evita erro de tamanho)
+          const truncar = (str, max) => str ? String(str).substring(0, max) : null;
+          
           dadosLote.push({
             os,
             ponto,
-            num_pedido: e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'] || null,
+            num_pedido: truncar(e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'], 100),
             cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
-            nome_cliente: e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'] || null,
-            empresa: e.empresa || e.Empresa || null,
-            nome_fantasia: e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'] || null,
-            centro_custo: e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto || null,
-            cidade_p1: e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'] || null,
+            nome_cliente: truncar(e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'], 255),
+            empresa: truncar(e.empresa || e.Empresa, 255),
+            nome_fantasia: truncar(e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'], 255),
+            centro_custo: truncar(e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto, 255),
+            cidade_p1: truncar(e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'], 100),
             endereco: e.endereco || null,
-            bairro: e.bairro || null,
-            cidade: e.cidade || null,
-            estado: e.estado || null,
+            bairro: truncar(e.bairro, 100),
+            cidade: truncar(e.cidade, 100),
+            estado: truncar(e.estado, 50),
             cod_prof: parseInt(e.cod_prof) || null,
-            nome_prof: e.nome_prof || null,
+            nome_prof: truncar(e.nome_prof, 255),
             data_hora: parseTimestamp(e.data_hora),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
-            categoria: e.categoria || null,
+            categoria: truncar(e.categoria, 100),
             valor: parseNum(e.valor),
             distancia: distancia,
             valor_prof: parseNum(e.valor_prof),
-            execucao_comp: e.execucao_comp ? String(e.execucao_comp) : null,
-            status: e.status || null,
-            motivo: e.motivo || null,
-            ocorrencia: e.ocorrencia || null,
+            execucao_comp: truncar(e.execucao_comp ? String(e.execucao_comp) : null, 50),
+            status: truncar(e.status, 100),
+            motivo: truncar(e.motivo, 255),
+            ocorrencia: truncar(e.ocorrencia, 255),
             velocidade_media: parseNum(e.velocidade_media),
             dentro_prazo: dentroPrazo,
             prazo_minutos: prazoMinutos,
