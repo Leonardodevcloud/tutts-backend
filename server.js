@@ -5173,6 +5173,9 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
 // DIAGNÓSTICO - verificar dados do BI
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
+    // Versão do código para verificar deploy
+    const versao = '2025-12-09-v2-limpeza-periodo';
+    
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
     
@@ -5222,7 +5225,8 @@ app.get('/api/bi/diagnostico', async (req, res) => {
       comOcorrencia: comOcorrencia.rows[0].total,
       ocorrenciasRetorno: ocorrenciasRetorno.rows[0].total,
       ocorrenciasUnicas: ocorrenciasUnicas.rows,
-      amostraEntregas: amostra.rows
+      amostraEntregas: amostra.rows,
+      versao: versao
     });
   } catch (err) {
     console.error('❌ Erro no diagnóstico:', err);
