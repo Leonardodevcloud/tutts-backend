@@ -6347,27 +6347,21 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       retornos: p.retornos
     })).sort((a, b) => b.total_entregas - a.total_entregas);
     
-    // Gráficos
-    const porTempo = await pool.query(`
-      SELECT CASE WHEN tempo_execucao_minutos IS NULL THEN 'Sem dados'
-        WHEN tempo_execucao_minutos <= 45 THEN '0-45 min'
-        WHEN tempo_execucao_minutos <= 60 THEN '45-60 min'
-        WHEN tempo_execucao_minutos <= 75 THEN '60-75 min'
-        WHEN tempo_execucao_minutos <= 90 THEN '75-90 min'
-        WHEN tempo_execucao_minutos <= 120 THEN '90-120 min'
-        ELSE '> 120 min' END as faixa, COUNT(*) as total
-      FROM bi_entregas ${where} GROUP BY 1 ORDER BY MIN(COALESCE(tempo_execucao_minutos, 0))
+    // Gráficos - retorna dados brutos para o frontend agrupar nas faixas que quiser
+    const dadosGraficos = await pool.query(`
+      SELECT 
+        tempo_execucao_minutos as tempo,
+        distancia as km
+      FROM bi_entregas 
+      ${where}
     `, params);
     
-    const porKm = await pool.query(`
-      SELECT CASE WHEN distancia IS NULL THEN 'Sem dados'
-        WHEN distancia <= 10 THEN '0-10 km' WHEN distancia <= 20 THEN '11-20 km'
-        WHEN distancia <= 30 THEN '21-30 km' WHEN distancia <= 40 THEN '31-40 km'
-        WHEN distancia <= 50 THEN '41-50 km' ELSE '> 50 km' END as faixa, COUNT(*) as total
-      FROM bi_entregas ${where} GROUP BY 1 ORDER BY MIN(COALESCE(distancia, 0))
-    `, params);
-    
-    res.json({ metricas, porCliente, porProfissional, porTempo: porTempo.rows, porKm: porKm.rows });
+    res.json({ 
+      metricas, 
+      porCliente, 
+      porProfissional, 
+      dadosGraficos: dadosGraficos.rows 
+    });
   } catch (err) {
     console.error('❌ Erro dashboard-completo:', err.message);
     res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
