@@ -5969,6 +5969,17 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       const c = porClienteMap[codCliente];
       
+      // Função para verificar se é retorno baseado na Ocorrência
+      const isRetornoCliente = (ocorrencia) => {
+        if (!ocorrencia) return false;
+        const oc = ocorrencia.toLowerCase().trim();
+        return oc.includes('cliente fechado') || 
+               oc.includes('clienteaus') ||
+               oc.includes('cliente ausente') ||
+               oc.includes('loja fechada') ||
+               oc.includes('produto incorreto');
+      };
+      
       Object.keys(osDoCliente).forEach(os => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
@@ -5997,17 +6008,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
         const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
           (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
-        
-        // Função para verificar se é retorno baseado na Ocorrência
-        const isRetornoCliente = (ocorrencia) => {
-          if (!ocorrencia) return false;
-          const oc = ocorrencia.toLowerCase().trim();
-          return oc.includes('cliente fechado') || 
-                 oc.includes('clienteaus') ||
-                 oc.includes('cliente ausente') ||
-                 oc.includes('loja fechada') ||
-                 oc.includes('produto incorreto');
-        };
         
         linhasParaProcessar.forEach(l => {
           // Métricas do cliente total
