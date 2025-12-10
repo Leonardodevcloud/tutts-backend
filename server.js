@@ -242,10 +242,29 @@ async function createTables() {
         created_at TIMESTAMP DEFAULT NOW(),
         expires_at TIMESTAMP,
         resolved_at TIMESTAMP,
-        resolved_by VARCHAR(255)
+        resolved_by VARCHAR(255),
+        link_token VARCHAR(100)
       )
     `);
     console.log('✅ Tabela indicacoes verificada');
+
+    // Nova tabela: Links de indicação (tokens únicos por usuário)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS indicacao_links (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        token VARCHAR(100) UNIQUE NOT NULL,
+        active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela indicacao_links verificada');
+
+    // Migração: adicionar coluna link_token se não existir
+    try {
+      await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS link_token VARCHAR(100)`);
+    } catch (e) {}
 
     // Migração: adicionar colunas de crédito lançado se não existirem
     try {
@@ -2550,6 +2569,178 @@ app.post('/api/indicacoes/verificar-expiradas', async (req, res) => {
     res.json({ expiradas: result.rows.length, indicacoes: result.rows });
   } catch (error) {
     console.error('❌ Erro ao verificar expiradas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NOVO SISTEMA DE LINKS DE INDICAÇÃO
+// ============================================
+
+// Gerar token único
+const gerarTokenIndicacao = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let token = '';
+  for (let i = 0; i < 12; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+};
+
+// Gerar ou obter link de indicação do usuário
+app.post('/api/indicacao-link/gerar', async (req, res) => {
+  try {
+    const { user_cod, user_name } = req.body;
+    
+    if (!user_cod || !user_name) {
+      return res.status(400).json({ error: 'user_cod e user_name são obrigatórios' });
+    }
+    
+    // Verificar se já existe um link ativo para este usuário
+    const existente = await pool.query(
+      'SELECT * FROM indicacao_links WHERE LOWER(user_cod) = LOWER($1) AND active = TRUE',
+      [user_cod]
+    );
+    
+    if (existente.rows.length > 0) {
+      return res.json(existente.rows[0]);
+    }
+    
+    // Gerar novo token único
+    let token = gerarTokenIndicacao();
+    let tentativas = 0;
+    while (tentativas < 10) {
+      const existe = await pool.query('SELECT id FROM indicacao_links WHERE token = $1', [token]);
+      if (existe.rows.length === 0) break;
+      token = gerarTokenIndicacao();
+      tentativas++;
+    }
+    
+    // Criar novo link
+    const result = await pool.query(
+      `INSERT INTO indicacao_links (user_cod, user_name, token) VALUES ($1, $2, $3) RETURNING *`,
+      [user_cod, user_name, token]
+    );
+    
+    console.log('✅ Link de indicação gerado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao gerar link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obter link existente do usuário
+app.get('/api/indicacao-link/usuario/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM indicacao_links WHERE LOWER(user_cod) = LOWER($1) AND active = TRUE',
+      [userCod]
+    );
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    console.error('❌ Erro ao buscar link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Validar token (público - para página de cadastro)
+app.get('/api/indicacao-link/validar/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const result = await pool.query(
+      'SELECT user_cod, user_name FROM indicacao_links WHERE token = $1 AND active = TRUE',
+      [token]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Link inválido ou expirado' });
+    }
+    
+    res.json({ valido: true, indicador: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao validar token:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cadastrar indicado via link (público)
+app.post('/api/indicacao-link/cadastrar', async (req, res) => {
+  try {
+    const { token, nome, telefone } = req.body;
+    
+    if (!token || !nome || !telefone) {
+      return res.status(400).json({ error: 'Token, nome e telefone são obrigatórios' });
+    }
+    
+    // Validar token
+    const linkResult = await pool.query(
+      'SELECT * FROM indicacao_links WHERE token = $1 AND active = TRUE',
+      [token]
+    );
+    
+    if (linkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Link inválido ou expirado' });
+    }
+    
+    const link = linkResult.rows[0];
+    
+    // Verificar se este telefone já foi indicado por este usuário
+    const jaIndicado = await pool.query(
+      `SELECT id FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) AND indicado_contato = $2`,
+      [link.user_cod, telefone]
+    );
+    
+    if (jaIndicado.rows.length > 0) {
+      return res.status(400).json({ error: 'Este telefone já foi indicado anteriormente' });
+    }
+    
+    // Criar indicação
+    const result = await pool.query(
+      `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, status, created_at) 
+       VALUES ($1, $2, $3, $4, $5, 'pendente', NOW()) RETURNING *`,
+      [link.user_cod, link.user_name, nome, telefone, token]
+    );
+    
+    console.log('✅ Indicação via link cadastrada:', result.rows[0]);
+    res.json({ success: true, indicacao: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao cadastrar indicado:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar indicações recebidas via link (para admin)
+app.get('/api/indicacao-link/indicacoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM indicacoes WHERE link_token IS NOT NULL ORDER BY created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar indicações via link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Estatísticas de indicações por usuário
+app.get('/api/indicacao-link/estatisticas/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT 
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'pendente' THEN 1 END) as pendentes,
+        COUNT(CASE WHEN status = 'aprovada' THEN 1 END) as aprovadas,
+        COUNT(CASE WHEN status = 'rejeitada' THEN 1 END) as rejeitadas
+       FROM indicacoes 
+       WHERE LOWER(user_cod) = LOWER($1) AND link_token IS NOT NULL`,
+      [userCod]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao buscar estatísticas:', error);
     res.status(500).json({ error: error.message });
   }
 });
