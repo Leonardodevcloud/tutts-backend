@@ -5861,6 +5861,17 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     let totalRetornos = 0;
     let ultimaEntrega = null;
     
+    // Função para verificar se é retorno baseado na Ocorrência
+    const isRetorno = (ocorrencia) => {
+      if (!ocorrencia) return false;
+      const oc = ocorrencia.toLowerCase().trim();
+      return oc.includes('cliente fechado') || 
+             oc.includes('clienteaus') ||
+             oc.includes('cliente ausente') ||
+             oc.includes('loja fechada') ||
+             oc.includes('produto incorreto');
+    };
+    
     // Processar por cliente/OS
     Object.keys(osPorCliente).forEach(codCliente => {
       const osDoCliente = osPorCliente[codCliente];
@@ -5893,17 +5904,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
-        
-        // Função para verificar se é retorno baseado na Ocorrência
-        const isRetorno = (ocorrencia) => {
-          if (!ocorrencia) return false;
-          const oc = ocorrencia.toLowerCase().trim();
-          return oc.includes('cliente fechado') || 
-                 oc.includes('clienteaus') ||
-                 oc.includes('cliente ausente') ||
-                 oc.includes('loja fechada') ||
-                 oc.includes('produto incorreto');
-        };
         
         // Função para processar métricas de uma linha
         const processarLinha = (l) => {
