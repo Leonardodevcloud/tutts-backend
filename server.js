@@ -5174,7 +5174,7 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-09-v2-limpeza-periodo';
+    const versao = '2025-12-09-v3-melhor-deteccao-datas';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -5261,18 +5261,57 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     
     console.log(`📤 Iniciando upload de ${entregas.length} entregas...`);
     
+    // Log da primeira entrega para debug
+    if (entregas.length > 0) {
+      console.log('📋 Campos de data da primeira entrega:', {
+        data_hora: entregas[0].data_hora,
+        data_solicitado: entregas[0].data_solicitado,
+        finalizado: entregas[0].finalizado
+      });
+    }
+    
     // Detectar período das entregas para limpar dados antigos
     let dataMin = null, dataMax = null;
+    let datasEncontradas = 0;
+    
     for (const e of entregas) {
-      const data = e.data_hora || e.data_solicitado;
-      if (data) {
-        const d = new Date(typeof data === 'number' ? (data - 25569) * 86400000 : data);
-        if (!isNaN(d.getTime())) {
-          if (!dataMin || d < dataMin) dataMin = d;
-          if (!dataMax || d > dataMax) dataMax = d;
+      // Tentar múltiplos campos de data
+      const camposData = [e.data_hora, e.data_solicitado, e.finalizado];
+      
+      for (const data of camposData) {
+        if (data) {
+          let d = null;
+          
+          // Se for número (serial do Excel)
+          if (typeof data === 'number') {
+            d = new Date((data - 25569) * 86400000);
+          }
+          // Se for string
+          else if (typeof data === 'string') {
+            // Tentar formato DD/MM/YYYY
+            const match = data.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (match) {
+              d = new Date(match[3], match[2] - 1, match[1]);
+            } else {
+              d = new Date(data);
+            }
+          }
+          // Se já for Date
+          else if (data instanceof Date) {
+            d = data;
+          }
+          
+          if (d && !isNaN(d.getTime())) {
+            datasEncontradas++;
+            if (!dataMin || d < dataMin) dataMin = d;
+            if (!dataMax || d > dataMax) dataMax = d;
+            break; // Já encontrou uma data válida nessa linha
+          }
         }
       }
     }
+    
+    console.log(`📅 Datas encontradas em ${datasEncontradas} de ${entregas.length} linhas`);
     
     // Limpar dados do período antes de inserir (evita duplicatas)
     if (dataMin && dataMax) {
@@ -5280,12 +5319,15 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       const dataFimStr = dataMax.toISOString().split('T')[0];
       console.log(`🧹 Limpando dados existentes de ${dataInicioStr} a ${dataFimStr}...`);
       
+      // Limpar por data_hora (TIMESTAMP) ao invés de data_solicitado
       const deleteResult = await pool.query(`
         DELETE FROM bi_entregas 
-        WHERE data_solicitado >= $1 AND data_solicitado <= $2
+        WHERE DATE(data_hora) >= $1 AND DATE(data_hora) <= $2
       `, [dataInicioStr, dataFimStr]);
       
       console.log(`🧹 ${deleteResult.rowCount} registros removidos do período`);
+    } else {
+      console.log(`⚠️ Não foi possível detectar período das datas - nenhum dado será limpo`);
     }
     
     // Buscar configurações de prazo
