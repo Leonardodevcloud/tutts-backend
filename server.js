@@ -5873,9 +5873,15 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const entregasOS = calcularEntregasOS(linhasOS);
         totalEntregas += entregasOS;
         
-        // Contagem de profissionais
+        // Contagem de profissionais e RETORNOS (em todas as linhas)
         linhasOS.forEach((row) => {
           profissionais.add(row.cod_prof);
+          
+          // RETORNO = ocorrência indica problema (conta em TODAS as linhas)
+          if (isRetorno(row.ocorrencia)) {
+            totalRetornos++;
+          }
+          
           // Última entrega
           if (row.finalizado) {
             const dataFin = new Date(row.finalizado);
@@ -5904,11 +5910,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
           else semPrazo++; // null ou undefined
-          
-          // RETORNO = ocorrência indica problema (conta apenas nas linhas de entrega)
-          if (isRetorno(l.ocorrencia)) {
-            totalRetornos++;
-          }
           
           somaValor += parseFloat(l.valor) || 0;
           somaValorProf += parseFloat(l.valor_prof) || 0;
@@ -5972,9 +5973,15 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
         
-        // Coletar profissionais e última entrega
+        // Coletar profissionais, última entrega e RETORNOS (em todas as linhas)
         linhasOS.forEach(l => {
           c.profissionais_set.add(l.cod_prof);
+          
+          // RETORNO = ocorrência indica problema (conta em TODAS as linhas)
+          if (isRetornoCliente(l.ocorrencia)) {
+            c.total_retornos++;
+          }
+          
           if (l.finalizado) {
             const dataFin = new Date(l.finalizado);
             if (!c.ultima_entrega || dataFin > c.ultima_entrega) {
@@ -6008,11 +6015,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           else if (l.dentro_prazo === false) c.fora_prazo++;
           else c.sem_prazo++;
           
-          // Retorno = ocorrência indica problema (apenas nas linhas de entrega)
-          if (isRetornoCliente(l.ocorrencia)) {
-            c.total_retornos++;
-          }
-          
           c.soma_valor += parseFloat(l.valor) || 0;
           c.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
@@ -6036,13 +6038,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
           else ccData.sem_prazo++;
-          // Retorno = ocorrência indica problema
-          if (isRetornoCliente(l.ocorrencia)) ccData.total_retornos++;
           ccData.soma_valor += parseFloat(l.valor) || 0;
           ccData.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
             ccData.soma_tempo += parseFloat(l.tempo_execucao_minutos);
             ccData.count_tempo++;
+          }
+        });
+        
+        // Contar retornos por centro de custo (em TODAS as linhas da OS)
+        linhasOS.forEach(l => {
+          const cc = l.centro_custo || 'Sem Centro';
+          if (c.centros_custo_map[cc] && isRetornoCliente(l.ocorrencia)) {
+            c.centros_custo_map[cc].total_retornos++;
           }
         });
       });
@@ -6146,11 +6154,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const entregasOS = calcularEntregasOS(linhas);
         p.total_entregas += entregasOS;
         
-        // Contagem de retornos (ocorrência indica problema) - apenas linhas de entrega
-        const linhasEntregaRetorno = linhas.filter(l => parseInt(l.ponto) >= 2);
-        const linhasParaRetorno = linhasEntregaRetorno.length > 0 ? linhasEntregaRetorno : 
-          (linhas.length > 1 ? linhas.slice(1) : linhas);
-        linhasParaRetorno.forEach(l => {
+        // Contagem de retornos (ocorrência indica problema) - TODAS as linhas
+        linhas.forEach(l => {
           if (isRetornoProf(l.ocorrencia)) p.retornos++;
         });
         
