@@ -5873,14 +5873,25 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
         const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
         
+        // Função para verificar se é retorno baseado na Ocorrência
+        const isRetorno = (ocorrencia) => {
+          if (!ocorrencia) return false;
+          const oc = ocorrencia.toLowerCase().trim();
+          return oc.includes('cliente fechado') || 
+                 oc.includes('clienteaus') ||
+                 oc.includes('cliente ausente') ||
+                 oc.includes('loja fechada') ||
+                 oc.includes('produto incorreto');
+        };
+        
         // Função para processar métricas de uma linha
         const processarLinha = (l) => {
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
           else semPrazo++; // null ou undefined
           
-          // RETORNO = motivo contém "erro" (conta apenas nas linhas de entrega)
-          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
+          // RETORNO = ocorrência indica problema (conta apenas nas linhas de entrega)
+          if (isRetorno(l.ocorrencia)) {
             totalRetornos++;
           }
           
@@ -5965,14 +5976,25 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
           (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
         
+        // Função para verificar se é retorno baseado na Ocorrência
+        const isRetornoCliente = (ocorrencia) => {
+          if (!ocorrencia) return false;
+          const oc = ocorrencia.toLowerCase().trim();
+          return oc.includes('cliente fechado') || 
+                 oc.includes('clienteaus') ||
+                 oc.includes('cliente ausente') ||
+                 oc.includes('loja fechada') ||
+                 oc.includes('produto incorreto');
+        };
+        
         linhasParaProcessar.forEach(l => {
           // Métricas do cliente total
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
           else c.sem_prazo++;
           
-          // Retorno = motivo contém "erro" (apenas nas linhas de entrega)
-          if (l.motivo && l.motivo.toLowerCase().includes('erro')) {
+          // Retorno = ocorrência indica problema (apenas nas linhas de entrega)
+          if (isRetornoCliente(l.ocorrencia)) {
             c.total_retornos++;
           }
           
@@ -5999,8 +6021,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
           else ccData.sem_prazo++;
-          // Retorno = motivo contém "erro"
-          if (l.motivo && l.motivo.toLowerCase().includes('erro')) ccData.total_retornos++;
+          // Retorno = ocorrência indica problema
+          if (isRetornoCliente(l.ocorrencia)) ccData.total_retornos++;
           ccData.soma_valor += parseFloat(l.valor) || 0;
           ccData.soma_valor_prof += parseFloat(l.valor_prof) || 0;
           if (l.tempo_execucao_minutos != null) {
@@ -6093,14 +6115,28 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       const p = porProfMap[codProf];
       
+      // Função para verificar se é retorno baseado na Ocorrência
+      const isRetornoProf = (ocorrencia) => {
+        if (!ocorrencia) return false;
+        const oc = ocorrencia.toLowerCase().trim();
+        return oc.includes('cliente fechado') || 
+               oc.includes('clienteaus') ||
+               oc.includes('cliente ausente') ||
+               oc.includes('loja fechada') ||
+               oc.includes('produto incorreto');
+      };
+      
       Object.keys(osDoProf).forEach(os => {
         const { codCliente, linhas } = osDoProf[os];
         const entregasOS = calcularEntregasOS(linhas);
         p.total_entregas += entregasOS;
         
-        // Contagem de retornos (motivo = 'erro')
-        linhas.forEach(l => {
-          if (l.motivo && l.motivo.toLowerCase().includes('erro')) p.retornos++;
+        // Contagem de retornos (ocorrência indica problema) - apenas linhas de entrega
+        const linhasEntregaRetorno = linhas.filter(l => parseInt(l.ponto) >= 2);
+        const linhasParaRetorno = linhasEntregaRetorno.length > 0 ? linhasEntregaRetorno : 
+          (linhas.length > 1 ? linhas.slice(1) : linhas);
+        linhasParaRetorno.forEach(l => {
+          if (isRetornoProf(l.ocorrencia)) p.retornos++;
         });
         
         // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
