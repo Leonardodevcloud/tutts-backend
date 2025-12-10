@@ -5187,6 +5187,12 @@ app.get('/api/bi/diagnostico', async (req, res) => {
     const comCentroCusto = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != ''`);
     const centrosUnicos = await pool.query(`SELECT DISTINCT centro_custo, cod_cliente FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' LIMIT 20`);
     
+    // Verificar motivos (retornos)
+    const comMotivo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE motivo IS NOT NULL AND motivo != ''`);
+    const motivosErro = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE LOWER(motivo) LIKE '%erro%'`);
+    const motivosUnicos = await pool.query(`SELECT DISTINCT motivo, COUNT(*) as qtd FROM bi_entregas WHERE motivo IS NOT NULL AND motivo != '' GROUP BY motivo ORDER BY qtd DESC LIMIT 20`);
+    const amostraErros = await pool.query(`SELECT os, ponto, cod_cliente, motivo FROM bi_entregas WHERE LOWER(motivo) LIKE '%erro%' LIMIT 10`);
+    
     res.json({
       prazoPadrao: prazoPadrao.rows,
       totalEntregas: entregas.rows[0].total,
@@ -5195,6 +5201,10 @@ app.get('/api/bi/diagnostico', async (req, res) => {
       foraPrazo: foraPrazo.rows[0].total,
       comCentroCusto: comCentroCusto.rows[0].total,
       centrosUnicos: centrosUnicos.rows,
+      comMotivo: comMotivo.rows[0].total,
+      motivosComErro: motivosErro.rows[0].total,
+      motivosUnicos: motivosUnicos.rows,
+      amostraErros: amostraErros.rows,
       amostraEntregas: amostra.rows
     });
   } catch (err) {
@@ -5210,10 +5220,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     
     console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
     
-    // Log para debug - verificar se centro_custo está vindo
+    // Log para debug - verificar se centro_custo e motivo estão vindo
     if (entregas && entregas.length > 0) {
       console.log('📋 Amostra primeira entrega:', JSON.stringify(entregas[0], null, 2));
       console.log('📋 Centro custo da primeira:', entregas[0].centro_custo);
+      console.log('📋 Motivo da primeira:', entregas[0].motivo);
+      
+      // Contar quantas têm motivo "erro"
+      const comErro = entregas.filter(e => e.motivo && e.motivo.toLowerCase().includes('erro'));
+      console.log(`📋 Total com motivo "erro": ${comErro.length}`);
+      if (comErro.length > 0) {
+        console.log('📋 Exemplos de motivos com erro:', comErro.slice(0, 5).map(e => e.motivo));
+      }
     }
     
     if (!entregas || entregas.length === 0) {
