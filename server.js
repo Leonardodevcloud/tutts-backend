@@ -5193,6 +5193,18 @@ app.get('/api/bi/diagnostico', async (req, res) => {
     const motivosUnicos = await pool.query(`SELECT DISTINCT motivo, COUNT(*) as qtd FROM bi_entregas WHERE motivo IS NOT NULL AND motivo != '' GROUP BY motivo ORDER BY qtd DESC LIMIT 20`);
     const amostraErros = await pool.query(`SELECT os, ponto, cod_cliente, motivo FROM bi_entregas WHERE LOWER(motivo) LIKE '%erro%' LIMIT 10`);
     
+    // Verificar ocorrências (nova regra de retornos)
+    const comOcorrencia = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != ''`);
+    const ocorrenciasRetorno = await pool.query(`
+      SELECT COUNT(*) as total FROM bi_entregas 
+      WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' 
+         OR LOWER(ocorrencia) LIKE '%clienteaus%'
+         OR LOWER(ocorrencia) LIKE '%cliente ausente%'
+         OR LOWER(ocorrencia) LIKE '%loja fechada%'
+         OR LOWER(ocorrencia) LIKE '%produto incorreto%'
+    `);
+    const ocorrenciasUnicas = await pool.query(`SELECT DISTINCT ocorrencia, COUNT(*) as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 30`);
+    
     res.json({
       prazoPadrao: prazoPadrao.rows,
       totalEntregas: entregas.rows[0].total,
@@ -5205,6 +5217,9 @@ app.get('/api/bi/diagnostico', async (req, res) => {
       motivosComErro: motivosErro.rows[0].total,
       motivosUnicos: motivosUnicos.rows,
       amostraErros: amostraErros.rows,
+      comOcorrencia: comOcorrencia.rows[0].total,
+      ocorrenciasRetorno: ocorrenciasRetorno.rows[0].total,
+      ocorrenciasUnicas: ocorrenciasUnicas.rows,
       amostraEntregas: amostra.rows
     });
   } catch (err) {
