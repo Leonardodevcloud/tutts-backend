@@ -784,6 +784,8 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prof ON bi_entregas(cod_prof)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prazo ON bi_entregas(dentro_prazo)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto ON bi_entregas(os, ponto)`).catch(() => {});
+    // Índice UNIQUE para UPSERT (ON CONFLICT)
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto_unique ON bi_entregas(os, ponto)`).catch(() => {});
 
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
@@ -5253,6 +5255,35 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return res.status(400).json({ error: 'Nenhuma entrega recebida' });
     }
     
+    console.log(`📤 Iniciando upload de ${entregas.length} entregas...`);
+    
+    // Detectar período das entregas para limpar dados antigos
+    let dataMin = null, dataMax = null;
+    for (const e of entregas) {
+      const data = e.data_hora || e.data_solicitado;
+      if (data) {
+        const d = new Date(typeof data === 'number' ? (data - 25569) * 86400000 : data);
+        if (!isNaN(d.getTime())) {
+          if (!dataMin || d < dataMin) dataMin = d;
+          if (!dataMax || d > dataMax) dataMax = d;
+        }
+      }
+    }
+    
+    // Limpar dados do período antes de inserir (evita duplicatas)
+    if (dataMin && dataMax) {
+      const dataInicioStr = dataMin.toISOString().split('T')[0];
+      const dataFimStr = dataMax.toISOString().split('T')[0];
+      console.log(`🧹 Limpando dados existentes de ${dataInicioStr} a ${dataFimStr}...`);
+      
+      const deleteResult = await pool.query(`
+        DELETE FROM bi_entregas 
+        WHERE data_solicitado >= $1 AND data_solicitado <= $2
+      `, [dataInicioStr, dataFimStr]);
+      
+      console.log(`🧹 ${deleteResult.rowCount} registros removidos do período`);
+    }
+    
     // Buscar configurações de prazo
     const prazosCliente = await pool.query(`
       SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
@@ -5379,106 +5410,124 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     let erros = 0;
     let dentroPrazoCount = 0;
     let foraPrazoCount = 0;
+    let linhasIgnoradas = 0;
+    let motivosIgnoradas = {};
     
-    for (const e of entregas) {
-      try {
-        const os = parseInt(e.os);
-        if (!os) {
-          erros++;
-          continue;
-        }
-        
-        const distancia = parseNum(e.distancia) || 0;
-        const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-        
-        // Calcular tempo de execução usando Execução Comp. ou (Finalizado - Data/Hora)
-        const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
-        
-        const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
-        
-        if (dentroPrazo === true) dentroPrazoCount++;
-        if (dentroPrazo === false) foraPrazoCount++;
-        
-        // Extrair número do ponto
-        // Primeiro tenta campos específicos, depois extrai do endereço (ex: "Ponto 1 - Rua...")
-        let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
-        
-        // Se não encontrou ponto, tenta extrair do endereço
-        if (ponto === 0 && e.endereco) {
-          const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
-          if (matchPonto) {
-            ponto = parseInt(matchPonto[1]) || 1;
+    // Processar em lotes para melhor performance
+    const BATCH_SIZE = 500;
+    const totalBatches = Math.ceil(entregas.length / BATCH_SIZE);
+    
+    console.log(`📦 Processando ${entregas.length} linhas em ${totalBatches} lotes de ${BATCH_SIZE}`);
+    
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+      const start = batchIndex * BATCH_SIZE;
+      const end = Math.min(start + BATCH_SIZE, entregas.length);
+      const batch = entregas.slice(start, end);
+      
+      console.log(`📦 Processando lote ${batchIndex + 1}/${totalBatches} (linhas ${start + 1} a ${end})`);
+      
+      // Preparar dados do lote
+      const dadosLote = [];
+      
+      for (const e of batch) {
+        try {
+          const os = parseInt(e.os);
+          if (!os) {
+            linhasIgnoradas++;
+            motivosIgnoradas['OS inválida'] = (motivosIgnoradas['OS inválida'] || 0) + 1;
+            continue;
           }
+          
+          const distancia = parseNum(e.distancia) || 0;
+          const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
+          
+          // Calcular tempo de execução usando Execução Comp. ou (Finalizado - Data/Hora)
+          const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
+          
+          const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+          
+          if (dentroPrazo === true) dentroPrazoCount++;
+          if (dentroPrazo === false) foraPrazoCount++;
+          
+          // Extrair número do ponto
+          let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
+          
+          // Se não encontrou ponto, tenta extrair do endereço
+          if (ponto === 0 && e.endereco) {
+            const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
+            if (matchPonto) {
+              ponto = parseInt(matchPonto[1]) || 1;
+            }
+          }
+          
+          // Se ainda não tem ponto, usa 1 como padrão
+          if (ponto === 0) ponto = 1;
+          
+          dadosLote.push({
+            os,
+            ponto,
+            num_pedido: e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'] || null,
+            cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
+            nome_cliente: e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'] || null,
+            empresa: e.empresa || e.Empresa || null,
+            nome_fantasia: e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'] || null,
+            centro_custo: e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto || null,
+            cidade_p1: e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'] || null,
+            endereco: e.endereco || null,
+            bairro: e.bairro || null,
+            cidade: e.cidade || null,
+            estado: e.estado || null,
+            cod_prof: parseInt(e.cod_prof) || null,
+            nome_prof: e.nome_prof || null,
+            data_hora: parseTimestamp(e.data_hora),
+            finalizado: parseTimestamp(e.finalizado),
+            data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
+            categoria: e.categoria || null,
+            valor: parseNum(e.valor),
+            distancia: distancia,
+            valor_prof: parseNum(e.valor_prof),
+            execucao_comp: e.execucao_comp ? String(e.execucao_comp) : null,
+            status: e.status || null,
+            motivo: e.motivo || null,
+            ocorrencia: e.ocorrencia || null,
+            velocidade_media: parseNum(e.velocidade_media),
+            dentro_prazo: dentroPrazo,
+            prazo_minutos: prazoMinutos,
+            tempo_execucao_minutos: tempoExecucao,
+            data_upload: data_referencia || new Date().toISOString().split('T')[0]
+          });
+        } catch (err) {
+          linhasIgnoradas++;
+          motivosIgnoradas['Erro parsing'] = (motivosIgnoradas['Erro parsing'] || 0) + 1;
         }
-        
-        // Se ainda não tem ponto, usa 1 como padrão
-        if (ponto === 0) ponto = 1;
-        
-        // Log para debug (primeiras 10 entregas)
-        if (inseridos + atualizados < 10) {
-          console.log(`📊 OS ${os} Ponto ${ponto}: dist=${distancia}km, execComp=${e.execucao_comp} (tipo: ${typeof e.execucao_comp}), tempo=${tempoExecucao}min, prazo=${prazoMinutos}min, dentro=${dentroPrazo}`);
-        }
-        
-        // Preparar dados
-        const dados = {
-          os,
-          ponto,
-          num_pedido: e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'] || null,
-          cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
-          nome_cliente: e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'] || null,
-          empresa: e.empresa || e.Empresa || null,
-          nome_fantasia: e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'] || null,
-          centro_custo: e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto || null,
-          cidade_p1: e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'] || null,
-          endereco: e.endereco || null,
-          bairro: e.bairro || null,
-          cidade: e.cidade || null,
-          estado: e.estado || null,
-          cod_prof: parseInt(e.cod_prof) || null,
-          nome_prof: e.nome_prof || null,
-          data_hora: parseTimestamp(e.data_hora),
-          finalizado: parseTimestamp(e.finalizado),
-          data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
-          categoria: e.categoria || null,
-          valor: parseNum(e.valor),
-          distancia: distancia,
-          valor_prof: parseNum(e.valor_prof),
-          execucao_comp: e.execucao_comp ? String(e.execucao_comp) : null,
-          status: e.status || null,
-          motivo: e.motivo || null,
-          ocorrencia: e.ocorrencia || null,
-          velocidade_media: parseNum(e.velocidade_media),
-          dentro_prazo: dentroPrazo,
-          prazo_minutos: prazoMinutos,
-          tempo_execucao_minutos: tempoExecucao
-        };
-        
-        // Verificar se já existe (mesmo OS + Ponto)
-        const existe = await pool.query(`SELECT id FROM bi_entregas WHERE os = $1 AND ponto = $2`, [os, ponto]);
-        
-        if (existe.rows.length > 0) {
-          await pool.query(`
-            UPDATE bi_entregas SET
-              num_pedido = $3, cod_cliente = $4, nome_cliente = $5, empresa = $6,
-              nome_fantasia = $7, centro_custo = $8, cidade_p1 = $9, endereco = $10,
-              bairro = $11, cidade = $12, estado = $13, cod_prof = $14, nome_prof = $15,
-              data_hora = $16, finalizado = $17, data_solicitado = $18,
-              categoria = $19, valor = $20, distancia = $21, valor_prof = $22,
-              execucao_comp = $23, status = $24, motivo = $25, ocorrencia = $26, velocidade_media = $27,
-              dentro_prazo = $28, prazo_minutos = $29, tempo_execucao_minutos = $30
-            WHERE os = $1 AND ponto = $2
-          `, [
-            dados.os, dados.ponto, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
-            dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
-            dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
-            dados.data_hora, dados.finalizado, dados.data_solicitado,
-            dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
-            dados.execucao_comp, dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
-            dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos
-          ]);
-          atualizados++;
-        } else {
-          await pool.query(`
+      }
+      
+      // Inserir lote usando INSERT ... ON CONFLICT (UPSERT)
+      if (dadosLote.length > 0) {
+        try {
+          // Construir query de inserção em massa
+          const valores = [];
+          const params = [];
+          let paramIndex = 1;
+          
+          for (const d of dadosLote) {
+            const indices = [];
+            for (let i = 0; i < 31; i++) {
+              indices.push(`$${paramIndex++}`);
+            }
+            valores.push(`(${indices.join(',')})`);
+            params.push(
+              d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
+              d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
+              d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
+              d.data_hora, d.finalizado, d.data_solicitado,
+              d.categoria, d.valor, d.distancia, d.valor_prof,
+              d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
+              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+            );
+          }
+          
+          const query = `
             INSERT INTO bi_entregas (
               os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
@@ -5487,28 +5536,63 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
-          `, [
-            dados.os, dados.ponto, dados.num_pedido, dados.cod_cliente, dados.nome_cliente, dados.empresa,
-            dados.nome_fantasia, dados.centro_custo, dados.cidade_p1, dados.endereco,
-            dados.bairro, dados.cidade, dados.estado, dados.cod_prof, dados.nome_prof,
-            dados.data_hora, dados.finalizado, dados.data_solicitado,
-            dados.categoria, dados.valor, dados.distancia, dados.valor_prof,
-            dados.execucao_comp, dados.status, dados.motivo, dados.ocorrencia, dados.velocidade_media,
-            dados.dentro_prazo, dados.prazo_minutos, dados.tempo_execucao_minutos, 
-            data_referencia || new Date().toISOString().split('T')[0]
-          ]);
-          inseridos++;
+            ) VALUES ${valores.join(',')}
+          `;
+          
+          const result = await pool.query(query, params);
+          inseridos += dadosLote.length;
+          
+        } catch (batchErr) {
+          console.error(`❌ Erro no lote ${batchIndex + 1}:`, batchErr.message);
+          // Se falhar o batch, tenta inserir um por um
+          for (const d of dadosLote) {
+            try {
+              await pool.query(`
+                INSERT INTO bi_entregas (
+                  os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
+                  nome_fantasia, centro_custo, cidade_p1, endereco,
+                  bairro, cidade, estado, cod_prof, nome_prof,
+                  data_hora, finalizado, data_solicitado,
+                  categoria, valor, distancia, valor_prof,
+                  execucao_comp, status, motivo, ocorrencia, velocidade_media,
+                  dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+              `, [
+                d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
+                d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
+                d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
+                d.data_hora, d.finalizado, d.data_solicitado,
+                d.categoria, d.valor, d.distancia, d.valor_prof,
+                d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
+                d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+              ]);
+              inseridos++;
+            } catch (singleErr) {
+              console.error(`❌ Erro individual OS ${d.os} Ponto ${d.ponto}:`, singleErr.message);
+              erros++;
+            }
+          }
         }
-      } catch (err) {
-        console.error('Erro ao processar entrega:', e.os, err.message);
-        erros++;
       }
     }
     
-    console.log(`✅ Upload concluído: ${inseridos} inseridos, ${atualizados} atualizados, ${erros} erros`);
+    console.log(`✅ Upload concluído: ${inseridos} processados, ${erros} erros, ${linhasIgnoradas} ignoradas`);
     console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
-    res.json({ success: true, inseridos, atualizados, erros, total: entregas.length, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount });
+    if (Object.keys(motivosIgnoradas).length > 0) {
+      console.log(`⚠️ Motivos de linhas ignoradas:`, motivosIgnoradas);
+    }
+    
+    res.json({ 
+      success: true, 
+      inseridos, 
+      atualizados, 
+      erros, 
+      linhasIgnoradas,
+      motivosIgnoradas,
+      total: entregas.length, 
+      dentroPrazo: dentroPrazoCount, 
+      foraPrazo: foraPrazoCount 
+    });
   } catch (err) {
     console.error('❌ Erro no upload:', err);
     res.status(500).json({ error: 'Erro ao fazer upload: ' + err.message });
