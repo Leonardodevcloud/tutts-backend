@@ -255,11 +255,21 @@ async function createTables() {
         user_cod VARCHAR(50) NOT NULL,
         user_name VARCHAR(255) NOT NULL,
         token VARCHAR(100) UNIQUE NOT NULL,
+        promocao_id INTEGER,
+        regiao VARCHAR(255),
+        valor_bonus DECIMAL(10,2),
         active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
     console.log('✅ Tabela indicacao_links verificada');
+
+    // Migração: adicionar colunas de promoção na tabela indicacao_links
+    try {
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS promocao_id INTEGER`);
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS regiao VARCHAR(255)`);
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS valor_bonus DECIMAL(10,2)`);
+    } catch (e) {}
 
     // Migração: adicionar coluna link_token se não existir
     try {
@@ -851,7 +861,11 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Health check
+// Health check (raiz e /api/health)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'API funcionando' });
 });
@@ -2590,23 +2604,13 @@ const gerarTokenIndicacao = () => {
 // Gerar ou obter link de indicação do usuário
 app.post('/api/indicacao-link/gerar', async (req, res) => {
   try {
-    const { user_cod, user_name } = req.body;
+    const { user_cod, user_name, promocao_id, regiao, valor_bonus } = req.body;
     
     if (!user_cod || !user_name) {
       return res.status(400).json({ error: 'user_cod e user_name são obrigatórios' });
     }
     
-    // Verificar se já existe um link ativo para este usuário
-    const existente = await pool.query(
-      'SELECT * FROM indicacao_links WHERE LOWER(user_cod) = LOWER($1) AND active = TRUE',
-      [user_cod]
-    );
-    
-    if (existente.rows.length > 0) {
-      return res.json(existente.rows[0]);
-    }
-    
-    // Gerar novo token único
+    // Gerar novo token único (sempre gera um novo para cada promoção)
     let token = gerarTokenIndicacao();
     let tentativas = 0;
     while (tentativas < 10) {
@@ -2616,10 +2620,11 @@ app.post('/api/indicacao-link/gerar', async (req, res) => {
       tentativas++;
     }
     
-    // Criar novo link
+    // Criar novo link com dados da promoção
     const result = await pool.query(
-      `INSERT INTO indicacao_links (user_cod, user_name, token) VALUES ($1, $2, $3) RETURNING *`,
-      [user_cod, user_name, token]
+      `INSERT INTO indicacao_links (user_cod, user_name, token, promocao_id, regiao, valor_bonus) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [user_cod, user_name, token, promocao_id || null, regiao || null, valor_bonus || null]
     );
     
     console.log('✅ Link de indicação gerado:', result.rows[0]);
@@ -2674,7 +2679,7 @@ app.post('/api/indicacao-link/cadastrar', async (req, res) => {
       return res.status(400).json({ error: 'Token, nome e telefone são obrigatórios' });
     }
     
-    // Validar token
+    // Validar token e pegar dados da promoção
     const linkResult = await pool.query(
       'SELECT * FROM indicacao_links WHERE token = $1 AND active = TRUE',
       [token]
@@ -2696,11 +2701,11 @@ app.post('/api/indicacao-link/cadastrar', async (req, res) => {
       return res.status(400).json({ error: 'Este telefone já foi indicado anteriormente' });
     }
     
-    // Criar indicação
+    // Criar indicação com dados da promoção
     const result = await pool.query(
-      `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, status, created_at) 
-       VALUES ($1, $2, $3, $4, $5, 'pendente', NOW()) RETURNING *`,
-      [link.user_cod, link.user_name, nome, telefone, token]
+      `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, promocao_id, regiao, valor_bonus, status, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pendente', NOW()) RETURNING *`,
+      [link.user_cod, link.user_name, nome, telefone, token, link.promocao_id, link.regiao, link.valor_bonus]
     );
     
     console.log('✅ Indicação via link cadastrada:', result.rows[0]);
