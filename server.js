@@ -7115,32 +7115,32 @@ app.delete('/api/bi/entregas', async (req, res) => {
 });
 
 // ============================================
-// RELATÓRIO INTELIGENTE COM IA (Gemini)
+// RELATÓRIO INTELIGENTE COM IA (Groq - Llama)
 // ============================================
 
-const GEMINI_API_KEY = 'AIzaSyDWpxtQVqYmANvHT46ynDY59crzw3RrRig';
+const GROQ_API_KEY = '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';
 const https = require('https');
 
-// Função auxiliar para fazer requisição HTTPS
-const fazerRequisicaoGemini = (prompt) => {
+// Função auxiliar para fazer requisição ao Groq
+const fazerRequisicaoIA = (prompt) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 1000
-      }
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 1000
     });
 
     const options = {
-      hostname: 'generativelanguage.googleapis.com',
+      hostname: 'api.groq.com',
       port: 443,
-      path: `/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`,
+      path: '/openai/v1/chat/completions',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Length': Buffer.byteLength(postData)
       }
     };
@@ -7151,10 +7151,10 @@ const fazerRequisicaoGemini = (prompt) => {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          if (json.candidates && json.candidates[0]?.content?.parts?.[0]?.text) {
-            resolve(json.candidates[0].content.parts[0].text);
+          if (json.choices && json.choices[0]?.message?.content) {
+            resolve(json.choices[0].message.content);
           } else if (json.error) {
-            reject(new Error(json.error.message || 'Erro na API Gemini'));
+            reject(new Error(json.error.message || 'Erro na API Groq'));
           } else {
             reject(new Error('Resposta inválida da API'));
           }
@@ -7264,7 +7264,7 @@ Estruture o relatório assim:
 Seja conciso, máximo 300 palavras.`;
 
     // Chamar API do Gemini
-    const relatorio = await fazerRequisicaoGemini(prompt);
+    const relatorio = await fazerRequisicaoIA(prompt);
     
     res.json({ 
       success: true, 
