@@ -7114,6 +7114,143 @@ app.delete('/api/bi/entregas', async (req, res) => {
   }
 });
 
+// ============================================
+// RELATÓRIO INTELIGENTE COM IA (Gemini)
+// ============================================
+
+const GEMINI_API_KEY = 'AIzaSyDWpxtQVqYmANvHT46ynDY59crzw3RrRig';
+
+app.post('/api/relatorio-ia', async (req, res) => {
+  try {
+    const { tipo = 'financeiro', periodo = 'hoje' } = req.body;
+    
+    // Definir período
+    let dataInicio, dataFim;
+    const agora = new Date();
+    
+    if (periodo === 'hoje') {
+      dataInicio = new Date(agora);
+      dataInicio.setHours(0, 0, 0, 0);
+      dataFim = new Date(agora);
+      dataFim.setHours(23, 59, 59, 999);
+    } else if (periodo === 'semana') {
+      dataInicio = new Date(agora);
+      dataInicio.setDate(agora.getDate() - 7);
+      dataInicio.setHours(0, 0, 0, 0);
+      dataFim = new Date(agora);
+    } else if (periodo === 'mes') {
+      dataInicio = new Date(agora.getFullYear(), agora.getMonth(), 1);
+      dataFim = new Date(agora);
+    }
+    
+    // Buscar dados do banco
+    let dados = {};
+    
+    if (tipo === 'financeiro') {
+      // Saques
+      const saques = await pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado' OR status = 'aprovado_gratuidade') as aprovados,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
+          COUNT(*) FILTER (WHERE status = 'aguardando_aprovacao') as pendentes,
+          COALESCE(SUM(final_amount) FILTER (WHERE status = 'aprovado' OR status = 'aprovado_gratuidade'), 0) as valor_total,
+          COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/60) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')), 0) as tempo_medio_minutos
+        FROM withdrawals 
+        WHERE created_at >= $1 AND created_at <= $2
+      `, [dataInicio, dataFim]);
+      
+      // Top profissionais
+      const topProfissionais = await pool.query(`
+        SELECT user_name, COUNT(*) as total_saques, SUM(final_amount) as valor_total
+        FROM withdrawals 
+        WHERE created_at >= $1 AND created_at <= $2 
+          AND (status = 'aprovado' OR status = 'aprovado_gratuidade')
+        GROUP BY user_name
+        ORDER BY total_saques DESC
+        LIMIT 5
+      `, [dataInicio, dataFim]);
+      
+      dados = {
+        saques: saques.rows[0],
+        topProfissionais: topProfissionais.rows
+      };
+    } else if (tipo === 'validacoes') {
+      // Solicitações de ajuste
+      const ajustes = await pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovada') as aprovadas,
+          COUNT(*) FILTER (WHERE status = 'rejeitada') as rejeitadas,
+          COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
+        FROM submissions 
+        WHERE created_at >= $1 AND created_at <= $2
+      `, [dataInicio, dataFim]);
+      
+      dados = {
+        ajustes: ajustes.rows[0]
+      };
+    }
+    
+    // Montar prompt para a IA
+    const prompt = `Você é um assistente de análise de dados para uma empresa de entregas chamada TUTTS.
+    
+Gere um relatório executivo em português brasileiro, de forma clara e objetiva.
+Use emojis para deixar mais visual. Seja direto e analítico.
+
+Período: ${periodo === 'hoje' ? 'Hoje' : periodo === 'semana' ? 'Últimos 7 dias' : 'Este mês'}
+Data: ${agora.toLocaleDateString('pt-BR')}
+
+Dados do período:
+${JSON.stringify(dados, null, 2)}
+
+Estruture o relatório assim:
+1. 📊 RESUMO EXECUTIVO (2-3 frases principais)
+2. 📈 MÉTRICAS PRINCIPAIS (lista com números)
+3. ✅ PONTOS POSITIVOS (se houver)
+4. ⚠️ PONTOS DE ATENÇÃO (se houver)
+5. 💡 RECOMENDAÇÕES (1-2 sugestões práticas)
+
+Seja conciso, máximo 300 palavras.`;
+
+    // Chamar API do Gemini
+    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: prompt }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1000
+        }
+      })
+    });
+    
+    if (!geminiResponse.ok) {
+      const errText = await geminiResponse.text();
+      console.error('Erro Gemini:', errText);
+      throw new Error('Erro na API do Gemini');
+    }
+    
+    const geminiData = await geminiResponse.json();
+    const relatorio = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível gerar o relatório.';
+    
+    res.json({ 
+      success: true, 
+      relatorio,
+      dados,
+      periodo,
+      geradoEm: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('❌ Erro ao gerar relatório IA:', err);
+    res.status(500).json({ error: 'Erro ao gerar relatório: ' + err.message });
+  }
+});
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
