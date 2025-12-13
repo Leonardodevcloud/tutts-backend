@@ -7115,17 +7115,16 @@ app.delete('/api/bi/entregas', async (req, res) => {
 });
 
 // ============================================
-// RELATÓRIO INTELIGENTE COM IA (Groq - Llama)
+// RELATÓRIO INTELIGENTE COM IA (OpenRouter - Gratuito)
 // ============================================
 
-const GROQ_API_KEY = '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';
 const https = require('https');
 
-// Função auxiliar para fazer requisição ao Groq
+// Função auxiliar para fazer requisição ao OpenRouter
 const fazerRequisicaoIA = (prompt) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({
-      model: 'llama-3.1-8b-instant',
+      model: 'meta-llama/llama-3.2-3b-instruct:free',
       messages: [
         { role: 'user', content: prompt }
       ],
@@ -7134,13 +7133,14 @@ const fazerRequisicaoIA = (prompt) => {
     });
 
     const options = {
-      hostname: 'api.groq.com',
+      hostname: 'openrouter.ai',
       port: 443,
-      path: '/openai/v1/chat/completions',
+      path: '/api/v1/chat/completions',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'HTTP-Referer': 'https://tutts-frontend.vercel.app',
+        'X-Title': 'Central do Entregador Tutts',
         'Content-Length': Buffer.byteLength(postData)
       }
     };
@@ -7154,7 +7154,7 @@ const fazerRequisicaoIA = (prompt) => {
           if (json.choices && json.choices[0]?.message?.content) {
             resolve(json.choices[0].message.content);
           } else if (json.error) {
-            reject(new Error(json.error.message || 'Erro na API Groq'));
+            reject(new Error(json.error.message || 'Erro na API'));
           } else {
             reject(new Error('Resposta inválida da API'));
           }
