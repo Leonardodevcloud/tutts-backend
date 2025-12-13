@@ -7118,7 +7118,7 @@ app.delete('/api/bi/entregas', async (req, res) => {
 // RELATÓRIO INTELIGENTE COM IA (Google Gemini)
 // ============================================
 
-const GEMINI_API_KEY = 'AIzaSyDWpxtQVqYmANvHT46ynDY59crzw3RrRig';
+const GEMINI_API_KEY = 'AIzaSyB6yUFOY0uwX25O6hfGgMvEZq0Fa4KWxWs';
 const https = require('https');
 
 // Função auxiliar para fazer requisição ao Gemini
@@ -7137,7 +7137,7 @@ const fazerRequisicaoIA = (prompt) => {
     const options = {
       hostname: 'generativelanguage.googleapis.com',
       port: 443,
-      path: `/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
+      path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
