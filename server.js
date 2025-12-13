@@ -7115,32 +7115,32 @@ app.delete('/api/bi/entregas', async (req, res) => {
 });
 
 // ============================================
-// RELATÓRIO INTELIGENTE COM IA (OpenRouter - Gratuito)
+// RELATÓRIO INTELIGENTE COM IA (Google Gemini)
 // ============================================
 
+const GEMINI_API_KEY = 'AIzaSyDWpxtQVqYmANvHT46ynDY59crzw3RrRig';
 const https = require('https');
 
-// Função auxiliar para fazer requisição ao OpenRouter
+// Função auxiliar para fazer requisição ao Gemini
 const fazerRequisicaoIA = (prompt) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({
-      model: 'meta-llama/llama-3.2-3b-instruct:free',
-      messages: [
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 1000
+      contents: [{
+        parts: [{ text: prompt }]
+      }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 1000
+      }
     });
 
     const options = {
-      hostname: 'openrouter.ai',
+      hostname: 'generativelanguage.googleapis.com',
       port: 443,
-      path: '/api/v1/chat/completions',
+      path: `/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://tutts-frontend.vercel.app',
-        'X-Title': 'Central do Entregador Tutts',
         'Content-Length': Buffer.byteLength(postData)
       }
     };
@@ -7151,11 +7151,12 @@ const fazerRequisicaoIA = (prompt) => {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          if (json.choices && json.choices[0]?.message?.content) {
-            resolve(json.choices[0].message.content);
+          if (json.candidates && json.candidates[0]?.content?.parts?.[0]?.text) {
+            resolve(json.candidates[0].content.parts[0].text);
           } else if (json.error) {
             reject(new Error(json.error.message || 'Erro na API'));
           } else {
+            console.log('Resposta Gemini:', JSON.stringify(json));
             reject(new Error('Resposta inválida da API'));
           }
         } catch (e) {
