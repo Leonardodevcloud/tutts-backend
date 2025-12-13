@@ -7119,6 +7119,56 @@ app.delete('/api/bi/entregas', async (req, res) => {
 // ============================================
 
 const GEMINI_API_KEY = 'AIzaSyDWpxtQVqYmANvHT46ynDY59crzw3RrRig';
+const https = require('https');
+
+// Função auxiliar para fazer requisição HTTPS
+const fazerRequisicaoGemini = (prompt) => {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({
+      contents: [{
+        parts: [{ text: prompt }]
+      }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 1000
+      }
+    });
+
+    const options = {
+      hostname: 'generativelanguage.googleapis.com',
+      port: 443,
+      path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.candidates && json.candidates[0]?.content?.parts?.[0]?.text) {
+            resolve(json.candidates[0].content.parts[0].text);
+          } else if (json.error) {
+            reject(new Error(json.error.message || 'Erro na API Gemini'));
+          } else {
+            reject(new Error('Resposta inválida da API'));
+          }
+        } catch (e) {
+          reject(new Error('Erro ao processar resposta: ' + e.message));
+        }
+      });
+    });
+
+    req.on('error', (e) => reject(e));
+    req.write(postData);
+    req.end();
+  });
+};
 
 app.post('/api/relatorio-ia', async (req, res) => {
   try {
@@ -7214,28 +7264,7 @@ Estruture o relatório assim:
 Seja conciso, máximo 300 palavras.`;
 
     // Chamar API do Gemini
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: prompt }]
-        }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 1000
-        }
-      })
-    });
-    
-    if (!geminiResponse.ok) {
-      const errText = await geminiResponse.text();
-      console.error('Erro Gemini:', errText);
-      throw new Error('Erro na API do Gemini');
-    }
-    
-    const geminiData = await geminiResponse.json();
-    const relatorio = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível gerar o relatório.';
+    const relatorio = await fazerRequisicaoGemini(prompt);
     
     res.json({ 
       success: true, 
