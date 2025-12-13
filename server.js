@@ -1058,7 +1058,7 @@ app.delete('/api/users/:codProfissional', async (req, res) => {
     
     // 2. Deletar saques (withdrawals)
     deletedData.withdrawals = await safeDelete(
-      'DELETE FROM withdrawals WHERE LOWER(user_cod) = LOWER($1)',
+      'DELETE FROM withdrawal_requests WHERE LOWER(user_cod) = LOWER($1)',
       [codProfissional]
     );
     
@@ -7206,14 +7206,14 @@ app.post('/api/relatorio-ia', async (req, res) => {
           COUNT(*) FILTER (WHERE status = 'aguardando_aprovacao') as pendentes,
           COALESCE(SUM(final_amount) FILTER (WHERE status = 'aprovado' OR status = 'aprovado_gratuidade'), 0) as valor_total,
           COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/60) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')), 0) as tempo_medio_minutos
-        FROM withdrawals 
+        FROM withdrawal_requests 
         WHERE created_at >= $1 AND created_at <= $2
       `, [dataInicio, dataFim]);
       
       // Top profissionais
       const topProfissionais = await pool.query(`
         SELECT user_name, COUNT(*) as total_saques, SUM(final_amount) as valor_total
-        FROM withdrawals 
+        FROM withdrawal_requests 
         WHERE created_at >= $1 AND created_at <= $2 
           AND (status = 'aprovado' OR status = 'aprovado_gratuidade')
         GROUP BY user_name
