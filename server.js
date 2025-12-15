@@ -831,6 +831,107 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_status ON loja_pedidos(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_sugestoes_status ON loja_sugestoes(status)`).catch(() => {});
 
+    // ============================================
+    // TABELAS TO-DO
+    // ============================================
+    
+    // Tabela de Grupos de TO-DO
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_grupos (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        icone VARCHAR(50) DEFAULT '📋',
+        cor VARCHAR(20) DEFAULT '#7c3aed',
+        tipo VARCHAR(20) DEFAULT 'compartilhado',
+        criado_por VARCHAR(50) NOT NULL,
+        criado_por_nome VARCHAR(255),
+        visivel_para JSONB DEFAULT '[]',
+        ordem INT DEFAULT 0,
+        ativo BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_grupos verificada');
+
+    // Tabela principal de Tarefas TO-DO
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_tarefas (
+        id SERIAL PRIMARY KEY,
+        grupo_id INT REFERENCES todo_grupos(id) ON DELETE CASCADE,
+        titulo VARCHAR(500) NOT NULL,
+        descricao TEXT,
+        status VARCHAR(30) DEFAULT 'pendente',
+        prioridade VARCHAR(20) DEFAULT 'media',
+        data_prazo TIMESTAMP,
+        data_conclusao TIMESTAMP,
+        recorrente BOOLEAN DEFAULT FALSE,
+        tipo_recorrencia VARCHAR(20),
+        proxima_recorrencia TIMESTAMP,
+        tipo VARCHAR(20) DEFAULT 'compartilhado',
+        criado_por VARCHAR(50) NOT NULL,
+        criado_por_nome VARCHAR(255),
+        responsaveis JSONB DEFAULT '[]',
+        ordem INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        concluido_por VARCHAR(50),
+        concluido_por_nome VARCHAR(255)
+      )
+    `);
+    console.log('✅ Tabela todo_tarefas verificada');
+
+    // Tabela de Anexos das Tarefas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_anexos (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        nome_arquivo VARCHAR(500) NOT NULL,
+        tipo_arquivo VARCHAR(100),
+        tamanho INT,
+        url TEXT NOT NULL,
+        enviado_por VARCHAR(50),
+        enviado_por_nome VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_anexos verificada');
+
+    // Tabela de Comentários nas Tarefas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_comentarios (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        texto TEXT NOT NULL,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_comentarios verificada');
+
+    // Tabela de Histórico/Log de Ações
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_historico (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        acao VARCHAR(100) NOT NULL,
+        descricao TEXT,
+        user_cod VARCHAR(50),
+        user_name VARCHAR(255),
+        dados_anteriores JSONB,
+        dados_novos JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_historico verificada');
+
+    // Índices do TO-DO
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_grupo ON todo_tarefas(grupo_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_status ON todo_tarefas(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_criador ON todo_tarefas(criado_por)`).catch(() => {});
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -7113,6 +7214,513 @@ app.delete('/api/bi/entregas', async (req, res) => {
     res.status(500).json({ error: 'Erro ao limpar entregas' });
   }
 });
+
+// ============================================
+// ROTAS TO-DO - GRUPOS
+// ============================================
+
+// Listar grupos (filtrado por permissão)
+app.get('/api/todo/grupos', async (req, res) => {
+  try {
+    const { user_cod, role } = req.query;
+    
+    let query = `
+      SELECT * FROM todo_grupos 
+      WHERE ativo = TRUE
+    `;
+    
+    if (role !== 'admin_master') {
+      query += ` AND (
+        tipo = 'compartilhado' 
+        OR criado_por = '${user_cod}'
+        OR visivel_para @> '"${user_cod}"'
+      )`;
+    }
+    
+    query += ' ORDER BY ordem, nome';
+    
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar grupos:', err);
+    res.status(500).json({ error: 'Erro ao listar grupos' });
+  }
+});
+
+// Criar grupo
+app.post('/api/todo/grupos', async (req, res) => {
+  try {
+    const { nome, descricao, icone, cor, tipo, criado_por, criado_por_nome, visivel_para } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_grupos (nome, descricao, icone, cor, tipo, criado_por, criado_por_nome, visivel_para)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [nome, descricao, icone || '📋', cor || '#7c3aed', tipo || 'compartilhado', criado_por, criado_por_nome, JSON.stringify(visivel_para || [])]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar grupo:', err);
+    res.status(500).json({ error: 'Erro ao criar grupo' });
+  }
+});
+
+// Atualizar grupo
+app.put('/api/todo/grupos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, icone, cor, visivel_para } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE todo_grupos 
+      SET nome = COALESCE($1, nome),
+          descricao = COALESCE($2, descricao),
+          icone = COALESCE($3, icone),
+          cor = COALESCE($4, cor),
+          visivel_para = COALESCE($5, visivel_para),
+          updated_at = NOW()
+      WHERE id = $6
+      RETURNING *
+    `, [nome, descricao, icone, cor, JSON.stringify(visivel_para), id]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar grupo:', err);
+    res.status(500).json({ error: 'Erro ao atualizar grupo' });
+  }
+});
+
+// Excluir grupo (soft delete)
+app.delete('/api/todo/grupos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('UPDATE todo_grupos SET ativo = FALSE WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir grupo:', err);
+    res.status(500).json({ error: 'Erro ao excluir grupo' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - TAREFAS
+// ============================================
+
+// Listar tarefas (com filtros)
+app.get('/api/todo/tarefas', async (req, res) => {
+  try {
+    const { user_cod, role, grupo_id, status, responsavel } = req.query;
+    
+    let query = `
+      SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor,
+             (SELECT COUNT(*) FROM todo_anexos WHERE tarefa_id = t.id) as qtd_anexos,
+             (SELECT COUNT(*) FROM todo_comentarios WHERE tarefa_id = t.id) as qtd_comentarios
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramIndex = 1;
+    
+    if (grupo_id) {
+      query += ` AND t.grupo_id = $${paramIndex}`;
+      params.push(grupo_id);
+      paramIndex++;
+    }
+    
+    if (status && status !== 'todas') {
+      query += ` AND t.status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+    
+    if (responsavel) {
+      query += ` AND t.responsaveis @> $${paramIndex}::jsonb`;
+      params.push(JSON.stringify([{ user_cod: responsavel }]));
+      paramIndex++;
+    }
+    
+    if (role !== 'admin_master') {
+      query += ` AND (
+        t.tipo = 'compartilhado' 
+        OR t.criado_por = '${user_cod}'
+        OR t.responsaveis @> '[{"user_cod":"${user_cod}"}]'
+      )`;
+    }
+    
+    query += ' ORDER BY CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar tarefas:', err);
+    res.status(500).json({ error: 'Erro ao listar tarefas' });
+  }
+});
+
+// Buscar tarefa específica com detalhes
+app.get('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const tarefa = await pool.query(`
+      SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE t.id = $1
+    `, [id]);
+    
+    const anexos = await pool.query('SELECT * FROM todo_anexos WHERE tarefa_id = $1 ORDER BY created_at DESC', [id]);
+    const comentarios = await pool.query('SELECT * FROM todo_comentarios WHERE tarefa_id = $1 ORDER BY created_at DESC', [id]);
+    const historico = await pool.query('SELECT * FROM todo_historico WHERE tarefa_id = $1 ORDER BY created_at DESC LIMIT 20', [id]);
+    
+    res.json({
+      ...tarefa.rows[0],
+      anexos: anexos.rows,
+      comentarios: comentarios.rows,
+      historico: historico.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao buscar tarefa' });
+  }
+});
+
+// Criar tarefa
+app.post('/api/todo/tarefas', async (req, res) => {
+  try {
+    const { 
+      grupo_id, titulo, descricao, prioridade, data_prazo, 
+      recorrente, tipo_recorrencia, tipo, 
+      criado_por, criado_por_nome, responsaveis 
+    } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_tarefas (
+        grupo_id, titulo, descricao, prioridade, data_prazo,
+        recorrente, tipo_recorrencia, tipo,
+        criado_por, criado_por_nome, responsaveis
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `, [
+      grupo_id, titulo, descricao, prioridade || 'media', data_prazo,
+      recorrente || false, tipo_recorrencia, tipo || 'compartilhado',
+      criado_por, criado_por_nome, JSON.stringify(responsaveis || [])
+    ]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'criada', 'Tarefa criada', $2, $3)
+    `, [result.rows[0].id, criado_por, criado_por_nome]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao criar tarefa' });
+  }
+});
+
+// Atualizar tarefa
+app.put('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      titulo, descricao, status, prioridade, data_prazo,
+      recorrente, tipo_recorrencia, responsaveis,
+      user_cod, user_name
+    } = req.body;
+    
+    const anterior = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    
+    let concluido_por = null;
+    let concluido_por_nome = null;
+    let data_conclusao = null;
+    
+    if (status === 'concluida' && anterior.rows[0]?.status !== 'concluida') {
+      concluido_por = user_cod;
+      concluido_por_nome = user_name;
+      data_conclusao = new Date();
+    }
+    
+    const result = await pool.query(`
+      UPDATE todo_tarefas 
+      SET titulo = COALESCE($1, titulo),
+          descricao = COALESCE($2, descricao),
+          status = COALESCE($3, status),
+          prioridade = COALESCE($4, prioridade),
+          data_prazo = COALESCE($5, data_prazo),
+          recorrente = COALESCE($6, recorrente),
+          tipo_recorrencia = COALESCE($7, tipo_recorrencia),
+          responsaveis = COALESCE($8, responsaveis),
+          concluido_por = COALESCE($9, concluido_por),
+          concluido_por_nome = COALESCE($10, concluido_por_nome),
+          data_conclusao = COALESCE($11, data_conclusao),
+          updated_at = NOW()
+      WHERE id = $12
+      RETURNING *
+    `, [
+      titulo, descricao, status, prioridade, data_prazo,
+      recorrente, tipo_recorrencia, responsaveis ? JSON.stringify(responsaveis) : null,
+      concluido_por, concluido_por_nome, data_conclusao, id
+    ]);
+    
+    let acaoDesc = 'Tarefa atualizada';
+    if (status && status !== anterior.rows[0]?.status) {
+      acaoDesc = `Status alterado: ${anterior.rows[0]?.status || 'pendente'} → ${status}`;
+    }
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name, dados_anteriores, dados_novos)
+      VALUES ($1, 'atualizada', $2, $3, $4, $5, $6)
+    `, [id, acaoDesc, user_cod, user_name, JSON.stringify(anterior.rows[0]), JSON.stringify(result.rows[0])]);
+    
+    // Se tarefa recorrente foi concluída, criar próxima
+    if (status === 'concluida' && result.rows[0].recorrente && result.rows[0].tipo_recorrencia) {
+      const tarefa = result.rows[0];
+      let proximoPrazo = new Date(tarefa.data_prazo || new Date());
+      
+      switch (tarefa.tipo_recorrencia) {
+        case 'diario':
+          proximoPrazo.setDate(proximoPrazo.getDate() + 1);
+          break;
+        case 'semanal':
+          proximoPrazo.setDate(proximoPrazo.getDate() + 7);
+          break;
+        case 'mensal':
+          proximoPrazo.setMonth(proximoPrazo.getMonth() + 1);
+          break;
+      }
+      
+      await pool.query(`
+        INSERT INTO todo_tarefas (
+          grupo_id, titulo, descricao, prioridade, data_prazo,
+          recorrente, tipo_recorrencia, tipo,
+          criado_por, criado_por_nome, responsaveis
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `, [
+        tarefa.grupo_id, tarefa.titulo, tarefa.descricao, tarefa.prioridade, proximoPrazo,
+        true, tarefa.tipo_recorrencia, tarefa.tipo,
+        tarefa.criado_por, tarefa.criado_por_nome, tarefa.responsaveis
+      ]);
+      console.log('✅ Tarefa recorrente criada para:', proximoPrazo);
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao atualizar tarefa' });
+  }
+});
+
+// Excluir tarefa
+app.delete('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_tarefas WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir tarefa:', err);
+    res.status(500).json({ error: 'Erro ao excluir tarefa' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - COMENTÁRIOS
+// ============================================
+
+app.post('/api/todo/tarefas/:id/comentarios', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { texto, user_cod, user_name } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_comentarios (tarefa_id, texto, user_cod, user_name)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [id, texto, user_cod, user_name]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'comentario', 'Comentário adicionado', $2, $3)
+    `, [id, user_cod, user_name]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar comentário:', err);
+    res.status(500).json({ error: 'Erro ao adicionar comentário' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - ANEXOS
+// ============================================
+
+app.post('/api/todo/tarefas/:id/anexos', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_anexos (tarefa_id, nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+    `, [id, nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'anexo', $2, $3, $4)
+    `, [id, `Anexo adicionado: ${nome_arquivo}`, enviado_por, enviado_por_nome]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar anexo:', err);
+    res.status(500).json({ error: 'Erro ao adicionar anexo' });
+  }
+});
+
+app.delete('/api/todo/anexos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_anexos WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir anexo:', err);
+    res.status(500).json({ error: 'Erro ao excluir anexo' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - MÉTRICAS (Admin Master)
+// ============================================
+
+app.get('/api/todo/metricas', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    const dias = parseInt(periodo);
+    
+    const statusResult = await pool.query(`
+      SELECT status, COUNT(*) as total
+      FROM todo_tarefas
+      WHERE created_at >= NOW() - INTERVAL '${dias} days'
+      GROUP BY status
+    `);
+    
+    const conclusaoResult = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'concluida' AND (data_conclusao <= data_prazo OR data_prazo IS NULL)) as no_prazo,
+        COUNT(*) FILTER (WHERE status = 'concluida' AND data_conclusao > data_prazo) as fora_prazo,
+        COUNT(*) FILTER (WHERE status = 'concluida') as total_concluidas,
+        COUNT(*) FILTER (WHERE status != 'concluida' AND data_prazo < NOW()) as atrasadas,
+        COUNT(*) as total
+      FROM todo_tarefas
+      WHERE created_at >= NOW() - INTERVAL '${dias} days'
+    `);
+    
+    const porResponsavelResult = await pool.query(`
+      SELECT 
+        concluido_por as user_cod,
+        concluido_por_nome as user_name,
+        COUNT(*) as total_concluidas,
+        COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL) as no_prazo,
+        COUNT(*) FILTER (WHERE data_conclusao > data_prazo) as fora_prazo,
+        AVG(EXTRACT(EPOCH FROM (data_conclusao - created_at)) / 3600) as tempo_medio_horas
+      FROM todo_tarefas
+      WHERE status = 'concluida' 
+        AND concluido_por IS NOT NULL
+        AND data_conclusao >= NOW() - INTERVAL '${dias} days'
+      GROUP BY concluido_por, concluido_por_nome
+      ORDER BY total_concluidas DESC
+    `);
+    
+    const porGrupoResult = await pool.query(`
+      SELECT 
+        g.id,
+        g.nome,
+        g.icone,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE t.status = 'concluida') as concluidas,
+        COUNT(*) FILTER (WHERE t.status = 'pendente') as pendentes,
+        COUNT(*) FILTER (WHERE t.status = 'em_andamento') as em_andamento
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE t.created_at >= NOW() - INTERVAL '${dias} days'
+      GROUP BY g.id, g.nome, g.icone
+      ORDER BY total DESC
+    `);
+    
+    const conclusao = conclusaoResult.rows[0];
+    const taxaNoPrazo = conclusao.total_concluidas > 0 
+      ? ((conclusao.no_prazo / conclusao.total_concluidas) * 100).toFixed(1) 
+      : 0;
+    
+    res.json({
+      totais: {
+        total: parseInt(conclusao.total),
+        concluidas: parseInt(conclusao.total_concluidas),
+        atrasadas: parseInt(conclusao.atrasadas),
+        no_prazo: parseInt(conclusao.no_prazo),
+        vencidas: parseInt(conclusao.atrasadas),
+        taxaNoPrazo: parseFloat(taxaNoPrazo)
+      },
+      porStatus: statusResult.rows,
+      porResponsavel: porResponsavelResult.rows,
+      porGrupo: porGrupoResult.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar métricas:', err);
+    res.status(500).json({ error: 'Erro ao buscar métricas' });
+  }
+});
+
+app.get('/api/todo/metricas/ranking', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    
+    const result = await pool.query(`
+      SELECT 
+        concluido_por as user_cod,
+        concluido_por_nome as user_name,
+        COUNT(*) as total_concluidas,
+        COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL) as no_prazo,
+        ROUND(
+          (COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL)::DECIMAL / 
+           NULLIF(COUNT(*), 0) * 100), 1
+        ) as taxa_prazo,
+        ROUND(AVG(EXTRACT(EPOCH FROM (data_conclusao - created_at)) / 3600)::DECIMAL, 1) as tempo_medio_horas
+      FROM todo_tarefas
+      WHERE status = 'concluida' 
+        AND concluido_por IS NOT NULL
+        AND data_conclusao >= NOW() - INTERVAL '${periodo} days'
+      GROUP BY concluido_por, concluido_por_nome
+      HAVING COUNT(*) >= 1
+      ORDER BY taxa_prazo DESC, total_concluidas DESC
+    `);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar ranking:', err);
+    res.status(500).json({ error: 'Erro ao buscar ranking' });
+  }
+});
+
+// Listar admins para o TO-DO
+app.get('/api/todo/admins', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cod_profissional as cod, full_name as nome 
+      FROM users 
+      WHERE role IN ('admin', 'admin_master')
+      ORDER BY full_name
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar admins:', err);
+    res.json([]);
+  }
+});
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
