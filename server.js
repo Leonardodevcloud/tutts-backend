@@ -494,6 +494,8 @@ async function createTables() {
         observacao TEXT,
         is_excedente BOOLEAN DEFAULT FALSE,
         is_reposicao BOOLEAN DEFAULT FALSE,
+        observacao_criada_por VARCHAR(200),
+        observacao_criada_em TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -501,7 +503,29 @@ async function createTables() {
     // Migração: adicionar colunas se não existirem
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_excedente BOOLEAN DEFAULT FALSE`).catch(() => {});
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_reposicao BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS observacao_criada_por VARCHAR(200)`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS observacao_criada_em TIMESTAMP`).catch(() => {});
     console.log('✅ Tabela disponibilidade_linhas verificada');
+    
+    // Tabela de Histórico de Observações (persiste após reset)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS disponibilidade_observacoes_historico (
+        id SERIAL PRIMARY KEY,
+        linha_id INT,
+        loja_id INT,
+        cod_profissional VARCHAR(50),
+        nome_profissional VARCHAR(200),
+        observacao TEXT NOT NULL,
+        criada_por VARCHAR(200),
+        criada_em TIMESTAMP,
+        data_reset DATE,
+        data_planilha DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_obs_hist_data ON disponibilidade_observacoes_historico(data_reset)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_obs_hist_cod ON disponibilidade_observacoes_historico(cod_profissional)`).catch(() => {});
+    console.log('✅ Tabela disponibilidade_observacoes_historico verificada');
 
     // Tabela de Faltosos
     await pool.query(`
@@ -3684,25 +3708,55 @@ app.post('/api/disponibilidade/linhas', async (req, res) => {
 app.put('/api/disponibilidade/linhas/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { cod_profissional, nome_profissional, status, observacao } = req.body;
+    const { cod_profissional, nome_profissional, status, observacao, observacao_usuario } = req.body;
     
     // Validar status - incluindo SEM CONTATO e A CAMINHO
     const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'A CAMINHO', 'EM LOJA', 'FALTANDO', 'SEM CONTATO'];
     const statusFinal = statusValidos.includes(status) ? status : 'A CONFIRMAR';
+    
+    // Buscar linha atual para verificar se observação mudou
+    const linhaAtual = await pool.query('SELECT observacao FROM disponibilidade_linhas WHERE id = $1', [id]);
+    const obsAtual = linhaAtual.rows[0]?.observacao || '';
+    const obsNova = observacao || '';
+    
+    // Se observação foi adicionada ou modificada, registrar quem e quando
+    let observacaoCriadaPor = null;
+    let observacaoCriadaEm = null;
+    
+    if (obsNova && obsNova !== obsAtual) {
+      // Observação foi modificada ou criada - registrar metadados
+      observacaoCriadaPor = observacao_usuario || 'Sistema';
+      observacaoCriadaEm = new Date();
+    } else if (obsNova) {
+      // Observação não mudou - manter os metadados existentes
+      const metadados = await pool.query(
+        'SELECT observacao_criada_por, observacao_criada_em FROM disponibilidade_linhas WHERE id = $1',
+        [id]
+      );
+      if (metadados.rows.length > 0) {
+        observacaoCriadaPor = metadados.rows[0].observacao_criada_por;
+        observacaoCriadaEm = metadados.rows[0].observacao_criada_em;
+      }
+    }
+    // Se observação foi removida (obsNova vazio), os metadados ficam null
     
     const result = await pool.query(
       `UPDATE disponibilidade_linhas 
        SET cod_profissional = $1, 
            nome_profissional = $2, 
            status = $3, 
-           observacao = $4, 
+           observacao = $4,
+           observacao_criada_por = $5,
+           observacao_criada_em = $6,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5 RETURNING *`,
+       WHERE id = $7 RETURNING *`,
       [
         cod_profissional || null, 
         nome_profissional || null, 
         statusFinal, 
-        observacao || null, 
+        observacao || null,
+        observacaoCriadaPor,
+        observacaoCriadaEm,
         id
       ]
     );
@@ -4411,6 +4465,30 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     }
     console.log('📸 Espelho salvo antes do reset:', dataEspelho, '- Linhas:', linhas.rows.length);
     
+    // 1.5. SALVAR OBSERVAÇÕES NO HISTÓRICO antes de resetar
+    const linhasComObs = linhas.rows.filter(l => l.observacao && l.observacao.trim() !== '');
+    let observacoesSalvas = 0;
+    
+    for (const linha of linhasComObs) {
+      await pool.query(
+        `INSERT INTO disponibilidade_observacoes_historico 
+         (linha_id, loja_id, cod_profissional, nome_profissional, observacao, criada_por, criada_em, data_reset, data_planilha)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8)`,
+        [
+          linha.id,
+          linha.loja_id,
+          linha.cod_profissional,
+          linha.nome_profissional,
+          linha.observacao,
+          linha.observacao_criada_por,
+          linha.observacao_criada_em,
+          dataEspelho
+        ]
+      );
+      observacoesSalvas++;
+    }
+    console.log('📝 Observações salvas no histórico:', observacoesSalvas);
+    
     // 2. REGISTRAR MOTOBOYS "EM LOJA" antes de resetar
     const emLojaLinhas = linhas.rows.filter(l => l.status === 'EM LOJA' && l.cod_profissional);
     for (const linha of emLojaLinhas) {
@@ -4541,6 +4619,8 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
       `UPDATE disponibilidade_linhas 
        SET status = 'A CONFIRMAR', 
            observacao = NULL,
+           observacao_criada_por = NULL,
+           observacao_criada_em = NULL,
            updated_at = CURRENT_TIMESTAMP`
     );
     
@@ -4556,6 +4636,71 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao resetar:', err);
     res.status(500).json({ error: 'Erro ao resetar status' });
+  }
+});
+
+// ============================================
+// HISTÓRICO DE OBSERVAÇÕES
+// ============================================
+
+// GET /api/disponibilidade/observacoes-historico - Listar histórico de observações com filtros
+app.get('/api/disponibilidade/observacoes-historico', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_profissional, loja_id, limit = 100 } = req.query;
+    
+    let query = 'SELECT * FROM disponibilidade_observacoes_historico WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      query += ` AND data_reset >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    
+    if (data_fim) {
+      query += ` AND data_reset <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    if (cod_profissional) {
+      query += ` AND cod_profissional = $${paramIndex}`;
+      params.push(cod_profissional);
+      paramIndex++;
+    }
+    
+    if (loja_id) {
+      query += ` AND loja_id = $${paramIndex}`;
+      params.push(loja_id);
+      paramIndex++;
+    }
+    
+    query += ` ORDER BY data_reset DESC, created_at DESC LIMIT $${paramIndex}`;
+    params.push(parseInt(limit));
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar histórico de observações:', err);
+    res.status(500).json({ error: 'Erro ao buscar histórico de observações' });
+  }
+});
+
+// GET /api/disponibilidade/observacoes-historico/datas - Listar datas disponíveis no histórico
+app.get('/api/disponibilidade/observacoes-historico/datas', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT data_reset, data_planilha, COUNT(*) as total_observacoes
+      FROM disponibilidade_observacoes_historico
+      GROUP BY data_reset, data_planilha
+      ORDER BY data_reset DESC
+      LIMIT 30
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar datas do histórico:', err);
+    res.status(500).json({ error: 'Erro ao buscar datas do histórico' });
   }
 });
 
