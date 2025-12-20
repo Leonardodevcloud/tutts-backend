@@ -932,6 +932,27 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_status ON todo_tarefas(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_criador ON todo_tarefas(criado_por)`).catch(() => {});
 
+    // ============================================
+    // TABELA DE PERMISSÕES DE ADMIN
+    // ============================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admin_permissions (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL UNIQUE,
+        user_name VARCHAR(255),
+        modules JSONB DEFAULT '[]',
+        tabs JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela admin_permissions verificada');
+
+    // Adicionar coluna modules e tabs à tabela users (para admins)
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_modules JSONB DEFAULT '[]'`).catch(() => {});
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB DEFAULT '{}'`).catch(() => {});
+    console.log('✅ Colunas de permissões adicionadas à tabela users');
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -1041,7 +1062,7 @@ app.post('/api/users/login', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, password FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      'SELECT id, cod_profissional, full_name, role, password, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
@@ -1121,6 +1142,78 @@ app.patch('/api/users/:codProfissional/role', async (req, res) => {
   } catch (error) {
     console.error('❌ Erro ao atualizar role:', error);
     res.status(500).json({ error: 'Erro ao atualizar role: ' + error.message });
+  }
+});
+
+// ============================================
+// ENDPOINTS DE PERMISSÕES DE ADMIN
+// ============================================
+
+// Listar todos os admins com permissões
+app.get('/api/admin-permissions', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.cod_profissional, u.full_name, u.role, 
+             COALESCE(u.allowed_modules, '[]') as allowed_modules,
+             COALESCE(u.allowed_tabs, '{}') as allowed_tabs,
+             u.created_at
+      FROM users u
+      WHERE u.role IN ('admin', 'admin_financeiro')
+      ORDER BY u.full_name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar permissões:', error);
+    res.status(500).json({ error: 'Erro ao listar permissões' });
+  }
+});
+
+// Atualizar permissões de um admin
+app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
+  try {
+    const { codProfissional } = req.params;
+    const { allowed_modules, allowed_tabs } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE users 
+      SET allowed_modules = $1, allowed_tabs = $2, updated_at = NOW()
+      WHERE LOWER(cod_profissional) = LOWER($3)
+      RETURNING id, cod_profissional, full_name, role, allowed_modules, allowed_tabs
+    `, [JSON.stringify(allowed_modules || []), JSON.stringify(allowed_tabs || {}), codProfissional]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    console.log(`🔐 Permissões atualizadas: ${codProfissional}`);
+    res.json({ message: 'Permissões atualizadas com sucesso', user: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao atualizar permissões:', error);
+    res.status(500).json({ error: 'Erro ao atualizar permissões: ' + error.message });
+  }
+});
+
+// Obter permissões de um admin específico
+app.get('/api/admin-permissions/:codProfissional', async (req, res) => {
+  try {
+    const { codProfissional } = req.params;
+    
+    const result = await pool.query(`
+      SELECT id, cod_profissional, full_name, role, 
+             COALESCE(allowed_modules, '[]') as allowed_modules,
+             COALESCE(allowed_tabs, '{}') as allowed_tabs
+      FROM users
+      WHERE LOWER(cod_profissional) = LOWER($1)
+    `, [codProfissional]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao buscar permissões:', error);
+    res.status(500).json({ error: 'Erro ao buscar permissões' });
   }
 });
 
