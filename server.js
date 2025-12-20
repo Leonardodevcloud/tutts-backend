@@ -953,6 +953,47 @@ async function createTables() {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB DEFAULT '{}'`).catch(() => {});
     console.log('✅ Colunas de permissões adicionadas à tabela users');
 
+    // ==================== MÓDULO SOCIAL ====================
+    // Tabela de perfis sociais (foto e nome de exibição)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS social_profiles (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) UNIQUE NOT NULL,
+        display_name VARCHAR(100),
+        profile_photo TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela social_profiles verificada/criada');
+
+    // Tabela de status online dos usuários
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS social_status (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) UNIQUE NOT NULL,
+        is_online BOOLEAN DEFAULT false,
+        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela social_status verificada/criada');
+
+    // Tabela de mensagens e reações
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS social_messages (
+        id SERIAL PRIMARY KEY,
+        from_user_cod VARCHAR(50) NOT NULL,
+        from_user_name VARCHAR(255),
+        to_user_cod VARCHAR(50) NOT NULL,
+        message_type VARCHAR(20) DEFAULT 'message',
+        content TEXT NOT NULL,
+        is_read BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela social_messages verificada/criada');
+    // ==================== FIM MÓDULO SOCIAL ====================
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -1176,7 +1217,7 @@ app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
     
     const result = await pool.query(`
       UPDATE users 
-      SET allowed_modules = $1, allowed_tabs = $2
+      SET allowed_modules = $1, allowed_tabs = $2, updated_at = NOW()
       WHERE LOWER(cod_profissional) = LOWER($3)
       RETURNING id, cod_profissional, full_name, role, allowed_modules, allowed_tabs
     `, [JSON.stringify(allowed_modules || []), JSON.stringify(allowed_tabs || {}), codProfissional]);
@@ -2477,7 +2518,7 @@ app.patch('/api/password-recovery/:id/reset', async (req, res) => {
 
     // Atualizar senha do usuário
     await pool.query(
-      'UPDATE users SET password = $1 WHERE LOWER(cod_profissional) = LOWER($2)',
+      'UPDATE users SET password = $1, updated_at = NOW() WHERE LOWER(cod_profissional) = LOWER($2)',
       [newPassword, request.user_cod]
     );
 
@@ -7813,6 +7854,164 @@ app.get('/api/todo/admins', async (req, res) => {
     res.json([]);
   }
 });
+
+// ==================== ROTAS DO MÓDULO SOCIAL ====================
+
+// Obter perfil social do usuário
+app.get('/api/social/profile/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM social_profiles WHERE user_cod = $1',
+      [userCod]
+    );
+    if (result.rows.length > 0) {
+      res.json(result.rows[0]);
+    } else {
+      res.json(null);
+    }
+  } catch (err) {
+    console.error('Erro ao buscar perfil social:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Criar ou atualizar perfil social
+app.put('/api/social/profile/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const { display_name, profile_photo } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO social_profiles (user_cod, display_name, profile_photo, updated_at)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (user_cod) 
+      DO UPDATE SET 
+        display_name = COALESCE($2, social_profiles.display_name),
+        profile_photo = COALESCE($3, social_profiles.profile_photo),
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *
+    `, [userCod, display_name, profile_photo]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Erro ao salvar perfil social:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Atualizar status online
+app.post('/api/social/status', async (req, res) => {
+  try {
+    const { user_cod, is_online } = req.body;
+    
+    await pool.query(`
+      INSERT INTO social_status (user_cod, is_online, last_seen)
+      VALUES ($1, $2, CURRENT_TIMESTAMP)
+      ON CONFLICT (user_cod) 
+      DO UPDATE SET 
+        is_online = $2,
+        last_seen = CURRENT_TIMESTAMP
+    `, [user_cod, is_online]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Erro ao atualizar status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar todos os usuários com status e perfil social
+app.get('/api/social/users', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        u.cod_profissional,
+        u.full_name,
+        u.role,
+        COALESCE(sp.display_name, u.full_name) as display_name,
+        sp.profile_photo,
+        COALESCE(ss.is_online, false) as is_online,
+        ss.last_seen
+      FROM users u
+      LEFT JOIN social_profiles sp ON u.cod_profissional = sp.user_cod
+      LEFT JOIN social_status ss ON u.cod_profissional = ss.user_cod
+      WHERE u.role IN ('user', 'admin', 'admin_financeiro', 'admin_master')
+      ORDER BY ss.is_online DESC NULLS LAST, COALESCE(sp.display_name, u.full_name) ASC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erro ao listar usuários:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Enviar mensagem ou reação
+app.post('/api/social/messages', async (req, res) => {
+  try {
+    const { from_user_cod, from_user_name, to_user_cod, message_type, content } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO social_messages (from_user_cod, from_user_name, to_user_cod, message_type, content)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [from_user_cod, from_user_name, to_user_cod, message_type, content]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Erro ao enviar mensagem:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Buscar mensagens recebidas por um usuário
+app.get('/api/social/messages/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM social_messages 
+      WHERE to_user_cod = $1 
+      ORDER BY created_at DESC 
+      LIMIT 50
+    `, [userCod]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erro ao buscar mensagens:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Marcar mensagens como lidas
+app.patch('/api/social/messages/read', async (req, res) => {
+  try {
+    const { user_cod } = req.body;
+    await pool.query(
+      'UPDATE social_messages SET is_read = true WHERE to_user_cod = $1 AND is_read = false',
+      [user_cod]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Erro ao marcar como lido:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Contar mensagens não lidas
+app.get('/api/social/messages/unread/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT COUNT(*) as count FROM social_messages WHERE to_user_cod = $1 AND is_read = false',
+      [userCod]
+    );
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (err) {
+    console.error('Erro ao contar não lidas:', err);
+    res.json({ count: 0 });
+  }
+});
+
+// ==================== FIM ROTAS MÓDULO SOCIAL ====================
 
 // Iniciar servidor
 app.listen(port, () => {
