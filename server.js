@@ -7976,8 +7976,3 @@ app.delete('/api/admin-permissions/:cod', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Iniciar servidor
-app.listen(port, () => {
-  console.log(`🚀 Servidor rodando na porta ${port}`);
-});
