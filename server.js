@@ -4614,13 +4614,10 @@ app.post('/api/disponibilidade/resetar', async (req, res) => {
     );
     console.log('🗑️ Reposições vazias removidas');
     
-    // 5. Resetar APENAS status e observação (manter cod e nome!)
+    // 5. Resetar APENAS status (MANTER observações, cod e nome!)
     await pool.query(
       `UPDATE disponibilidade_linhas 
        SET status = 'A CONFIRMAR', 
-           observacao = NULL,
-           observacao_criada_por = NULL,
-           observacao_criada_em = NULL,
            updated_at = CURRENT_TIMESTAMP`
     );
     
