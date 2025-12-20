@@ -1219,17 +1219,30 @@ app.get('/api/admin-permissions', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT u.id, u.cod_profissional, u.full_name, u.role, 
-             COALESCE(u.allowed_modules, '[]') as allowed_modules,
-             COALESCE(u.allowed_tabs, '{}') as allowed_tabs,
+             COALESCE(u.allowed_modules::text, '[]') as allowed_modules,
+             COALESCE(u.allowed_tabs::text, '{}') as allowed_tabs,
              u.created_at
       FROM users u
       WHERE u.role IN ('admin', 'admin_financeiro')
       ORDER BY u.full_name
     `);
-    res.json(result.rows);
+    
+    // Parse JSON strings
+    const rows = result.rows.map(row => {
+      try {
+        row.allowed_modules = typeof row.allowed_modules === 'string' ? JSON.parse(row.allowed_modules) : (row.allowed_modules || []);
+        row.allowed_tabs = typeof row.allowed_tabs === 'string' ? JSON.parse(row.allowed_tabs) : (row.allowed_tabs || {});
+      } catch (e) {
+        row.allowed_modules = [];
+        row.allowed_tabs = {};
+      }
+      return row;
+    });
+    
+    res.json(rows);
   } catch (error) {
     console.error('❌ Erro ao listar permissões:', error);
-    res.status(500).json({ error: 'Erro ao listar permissões' });
+    res.json([]);
   }
 });
 
@@ -1265,20 +1278,30 @@ app.get('/api/admin-permissions/:codProfissional', async (req, res) => {
     
     const result = await pool.query(`
       SELECT id, cod_profissional, full_name, role, 
-             COALESCE(allowed_modules, '[]') as allowed_modules,
-             COALESCE(allowed_tabs, '{}') as allowed_tabs
+             COALESCE(allowed_modules::text, '[]') as allowed_modules,
+             COALESCE(allowed_tabs::text, '{}') as allowed_tabs
       FROM users
       WHERE LOWER(cod_profissional) = LOWER($1)
     `, [codProfissional]);
     
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
+      return res.json({ allowed_modules: [], allowed_tabs: {} });
     }
     
-    res.json(result.rows[0]);
+    // Parse JSON strings se necessário
+    const row = result.rows[0];
+    try {
+      row.allowed_modules = typeof row.allowed_modules === 'string' ? JSON.parse(row.allowed_modules) : (row.allowed_modules || []);
+      row.allowed_tabs = typeof row.allowed_tabs === 'string' ? JSON.parse(row.allowed_tabs) : (row.allowed_tabs || {});
+    } catch (e) {
+      row.allowed_modules = [];
+      row.allowed_tabs = {};
+    }
+    
+    res.json(row);
   } catch (error) {
     console.error('❌ Erro ao buscar permissões:', error);
-    res.status(500).json({ error: 'Erro ao buscar permissões' });
+    res.json({ allowed_modules: [], allowed_tabs: {} });
   }
 });
 
