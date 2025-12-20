@@ -242,10 +242,39 @@ async function createTables() {
         created_at TIMESTAMP DEFAULT NOW(),
         expires_at TIMESTAMP,
         resolved_at TIMESTAMP,
-        resolved_by VARCHAR(255)
+        resolved_by VARCHAR(255),
+        link_token VARCHAR(100)
       )
     `);
     console.log('✅ Tabela indicacoes verificada');
+
+    // Nova tabela: Links de indicação (tokens únicos por usuário)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS indicacao_links (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        token VARCHAR(100) UNIQUE NOT NULL,
+        promocao_id INTEGER,
+        regiao VARCHAR(255),
+        valor_bonus DECIMAL(10,2),
+        active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela indicacao_links verificada');
+
+    // Migração: adicionar colunas de promoção na tabela indicacao_links
+    try {
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS promocao_id INTEGER`);
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS regiao VARCHAR(255)`);
+      await pool.query(`ALTER TABLE indicacao_links ADD COLUMN IF NOT EXISTS valor_bonus DECIMAL(10,2)`);
+    } catch (e) {}
+
+    // Migração: adicionar coluna link_token se não existir
+    try {
+      await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS link_token VARCHAR(100)`);
+    } catch (e) {}
 
     // Migração: adicionar colunas de crédito lançado se não existirem
     try {
@@ -555,64 +584,389 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_cod ON disponibilidade_restricoes(cod_profissional)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_loja ON disponibilidade_restricoes(loja_id)`).catch(() => {});
 
+    // ============================================
+    // TABELAS DA LOJA
+    // ============================================
+
+    // Tabela de estoque da loja
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(255) NOT NULL,
+        marca VARCHAR(255),
+        valor DECIMAL(10,2) NOT NULL,
+        quantidade INTEGER DEFAULT 0,
+        tem_tamanho BOOLEAN DEFAULT FALSE,
+        imagem_url TEXT,
+        status VARCHAR(20) DEFAULT 'ativo',
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque verificada');
+
+    // Tabela de tamanhos do estoque
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque_tamanhos (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id) ON DELETE CASCADE,
+        tamanho VARCHAR(20) NOT NULL,
+        quantidade INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque_tamanhos verificada');
+
+    // Tabela de movimentações de estoque (entradas e saídas)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_estoque_movimentacoes (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id) ON DELETE CASCADE,
+        tipo VARCHAR(20) NOT NULL,
+        quantidade INTEGER NOT NULL,
+        tamanho VARCHAR(20),
+        motivo TEXT,
+        pedido_id INTEGER REFERENCES loja_pedidos(id),
+        user_name VARCHAR(255),
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_estoque_movimentacoes verificada');
+
+    // Tabela de produtos à venda
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_produtos (
+        id SERIAL PRIMARY KEY,
+        estoque_id INTEGER REFERENCES loja_estoque(id),
+        nome VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        marca VARCHAR(255),
+        valor DECIMAL(10,2) NOT NULL,
+        imagem_url TEXT,
+        parcelas_config JSONB DEFAULT '[]',
+        abatimento_avista DECIMAL(5,2) DEFAULT 0,
+        abatimento_2semanas DECIMAL(5,2) DEFAULT 0,
+        abatimento_3semanas DECIMAL(5,2) DEFAULT 0,
+        abatimento_4semanas DECIMAL(5,2) DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'ativo',
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_produtos verificada');
+
+    // Migração: adicionar coluna parcelas_config se não existir
+    try {
+      await pool.query(`ALTER TABLE loja_produtos ADD COLUMN IF NOT EXISTS parcelas_config JSONB DEFAULT '[]'`);
+      console.log('✅ Coluna parcelas_config verificada');
+    } catch (e) {}
+
+    // Tabela de pedidos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_pedidos (
+        id SERIAL PRIMARY KEY,
+        produto_id INTEGER REFERENCES loja_produtos(id),
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        produto_nome VARCHAR(255) NOT NULL,
+        tamanho VARCHAR(20),
+        marca VARCHAR(255),
+        valor_original DECIMAL(10,2) NOT NULL,
+        tipo_abatimento VARCHAR(50) NOT NULL,
+        valor_abatimento DECIMAL(10,2) DEFAULT 0,
+        valor_final DECIMAL(10,2) NOT NULL,
+        parcelas INTEGER DEFAULT 1,
+        valor_parcela DECIMAL(10,2),
+        status VARCHAR(20) DEFAULT 'pendente',
+        admin_id VARCHAR(255),
+        admin_name VARCHAR(255),
+        observacao TEXT,
+        debito_lancado BOOLEAN DEFAULT FALSE,
+        debito_lancado_em TIMESTAMP,
+        debito_lancado_por VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_pedidos verificada');
+    
+    // Adicionar colunas que podem não existir
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado_em TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_pedidos ADD COLUMN IF NOT EXISTS debito_lancado_por VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE loja_estoque ADD COLUMN IF NOT EXISTS tipo_tamanho VARCHAR(20) DEFAULT 'letras'`).catch(() => {});
+
+    // Tabela de sugestões de produtos
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loja_sugestoes (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        sugestao TEXT NOT NULL,
+        status VARCHAR(20) DEFAULT 'pendente',
+        resposta TEXT,
+        respondido_por VARCHAR(255),
+        respondido_em TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela loja_sugestoes verificada');
+
+    // ========== MÓDULO BI ==========
+    
+    // Tabela de configuração de prazos por cliente
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_prazos_cliente (
+        id SERIAL PRIMARY KEY,
+        tipo VARCHAR(20) NOT NULL, -- 'cliente' ou 'centro_custo'
+        codigo VARCHAR(100) NOT NULL, -- Cód. cliente ou nome do centro de custo
+        nome VARCHAR(255), -- Nome para exibição
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(tipo, codigo)
+      )
+    `);
+    console.log('✅ Tabela bi_prazos_cliente verificada');
+
+    // Tabela de faixas de prazo por cliente
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_faixas_prazo (
+        id SERIAL PRIMARY KEY,
+        prazo_cliente_id INTEGER REFERENCES bi_prazos_cliente(id) ON DELETE CASCADE,
+        km_min DECIMAL(10,2) NOT NULL DEFAULT 0,
+        km_max DECIMAL(10,2), -- NULL significa infinito
+        prazo_minutos INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_faixas_prazo verificada');
+
+    // Tabela de prazo padrão (para clientes não configurados)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_prazo_padrao (
+        id SERIAL PRIMARY KEY,
+        km_min DECIMAL(10,2) NOT NULL DEFAULT 0,
+        km_max DECIMAL(10,2),
+        prazo_minutos INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_prazo_padrao verificada');
+
+    // Tabela de entregas (dados importados do Excel)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_entregas (
+        id SERIAL PRIMARY KEY,
+        os INTEGER NOT NULL,
+        ponto INTEGER DEFAULT 1,
+        num_pedido VARCHAR(100),
+        cod_cliente INTEGER,
+        nome_cliente VARCHAR(255),
+        empresa VARCHAR(255),
+        nome_fantasia VARCHAR(255),
+        centro_custo VARCHAR(255),
+        cidade_p1 VARCHAR(100),
+        endereco TEXT,
+        bairro VARCHAR(100),
+        cidade VARCHAR(100),
+        estado VARCHAR(10),
+        cod_prof INTEGER,
+        nome_prof VARCHAR(255),
+        data_hora TIMESTAMP,
+        data_hora_alocado TIMESTAMP,
+        data_solicitado DATE,
+        hora_solicitado TIME,
+        data_chegada DATE,
+        hora_chegada TIME,
+        data_saida DATE,
+        hora_saida TIME,
+        categoria VARCHAR(100),
+        valor DECIMAL(10,2),
+        distancia DECIMAL(10,2),
+        valor_prof DECIMAL(10,2),
+        finalizado TIMESTAMP,
+        execucao_comp VARCHAR(20),
+        execucao_espera VARCHAR(20),
+        status VARCHAR(50),
+        motivo VARCHAR(50),
+        ocorrencia VARCHAR(100),
+        velocidade_media DECIMAL(10,2),
+        data_upload DATE DEFAULT CURRENT_DATE,
+        dentro_prazo BOOLEAN,
+        prazo_minutos INTEGER,
+        tempo_execucao_minutos INTEGER,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_entregas verificada');
+
+    // Migration: Adicionar coluna ponto se não existir
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
+    
+    // Migration: Aumentar tamanho de campos VARCHAR que podem ser pequenos demais
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN estado TYPE VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN status TYPE VARCHAR(100)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN motivo TYPE VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN ocorrencia TYPE VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN execucao_comp TYPE VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN execucao_espera TYPE VARCHAR(50)`).catch(() => {});
+    
+    // Índices do BI
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_data ON bi_entregas(data_solicitado)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_cliente ON bi_entregas(cod_cliente)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_centro ON bi_entregas(centro_custo)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prof ON bi_entregas(cod_prof)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_prazo ON bi_entregas(dentro_prazo)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto ON bi_entregas(os, ponto)`).catch(() => {});
+    // Índice UNIQUE para UPSERT (ON CONFLICT)
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto_unique ON bi_entregas(os, ponto)`).catch(() => {});
+
+    // Índices da loja
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_produtos_status ON loja_produtos(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_user ON loja_pedidos(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_pedidos_status ON loja_pedidos(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_sugestoes_status ON loja_sugestoes(status)`).catch(() => {});
+
+    // ============================================
+    // TABELAS TO-DO
+    // ============================================
+    
+    // Tabela de Grupos de TO-DO
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_grupos (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        icone VARCHAR(50) DEFAULT '📋',
+        cor VARCHAR(20) DEFAULT '#7c3aed',
+        tipo VARCHAR(20) DEFAULT 'compartilhado',
+        criado_por VARCHAR(50) NOT NULL,
+        criado_por_nome VARCHAR(255),
+        visivel_para JSONB DEFAULT '[]',
+        ordem INT DEFAULT 0,
+        ativo BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_grupos verificada');
+
+    // Tabela principal de Tarefas TO-DO
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_tarefas (
+        id SERIAL PRIMARY KEY,
+        grupo_id INT REFERENCES todo_grupos(id) ON DELETE CASCADE,
+        titulo VARCHAR(500) NOT NULL,
+        descricao TEXT,
+        status VARCHAR(30) DEFAULT 'pendente',
+        prioridade VARCHAR(20) DEFAULT 'media',
+        data_prazo TIMESTAMP,
+        data_conclusao TIMESTAMP,
+        recorrente BOOLEAN DEFAULT FALSE,
+        tipo_recorrencia VARCHAR(20),
+        proxima_recorrencia TIMESTAMP,
+        tipo VARCHAR(20) DEFAULT 'compartilhado',
+        criado_por VARCHAR(50) NOT NULL,
+        criado_por_nome VARCHAR(255),
+        responsaveis JSONB DEFAULT '[]',
+        ordem INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        concluido_por VARCHAR(50),
+        concluido_por_nome VARCHAR(255)
+      )
+    `);
+    console.log('✅ Tabela todo_tarefas verificada');
+
+    // Tabela de Anexos das Tarefas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_anexos (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        nome_arquivo VARCHAR(500) NOT NULL,
+        tipo_arquivo VARCHAR(100),
+        tamanho INT,
+        url TEXT NOT NULL,
+        enviado_por VARCHAR(50),
+        enviado_por_nome VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_anexos verificada');
+
+    // Tabela de Comentários nas Tarefas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_comentarios (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        texto TEXT NOT NULL,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_comentarios verificada');
+
+    // Tabela de Histórico/Log de Ações
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_historico (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        acao VARCHAR(100) NOT NULL,
+        descricao TEXT,
+        user_cod VARCHAR(50),
+        user_name VARCHAR(255),
+        dados_anteriores JSONB,
+        dados_novos JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_historico verificada');
+
+    // Índices do TO-DO
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_grupo ON todo_tarefas(grupo_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_status ON todo_tarefas(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_criador ON todo_tarefas(criado_por)`).catch(() => {});
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
   }
 }
 
-// Middlewares - CORS configurado
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Permitir requisições sem origin (como apps mobile ou Postman)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:5173',
-      'https://tutts.vercel.app',
-      'https://tutts-frontend.vercel.app'
-    ];
-    
-    // Permitir qualquer subdomínio do vercel
-    if (origin.includes('vercel.app') || origin.includes('localhost') || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.log('CORS bloqueado para origin:', origin);
-      callback(null, true); // Permitir mesmo assim para debug
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-  optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
-
-// Headers CORS manuais para garantir (backup)
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
+// Middlewares - CORS configurado (DEVE SER O PRIMEIRO!)
+// Responder imediatamente a requisições OPTIONS (preflight) - ANTES de tudo
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
-  
-  // Responder imediatamente a requisições OPTIONS (preflight)
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  res.setHeader('Access-Control-Max-Age', '86400');
+  return res.status(200).end();
+});
+
+// CORS para todas requisições
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
   next();
 });
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Health check
+// Health check (raiz e /api/health)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'API funcionando' });
 });
@@ -805,7 +1159,7 @@ app.delete('/api/users/:codProfissional', async (req, res) => {
     
     // 2. Deletar saques (withdrawals)
     deletedData.withdrawals = await safeDelete(
-      'DELETE FROM withdrawals WHERE LOWER(user_cod) = LOWER($1)',
+      'DELETE FROM withdrawal_requests WHERE LOWER(user_cod) = LOWER($1)',
       [codProfissional]
     );
     
@@ -2330,6 +2684,169 @@ app.post('/api/indicacoes/verificar-expiradas', async (req, res) => {
     res.json({ expiradas: result.rows.length, indicacoes: result.rows });
   } catch (error) {
     console.error('❌ Erro ao verificar expiradas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NOVO SISTEMA DE LINKS DE INDICAÇÃO
+// ============================================
+
+// Gerar token único
+const gerarTokenIndicacao = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let token = '';
+  for (let i = 0; i < 12; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+};
+
+// Gerar ou obter link de indicação do usuário
+app.post('/api/indicacao-link/gerar', async (req, res) => {
+  try {
+    const { user_cod, user_name, promocao_id, regiao, valor_bonus } = req.body;
+    
+    if (!user_cod || !user_name) {
+      return res.status(400).json({ error: 'user_cod e user_name são obrigatórios' });
+    }
+    
+    // Gerar novo token único (sempre gera um novo para cada promoção)
+    let token = gerarTokenIndicacao();
+    let tentativas = 0;
+    while (tentativas < 10) {
+      const existe = await pool.query('SELECT id FROM indicacao_links WHERE token = $1', [token]);
+      if (existe.rows.length === 0) break;
+      token = gerarTokenIndicacao();
+      tentativas++;
+    }
+    
+    // Criar novo link com dados da promoção
+    const result = await pool.query(
+      `INSERT INTO indicacao_links (user_cod, user_name, token, promocao_id, regiao, valor_bonus) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [user_cod, user_name, token, promocao_id || null, regiao || null, valor_bonus || null]
+    );
+    
+    console.log('✅ Link de indicação gerado:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao gerar link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obter link existente do usuário
+app.get('/api/indicacao-link/usuario/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM indicacao_links WHERE LOWER(user_cod) = LOWER($1) AND active = TRUE',
+      [userCod]
+    );
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    console.error('❌ Erro ao buscar link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Validar token (público - para página de cadastro)
+app.get('/api/indicacao-link/validar/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const result = await pool.query(
+      'SELECT user_cod, user_name FROM indicacao_links WHERE token = $1 AND active = TRUE',
+      [token]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Link inválido ou expirado' });
+    }
+    
+    res.json({ valido: true, indicador: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao validar token:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cadastrar indicado via link (público)
+app.post('/api/indicacao-link/cadastrar', async (req, res) => {
+  try {
+    const { token, nome, telefone } = req.body;
+    
+    if (!token || !nome || !telefone) {
+      return res.status(400).json({ error: 'Token, nome e telefone são obrigatórios' });
+    }
+    
+    // Validar token e pegar dados da promoção
+    const linkResult = await pool.query(
+      'SELECT * FROM indicacao_links WHERE token = $1 AND active = TRUE',
+      [token]
+    );
+    
+    if (linkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Link inválido ou expirado' });
+    }
+    
+    const link = linkResult.rows[0];
+    
+    // Verificar se este telefone já foi indicado por este usuário
+    const jaIndicado = await pool.query(
+      `SELECT id FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) AND indicado_contato = $2`,
+      [link.user_cod, telefone]
+    );
+    
+    if (jaIndicado.rows.length > 0) {
+      return res.status(400).json({ error: 'Este telefone já foi indicado anteriormente' });
+    }
+    
+    // Criar indicação com dados da promoção
+    const result = await pool.query(
+      `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, promocao_id, regiao, valor_bonus, status, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pendente', NOW()) RETURNING *`,
+      [link.user_cod, link.user_name, nome, telefone, token, link.promocao_id, link.regiao, link.valor_bonus]
+    );
+    
+    console.log('✅ Indicação via link cadastrada:', result.rows[0]);
+    res.json({ success: true, indicacao: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao cadastrar indicado:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Listar indicações recebidas via link (para admin)
+app.get('/api/indicacao-link/indicacoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM indicacoes WHERE link_token IS NOT NULL ORDER BY created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar indicações via link:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Estatísticas de indicações por usuário
+app.get('/api/indicacao-link/estatisticas/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT 
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'pendente' THEN 1 END) as pendentes,
+        COUNT(CASE WHEN status = 'aprovada' THEN 1 END) as aprovadas,
+        COUNT(CASE WHEN status = 'rejeitada' THEN 1 END) as rejeitadas
+       FROM indicacoes 
+       WHERE LOWER(user_cod) = LOWER($1) AND link_token IS NOT NULL`,
+      [userCod]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao buscar estatísticas:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4371,8 +4888,2926 @@ app.get('/api/disponibilidade/publico', async (req, res) => {
   }
 });
 
+// ============================================
+// LOJA - ENDPOINTS
+// ============================================
+
+// === ESTOQUE ===
+
+// GET - Listar estoque
+app.get('/api/loja/estoque', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT e.*, 
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL), '[]') as tamanhos
+      FROM loja_estoque e
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      GROUP BY e.id
+      ORDER BY e.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar estoque:', err);
+    res.status(500).json({ error: 'Erro ao listar estoque' });
+  }
+});
+
+// POST - Adicionar item ao estoque
+app.post('/api/loja/estoque', async (req, res) => {
+  try {
+    const { nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, tamanhos, imagem_url, created_by } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_estoque (nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, imagem_url, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [nome, marca, valor, quantidade || 0, tem_tamanho || false, tipo_tamanho || 'letras', imagem_url, created_by]
+    );
+    
+    const estoqueId = result.rows[0].id;
+    
+    // Se tem tamanhos, inserir na tabela de tamanhos
+    if (tem_tamanho && tamanhos && tamanhos.length > 0) {
+      for (const t of tamanhos) {
+        await pool.query(
+          `INSERT INTO loja_estoque_tamanhos (estoque_id, tamanho, quantidade) VALUES ($1, $2, $3)`,
+          [estoqueId, t.tamanho, t.quantidade || 0]
+        );
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar estoque:', err);
+    res.status(500).json({ error: 'Erro ao adicionar estoque' });
+  }
+});
+
+// PUT - Atualizar item do estoque
+app.put('/api/loja/estoque/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho, tamanhos, imagem_url, status } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_estoque SET nome=$1, marca=$2, valor=$3, quantidade=$4, tem_tamanho=$5, tipo_tamanho=$6, imagem_url=$7, status=$8, updated_at=NOW()
+       WHERE id=$9 RETURNING *`,
+      [nome, marca, valor, quantidade, tem_tamanho, tipo_tamanho || 'letras', imagem_url, status || 'ativo', id]
+    );
+    
+    // Atualizar tamanhos
+    if (tem_tamanho) {
+      // Remover tamanhos antigos
+      await pool.query(`DELETE FROM loja_estoque_tamanhos WHERE estoque_id = $1`, [id]);
+      
+      // Inserir novos
+      if (tamanhos && tamanhos.length > 0) {
+        for (const t of tamanhos) {
+          await pool.query(
+            `INSERT INTO loja_estoque_tamanhos (estoque_id, tamanho, quantidade) VALUES ($1, $2, $3)`,
+            [id, t.tamanho, t.quantidade || 0]
+          );
+        }
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar estoque:', err);
+    res.status(500).json({ error: 'Erro ao atualizar estoque' });
+  }
+});
+
+// DELETE - Remover item do estoque
+app.delete('/api/loja/estoque/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_estoque WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover estoque:', err);
+    res.status(500).json({ error: 'Erro ao remover estoque' });
+  }
+});
+
+// === PRODUTOS À VENDA ===
+
+// GET - Listar produtos
+app.get('/api/loja/produtos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.*, e.tem_tamanho,
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL), '[]') as tamanhos
+      FROM loja_produtos p
+      LEFT JOIN loja_estoque e ON e.id = p.estoque_id
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      GROUP BY p.id, e.tem_tamanho
+      ORDER BY p.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar produtos:', err);
+    res.status(500).json({ error: 'Erro ao listar produtos' });
+  }
+});
+
+// GET - Produtos ativos (para usuário)
+app.get('/api/loja/produtos/ativos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.*, e.tem_tamanho, e.quantidade as estoque_total,
+        COALESCE(json_agg(
+          json_build_object('id', t.id, 'tamanho', t.tamanho, 'quantidade', t.quantidade)
+        ) FILTER (WHERE t.id IS NOT NULL AND t.quantidade > 0), '[]') as tamanhos
+      FROM loja_produtos p
+      LEFT JOIN loja_estoque e ON e.id = p.estoque_id
+      LEFT JOIN loja_estoque_tamanhos t ON t.estoque_id = e.id
+      WHERE p.status = 'ativo'
+      GROUP BY p.id, e.tem_tamanho, e.quantidade
+      ORDER BY p.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar produtos ativos:', err);
+    res.status(500).json({ error: 'Erro ao listar produtos' });
+  }
+});
+
+// POST - Adicionar produto à venda
+app.post('/api/loja/produtos', async (req, res) => {
+  try {
+    const { estoque_id, nome, descricao, marca, valor, imagem_url, parcelas_config, created_by } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_produtos (estoque_id, nome, descricao, marca, valor, imagem_url, parcelas_config, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [estoque_id, nome, descricao, marca, valor, imagem_url, JSON.stringify(parcelas_config || []), created_by]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar produto:', err);
+    res.status(500).json({ error: 'Erro ao adicionar produto' });
+  }
+});
+
+// PUT - Atualizar produto
+app.put('/api/loja/produtos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, marca, valor, imagem_url, parcelas_config, status } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_produtos SET nome=$1, descricao=$2, marca=$3, valor=$4, imagem_url=$5, parcelas_config=$6, status=$7, updated_at=NOW()
+       WHERE id=$8 RETURNING *`,
+      [nome, descricao, marca, valor, imagem_url, JSON.stringify(parcelas_config || []), status, id]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar produto:', err);
+    res.status(500).json({ error: 'Erro ao atualizar produto' });
+  }
+});
+
+// DELETE - Remover produto
+app.delete('/api/loja/produtos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_produtos WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover produto:', err);
+    res.status(500).json({ error: 'Erro ao remover produto' });
+  }
+});
+
+// === PEDIDOS ===
+
+// GET - Listar todos os pedidos (admin)
+app.get('/api/loja/pedidos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM loja_pedidos ORDER BY created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar pedidos:', err);
+    res.status(500).json({ error: 'Erro ao listar pedidos' });
+  }
+});
+
+// GET - Pedidos do usuário
+app.get('/api/loja/pedidos/user/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_pedidos WHERE user_cod = $1 ORDER BY created_at DESC`,
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar pedidos do usuário:', err);
+    res.status(500).json({ error: 'Erro ao listar pedidos' });
+  }
+});
+
+// POST - Criar pedido
+app.post('/api/loja/pedidos', async (req, res) => {
+  try {
+    const { produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_pedidos (produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [produto_id, user_cod, user_name, produto_nome, tamanho, marca, valor_original, tipo_abatimento, valor_abatimento, valor_final, parcelas, valor_parcela]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar pedido:', err);
+    res.status(500).json({ error: 'Erro ao criar pedido' });
+  }
+});
+
+// PATCH - Atualizar status do pedido
+app.patch('/api/loja/pedidos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_id, admin_name, observacao, debito_lancado, debito_lancado_em, debito_lancado_por } = req.body;
+    
+    let result;
+    
+    // Se for atualização de débito lançado
+    if (debito_lancado !== undefined) {
+      result = await pool.query(
+        `UPDATE loja_pedidos SET debito_lancado=$1, debito_lancado_em=$2, debito_lancado_por=$3, updated_at=NOW()
+         WHERE id=$4 RETURNING *`,
+        [debito_lancado, debito_lancado_em, debito_lancado_por, id]
+      );
+    } else {
+      // Atualização de status
+      result = await pool.query(
+        `UPDATE loja_pedidos SET status=$1, admin_id=$2, admin_name=$3, observacao=$4, updated_at=NOW()
+         WHERE id=$5 RETURNING *`,
+        [status, admin_id, admin_name, observacao, id]
+      );
+      
+      // Se aprovado, decrementar estoque
+      if (status === 'aprovado') {
+        const pedido = result.rows[0];
+        if (pedido.tamanho) {
+          // Decrementar do tamanho específico
+          await pool.query(`
+            UPDATE loja_estoque_tamanhos 
+            SET quantidade = quantidade - 1 
+            WHERE estoque_id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+            AND tamanho = $2 AND quantidade > 0
+          `, [pedido.produto_id, pedido.tamanho]);
+        } else {
+          // Decrementar do estoque geral
+          await pool.query(`
+            UPDATE loja_estoque 
+            SET quantidade = quantidade - 1 
+            WHERE id = (SELECT estoque_id FROM loja_produtos WHERE id = $1) 
+            AND quantidade > 0
+          `, [pedido.produto_id]);
+        }
+      }
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar pedido:', err);
+    res.status(500).json({ error: 'Erro ao atualizar pedido' });
+  }
+});
+
+// DELETE - Remover pedido
+app.delete('/api/loja/pedidos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_pedidos WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover pedido:', err);
+    res.status(500).json({ error: 'Erro ao remover pedido' });
+  }
+});
+
+// ==================== MOVIMENTAÇÕES DE ESTOQUE ====================
+
+// GET - Listar movimentações de um item
+app.get('/api/loja/estoque/:id/movimentacoes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_estoque_movimentacoes WHERE estoque_id = $1 ORDER BY created_at DESC LIMIT 100`,
+      [id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar movimentações:', err);
+    res.status(500).json({ error: 'Erro ao listar movimentações' });
+  }
+});
+
+// GET - Listar todas movimentações
+app.get('/api/loja/movimentacoes', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, e.nome as produto_nome, e.marca
+      FROM loja_estoque_movimentacoes m
+      LEFT JOIN loja_estoque e ON m.estoque_id = e.id
+      ORDER BY m.created_at DESC
+      LIMIT 500
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar movimentações:', err);
+    res.status(500).json({ error: 'Erro ao listar movimentações' });
+  }
+});
+
+// POST - Registrar entrada de estoque
+app.post('/api/loja/estoque/:id/entrada', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantidade, tamanho, motivo, created_by } = req.body;
+    
+    // Registrar movimentação
+    await pool.query(
+      `INSERT INTO loja_estoque_movimentacoes (estoque_id, tipo, quantidade, tamanho, motivo, created_by)
+       VALUES ($1, 'entrada', $2, $3, $4, $5)`,
+      [id, quantidade, tamanho || null, motivo || 'Entrada manual', created_by]
+    );
+    
+    // Atualizar quantidade
+    if (tamanho) {
+      await pool.query(
+        `UPDATE loja_estoque_tamanhos SET quantidade = quantidade + $1 WHERE estoque_id = $2 AND tamanho = $3`,
+        [quantidade, id, tamanho]
+      );
+    } else {
+      await pool.query(
+        `UPDATE loja_estoque SET quantidade = quantidade + $1 WHERE id = $2`,
+        [quantidade, id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar entrada:', err);
+    res.status(500).json({ error: 'Erro ao registrar entrada' });
+  }
+});
+
+// POST - Registrar saída de estoque
+app.post('/api/loja/estoque/:id/saida', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantidade, tamanho, motivo, created_by } = req.body;
+    
+    // Registrar movimentação
+    await pool.query(
+      `INSERT INTO loja_estoque_movimentacoes (estoque_id, tipo, quantidade, tamanho, motivo, created_by)
+       VALUES ($1, 'saida', $2, $3, $4, $5)`,
+      [id, quantidade, tamanho || null, motivo || 'Saída manual', created_by]
+    );
+    
+    // Atualizar quantidade
+    if (tamanho) {
+      await pool.query(
+        `UPDATE loja_estoque_tamanhos SET quantidade = GREATEST(0, quantidade - $1) WHERE estoque_id = $2 AND tamanho = $3`,
+        [quantidade, id, tamanho]
+      );
+    } else {
+      await pool.query(
+        `UPDATE loja_estoque SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2`,
+        [quantidade, id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar saída:', err);
+    res.status(500).json({ error: 'Erro ao registrar saída' });
+  }
+});
+
+// ==================== SUGESTÕES DE PRODUTOS ====================
+
+// GET - Listar todas sugestões (admin)
+app.get('/api/loja/sugestoes', async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM loja_sugestoes ORDER BY created_at DESC`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar sugestões:', err);
+    res.status(500).json({ error: 'Erro ao listar sugestões' });
+  }
+});
+
+// GET - Listar sugestões do usuário
+app.get('/api/loja/sugestoes/user/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(
+      `SELECT * FROM loja_sugestoes WHERE user_cod = $1 ORDER BY created_at DESC`,
+      [userCod]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar sugestões:', err);
+    res.status(500).json({ error: 'Erro ao listar sugestões' });
+  }
+});
+
+// POST - Criar sugestão
+app.post('/api/loja/sugestoes', async (req, res) => {
+  try {
+    const { user_cod, user_name, sugestao } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO loja_sugestoes (user_cod, user_name, sugestao) VALUES ($1, $2, $3) RETURNING *`,
+      [user_cod, user_name, sugestao]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar sugestão:', err);
+    res.status(500).json({ error: 'Erro ao criar sugestão' });
+  }
+});
+
+// PATCH - Responder sugestão (admin)
+app.patch('/api/loja/sugestoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, resposta, respondido_por } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE loja_sugestoes SET status=$1, resposta=$2, respondido_por=$3, respondido_em=NOW() WHERE id=$4 RETURNING *`,
+      [status, resposta, respondido_por, id]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao responder sugestão:', err);
+    res.status(500).json({ error: 'Erro ao responder sugestão' });
+  }
+});
+
+// DELETE - Remover sugestão
+app.delete('/api/loja/sugestoes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM loja_sugestoes WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover sugestão:', err);
+    res.status(500).json({ error: 'Erro ao remover sugestão' });
+  }
+});
+
+// ==================== MÓDULO BI ====================
+
+// Listar todos os clientes/centros de custo configurados
+app.get('/api/bi/prazos', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT pc.*, 
+        COALESCE(json_agg(
+          json_build_object('id', fp.id, 'km_min', fp.km_min, 'km_max', fp.km_max, 'prazo_minutos', fp.prazo_minutos)
+          ORDER BY fp.km_min
+        ) FILTER (WHERE fp.id IS NOT NULL), '[]') as faixas
+      FROM bi_prazos_cliente pc
+      LEFT JOIN bi_faixas_prazo fp ON pc.id = fp.prazo_cliente_id
+      GROUP BY pc.id
+      ORDER BY pc.tipo, pc.nome
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar prazos:', err);
+    res.status(500).json({ error: 'Erro ao listar prazos' });
+  }
+});
+
+// Buscar prazo padrão
+app.get('/api/bi/prazo-padrao', async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar prazo padrão:', err);
+    res.status(500).json({ error: 'Erro ao buscar prazo padrão' });
+  }
+});
+
+// Salvar prazo padrão
+app.post('/api/bi/prazo-padrao', async (req, res) => {
+  try {
+    const { faixas } = req.body;
+    
+    // Limpar faixas anteriores
+    await pool.query(`DELETE FROM bi_prazo_padrao`);
+    
+    // Inserir novas faixas
+    for (const faixa of faixas) {
+      await pool.query(
+        `INSERT INTO bi_prazo_padrao (km_min, km_max, prazo_minutos) VALUES ($1, $2, $3)`,
+        [faixa.km_min, faixa.km_max, faixa.prazo_minutos]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao salvar prazo padrão:', err);
+    res.status(500).json({ error: 'Erro ao salvar prazo padrão' });
+  }
+});
+
+// Criar/Atualizar configuração de prazo para cliente/centro
+app.post('/api/bi/prazos', async (req, res) => {
+  try {
+    const { tipo, codigo, nome, faixas } = req.body;
+    
+    // Inserir ou atualizar cliente
+    const result = await pool.query(`
+      INSERT INTO bi_prazos_cliente (tipo, codigo, nome, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (tipo, codigo) DO UPDATE SET nome = $3, updated_at = NOW()
+      RETURNING id
+    `, [tipo, codigo, nome]);
+    
+    const clienteId = result.rows[0].id;
+    
+    // Limpar faixas anteriores
+    await pool.query(`DELETE FROM bi_faixas_prazo WHERE prazo_cliente_id = $1`, [clienteId]);
+    
+    // Inserir novas faixas
+    for (const faixa of faixas) {
+      await pool.query(
+        `INSERT INTO bi_faixas_prazo (prazo_cliente_id, km_min, km_max, prazo_minutos) VALUES ($1, $2, $3, $4)`,
+        [clienteId, faixa.km_min, faixa.km_max, faixa.prazo_minutos]
+      );
+    }
+    
+    res.json({ success: true, id: clienteId });
+  } catch (err) {
+    console.error('❌ Erro ao salvar prazo:', err);
+    res.status(500).json({ error: 'Erro ao salvar prazo' });
+  }
+});
+
+// Remover configuração de prazo
+app.delete('/api/bi/prazos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM bi_prazos_cliente WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover prazo:', err);
+    res.status(500).json({ error: 'Erro ao remover prazo' });
+  }
+});
+
+// DIAGNÓSTICO - verificar dados do BI
+app.get('/api/bi/diagnostico', async (req, res) => {
+  try {
+    // Versão do código para verificar deploy
+    const versao = '2025-12-09-v4-varchar-aumentado';
+    
+    // Verificar prazo padrão
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
+    
+    // Verificar entregas
+    const entregas = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas`);
+    const amostra = await pool.query(`SELECT id, os, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
+    
+    // Verificar quantos têm prazo calculado
+    const comPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo IS NOT NULL`);
+    const dentroPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = true`);
+    const foraPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = false`);
+    
+    // Verificar centros de custo
+    const comCentroCusto = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != ''`);
+    const centrosUnicos = await pool.query(`SELECT DISTINCT centro_custo, cod_cliente FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' LIMIT 20`);
+    
+    // Verificar motivos (retornos)
+    const comMotivo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE motivo IS NOT NULL AND motivo != ''`);
+    const motivosErro = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE LOWER(motivo) LIKE '%erro%'`);
+    const motivosUnicos = await pool.query(`SELECT DISTINCT motivo, COUNT(*) as qtd FROM bi_entregas WHERE motivo IS NOT NULL AND motivo != '' GROUP BY motivo ORDER BY qtd DESC LIMIT 20`);
+    const amostraErros = await pool.query(`SELECT os, ponto, cod_cliente, motivo FROM bi_entregas WHERE LOWER(motivo) LIKE '%erro%' LIMIT 10`);
+    
+    // Verificar ocorrências (nova regra de retornos)
+    const comOcorrencia = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != ''`);
+    const ocorrenciasRetorno = await pool.query(`
+      SELECT COUNT(*) as total FROM bi_entregas 
+      WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' 
+         OR LOWER(ocorrencia) LIKE '%clienteaus%'
+         OR LOWER(ocorrencia) LIKE '%cliente ausente%'
+         OR LOWER(ocorrencia) LIKE '%loja fechada%'
+         OR LOWER(ocorrencia) LIKE '%produto incorreto%'
+    `);
+    const ocorrenciasUnicas = await pool.query(`SELECT DISTINCT ocorrencia, COUNT(*) as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 30`);
+    
+    res.json({
+      prazoPadrao: prazoPadrao.rows,
+      totalEntregas: entregas.rows[0].total,
+      comPrazoCalculado: comPrazo.rows[0].total,
+      dentroPrazo: dentroPrazo.rows[0].total,
+      foraPrazo: foraPrazo.rows[0].total,
+      comCentroCusto: comCentroCusto.rows[0].total,
+      centrosUnicos: centrosUnicos.rows,
+      comMotivo: comMotivo.rows[0].total,
+      motivosComErro: motivosErro.rows[0].total,
+      motivosUnicos: motivosUnicos.rows,
+      amostraErros: amostraErros.rows,
+      comOcorrencia: comOcorrencia.rows[0].total,
+      ocorrenciasRetorno: ocorrenciasRetorno.rows[0].total,
+      ocorrenciasUnicas: ocorrenciasUnicas.rows,
+      amostraEntregas: amostra.rows,
+      versao: versao
+    });
+  } catch (err) {
+    console.error('❌ Erro no diagnóstico:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upload de entregas (recebe JSON do Excel processado no frontend)
+app.post('/api/bi/entregas/upload', async (req, res) => {
+  try {
+    const { entregas, data_referencia } = req.body;
+    
+    console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
+    
+    // Log para debug - verificar se centro_custo e motivo estão vindo
+    if (entregas && entregas.length > 0) {
+      console.log('📋 Amostra primeira entrega:', JSON.stringify(entregas[0], null, 2));
+      console.log('📋 Centro custo da primeira:', entregas[0].centro_custo);
+      console.log('📋 Motivo da primeira:', entregas[0].motivo);
+      
+      // Contar quantas têm motivo "erro"
+      const comErro = entregas.filter(e => e.motivo && e.motivo.toLowerCase().includes('erro'));
+      console.log(`📋 Total com motivo "erro": ${comErro.length}`);
+      if (comErro.length > 0) {
+        console.log('📋 Exemplos de motivos com erro:', comErro.slice(0, 5).map(e => e.motivo));
+      }
+    }
+    
+    if (!entregas || entregas.length === 0) {
+      return res.status(400).json({ error: 'Nenhuma entrega recebida' });
+    }
+    
+    console.log(`📤 Iniciando upload de ${entregas.length} entregas...`);
+    
+    // Log da primeira entrega para debug
+    if (entregas.length > 0) {
+      console.log('📋 Campos de data da primeira entrega:', {
+        data_hora: entregas[0].data_hora,
+        data_solicitado: entregas[0].data_solicitado,
+        finalizado: entregas[0].finalizado
+      });
+    }
+    
+    // Detectar período das entregas para limpar dados antigos
+    let dataMin = null, dataMax = null;
+    let datasEncontradas = 0;
+    
+    for (const e of entregas) {
+      // Tentar múltiplos campos de data
+      const camposData = [e.data_hora, e.data_solicitado, e.finalizado];
+      
+      for (const data of camposData) {
+        if (data) {
+          let d = null;
+          
+          // Se for número (serial do Excel)
+          if (typeof data === 'number') {
+            d = new Date((data - 25569) * 86400000);
+          }
+          // Se for string
+          else if (typeof data === 'string') {
+            // Tentar formato DD/MM/YYYY
+            const match = data.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (match) {
+              d = new Date(match[3], match[2] - 1, match[1]);
+            } else {
+              d = new Date(data);
+            }
+          }
+          // Se já for Date
+          else if (data instanceof Date) {
+            d = data;
+          }
+          
+          if (d && !isNaN(d.getTime())) {
+            datasEncontradas++;
+            if (!dataMin || d < dataMin) dataMin = d;
+            if (!dataMax || d > dataMax) dataMax = d;
+            break; // Já encontrou uma data válida nessa linha
+          }
+        }
+      }
+    }
+    
+    console.log(`📅 Datas encontradas em ${datasEncontradas} de ${entregas.length} linhas`);
+    
+    // Limpar dados do período antes de inserir (evita duplicatas)
+    if (dataMin && dataMax) {
+      const dataInicioStr = dataMin.toISOString().split('T')[0];
+      const dataFimStr = dataMax.toISOString().split('T')[0];
+      console.log(`🧹 Limpando dados existentes de ${dataInicioStr} a ${dataFimStr}...`);
+      
+      // Limpar por data_hora (TIMESTAMP) ao invés de data_solicitado
+      const deleteResult = await pool.query(`
+        DELETE FROM bi_entregas 
+        WHERE DATE(data_hora) >= $1 AND DATE(data_hora) <= $2
+      `, [dataInicioStr, dataFimStr]);
+      
+      console.log(`🧹 ${deleteResult.rowCount} registros removidos do período`);
+    } else {
+      console.log(`⚠️ Não foi possível detectar período das datas - nenhum dado será limpo`);
+    }
+    
+    // Buscar configurações de prazo
+    const prazosCliente = await pool.query(`
+      SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+      FROM bi_prazos_cliente pc
+      JOIN bi_faixas_prazo fp ON pc.id = fp.prazo_cliente_id
+    `).catch(() => ({ rows: [] }));
+    
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
+    
+    console.log(`📊 Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
+    if (prazoPadrao.rows.length > 0) {
+      console.log(`📊 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    }
+    
+    // Função para encontrar prazo baseado na distância
+    const encontrarPrazo = (codCliente, centroCusto, distancia) => {
+      let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+      if (faixas.length === 0) {
+        faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
+      }
+      if (faixas.length === 0) {
+        faixas = prazoPadrao.rows;
+      }
+      for (const faixa of faixas) {
+        const kmMin = parseFloat(faixa.km_min) || 0;
+        const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+        if (distancia >= kmMin && distancia < kmMax) {
+          return parseInt(faixa.prazo_minutos);
+        }
+      }
+      return null;
+    };
+    
+    // Função para converter data/hora do Excel para Date
+    const parseDataHora = (valor) => {
+      if (!valor) return null;
+      // Se for número (serial date do Excel - dias desde 1900)
+      if (typeof valor === 'number') {
+        // Excel serial date: dias desde 1/1/1900 (com bug do ano 1900)
+        const excelEpoch = new Date(1899, 11, 30); // 30/12/1899
+        const date = new Date(excelEpoch.getTime() + valor * 86400000);
+        return date;
+      }
+      // Se for string no formato DD/MM/YYYY HH:MM:SS ou DD/MM/YYYY HH:MM
+      if (typeof valor === 'string') {
+        // Tentar formato DD/MM/YYYY HH:MM:SS
+        const regex = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/;
+        const match = valor.match(regex);
+        if (match) {
+          const [_, dia, mes, ano, hora, min, seg] = match;
+          return new Date(ano, mes - 1, dia, hora, min, seg || 0);
+        }
+        // Tentar ISO
+        const d = new Date(valor);
+        if (!isNaN(d.getTime())) return d;
+      }
+      return null;
+    };
+    
+    // Função para calcular tempo de execução em minutos
+    // Usa o campo Execução Comp. que já é a diferença em fração de dia
+    // OU calcula (Finalizado - Data/Hora) se não tiver Execução Comp.
+    const calcularTempoExecucao = (execucaoComp, dataHora, finalizado) => {
+      // Se tiver Execução Comp. (fração do dia), usa direto
+      if (execucaoComp !== null && execucaoComp !== undefined && execucaoComp !== '') {
+        if (typeof execucaoComp === 'number') {
+          // Fração do dia -> minutos (0.5 = 12h = 720min)
+          return Math.round(execucaoComp * 24 * 60);
+        }
+        // Se for string HH:MM:SS
+        if (typeof execucaoComp === 'string' && execucaoComp.includes(':')) {
+          const partes = execucaoComp.split(':');
+          if (partes.length >= 2) {
+            return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+          }
+        }
+      }
+      
+      // Fallback: calcular a partir de Data/Hora e Finalizado
+      if (dataHora && finalizado && typeof dataHora === 'number' && typeof finalizado === 'number') {
+        const diff = finalizado - dataHora; // diferença em dias
+        if (diff >= 0) {
+          return Math.round(diff * 24 * 60); // converter para minutos
+        }
+      }
+      
+      return null;
+    };
+    
+    // Função para converter data do Excel para formato ISO (só data)
+    const parseData = (valor) => {
+      if (!valor) return null;
+      if (typeof valor === 'number') {
+        const excelEpoch = new Date(1899, 11, 30);
+        const date = new Date(excelEpoch.getTime() + valor * 86400000);
+        return date.toISOString().split('T')[0];
+      }
+      if (typeof valor === 'string' && valor.includes('/')) {
+        const partes = valor.split(/[\s\/]/);
+        if (partes.length >= 3) {
+          return `${partes[2]}-${partes[1].padStart(2,'0')}-${partes[0].padStart(2,'0')}`;
+        }
+      }
+      return valor;
+    };
+    
+    // Função para converter timestamp para formato ISO
+    const parseTimestamp = (valor) => {
+      const d = parseDataHora(valor);
+      return d ? d.toISOString() : null;
+    };
+    
+    // Função para limpar número
+    const parseNum = (valor) => {
+      if (!valor) return null;
+      if (typeof valor === 'number') return valor;
+      const str = String(valor).replace(',', '.').replace(/[^\d.-]/g, '');
+      const num = parseFloat(str);
+      return isNaN(num) ? null : num;
+    };
+    
+    let inseridos = 0;
+    let atualizados = 0;
+    let erros = 0;
+    let dentroPrazoCount = 0;
+    let foraPrazoCount = 0;
+    let linhasIgnoradas = 0;
+    let motivosIgnoradas = {};
+    
+    // Processar em lotes para melhor performance
+    const BATCH_SIZE = 500;
+    const totalBatches = Math.ceil(entregas.length / BATCH_SIZE);
+    
+    console.log(`📦 Processando ${entregas.length} linhas em ${totalBatches} lotes de ${BATCH_SIZE}`);
+    
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+      const start = batchIndex * BATCH_SIZE;
+      const end = Math.min(start + BATCH_SIZE, entregas.length);
+      const batch = entregas.slice(start, end);
+      
+      console.log(`📦 Processando lote ${batchIndex + 1}/${totalBatches} (linhas ${start + 1} a ${end})`);
+      
+      // Preparar dados do lote
+      const dadosLote = [];
+      
+      for (const e of batch) {
+        try {
+          const os = parseInt(e.os);
+          if (!os) {
+            linhasIgnoradas++;
+            motivosIgnoradas['OS inválida'] = (motivosIgnoradas['OS inválida'] || 0) + 1;
+            continue;
+          }
+          
+          const distancia = parseNum(e.distancia) || 0;
+          const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
+          
+          // Calcular tempo de execução usando Execução Comp. ou (Finalizado - Data/Hora)
+          const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
+          
+          const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+          
+          if (dentroPrazo === true) dentroPrazoCount++;
+          if (dentroPrazo === false) foraPrazoCount++;
+          
+          // Extrair número do ponto
+          let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
+          
+          // Se não encontrou ponto, tenta extrair do endereço
+          if (ponto === 0 && e.endereco) {
+            const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
+            if (matchPonto) {
+              ponto = parseInt(matchPonto[1]) || 1;
+            }
+          }
+          
+          // Se ainda não tem ponto, usa 1 como padrão
+          if (ponto === 0) ponto = 1;
+          
+          // Função para truncar strings (evita erro de tamanho)
+          const truncar = (str, max) => str ? String(str).substring(0, max) : null;
+          
+          dadosLote.push({
+            os,
+            ponto,
+            num_pedido: truncar(e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'], 100),
+            cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
+            nome_cliente: truncar(e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'], 255),
+            empresa: truncar(e.empresa || e.Empresa, 255),
+            nome_fantasia: truncar(e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'], 255),
+            centro_custo: truncar(e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto, 255),
+            cidade_p1: truncar(e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'], 100),
+            endereco: e.endereco || null,
+            bairro: truncar(e.bairro, 100),
+            cidade: truncar(e.cidade, 100),
+            estado: truncar(e.estado, 50),
+            cod_prof: parseInt(e.cod_prof) || null,
+            nome_prof: truncar(e.nome_prof, 255),
+            data_hora: parseTimestamp(e.data_hora),
+            finalizado: parseTimestamp(e.finalizado),
+            data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
+            categoria: truncar(e.categoria, 100),
+            valor: parseNum(e.valor),
+            distancia: distancia,
+            valor_prof: parseNum(e.valor_prof),
+            execucao_comp: truncar(e.execucao_comp ? String(e.execucao_comp) : null, 50),
+            status: truncar(e.status, 100),
+            motivo: truncar(e.motivo, 255),
+            ocorrencia: truncar(e.ocorrencia, 255),
+            velocidade_media: parseNum(e.velocidade_media),
+            dentro_prazo: dentroPrazo,
+            prazo_minutos: prazoMinutos,
+            tempo_execucao_minutos: tempoExecucao,
+            data_upload: data_referencia || new Date().toISOString().split('T')[0]
+          });
+        } catch (err) {
+          linhasIgnoradas++;
+          motivosIgnoradas['Erro parsing'] = (motivosIgnoradas['Erro parsing'] || 0) + 1;
+        }
+      }
+      
+      // Inserir lote usando INSERT ... ON CONFLICT (UPSERT)
+      if (dadosLote.length > 0) {
+        try {
+          // Construir query de inserção em massa
+          const valores = [];
+          const params = [];
+          let paramIndex = 1;
+          
+          for (const d of dadosLote) {
+            const indices = [];
+            for (let i = 0; i < 31; i++) {
+              indices.push(`$${paramIndex++}`);
+            }
+            valores.push(`(${indices.join(',')})`);
+            params.push(
+              d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
+              d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
+              d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
+              d.data_hora, d.finalizado, d.data_solicitado,
+              d.categoria, d.valor, d.distancia, d.valor_prof,
+              d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
+              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+            );
+          }
+          
+          const query = `
+            INSERT INTO bi_entregas (
+              os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
+              nome_fantasia, centro_custo, cidade_p1, endereco,
+              bairro, cidade, estado, cod_prof, nome_prof,
+              data_hora, finalizado, data_solicitado,
+              categoria, valor, distancia, valor_prof,
+              execucao_comp, status, motivo, ocorrencia, velocidade_media,
+              dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
+            ) VALUES ${valores.join(',')}
+          `;
+          
+          const result = await pool.query(query, params);
+          inseridos += dadosLote.length;
+          
+        } catch (batchErr) {
+          console.error(`❌ Erro no lote ${batchIndex + 1}:`, batchErr.message);
+          // Se falhar o batch, tenta inserir um por um
+          for (const d of dadosLote) {
+            try {
+              await pool.query(`
+                INSERT INTO bi_entregas (
+                  os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
+                  nome_fantasia, centro_custo, cidade_p1, endereco,
+                  bairro, cidade, estado, cod_prof, nome_prof,
+                  data_hora, finalizado, data_solicitado,
+                  categoria, valor, distancia, valor_prof,
+                  execucao_comp, status, motivo, ocorrencia, velocidade_media,
+                  dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+              `, [
+                d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
+                d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
+                d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
+                d.data_hora, d.finalizado, d.data_solicitado,
+                d.categoria, d.valor, d.distancia, d.valor_prof,
+                d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
+                d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+              ]);
+              inseridos++;
+            } catch (singleErr) {
+              console.error(`❌ Erro individual OS ${d.os} Ponto ${d.ponto}:`, singleErr.message);
+              erros++;
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ Upload concluído: ${inseridos} processados, ${erros} erros, ${linhasIgnoradas} ignoradas`);
+    console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
+    if (Object.keys(motivosIgnoradas).length > 0) {
+      console.log(`⚠️ Motivos de linhas ignoradas:`, motivosIgnoradas);
+    }
+    
+    res.json({ 
+      success: true, 
+      inseridos, 
+      atualizados, 
+      erros, 
+      linhasIgnoradas,
+      motivosIgnoradas,
+      total: entregas.length, 
+      dentroPrazo: dentroPrazoCount, 
+      foraPrazo: foraPrazoCount 
+    });
+  } catch (err) {
+    console.error('❌ Erro no upload:', err);
+    res.status(500).json({ error: 'Erro ao fazer upload: ' + err.message });
+  }
+});
+
+// Recalcular prazos de todas as entregas
+app.post('/api/bi/entregas/recalcular', async (req, res) => {
+  try {
+    // Buscar configurações de prazo
+    const prazosCliente = await pool.query(`
+      SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+      FROM bi_prazos_cliente pc
+      JOIN bi_faixas_prazo fp ON pc.id = fp.prazo_cliente_id
+    `);
+    
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
+    
+    console.log(`🔄 Recalculando - Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
+    if (prazoPadrao.rows.length > 0) {
+      console.log(`🔄 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    } else {
+      console.log(`⚠️ ATENÇÃO: Nenhum prazo padrão configurado! Configure na aba Prazos.`);
+    }
+    
+    // Buscar todas as entregas
+    const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp FROM bi_entregas`);
+    console.log(`🔄 Total de entregas: ${entregas.rows.length}`);
+    
+    const encontrarPrazo = (codCliente, centroCusto, distancia) => {
+      let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+      if (faixas.length === 0) {
+        faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
+      }
+      if (faixas.length === 0) {
+        faixas = prazoPadrao.rows;
+      }
+      for (const faixa of faixas) {
+        const kmMin = parseFloat(faixa.km_min) || 0;
+        const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+        if (distancia >= kmMin && distancia < kmMax) {
+          return parseInt(faixa.prazo_minutos);
+        }
+      }
+      return null;
+    };
+    
+    // Calcular tempo em minutos
+    const calcularTempoExecucao = (execucaoComp, dataHora, finalizado) => {
+      // Se tiver execucao_comp como string HH:MM:SS
+      if (execucaoComp && typeof execucaoComp === 'string' && execucaoComp.includes(':')) {
+        const partes = execucaoComp.split(':');
+        if (partes.length >= 2) {
+          return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+        }
+      }
+      
+      // Calcular a partir dos timestamps
+      if (!dataHora || !finalizado) return null;
+      const inicio = new Date(dataHora);
+      const fim = new Date(finalizado);
+      if (isNaN(inicio.getTime()) || isNaN(fim.getTime())) return null;
+      const diffMs = fim.getTime() - inicio.getTime();
+      if (diffMs < 0) return null;
+      return Math.round(diffMs / 60000); // ms para minutos
+    };
+    
+    let atualizados = 0;
+    let dentroPrazoCount = 0;
+    let foraPrazoCount = 0;
+    let semPrazoCount = 0;
+    
+    for (const e of entregas.rows) {
+      const distancia = parseFloat(e.distancia) || 0;
+      const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
+      const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
+      const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+      
+      if (dentroPrazo === true) dentroPrazoCount++;
+      else if (dentroPrazo === false) foraPrazoCount++;
+      else semPrazoCount++;
+      
+      // Log para debug (primeiras 5)
+      if (atualizados < 5) {
+        console.log(`🔄 ID ${e.id}: dist=${distancia}km, execComp="${e.execucao_comp}", data_hora=${e.data_hora}, finalizado=${e.finalizado}, prazo=${prazoMinutos}min, tempo=${tempoExecucao}min, dentro=${dentroPrazo}`);
+      }
+      
+      await pool.query(`
+        UPDATE bi_entregas SET dentro_prazo = $1, prazo_minutos = $2, tempo_execucao_minutos = $3 WHERE id = $4
+      `, [dentroPrazo, prazoMinutos, tempoExecucao, e.id]);
+      atualizados++;
+    }
+    
+    console.log(`✅ Recalculado: ${atualizados} entregas`);
+    console.log(`   ✅ Dentro: ${dentroPrazoCount} | ❌ Fora: ${foraPrazoCount} | ⚠️ Sem dados: ${semPrazoCount}`);
+    res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount, semDados: semPrazoCount });
+  } catch (err) {
+    console.error('❌ Erro ao recalcular:', err);
+    res.status(500).json({ error: 'Erro ao recalcular' });
+  }
+});
+
+// Dashboard BI - Métricas gerais COMPLETO
+app.get('/api/bi/dashboard', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      where += ` AND data_solicitado >= $${paramIndex++}`;
+      params.push(data_inicio);
+    }
+    if (data_fim) {
+      where += ` AND data_solicitado <= $${paramIndex++}`;
+      params.push(data_fim);
+    }
+    if (cod_cliente) {
+      where += ` AND cod_cliente = $${paramIndex++}`;
+      params.push(cod_cliente);
+    }
+    if (centro_custo) {
+      where += ` AND centro_custo = $${paramIndex++}`;
+      params.push(centro_custo);
+    }
+    if (cod_prof) {
+      where += ` AND cod_prof = $${paramIndex++}`;
+      params.push(cod_prof);
+    }
+    if (categoria) {
+      where += ` AND categoria ILIKE $${paramIndex++}`;
+      params.push(`%${categoria}%`);
+    }
+    if (status_prazo === 'dentro') {
+      where += ` AND dentro_prazo = true`;
+    } else if (status_prazo === 'fora') {
+      where += ` AND dentro_prazo = false`;
+    }
+    if (cidade) {
+      where += ` AND cidade = $${paramIndex++}`;
+      params.push(cidade);
+    }
+    
+    // Métricas gerais completas
+    const metricas = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo IS NULL) as sem_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(AVG(distancia)::numeric, 2) as distancia_media,
+        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
+        ROUND(SUM(valor)::numeric, 2) as valor_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_profissional,
+        ROUND(SUM(valor)::numeric - COALESCE(SUM(valor_prof)::numeric, 0), 2) as faturamento,
+        ROUND(AVG(valor)::numeric, 2) as ticket_medio,
+        COUNT(DISTINCT cod_prof) as total_entregadores,
+        COUNT(DISTINCT cod_cliente) as total_clientes,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_entregador,
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
+      FROM bi_entregas ${where}
+    `, params);
+    
+    // Entregas por dia
+    const porDia = await pool.query(`
+      SELECT 
+        data_solicitado as data,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo
+      FROM bi_entregas ${where}
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado
+    `, params);
+    
+    // Por centro de custo
+    const porCentro = await pool.query(`
+      SELECT 
+        centro_custo,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo
+      FROM bi_entregas ${where}
+      GROUP BY centro_custo
+      ORDER BY total DESC
+      LIMIT 20
+    `, params);
+    
+    // Ranking profissionais
+    const ranking = await pool.query(`
+      SELECT 
+        cod_prof,
+        nome_prof,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
+      FROM bi_entregas ${where}
+      GROUP BY cod_prof, nome_prof
+      ORDER BY total DESC
+      LIMIT 20
+    `, params);
+    
+    // Por categoria
+    const porCategoria = await pool.query(`
+      SELECT 
+        categoria,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo
+      FROM bi_entregas ${where}
+      GROUP BY categoria
+      ORDER BY total DESC
+    `, params);
+    
+    res.json({
+      metricas: metricas.rows[0],
+      porDia: porDia.rows,
+      porCentro: porCentro.rows,
+      ranking: ranking.rows,
+      porCategoria: porCategoria.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro no dashboard:', err);
+    res.status(500).json({ error: 'Erro ao carregar dashboard' });
+  }
+});
+
+// Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
+// Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
+app.get('/api/bi/dashboard-completo', async (req, res) => {
+  try {
+    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, cidade } = req.query;
+    // Suporte a múltiplos clientes e centros de custo
+    let cod_cliente = req.query.cod_cliente;
+    let centro_custo = req.query.centro_custo;
+    
+    // Converter para array se necessário
+    if (cod_cliente && !Array.isArray(cod_cliente)) cod_cliente = [cod_cliente];
+    if (centro_custo && !Array.isArray(centro_custo)) centro_custo = [centro_custo];
+    
+    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof });
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    // Converter datas ISO para YYYY-MM-DD
+    if (data_inicio) { 
+      const dataIni = data_inicio.includes('T') ? data_inicio.split('T')[0] : data_inicio;
+      where += ` AND data_solicitado >= $${paramIndex++}`; 
+      params.push(dataIni); 
+    }
+    if (data_fim) { 
+      const dataFim = data_fim.includes('T') ? data_fim.split('T')[0] : data_fim;
+      where += ` AND data_solicitado <= $${paramIndex++}`; 
+      params.push(dataFim); 
+    }
+    // Múltiplos clientes
+    if (cod_cliente && cod_cliente.length > 0) { 
+      where += ` AND cod_cliente = ANY($${paramIndex++}::int[])`; 
+      params.push(cod_cliente.map(c => parseInt(c))); 
+    }
+    // Múltiplos centros de custo
+    if (centro_custo && centro_custo.length > 0) { 
+      where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
+      params.push(centro_custo); 
+    }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    console.log('📊 WHERE:', where, 'Params:', params);
+    
+    // Buscar regras de contagem
+    const regrasContagem = await pool.query('SELECT cod_cliente FROM bi_regras_contagem');
+    const clientesComRegra = new Set(regrasContagem.rows.map(r => String(r.cod_cliente)));
+    console.log('📊 Clientes COM regra de contagem:', [...clientesComRegra]);
+    console.log('📊 Total de clientes com regra:', clientesComRegra.size);
+    
+    // Buscar máscaras
+    const mascaras = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mapMascaras = {};
+    mascaras.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
+    
+    // Buscar todos os dados filtrados
+    const dadosQuery = await pool.query(`
+      SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
+        cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
+        valor, valor_prof, distancia, ocorrencia, centro_custo, motivo, finalizado
+      FROM bi_entregas ${where}
+    `, params);
+    
+    const dados = dadosQuery.rows;
+    console.log('📊 Total registros retornados:', dados.length);
+    
+    // LÓGICA DE CONTAGEM:
+    // Cliente SEM regra: 1 OS = 1 entrega (conta OS únicas)
+    // Cliente COM regra: conta pontos > 1 (cada ponto de entrega conta, exclui coleta)
+    
+    // Agrupar por cliente/OS
+    const osPorCliente = {};
+    dados.forEach(row => {
+      const codStr = String(row.cod_cliente);
+      const os = row.os;
+      if (!osPorCliente[codStr]) osPorCliente[codStr] = {};
+      if (!osPorCliente[codStr][os]) osPorCliente[codStr][os] = [];
+      osPorCliente[codStr][os].push(row);
+    });
+    
+    // Log de debug por cliente
+    Object.keys(osPorCliente).forEach(codCliente => {
+      const totalOS = Object.keys(osPorCliente[codCliente]).length;
+      const temRegra = clientesComRegra.has(codCliente);
+      console.log(`📊 Cliente ${codCliente}: ${totalOS} OS distintas, tem regra: ${temRegra}`);
+    });
+    
+    // Função para calcular entregas de uma OS
+    // REGRA UNIVERSAL: conta apenas pontos >= 2 (ponto 1 é coleta, não conta)
+    const calcularEntregasOS = (linhasOS) => {
+      const entregasCount = linhasOS.filter(l => {
+        const pontoNum = parseInt(l.ponto) || 1;
+        return pontoNum >= 2;
+      }).length;
+      
+      // Se não encontrou pontos >= 2, usa fallback: linhas - 1
+      if (entregasCount === 0 && linhasOS.length > 1) {
+        return linhasOS.length - 1;
+      }
+      
+      // Mínimo 1 entrega se só tem 1 linha
+      return entregasCount > 0 ? entregasCount : 1;
+    };
+    
+    // Calcular métricas gerais - usando a lógica por OS
+    let totalOS = new Set();
+    let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0, semPrazo = 0;
+    let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
+    let profissionais = new Set();
+    let totalRetornos = 0;
+    let ultimaEntrega = null;
+    
+    // Função para verificar se é retorno baseado na Ocorrência
+    const isRetorno = (ocorrencia) => {
+      if (!ocorrencia) return false;
+      const oc = ocorrencia.toLowerCase().trim();
+      return oc.includes('cliente fechado') || 
+             oc.includes('clienteaus') ||
+             oc.includes('cliente ausente') ||
+             oc.includes('loja fechada') ||
+             oc.includes('produto incorreto');
+    };
+    
+    // Processar por cliente/OS
+    Object.keys(osPorCliente).forEach(codCliente => {
+      const osDoCliente = osPorCliente[codCliente];
+      
+      Object.keys(osDoCliente).forEach(os => {
+        const linhasOS = osDoCliente[os];
+        totalOS.add(os);
+        
+        // Contar entregas desta OS (pontos >= 2)
+        const entregasOS = calcularEntregasOS(linhasOS);
+        totalEntregas += entregasOS;
+        
+        // Contagem de profissionais e RETORNOS (em todas as linhas)
+        linhasOS.forEach((row) => {
+          profissionais.add(row.cod_prof);
+          
+          // RETORNO = ocorrência indica problema (conta em TODAS as linhas)
+          if (isRetorno(row.ocorrencia)) {
+            totalRetornos++;
+          }
+          
+          // Última entrega
+          if (row.finalizado) {
+            const dataFin = new Date(row.finalizado);
+            if (!ultimaEntrega || dataFin > ultimaEntrega) {
+              ultimaEntrega = dataFin;
+            }
+          }
+        });
+        
+        // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
+        const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
+        
+        // Para prazo: processa todas as linhas de entrega
+        const processarPrazo = (l) => {
+          if (l.dentro_prazo === true) dentroPrazo++;
+          else if (l.dentro_prazo === false) foraPrazo++;
+          else semPrazo++; // null ou undefined
+          
+          if (l.tempo_execucao_minutos != null) {
+            somaTempoExec += parseFloat(l.tempo_execucao_minutos);
+            countTempoExec++;
+          }
+        };
+        
+        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
+        const linhaValor = linhasOS.reduce((maior, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 0;
+          const pontoMaior = parseInt(maior?.ponto) || 0;
+          return pontoAtual > pontoMaior ? atual : maior;
+        }, linhasOS[0]);
+        
+        somaValor += parseFloat(linhaValor?.valor) || 0;
+        somaValorProf += parseFloat(linhaValor?.valor_prof) || 0;
+        
+        if (linhasEntrega.length > 0) {
+          linhasEntrega.forEach(processarPrazo);
+        } else if (linhasOS.length > 1) {
+          linhasOS.slice(1).forEach(processarPrazo);
+        } else {
+          processarPrazo(linhasOS[0]);
+        }
+      });
+    });
+    
+    const metricas = {
+      total_os: totalOS.size,
+      total_entregas: totalEntregas,
+      dentro_prazo: dentroPrazo,
+      fora_prazo: foraPrazo,
+      sem_prazo: semPrazo,
+      tempo_medio: countTempoExec > 0 ? (somaTempoExec / countTempoExec).toFixed(2) : 0,
+      valor_total: somaValor.toFixed(2),
+      valor_prof_total: somaValorProf.toFixed(2),
+      ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
+      total_profissionais: profissionais.size,
+      media_entregas_por_prof: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
+      total_retornos: totalRetornos,
+      incentivo: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
+      ultima_entrega: ultimaEntrega ? ultimaEntrega.toISOString() : null
+    };
+    
+    // Agrupar por cliente - usando mesma lógica
+    const porClienteMap = {};
+    Object.keys(osPorCliente).forEach(codCliente => {
+      const osDoCliente = osPorCliente[codCliente];
+      
+      if (!porClienteMap[codCliente]) {
+        const primeiraLinha = Object.values(osDoCliente)[0][0];
+        porClienteMap[codCliente] = {
+          cod_cliente: primeiraLinha.cod_cliente,
+          nome_cliente: primeiraLinha.nome_cliente,
+          nome_display: mapMascaras[codCliente] || primeiraLinha.nome_cliente,
+          tem_mascara: !!mapMascaras[codCliente],
+          os_set: new Set(),
+          profissionais_set: new Set(),
+          centros_custo_map: {}, // Mapa de centros de custo com dados
+          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0,
+          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0,
+          total_retornos: 0, ultima_entrega: null
+        };
+      }
+      
+      const c = porClienteMap[codCliente];
+      
+      // Função para verificar se é retorno baseado na Ocorrência
+      const isRetornoCliente = (ocorrencia) => {
+        if (!ocorrencia) return false;
+        const oc = ocorrencia.toLowerCase().trim();
+        return oc.includes('cliente fechado') || 
+               oc.includes('clienteaus') ||
+               oc.includes('cliente ausente') ||
+               oc.includes('loja fechada') ||
+               oc.includes('produto incorreto');
+      };
+      
+      Object.keys(osDoCliente).forEach(os => {
+        const linhasOS = osDoCliente[os];
+        c.os_set.add(os);
+        
+        // Coletar profissionais, última entrega e RETORNOS (em todas as linhas)
+        linhasOS.forEach(l => {
+          c.profissionais_set.add(l.cod_prof);
+          
+          // RETORNO = ocorrência indica problema (conta em TODAS as linhas)
+          if (isRetornoCliente(l.ocorrencia)) {
+            c.total_retornos++;
+          }
+          
+          if (l.finalizado) {
+            const dataFin = new Date(l.finalizado);
+            if (!c.ultima_entrega || dataFin > c.ultima_entrega) {
+              c.ultima_entrega = dataFin;
+            }
+          }
+        });
+        
+        const entregasOS = calcularEntregasOS(linhasOS);
+        c.total_entregas += entregasOS;
+        
+        // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
+        const linhasEntrega = linhasOS.filter(l => parseInt(l.ponto) >= 2);
+        const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
+          (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
+        
+        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto)
+        const linhaValor = linhasOS.reduce((maior, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 0;
+          const pontoMaior = parseInt(maior?.ponto) || 0;
+          return pontoAtual > pontoMaior ? atual : maior;
+        }, linhasOS[0]);
+        
+        c.soma_valor += parseFloat(linhaValor?.valor) || 0;
+        c.soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+        
+        // Centro de custo para valores - pega do linhaValor
+        const ccValor = linhaValor?.centro_custo || 'Sem Centro';
+        if (!c.centros_custo_map[ccValor]) {
+          c.centros_custo_map[ccValor] = {
+            centro_custo: ccValor,
+            os_set: new Set(),
+            total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
+            soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+          };
+        }
+        c.centros_custo_map[ccValor].soma_valor += parseFloat(linhaValor?.valor) || 0;
+        c.centros_custo_map[ccValor].soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+        c.centros_custo_map[ccValor].os_set.add(os);
+        
+        linhasParaProcessar.forEach(l => {
+          // Métricas do cliente total (prazo e tempo)
+          if (l.dentro_prazo === true) c.dentro_prazo++;
+          else if (l.dentro_prazo === false) c.fora_prazo++;
+          else c.sem_prazo++;
+          
+          if (l.tempo_execucao_minutos != null) {
+            c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+            c.count_tempo++;
+          }
+          
+          // Agrupar por centro de custo (prazo e entregas)
+          const cc = l.centro_custo || 'Sem Centro';
+          if (!c.centros_custo_map[cc]) {
+            c.centros_custo_map[cc] = {
+              centro_custo: cc,
+              os_set: new Set(),
+              total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
+              soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
+            };
+          }
+          const ccData = c.centros_custo_map[cc];
+          ccData.total_entregas++;
+          if (l.dentro_prazo === true) ccData.dentro_prazo++;
+          else if (l.dentro_prazo === false) ccData.fora_prazo++;
+          else ccData.sem_prazo++;
+          if (l.tempo_execucao_minutos != null) {
+            ccData.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+            ccData.count_tempo++;
+          }
+        });
+        
+        // Contar retornos por centro de custo (em TODAS as linhas da OS)
+        linhasOS.forEach(l => {
+          const cc = l.centro_custo || 'Sem Centro';
+          if (c.centros_custo_map[cc] && isRetornoCliente(l.ocorrencia)) {
+            c.centros_custo_map[cc].total_retornos++;
+          }
+        });
+      });
+    });
+    
+    const porCliente = Object.values(porClienteMap).map(c => {
+      // Converter centros_custo_map em array com dados
+      const centros_custo_dados = Object.values(c.centros_custo_map).map(cc => ({
+        centro_custo: cc.centro_custo,
+        total_os: cc.os_set.size,
+        total_entregas: cc.total_entregas,
+        total_retornos: cc.total_retornos,
+        dentro_prazo: cc.dentro_prazo,
+        fora_prazo: cc.fora_prazo,
+        sem_prazo: cc.sem_prazo,
+        tempo_medio: cc.count_tempo > 0 ? (cc.soma_tempo / cc.count_tempo).toFixed(2) : null,
+        valor_total: cc.soma_valor.toFixed(2),
+        valor_prof: cc.soma_valor_prof.toFixed(2)
+      })).sort((a, b) => b.total_entregas - a.total_entregas);
+      
+      const totalProfs = c.profissionais_set.size;
+      const ticketMedio = c.total_entregas > 0 ? (c.soma_valor / c.total_entregas) : 0;
+      const incentivo = totalProfs > 0 ? (c.total_entregas / totalProfs) : 0;
+      
+      return {
+        cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
+        nome_display: c.nome_display, tem_mascara: c.tem_mascara,
+        total_os: c.os_set.size, total_entregas: c.total_entregas,
+        centros_custo: centros_custo_dados, // Agora é array com dados completos
+        dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
+        tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
+        valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
+        // Novas métricas
+        ticket_medio: ticketMedio.toFixed(2),
+        total_profissionais: totalProfs,
+        entregas_por_prof: incentivo.toFixed(2),
+        incentivo: incentivo.toFixed(2),
+        total_retornos: c.total_retornos,
+        ultima_entrega: c.ultima_entrega ? c.ultima_entrega.toISOString() : null
+      };
+    }).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Log centros de custo encontrados
+    console.log('📁 CENTROS DE CUSTO POR CLIENTE:');
+    porCliente.forEach(c => {
+      console.log(`   - ${c.cod_cliente}: ${c.centros_custo.length} centros -> [${c.centros_custo.join(', ')}]`);
+    });
+    
+    // Log resultado por cliente
+    console.log('📊 RESULTADO POR CLIENTE:');
+    porCliente.forEach(c => {
+      const temRegra = clientesComRegra.has(String(c.cod_cliente));
+      console.log(`   - ${c.cod_cliente} (${c.nome_display}): ${c.total_os} OS, ${c.total_entregas} entregas, regra: ${temRegra}`);
+    });
+    console.log('📊 TOTAL GERAL: ', metricas.total_os, 'OS,', metricas.total_entregas, 'entregas');
+    
+    // Agrupar por profissional - também precisa respeitar a regra
+    const porProfMap = {};
+    
+    // Agrupar por profissional/OS para aplicar regra corretamente
+    const osPorProf = {};
+    dados.forEach(row => {
+      const codProf = String(row.cod_prof);
+      const codCliente = String(row.cod_cliente);
+      const os = row.os;
+      const chave = `${codProf}-${os}`;
+      
+      if (!osPorProf[codProf]) osPorProf[codProf] = {};
+      if (!osPorProf[codProf][os]) osPorProf[codProf][os] = { codCliente, linhas: [] };
+      osPorProf[codProf][os].linhas.push(row);
+    });
+    
+    Object.keys(osPorProf).forEach(codProf => {
+      const osDoProf = osPorProf[codProf];
+      
+      if (!porProfMap[codProf]) {
+        const primeiraLinha = Object.values(osDoProf)[0].linhas[0];
+        porProfMap[codProf] = {
+          cod_prof: primeiraLinha.cod_prof,
+          nome_prof: primeiraLinha.nome_prof,
+          total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+          soma_tempo: 0, count_tempo: 0, soma_dist: 0, soma_valor_prof: 0, retornos: 0
+        };
+      }
+      
+      const p = porProfMap[codProf];
+      
+      // Função para verificar se é retorno baseado na Ocorrência
+      const isRetornoProf = (ocorrencia) => {
+        if (!ocorrencia) return false;
+        const oc = ocorrencia.toLowerCase().trim();
+        return oc.includes('cliente fechado') || 
+               oc.includes('clienteaus') ||
+               oc.includes('cliente ausente') ||
+               oc.includes('loja fechada') ||
+               oc.includes('produto incorreto');
+      };
+      
+      Object.keys(osDoProf).forEach(os => {
+        const { codCliente, linhas } = osDoProf[os];
+        const entregasOS = calcularEntregasOS(linhas);
+        p.total_entregas += entregasOS;
+        
+        // Contagem de retornos (ocorrência indica problema) - TODAS as linhas
+        linhas.forEach(l => {
+          if (isRetornoProf(l.ocorrencia)) p.retornos++;
+        });
+        
+        // REGRA UNIVERSAL: métricas apenas das entregas (ponto >= 2)
+        const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
+        
+        if (linhasEntrega.length > 0) {
+          linhasEntrega.forEach(l => {
+            if (l.dentro_prazo === true) p.dentro_prazo++;
+            else if (l.dentro_prazo === false) p.fora_prazo++;
+            p.soma_dist += parseFloat(l.distancia) || 0;
+            p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              p.count_tempo++;
+            }
+          });
+        } else if (linhas.length > 1) {
+          linhas.slice(1).forEach(l => {
+            if (l.dentro_prazo === true) p.dentro_prazo++;
+            else if (l.dentro_prazo === false) p.fora_prazo++;
+            p.soma_dist += parseFloat(l.distancia) || 0;
+            p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+            if (l.tempo_execucao_minutos != null) {
+              p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+              p.count_tempo++;
+            }
+          });
+        } else {
+          const l = linhas[0];
+          if (l.dentro_prazo === true) p.dentro_prazo++;
+          else if (l.dentro_prazo === false) p.fora_prazo++;
+          p.soma_dist += parseFloat(l.distancia) || 0;
+          p.soma_valor_prof += parseFloat(l.valor_prof) || 0;
+          if (l.tempo_execucao_minutos != null) {
+            p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+            p.count_tempo++;
+          }
+        }
+      });
+    });
+    
+    const porProfissional = Object.values(porProfMap).map(p => ({
+      cod_prof: p.cod_prof, nome_prof: p.nome_prof,
+      total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
+      tempo_medio: p.count_tempo > 0 ? (p.soma_tempo / p.count_tempo).toFixed(2) : null,
+      distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
+      retornos: p.retornos
+    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // Gráficos - retorna dados brutos para o frontend agrupar nas faixas que quiser
+    const dadosGraficos = await pool.query(`
+      SELECT 
+        tempo_execucao_minutos as tempo,
+        distancia as km
+      FROM bi_entregas 
+      ${where}
+    `, params);
+    
+    res.json({ 
+      metricas, 
+      porCliente, 
+      porProfissional, 
+      dadosGraficos: dadosGraficos.rows 
+    });
+  } catch (err) {
+    console.error('❌ Erro dashboard-completo:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
+  }
+});
+
+
+// Lista de entregas detalhada (para análise por OS)
+app.get('/api/bi/entregas-lista', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    // Converter datas ISO para YYYY-MM-DD
+    if (data_inicio) { 
+      const dataIni = data_inicio.split('T')[0];
+      where += ` AND data_solicitado >= $${paramIndex++}`; 
+      params.push(dataIni); 
+    }
+    if (data_fim) { 
+      const dataFim = data_fim.split('T')[0];
+      where += ` AND data_solicitado <= $${paramIndex++}`; 
+      params.push(dataFim); 
+    }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    const result = await pool.query(`
+      SELECT 
+        os,
+        nome_prof,
+        endereco,
+        cidade,
+        data_solicitado,
+        data_hora,
+        finalizado,
+        distancia,
+        dentro_prazo,
+        tempo_execucao_minutos,
+        prazo_minutos,
+        valor,
+        valor_prof,
+        categoria,
+        ocorrencia,
+        status
+      FROM bi_entregas ${where}
+      ORDER BY data_hora DESC
+      LIMIT 500
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar entregas:', err);
+    res.status(500).json({ error: 'Erro ao listar entregas' });
+  }
+});
+
+// Lista de cidades disponíveis
+app.get('/api/bi/cidades', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cidade, COUNT(*) as total
+      FROM bi_entregas
+      WHERE cidade IS NOT NULL AND cidade != ''
+      GROUP BY cidade
+      ORDER BY total DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar cidades:', err);
+    res.json([]);
+  }
+});
+
+// Relação Cliente -> Centros de Custo
+app.get('/api/bi/cliente-centros', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cod_cliente, centro_custo
+      FROM bi_entregas
+      WHERE cod_cliente IS NOT NULL AND centro_custo IS NOT NULL AND centro_custo != ''
+      GROUP BY cod_cliente, centro_custo
+      ORDER BY cod_cliente, centro_custo
+    `);
+    // Agrupa por cliente
+    const mapa = {};
+    result.rows.forEach(r => {
+      const cod = String(r.cod_cliente);
+      if (!mapa[cod]) mapa[cod] = [];
+      mapa[cod].push(r.centro_custo);
+    });
+    res.json(mapa);
+  } catch (err) {
+    console.error('❌ Erro ao listar cliente-centros:', err);
+    res.json({});
+  }
+});
+
+// ===== MÁSCARAS DE CLIENTES =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_mascaras (
+    id SERIAL PRIMARY KEY,
+    cod_cliente VARCHAR(50) NOT NULL UNIQUE,
+    mascara VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_mascaras já existe ou erro:', err.message));
+
+// Listar máscaras
+app.get('/api/bi/mascaras', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_mascaras ORDER BY cod_cliente');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar máscaras:', err);
+    res.json([]);
+  }
+});
+
+// Criar/Atualizar máscara
+app.post('/api/bi/mascaras', async (req, res) => {
+  try {
+    const { cod_cliente, mascara } = req.body;
+    if (!cod_cliente || !mascara) {
+      return res.status(400).json({ error: 'cod_cliente e mascara são obrigatórios' });
+    }
+    
+    // Upsert - atualiza se existir, insere se não
+    const result = await pool.query(`
+      INSERT INTO bi_mascaras (cod_cliente, mascara) 
+      VALUES ($1, $2)
+      ON CONFLICT (cod_cliente) DO UPDATE SET mascara = $2
+      RETURNING *
+    `, [cod_cliente, mascara]);
+    
+    res.json({ success: true, mascara: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar máscara:', err);
+    res.status(500).json({ error: 'Erro ao salvar máscara' });
+  }
+});
+
+// Excluir máscara
+app.delete('/api/bi/mascaras/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_mascaras WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir máscara:', err);
+    res.status(500).json({ error: 'Erro ao excluir máscara' });
+  }
+});
+
+// ===== REGRAS DE CONTAGEM DE ENTREGAS =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_regras_contagem (
+    id SERIAL PRIMARY KEY,
+    cod_cliente VARCHAR(50) NOT NULL UNIQUE,
+    nome_cliente VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_regras_contagem já existe ou erro:', err.message));
+
+// Listar regras de contagem
+app.get('/api/bi/regras-contagem', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_regras_contagem ORDER BY cod_cliente');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar regras de contagem:', err);
+    res.json([]);
+  }
+});
+
+// Criar regra de contagem
+app.post('/api/bi/regras-contagem', async (req, res) => {
+  try {
+    const { cod_cliente, nome_cliente } = req.body;
+    if (!cod_cliente) {
+      return res.status(400).json({ error: 'cod_cliente é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO bi_regras_contagem (cod_cliente, nome_cliente) 
+      VALUES ($1, $2)
+      ON CONFLICT (cod_cliente) DO NOTHING
+      RETURNING *
+    `, [cod_cliente, nome_cliente || null]);
+    
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Cliente já possui regra de contagem' });
+    }
+    
+    res.json({ success: true, regra: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar regra de contagem:', err);
+    res.status(500).json({ error: 'Erro ao salvar regra' });
+  }
+});
+
+// Excluir regra de contagem
+app.delete('/api/bi/regras-contagem/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_regras_contagem WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir regra:', err);
+    res.status(500).json({ error: 'Erro ao excluir regra' });
+  }
+});
+
+// Resumo por Cliente (tabela detalhada)
+app.get('/api/bi/resumo-clientes', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    const result = await pool.query(`
+      SELECT 
+        cod_cliente,
+        nome_cliente,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as valor_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_prof,
+        ROUND(SUM(valor)::numeric - COALESCE(SUM(valor_prof)::numeric, 0), 2) as faturamento
+      FROM bi_entregas ${where}
+      GROUP BY cod_cliente, nome_cliente
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro resumo clientes:', err);
+    res.status(500).json({ error: 'Erro ao carregar resumo por cliente' });
+  }
+});
+
+// Resumo por Profissional (tabela detalhada)
+app.get('/api/bi/resumo-profissionais', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    const result = await pool.query(`
+      SELECT 
+        cod_prof,
+        nome_prof,
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_entrega,
+        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
+        ROUND(SUM(valor_prof)::numeric, 2) as valor_total,
+        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
+      FROM bi_entregas ${where}
+      GROUP BY cod_prof, nome_prof
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro resumo profissionais:', err);
+    res.status(500).json({ error: 'Erro ao carregar resumo por profissional' });
+  }
+});
+
+// Análise por OS (detalhamento)
+app.get('/api/bi/analise-os', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, os } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    if (os) { where += ` AND os = $${paramIndex++}`; params.push(os); }
+    
+    const result = await pool.query(`
+      SELECT 
+        os, nome_prof, endereco, cidade, 
+        data_solicitado, hora_solicitado,
+        hora_chegada, hora_saida,
+        tempo_execucao_minutos, distancia, 
+        dentro_prazo, prazo_minutos,
+        finalizado, status, ocorrencia, categoria
+      FROM bi_entregas ${where}
+      ORDER BY data_solicitado DESC, os DESC
+      LIMIT 500
+    `, params);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro análise OS:', err);
+    res.status(500).json({ error: 'Erro ao carregar análise por OS' });
+  }
+});
+
+// Gráficos - Faixas de tempo e KM
+app.get('/api/bi/graficos', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo } = req.query;
+    
+    let where = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { where += ` AND data_solicitado >= $${paramIndex++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${paramIndex++}`; params.push(data_fim); }
+    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
+    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
+    if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
+    if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
+    if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    
+    // Faixas de tempo
+    const faixasTempo = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos IS NULL) as nao_atribuida,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 45) as ate_45,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 45 AND tempo_execucao_minutos <= 60) as ate_60,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 60 AND tempo_execucao_minutos <= 75) as ate_75,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 75 AND tempo_execucao_minutos <= 90) as ate_90,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 90 AND tempo_execucao_minutos <= 120) as ate_120,
+        COUNT(*) FILTER (WHERE tempo_execucao_minutos > 120) as mais_120
+      FROM bi_entregas ${where}
+    `, params);
+    
+    // Faixas de KM
+    const faixasKm = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE distancia > 100) as mais_100,
+        COUNT(*) FILTER (WHERE distancia >= 0 AND distancia <= 10) as km_0_10,
+        COUNT(*) FILTER (WHERE distancia > 10 AND distancia <= 15) as km_11_15,
+        COUNT(*) FILTER (WHERE distancia > 15 AND distancia <= 20) as km_16_20,
+        COUNT(*) FILTER (WHERE distancia > 20 AND distancia <= 25) as km_21_25,
+        COUNT(*) FILTER (WHERE distancia > 25 AND distancia <= 30) as km_26_30,
+        COUNT(*) FILTER (WHERE distancia > 30 AND distancia <= 35) as km_31_35,
+        COUNT(*) FILTER (WHERE distancia > 35 AND distancia <= 40) as km_36_40,
+        COUNT(*) FILTER (WHERE distancia > 40 AND distancia <= 50) as km_41_50,
+        COUNT(*) FILTER (WHERE distancia > 50 AND distancia <= 60) as km_51_60,
+        COUNT(*) FILTER (WHERE distancia > 60 AND distancia <= 70) as km_61_70,
+        COUNT(*) FILTER (WHERE distancia > 70 AND distancia <= 80) as km_71_80,
+        COUNT(*) FILTER (WHERE distancia > 80 AND distancia <= 90) as km_81_90,
+        COUNT(*) FILTER (WHERE distancia > 90 AND distancia <= 100) as km_91_100
+      FROM bi_entregas ${where}
+    `, params);
+    
+    res.json({
+      faixasTempo: faixasTempo.rows[0] || {},
+      faixasKm: faixasKm.rows[0] || {}
+    });
+  } catch (err) {
+    console.error('❌ Erro gráficos:', err);
+    res.status(500).json({ error: 'Erro ao carregar gráficos' });
+  }
+});
+
+// Listar clientes únicos (para dropdown)
+app.get('/api/bi/clientes', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cod_cliente, nome_cliente 
+      FROM bi_entregas 
+      WHERE cod_cliente IS NOT NULL
+      ORDER BY nome_cliente
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar clientes:', err);
+    res.status(500).json({ error: 'Erro ao listar clientes' });
+  }
+});
+
+// Listar centros de custo únicos (para dropdown)
+app.get('/api/bi/centros-custo', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT centro_custo 
+      FROM bi_entregas 
+      WHERE centro_custo IS NOT NULL AND centro_custo != ''
+      ORDER BY centro_custo
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar centros:', err);
+    res.status(500).json({ error: 'Erro ao listar centros' });
+  }
+});
+
+// Listar profissionais únicos (para dropdown)
+app.get('/api/bi/profissionais', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cod_prof, nome_prof 
+      FROM bi_entregas 
+      WHERE cod_prof IS NOT NULL
+      ORDER BY nome_prof
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar profissionais:', err);
+    res.status(500).json({ error: 'Erro ao listar profissionais' });
+  }
+});
+
+// Listar datas disponíveis (apenas datas com dados)
+app.get('/api/bi/datas', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT data_solicitado as data, COUNT(*) as total
+      FROM bi_entregas 
+      WHERE data_solicitado IS NOT NULL
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar datas:', err);
+    res.status(500).json({ error: 'Erro ao listar datas' });
+  }
+});
+
+// Listar uploads realizados
+app.get('/api/bi/uploads', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT data_upload, COUNT(*) as total_registros, 
+             MIN(data_solicitado) as data_inicial,
+             MAX(data_solicitado) as data_final
+      FROM bi_entregas 
+      WHERE data_upload IS NOT NULL
+      GROUP BY data_upload
+      ORDER BY data_upload DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar uploads:', err);
+    res.status(500).json({ error: 'Erro ao listar uploads' });
+  }
+});
+
+// Excluir upload por data
+app.delete('/api/bi/uploads/:data', async (req, res) => {
+  try {
+    const { data } = req.params;
+    const result = await pool.query(`DELETE FROM bi_entregas WHERE data_upload = $1`, [data]);
+    res.json({ success: true, deletados: result.rowCount });
+  } catch (err) {
+    console.error('❌ Erro ao excluir upload:', err);
+    res.status(500).json({ error: 'Erro ao excluir upload' });
+  }
+});
+
+// Limpar entregas por período
+app.delete('/api/bi/entregas', async (req, res) => {
+  try {
+    const { data_inicio, data_fim } = req.query;
+    
+    let query = 'DELETE FROM bi_entregas WHERE 1=1';
+    const params = [];
+    
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND data_solicitado >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND data_solicitado <= $${params.length}`;
+    }
+    
+    const result = await pool.query(query, params);
+    res.json({ success: true, deletados: result.rowCount });
+  } catch (err) {
+    console.error('❌ Erro ao limpar entregas:', err);
+    res.status(500).json({ error: 'Erro ao limpar entregas' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - GRUPOS
+// ============================================
+
+// Listar grupos (filtrado por permissão)
+app.get('/api/todo/grupos', async (req, res) => {
+  try {
+    const { user_cod, role } = req.query;
+    
+    let query = `
+      SELECT * FROM todo_grupos 
+      WHERE ativo = TRUE
+    `;
+    
+    if (role !== 'admin_master') {
+      query += ` AND (
+        tipo = 'compartilhado' 
+        OR criado_por = '${user_cod}'
+        OR visivel_para @> '"${user_cod}"'
+      )`;
+    }
+    
+    query += ' ORDER BY ordem, nome';
+    
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar grupos:', err);
+    res.status(500).json({ error: 'Erro ao listar grupos' });
+  }
+});
+
+// Criar grupo
+app.post('/api/todo/grupos', async (req, res) => {
+  try {
+    const { nome, descricao, icone, cor, tipo, criado_por, criado_por_nome, visivel_para } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_grupos (nome, descricao, icone, cor, tipo, criado_por, criado_por_nome, visivel_para)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [nome, descricao, icone || '📋', cor || '#7c3aed', tipo || 'compartilhado', criado_por, criado_por_nome, JSON.stringify(visivel_para || [])]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar grupo:', err);
+    res.status(500).json({ error: 'Erro ao criar grupo' });
+  }
+});
+
+// Atualizar grupo
+app.put('/api/todo/grupos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, icone, cor, visivel_para } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE todo_grupos 
+      SET nome = COALESCE($1, nome),
+          descricao = COALESCE($2, descricao),
+          icone = COALESCE($3, icone),
+          cor = COALESCE($4, cor),
+          visivel_para = COALESCE($5, visivel_para),
+          updated_at = NOW()
+      WHERE id = $6
+      RETURNING *
+    `, [nome, descricao, icone, cor, JSON.stringify(visivel_para), id]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar grupo:', err);
+    res.status(500).json({ error: 'Erro ao atualizar grupo' });
+  }
+});
+
+// Excluir grupo (soft delete)
+app.delete('/api/todo/grupos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('UPDATE todo_grupos SET ativo = FALSE WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir grupo:', err);
+    res.status(500).json({ error: 'Erro ao excluir grupo' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - TAREFAS
+// ============================================
+
+// Listar tarefas (com filtros)
+app.get('/api/todo/tarefas', async (req, res) => {
+  try {
+    const { user_cod, role, grupo_id, status, responsavel } = req.query;
+    
+    let query = `
+      SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor,
+             (SELECT COUNT(*) FROM todo_anexos WHERE tarefa_id = t.id) as qtd_anexos,
+             (SELECT COUNT(*) FROM todo_comentarios WHERE tarefa_id = t.id) as qtd_comentarios
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramIndex = 1;
+    
+    if (grupo_id) {
+      query += ` AND t.grupo_id = $${paramIndex}`;
+      params.push(grupo_id);
+      paramIndex++;
+    }
+    
+    if (status && status !== 'todas') {
+      query += ` AND t.status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+    
+    if (responsavel) {
+      query += ` AND t.responsaveis @> $${paramIndex}::jsonb`;
+      params.push(JSON.stringify([{ user_cod: responsavel }]));
+      paramIndex++;
+    }
+    
+    if (role !== 'admin_master') {
+      query += ` AND (
+        t.tipo = 'compartilhado' 
+        OR t.criado_por = '${user_cod}'
+        OR t.responsaveis @> '[{"user_cod":"${user_cod}"}]'
+      )`;
+    }
+    
+    query += ' ORDER BY CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar tarefas:', err);
+    res.status(500).json({ error: 'Erro ao listar tarefas' });
+  }
+});
+
+// Buscar tarefa específica com detalhes
+app.get('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const tarefa = await pool.query(`
+      SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE t.id = $1
+    `, [id]);
+    
+    const anexos = await pool.query('SELECT * FROM todo_anexos WHERE tarefa_id = $1 ORDER BY created_at DESC', [id]);
+    const comentarios = await pool.query('SELECT * FROM todo_comentarios WHERE tarefa_id = $1 ORDER BY created_at DESC', [id]);
+    const historico = await pool.query('SELECT * FROM todo_historico WHERE tarefa_id = $1 ORDER BY created_at DESC LIMIT 20', [id]);
+    
+    res.json({
+      ...tarefa.rows[0],
+      anexos: anexos.rows,
+      comentarios: comentarios.rows,
+      historico: historico.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao buscar tarefa' });
+  }
+});
+
+// Criar tarefa
+app.post('/api/todo/tarefas', async (req, res) => {
+  try {
+    const { 
+      grupo_id, titulo, descricao, prioridade, data_prazo, 
+      recorrente, tipo_recorrencia, tipo, 
+      criado_por, criado_por_nome, responsaveis 
+    } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_tarefas (
+        grupo_id, titulo, descricao, prioridade, data_prazo,
+        recorrente, tipo_recorrencia, tipo,
+        criado_por, criado_por_nome, responsaveis
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `, [
+      grupo_id, titulo, descricao, prioridade || 'media', data_prazo,
+      recorrente || false, tipo_recorrencia, tipo || 'compartilhado',
+      criado_por, criado_por_nome, JSON.stringify(responsaveis || [])
+    ]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'criada', 'Tarefa criada', $2, $3)
+    `, [result.rows[0].id, criado_por, criado_por_nome]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao criar tarefa' });
+  }
+});
+
+// Atualizar tarefa
+app.put('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      titulo, descricao, status, prioridade, data_prazo,
+      recorrente, tipo_recorrencia, responsaveis,
+      user_cod, user_name
+    } = req.body;
+    
+    const anterior = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    
+    let concluido_por = null;
+    let concluido_por_nome = null;
+    let data_conclusao = null;
+    
+    if (status === 'concluida' && anterior.rows[0]?.status !== 'concluida') {
+      concluido_por = user_cod;
+      concluido_por_nome = user_name;
+      data_conclusao = new Date();
+    }
+    
+    const result = await pool.query(`
+      UPDATE todo_tarefas 
+      SET titulo = COALESCE($1, titulo),
+          descricao = COALESCE($2, descricao),
+          status = COALESCE($3, status),
+          prioridade = COALESCE($4, prioridade),
+          data_prazo = COALESCE($5, data_prazo),
+          recorrente = COALESCE($6, recorrente),
+          tipo_recorrencia = COALESCE($7, tipo_recorrencia),
+          responsaveis = COALESCE($8, responsaveis),
+          concluido_por = COALESCE($9, concluido_por),
+          concluido_por_nome = COALESCE($10, concluido_por_nome),
+          data_conclusao = COALESCE($11, data_conclusao),
+          updated_at = NOW()
+      WHERE id = $12
+      RETURNING *
+    `, [
+      titulo, descricao, status, prioridade, data_prazo,
+      recorrente, tipo_recorrencia, responsaveis ? JSON.stringify(responsaveis) : null,
+      concluido_por, concluido_por_nome, data_conclusao, id
+    ]);
+    
+    let acaoDesc = 'Tarefa atualizada';
+    if (status && status !== anterior.rows[0]?.status) {
+      acaoDesc = `Status alterado: ${anterior.rows[0]?.status || 'pendente'} → ${status}`;
+    }
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name, dados_anteriores, dados_novos)
+      VALUES ($1, 'atualizada', $2, $3, $4, $5, $6)
+    `, [id, acaoDesc, user_cod, user_name, JSON.stringify(anterior.rows[0]), JSON.stringify(result.rows[0])]);
+    
+    // Se tarefa recorrente foi concluída, criar próxima
+    if (status === 'concluida' && result.rows[0].recorrente && result.rows[0].tipo_recorrencia) {
+      const tarefa = result.rows[0];
+      let proximoPrazo = new Date(tarefa.data_prazo || new Date());
+      
+      switch (tarefa.tipo_recorrencia) {
+        case 'diario':
+          proximoPrazo.setDate(proximoPrazo.getDate() + 1);
+          break;
+        case 'semanal':
+          proximoPrazo.setDate(proximoPrazo.getDate() + 7);
+          break;
+        case 'mensal':
+          proximoPrazo.setMonth(proximoPrazo.getMonth() + 1);
+          break;
+      }
+      
+      await pool.query(`
+        INSERT INTO todo_tarefas (
+          grupo_id, titulo, descricao, prioridade, data_prazo,
+          recorrente, tipo_recorrencia, tipo,
+          criado_por, criado_por_nome, responsaveis
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `, [
+        tarefa.grupo_id, tarefa.titulo, tarefa.descricao, tarefa.prioridade, proximoPrazo,
+        true, tarefa.tipo_recorrencia, tarefa.tipo,
+        tarefa.criado_por, tarefa.criado_por_nome, tarefa.responsaveis
+      ]);
+      console.log('✅ Tarefa recorrente criada para:', proximoPrazo);
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar tarefa:', err);
+    res.status(500).json({ error: 'Erro ao atualizar tarefa' });
+  }
+});
+
+// Excluir tarefa
+app.delete('/api/todo/tarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_tarefas WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir tarefa:', err);
+    res.status(500).json({ error: 'Erro ao excluir tarefa' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - COMENTÁRIOS
+// ============================================
+
+app.post('/api/todo/tarefas/:id/comentarios', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { texto, user_cod, user_name } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_comentarios (tarefa_id, texto, user_cod, user_name)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [id, texto, user_cod, user_name]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'comentario', 'Comentário adicionado', $2, $3)
+    `, [id, user_cod, user_name]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar comentário:', err);
+    res.status(500).json({ error: 'Erro ao adicionar comentário' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - ANEXOS
+// ============================================
+
+app.post('/api/todo/tarefas/:id/anexos', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_anexos (tarefa_id, nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+    `, [id, nome_arquivo, tipo_arquivo, tamanho, url, enviado_por, enviado_por_nome]);
+    
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'anexo', $2, $3, $4)
+    `, [id, `Anexo adicionado: ${nome_arquivo}`, enviado_por, enviado_por_nome]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar anexo:', err);
+    res.status(500).json({ error: 'Erro ao adicionar anexo' });
+  }
+});
+
+app.delete('/api/todo/anexos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_anexos WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir anexo:', err);
+    res.status(500).json({ error: 'Erro ao excluir anexo' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - MÉTRICAS (Admin Master)
+// ============================================
+
+app.get('/api/todo/metricas', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    const dias = parseInt(periodo);
+    
+    const statusResult = await pool.query(`
+      SELECT status, COUNT(*) as total
+      FROM todo_tarefas
+      WHERE created_at >= NOW() - INTERVAL '${dias} days'
+      GROUP BY status
+    `);
+    
+    const conclusaoResult = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'concluida' AND (data_conclusao <= data_prazo OR data_prazo IS NULL)) as no_prazo,
+        COUNT(*) FILTER (WHERE status = 'concluida' AND data_conclusao > data_prazo) as fora_prazo,
+        COUNT(*) FILTER (WHERE status = 'concluida') as total_concluidas,
+        COUNT(*) FILTER (WHERE status != 'concluida' AND data_prazo < NOW()) as atrasadas,
+        COUNT(*) as total
+      FROM todo_tarefas
+      WHERE created_at >= NOW() - INTERVAL '${dias} days'
+    `);
+    
+    const porResponsavelResult = await pool.query(`
+      SELECT 
+        concluido_por as user_cod,
+        concluido_por_nome as user_name,
+        COUNT(*) as total_concluidas,
+        COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL) as no_prazo,
+        COUNT(*) FILTER (WHERE data_conclusao > data_prazo) as fora_prazo,
+        AVG(EXTRACT(EPOCH FROM (data_conclusao - created_at)) / 3600) as tempo_medio_horas
+      FROM todo_tarefas
+      WHERE status = 'concluida' 
+        AND concluido_por IS NOT NULL
+        AND data_conclusao >= NOW() - INTERVAL '${dias} days'
+      GROUP BY concluido_por, concluido_por_nome
+      ORDER BY total_concluidas DESC
+    `);
+    
+    const porGrupoResult = await pool.query(`
+      SELECT 
+        g.id,
+        g.nome,
+        g.icone,
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE t.status = 'concluida') as concluidas,
+        COUNT(*) FILTER (WHERE t.status = 'pendente') as pendentes,
+        COUNT(*) FILTER (WHERE t.status = 'em_andamento') as em_andamento
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      WHERE t.created_at >= NOW() - INTERVAL '${dias} days'
+      GROUP BY g.id, g.nome, g.icone
+      ORDER BY total DESC
+    `);
+    
+    const conclusao = conclusaoResult.rows[0];
+    const taxaNoPrazo = conclusao.total_concluidas > 0 
+      ? ((conclusao.no_prazo / conclusao.total_concluidas) * 100).toFixed(1) 
+      : 0;
+    
+    res.json({
+      totais: {
+        total: parseInt(conclusao.total),
+        concluidas: parseInt(conclusao.total_concluidas),
+        atrasadas: parseInt(conclusao.atrasadas),
+        no_prazo: parseInt(conclusao.no_prazo),
+        vencidas: parseInt(conclusao.atrasadas),
+        taxaNoPrazo: parseFloat(taxaNoPrazo)
+      },
+      porStatus: statusResult.rows,
+      porResponsavel: porResponsavelResult.rows,
+      porGrupo: porGrupoResult.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar métricas:', err);
+    res.status(500).json({ error: 'Erro ao buscar métricas' });
+  }
+});
+
+app.get('/api/todo/metricas/ranking', async (req, res) => {
+  try {
+    const { periodo = '30' } = req.query;
+    
+    const result = await pool.query(`
+      SELECT 
+        concluido_por as user_cod,
+        concluido_por_nome as user_name,
+        COUNT(*) as total_concluidas,
+        COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL) as no_prazo,
+        ROUND(
+          (COUNT(*) FILTER (WHERE data_conclusao <= data_prazo OR data_prazo IS NULL)::DECIMAL / 
+           NULLIF(COUNT(*), 0) * 100), 1
+        ) as taxa_prazo,
+        ROUND(AVG(EXTRACT(EPOCH FROM (data_conclusao - created_at)) / 3600)::DECIMAL, 1) as tempo_medio_horas
+      FROM todo_tarefas
+      WHERE status = 'concluida' 
+        AND concluido_por IS NOT NULL
+        AND data_conclusao >= NOW() - INTERVAL '${periodo} days'
+      GROUP BY concluido_por, concluido_por_nome
+      HAVING COUNT(*) >= 1
+      ORDER BY taxa_prazo DESC, total_concluidas DESC
+    `);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar ranking:', err);
+    res.status(500).json({ error: 'Erro ao buscar ranking' });
+  }
+});
+
+// Listar admins para o TO-DO
+app.get('/api/todo/admins', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cod_profissional as cod, full_name as nome 
+      FROM users 
+      WHERE role IN ('admin', 'admin_master')
+      ORDER BY full_name
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar admins:', err);
+    res.json([]);
+  }
+});
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`📡 API: http://localhost:${port}/api/health`);
+});
+
+// ===== REGIÕES =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bi_regioes (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    clientes JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela bi_regioes já existe ou erro:', err.message));
+
+// Listar regiões
+app.get('/api/bi/regioes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bi_regioes ORDER BY nome');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar regiões:', err);
+    res.json([]);
+  }
+});
+
+// Criar região
+app.post('/api/bi/regioes', async (req, res) => {
+  try {
+    const { nome, clientes } = req.body;
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO bi_regioes (nome, clientes) 
+      VALUES ($1, $2)
+      RETURNING *
+    `, [nome, JSON.stringify(clientes || [])]);
+    
+    res.json({ success: true, regiao: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao salvar região:', err);
+    res.status(500).json({ error: 'Erro ao salvar região' });
+  }
+});
+
+// Excluir região
+app.delete('/api/bi/regioes/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM bi_regioes WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir região:', err);
+    res.status(500).json({ error: 'Erro ao excluir região' });
+  }
+});
+
+// ===== CATEGORIAS (da planilha) =====
+app.get('/api/bi/categorias', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT categoria
+      FROM bi_entregas
+      WHERE categoria IS NOT NULL AND categoria != ''
+      ORDER BY categoria
+    `);
+    res.json(result.rows.map(r => r.categoria));
+  } catch (err) {
+    console.error('❌ Erro ao listar categorias:', err);
+    res.json([]);
+  }
+});
+
+// ===== DADOS PARA FILTROS INTELIGENTES =====
+app.get('/api/bi/dados-filtro', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT cod_cliente, centro_custo, categoria
+      FROM bi_entregas
+      WHERE cod_cliente IS NOT NULL
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar dados de filtro:', err);
+    res.json([]);
+  }
 });
