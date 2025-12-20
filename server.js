@@ -975,6 +975,7 @@ async function createTables() {
     // Adicionar coluna modules e tabs à tabela users (para admins)
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_modules JSONB DEFAULT '[]'`).catch(() => {});
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB DEFAULT '{}'`).catch(() => {});
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`).catch(() => {});
     console.log('✅ Colunas de permissões adicionadas à tabela users');
 
     // ==================== MÓDULO SOCIAL ====================
@@ -1252,22 +1253,26 @@ app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
     const { codProfissional } = req.params;
     const { allowed_modules, allowed_tabs } = req.body;
     
+    // Garantir que são objetos válidos
+    const modules = Array.isArray(allowed_modules) ? allowed_modules : [];
+    const tabs = (allowed_tabs && typeof allowed_tabs === 'object') ? allowed_tabs : {};
+    
     const result = await pool.query(`
       UPDATE users 
-      SET allowed_modules = $1, allowed_tabs = $2, updated_at = NOW()
+      SET allowed_modules = $1::jsonb, allowed_tabs = $2::jsonb
       WHERE LOWER(cod_profissional) = LOWER($3)
       RETURNING id, cod_profissional, full_name, role, allowed_modules, allowed_tabs
-    `, [JSON.stringify(allowed_modules || []), JSON.stringify(allowed_tabs || {}), codProfissional]);
+    `, [JSON.stringify(modules), JSON.stringify(tabs), codProfissional]);
     
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
+      return res.json({ message: 'Usuário não encontrado', success: false });
     }
     
     console.log(`🔐 Permissões atualizadas: ${codProfissional}`);
-    res.json({ message: 'Permissões atualizadas com sucesso', user: result.rows[0] });
+    res.json({ message: 'Permissões atualizadas com sucesso', user: result.rows[0], success: true });
   } catch (error) {
     console.error('❌ Erro ao atualizar permissões:', error);
-    res.status(500).json({ error: 'Erro ao atualizar permissões: ' + error.message });
+    res.json({ message: 'Erro ao atualizar', success: false, error: error.message });
   }
 });
 
