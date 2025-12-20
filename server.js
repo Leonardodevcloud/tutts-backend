@@ -7904,3 +7904,80 @@ app.get('/api/bi/dados-filtro', async (req, res) => {
     res.json([]);
   }
 });
+
+// ===== SISTEMA DE PERMISSÕES ADMIN =====
+
+// Criar tabela de permissões (executar na inicialização)
+(async function createPermissionsTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admin_permissions (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) UNIQUE NOT NULL,
+        ativo BOOLEAN DEFAULT TRUE,
+        modulos JSONB DEFAULT '{}',
+        abas JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela admin_permissions verificada');
+  } catch (err) {
+    console.error('Erro ao criar tabela admin_permissions:', err);
+  }
+})();
+
+// Listar todas as permissões de admins
+app.get('/api/admin-permissions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM admin_permissions ORDER BY updated_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Obter permissões de um admin específico
+app.get('/api/admin-permissions/:cod', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM admin_permissions WHERE user_cod = $1',
+      [req.params.cod]
+    );
+    res.json(result.rows[0] || { ativo: true, modulos: {}, abas: {} });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Atualizar permissões de um admin
+app.put('/api/admin-permissions/:cod', async (req, res) => {
+  try {
+    const { ativo, modulos, abas } = req.body;
+    const result = await pool.query(`
+      INSERT INTO admin_permissions (user_cod, ativo, modulos, abas, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (user_cod)
+      DO UPDATE SET ativo = $2, modulos = $3, abas = $4, updated_at = NOW()
+      RETURNING *
+    `, [req.params.cod, ativo !== false, JSON.stringify(modulos || {}), JSON.stringify(abas || {})]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Deletar permissões de um admin
+app.delete('/api/admin-permissions/:cod', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM admin_permissions WHERE user_cod = $1', [req.params.cod]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Iniciar servidor
+app.listen(port, () => {
+  console.log(`🚀 Servidor rodando na porta ${port}`);
+});
