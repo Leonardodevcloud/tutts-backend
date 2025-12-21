@@ -8218,7 +8218,6 @@ app.get('/api/social/messages/unread/:userCod', async (req, res) => {
 // Listar todas as regiões (cidades) da planilha
 app.get('/api/avisos-op/regioes', async (req, res) => {
   try {
-    const fetch = (await import('node-fetch')).default;
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
     const response = await fetch(sheetUrl);
     const text = await response.text();
@@ -8313,7 +8312,6 @@ app.get('/api/avisos-op/usuario/:cod', async (req, res) => {
     const { cod } = req.params;
     
     // Buscar região do usuário na planilha
-    const fetch = (await import('node-fetch')).default;
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
     const response = await fetch(sheetUrl);
     const text = await response.text();
