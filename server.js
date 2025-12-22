@@ -957,6 +957,90 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_criador ON todo_tarefas(criado_por)`).catch(() => {});
 
     // ============================================
+    // NOVAS TABELAS TO-DO - MELHORIAS
+    // ============================================
+
+    // Tabela de Subtarefas/Checklist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_subtarefas (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        titulo VARCHAR(500) NOT NULL,
+        concluida BOOLEAN DEFAULT FALSE,
+        ordem INT DEFAULT 0,
+        concluida_por VARCHAR(50),
+        concluida_por_nome VARCHAR(255),
+        concluida_em TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_subtarefas verificada');
+
+    // Tabela de Time Tracking (registro de tempo)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_time_tracking (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255),
+        inicio TIMESTAMP NOT NULL,
+        fim TIMESTAMP,
+        duracao_segundos INT,
+        descricao TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_time_tracking verificada');
+
+    // Tabela de Dependências entre Tarefas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_dependencias (
+        id SERIAL PRIMARY KEY,
+        tarefa_id INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        depende_de INT REFERENCES todo_tarefas(id) ON DELETE CASCADE,
+        tipo VARCHAR(30) DEFAULT 'finish_to_start',
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(tarefa_id, depende_de)
+      )
+    `);
+    console.log('✅ Tabela todo_dependencias verificada');
+
+    // Tabela de Templates de Tarefas Recorrentes
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS todo_templates (
+        id SERIAL PRIMARY KEY,
+        grupo_id INT REFERENCES todo_grupos(id) ON DELETE SET NULL,
+        nome VARCHAR(255) NOT NULL,
+        titulo_tarefa VARCHAR(500) NOT NULL,
+        descricao TEXT,
+        prioridade VARCHAR(20) DEFAULT 'media',
+        checklist JSONB DEFAULT '[]',
+        tempo_estimado_minutos INT,
+        criado_por VARCHAR(50),
+        criado_por_nome VARCHAR(255),
+        ativo BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela todo_templates verificada');
+
+    // Migração: adicionar novas colunas na tabela todo_tarefas
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS coluna_kanban VARCHAR(30) DEFAULT 'todo'`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS tempo_estimado_minutos INT`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS tempo_gasto_segundos INT DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS timer_ativo BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS timer_inicio TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS timer_user_cod VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS template_id INT`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS cor VARCHAR(20)`).catch(() => {});
+    console.log('✅ Colunas adicionais todo_tarefas verificadas');
+
+    // Índices adicionais
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_subtarefas_tarefa ON todo_subtarefas(tarefa_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_time_tarefa ON todo_time_tracking(tarefa_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_kanban ON todo_tarefas(coluna_kanban)`).catch(() => {});
+
+    // ============================================
     // TABELA DE PERMISSÕES DE ADMIN
     // ============================================
     await pool.query(`
@@ -7643,12 +7727,15 @@ app.delete('/api/todo/grupos/:id', async (req, res) => {
 // Listar tarefas (com filtros)
 app.get('/api/todo/tarefas', async (req, res) => {
   try {
-    const { user_cod, role, grupo_id, status, responsavel } = req.query;
+    const { user_cod, role, grupo_id, status, responsavel, coluna_kanban } = req.query;
     
     let query = `
       SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor,
              (SELECT COUNT(*) FROM todo_anexos WHERE tarefa_id = t.id) as qtd_anexos,
-             (SELECT COUNT(*) FROM todo_comentarios WHERE tarefa_id = t.id) as qtd_comentarios
+             (SELECT COUNT(*) FROM todo_comentarios WHERE tarefa_id = t.id) as qtd_comentarios,
+             (SELECT COUNT(*) FROM todo_subtarefas WHERE tarefa_id = t.id) as qtd_subtarefas,
+             (SELECT COUNT(*) FROM todo_subtarefas WHERE tarefa_id = t.id AND concluida = true) as qtd_subtarefas_concluidas,
+             (SELECT COUNT(*) FROM todo_dependencias WHERE tarefa_id = t.id) as qtd_dependencias
       FROM todo_tarefas t
       LEFT JOIN todo_grupos g ON t.grupo_id = g.id
       WHERE 1=1
@@ -7668,6 +7755,12 @@ app.get('/api/todo/tarefas', async (req, res) => {
       paramIndex++;
     }
     
+    if (coluna_kanban) {
+      query += ` AND t.coluna_kanban = $${paramIndex}`;
+      params.push(coluna_kanban);
+      paramIndex++;
+    }
+    
     if (responsavel) {
       query += ` AND t.responsaveis @> $${paramIndex}::jsonb`;
       params.push(JSON.stringify([{ user_cod: responsavel }]));
@@ -7682,7 +7775,7 @@ app.get('/api/todo/tarefas', async (req, res) => {
       )`;
     }
     
-    query += ' ORDER BY CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
+    query += ' ORDER BY t.ordem ASC, CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
     
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -8052,6 +8145,516 @@ app.get('/api/todo/admins', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao listar admins:', err);
     res.json([]);
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - SUBTAREFAS/CHECKLIST
+// ============================================
+
+// Listar subtarefas de uma tarefa
+app.get('/api/todo/tarefas/:id/subtarefas', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM todo_subtarefas WHERE tarefa_id = $1 ORDER BY ordem, id',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar subtarefas:', err);
+    res.status(500).json({ error: 'Erro ao listar subtarefas' });
+  }
+});
+
+// Criar subtarefa
+app.post('/api/todo/tarefas/:id/subtarefas', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { titulo, ordem } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_subtarefas (tarefa_id, titulo, ordem)
+      VALUES ($1, $2, $3)
+      RETURNING *
+    `, [id, titulo, ordem || 0]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar subtarefa:', err);
+    res.status(500).json({ error: 'Erro ao criar subtarefa' });
+  }
+});
+
+// Atualizar subtarefa (toggle concluída)
+app.put('/api/todo/subtarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { titulo, concluida, user_cod, user_name } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE todo_subtarefas 
+      SET titulo = COALESCE($1, titulo),
+          concluida = COALESCE($2, concluida),
+          concluida_por = CASE WHEN $2 = true THEN $3 ELSE NULL END,
+          concluida_por_nome = CASE WHEN $2 = true THEN $4 ELSE NULL END,
+          concluida_em = CASE WHEN $2 = true THEN NOW() ELSE NULL END
+      WHERE id = $5
+      RETURNING *
+    `, [titulo, concluida, user_cod, user_name, id]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar subtarefa:', err);
+    res.status(500).json({ error: 'Erro ao atualizar subtarefa' });
+  }
+});
+
+// Excluir subtarefa
+app.delete('/api/todo/subtarefas/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_subtarefas WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir subtarefa:', err);
+    res.status(500).json({ error: 'Erro ao excluir subtarefa' });
+  }
+});
+
+// Reordenar subtarefas
+app.put('/api/todo/tarefas/:id/subtarefas/reordenar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { subtarefas } = req.body; // Array de {id, ordem}
+    
+    for (const sub of subtarefas) {
+      await pool.query('UPDATE todo_subtarefas SET ordem = $1 WHERE id = $2', [sub.ordem, sub.id]);
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao reordenar subtarefas:', err);
+    res.status(500).json({ error: 'Erro ao reordenar subtarefas' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - TIME TRACKING
+// ============================================
+
+// Iniciar timer
+app.post('/api/todo/tarefas/:id/timer/iniciar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, user_name } = req.body;
+    
+    // Verificar se já tem timer ativo
+    const tarefaAtual = await pool.query('SELECT timer_ativo FROM todo_tarefas WHERE id = $1', [id]);
+    if (tarefaAtual.rows[0]?.timer_ativo) {
+      return res.status(400).json({ error: 'Timer já está ativo para esta tarefa' });
+    }
+    
+    // Parar qualquer outro timer do usuário
+    const outrosTimers = await pool.query(
+      'SELECT id, timer_inicio FROM todo_tarefas WHERE timer_ativo = true AND timer_user_cod = $1',
+      [user_cod]
+    );
+    
+    for (const tarefa of outrosTimers.rows) {
+      const duracaoSegundos = Math.floor((Date.now() - new Date(tarefa.timer_inicio).getTime()) / 1000);
+      await pool.query(`
+        UPDATE todo_tarefas 
+        SET timer_ativo = false, 
+            timer_inicio = NULL, 
+            timer_user_cod = NULL,
+            tempo_gasto_segundos = COALESCE(tempo_gasto_segundos, 0) + $1
+        WHERE id = $2
+      `, [duracaoSegundos, tarefa.id]);
+      
+      // Registrar no histórico de time tracking
+      await pool.query(`
+        INSERT INTO todo_time_tracking (tarefa_id, user_cod, user_name, inicio, fim, duracao_segundos)
+        VALUES ($1, $2, $3, $4, NOW(), $5)
+      `, [tarefa.id, user_cod, user_name, tarefa.timer_inicio, duracaoSegundos]);
+    }
+    
+    // Iniciar novo timer
+    await pool.query(`
+      UPDATE todo_tarefas 
+      SET timer_ativo = true, timer_inicio = NOW(), timer_user_cod = $1, status = 'em_andamento'
+      WHERE id = $2
+    `, [user_cod, id]);
+    
+    const result = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao iniciar timer:', err);
+    res.status(500).json({ error: 'Erro ao iniciar timer' });
+  }
+});
+
+// Parar timer
+app.post('/api/todo/tarefas/:id/timer/parar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, user_name, descricao } = req.body;
+    
+    const tarefa = await pool.query('SELECT timer_inicio, tempo_gasto_segundos FROM todo_tarefas WHERE id = $1', [id]);
+    if (!tarefa.rows[0]?.timer_inicio) {
+      return res.status(400).json({ error: 'Nenhum timer ativo para esta tarefa' });
+    }
+    
+    const duracaoSegundos = Math.floor((Date.now() - new Date(tarefa.rows[0].timer_inicio).getTime()) / 1000);
+    const tempoTotal = (tarefa.rows[0].tempo_gasto_segundos || 0) + duracaoSegundos;
+    
+    // Registrar no histórico
+    await pool.query(`
+      INSERT INTO todo_time_tracking (tarefa_id, user_cod, user_name, inicio, fim, duracao_segundos, descricao)
+      VALUES ($1, $2, $3, $4, NOW(), $5, $6)
+    `, [id, user_cod, user_name, tarefa.rows[0].timer_inicio, duracaoSegundos, descricao]);
+    
+    // Atualizar tarefa
+    await pool.query(`
+      UPDATE todo_tarefas 
+      SET timer_ativo = false, 
+          timer_inicio = NULL, 
+          timer_user_cod = NULL,
+          tempo_gasto_segundos = $1
+      WHERE id = $2
+    `, [tempoTotal, id]);
+    
+    const result = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao parar timer:', err);
+    res.status(500).json({ error: 'Erro ao parar timer' });
+  }
+});
+
+// Histórico de tempo de uma tarefa
+app.get('/api/todo/tarefas/:id/time-tracking', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM todo_time_tracking WHERE tarefa_id = $1 ORDER BY inicio DESC',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar histórico de tempo:', err);
+    res.status(500).json({ error: 'Erro ao buscar histórico' });
+  }
+});
+
+// Adicionar tempo manual
+app.post('/api/todo/tarefas/:id/time-tracking', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, user_name, duracao_minutos, descricao, data } = req.body;
+    
+    const duracaoSegundos = duracao_minutos * 60;
+    const dataRegistro = data ? new Date(data) : new Date();
+    
+    // Inserir registro
+    await pool.query(`
+      INSERT INTO todo_time_tracking (tarefa_id, user_cod, user_name, inicio, fim, duracao_segundos, descricao)
+      VALUES ($1, $2, $3, $4, $4, $5, $6)
+    `, [id, user_cod, user_name, dataRegistro, duracaoSegundos, descricao]);
+    
+    // Atualizar tempo total da tarefa
+    await pool.query(`
+      UPDATE todo_tarefas 
+      SET tempo_gasto_segundos = COALESCE(tempo_gasto_segundos, 0) + $1
+      WHERE id = $2
+    `, [duracaoSegundos, id]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao adicionar tempo:', err);
+    res.status(500).json({ error: 'Erro ao adicionar tempo' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - KANBAN
+// ============================================
+
+// Atualizar coluna kanban de uma tarefa
+app.put('/api/todo/tarefas/:id/kanban', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { coluna_kanban, ordem, user_cod, user_name } = req.body;
+    
+    // Mapear coluna para status
+    let status = 'pendente';
+    if (coluna_kanban === 'doing') status = 'em_andamento';
+    else if (coluna_kanban === 'done') status = 'concluida';
+    
+    const updateData = {
+      coluna_kanban,
+      status,
+      updated_at: new Date()
+    };
+    
+    if (status === 'concluida') {
+      updateData.concluido_por = user_cod;
+      updateData.concluido_por_nome = user_name;
+      updateData.data_conclusao = new Date();
+    }
+    
+    await pool.query(`
+      UPDATE todo_tarefas 
+      SET coluna_kanban = $1, 
+          status = $2, 
+          ordem = COALESCE($3, ordem),
+          concluido_por = CASE WHEN $2 = 'concluida' THEN $4 ELSE concluido_por END,
+          concluido_por_nome = CASE WHEN $2 = 'concluida' THEN $5 ELSE concluido_por_nome END,
+          data_conclusao = CASE WHEN $2 = 'concluida' THEN NOW() ELSE data_conclusao END,
+          updated_at = NOW()
+      WHERE id = $6
+    `, [coluna_kanban, status, ordem, user_cod, user_name, id]);
+    
+    // Registrar no histórico
+    await pool.query(`
+      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+      VALUES ($1, 'movida', $2, $3, $4)
+    `, [id, `Movida para ${coluna_kanban}`, user_cod, user_name]);
+    
+    const result = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao mover tarefa no kanban:', err);
+    res.status(500).json({ error: 'Erro ao mover tarefa' });
+  }
+});
+
+// Reordenar tarefas dentro de uma coluna
+app.put('/api/todo/kanban/reordenar', async (req, res) => {
+  try {
+    const { tarefas } = req.body; // Array de {id, ordem, coluna_kanban}
+    
+    for (const tarefa of tarefas) {
+      await pool.query(
+        'UPDATE todo_tarefas SET ordem = $1, coluna_kanban = $2 WHERE id = $3',
+        [tarefa.ordem, tarefa.coluna_kanban, tarefa.id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao reordenar kanban:', err);
+    res.status(500).json({ error: 'Erro ao reordenar' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - DEPENDÊNCIAS
+// ============================================
+
+// Listar dependências de uma tarefa
+app.get('/api/todo/tarefas/:id/dependencias', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Tarefas das quais esta depende
+    const dependeDe = await pool.query(`
+      SELECT d.*, t.titulo, t.status 
+      FROM todo_dependencias d
+      JOIN todo_tarefas t ON d.depende_de = t.id
+      WHERE d.tarefa_id = $1
+    `, [id]);
+    
+    // Tarefas que dependem desta
+    const dependentes = await pool.query(`
+      SELECT d.*, t.titulo, t.status 
+      FROM todo_dependencias d
+      JOIN todo_tarefas t ON d.tarefa_id = t.id
+      WHERE d.depende_de = $1
+    `, [id]);
+    
+    res.json({
+      depende_de: dependeDe.rows,
+      dependentes: dependentes.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao listar dependências:', err);
+    res.status(500).json({ error: 'Erro ao listar dependências' });
+  }
+});
+
+// Adicionar dependência
+app.post('/api/todo/tarefas/:id/dependencias', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { depende_de, tipo } = req.body;
+    
+    // Verificar se não cria dependência circular
+    const circular = await pool.query(`
+      WITH RECURSIVE dep_chain AS (
+        SELECT tarefa_id, depende_de FROM todo_dependencias WHERE tarefa_id = $1
+        UNION
+        SELECT d.tarefa_id, d.depende_de 
+        FROM todo_dependencias d
+        JOIN dep_chain c ON d.tarefa_id = c.depende_de
+      )
+      SELECT * FROM dep_chain WHERE depende_de = $2
+    `, [depende_de, id]);
+    
+    if (circular.rows.length > 0) {
+      return res.status(400).json({ error: 'Dependência circular detectada!' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO todo_dependencias (tarefa_id, depende_de, tipo)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (tarefa_id, depende_de) DO NOTHING
+      RETURNING *
+    `, [id, depende_de, tipo || 'finish_to_start']);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao adicionar dependência:', err);
+    res.status(500).json({ error: 'Erro ao adicionar dependência' });
+  }
+});
+
+// Remover dependência
+app.delete('/api/todo/dependencias/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM todo_dependencias WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover dependência:', err);
+    res.status(500).json({ error: 'Erro ao remover dependência' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - TEMPLATES
+// ============================================
+
+// Listar templates
+app.get('/api/todo/templates', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM todo_templates WHERE ativo = true ORDER BY nome');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar templates:', err);
+    res.json([]);
+  }
+});
+
+// Criar template
+app.post('/api/todo/templates', async (req, res) => {
+  try {
+    const { grupo_id, nome, titulo_tarefa, descricao, prioridade, checklist, tempo_estimado_minutos, criado_por, criado_por_nome } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO todo_templates (grupo_id, nome, titulo_tarefa, descricao, prioridade, checklist, tempo_estimado_minutos, criado_por, criado_por_nome)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `, [grupo_id, nome, titulo_tarefa, descricao, prioridade, JSON.stringify(checklist || []), tempo_estimado_minutos, criado_por, criado_por_nome]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar template:', err);
+    res.status(500).json({ error: 'Erro ao criar template' });
+  }
+});
+
+// Criar tarefa a partir de template
+app.post('/api/todo/templates/:id/criar-tarefa', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { grupo_id, data_prazo, responsaveis, criado_por, criado_por_nome } = req.body;
+    
+    const template = await pool.query('SELECT * FROM todo_templates WHERE id = $1', [id]);
+    if (template.rows.length === 0) {
+      return res.status(404).json({ error: 'Template não encontrado' });
+    }
+    
+    const t = template.rows[0];
+    
+    // Criar tarefa
+    const tarefa = await pool.query(`
+      INSERT INTO todo_tarefas (
+        grupo_id, titulo, descricao, prioridade, data_prazo,
+        tempo_estimado_minutos, template_id, tipo,
+        criado_por, criado_por_nome, responsaveis
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'compartilhado', $8, $9, $10)
+      RETURNING *
+    `, [
+      grupo_id || t.grupo_id, t.titulo_tarefa, t.descricao, t.prioridade, data_prazo,
+      t.tempo_estimado_minutos, id,
+      criado_por, criado_por_nome, JSON.stringify(responsaveis || [])
+    ]);
+    
+    // Criar subtarefas do checklist
+    const checklist = t.checklist || [];
+    for (let i = 0; i < checklist.length; i++) {
+      await pool.query(`
+        INSERT INTO todo_subtarefas (tarefa_id, titulo, ordem)
+        VALUES ($1, $2, $3)
+      `, [tarefa.rows[0].id, checklist[i], i]);
+    }
+    
+    res.json(tarefa.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar tarefa do template:', err);
+    res.status(500).json({ error: 'Erro ao criar tarefa' });
+  }
+});
+
+// ============================================
+// ROTAS TO-DO - RELATÓRIO DE TEMPO
+// ============================================
+
+app.get('/api/todo/relatorio-tempo', async (req, res) => {
+  try {
+    const { periodo = '30', user_cod } = req.query;
+    const dias = parseInt(periodo);
+    
+    let query = `
+      SELECT 
+        t.id as tarefa_id,
+        t.titulo,
+        t.tempo_estimado_minutos,
+        t.tempo_gasto_segundos,
+        g.nome as grupo_nome,
+        COALESCE(SUM(tt.duracao_segundos), 0) as tempo_registrado
+      FROM todo_tarefas t
+      LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      LEFT JOIN todo_time_tracking tt ON t.id = tt.tarefa_id
+      WHERE t.created_at >= NOW() - INTERVAL '${dias} days'
+    `;
+    
+    const params = [];
+    if (user_cod) {
+      query += ` AND tt.user_cod = $1`;
+      params.push(user_cod);
+    }
+    
+    query += ` GROUP BY t.id, t.titulo, t.tempo_estimado_minutos, t.tempo_gasto_segundos, g.nome ORDER BY tempo_registrado DESC`;
+    
+    const result = await pool.query(query, params);
+    
+    // Calcular totais
+    const totais = result.rows.reduce((acc, row) => ({
+      tempo_estimado: acc.tempo_estimado + (row.tempo_estimado_minutos || 0) * 60,
+      tempo_gasto: acc.tempo_gasto + (row.tempo_gasto_segundos || 0),
+      tempo_registrado: acc.tempo_registrado + parseInt(row.tempo_registrado || 0)
+    }), { tempo_estimado: 0, tempo_gasto: 0, tempo_registrado: 0 });
+    
+    res.json({
+      tarefas: result.rows,
+      totais
+    });
+  } catch (err) {
+    console.error('❌ Erro ao gerar relatório de tempo:', err);
+    res.status(500).json({ error: 'Erro ao gerar relatório' });
   }
 });
 
