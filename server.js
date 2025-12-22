@@ -8386,46 +8386,62 @@ app.put('/api/todo/tarefas/:id/kanban', async (req, res) => {
     const { id } = req.params;
     const { coluna_kanban, ordem, user_cod, user_name } = req.body;
     
+    console.log('🔄 Movendo tarefa no kanban:', { id, coluna_kanban, user_cod });
+    
+    if (!coluna_kanban) {
+      return res.status(400).json({ error: 'coluna_kanban é obrigatório' });
+    }
+    
+    // Verificar se a tarefa existe
+    const tarefaCheck = await pool.query('SELECT id FROM todo_tarefas WHERE id = $1', [id]);
+    if (tarefaCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Tarefa não encontrada' });
+    }
+    
     // Mapear coluna para status
     let status = 'pendente';
     if (coluna_kanban === 'doing') status = 'em_andamento';
     else if (coluna_kanban === 'done') status = 'concluida';
     
-    const updateData = {
-      coluna_kanban,
-      status,
-      updated_at: new Date()
-    };
+    // Atualizar tarefa
+    const updateQuery = status === 'concluida' 
+      ? `UPDATE todo_tarefas 
+         SET coluna_kanban = $1, 
+             status = $2, 
+             concluido_por = $3,
+             concluido_por_nome = $4,
+             data_conclusao = NOW(),
+             updated_at = NOW()
+         WHERE id = $5
+         RETURNING *`
+      : `UPDATE todo_tarefas 
+         SET coluna_kanban = $1, 
+             status = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING *`;
     
-    if (status === 'concluida') {
-      updateData.concluido_por = user_cod;
-      updateData.concluido_por_nome = user_name;
-      updateData.data_conclusao = new Date();
+    const params = status === 'concluida' 
+      ? [coluna_kanban, status, user_cod, user_name, id]
+      : [coluna_kanban, status, id];
+    
+    const result = await pool.query(updateQuery, params);
+    
+    // Registrar no histórico (ignorar erro se tabela não existir)
+    try {
+      await pool.query(`
+        INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+        VALUES ($1, 'movida', $2, $3, $4)
+      `, [id, `Movida para ${coluna_kanban}`, user_cod || 'sistema', user_name || 'Sistema']);
+    } catch (histErr) {
+      console.log('⚠️ Histórico não registrado:', histErr.message);
     }
     
-    await pool.query(`
-      UPDATE todo_tarefas 
-      SET coluna_kanban = $1, 
-          status = $2, 
-          ordem = COALESCE($3, ordem),
-          concluido_por = CASE WHEN $2 = 'concluida' THEN $4 ELSE concluido_por END,
-          concluido_por_nome = CASE WHEN $2 = 'concluida' THEN $5 ELSE concluido_por_nome END,
-          data_conclusao = CASE WHEN $2 = 'concluida' THEN NOW() ELSE data_conclusao END,
-          updated_at = NOW()
-      WHERE id = $6
-    `, [coluna_kanban, status, ordem, user_cod, user_name, id]);
-    
-    // Registrar no histórico
-    await pool.query(`
-      INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
-      VALUES ($1, 'movida', $2, $3, $4)
-    `, [id, `Movida para ${coluna_kanban}`, user_cod, user_name]);
-    
-    const result = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    console.log('✅ Tarefa movida com sucesso:', result.rows[0]?.id);
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao mover tarefa no kanban:', err);
-    res.status(500).json({ error: 'Erro ao mover tarefa' });
+    res.status(500).json({ error: 'Erro ao mover tarefa', details: err.message });
   }
 });
 
