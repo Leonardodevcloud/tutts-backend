@@ -9392,9 +9392,3 @@ app.get('/api/operacoes-regioes', async (req, res) => {
 // ============================================
 // FIM MÓDULO OPERAÇÕES
 // ============================================
-
-// Iniciar servidor
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
