@@ -9037,7 +9037,21 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 // GET - Dados para Acompanhamento Periódico
 app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    let { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    // Se não tiver data, busca últimos 30 dias
+    if (!data_inicio || !data_fim) {
+      const hoje = new Date();
+      const trintaDiasAtras = new Date(hoje);
+      trintaDiasAtras.setDate(hoje.getDate() - 30);
+      
+      if (!data_fim) {
+        data_fim = hoje.toISOString().split('T')[0];
+      }
+      if (!data_inicio) {
+        data_inicio = trintaDiasAtras.toISOString().split('T')[0];
+      }
+    }
     
     let whereConditions = [];
     let params = [];
@@ -9082,6 +9096,8 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     const whereClause = whereConditions.length > 0 
       ? 'WHERE ' + whereConditions.join(' AND ')
       : '';
+    
+    console.log('📈 Acompanhamento - Query params:', { data_inicio, data_fim, cod_cliente, centro_custo });
     
     // Query agrupada por data
     const queryPorData = `
