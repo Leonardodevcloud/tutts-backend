@@ -9030,6 +9030,176 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 
 // ==================== FIM ROTAS MÓDULO AVISOS ====================
 
+// ============================================
+// ACOMPANHAMENTO PERIÓDICO - MÓDULO BI
+// ============================================
+
+// GET - Dados para Acompanhamento Periódico
+app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    let whereConditions = [];
+    let params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereConditions.push(`data_solicitado >= $${paramIndex}`);
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    
+    if (data_fim) {
+      whereConditions.push(`data_solicitado <= $${paramIndex}`);
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').filter(c => c);
+      if (clientes.length > 0) {
+        whereConditions.push(`cod_cliente = ANY($${paramIndex}::int[])`);
+        params.push(clientes.map(c => parseInt(c)));
+        paramIndex++;
+      }
+    }
+    
+    if (centro_custo) {
+      const centros = centro_custo.split(',').filter(c => c);
+      if (centros.length > 0) {
+        whereConditions.push(`centro_custo = ANY($${paramIndex}::text[])`);
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    
+    if (categoria) {
+      whereConditions.push(`categoria = $${paramIndex}`);
+      params.push(categoria);
+      paramIndex++;
+    }
+    
+    const whereClause = whereConditions.length > 0 
+      ? 'WHERE ' + whereConditions.join(' AND ')
+      : '';
+    
+    // Query agrupada por data
+    const queryPorData = `
+      SELECT 
+        data_solicitado as data,
+        TO_CHAR(data_solicitado, 'DD/MM') as data_formatada,
+        TO_CHAR(data_solicitado, 'DD/MM/YYYY') as data_completa,
+        COUNT(*) as total_os,
+        COUNT(CASE WHEN dentro_prazo = true THEN 1 END) as dentro_prazo,
+        COUNT(CASE WHEN dentro_prazo = false THEN 1 END) as fora_prazo,
+        ROUND(
+          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
+          NULLIF(COUNT(*), 0) * 100, 
+          1
+        ) as taxa_prazo,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
+        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media,
+        COALESCE(ROUND(AVG(tempo_execucao_minutos)::numeric, 1), 0) as tempo_medio
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado ASC
+    `;
+    
+    const resultPorData = await pool.query(queryPorData, params);
+    
+    // Query por cliente
+    const queryPorCliente = `
+      SELECT 
+        cod_cliente,
+        nome_cliente,
+        COUNT(*) as total_os,
+        ROUND(
+          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
+          NULLIF(COUNT(*), 0) * 100, 
+          1
+        ) as taxa_prazo,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_motoboy
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY cod_cliente, nome_cliente
+      ORDER BY total_os DESC
+      LIMIT 20
+    `;
+    
+    const resultPorCliente = await pool.query(queryPorCliente, params);
+    
+    // Query por centro de custo
+    const queryPorCentro = `
+      SELECT 
+        centro_custo,
+        cod_cliente,
+        COUNT(*) as total_os,
+        ROUND(
+          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
+          NULLIF(COUNT(*), 0) * 100, 
+          1
+        ) as taxa_prazo,
+        COALESCE(SUM(valor), 0) as valor_total
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY centro_custo, cod_cliente
+      ORDER BY total_os DESC
+      LIMIT 30
+    `;
+    
+    const resultPorCentro = await pool.query(queryPorCentro, params);
+    
+    // Totais gerais
+    const queryTotais = `
+      SELECT 
+        COUNT(*) as total_os,
+        COUNT(CASE WHEN dentro_prazo = true THEN 1 END) as total_dentro_prazo,
+        ROUND(
+          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
+          NULLIF(COUNT(*), 0) * 100, 
+          1
+        ) as taxa_prazo_geral,
+        COALESCE(SUM(valor), 0) as valor_total_geral,
+        COALESCE(SUM(valor_prof), 0) as valor_motoboy_geral,
+        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media_geral,
+        COALESCE(ROUND(AVG(tempo_execucao_minutos)::numeric, 1), 0) as tempo_medio_geral
+      FROM bi_entregas
+      ${whereClause}
+    `;
+    
+    const resultTotais = await pool.query(queryTotais, params);
+    
+    console.log('📈 Acompanhamento periódico consultado:', {
+      dias: resultPorData.rows.length,
+      clientes: resultPorCliente.rows.length,
+      centros: resultPorCentro.rows.length
+    });
+    
+    res.json({
+      porData: resultPorData.rows,
+      porCliente: resultPorCliente.rows,
+      porCentroCusto: resultPorCentro.rows,
+      totais: resultTotais.rows[0] || {},
+      periodo: {
+        inicio: data_inicio,
+        fim: data_fim,
+        totalDias: resultPorData.rows.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao buscar acompanhamento periódico:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados de acompanhamento' });
+  }
+});
+
+// ============================================
+// FIM ACOMPANHAMENTO PERIÓDICO
+// ============================================
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
