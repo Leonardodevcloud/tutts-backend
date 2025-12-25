@@ -9136,25 +9136,37 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
           SELECT MAX(COALESCE(ponto, 1)) FROM bi_entregas b2 WHERE b2.os = bi_entregas.os
         ) THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
         
-        -- 8. Ticket Médio (calculado no JS)
-        
-        -- 9. Tempo Médio Entrega (apenas entregas, ponto >= 2)
-        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_entrega,
-        
-        -- 10. Tempo Médio Alocação (diferença entre alocado e solicitado)
+        -- 9. Tempo Médio Entrega (coluna execucao_comp, formato HH:MM:SS)
+        -- Converte execucao_comp para minutos e faz média
         COALESCE(ROUND(AVG(
-          CASE WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL 
-          THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 
+          CASE WHEN COALESCE(ponto, 1) >= 2 AND execucao_comp IS NOT NULL AND execucao_comp ~ '^[0-9]+:[0-9]+:[0-9]+$'
+          THEN (
+            SPLIT_PART(execucao_comp, ':', 1)::numeric * 60 +
+            SPLIT_PART(execucao_comp, ':', 2)::numeric +
+            SPLIT_PART(execucao_comp, ':', 3)::numeric / 60
+          )
+          END
+        )::numeric, 1), 0) as tempo_medio_entrega,
+        
+        -- 10. Tempo Médio Alocação (apenas a parte de hora de data_hora_alocado)
+        -- data_hora_alocado está como TIMESTAMP, pegamos só a hora
+        COALESCE(ROUND(AVG(
+          CASE WHEN data_hora_alocado IS NOT NULL
+          THEN EXTRACT(HOUR FROM data_hora_alocado) * 60 + 
+               EXTRACT(MINUTE FROM data_hora_alocado) +
+               EXTRACT(SECOND FROM data_hora_alocado) / 60
           END
         )::numeric, 1), 0) as tempo_medio_alocacao,
         
-        -- 11. Tempo Médio Coleta (tempo do ponto 1)
-        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_coleta,
+        -- 11. Tempo Médio Coleta (diferença entre hora_saida e hora_solicitado)
+        COALESCE(ROUND(AVG(
+          CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (hora_saida - hora_solicitado)) / 60
+          END
+        )::numeric, 1), 0) as tempo_medio_coleta,
         
         -- 12. Total Entregadores
         COUNT(DISTINCT cod_prof) as total_entregadores,
-        
-        -- 13. Média Entregas por Profissional (calculado no JS)
         
         -- Taxa prazo %
         ROUND(
@@ -9246,8 +9258,22 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         ) as taxa_prazo_geral,
         COALESCE(SUM(valor), 0) as valor_total_geral,
         COALESCE(SUM(valor_prof), 0) as valor_motoboy_geral,
-        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_entrega,
-        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_coleta,
+        -- Tempo Médio Entrega (execucao_comp convertido para minutos)
+        COALESCE(ROUND(AVG(
+          CASE WHEN COALESCE(ponto, 1) >= 2 AND execucao_comp IS NOT NULL AND execucao_comp ~ '^[0-9]+:[0-9]+:[0-9]+$'
+          THEN (
+            SPLIT_PART(execucao_comp, ':', 1)::numeric * 60 +
+            SPLIT_PART(execucao_comp, ':', 2)::numeric +
+            SPLIT_PART(execucao_comp, ':', 3)::numeric / 60
+          )
+          END
+        )::numeric, 1), 0) as tempo_medio_entrega,
+        -- Tempo Médio Coleta (hora_saida - hora_solicitado)
+        COALESCE(ROUND(AVG(
+          CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (hora_saida - hora_solicitado)) / 60
+          END
+        )::numeric, 1), 0) as tempo_medio_coleta,
         COUNT(DISTINCT cod_prof) as total_entregadores
       FROM bi_entregas
       ${whereClause}
