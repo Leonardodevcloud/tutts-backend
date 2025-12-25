@@ -6287,6 +6287,9 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             cod_prof: parseInt(e.cod_prof) || null,
             nome_prof: truncar(e.nome_prof, 255),
             data_hora: parseTimestamp(e.data_hora),
+            data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['data_hora_alocado']),
+            hora_solicitado: e.hora_solicitado || e['Hora solicitado'] || e['Hora Solicitado'] || e['hora_solicitado'] || null,
+            hora_saida: e.hora_saida || e['Hora Saida'] || e['Hora saida'] || e['Hora Saída'] || e['hora_saida'] || null,
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
             categoria: truncar(e.categoria, 100),
@@ -6319,7 +6322,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           
           for (const d of dadosLote) {
             const indices = [];
-            for (let i = 0; i < 31; i++) {
+            for (let i = 0; i < 34; i++) {
               indices.push(`$${paramIndex++}`);
             }
             valores.push(`(${indices.join(',')})`);
@@ -6327,7 +6330,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-              d.data_hora, d.finalizado, d.data_solicitado,
+              d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.finalizado, d.data_solicitado,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -6339,7 +6342,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
               bairro, cidade, estado, cod_prof, nome_prof,
-              data_hora, finalizado, data_solicitado,
+              data_hora, data_hora_alocado, hora_solicitado, hora_saida, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
@@ -6359,16 +6362,16 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                   os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
                   nome_fantasia, centro_custo, cidade_p1, endereco,
                   bairro, cidade, estado, cod_prof, nome_prof,
-                  data_hora, finalizado, data_solicitado,
+                  data_hora, data_hora_alocado, hora_solicitado, hora_saida, finalizado, data_solicitado,
                   categoria, valor, distancia, valor_prof,
                   execucao_comp, status, motivo, ocorrencia, velocidade_media,
                   dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
               `, [
                 d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
                 d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
                 d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-                d.data_hora, d.finalizado, d.data_solicitado,
+                d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.finalizado, d.data_solicitado,
                 d.categoria, d.valor, d.distancia, d.valor_prof,
                 d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
                 d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -9148,8 +9151,8 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
           END
         )::numeric, 1), 0) as tempo_medio_entrega,
         
-        -- 10. Tempo Médio Alocação (apenas a parte de hora de data_hora_alocado)
-        -- data_hora_alocado está como TIMESTAMP, pegamos só a hora
+        -- 10. Tempo Médio Alocação (média da hora do campo data_hora_alocado em minutos desde meia-noite)
+        -- data_hora_alocado está como TIMESTAMP (ex: 09/12/2025 14:21:54)
         COALESCE(ROUND(AVG(
           CASE WHEN data_hora_alocado IS NOT NULL
           THEN EXTRACT(HOUR FROM data_hora_alocado) * 60 + 
@@ -9158,10 +9161,11 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
           END
         )::numeric, 1), 0) as tempo_medio_alocacao,
         
-        -- 11. Tempo Médio Coleta (diferença entre hora_saida e hora_solicitado)
+        -- 11. Tempo Médio Coleta (diferença entre hora_saida e hora_solicitado em minutos)
+        -- hora_saida e hora_solicitado são campos TIME
         COALESCE(ROUND(AVG(
           CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (hora_saida - hora_solicitado)) / 60
+          THEN EXTRACT(EPOCH FROM (hora_saida::time - hora_solicitado::time)) / 60
           END
         )::numeric, 1), 0) as tempo_medio_coleta,
         
@@ -9271,7 +9275,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         -- Tempo Médio Coleta (hora_saida - hora_solicitado)
         COALESCE(ROUND(AVG(
           CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (hora_saida - hora_solicitado)) / 60
+          THEN EXTRACT(EPOCH FROM (hora_saida::time - hora_solicitado::time)) / 60
           END
         )::numeric, 1), 0) as tempo_medio_coleta,
         COUNT(DISTINCT cod_prof) as total_entregadores
