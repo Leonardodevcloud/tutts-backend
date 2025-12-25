@@ -9099,24 +9099,73 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     
     console.log('📈 Acompanhamento - Query params:', { data_inicio, data_fim, cod_cliente, centro_custo });
     
-    // Query agrupada por data
+    // Query COMPLETA agrupada por data com TODOS os 15 campos
     const queryPorData = `
       SELECT 
         data_solicitado as data,
-        TO_CHAR(data_solicitado, 'DD/MM') as data_formatada,
+        TO_CHAR(data_solicitado, 'DD-MM') as data_formatada,
         TO_CHAR(data_solicitado, 'DD/MM/YYYY') as data_completa,
-        COUNT(*) as total_os,
-        COUNT(CASE WHEN dentro_prazo = true THEN 1 END) as dentro_prazo,
-        COUNT(CASE WHEN dentro_prazo = false THEN 1 END) as fora_prazo,
+        EXTRACT(DOW FROM data_solicitado) as dia_semana,
+        
+        -- 1. OS (contagem distinta)
+        COUNT(DISTINCT os) as total_os,
+        
+        -- 2. Entregas (apenas ponto >= 2)
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        
+        -- 3. No Prazo (entregas no prazo)
+        COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END) as dentro_prazo,
+        
+        -- 4. Fora Prazo
+        COUNT(CASE WHEN dentro_prazo = false AND COALESCE(ponto, 1) >= 2 THEN 1 END) as fora_prazo,
+        
+        -- 5. Retornos (baseado em ocorrência)
+        COUNT(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' 
+                     OR LOWER(ocorrencia) LIKE '%cliente ausente%'
+                     OR LOWER(ocorrencia) LIKE '%clienteaus%'
+                     OR LOWER(ocorrencia) LIKE '%loja fechada%'
+                     OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 END) as retornos,
+        
+        -- 6. Valor Total
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) = (
+          SELECT MAX(COALESCE(ponto, 1)) FROM bi_entregas b2 WHERE b2.os = bi_entregas.os
+        ) THEN valor ELSE 0 END), 0) as valor_total,
+        
+        -- 7. Valor Profissional
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) = (
+          SELECT MAX(COALESCE(ponto, 1)) FROM bi_entregas b2 WHERE b2.os = bi_entregas.os
+        ) THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
+        
+        -- 8. Ticket Médio (calculado no JS)
+        
+        -- 9. Tempo Médio Entrega (apenas entregas, ponto >= 2)
+        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_entrega,
+        
+        -- 10. Tempo Médio Alocação (diferença entre alocado e solicitado)
+        COALESCE(ROUND(AVG(
+          CASE WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL 
+          THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 
+          END
+        )::numeric, 1), 0) as tempo_medio_alocacao,
+        
+        -- 11. Tempo Médio Coleta (tempo do ponto 1)
+        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_coleta,
+        
+        -- 12. Total Entregadores
+        COUNT(DISTINCT cod_prof) as total_entregadores,
+        
+        -- 13. Média Entregas por Profissional (calculado no JS)
+        
+        -- Taxa prazo %
         ROUND(
-          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
-          NULLIF(COUNT(*), 0) * 100, 
+          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
           1
         ) as taxa_prazo,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
-        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media,
-        COALESCE(ROUND(AVG(tempo_execucao_minutos)::numeric, 1), 0) as tempo_medio
+        
+        -- Distância média
+        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media
+        
       FROM bi_entregas
       ${whereClause}
       GROUP BY data_solicitado
@@ -9125,19 +9174,50 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     
     const resultPorData = await pool.query(queryPorData, params);
     
+    // Processar dados para adicionar campos calculados
+    const dadosProcessados = resultPorData.rows.map((row, index, arr) => {
+      const totalEntregas = parseInt(row.total_entregas) || 0;
+      const totalEntregadores = parseInt(row.total_entregadores) || 1;
+      const valorTotal = parseFloat(row.valor_total) || 0;
+      
+      // Ticket Médio
+      const ticketMedio = totalEntregas > 0 ? (valorTotal / totalEntregas) : 0;
+      
+      // Média Entregas por Profissional
+      const mediaEntProfissional = totalEntregadores > 0 ? (totalEntregas / totalEntregadores) : 0;
+      
+      // Evolução Semanal (comparação com 7 dias antes)
+      let evolucaoSemanal = null;
+      if (index >= 7) {
+        const entregasAnterior = parseInt(arr[index - 7].total_entregas) || 0;
+        if (entregasAnterior > 0) {
+          evolucaoSemanal = ((totalEntregas - entregasAnterior) / entregasAnterior * 100).toFixed(1);
+        }
+      }
+      
+      return {
+        ...row,
+        ticket_medio: ticketMedio.toFixed(2),
+        media_ent_profissional: mediaEntProfissional.toFixed(2),
+        evolucao_semanal: evolucaoSemanal
+      };
+    });
+    
     // Query por cliente
     const queryPorCliente = `
       SELECT 
         cod_cliente,
         nome_cliente,
-        COUNT(*) as total_os,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
         ROUND(
-          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
-          NULLIF(COUNT(*), 0) * 100, 
+          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
           1
         ) as taxa_prazo,
         COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_motoboy
+        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
+        COUNT(DISTINCT cod_prof) as total_entregadores
       FROM bi_entregas
       ${whereClause}
       GROUP BY cod_cliente, nome_cliente
@@ -9147,62 +9227,57 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     
     const resultPorCliente = await pool.query(queryPorCliente, params);
     
-    // Query por centro de custo
-    const queryPorCentro = `
-      SELECT 
-        centro_custo,
-        cod_cliente,
-        COUNT(*) as total_os,
-        ROUND(
-          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
-          NULLIF(COUNT(*), 0) * 100, 
-          1
-        ) as taxa_prazo,
-        COALESCE(SUM(valor), 0) as valor_total
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY centro_custo, cod_cliente
-      ORDER BY total_os DESC
-      LIMIT 30
-    `;
-    
-    const resultPorCentro = await pool.query(queryPorCentro, params);
-    
     // Totais gerais
     const queryTotais = `
       SELECT 
-        COUNT(*) as total_os,
-        COUNT(CASE WHEN dentro_prazo = true THEN 1 END) as total_dentro_prazo,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END) as total_dentro_prazo,
+        COUNT(CASE WHEN dentro_prazo = false AND COALESCE(ponto, 1) >= 2 THEN 1 END) as total_fora_prazo,
+        COUNT(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' 
+                     OR LOWER(ocorrencia) LIKE '%cliente ausente%'
+                     OR LOWER(ocorrencia) LIKE '%clienteaus%'
+                     OR LOWER(ocorrencia) LIKE '%loja fechada%'
+                     OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 END) as total_retornos,
         ROUND(
-          COUNT(CASE WHEN dentro_prazo = true THEN 1 END)::numeric / 
-          NULLIF(COUNT(*), 0) * 100, 
+          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
           1
         ) as taxa_prazo_geral,
         COALESCE(SUM(valor), 0) as valor_total_geral,
         COALESCE(SUM(valor_prof), 0) as valor_motoboy_geral,
-        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media_geral,
-        COALESCE(ROUND(AVG(tempo_execucao_minutos)::numeric, 1), 0) as tempo_medio_geral
+        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_entrega,
+        COALESCE(ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END)::numeric, 1), 0) as tempo_medio_coleta,
+        COUNT(DISTINCT cod_prof) as total_entregadores
       FROM bi_entregas
       ${whereClause}
     `;
     
     const resultTotais = await pool.query(queryTotais, params);
+    const totais = resultTotais.rows[0] || {};
+    
+    // Calcular campos derivados nos totais
+    const totalEntregas = parseInt(totais.total_entregas) || 0;
+    const totalEntregadores = parseInt(totais.total_entregadores) || 1;
+    const valorTotalGeral = parseFloat(totais.valor_total_geral) || 0;
+    
+    totais.ticket_medio = totalEntregas > 0 ? (valorTotalGeral / totalEntregas).toFixed(2) : '0.00';
+    totais.media_ent_profissional = totalEntregadores > 0 ? (totalEntregas / totalEntregadores).toFixed(2) : '0.00';
     
     console.log('📈 Acompanhamento periódico consultado:', {
-      dias: resultPorData.rows.length,
+      dias: dadosProcessados.length,
       clientes: resultPorCliente.rows.length,
-      centros: resultPorCentro.rows.length
+      totais: totais
     });
     
     res.json({
-      porData: resultPorData.rows,
+      porData: dadosProcessados,
       porCliente: resultPorCliente.rows,
-      porCentroCusto: resultPorCentro.rows,
-      totais: resultTotais.rows[0] || {},
+      totais: totais,
       periodo: {
         inicio: data_inicio,
         fim: data_fim,
-        totalDias: resultPorData.rows.length
+        totalDias: dadosProcessados.length
       }
     });
     
