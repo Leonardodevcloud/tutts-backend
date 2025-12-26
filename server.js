@@ -830,6 +830,10 @@ async function createTables() {
     // Migration: Adicionar coluna ponto se não existir
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
     
+    // Migration: Adicionar colunas de coordenadas
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,7)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(10,7)`).catch(() => {});
+    
     // Migration: Aumentar tamanho de campos VARCHAR que podem ser pequenos demais
     await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN estado TYPE VARCHAR(50)`).catch(() => {});
     await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN status TYPE VARCHAR(100)`).catch(() => {});
@@ -6290,6 +6294,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['data_hora_alocado']),
             hora_solicitado: e.hora_solicitado || e['Hora solicitado'] || e['Hora Solicitado'] || e['hora_solicitado'] || null,
             hora_saida: e.hora_saida || e['Hora Saida'] || e['Hora saida'] || e['Hora Saída'] || e['hora_saida'] || null,
+            latitude: parseFloat(e.latitude || e['Latitude'] || e['lat'] || e['Lat']) || null,
+            longitude: parseFloat(e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long']) || null,
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
             categoria: truncar(e.categoria, 100),
@@ -6322,7 +6328,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           
           for (const d of dadosLote) {
             const indices = [];
-            for (let i = 0; i < 34; i++) {
+            for (let i = 0; i < 36; i++) {
               indices.push(`$${paramIndex++}`);
             }
             valores.push(`(${indices.join(',')})`);
@@ -6330,7 +6336,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-              d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.finalizado, d.data_solicitado,
+              d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.latitude, d.longitude, d.finalizado, d.data_solicitado,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -6342,7 +6348,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
               bairro, cidade, estado, cod_prof, nome_prof,
-              data_hora, data_hora_alocado, hora_solicitado, hora_saida, finalizado, data_solicitado,
+              data_hora, data_hora_alocado, hora_solicitado, hora_saida, latitude, longitude, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
@@ -6362,16 +6368,16 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                   os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
                   nome_fantasia, centro_custo, cidade_p1, endereco,
                   bairro, cidade, estado, cod_prof, nome_prof,
-                  data_hora, data_hora_alocado, hora_solicitado, hora_saida, finalizado, data_solicitado,
+                  data_hora, data_hora_alocado, hora_solicitado, hora_saida, latitude, longitude, finalizado, data_solicitado,
                   categoria, valor, distancia, valor_prof,
                   execucao_comp, status, motivo, ocorrencia, velocidade_media,
                   dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
               `, [
                 d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
                 d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
                 d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-                d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.finalizado, d.data_solicitado,
+                d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.latitude, d.longitude, d.finalizado, d.data_solicitado,
                 d.categoria, d.valor, d.distancia, d.valor_prof,
                 d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
                 d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -9319,6 +9325,133 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
 
 // ============================================
 // FIM ACOMPANHAMENTO PERIÓDICO
+// ============================================
+
+// ============================================
+// MAPA DE CALOR - COORDENADAS
+// ============================================
+
+// GET - Coordenadas para Mapa de Calor
+app.get('/api/bi/mapa-calor', async (req, res) => {
+  try {
+    let { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    // Se não tiver data, busca últimos 30 dias
+    if (!data_inicio || !data_fim) {
+      const hoje = new Date();
+      const trintaDiasAtras = new Date(hoje);
+      trintaDiasAtras.setDate(hoje.getDate() - 30);
+      
+      if (!data_fim) {
+        data_fim = hoje.toISOString().split('T')[0];
+      }
+      if (!data_inicio) {
+        data_inicio = trintaDiasAtras.toISOString().split('T')[0];
+      }
+    }
+    
+    let whereConditions = ['latitude IS NOT NULL', 'longitude IS NOT NULL'];
+    let params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereConditions.push(`data_solicitado >= $${paramIndex}`);
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    
+    if (data_fim) {
+      whereConditions.push(`data_solicitado <= $${paramIndex}`);
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').filter(c => c);
+      if (clientes.length > 0) {
+        whereConditions.push(`cod_cliente = ANY($${paramIndex}::int[])`);
+        params.push(clientes.map(c => parseInt(c)));
+        paramIndex++;
+      }
+    }
+    
+    if (centro_custo) {
+      const centros = centro_custo.split(',').filter(c => c);
+      if (centros.length > 0) {
+        whereConditions.push(`centro_custo = ANY($${paramIndex}::text[])`);
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    
+    if (categoria) {
+      whereConditions.push(`categoria = $${paramIndex}`);
+      params.push(categoria);
+      paramIndex++;
+    }
+    
+    const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+    
+    // Query para buscar coordenadas (apenas ponto >= 2 para entregas)
+    const query = `
+      SELECT 
+        latitude,
+        longitude,
+        cidade,
+        bairro,
+        COUNT(*) as quantidade
+      FROM bi_entregas
+      ${whereClause}
+      AND COALESCE(ponto, 1) >= 2
+      GROUP BY latitude, longitude, cidade, bairro
+      ORDER BY quantidade DESC
+      LIMIT 5000
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    // Transformar para formato do heatmap [lat, lng, intensity]
+    const pontos = result.rows.map(r => ({
+      lat: parseFloat(r.latitude),
+      lng: parseFloat(r.longitude),
+      count: parseInt(r.quantidade),
+      cidade: r.cidade,
+      bairro: r.bairro
+    }));
+    
+    // Estatísticas por cidade
+    const porCidade = {};
+    result.rows.forEach(r => {
+      const cidade = r.cidade || 'Não informada';
+      if (!porCidade[cidade]) {
+        porCidade[cidade] = 0;
+      }
+      porCidade[cidade] += parseInt(r.quantidade);
+    });
+    
+    const cidadesRanking = Object.entries(porCidade)
+      .map(([cidade, total]) => ({ cidade, total }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+    
+    console.log('🗺️ Mapa de calor:', { pontos: pontos.length, cidades: cidadesRanking.length });
+    
+    res.json({
+      pontos,
+      totalPontos: pontos.length,
+      totalEntregas: pontos.reduce((sum, p) => sum + p.count, 0),
+      cidadesRanking,
+      periodo: { inicio: data_inicio, fim: data_fim }
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao buscar mapa de calor:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados do mapa de calor' });
+  }
+});
+
+// ============================================
+// FIM MAPA DE CALOR
 // ============================================
 
 // Iniciar servidor
