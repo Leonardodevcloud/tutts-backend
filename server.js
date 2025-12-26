@@ -9428,7 +9428,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
-    let whereClause = 'WHERE 1=1';
+    let whereClause = 'WHERE ponto >= 2'; // REGRA: apenas entregas (ponto >= 2), não conta coleta (ponto 1)
     const params = [];
     let paramIndex = 1;
     
@@ -9464,7 +9464,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       paramIndex++;
     }
     
-    // BUSCAR PONTOS COM COORDENADAS REAIS DO BANCO
+    // BUSCAR PONTOS COM COORDENADAS REAIS DO BANCO (apenas ponto >= 2)
     // Agrupa por coordenadas aproximadas (arredonda para 3 casas decimais ~111m de precisão)
     const pontosQuery = await pool.query(`
       SELECT 
@@ -9613,7 +9613,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
-    let whereClause = 'WHERE 1=1';
+    let whereClause = 'WHERE ponto >= 2'; // REGRA: apenas entregas (ponto >= 2)
     const params = [];
     let paramIndex = 1;
     
