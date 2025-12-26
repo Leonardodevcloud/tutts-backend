@@ -6274,6 +6274,15 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           // Função para truncar strings (evita erro de tamanho)
           const truncar = (str, max) => str ? String(str).substring(0, max) : null;
           
+          // Debug: mostrar coordenadas das primeiras linhas
+          if (dadosLote.length < 3) {
+            const coords = {
+              lat_raw: e.latitude || e['Latitude'] || e['lat'] || e['Lat'],
+              lng_raw: e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long']
+            };
+            console.log('📍 Debug coordenadas linha', dadosLote.length + 1, ':', coords);
+          }
+          
           dadosLote.push({
             os,
             ponto,
@@ -9404,7 +9413,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
     
     const whereClause = 'WHERE ' + whereConditions.join(' AND ');
     
-    // Query para buscar coordenadas (apenas ponto >= 2 para entregas)
+    // Query para buscar coordenadas (todos os registros com coordenadas)
     const query = `
       SELECT 
         latitude,
@@ -9414,7 +9423,6 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
         COUNT(*) as quantidade
       FROM bi_entregas
       ${whereClause}
-      AND COALESCE(ponto, 1) >= 2
       GROUP BY latitude, longitude, cidade, bairro
       ORDER BY quantidade DESC
       LIMIT 5000
