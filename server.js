@@ -830,10 +830,6 @@ async function createTables() {
     // Migration: Adicionar coluna ponto se não existir
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
     
-    // Migration: Adicionar colunas de coordenadas
-    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,7)`).catch(() => {});
-    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(10,7)`).catch(() => {});
-    
     // Migration: Aumentar tamanho de campos VARCHAR que podem ser pequenos demais
     await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN estado TYPE VARCHAR(50)`).catch(() => {});
     await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN status TYPE VARCHAR(100)`).catch(() => {});
@@ -6274,23 +6270,6 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           // Função para truncar strings (evita erro de tamanho)
           const truncar = (str, max) => str ? String(str).substring(0, max) : null;
           
-          // Debug: mostrar coordenadas das primeiras linhas
-          if (dadosLote.length < 3) {
-            const coords = {
-              lat_raw: e.latitude || e['Latitude'] || e['lat'] || e['Lat'],
-              lng_raw: e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long']
-            };
-            console.log('📍 Debug coordenadas linha', dadosLote.length + 1, ':', coords);
-            // Mostrar todas as colunas na primeira linha
-            if (dadosLote.length === 0) {
-              console.log('📋 Colunas do Excel:', Object.keys(e).join(', '));
-              // Mostrar valores específicos de Latitude e Longitude
-              console.log('🔍 Valor e["Latitude"]:', e['Latitude']);
-              console.log('🔍 Valor e["Longitude"]:', e['Longitude']);
-              console.log('🔍 Tipo e["Latitude"]:', typeof e['Latitude']);
-            }
-          }
-          
           dadosLote.push({
             os,
             ponto,
@@ -6308,23 +6287,6 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             cod_prof: parseInt(e.cod_prof) || null,
             nome_prof: truncar(e.nome_prof, 255),
             data_hora: parseTimestamp(e.data_hora),
-            data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['data_hora_alocado']),
-            hora_solicitado: e.hora_solicitado || e['Hora solicitado'] || e['Hora Solicitado'] || e['hora_solicitado'] || null,
-            hora_saida: e.hora_saida || e['Hora Saida'] || e['Hora saida'] || e['Hora Saída'] || e['hora_saida'] || null,
-            latitude: (function() {
-              var val = e.latitude || e['Latitude'] || e['lat'] || e['Lat'] || e['LAT'] || e['LATITUDE'] || e['Lat.'] || e['latitude '] || e['Latitude '] || e[' Latitude'] || e[' latitude'];
-              if (val === undefined || val === null || val === '') return null;
-              var str = String(val).replace(',', '.').replace(/\s/g, '').trim();
-              var num = parseFloat(str);
-              return isNaN(num) ? null : num;
-            })(),
-            longitude: (function() {
-              var val = e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long'] || e['LNG'] || e['LONGITUDE'] || e['Lng.'] || e['Long.'] || e['longitude '] || e['Longitude '] || e[' Longitude'] || e[' longitude'];
-              if (val === undefined || val === null || val === '') return null;
-              var str = String(val).replace(',', '.').replace(/\s/g, '').trim();
-              var num = parseFloat(str);
-              return isNaN(num) ? null : num;
-            })(),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
             categoria: truncar(e.categoria, 100),
@@ -6341,12 +6303,6 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             tempo_execucao_minutos: tempoExecucao,
             data_upload: data_referencia || new Date().toISOString().split('T')[0]
           });
-          
-          // Log das coordenadas do registro que acabou de ser adicionado
-          if (dadosLote.length <= 3) {
-            const ultimo = dadosLote[dadosLote.length - 1];
-            console.log('✅ Coordenadas salvas linha', dadosLote.length, ':', { lat: ultimo.latitude, lng: ultimo.longitude });
-          }
         } catch (err) {
           linhasIgnoradas++;
           motivosIgnoradas['Erro parsing'] = (motivosIgnoradas['Erro parsing'] || 0) + 1;
@@ -6363,7 +6319,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           
           for (const d of dadosLote) {
             const indices = [];
-            for (let i = 0; i < 36; i++) {
+            for (let i = 0; i < 31; i++) {
               indices.push(`$${paramIndex++}`);
             }
             valores.push(`(${indices.join(',')})`);
@@ -6371,7 +6327,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-              d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.latitude, d.longitude, d.finalizado, d.data_solicitado,
+              d.data_hora, d.finalizado, d.data_solicitado,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -6383,7 +6339,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
               nome_fantasia, centro_custo, cidade_p1, endereco,
               bairro, cidade, estado, cod_prof, nome_prof,
-              data_hora, data_hora_alocado, hora_solicitado, hora_saida, latitude, longitude, finalizado, data_solicitado,
+              data_hora, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
               dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
@@ -6403,16 +6359,16 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                   os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
                   nome_fantasia, centro_custo, cidade_p1, endereco,
                   bairro, cidade, estado, cod_prof, nome_prof,
-                  data_hora, data_hora_alocado, hora_solicitado, hora_saida, latitude, longitude, finalizado, data_solicitado,
+                  data_hora, finalizado, data_solicitado,
                   categoria, valor, distancia, valor_prof,
                   execucao_comp, status, motivo, ocorrencia, velocidade_media,
                   dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
               `, [
                 d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
                 d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
                 d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-                d.data_hora, d.data_hora_alocado, d.hora_solicitado, d.hora_saida, d.latitude, d.longitude, d.finalizado, d.data_solicitado,
+                d.data_hora, d.finalizado, d.data_solicitado,
                 d.categoria, d.valor, d.distancia, d.valor_prof,
                 d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
                 d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
@@ -9074,464 +9030,6 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 
 // ==================== FIM ROTAS MÓDULO AVISOS ====================
 
-// ============================================
-// ACOMPANHAMENTO PERIÓDICO - MÓDULO BI
-// ============================================
-
-// GET - Dados para Acompanhamento Periódico
-app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
-  try {
-    let { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
-    
-    // Se não tiver data, busca últimos 30 dias
-    if (!data_inicio || !data_fim) {
-      const hoje = new Date();
-      const trintaDiasAtras = new Date(hoje);
-      trintaDiasAtras.setDate(hoje.getDate() - 30);
-      
-      if (!data_fim) {
-        data_fim = hoje.toISOString().split('T')[0];
-      }
-      if (!data_inicio) {
-        data_inicio = trintaDiasAtras.toISOString().split('T')[0];
-      }
-    }
-    
-    let whereConditions = [];
-    let params = [];
-    let paramIndex = 1;
-    
-    if (data_inicio) {
-      whereConditions.push(`data_solicitado >= $${paramIndex}`);
-      params.push(data_inicio);
-      paramIndex++;
-    }
-    
-    if (data_fim) {
-      whereConditions.push(`data_solicitado <= $${paramIndex}`);
-      params.push(data_fim);
-      paramIndex++;
-    }
-    
-    if (cod_cliente) {
-      const clientes = cod_cliente.split(',').filter(c => c);
-      if (clientes.length > 0) {
-        whereConditions.push(`cod_cliente = ANY($${paramIndex}::int[])`);
-        params.push(clientes.map(c => parseInt(c)));
-        paramIndex++;
-      }
-    }
-    
-    if (centro_custo) {
-      const centros = centro_custo.split(',').filter(c => c);
-      if (centros.length > 0) {
-        whereConditions.push(`centro_custo = ANY($${paramIndex}::text[])`);
-        params.push(centros);
-        paramIndex++;
-      }
-    }
-    
-    if (categoria) {
-      whereConditions.push(`categoria = $${paramIndex}`);
-      params.push(categoria);
-      paramIndex++;
-    }
-    
-    const whereClause = whereConditions.length > 0 
-      ? 'WHERE ' + whereConditions.join(' AND ')
-      : '';
-    
-    console.log('📈 Acompanhamento - Query params:', { data_inicio, data_fim, cod_cliente, centro_custo });
-    
-    // Query COMPLETA agrupada por data com TODOS os 15 campos
-    const queryPorData = `
-      SELECT 
-        data_solicitado as data,
-        TO_CHAR(data_solicitado, 'DD-MM') as data_formatada,
-        TO_CHAR(data_solicitado, 'DD/MM/YYYY') as data_completa,
-        EXTRACT(DOW FROM data_solicitado) as dia_semana,
-        
-        -- 1. OS (contagem distinta)
-        COUNT(DISTINCT os) as total_os,
-        
-        -- 2. Entregas (apenas ponto >= 2)
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-        
-        -- 3. No Prazo (entregas no prazo)
-        COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END) as dentro_prazo,
-        
-        -- 4. Fora Prazo
-        COUNT(CASE WHEN dentro_prazo = false AND COALESCE(ponto, 1) >= 2 THEN 1 END) as fora_prazo,
-        
-        -- 5. Retornos (baseado em ocorrência)
-        COUNT(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' 
-                     OR LOWER(ocorrencia) LIKE '%cliente ausente%'
-                     OR LOWER(ocorrencia) LIKE '%clienteaus%'
-                     OR LOWER(ocorrencia) LIKE '%loja fechada%'
-                     OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 END) as retornos,
-        
-        -- 6. Valor Total
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) = (
-          SELECT MAX(COALESCE(ponto, 1)) FROM bi_entregas b2 WHERE b2.os = bi_entregas.os
-        ) THEN valor ELSE 0 END), 0) as valor_total,
-        
-        -- 7. Valor Profissional
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) = (
-          SELECT MAX(COALESCE(ponto, 1)) FROM bi_entregas b2 WHERE b2.os = bi_entregas.os
-        ) THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
-        
-        -- 9. Tempo Médio Entrega (coluna execucao_comp, formato HH:MM:SS)
-        -- Converte execucao_comp para minutos e faz média
-        COALESCE(ROUND(AVG(
-          CASE WHEN COALESCE(ponto, 1) >= 2 AND execucao_comp IS NOT NULL AND execucao_comp ~ '^[0-9]+:[0-9]+:[0-9]+$'
-          THEN (
-            SPLIT_PART(execucao_comp, ':', 1)::numeric * 60 +
-            SPLIT_PART(execucao_comp, ':', 2)::numeric +
-            SPLIT_PART(execucao_comp, ':', 3)::numeric / 60
-          )
-          END
-        )::numeric, 1), 0) as tempo_medio_entrega,
-        
-        -- 10. Tempo Médio Alocação (média da hora do campo data_hora_alocado em minutos desde meia-noite)
-        -- data_hora_alocado está como TIMESTAMP (ex: 09/12/2025 14:21:54)
-        COALESCE(ROUND(AVG(
-          CASE WHEN data_hora_alocado IS NOT NULL
-          THEN EXTRACT(HOUR FROM data_hora_alocado) * 60 + 
-               EXTRACT(MINUTE FROM data_hora_alocado) +
-               EXTRACT(SECOND FROM data_hora_alocado) / 60
-          END
-        )::numeric, 1), 0) as tempo_medio_alocacao,
-        
-        -- 11. Tempo Médio Coleta (diferença entre hora_saida e hora_solicitado em minutos)
-        -- hora_saida e hora_solicitado são campos TIME
-        COALESCE(ROUND(AVG(
-          CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (hora_saida::time - hora_solicitado::time)) / 60
-          END
-        )::numeric, 1), 0) as tempo_medio_coleta,
-        
-        -- 12. Total Entregadores
-        COUNT(DISTINCT cod_prof) as total_entregadores,
-        
-        -- Taxa prazo %
-        ROUND(
-          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
-          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
-          1
-        ) as taxa_prazo,
-        
-        -- Distância média
-        COALESCE(ROUND(AVG(distancia)::numeric, 2), 0) as distancia_media
-        
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY data_solicitado
-      ORDER BY data_solicitado ASC
-    `;
-    
-    const resultPorData = await pool.query(queryPorData, params);
-    
-    // Processar dados para adicionar campos calculados
-    const dadosProcessados = resultPorData.rows.map((row, index, arr) => {
-      const totalEntregas = parseInt(row.total_entregas) || 0;
-      const totalEntregadores = parseInt(row.total_entregadores) || 1;
-      const valorTotal = parseFloat(row.valor_total) || 0;
-      
-      // Ticket Médio
-      const ticketMedio = totalEntregas > 0 ? (valorTotal / totalEntregas) : 0;
-      
-      // Média Entregas por Profissional
-      const mediaEntProfissional = totalEntregadores > 0 ? (totalEntregas / totalEntregadores) : 0;
-      
-      // Evolução Semanal (comparação com 7 dias antes)
-      let evolucaoSemanal = null;
-      if (index >= 7) {
-        const entregasAnterior = parseInt(arr[index - 7].total_entregas) || 0;
-        if (entregasAnterior > 0) {
-          evolucaoSemanal = ((totalEntregas - entregasAnterior) / entregasAnterior * 100).toFixed(1);
-        }
-      }
-      
-      return {
-        ...row,
-        ticket_medio: ticketMedio.toFixed(2),
-        media_ent_profissional: mediaEntProfissional.toFixed(2),
-        evolucao_semanal: evolucaoSemanal
-      };
-    });
-    
-    // Query por cliente
-    const queryPorCliente = `
-      SELECT 
-        cod_cliente,
-        nome_cliente,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-        ROUND(
-          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
-          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
-          1
-        ) as taxa_prazo,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
-        COUNT(DISTINCT cod_prof) as total_entregadores
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY cod_cliente, nome_cliente
-      ORDER BY total_os DESC
-      LIMIT 20
-    `;
-    
-    const resultPorCliente = await pool.query(queryPorCliente, params);
-    
-    // Totais gerais
-    const queryTotais = `
-      SELECT 
-        COUNT(DISTINCT os) as total_os,
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-        COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END) as total_dentro_prazo,
-        COUNT(CASE WHEN dentro_prazo = false AND COALESCE(ponto, 1) >= 2 THEN 1 END) as total_fora_prazo,
-        COUNT(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' 
-                     OR LOWER(ocorrencia) LIKE '%cliente ausente%'
-                     OR LOWER(ocorrencia) LIKE '%clienteaus%'
-                     OR LOWER(ocorrencia) LIKE '%loja fechada%'
-                     OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 END) as total_retornos,
-        ROUND(
-          COUNT(CASE WHEN dentro_prazo = true AND COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
-          NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 
-          1
-        ) as taxa_prazo_geral,
-        COALESCE(SUM(valor), 0) as valor_total_geral,
-        COALESCE(SUM(valor_prof), 0) as valor_motoboy_geral,
-        -- Tempo Médio Entrega (execucao_comp convertido para minutos)
-        COALESCE(ROUND(AVG(
-          CASE WHEN COALESCE(ponto, 1) >= 2 AND execucao_comp IS NOT NULL AND execucao_comp ~ '^[0-9]+:[0-9]+:[0-9]+$'
-          THEN (
-            SPLIT_PART(execucao_comp, ':', 1)::numeric * 60 +
-            SPLIT_PART(execucao_comp, ':', 2)::numeric +
-            SPLIT_PART(execucao_comp, ':', 3)::numeric / 60
-          )
-          END
-        )::numeric, 1), 0) as tempo_medio_entrega,
-        -- Tempo Médio Coleta (hora_saida - hora_solicitado)
-        COALESCE(ROUND(AVG(
-          CASE WHEN hora_saida IS NOT NULL AND hora_solicitado IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (hora_saida::time - hora_solicitado::time)) / 60
-          END
-        )::numeric, 1), 0) as tempo_medio_coleta,
-        COUNT(DISTINCT cod_prof) as total_entregadores
-      FROM bi_entregas
-      ${whereClause}
-    `;
-    
-    const resultTotais = await pool.query(queryTotais, params);
-    const totais = resultTotais.rows[0] || {};
-    
-    // Calcular campos derivados nos totais
-    const totalEntregas = parseInt(totais.total_entregas) || 0;
-    const totalEntregadores = parseInt(totais.total_entregadores) || 1;
-    const valorTotalGeral = parseFloat(totais.valor_total_geral) || 0;
-    
-    totais.ticket_medio = totalEntregas > 0 ? (valorTotalGeral / totalEntregas).toFixed(2) : '0.00';
-    totais.media_ent_profissional = totalEntregadores > 0 ? (totalEntregas / totalEntregadores).toFixed(2) : '0.00';
-    
-    console.log('📈 Acompanhamento periódico consultado:', {
-      dias: dadosProcessados.length,
-      clientes: resultPorCliente.rows.length,
-      totais: totais
-    });
-    
-    res.json({
-      porData: dadosProcessados,
-      porCliente: resultPorCliente.rows,
-      totais: totais,
-      periodo: {
-        inicio: data_inicio,
-        fim: data_fim,
-        totalDias: dadosProcessados.length
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Erro ao buscar acompanhamento periódico:', error);
-    res.status(500).json({ error: 'Erro ao buscar dados de acompanhamento' });
-  }
-});
-
-// ============================================
-// FIM ACOMPANHAMENTO PERIÓDICO
-// ============================================
-
-// ============================================
-// MAPA DE CALOR - COORDENADAS
-// ============================================
-
-// GET - Coordenadas para Mapa de Calor
-app.get('/api/bi/mapa-calor', async (req, res) => {
-  try {
-    let { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
-    
-    // Se não tiver data, busca últimos 30 dias
-    if (!data_inicio || !data_fim) {
-      const hoje = new Date();
-      const trintaDiasAtras = new Date(hoje);
-      trintaDiasAtras.setDate(hoje.getDate() - 30);
-      
-      if (!data_fim) {
-        data_fim = hoje.toISOString().split('T')[0];
-      }
-      if (!data_inicio) {
-        data_inicio = trintaDiasAtras.toISOString().split('T')[0];
-      }
-    }
-    
-    let whereConditions = ['latitude IS NOT NULL', 'longitude IS NOT NULL'];
-    let params = [];
-    let paramIndex = 1;
-    
-    if (data_inicio) {
-      whereConditions.push(`data_solicitado >= $${paramIndex}`);
-      params.push(data_inicio);
-      paramIndex++;
-    }
-    
-    if (data_fim) {
-      whereConditions.push(`data_solicitado <= $${paramIndex}`);
-      params.push(data_fim);
-      paramIndex++;
-    }
-    
-    if (cod_cliente) {
-      const clientes = cod_cliente.split(',').filter(c => c);
-      if (clientes.length > 0) {
-        whereConditions.push(`cod_cliente = ANY($${paramIndex}::int[])`);
-        params.push(clientes.map(c => parseInt(c)));
-        paramIndex++;
-      }
-    }
-    
-    if (centro_custo) {
-      const centros = centro_custo.split(',').filter(c => c);
-      if (centros.length > 0) {
-        whereConditions.push(`centro_custo = ANY($${paramIndex}::text[])`);
-        params.push(centros);
-        paramIndex++;
-      }
-    }
-    
-    if (categoria) {
-      whereConditions.push(`categoria = $${paramIndex}`);
-      params.push(categoria);
-      paramIndex++;
-    }
-    
-    const whereClause = 'WHERE ' + whereConditions.join(' AND ');
-    
-    // Query para buscar coordenadas (todos os registros com coordenadas)
-    const query = `
-      SELECT 
-        latitude,
-        longitude,
-        cidade,
-        bairro,
-        COUNT(*) as quantidade
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY latitude, longitude, cidade, bairro
-      ORDER BY quantidade DESC
-      LIMIT 5000
-    `;
-    
-    const result = await pool.query(query, params);
-    
-    // Transformar para formato do heatmap [lat, lng, intensity]
-    const pontos = result.rows.map(r => ({
-      lat: parseFloat(r.latitude),
-      lng: parseFloat(r.longitude),
-      count: parseInt(r.quantidade),
-      cidade: r.cidade,
-      bairro: r.bairro
-    }));
-    
-    // Estatísticas por cidade
-    const porCidade = {};
-    result.rows.forEach(r => {
-      const cidade = r.cidade || 'Não informada';
-      if (!porCidade[cidade]) {
-        porCidade[cidade] = 0;
-      }
-      porCidade[cidade] += parseInt(r.quantidade);
-    });
-    
-    const cidadesRanking = Object.entries(porCidade)
-      .map(([cidade, total]) => ({ cidade, total }))
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 10);
-    
-    // Debug: verificar quantos registros têm coordenadas
-    const debugQuery = await pool.query(`
-      SELECT 
-        COUNT(*) as total,
-        COUNT(latitude) as com_lat,
-        COUNT(longitude) as com_lng,
-        COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) as com_ambos
-      FROM bi_entregas
-    `);
-    console.log('🗺️ Debug coordenadas:', debugQuery.rows[0]);
-    
-    console.log('🗺️ Mapa de calor:', { pontos: pontos.length, cidades: cidadesRanking.length });
-    
-    res.json({
-      pontos,
-      totalPontos: pontos.length,
-      totalEntregas: pontos.reduce((sum, p) => sum + p.count, 0),
-      cidadesRanking,
-      periodo: { inicio: data_inicio, fim: data_fim }
-    });
-    
-  } catch (error) {
-    console.error('❌ Erro ao buscar mapa de calor:', error);
-    res.status(500).json({ error: 'Erro ao buscar dados do mapa de calor' });
-  }
-});
-
-// ============================================
-// FIM MAPA DE CALOR
-// ============================================
-
-// Endpoint de debug para verificar coordenadas
-app.get('/api/bi/debug-coordenadas', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        COUNT(*) as total_registros,
-        COUNT(latitude) as com_latitude,
-        COUNT(longitude) as com_longitude,
-        COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) as com_ambas,
-        MIN(latitude) as lat_min,
-        MAX(latitude) as lat_max,
-        MIN(longitude) as lng_min,
-        MAX(longitude) as lng_max
-      FROM bi_entregas
-    `);
-    
-    // Pegar algumas amostras com coordenadas
-    const amostras = await pool.query(`
-      SELECT latitude, longitude, cidade, bairro 
-      FROM bi_entregas 
-      WHERE latitude IS NOT NULL AND longitude IS NOT NULL 
-      LIMIT 5
-    `);
-    
-    res.json({
-      estatisticas: result.rows[0],
-      amostras: amostras.rows
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
@@ -9894,3 +9392,411 @@ app.get('/api/operacoes-regioes', async (req, res) => {
 // ============================================
 // FIM MÓDULO OPERAÇÕES
 // ============================================
+// ============================================
+// NOVOS ENDPOINTS BI - MAPA DE CALOR E ACOMPANHAMENTO
+// Adicione isso ao final do seu server.js
+// ============================================
+
+// GET - Mapa de Calor por Cidade/Bairro
+app.get('/api/bi/mapa-calor', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    if (categoria) {
+      whereClause += ` AND categoria = $${paramIndex}`;
+      params.push(categoria);
+      paramIndex++;
+    }
+    
+    // Buscar dados agrupados por cidade
+    const cidadesQuery = await pool.query(`
+      SELECT 
+        COALESCE(cidade, 'Não informado') as cidade,
+        COALESCE(estado, 'GO') as estado,
+        COUNT(*) as total_entregas,
+        COUNT(DISTINCT os) as total_os,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(AVG(distancia), 0) as distancia_media,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY cidade, estado
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    // Buscar dados agrupados por bairro (top 50)
+    const bairrosQuery = await pool.query(`
+      SELECT 
+        COALESCE(bairro, 'Não informado') as bairro,
+        COALESCE(cidade, 'Não informado') as cidade,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY bairro, cidade
+      ORDER BY total_entregas DESC
+      LIMIT 50
+    `, params);
+    
+    // Resumo geral
+    const resumoQuery = await pool.query(`
+      SELECT 
+        COUNT(*) as total_entregas,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(DISTINCT cidade) as total_cidades,
+        COUNT(DISTINCT bairro) as total_bairros,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_geral,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+    `, params);
+    
+    // Horários de pico (heatmap por hora)
+    const horariosQuery = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM data_hora) as hora,
+        EXTRACT(DOW FROM data_hora) as dia_semana,
+        COUNT(*) as total
+      FROM bi_entregas
+      ${whereClause}
+      AND data_hora IS NOT NULL
+      GROUP BY EXTRACT(HOUR FROM data_hora), EXTRACT(DOW FROM data_hora)
+      ORDER BY dia_semana, hora
+    `, params);
+    
+    // Coordenadas aproximadas para cidades de Goiás (para o mapa)
+    // Você pode expandir esse dicionário conforme necessário
+    const coordenadasCidades = {
+      'GOIANIA': { lat: -16.6869, lng: -49.2648 },
+      'GOIÂNIA': { lat: -16.6869, lng: -49.2648 },
+      'APARECIDA DE GOIANIA': { lat: -16.8235, lng: -49.2461 },
+      'APARECIDA DE GOIÂNIA': { lat: -16.8235, lng: -49.2461 },
+      'ANAPOLIS': { lat: -16.3227, lng: -48.9530 },
+      'ANÁPOLIS': { lat: -16.3227, lng: -48.9530 },
+      'RIO VERDE': { lat: -17.7927, lng: -50.9280 },
+      'LUZIANIA': { lat: -16.2518, lng: -47.9503 },
+      'LUZIÂNIA': { lat: -16.2518, lng: -47.9503 },
+      'AGUAS LINDAS': { lat: -15.7668, lng: -48.2806 },
+      'ÁGUAS LINDAS': { lat: -15.7668, lng: -48.2806 },
+      'AGUAS LINDAS DE GOIAS': { lat: -15.7668, lng: -48.2806 },
+      'TRINDADE': { lat: -16.6514, lng: -49.4911 },
+      'FORMOSA': { lat: -15.5352, lng: -47.3385 },
+      'NOVO GAMA': { lat: -16.0592, lng: -48.0384 },
+      'SENADOR CANEDO': { lat: -16.7026, lng: -49.0909 },
+      'GOIANIRA': { lat: -16.4969, lng: -49.4252 },
+      'JATAI': { lat: -17.8813, lng: -51.7145 },
+      'JATAÍ': { lat: -17.8813, lng: -51.7145 },
+      'ITUMBIARA': { lat: -18.4178, lng: -49.2152 },
+      'CALDAS NOVAS': { lat: -17.7442, lng: -48.6259 },
+      'CATALAO': { lat: -18.1657, lng: -47.9467 },
+      'CATALÃO': { lat: -18.1657, lng: -47.9467 },
+      'VALPARAISO': { lat: -16.0684, lng: -47.9767 },
+      'VALPARAÍSO': { lat: -16.0684, lng: -47.9767 },
+      'VALPARAISO DE GOIAS': { lat: -16.0684, lng: -47.9767 },
+      'CIDADE OCIDENTAL': { lat: -16.0766, lng: -47.9228 },
+      'PLANALTINA': { lat: -15.4522, lng: -47.6142 },
+      'INHUMAS': { lat: -16.3597, lng: -49.4949 },
+      'GOIANESIA': { lat: -15.3187, lng: -49.1216 },
+      'GOIANÉSIA': { lat: -15.3187, lng: -49.1216 },
+      'MINEIROS': { lat: -17.5696, lng: -52.5509 },
+      'NEROPOLIS': { lat: -16.4062, lng: -49.2209 },
+      'NERÓPOLIS': { lat: -16.4062, lng: -49.2209 },
+      'SANTA HELENA': { lat: -17.8120, lng: -50.5964 },
+      'PIRACANJUBA': { lat: -17.3025, lng: -49.0151 },
+      'BRASILIA': { lat: -15.7942, lng: -47.8822 },
+      'BRASÍLIA': { lat: -15.7942, lng: -47.8822 }
+    };
+    
+    // Gerar pontos para o mapa baseado nas cidades
+    const pontos = cidadesQuery.rows.map(cidade => {
+      const cidadeUpper = (cidade.cidade || '').toUpperCase().trim();
+      const coords = coordenadasCidades[cidadeUpper];
+      
+      if (coords) {
+        return {
+          cidade: cidade.cidade,
+          lat: coords.lat + (Math.random() - 0.5) * 0.05, // Pequena variação para não sobrepor
+          lng: coords.lng + (Math.random() - 0.5) * 0.05,
+          count: parseInt(cidade.total_entregas),
+          taxaPrazo: parseFloat(cidade.taxa_prazo) || 0,
+          noPrazo: parseInt(cidade.no_prazo) || 0,
+          foraPrazo: parseInt(cidade.fora_prazo) || 0
+        };
+      }
+      return null;
+    }).filter(p => p !== null);
+    
+    res.json({
+      totalEntregas: parseInt(resumoQuery.rows[0]?.total_entregas) || 0,
+      totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
+      totalPontos: pontos.length,
+      totalCidades: parseInt(resumoQuery.rows[0]?.total_cidades) || 0,
+      totalBairros: parseInt(resumoQuery.rows[0]?.total_bairros) || 0,
+      totalProfissionais: parseInt(resumoQuery.rows[0]?.total_profissionais) || 0,
+      taxaPrazoGeral: parseFloat(resumoQuery.rows[0]?.taxa_prazo_geral) || 0,
+      pontos: pontos,
+      cidadesRanking: cidadesQuery.rows.slice(0, 10).map(c => ({
+        cidade: c.cidade,
+        estado: c.estado,
+        total: parseInt(c.total_entregas),
+        noPrazo: parseInt(c.no_prazo) || 0,
+        foraPrazo: parseInt(c.fora_prazo) || 0,
+        taxaPrazo: parseFloat(c.taxa_prazo) || 0,
+        totalProfissionais: parseInt(c.total_profissionais) || 0
+      })),
+      bairrosRanking: bairrosQuery.rows.map(b => ({
+        bairro: b.bairro,
+        cidade: b.cidade,
+        total: parseInt(b.total_entregas),
+        noPrazo: parseInt(b.no_prazo) || 0,
+        foraPrazo: parseInt(b.fora_prazo) || 0,
+        taxaPrazo: parseFloat(b.taxa_prazo) || 0
+      })),
+      horariosHeatmap: horariosQuery.rows.map(h => ({
+        hora: parseInt(h.hora),
+        diaSemana: parseInt(h.dia_semana),
+        total: parseInt(h.total)
+      }))
+    });
+    
+  } catch (error) {
+    console.error('Erro mapa de calor:', error);
+    res.status(500).json({ error: 'Erro ao gerar mapa de calor', details: error.message });
+  }
+});
+
+// GET - Acompanhamento Periódico (evolução temporal)
+app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    if (categoria) {
+      whereClause += ` AND categoria = $${paramIndex}`;
+      params.push(categoria);
+      paramIndex++;
+    }
+    
+    // Dados por data
+    const porDataQuery = await pool.query(`
+      SELECT 
+        data_solicitado,
+        TO_CHAR(data_solicitado, 'DD/MM') as data_formatada,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
+        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
+        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 1) as tempo_medio_alocacao,
+        ROUND(AVG(EXTRACT(EPOCH FROM (
+          CASE WHEN hora_chegada IS NOT NULL AND data_chegada IS NOT NULL 
+          THEN (data_chegada + hora_chegada)::timestamp - data_hora_alocado 
+          ELSE NULL END
+        )) / 60), 1) as tempo_medio_coleta,
+        COUNT(DISTINCT cod_prof) as total_entregadores,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado
+    `, params);
+    
+    // Calcular evolução semanal
+    const porData = porDataQuery.rows.map((d, idx, arr) => {
+      let evolucaoSemanal = null;
+      if (idx >= 7) {
+        const entregas7DiasAtras = arr[idx - 7]?.total_entregas;
+        if (entregas7DiasAtras > 0) {
+          evolucaoSemanal = ((d.total_entregas - entregas7DiasAtras) / entregas7DiasAtras * 100).toFixed(1);
+        }
+      }
+      return {
+        ...d,
+        total_os: parseInt(d.total_os) || 0,
+        total_entregas: parseInt(d.total_entregas) || 0,
+        dentro_prazo: parseInt(d.dentro_prazo) || 0,
+        fora_prazo: parseInt(d.fora_prazo) || 0,
+        taxa_prazo: parseFloat(d.taxa_prazo) || 0,
+        retornos: parseInt(d.retornos) || 0,
+        valor_total: parseFloat(d.valor_total) || 0,
+        valor_motoboy: parseFloat(d.valor_motoboy) || 0,
+        ticket_medio: parseFloat(d.ticket_medio) || 0,
+        tempo_medio_entrega: parseFloat(d.tempo_medio_entrega) || 0,
+        tempo_medio_alocacao: parseFloat(d.tempo_medio_alocacao) || 0,
+        tempo_medio_coleta: parseFloat(d.tempo_medio_coleta) || 0,
+        total_entregadores: parseInt(d.total_entregadores) || 0,
+        media_ent_profissional: parseFloat(d.media_ent_profissional) || 0,
+        evolucao_semanal: evolucaoSemanal
+      };
+    });
+    
+    // Resumo geral
+    const resumoQuery = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as total_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_geral,
+        COALESCE(SUM(valor), 0) as valor_total,
+        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_geral,
+        COUNT(DISTINCT cod_prof) as total_profissionais,
+        COUNT(DISTINCT data_solicitado) as total_dias
+      FROM bi_entregas
+      ${whereClause}
+    `, params);
+    
+    res.json({
+      porData: porData,
+      resumo: {
+        totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
+        totalEntregas: parseInt(resumoQuery.rows[0]?.total_entregas) || 0,
+        totalPrazo: parseInt(resumoQuery.rows[0]?.total_prazo) || 0,
+        taxaPrazoGeral: parseFloat(resumoQuery.rows[0]?.taxa_prazo_geral) || 0,
+        valorTotal: parseFloat(resumoQuery.rows[0]?.valor_total) || 0,
+        tempoMedioGeral: parseFloat(resumoQuery.rows[0]?.tempo_medio_geral) || 0,
+        totalProfissionais: parseInt(resumoQuery.rows[0]?.total_profissionais) || 0,
+        totalDias: parseInt(resumoQuery.rows[0]?.total_dias) || 0
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erro acompanhamento periódico:', error);
+    res.status(500).json({ error: 'Erro ao gerar acompanhamento', details: error.message });
+  }
+});
+
+// GET - Dados para heatmap de horários
+app.get('/api/bi/heatmap-horarios', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente } = req.query;
+    
+    let whereClause = 'WHERE data_hora IS NOT NULL';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    
+    const result = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM data_hora) as hora,
+        EXTRACT(DOW FROM data_hora) as dia_semana,
+        COUNT(*) as total,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY EXTRACT(HOUR FROM data_hora), EXTRACT(DOW FROM data_hora)
+      ORDER BY dia_semana, hora
+    `, params);
+    
+    // Construir matriz 7x24 (dias x horas)
+    const matriz = Array(7).fill(null).map(() => Array(24).fill({ total: 0, noPrazo: 0, taxaPrazo: 0 }));
+    
+    result.rows.forEach(row => {
+      const dia = parseInt(row.dia_semana);
+      const hora = parseInt(row.hora);
+      matriz[dia][hora] = {
+        total: parseInt(row.total),
+        noPrazo: parseInt(row.no_prazo) || 0,
+        taxaPrazo: parseFloat(row.taxa_prazo) || 0
+      };
+    });
+    
+    res.json({
+      matriz,
+      diasSemana: ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
+    });
+    
+  } catch (error) {
+    console.error('Erro heatmap horários:', error);
+    res.status(500).json({ error: 'Erro ao gerar heatmap de horários' });
+  }
+});
