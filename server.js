@@ -9741,3 +9741,135 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     res.status(500).json({ error: 'Erro ao gerar acompanhamento', details: error.message });
   }
 });
+
+// GET - Dados agrupados por cliente para tabela de acompanhamento
+app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
+    
+    let whereClause = 'WHERE ponto >= 2';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    if (categoria) {
+      whereClause += ` AND categoria = $${paramIndex}`;
+      params.push(categoria);
+      paramIndex++;
+    }
+    
+    // Buscar dados agrupados por cliente
+    const clientesQuery = await pool.query(`
+      SELECT 
+        COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
+        cod_cliente,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_prof,
+        COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_execucao_minutos), 0) as tempo_medio_entrega_min,
+        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 0) as tempo_medio_alocacao_min,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY cod_cliente, nome_fantasia, nome_cliente
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    // Calcular totais
+    const totaisQuery = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_prof,
+        COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_execucao_minutos), 0) as tempo_medio_entrega_min,
+        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 0) as tempo_medio_alocacao_min,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+    `, params);
+    
+    // Formatar tempo em HH:MM:SS
+    const formatarTempo = (minutos) => {
+      if (!minutos || minutos <= 0) return '00:00:00';
+      const h = Math.floor(minutos / 60);
+      const m = Math.floor(minutos % 60);
+      const s = Math.floor((minutos % 1) * 60);
+      return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    };
+    
+    const clientes = clientesQuery.rows.map(c => ({
+      cliente: c.cliente,
+      cod_cliente: c.cod_cliente,
+      os: parseInt(c.total_os) || 0,
+      entregas: parseInt(c.total_entregas) || 0,
+      noPrazo: parseFloat(c.taxa_no_prazo) || 0,
+      foraPrazo: parseFloat(c.taxa_fora_prazo) || 0,
+      retornos: parseInt(c.retornos) || 0,
+      valorTotal: parseFloat(c.valor_total) || 0,
+      valorProf: parseFloat(c.valor_prof) || 0,
+      faturamentoTotal: parseFloat(c.faturamento_total) || 0,
+      ticketMedio: parseFloat(c.ticket_medio) || 0,
+      tempoMedioEntrega: formatarTempo(parseFloat(c.tempo_medio_entrega_min)),
+      tempoMedioAlocacao: formatarTempo(parseFloat(c.tempo_medio_alocacao_min)),
+      totalProfissionais: parseInt(c.total_profissionais) || 0
+    }));
+    
+    const totais = {
+      os: parseInt(totaisQuery.rows[0]?.total_os) || 0,
+      entregas: parseInt(totaisQuery.rows[0]?.total_entregas) || 0,
+      noPrazo: parseFloat(totaisQuery.rows[0]?.taxa_no_prazo) || 0,
+      foraPrazo: parseFloat(totaisQuery.rows[0]?.taxa_fora_prazo) || 0,
+      retornos: parseInt(totaisQuery.rows[0]?.retornos) || 0,
+      valorTotal: parseFloat(totaisQuery.rows[0]?.valor_total) || 0,
+      valorProf: parseFloat(totaisQuery.rows[0]?.valor_prof) || 0,
+      faturamentoTotal: parseFloat(totaisQuery.rows[0]?.faturamento_total) || 0,
+      ticketMedio: parseFloat(totaisQuery.rows[0]?.ticket_medio) || 0,
+      tempoMedioEntrega: formatarTempo(parseFloat(totaisQuery.rows[0]?.tempo_medio_entrega_min)),
+      tempoMedioAlocacao: formatarTempo(parseFloat(totaisQuery.rows[0]?.tempo_medio_alocacao_min)),
+      totalProfissionais: parseInt(totaisQuery.rows[0]?.total_profissionais) || 0
+    };
+    
+    res.json({ clientes, totais });
+    
+  } catch (error) {
+    console.error('Erro acompanhamento clientes:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados de clientes', details: error.message });
+  }
+});
