@@ -6294,8 +6294,20 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['data_hora_alocado']),
             hora_solicitado: e.hora_solicitado || e['Hora solicitado'] || e['Hora Solicitado'] || e['hora_solicitado'] || null,
             hora_saida: e.hora_saida || e['Hora Saida'] || e['Hora saida'] || e['Hora Saída'] || e['hora_saida'] || null,
-            latitude: parseFloat(e.latitude || e['Latitude'] || e['lat'] || e['Lat']) || null,
-            longitude: parseFloat(e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long']) || null,
+            latitude: (function() {
+              var val = e.latitude || e['Latitude'] || e['lat'] || e['Lat'] || e['LAT'] || e['LATITUDE'];
+              if (!val) return null;
+              var str = String(val).replace(',', '.').trim();
+              var num = parseFloat(str);
+              return isNaN(num) ? null : num;
+            })(),
+            longitude: (function() {
+              var val = e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long'] || e['LNG'] || e['LONGITUDE'];
+              if (!val) return null;
+              var str = String(val).replace(',', '.').trim();
+              var num = parseFloat(str);
+              return isNaN(num) ? null : num;
+            })(),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
             categoria: truncar(e.categoria, 100),
@@ -9433,6 +9445,17 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       .map(([cidade, total]) => ({ cidade, total }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
+    
+    // Debug: verificar quantos registros têm coordenadas
+    const debugQuery = await pool.query(`
+      SELECT 
+        COUNT(*) as total,
+        COUNT(latitude) as com_lat,
+        COUNT(longitude) as com_lng,
+        COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) as com_ambos
+      FROM bi_entregas
+    `);
+    console.log('🗺️ Debug coordenadas:', debugQuery.rows[0]);
     
     console.log('🗺️ Mapa de calor:', { pontos: pontos.length, cidades: cidadesRanking.length });
     
