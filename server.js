@@ -6281,6 +6281,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               lng_raw: e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long']
             };
             console.log('📍 Debug coordenadas linha', dadosLote.length + 1, ':', coords);
+            // Mostrar todas as colunas na primeira linha
+            if (dadosLote.length === 0) {
+              console.log('📋 Colunas do Excel:', Object.keys(e).join(', '));
+            }
           }
           
           dadosLote.push({
@@ -6304,16 +6308,16 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             hora_solicitado: e.hora_solicitado || e['Hora solicitado'] || e['Hora Solicitado'] || e['hora_solicitado'] || null,
             hora_saida: e.hora_saida || e['Hora Saida'] || e['Hora saida'] || e['Hora Saída'] || e['hora_saida'] || null,
             latitude: (function() {
-              var val = e.latitude || e['Latitude'] || e['lat'] || e['Lat'] || e['LAT'] || e['LATITUDE'];
-              if (!val) return null;
-              var str = String(val).replace(',', '.').trim();
+              var val = e.latitude || e['Latitude'] || e['lat'] || e['Lat'] || e['LAT'] || e['LATITUDE'] || e['Lat.'] || e['latitude '] || e['Latitude '] || e[' Latitude'] || e[' latitude'];
+              if (val === undefined || val === null || val === '') return null;
+              var str = String(val).replace(',', '.').replace(/\s/g, '').trim();
               var num = parseFloat(str);
               return isNaN(num) ? null : num;
             })(),
             longitude: (function() {
-              var val = e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long'] || e['LNG'] || e['LONGITUDE'];
-              if (!val) return null;
-              var str = String(val).replace(',', '.').trim();
+              var val = e.longitude || e['Longitude'] || e['lng'] || e['Lng'] || e['Long'] || e['LNG'] || e['LONGITUDE'] || e['Lng.'] || e['Long.'] || e['longitude '] || e['Longitude '] || e[' Longitude'] || e[' longitude'];
+              if (val === undefined || val === null || val === '') return null;
+              var str = String(val).replace(',', '.').replace(/\s/g, '').trim();
               var num = parseFloat(str);
               return isNaN(num) ? null : num;
             })(),
