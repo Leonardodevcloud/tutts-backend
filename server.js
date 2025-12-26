@@ -848,6 +848,12 @@ async function createTables() {
     // Índice UNIQUE para UPSERT (ON CONFLICT)
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto_unique ON bi_entregas(os, ponto)`).catch(() => {});
 
+    // Colunas de coordenadas para mapa de calor
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(11,8)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_coords ON bi_entregas(latitude, longitude) WHERE latitude IS NOT NULL`).catch(() => {});
+    console.log('✅ Colunas latitude/longitude verificadas');
+
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_produtos_status ON loja_produtos(status)`).catch(() => {});
@@ -6301,7 +6307,9 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             dentro_prazo: dentroPrazo,
             prazo_minutos: prazoMinutos,
             tempo_execucao_minutos: tempoExecucao,
-            data_upload: data_referencia || new Date().toISOString().split('T')[0]
+            data_upload: data_referencia || new Date().toISOString().split('T')[0],
+            latitude: parseNum(e.latitude || e.Latitude || e.lat || e.Lat || e.LAT || e.LATITUDE),
+            longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long)
           });
         } catch (err) {
           linhasIgnoradas++;
@@ -6319,7 +6327,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           
           for (const d of dadosLote) {
             const indices = [];
-            for (let i = 0; i < 31; i++) {
+            for (let i = 0; i < 33; i++) {
               indices.push(`$${paramIndex++}`);
             }
             valores.push(`(${indices.join(',')})`);
@@ -6330,7 +6338,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.data_hora, d.finalizado, d.data_solicitado,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
-              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
+              d.latitude, d.longitude
             );
           }
           
@@ -6342,7 +6351,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               data_hora, finalizado, data_solicitado,
               categoria, valor, distancia, valor_prof,
               execucao_comp, status, motivo, ocorrencia, velocidade_media,
-              dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
+              dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
+              latitude, longitude
             ) VALUES ${valores.join(',')}
           `;
           
@@ -6362,8 +6372,9 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                   data_hora, finalizado, data_solicitado,
                   categoria, valor, distancia, valor_prof,
                   execucao_comp, status, motivo, ocorrencia, velocidade_media,
-                  dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+                  dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
+                  latitude, longitude
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
               `, [
                 d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
                 d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
@@ -6371,7 +6382,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 d.data_hora, d.finalizado, d.data_solicitado,
                 d.categoria, d.valor, d.distancia, d.valor_prof,
                 d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
-                d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload
+                d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
+                d.latitude, d.longitude
               ]);
               inseridos++;
             } catch (singleErr) {
@@ -9393,11 +9405,25 @@ app.get('/api/operacoes-regioes', async (req, res) => {
 // FIM MÓDULO OPERAÇÕES
 // ============================================
 // ============================================
-// NOVOS ENDPOINTS BI - MAPA DE CALOR COM LEAFLET
+// NOVOS ENDPOINTS BI - MAPA DE CALOR COM COORDENADAS REAIS
 // Adicione isso ao final do seu server.js
 // ============================================
 
-// GET - Mapa de Calor por Cidade/Bairro COM COORDENADAS PARA LEAFLET
+// MIGRATION: Adicionar colunas de latitude e longitude na tabela bi_entregas
+// Execute isso uma vez para adicionar as colunas
+const migrateCoordenadas = async () => {
+  try {
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(11,8)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_coords ON bi_entregas(latitude, longitude)`).catch(() => {});
+    console.log('✅ Colunas latitude/longitude adicionadas na bi_entregas');
+  } catch (err) {
+    console.log('Colunas de coordenadas já existem ou erro:', err.message);
+  }
+};
+migrateCoordenadas();
+
+// GET - Mapa de Calor usando COORDENADAS REAIS do banco
 app.get('/api/bi/mapa-calor', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
@@ -9438,7 +9464,33 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       paramIndex++;
     }
     
-    // Buscar dados agrupados por cidade
+    // BUSCAR PONTOS COM COORDENADAS REAIS DO BANCO
+    // Agrupa por coordenadas aproximadas (arredonda para 3 casas decimais ~111m de precisão)
+    const pontosQuery = await pool.query(`
+      SELECT 
+        ROUND(latitude::numeric, 3) as lat_group,
+        ROUND(longitude::numeric, 3) as lng_group,
+        AVG(latitude) as latitude,
+        AVG(longitude) as longitude,
+        COALESCE(bairro, 'N/A') as bairro,
+        COALESCE(cidade, 'N/A') as cidade,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+      AND latitude IS NOT NULL 
+      AND longitude IS NOT NULL
+      AND latitude != 0 
+      AND longitude != 0
+      GROUP BY lat_group, lng_group, bairro, cidade
+      ORDER BY total_entregas DESC
+      LIMIT 500
+    `, params);
+    
+    // Buscar dados agrupados por cidade (para o ranking lateral)
     const cidadesQuery = await pool.query(`
       SELECT 
         COALESCE(cidade, 'Não informado') as cidade,
@@ -9449,7 +9501,6 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
         SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
         COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(AVG(distancia), 0) as distancia_media,
         COUNT(DISTINCT cod_prof) as total_profissionais
       FROM bi_entregas
       ${whereClause}
@@ -9457,7 +9508,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ORDER BY total_entregas DESC
     `, params);
     
-    // Buscar dados agrupados por bairro (top 100)
+    // Buscar dados agrupados por bairro (top 50)
     const bairrosQuery = await pool.query(`
       SELECT 
         COALESCE(bairro, 'Não informado') as bairro,
@@ -9470,7 +9521,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ${whereClause}
       GROUP BY bairro, cidade
       ORDER BY total_entregas DESC
-      LIMIT 100
+      LIMIT 50
     `, params);
     
     // Resumo geral
@@ -9483,7 +9534,8 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
         SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
         SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_geral,
-        COUNT(DISTINCT cod_prof) as total_profissionais
+        COUNT(DISTINCT cod_prof) as total_profissionais,
+        SUM(CASE WHEN latitude IS NOT NULL AND latitude != 0 THEN 1 ELSE 0 END) as com_coordenadas
       FROM bi_entregas
       ${whereClause}
     `, params);
@@ -9501,197 +9553,31 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ORDER BY dia_semana, hora
     `, params);
     
-    // COORDENADAS DETALHADAS PARA GOIÂNIA E REGIÃO
-    // Mapeamento de cidades com coordenadas
-    const coordenadasCidades = {
-      'GOIANIA': { lat: -16.6869, lng: -49.2648 },
-      'GOIÂNIA': { lat: -16.6869, lng: -49.2648 },
-      'APARECIDA DE GOIANIA': { lat: -16.8235, lng: -49.2461 },
-      'APARECIDA DE GOIÂNIA': { lat: -16.8235, lng: -49.2461 },
-      'ANAPOLIS': { lat: -16.3227, lng: -48.9530 },
-      'ANÁPOLIS': { lat: -16.3227, lng: -48.9530 },
-      'RIO VERDE': { lat: -17.7927, lng: -50.9280 },
-      'LUZIANIA': { lat: -16.2518, lng: -47.9503 },
-      'LUZIÂNIA': { lat: -16.2518, lng: -47.9503 },
-      'AGUAS LINDAS': { lat: -15.7668, lng: -48.2806 },
-      'ÁGUAS LINDAS': { lat: -15.7668, lng: -48.2806 },
-      'AGUAS LINDAS DE GOIAS': { lat: -15.7668, lng: -48.2806 },
-      'TRINDADE': { lat: -16.6514, lng: -49.4911 },
-      'FORMOSA': { lat: -15.5352, lng: -47.3385 },
-      'NOVO GAMA': { lat: -16.0592, lng: -48.0384 },
-      'SENADOR CANEDO': { lat: -16.7026, lng: -49.0909 },
-      'GOIANIRA': { lat: -16.4969, lng: -49.4252 },
-      'JATAI': { lat: -17.8813, lng: -51.7145 },
-      'JATAÍ': { lat: -17.8813, lng: -51.7145 },
-      'ITUMBIARA': { lat: -18.4178, lng: -49.2152 },
-      'CALDAS NOVAS': { lat: -17.7442, lng: -48.6259 },
-      'CATALAO': { lat: -18.1657, lng: -47.9467 },
-      'CATALÃO': { lat: -18.1657, lng: -47.9467 },
-      'VALPARAISO': { lat: -16.0684, lng: -47.9767 },
-      'VALPARAÍSO': { lat: -16.0684, lng: -47.9767 },
-      'VALPARAISO DE GOIAS': { lat: -16.0684, lng: -47.9767 },
-      'CIDADE OCIDENTAL': { lat: -16.0766, lng: -47.9228 },
-      'PLANALTINA': { lat: -15.4522, lng: -47.6142 },
-      'INHUMAS': { lat: -16.3597, lng: -49.4949 },
-      'GOIANESIA': { lat: -15.3187, lng: -49.1216 },
-      'GOIANÉSIA': { lat: -15.3187, lng: -49.1216 },
-      'MINEIROS': { lat: -17.5696, lng: -52.5509 },
-      'NEROPOLIS': { lat: -16.4062, lng: -49.2209 },
-      'NERÓPOLIS': { lat: -16.4062, lng: -49.2209 },
-      'SANTA HELENA': { lat: -17.8120, lng: -50.5964 },
-      'PIRACANJUBA': { lat: -17.3025, lng: -49.0151 },
-      'BRASILIA': { lat: -15.7942, lng: -47.8822 },
-      'BRASÍLIA': { lat: -15.7942, lng: -47.8822 },
-      'GOIANAPOLIS': { lat: -16.5094, lng: -49.0214 },
-      'GOIANÁPOLIS': { lat: -16.5094, lng: -49.0214 },
-      'BELA VISTA DE GOIAS': { lat: -16.9711, lng: -48.9536 },
-      'BELA VISTA DE GOIÁS': { lat: -16.9711, lng: -48.9536 },
-      'BONFINOPOLIS': { lat: -16.6194, lng: -49.0344 },
-      'BONFINÓPOLIS': { lat: -16.6194, lng: -49.0344 },
-      'LEOPOLDO DE BULHOES': { lat: -16.6181, lng: -48.7428 },
-      'LEOPOLDO DE BULHÕES': { lat: -16.6181, lng: -48.7428 },
-      'HIDROLÂNDIA': { lat: -16.9639, lng: -49.2286 },
-      'HIDROLANDIA': { lat: -16.9639, lng: -49.2286 },
-      'ARAGOIANIA': { lat: -16.9128, lng: -49.4489 },
-      'ARAGOIÂNIA': { lat: -16.9128, lng: -49.4489 },
-      'SANTO ANTONIO DE GOIAS': { lat: -16.4817, lng: -49.3106 },
-      'SANTO ANTÔNIO DE GOIÁS': { lat: -16.4817, lng: -49.3106 }
-    };
+    // Converter pontos do banco para o formato do mapa
+    const pontos = pontosQuery.rows.map(p => ({
+      lat: parseFloat(p.latitude),
+      lng: parseFloat(p.longitude),
+      bairro: p.bairro,
+      cidade: p.cidade,
+      count: parseInt(p.total_entregas),
+      taxaPrazo: parseFloat(p.taxa_prazo) || 0,
+      noPrazo: parseInt(p.no_prazo) || 0,
+      foraPrazo: parseInt(p.fora_prazo) || 0,
+      totalProfissionais: parseInt(p.total_profissionais) || 0
+    })).filter(p => !isNaN(p.lat) && !isNaN(p.lng) && p.lat !== 0 && p.lng !== 0);
     
-    // Mapeamento de bairros de Goiânia com coordenadas aproximadas
-    const coordenadasBairros = {
-      // Setor Central e arredores
-      'SETOR CENTRAL': { lat: -16.6799, lng: -49.2550 },
-      'CENTRO': { lat: -16.6799, lng: -49.2550 },
-      'SETOR OESTE': { lat: -16.6869, lng: -49.2748 },
-      'SETOR SUL': { lat: -16.7019, lng: -49.2648 },
-      'SETOR NORTE': { lat: -16.6669, lng: -49.2548 },
-      'SETOR LESTE': { lat: -16.6819, lng: -49.2348 },
-      'SETOR BUENO': { lat: -16.7119, lng: -49.2648 },
-      'SETOR MARISTA': { lat: -16.7019, lng: -49.2448 },
-      'SETOR AEROPORTO': { lat: -16.6269, lng: -49.2248 },
-      'SETOR PEDRO LUDOVICO': { lat: -16.7219, lng: -49.2548 },
-      'SETOR COIMBRA': { lat: -16.7119, lng: -49.2348 },
-      'SETOR UNIVERSITARIO': { lat: -16.6769, lng: -49.2348 },
-      'SETOR UNIVERSITÁRIO': { lat: -16.6769, lng: -49.2348 },
-      // Jardins
-      'JARDIM GOIAS': { lat: -16.7069, lng: -49.2348 },
-      'JARDIM GOIÁS': { lat: -16.7069, lng: -49.2348 },
-      'JARDIM AMERICA': { lat: -16.7169, lng: -49.2748 },
-      'JARDIM AMÉRICA': { lat: -16.7169, lng: -49.2748 },
-      'JARDIM EUROPA': { lat: -16.7169, lng: -49.2548 },
-      'JARDIM ATLANTICO': { lat: -16.6569, lng: -49.2148 },
-      'JARDIM ATLÂNTICO': { lat: -16.6569, lng: -49.2148 },
-      'JARDIM NOVO MUNDO': { lat: -16.6469, lng: -49.2248 },
-      // Vilas
-      'VILA NOVA': { lat: -16.6919, lng: -49.2948 },
-      'VILA AURORA': { lat: -16.6619, lng: -49.2848 },
-      'VILA REDENÇÃO': { lat: -16.6719, lng: -49.3048 },
-      'VILA JARDIM SAO JUDAS': { lat: -16.6819, lng: -49.2948 },
-      // Parques
-      'PARQUE AMAZONIA': { lat: -16.7319, lng: -49.2648 },
-      'PARQUE AMAZÔNIA': { lat: -16.7319, lng: -49.2648 },
-      'PARQUE ATHENEU': { lat: -16.7419, lng: -49.2248 },
-      'PARQUE ANHANGUERA': { lat: -16.6469, lng: -49.2948 },
-      // Residenciais
-      'RESIDENCIAL ELDORADO': { lat: -16.7519, lng: -49.3148 },
-      'RESIDENCIAL GOIANIA VIVA': { lat: -16.7619, lng: -49.2848 },
-      'RESIDENCIAL ITAIPU': { lat: -16.7719, lng: -49.2448 },
-      // Outros bairros importantes
-      'CAMPINAS': { lat: -16.6969, lng: -49.2948 },
-      'URIAS MAGALHAES': { lat: -16.6469, lng: -49.2748 },
-      'CIDADE JARDIM': { lat: -16.6769, lng: -49.2648 },
-      'ALTO DA GLORIA': { lat: -16.6669, lng: -49.2448 },
-      'ALTO DA GLÓRIA': { lat: -16.6669, lng: -49.2448 },
-      'FELIZ': { lat: -16.7019, lng: -49.3148 },
-      'VERA CRUZ': { lat: -16.6519, lng: -49.3048 },
-      'CRIMÉIA OESTE': { lat: -16.6519, lng: -49.2948 },
-      'CRIMEIA OESTE': { lat: -16.6519, lng: -49.2948 },
-      'SAO JUDAS TADEU': { lat: -16.6819, lng: -49.3148 },
-      'GARAVELO': { lat: -16.7819, lng: -49.2848 },
-      'BAIRRO FELIZ': { lat: -16.7019, lng: -49.3148 }
-    };
-    
-    // Gerar pontos para o mapa baseado nas cidades
-    const pontosCidades = cidadesQuery.rows.map(cidade => {
-      const cidadeUpper = (cidade.cidade || '').toUpperCase().trim()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // Remover acentos
-      
-      // Tentar encontrar coordenadas
-      let coords = coordenadasCidades[cidadeUpper];
-      if (!coords) {
-        // Tentar com versão acentuada
-        coords = coordenadasCidades[(cidade.cidade || '').toUpperCase().trim()];
-      }
-      
-      if (coords) {
-        return {
-          cidade: cidade.cidade,
-          tipo: 'cidade',
-          lat: coords.lat + (Math.random() - 0.5) * 0.02,
-          lng: coords.lng + (Math.random() - 0.5) * 0.02,
-          count: parseInt(cidade.total_entregas),
-          taxaPrazo: parseFloat(cidade.taxa_prazo) || 0,
-          noPrazo: parseInt(cidade.no_prazo) || 0,
-          foraPrazo: parseInt(cidade.fora_prazo) || 0,
-          totalProfissionais: parseInt(cidade.total_profissionais) || 0
-        };
-      }
-      return null;
-    }).filter(p => p !== null);
-    
-    // Gerar pontos para bairros (com variação maior para distribuir no mapa)
-    const pontosBairros = bairrosQuery.rows.map(bairro => {
-      const bairroUpper = (bairro.bairro || '').toUpperCase().trim()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const cidadeUpper = (bairro.cidade || '').toUpperCase().trim()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      
-      // Primeiro tentar coordenadas do bairro
-      let coords = coordenadasBairros[bairroUpper];
-      if (!coords) {
-        coords = coordenadasBairros[(bairro.bairro || '').toUpperCase().trim()];
-      }
-      
-      // Se não encontrar, usar coordenadas da cidade com variação
-      if (!coords) {
-        const cidadeCoords = coordenadasCidades[cidadeUpper] || coordenadasCidades[(bairro.cidade || '').toUpperCase().trim()];
-        if (cidadeCoords) {
-          coords = {
-            lat: cidadeCoords.lat + (Math.random() - 0.5) * 0.08,
-            lng: cidadeCoords.lng + (Math.random() - 0.5) * 0.08
-          };
-        }
-      }
-      
-      if (coords) {
-        return {
-          bairro: bairro.bairro,
-          cidade: bairro.cidade,
-          tipo: 'bairro',
-          lat: coords.lat + (Math.random() - 0.5) * 0.01,
-          lng: coords.lng + (Math.random() - 0.5) * 0.01,
-          count: parseInt(bairro.total_entregas),
-          taxaPrazo: parseFloat(bairro.taxa_prazo) || 0,
-          noPrazo: parseInt(bairro.no_prazo) || 0,
-          foraPrazo: parseInt(bairro.fora_prazo) || 0
-        };
-      }
-      return null;
-    }).filter(p => p !== null);
-    
-    // Combinar pontos (bairros têm prioridade por serem mais específicos)
-    const todosPontos = [...pontosBairros, ...pontosCidades];
+    console.log(`🗺️ Mapa de calor: ${pontos.length} pontos com coordenadas reais`);
     
     res.json({
       totalEntregas: parseInt(resumoQuery.rows[0]?.total_entregas) || 0,
       totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
-      totalPontos: todosPontos.length,
+      totalPontos: pontos.length,
       totalCidades: parseInt(resumoQuery.rows[0]?.total_cidades) || 0,
       totalBairros: parseInt(resumoQuery.rows[0]?.total_bairros) || 0,
       totalProfissionais: parseInt(resumoQuery.rows[0]?.total_profissionais) || 0,
       taxaPrazoGeral: parseFloat(resumoQuery.rows[0]?.taxa_prazo_geral) || 0,
-      pontos: todosPontos,
+      comCoordenadas: parseInt(resumoQuery.rows[0]?.com_coordenadas) || 0,
+      pontos: pontos,
       cidadesRanking: cidadesQuery.rows.slice(0, 15).map(c => ({
         cidade: c.cidade,
         estado: c.estado,
