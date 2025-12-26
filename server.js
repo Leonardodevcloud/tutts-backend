@@ -9393,11 +9393,11 @@ app.get('/api/operacoes-regioes', async (req, res) => {
 // FIM MÓDULO OPERAÇÕES
 // ============================================
 // ============================================
-// NOVOS ENDPOINTS BI - MAPA DE CALOR E ACOMPANHAMENTO
+// NOVOS ENDPOINTS BI - MAPA DE CALOR COM LEAFLET
 // Adicione isso ao final do seu server.js
 // ============================================
 
-// GET - Mapa de Calor por Cidade/Bairro
+// GET - Mapa de Calor por Cidade/Bairro COM COORDENADAS PARA LEAFLET
 app.get('/api/bi/mapa-calor', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
@@ -9457,7 +9457,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ORDER BY total_entregas DESC
     `, params);
     
-    // Buscar dados agrupados por bairro (top 50)
+    // Buscar dados agrupados por bairro (top 100)
     const bairrosQuery = await pool.query(`
       SELECT 
         COALESCE(bairro, 'Não informado') as bairro,
@@ -9470,7 +9470,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ${whereClause}
       GROUP BY bairro, cidade
       ORDER BY total_entregas DESC
-      LIMIT 50
+      LIMIT 100
     `, params);
     
     // Resumo geral
@@ -9501,8 +9501,8 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       ORDER BY dia_semana, hora
     `, params);
     
-    // Coordenadas aproximadas para cidades de Goiás (para o mapa)
-    // Você pode expandir esse dicionário conforme necessário
+    // COORDENADAS DETALHADAS PARA GOIÂNIA E REGIÃO
+    // Mapeamento de cidades com coordenadas
     const coordenadasCidades = {
       'GOIANIA': { lat: -16.6869, lng: -49.2648 },
       'GOIÂNIA': { lat: -16.6869, lng: -49.2648 },
@@ -9541,38 +9541,158 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       'SANTA HELENA': { lat: -17.8120, lng: -50.5964 },
       'PIRACANJUBA': { lat: -17.3025, lng: -49.0151 },
       'BRASILIA': { lat: -15.7942, lng: -47.8822 },
-      'BRASÍLIA': { lat: -15.7942, lng: -47.8822 }
+      'BRASÍLIA': { lat: -15.7942, lng: -47.8822 },
+      'GOIANAPOLIS': { lat: -16.5094, lng: -49.0214 },
+      'GOIANÁPOLIS': { lat: -16.5094, lng: -49.0214 },
+      'BELA VISTA DE GOIAS': { lat: -16.9711, lng: -48.9536 },
+      'BELA VISTA DE GOIÁS': { lat: -16.9711, lng: -48.9536 },
+      'BONFINOPOLIS': { lat: -16.6194, lng: -49.0344 },
+      'BONFINÓPOLIS': { lat: -16.6194, lng: -49.0344 },
+      'LEOPOLDO DE BULHOES': { lat: -16.6181, lng: -48.7428 },
+      'LEOPOLDO DE BULHÕES': { lat: -16.6181, lng: -48.7428 },
+      'HIDROLÂNDIA': { lat: -16.9639, lng: -49.2286 },
+      'HIDROLANDIA': { lat: -16.9639, lng: -49.2286 },
+      'ARAGOIANIA': { lat: -16.9128, lng: -49.4489 },
+      'ARAGOIÂNIA': { lat: -16.9128, lng: -49.4489 },
+      'SANTO ANTONIO DE GOIAS': { lat: -16.4817, lng: -49.3106 },
+      'SANTO ANTÔNIO DE GOIÁS': { lat: -16.4817, lng: -49.3106 }
+    };
+    
+    // Mapeamento de bairros de Goiânia com coordenadas aproximadas
+    const coordenadasBairros = {
+      // Setor Central e arredores
+      'SETOR CENTRAL': { lat: -16.6799, lng: -49.2550 },
+      'CENTRO': { lat: -16.6799, lng: -49.2550 },
+      'SETOR OESTE': { lat: -16.6869, lng: -49.2748 },
+      'SETOR SUL': { lat: -16.7019, lng: -49.2648 },
+      'SETOR NORTE': { lat: -16.6669, lng: -49.2548 },
+      'SETOR LESTE': { lat: -16.6819, lng: -49.2348 },
+      'SETOR BUENO': { lat: -16.7119, lng: -49.2648 },
+      'SETOR MARISTA': { lat: -16.7019, lng: -49.2448 },
+      'SETOR AEROPORTO': { lat: -16.6269, lng: -49.2248 },
+      'SETOR PEDRO LUDOVICO': { lat: -16.7219, lng: -49.2548 },
+      'SETOR COIMBRA': { lat: -16.7119, lng: -49.2348 },
+      'SETOR UNIVERSITARIO': { lat: -16.6769, lng: -49.2348 },
+      'SETOR UNIVERSITÁRIO': { lat: -16.6769, lng: -49.2348 },
+      // Jardins
+      'JARDIM GOIAS': { lat: -16.7069, lng: -49.2348 },
+      'JARDIM GOIÁS': { lat: -16.7069, lng: -49.2348 },
+      'JARDIM AMERICA': { lat: -16.7169, lng: -49.2748 },
+      'JARDIM AMÉRICA': { lat: -16.7169, lng: -49.2748 },
+      'JARDIM EUROPA': { lat: -16.7169, lng: -49.2548 },
+      'JARDIM ATLANTICO': { lat: -16.6569, lng: -49.2148 },
+      'JARDIM ATLÂNTICO': { lat: -16.6569, lng: -49.2148 },
+      'JARDIM NOVO MUNDO': { lat: -16.6469, lng: -49.2248 },
+      // Vilas
+      'VILA NOVA': { lat: -16.6919, lng: -49.2948 },
+      'VILA AURORA': { lat: -16.6619, lng: -49.2848 },
+      'VILA REDENÇÃO': { lat: -16.6719, lng: -49.3048 },
+      'VILA JARDIM SAO JUDAS': { lat: -16.6819, lng: -49.2948 },
+      // Parques
+      'PARQUE AMAZONIA': { lat: -16.7319, lng: -49.2648 },
+      'PARQUE AMAZÔNIA': { lat: -16.7319, lng: -49.2648 },
+      'PARQUE ATHENEU': { lat: -16.7419, lng: -49.2248 },
+      'PARQUE ANHANGUERA': { lat: -16.6469, lng: -49.2948 },
+      // Residenciais
+      'RESIDENCIAL ELDORADO': { lat: -16.7519, lng: -49.3148 },
+      'RESIDENCIAL GOIANIA VIVA': { lat: -16.7619, lng: -49.2848 },
+      'RESIDENCIAL ITAIPU': { lat: -16.7719, lng: -49.2448 },
+      // Outros bairros importantes
+      'CAMPINAS': { lat: -16.6969, lng: -49.2948 },
+      'URIAS MAGALHAES': { lat: -16.6469, lng: -49.2748 },
+      'CIDADE JARDIM': { lat: -16.6769, lng: -49.2648 },
+      'ALTO DA GLORIA': { lat: -16.6669, lng: -49.2448 },
+      'ALTO DA GLÓRIA': { lat: -16.6669, lng: -49.2448 },
+      'FELIZ': { lat: -16.7019, lng: -49.3148 },
+      'VERA CRUZ': { lat: -16.6519, lng: -49.3048 },
+      'CRIMÉIA OESTE': { lat: -16.6519, lng: -49.2948 },
+      'CRIMEIA OESTE': { lat: -16.6519, lng: -49.2948 },
+      'SAO JUDAS TADEU': { lat: -16.6819, lng: -49.3148 },
+      'GARAVELO': { lat: -16.7819, lng: -49.2848 },
+      'BAIRRO FELIZ': { lat: -16.7019, lng: -49.3148 }
     };
     
     // Gerar pontos para o mapa baseado nas cidades
-    const pontos = cidadesQuery.rows.map(cidade => {
-      const cidadeUpper = (cidade.cidade || '').toUpperCase().trim();
-      const coords = coordenadasCidades[cidadeUpper];
+    const pontosCidades = cidadesQuery.rows.map(cidade => {
+      const cidadeUpper = (cidade.cidade || '').toUpperCase().trim()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // Remover acentos
+      
+      // Tentar encontrar coordenadas
+      let coords = coordenadasCidades[cidadeUpper];
+      if (!coords) {
+        // Tentar com versão acentuada
+        coords = coordenadasCidades[(cidade.cidade || '').toUpperCase().trim()];
+      }
       
       if (coords) {
         return {
           cidade: cidade.cidade,
-          lat: coords.lat + (Math.random() - 0.5) * 0.05, // Pequena variação para não sobrepor
-          lng: coords.lng + (Math.random() - 0.5) * 0.05,
+          tipo: 'cidade',
+          lat: coords.lat + (Math.random() - 0.5) * 0.02,
+          lng: coords.lng + (Math.random() - 0.5) * 0.02,
           count: parseInt(cidade.total_entregas),
           taxaPrazo: parseFloat(cidade.taxa_prazo) || 0,
           noPrazo: parseInt(cidade.no_prazo) || 0,
-          foraPrazo: parseInt(cidade.fora_prazo) || 0
+          foraPrazo: parseInt(cidade.fora_prazo) || 0,
+          totalProfissionais: parseInt(cidade.total_profissionais) || 0
         };
       }
       return null;
     }).filter(p => p !== null);
     
+    // Gerar pontos para bairros (com variação maior para distribuir no mapa)
+    const pontosBairros = bairrosQuery.rows.map(bairro => {
+      const bairroUpper = (bairro.bairro || '').toUpperCase().trim()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const cidadeUpper = (bairro.cidade || '').toUpperCase().trim()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      
+      // Primeiro tentar coordenadas do bairro
+      let coords = coordenadasBairros[bairroUpper];
+      if (!coords) {
+        coords = coordenadasBairros[(bairro.bairro || '').toUpperCase().trim()];
+      }
+      
+      // Se não encontrar, usar coordenadas da cidade com variação
+      if (!coords) {
+        const cidadeCoords = coordenadasCidades[cidadeUpper] || coordenadasCidades[(bairro.cidade || '').toUpperCase().trim()];
+        if (cidadeCoords) {
+          coords = {
+            lat: cidadeCoords.lat + (Math.random() - 0.5) * 0.08,
+            lng: cidadeCoords.lng + (Math.random() - 0.5) * 0.08
+          };
+        }
+      }
+      
+      if (coords) {
+        return {
+          bairro: bairro.bairro,
+          cidade: bairro.cidade,
+          tipo: 'bairro',
+          lat: coords.lat + (Math.random() - 0.5) * 0.01,
+          lng: coords.lng + (Math.random() - 0.5) * 0.01,
+          count: parseInt(bairro.total_entregas),
+          taxaPrazo: parseFloat(bairro.taxa_prazo) || 0,
+          noPrazo: parseInt(bairro.no_prazo) || 0,
+          foraPrazo: parseInt(bairro.fora_prazo) || 0
+        };
+      }
+      return null;
+    }).filter(p => p !== null);
+    
+    // Combinar pontos (bairros têm prioridade por serem mais específicos)
+    const todosPontos = [...pontosBairros, ...pontosCidades];
+    
     res.json({
       totalEntregas: parseInt(resumoQuery.rows[0]?.total_entregas) || 0,
       totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
-      totalPontos: pontos.length,
+      totalPontos: todosPontos.length,
       totalCidades: parseInt(resumoQuery.rows[0]?.total_cidades) || 0,
       totalBairros: parseInt(resumoQuery.rows[0]?.total_bairros) || 0,
       totalProfissionais: parseInt(resumoQuery.rows[0]?.total_profissionais) || 0,
       taxaPrazoGeral: parseFloat(resumoQuery.rows[0]?.taxa_prazo_geral) || 0,
-      pontos: pontos,
-      cidadesRanking: cidadesQuery.rows.slice(0, 10).map(c => ({
+      pontos: todosPontos,
+      cidadesRanking: cidadesQuery.rows.slice(0, 15).map(c => ({
         cidade: c.cidade,
         estado: c.estado,
         total: parseInt(c.total_entregas),
@@ -9581,7 +9701,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
         taxaPrazo: parseFloat(c.taxa_prazo) || 0,
         totalProfissionais: parseInt(c.total_profissionais) || 0
       })),
-      bairrosRanking: bairrosQuery.rows.map(b => ({
+      bairrosRanking: bairrosQuery.rows.slice(0, 20).map(b => ({
         bairro: b.bairro,
         cidade: b.cidade,
         total: parseInt(b.total_entregas),
@@ -9733,70 +9853,5 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   } catch (error) {
     console.error('Erro acompanhamento periódico:', error);
     res.status(500).json({ error: 'Erro ao gerar acompanhamento', details: error.message });
-  }
-});
-
-// GET - Dados para heatmap de horários
-app.get('/api/bi/heatmap-horarios', async (req, res) => {
-  try {
-    const { data_inicio, data_fim, cod_cliente } = req.query;
-    
-    let whereClause = 'WHERE data_hora IS NOT NULL';
-    const params = [];
-    let paramIndex = 1;
-    
-    if (data_inicio) {
-      whereClause += ` AND data_solicitado >= $${paramIndex}`;
-      params.push(data_inicio);
-      paramIndex++;
-    }
-    if (data_fim) {
-      whereClause += ` AND data_solicitado <= $${paramIndex}`;
-      params.push(data_fim);
-      paramIndex++;
-    }
-    if (cod_cliente) {
-      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
-      if (clientes.length > 0) {
-        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
-        params.push(clientes);
-        paramIndex++;
-      }
-    }
-    
-    const result = await pool.query(`
-      SELECT 
-        EXTRACT(HOUR FROM data_hora) as hora,
-        EXTRACT(DOW FROM data_hora) as dia_semana,
-        COUNT(*) as total,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY EXTRACT(HOUR FROM data_hora), EXTRACT(DOW FROM data_hora)
-      ORDER BY dia_semana, hora
-    `, params);
-    
-    // Construir matriz 7x24 (dias x horas)
-    const matriz = Array(7).fill(null).map(() => Array(24).fill({ total: 0, noPrazo: 0, taxaPrazo: 0 }));
-    
-    result.rows.forEach(row => {
-      const dia = parseInt(row.dia_semana);
-      const hora = parseInt(row.hora);
-      matriz[dia][hora] = {
-        total: parseInt(row.total),
-        noPrazo: parseInt(row.no_prazo) || 0,
-        taxaPrazo: parseFloat(row.taxa_prazo) || 0
-      };
-    });
-    
-    res.json({
-      matriz,
-      diasSemana: ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
-    });
-    
-  } catch (error) {
-    console.error('Erro heatmap horários:', error);
-    res.status(500).json({ error: 'Erro ao gerar heatmap de horários' });
   }
 });
