@@ -6284,6 +6284,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             // Mostrar todas as colunas na primeira linha
             if (dadosLote.length === 0) {
               console.log('📋 Colunas do Excel:', Object.keys(e).join(', '));
+              // Mostrar valores específicos de Latitude e Longitude
+              console.log('🔍 Valor e["Latitude"]:', e['Latitude']);
+              console.log('🔍 Valor e["Longitude"]:', e['Longitude']);
+              console.log('🔍 Tipo e["Latitude"]:', typeof e['Latitude']);
             }
           }
           
@@ -6337,6 +6341,12 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             tempo_execucao_minutos: tempoExecucao,
             data_upload: data_referencia || new Date().toISOString().split('T')[0]
           });
+          
+          // Log das coordenadas do registro que acabou de ser adicionado
+          if (dadosLote.length <= 3) {
+            const ultimo = dadosLote[dadosLote.length - 1];
+            console.log('✅ Coordenadas salvas linha', dadosLote.length, ':', { lat: ultimo.latitude, lng: ultimo.longitude });
+          }
         } catch (err) {
           linhasIgnoradas++;
           motivosIgnoradas['Erro parsing'] = (motivosIgnoradas['Erro parsing'] || 0) + 1;
@@ -9488,6 +9498,39 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
 // ============================================
 // FIM MAPA DE CALOR
 // ============================================
+
+// Endpoint de debug para verificar coordenadas
+app.get('/api/bi/debug-coordenadas', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) as total_registros,
+        COUNT(latitude) as com_latitude,
+        COUNT(longitude) as com_longitude,
+        COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) as com_ambas,
+        MIN(latitude) as lat_min,
+        MAX(latitude) as lat_max,
+        MIN(longitude) as lng_min,
+        MAX(longitude) as lng_max
+      FROM bi_entregas
+    `);
+    
+    // Pegar algumas amostras com coordenadas
+    const amostras = await pool.query(`
+      SELECT latitude, longitude, cidade, bairro 
+      FROM bi_entregas 
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL 
+      LIMIT 5
+    `);
+    
+    res.json({
+      estatisticas: result.rows[0],
+      amostras: amostras.rows
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Iniciar servidor
 app.listen(port, () => {
