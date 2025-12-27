@@ -6256,6 +6256,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             cod_prof: parseInt(e.cod_prof) || null,
             nome_prof: truncar(e.nome_prof, 255),
             data_hora: parseTimestamp(e.data_hora),
+            data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['DataHoraAlocado']),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
             categoria: truncar(e.categoria, 100),
@@ -6288,17 +6289,17 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
                 nome_fantasia, centro_custo, cidade_p1, endereco,
                 bairro, cidade, estado, cod_prof, nome_prof,
-                data_hora, finalizado, data_solicitado,
+                data_hora, data_hora_alocado, finalizado, data_solicitado,
                 categoria, valor, distancia, valor_prof,
                 execucao_comp, status, motivo, ocorrencia, velocidade_media,
                 dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
                 latitude, longitude
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-              d.data_hora, d.finalizado, d.data_solicitado,
+              d.data_hora, d.data_hora_alocado, d.finalizado, d.data_solicitado,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
@@ -6443,6 +6444,77 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
     res.status(500).json({ error: 'Erro ao recalcular' });
+  }
+});
+
+// Atualizar data_hora_alocado em massa (para registros existentes)
+app.post('/api/bi/entregas/atualizar-alocado', async (req, res) => {
+  try {
+    const { entregas } = req.body;
+    
+    if (!entregas || !Array.isArray(entregas)) {
+      return res.status(400).json({ error: 'Array de entregas é obrigatório' });
+    }
+    
+    console.log(`📊 Atualizando data_hora_alocado para ${entregas.length} registros...`);
+    
+    // Função para parsear timestamp
+    const parseTimestamp = (val) => {
+      if (!val) return null;
+      try {
+        // Tenta diferentes formatos
+        if (typeof val === 'string') {
+          // Formato DD/MM/YYYY HH:MM:SS
+          const match = val.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):?(\d{2})?/);
+          if (match) {
+            return new Date(match[3], match[2] - 1, match[1], match[4], match[5], match[6] || 0);
+          }
+          // Formato ISO
+          const d = new Date(val);
+          if (!isNaN(d.getTime())) return d;
+        }
+        // Excel serial number
+        if (typeof val === 'number') {
+          const excelDate = new Date((val - 25569) * 86400 * 1000);
+          if (!isNaN(excelDate.getTime())) return excelDate;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    };
+    
+    let atualizados = 0;
+    let erros = 0;
+    
+    for (const e of entregas) {
+      const os = parseInt(e.os);
+      const ponto = parseInt(e.ponto) || 1;
+      const dataHoraAlocado = parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado']);
+      
+      if (!os || !dataHoraAlocado) {
+        erros++;
+        continue;
+      }
+      
+      try {
+        const result = await pool.query(`
+          UPDATE bi_entregas 
+          SET data_hora_alocado = $1 
+          WHERE os = $2 AND COALESCE(ponto, 1) = $3 AND data_hora_alocado IS NULL
+        `, [dataHoraAlocado, os, ponto]);
+        
+        if (result.rowCount > 0) atualizados++;
+      } catch (err) {
+        erros++;
+      }
+    }
+    
+    console.log(`✅ Atualização concluída: ${atualizados} atualizados, ${erros} erros`);
+    res.json({ success: true, atualizados, erros });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar data_hora_alocado:', err);
+    res.status(500).json({ error: 'Erro ao atualizar' });
   }
 });
 
@@ -6662,6 +6734,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     const dados = dadosQuery.rows;
     console.log('📊 Total registros retornados:', dados.length);
+    
+    // Debug: contar quantos têm data_hora_alocado
+    const comAlocado = dados.filter(d => d.data_hora_alocado).length;
+    const ponto1 = dados.filter(d => parseInt(d.ponto) === 1).length;
+    const comAlocadoPonto1 = dados.filter(d => d.data_hora_alocado && parseInt(d.ponto) === 1).length;
+    console.log('📊 Debug Alocação: comAlocado=' + comAlocado + ', ponto1=' + ponto1 + ', comAlocadoPonto1=' + comAlocadoPonto1);
     
     // ============================================
     // FUNÇÃO: Calcular tempo de alocação seguindo regra do BI (DAX)
