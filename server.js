@@ -1199,9 +1199,23 @@ async function createTables() {
 }
 
 // Middlewares - CORS configurado (DEVE SER O PRIMEIRO!)
+// Lista de origens permitidas
+const allowedOrigins = [
+  'https://www.centraltutts.online',
+  'https://centraltutts.online',
+  'http://localhost:3000',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+];
+
 // Responder imediatamente a requisições OPTIONS (preflight) - ANTES de tudo
 app.options('*', (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  const origin = req.headers.origin;
+  if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
@@ -1212,7 +1226,11 @@ app.options('*', (req, res) => {
 // CORS para todas requisições
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
@@ -1224,10 +1242,12 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Health check (raiz e /api/health)
 app.get('/health', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.get('/api/health', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({ status: 'ok', message: 'API funcionando' });
 });
 
