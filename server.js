@@ -848,6 +848,24 @@ async function createTables() {
     // Índice UNIQUE para UPSERT (ON CONFLICT)
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto_unique ON bi_entregas(os, ponto)`).catch(() => {});
 
+    // Tabela de histórico de uploads
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_upload_historico (
+        id SERIAL PRIMARY KEY,
+        usuario_id VARCHAR(100),
+        usuario_nome VARCHAR(255),
+        nome_arquivo VARCHAR(500),
+        total_linhas INTEGER,
+        linhas_inseridas INTEGER,
+        linhas_ignoradas INTEGER,
+        os_novas INTEGER,
+        os_ignoradas INTEGER,
+        data_upload TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_upload_historico verificada');
+
+
     // Colunas de coordenadas para mapa de calor
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8)`).catch(() => {});
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(11,8)`).catch(() => {});
@@ -6001,100 +6019,67 @@ app.get('/api/bi/diagnostico', async (req, res) => {
 // Upload de entregas (recebe JSON do Excel processado no frontend)
 app.post('/api/bi/entregas/upload', async (req, res) => {
   try {
-    const { entregas, data_referencia } = req.body;
+    const { entregas, data_referencia, usuario_id, usuario_nome, nome_arquivo } = req.body;
     
     console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
-    
-    // Log para debug - verificar se centro_custo e motivo estão vindo
-    if (entregas && entregas.length > 0) {
-      console.log('📋 Amostra primeira entrega:', JSON.stringify(entregas[0], null, 2));
-      console.log('📋 Centro custo da primeira:', entregas[0].centro_custo);
-      console.log('📋 Motivo da primeira:', entregas[0].motivo);
-      
-      // Contar quantas têm motivo "erro"
-      const comErro = entregas.filter(e => e.motivo && e.motivo.toLowerCase().includes('erro'));
-      console.log(`📋 Total com motivo "erro": ${comErro.length}`);
-      if (comErro.length > 0) {
-        console.log('📋 Exemplos de motivos com erro:', comErro.slice(0, 5).map(e => e.motivo));
-      }
-    }
+    console.log(`👤 Usuário: ${usuario_nome || 'não informado'} (${usuario_id || 'sem id'})`);
+    console.log(`📁 Arquivo: ${nome_arquivo || 'não informado'}`);
     
     if (!entregas || entregas.length === 0) {
       return res.status(400).json({ error: 'Nenhuma entrega recebida' });
     }
     
-    console.log(`📤 Iniciando upload de ${entregas.length} entregas...`);
+    // ============================================
+    // PASSO 1: Extrair todas as OS únicas do Excel
+    // ============================================
+    const osDoExcel = [...new Set(entregas.map(e => parseInt(e.os)).filter(os => os && !isNaN(os)))];
+    console.log(`📋 Total de OS únicas no Excel: ${osDoExcel.length}`);
     
-    // Log da primeira entrega para debug
-    if (entregas.length > 0) {
-      console.log('📋 Campos de data da primeira entrega:', {
-        data_hora: entregas[0].data_hora,
-        data_solicitado: entregas[0].data_solicitado,
-        finalizado: entregas[0].finalizado
+    if (osDoExcel.length === 0) {
+      return res.status(400).json({ error: 'Nenhuma OS válida encontrada no arquivo' });
+    }
+    
+    // ============================================
+    // PASSO 2: Verificar quais OS já existem no banco
+    // ============================================
+    const osExistentesQuery = await pool.query(`
+      SELECT DISTINCT os FROM bi_entregas WHERE os = ANY($1::int[])
+    `, [osDoExcel]);
+    
+    const osExistentes = new Set(osExistentesQuery.rows.map(r => r.os));
+    console.log(`🔍 OS que já existem no banco: ${osExistentes.size}`);
+    
+    // ============================================
+    // PASSO 3: Filtrar apenas entregas com OS novas
+    // ============================================
+    const entregasNovas = entregas.filter(e => {
+      const os = parseInt(e.os);
+      return os && !isNaN(os) && !osExistentes.has(os);
+    });
+    
+    const osIgnoradas = osDoExcel.filter(os => osExistentes.has(os));
+    console.log(`✅ Entregas novas para inserir: ${entregasNovas.length}`);
+    console.log(`⏭️ Linhas ignoradas (OS já existe): ${entregas.length - entregasNovas.length}`);
+    
+    if (entregasNovas.length === 0) {
+      // Registrar tentativa no histórico mesmo sem inserir nada
+      await pool.query(`
+        INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, data_upload)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `, [usuario_id, usuario_nome, nome_arquivo, entregas.length, 0, entregas.length]);
+      
+      return res.json({ 
+        success: true, 
+        inseridos: 0, 
+        ignorados: entregas.length,
+        os_ignoradas: osIgnoradas.length,
+        message: 'Todas as OS já existem no banco de dados'
       });
     }
     
-    // Detectar período das entregas para limpar dados antigos
-    let dataMin = null, dataMax = null;
-    let datasEncontradas = 0;
-    
-    for (const e of entregas) {
-      // Tentar múltiplos campos de data
-      const camposData = [e.data_hora, e.data_solicitado, e.finalizado];
-      
-      for (const data of camposData) {
-        if (data) {
-          let d = null;
-          
-          // Se for número (serial do Excel)
-          if (typeof data === 'number') {
-            d = new Date((data - 25569) * 86400000);
-          }
-          // Se for string
-          else if (typeof data === 'string') {
-            // Tentar formato DD/MM/YYYY
-            const match = data.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-            if (match) {
-              d = new Date(match[3], match[2] - 1, match[1]);
-            } else {
-              d = new Date(data);
-            }
-          }
-          // Se já for Date
-          else if (data instanceof Date) {
-            d = data;
-          }
-          
-          if (d && !isNaN(d.getTime())) {
-            datasEncontradas++;
-            if (!dataMin || d < dataMin) dataMin = d;
-            if (!dataMax || d > dataMax) dataMax = d;
-            break; // Já encontrou uma data válida nessa linha
-          }
-        }
-      }
-    }
-    
-    console.log(`📅 Datas encontradas em ${datasEncontradas} de ${entregas.length} linhas`);
-    
-    // Limpar dados do período antes de inserir (evita duplicatas)
-    if (dataMin && dataMax) {
-      const dataInicioStr = dataMin.toISOString().split('T')[0];
-      const dataFimStr = dataMax.toISOString().split('T')[0];
-      console.log(`🧹 Limpando dados existentes de ${dataInicioStr} a ${dataFimStr}...`);
-      
-      // Limpar por data_hora (TIMESTAMP) ao invés de data_solicitado
-      const deleteResult = await pool.query(`
-        DELETE FROM bi_entregas 
-        WHERE DATE(data_hora) >= $1 AND DATE(data_hora) <= $2
-      `, [dataInicioStr, dataFimStr]);
-      
-      console.log(`🧹 ${deleteResult.rowCount} registros removidos do período`);
-    } else {
-      console.log(`⚠️ Não foi possível detectar período das datas - nenhum dado será limpo`);
-    }
-    
-    // Buscar configurações de prazo
+    // ============================================
+    // PASSO 4: Buscar configurações de prazo
+    // ============================================
     const prazosCliente = await pool.query(`
       SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
       FROM bi_prazos_cliente pc
@@ -6102,11 +6087,6 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     `).catch(() => ({ rows: [] }));
     
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
-    
-    console.log(`📊 Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
-    if (prazoPadrao.rows.length > 0) {
-      console.log(`📊 Faixas padrão:`, prazoPadrao.rows.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
-    }
     
     // Função para encontrar prazo baseado na distância
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
@@ -6127,43 +6107,31 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
-    // Função para converter data/hora do Excel para Date
+    // Funções auxiliares de parsing
     const parseDataHora = (valor) => {
       if (!valor) return null;
-      // Se for número (serial date do Excel - dias desde 1900)
       if (typeof valor === 'number') {
-        // Excel serial date: dias desde 1/1/1900 (com bug do ano 1900)
-        const excelEpoch = new Date(1899, 11, 30); // 30/12/1899
-        const date = new Date(excelEpoch.getTime() + valor * 86400000);
-        return date;
+        const excelEpoch = new Date(1899, 11, 30);
+        return new Date(excelEpoch.getTime() + valor * 86400000);
       }
-      // Se for string no formato DD/MM/YYYY HH:MM:SS ou DD/MM/YYYY HH:MM
       if (typeof valor === 'string') {
-        // Tentar formato DD/MM/YYYY HH:MM:SS
         const regex = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/;
         const match = valor.match(regex);
         if (match) {
           const [_, dia, mes, ano, hora, min, seg] = match;
           return new Date(ano, mes - 1, dia, hora, min, seg || 0);
         }
-        // Tentar ISO
         const d = new Date(valor);
         if (!isNaN(d.getTime())) return d;
       }
       return null;
     };
     
-    // Função para calcular tempo de execução em minutos
-    // Usa o campo Execução Comp. que já é a diferença em fração de dia
-    // OU calcula (Finalizado - Data/Hora) se não tiver Execução Comp.
     const calcularTempoExecucao = (execucaoComp, dataHora, finalizado) => {
-      // Se tiver Execução Comp. (fração do dia), usa direto
       if (execucaoComp !== null && execucaoComp !== undefined && execucaoComp !== '') {
         if (typeof execucaoComp === 'number') {
-          // Fração do dia -> minutos (0.5 = 12h = 720min)
           return Math.round(execucaoComp * 24 * 60);
         }
-        // Se for string HH:MM:SS
         if (typeof execucaoComp === 'string' && execucaoComp.includes(':')) {
           const partes = execucaoComp.split(':');
           if (partes.length >= 2) {
@@ -6171,19 +6139,15 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           }
         }
       }
-      
-      // Fallback: calcular a partir de Data/Hora e Finalizado
       if (dataHora && finalizado && typeof dataHora === 'number' && typeof finalizado === 'number') {
-        const diff = finalizado - dataHora; // diferença em dias
+        const diff = finalizado - dataHora;
         if (diff >= 0) {
-          return Math.round(diff * 24 * 60); // converter para minutos
+          return Math.round(diff * 24 * 60);
         }
       }
-      
       return null;
     };
     
-    // Função para converter data do Excel para formato ISO (só data)
     const parseData = (valor) => {
       if (!valor) return null;
       if (typeof valor === 'number') {
@@ -6200,13 +6164,11 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return valor;
     };
     
-    // Função para converter timestamp para formato ISO
     const parseTimestamp = (valor) => {
       const d = parseDataHora(valor);
       return d ? d.toISOString() : null;
     };
     
-    // Função para limpar número
     const parseNum = (valor) => {
       if (!valor) return null;
       if (typeof valor === 'number') return valor;
@@ -6215,66 +6177,47 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return isNaN(num) ? null : num;
     };
     
+    const truncar = (str, max) => str ? String(str).substring(0, max) : null;
+    
+    // ============================================
+    // PASSO 5: Processar e inserir entregas novas
+    // ============================================
     let inseridos = 0;
-    let atualizados = 0;
     let erros = 0;
     let dentroPrazoCount = 0;
     let foraPrazoCount = 0;
-    let linhasIgnoradas = 0;
-    let motivosIgnoradas = {};
     
-    // Processar em lotes para melhor performance
     const BATCH_SIZE = 500;
-    const totalBatches = Math.ceil(entregas.length / BATCH_SIZE);
+    const totalBatches = Math.ceil(entregasNovas.length / BATCH_SIZE);
     
-    console.log(`📦 Processando ${entregas.length} linhas em ${totalBatches} lotes de ${BATCH_SIZE}`);
+    console.log(`📦 Processando ${entregasNovas.length} linhas novas em ${totalBatches} lotes`);
     
     for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
       const start = batchIndex * BATCH_SIZE;
-      const end = Math.min(start + BATCH_SIZE, entregas.length);
-      const batch = entregas.slice(start, end);
+      const end = Math.min(start + BATCH_SIZE, entregasNovas.length);
+      const batch = entregasNovas.slice(start, end);
       
-      console.log(`📦 Processando lote ${batchIndex + 1}/${totalBatches} (linhas ${start + 1} a ${end})`);
-      
-      // Preparar dados do lote
       const dadosLote = [];
       
       for (const e of batch) {
         try {
           const os = parseInt(e.os);
-          if (!os) {
-            linhasIgnoradas++;
-            motivosIgnoradas['OS inválida'] = (motivosIgnoradas['OS inválida'] || 0) + 1;
-            continue;
-          }
+          if (!os) continue;
           
           const distancia = parseNum(e.distancia) || 0;
           const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, distancia);
-          
-          // Calcular tempo de execução usando Execução Comp. ou (Finalizado - Data/Hora)
           const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
-          
           const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
           
           if (dentroPrazo === true) dentroPrazoCount++;
           if (dentroPrazo === false) foraPrazoCount++;
           
-          // Extrair número do ponto
           let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
-          
-          // Se não encontrou ponto, tenta extrair do endereço
           if (ponto === 0 && e.endereco) {
             const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
-            if (matchPonto) {
-              ponto = parseInt(matchPonto[1]) || 1;
-            }
+            if (matchPonto) ponto = parseInt(matchPonto[1]) || 1;
           }
-          
-          // Se ainda não tem ponto, usa 1 como padrão
           if (ponto === 0) ponto = 1;
-          
-          // Função para truncar strings (evita erro de tamanho)
-          const truncar = (str, max) => str ? String(str).substring(0, max) : null;
           
           dadosLote.push({
             os,
@@ -6312,26 +6255,26 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long)
           });
         } catch (err) {
-          linhasIgnoradas++;
-          motivosIgnoradas['Erro parsing'] = (motivosIgnoradas['Erro parsing'] || 0) + 1;
+          erros++;
         }
       }
       
-      // Inserir lote usando INSERT ... ON CONFLICT (UPSERT)
+      // Inserir lote
       if (dadosLote.length > 0) {
-        try {
-          // Construir query de inserção em massa
-          const valores = [];
-          const params = [];
-          let paramIndex = 1;
-          
-          for (const d of dadosLote) {
-            const indices = [];
-            for (let i = 0; i < 33; i++) {
-              indices.push(`$${paramIndex++}`);
-            }
-            valores.push(`(${indices.join(',')})`);
-            params.push(
+        for (const d of dadosLote) {
+          try {
+            await pool.query(`
+              INSERT INTO bi_entregas (
+                os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
+                nome_fantasia, centro_custo, cidade_p1, endereco,
+                bairro, cidade, estado, cod_prof, nome_prof,
+                data_hora, finalizado, data_solicitado,
+                categoria, valor, distancia, valor_prof,
+                execucao_comp, status, motivo, ocorrencia, velocidade_media,
+                dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
+                latitude, longitude
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+            `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
@@ -6340,77 +6283,46 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
               d.latitude, d.longitude
-            );
-          }
-          
-          const query = `
-            INSERT INTO bi_entregas (
-              os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
-              nome_fantasia, centro_custo, cidade_p1, endereco,
-              bairro, cidade, estado, cod_prof, nome_prof,
-              data_hora, finalizado, data_solicitado,
-              categoria, valor, distancia, valor_prof,
-              execucao_comp, status, motivo, ocorrencia, velocidade_media,
-              dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
-              latitude, longitude
-            ) VALUES ${valores.join(',')}
-          `;
-          
-          const result = await pool.query(query, params);
-          inseridos += dadosLote.length;
-          
-        } catch (batchErr) {
-          console.error(`❌ Erro no lote ${batchIndex + 1}:`, batchErr.message);
-          // Se falhar o batch, tenta inserir um por um
-          for (const d of dadosLote) {
-            try {
-              await pool.query(`
-                INSERT INTO bi_entregas (
-                  os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
-                  nome_fantasia, centro_custo, cidade_p1, endereco,
-                  bairro, cidade, estado, cod_prof, nome_prof,
-                  data_hora, finalizado, data_solicitado,
-                  categoria, valor, distancia, valor_prof,
-                  execucao_comp, status, motivo, ocorrencia, velocidade_media,
-                  dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
-                  latitude, longitude
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
-              `, [
-                d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
-                d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
-                d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-                d.data_hora, d.finalizado, d.data_solicitado,
-                d.categoria, d.valor, d.distancia, d.valor_prof,
-                d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
-                d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
-                d.latitude, d.longitude
-              ]);
-              inseridos++;
-            } catch (singleErr) {
-              console.error(`❌ Erro individual OS ${d.os} Ponto ${d.ponto}:`, singleErr.message);
-              erros++;
-            }
+            ]);
+            inseridos++;
+          } catch (singleErr) {
+            erros++;
           }
         }
       }
     }
     
-    console.log(`✅ Upload concluído: ${inseridos} processados, ${erros} erros, ${linhasIgnoradas} ignoradas`);
-    console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
-    if (Object.keys(motivosIgnoradas).length > 0) {
-      console.log(`⚠️ Motivos de linhas ignoradas:`, motivosIgnoradas);
-    }
+    // ============================================
+    // PASSO 6: Registrar no histórico de uploads
+    // ============================================
+    const linhasIgnoradas = entregas.length - entregasNovas.length;
     
-    res.json({ 
-      success: true, 
+    await pool.query(`
+      INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    `, [
+      usuario_id, 
+      usuario_nome, 
+      nome_arquivo, 
+      entregas.length, 
       inseridos, 
-      atualizados, 
-      erros, 
       linhasIgnoradas,
-      motivosIgnoradas,
-      total: entregas.length, 
-      dentroPrazo: dentroPrazoCount, 
-      foraPrazo: foraPrazoCount 
+      osDoExcel.length - osIgnoradas.length,
+      osIgnoradas.length
+    ]);
+    
+    console.log(`✅ Upload concluído: ${inseridos} inseridos, ${linhasIgnoradas} ignorados (OS duplicada), ${erros} erros`);
+    console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
+    
+    res.json({
+      success: true,
+      inseridos,
+      ignorados: linhasIgnoradas,
+      erros,
+      os_novas: osDoExcel.length - osIgnoradas.length,
+      os_ignoradas: osIgnoradas.length,
+      dentro_prazo: dentroPrazoCount,
+      fora_prazo: foraPrazoCount
     });
   } catch (err) {
     console.error('❌ Erro no upload:', err);
@@ -7625,18 +7537,42 @@ app.get('/api/bi/datas', async (req, res) => {
 });
 
 // Listar uploads realizados
+// Listar histórico de uploads
 app.get('/api/bi/uploads', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT data_upload, COUNT(*) as total_registros, 
-             MIN(data_solicitado) as data_inicial,
-             MAX(data_solicitado) as data_final
-      FROM bi_entregas 
-      WHERE data_upload IS NOT NULL
-      GROUP BY data_upload
+    // Primeiro tenta buscar do histórico novo
+    const historico = await pool.query(`
+      SELECT 
+        id,
+        usuario_id,
+        usuario_nome,
+        nome_arquivo,
+        total_linhas,
+        linhas_inseridas,
+        linhas_ignoradas,
+        os_novas,
+        os_ignoradas,
+        data_upload
+      FROM bi_upload_historico
       ORDER BY data_upload DESC
-    `);
-    res.json(result.rows);
+      LIMIT 50
+    `).catch(() => ({ rows: [] }));
+    
+    if (historico.rows.length > 0) {
+      res.json(historico.rows);
+    } else {
+      // Fallback para o método antigo (agregado por data_upload)
+      const result = await pool.query(`
+        SELECT data_upload, COUNT(*) as total_registros, 
+               MIN(data_solicitado) as data_inicial,
+               MAX(data_solicitado) as data_final
+        FROM bi_entregas 
+        WHERE data_upload IS NOT NULL
+        GROUP BY data_upload
+        ORDER BY data_upload DESC
+      `);
+      res.json(result.rows);
+    }
   } catch (err) {
     console.error('❌ Erro ao listar uploads:', err);
     res.status(500).json({ error: 'Erro ao listar uploads' });
@@ -7648,10 +7584,32 @@ app.delete('/api/bi/uploads/:data', async (req, res) => {
   try {
     const { data } = req.params;
     const result = await pool.query(`DELETE FROM bi_entregas WHERE data_upload = $1`, [data]);
+    // Também remove do histórico
+    await pool.query(`DELETE FROM bi_upload_historico WHERE DATE(data_upload) = $1`, [data]).catch(() => {});
     res.json({ success: true, deletados: result.rowCount });
   } catch (err) {
     console.error('❌ Erro ao excluir upload:', err);
     res.status(500).json({ error: 'Erro ao excluir upload' });
+  }
+});
+
+// Excluir upload por ID do histórico
+app.delete('/api/bi/uploads/historico/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Buscar info do histórico
+    const hist = await pool.query(`SELECT data_upload FROM bi_upload_historico WHERE id = $1`, [id]);
+    if (hist.rows.length > 0) {
+      const dataUpload = hist.rows[0].data_upload;
+      // Deletar entregas dessa data
+      await pool.query(`DELETE FROM bi_entregas WHERE data_upload = DATE($1)`, [dataUpload]);
+    }
+    // Deletar do histórico
+    await pool.query(`DELETE FROM bi_upload_historico WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir histórico:', err);
+    res.status(500).json({ error: 'Erro ao excluir histórico' });
   }
 });
 
@@ -9870,5 +9828,358 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   } catch (error) {
     console.error('Erro acompanhamento clientes:', error);
     res.status(500).json({ error: 'Erro ao buscar dados de clientes', details: error.message });
+  }
+});
+
+// ============================================
+// INTEGRAÇÃO GOOGLE DRIVE - IMPORTAÇÃO MANUAL
+// ============================================
+
+const { google } = require('googleapis');
+
+// ID da pasta do Google Drive
+const GOOGLE_DRIVE_FOLDER_ID = '1HkLg1oMf8IFUz-a4AhrtKOFPE51wnRt2';
+
+// Função para autenticar com Google Drive
+async function getGoogleDriveAuth() {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT || '{}');
+    
+    if (!credentials.client_email) {
+      console.log('⚠️ Google Service Account não configurada');
+      return null;
+    }
+    
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/drive']
+    });
+    
+    return auth;
+  } catch (error) {
+    console.error('❌ Erro ao autenticar Google Drive:', error.message);
+    return null;
+  }
+}
+
+// Endpoint para processar arquivos do Drive manualmente
+app.post('/api/bi/drive-processar', async (req, res) => {
+  try {
+    const auth = await getGoogleDriveAuth();
+    if (!auth) {
+      return res.status(400).json({ error: 'Google Drive não configurado. Configure GOOGLE_SERVICE_ACCOUNT nas variáveis de ambiente.' });
+    }
+    
+    const drive = google.drive({ version: 'v3', auth });
+    
+    // Listar arquivos Excel pendentes na pasta
+    const response = await drive.files.list({
+      q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and (mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'application/vnd.ms-excel') and trashed = false`,
+      fields: 'files(id, name, createdTime)'
+    });
+    
+    const arquivos = response.data.files;
+    console.log(`📂 ${arquivos.length} arquivos Excel encontrados na pasta do Drive`);
+    
+    if (arquivos.length === 0) {
+      return res.json({ processados: 0, message: 'Nenhum arquivo Excel na pasta' });
+    }
+    
+    const resultados = [];
+    for (const arquivo of arquivos) {
+      try {
+        console.log(`📄 Processando: ${arquivo.name}`);
+        const resultado = await processarArquivoDrive(drive, arquivo.id, arquivo.name);
+        resultados.push({ arquivo: arquivo.name, ...resultado });
+      } catch (err) {
+        console.error(`❌ Erro em ${arquivo.name}:`, err.message);
+        resultados.push({ arquivo: arquivo.name, success: false, error: err.message });
+      }
+    }
+    
+    res.json({ processados: resultados.length, resultados });
+    
+  } catch (error) {
+    console.error('❌ Erro ao processar Drive:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Função para processar um arquivo do Drive
+async function processarArquivoDrive(drive, fileId, fileName) {
+  console.log(`📄 Baixando arquivo ${fileName}...`);
+  
+  // Baixar conteúdo do arquivo
+  const response = await drive.files.get(
+    { fileId, alt: 'media' },
+    { responseType: 'arraybuffer' }
+  );
+  
+  const buffer = Buffer.from(response.data);
+  console.log(`📄 Arquivo baixado: ${buffer.length} bytes`);
+  
+  // Processar Excel
+  const XLSX = require('xlsx');
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+  const dados = XLSX.utils.sheet_to_json(worksheet);
+  
+  console.log(`📊 ${dados.length} linhas encontradas no Excel`);
+  
+  if (dados.length === 0) {
+    throw new Error('Arquivo vazio');
+  }
+  
+  // Mapear colunas para o formato esperado
+  const entregas = dados.map(row => ({
+    os: row.OS,
+    num_pedido: row["Nº Pedido"],
+    cod_cliente: row["Cód. cliente"],
+    nome_cliente: row["Nome cliente"],
+    empresa: row.Empresa,
+    nome_fantasia: row["Nome fantasia"],
+    centro_custo: row["Centro custo"],
+    cidade_p1: row["Cidade P1"],
+    endereco: row["Endereço"],
+    bairro: row.Bairro,
+    cidade: row.Cidade,
+    estado: row.Estado,
+    cod_prof: row["Cód. prof."],
+    nome_prof: row["Nome prof."],
+    data_hora: row["Data/Hora"],
+    data_hora_alocado: row["Data/Hora Alocado"],
+    data_solicitado: row["Data solicitado"],
+    hora_solicitado: row["Hora solicitado"],
+    data_chegada: row["Data Chegada"],
+    hora_chegada: row["Hora Chegada"],
+    data_saida: row["Data Saida"],
+    hora_saida: row["Hora Saida"],
+    latitude: row.Latitude || row.latitude || row.Lat || row.lat,
+    longitude: row.Longitude || row.longitude || row.Long || row.lng,
+    categoria: row.Categoria,
+    valor: row.Valor,
+    km: row["Distância"] || row.Distancia || row.KM || row.km,
+    valor_prof: row["Valor prof."],
+    finalizado: row.Finalizado,
+    ponto: row.Ponto || row.ponto || 1,
+    motivo: row.Motivo,
+    cep: row.CEP || row.cep
+  })).filter(e => e.os);
+  
+  console.log(`📋 ${entregas.length} entregas válidas para processar`);
+  
+  // Processar entregas usando a mesma lógica do upload existente
+  const inseridos = await processarEntregasDrive(entregas);
+  
+  console.log(`✅ ${inseridos} entregas processadas de ${fileName}`);
+  
+  // Mover arquivo para pasta "Processados"
+  await moverParaProcessados(drive, fileId, fileName);
+  
+  return { success: true, linhas: dados.length, inseridos };
+}
+
+// Função para processar entregas (similar à do upload)
+async function processarEntregasDrive(entregas) {
+  // Detectar período das entregas
+  let dataMin = null, dataMax = null;
+  
+  for (const e of entregas) {
+    const camposData = [e.data_hora, e.data_solicitado, e.finalizado];
+    for (const data of camposData) {
+      if (data) {
+        let d = null;
+        if (typeof data === 'number') {
+          const excelEpoch = new Date(1899, 11, 30);
+          d = new Date(excelEpoch.getTime() + data * 86400000);
+        } else if (typeof data === 'string') {
+          const match = data.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+          if (match) {
+            d = new Date(match[3], match[2] - 1, match[1]);
+          } else {
+            d = new Date(data);
+          }
+        }
+        if (d && !isNaN(d.getTime())) {
+          if (!dataMin || d < dataMin) dataMin = d;
+          if (!dataMax || d > dataMax) dataMax = d;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Limpar dados do período
+  if (dataMin && dataMax) {
+    const dataInicioStr = dataMin.toISOString().split('T')[0];
+    const dataFimStr = dataMax.toISOString().split('T')[0];
+    console.log(`🧹 Limpando dados de ${dataInicioStr} a ${dataFimStr}...`);
+    const deleteResult = await pool.query(`
+      DELETE FROM bi_entregas 
+      WHERE DATE(data_hora) >= $1 AND DATE(data_hora) <= $2
+    `, [dataInicioStr, dataFimStr]);
+    console.log(`🧹 ${deleteResult.rowCount} registros removidos`);
+  }
+  
+  // Buscar prazos
+  const prazosCliente = await pool.query(`
+    SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+    FROM bi_prazos_cliente pc
+    JOIN bi_faixas_prazo fp ON pc.id = fp.prazo_cliente_id
+  `).catch(() => ({ rows: [] }));
+  
+  const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
+  
+  const encontrarPrazo = (codCliente, centroCusto, distancia) => {
+    let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+    if (faixas.length === 0) {
+      faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
+    }
+    if (faixas.length === 0) {
+      faixas = prazoPadrao.rows;
+    }
+    for (const faixa of faixas) {
+      const kmMin = parseFloat(faixa.km_min) || 0;
+      const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+      if (distancia >= kmMin && distancia < kmMax) {
+        return parseInt(faixa.prazo_minutos);
+      }
+    }
+    return null;
+  };
+  
+  // Função para converter data/hora
+  const parseDataHora = (valor) => {
+    if (!valor) return null;
+    if (typeof valor === 'number') {
+      const excelEpoch = new Date(1899, 11, 30);
+      return new Date(excelEpoch.getTime() + valor * 86400000);
+    }
+    if (typeof valor === 'string') {
+      const regex = /(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/;
+      const match = valor.match(regex);
+      if (match) {
+        const [_, dia, mes, ano, hora, min, seg] = match;
+        return new Date(ano, mes - 1, dia, hora, min, seg || 0);
+      }
+      return new Date(valor);
+    }
+    return null;
+  };
+  
+  // Inserir entregas
+  let inseridos = 0;
+  for (const e of entregas) {
+    try {
+      const km = parseFloat(e.km) || 0;
+      const prazoMinutos = encontrarPrazo(e.cod_cliente, e.centro_custo, km);
+      
+      const dataHora = parseDataHora(e.data_hora);
+      const dataSolicitado = parseDataHora(e.data_solicitado);
+      const finalizado = parseDataHora(e.finalizado);
+      
+      // Calcular se está dentro do prazo
+      let dentroPrazo = null;
+      if (prazoMinutos && dataSolicitado && finalizado) {
+        const diffMinutos = (finalizado - dataSolicitado) / 60000;
+        dentroPrazo = diffMinutos <= prazoMinutos;
+      }
+      
+      await pool.query(`
+        INSERT INTO bi_entregas (
+          os, cod_cliente, centro_custo, ponto, data_hora, data_solicitado, finalizado,
+          cod_prof, nome_prof, km, valor, valor_prof, bairro, cidade, estado, cep,
+          latitude, longitude, categoria, motivo, prazo_minutos, dentro_prazo, data_upload
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())
+      `, [
+        e.os, e.cod_cliente, e.centro_custo, e.ponto || 1,
+        dataHora, dataSolicitado, finalizado,
+        e.cod_prof, e.nome_prof, km, e.valor || 0, e.valor_prof || 0,
+        e.bairro, e.cidade, e.estado || 'GO', e.cep,
+        e.latitude, e.longitude, e.categoria, e.motivo,
+        prazoMinutos, dentroPrazo
+      ]);
+      
+      inseridos++;
+    } catch (err) {
+      // Ignorar erros de linhas individuais
+    }
+  }
+  
+  return inseridos;
+}
+
+// Função para mover arquivo para pasta Processados
+async function moverParaProcessados(drive, fileId, fileName) {
+  try {
+    // Buscar ou criar pasta "Processados"
+    const response = await drive.files.list({
+      q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and name = 'Processados' and mimeType = 'application/vnd.google-apps.folder'`,
+      fields: 'files(id, name)'
+    });
+    
+    let processadosFolderId;
+    
+    if (response.data.files.length === 0) {
+      // Criar pasta Processados
+      const folder = await drive.files.create({
+        resource: {
+          name: 'Processados',
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [GOOGLE_DRIVE_FOLDER_ID]
+        },
+        fields: 'id'
+      });
+      processadosFolderId = folder.data.id;
+      console.log('📁 Pasta "Processados" criada');
+    } else {
+      processadosFolderId = response.data.files[0].id;
+    }
+    
+    // Mover arquivo
+    await drive.files.update({
+      fileId: fileId,
+      addParents: processadosFolderId,
+      removeParents: GOOGLE_DRIVE_FOLDER_ID,
+      fields: 'id, parents'
+    });
+    
+    console.log(`📁 Arquivo ${fileName} movido para Processados`);
+    
+  } catch (error) {
+    console.error('⚠️ Erro ao mover arquivo:', error.message);
+  }
+}
+
+// Endpoint para verificar status da integração Drive
+app.get('/api/bi/drive-status', async (req, res) => {
+  try {
+    const auth = await getGoogleDriveAuth();
+    
+    if (!auth) {
+      return res.json({ 
+        connected: false, 
+        message: 'Configure GOOGLE_SERVICE_ACCOUNT nas variáveis de ambiente'
+      });
+    }
+    
+    const drive = google.drive({ version: 'v3', auth });
+    
+    const response = await drive.files.list({
+      q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and (mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'application/vnd.ms-excel') and trashed = false`,
+      fields: 'files(id, name, createdTime)',
+      pageSize: 20
+    });
+    
+    res.json({
+      connected: true,
+      folder_id: GOOGLE_DRIVE_FOLDER_ID,
+      arquivos_pendentes: response.data.files.length,
+      arquivos: response.data.files.map(f => ({ nome: f.name, data: f.createdTime }))
+    });
+    
+  } catch (error) {
+    res.json({ connected: false, error: error.message });
   }
 });
