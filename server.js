@@ -5973,10 +5973,128 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
 });
 
 // DIAGNÓSTICO - verificar dados do BI
+// Endpoint para inicializar prazos com valores do DAX
+app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
+  try {
+    // Tabela de prazos baseada no DAX_Prazo_Cliente
+    const faixasPadrao = [
+      { km_min: 0, km_max: 10, prazo_segundos: 3600 },
+      { km_min: 10, km_max: 15, prazo_segundos: 4500 },
+      { km_min: 15, km_max: 20, prazo_segundos: 5400 },
+      { km_min: 20, km_max: 25, prazo_segundos: 6300 },
+      { km_min: 25, km_max: 30, prazo_segundos: 7200 },
+      { km_min: 30, km_max: 35, prazo_segundos: 8100 },
+      { km_min: 35, km_max: 40, prazo_segundos: 9000 },
+      { km_min: 40, km_max: 45, prazo_segundos: 9900 },
+      { km_min: 45, km_max: 50, prazo_segundos: 10800 },
+      { km_min: 50, km_max: 55, prazo_segundos: 11700 },
+      { km_min: 55, km_max: 60, prazo_segundos: 12600 },
+      { km_min: 60, km_max: 65, prazo_segundos: 13500 },
+      { km_min: 65, km_max: 70, prazo_segundos: 14400 },
+      { km_min: 70, km_max: 75, prazo_segundos: 15300 },
+      { km_min: 75, km_max: 80, prazo_segundos: 16200 },
+      { km_min: 80, km_max: 85, prazo_segundos: 17100 },
+      { km_min: 85, km_max: 90, prazo_segundos: 18000 },
+      { km_min: 90, km_max: 95, prazo_segundos: 18900 },
+      { km_min: 95, km_max: 100, prazo_segundos: 19800 },
+      // Acima de 100km = Fora do Prazo (prazo impossível de cumprir)
+      { km_min: 100, km_max: null, prazo_segundos: 0 }
+    ];
+    
+    // Limpar tabela de prazo padrão
+    await pool.query(`DELETE FROM bi_prazo_padrao`);
+    
+    // Inserir faixas padrão (convertendo segundos para minutos)
+    for (const faixa of faixasPadrao) {
+      await pool.query(
+        `INSERT INTO bi_prazo_padrao (km_min, km_max, prazo_minutos) VALUES ($1, $2, $3)`,
+        [faixa.km_min, faixa.km_max, faixa.prazo_segundos / 60]
+      );
+    }
+    
+    // Cliente 767 tem prazo fixo de 7200 segundos (120 minutos) para qualquer distância
+    // Verificar se já existe
+    let cliente767 = await pool.query(`SELECT id FROM bi_prazos_cliente WHERE tipo = 'cliente' AND codigo = '767'`);
+    
+    if (cliente767.rows.length === 0) {
+      // Criar cliente 767
+      const novoCliente = await pool.query(
+        `INSERT INTO bi_prazos_cliente (tipo, codigo, nome, updated_at) VALUES ('cliente', '767', 'Cliente 767 - Prazo Fixo 2h', NOW()) RETURNING id`
+      );
+      cliente767 = { rows: [{ id: novoCliente.rows[0].id }] };
+    }
+    
+    // Limpar faixas antigas do cliente 767
+    await pool.query(`DELETE FROM bi_faixas_prazo WHERE prazo_cliente_id = $1`, [cliente767.rows[0].id]);
+    
+    // Inserir prazo fixo de 120 minutos para cliente 767 (qualquer distância)
+    await pool.query(
+      `INSERT INTO bi_faixas_prazo (prazo_cliente_id, km_min, km_max, prazo_minutos) VALUES ($1, $2, $3, $4)`,
+      [cliente767.rows[0].id, 0, null, 120]
+    );
+    
+    // Recalcular prazo para todos os registros
+    const totalAtualizados = await pool.query(`
+      WITH prazo_calc AS (
+        SELECT 
+          e.id,
+          CASE 
+            -- Cliente 767 tem prazo fixo de 120 minutos
+            WHEN e.cod_cliente = 767 THEN 120
+            -- Faixas padrão baseadas na distância
+            WHEN e.distancia <= 10 THEN 60
+            WHEN e.distancia <= 15 THEN 75
+            WHEN e.distancia <= 20 THEN 90
+            WHEN e.distancia <= 25 THEN 105
+            WHEN e.distancia <= 30 THEN 120
+            WHEN e.distancia <= 35 THEN 135
+            WHEN e.distancia <= 40 THEN 150
+            WHEN e.distancia <= 45 THEN 165
+            WHEN e.distancia <= 50 THEN 180
+            WHEN e.distancia <= 55 THEN 195
+            WHEN e.distancia <= 60 THEN 210
+            WHEN e.distancia <= 65 THEN 225
+            WHEN e.distancia <= 70 THEN 240
+            WHEN e.distancia <= 75 THEN 255
+            WHEN e.distancia <= 80 THEN 270
+            WHEN e.distancia <= 85 THEN 285
+            WHEN e.distancia <= 90 THEN 300
+            WHEN e.distancia <= 95 THEN 315
+            WHEN e.distancia <= 100 THEN 330
+            ELSE 0 -- Acima de 100km = sempre fora do prazo
+          END as prazo_calculado
+        FROM bi_entregas e
+        WHERE e.distancia IS NOT NULL
+      )
+      UPDATE bi_entregas e
+      SET prazo_minutos = pc.prazo_calculado,
+          dentro_prazo = CASE 
+            WHEN pc.prazo_calculado = 0 THEN false
+            WHEN e.tempo_execucao_minutos IS NOT NULL AND e.tempo_execucao_minutos <= pc.prazo_calculado THEN true
+            WHEN e.tempo_execucao_minutos IS NOT NULL AND e.tempo_execucao_minutos > pc.prazo_calculado THEN false
+            ELSE NULL
+          END
+      FROM prazo_calc pc
+      WHERE e.id = pc.id
+    `);
+    
+    res.json({
+      success: true,
+      message: 'Prazos inicializados com valores do DAX',
+      faixasPadrao: faixasPadrao.length,
+      cliente767: 'Prazo fixo 120 minutos',
+      registrosAtualizados: totalAtualizados.rowCount
+    });
+  } catch (error) {
+    console.error('Erro ao inicializar prazos DAX:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-27-v5-tempo-alocacao-fix';
+    const versao = '2025-12-27-v6-prazo-dax-rules';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -6153,23 +6271,53 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`).catch(() => ({ rows: [] }));
     
-    // Função para encontrar prazo baseado na distância
+    // Função para encontrar prazo baseado na distância - REGRAS DAX
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
+      // Cliente 767 tem prazo fixo de 120 minutos
+      if (codCliente === 767 || codCliente === '767') {
+        return 120;
+      }
+      
+      // Primeiro tenta buscar do banco (configurações personalizadas)
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
       if (faixas.length === 0) {
         faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
       }
-      if (faixas.length === 0) {
-        faixas = prazoPadrao.rows;
-      }
-      for (const faixa of faixas) {
-        const kmMin = parseFloat(faixa.km_min) || 0;
-        const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
-        if (distancia >= kmMin && distancia < kmMax) {
-          return parseInt(faixa.prazo_minutos);
+      
+      // Se tem configuração personalizada, usa ela
+      if (faixas.length > 0) {
+        for (const faixa of faixas) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
         }
       }
-      return null;
+      
+      // Se não tem configuração personalizada, usa regras DAX padrão
+      if (distancia <= 10) return 60;
+      if (distancia <= 15) return 75;
+      if (distancia <= 20) return 90;
+      if (distancia <= 25) return 105;
+      if (distancia <= 30) return 120;
+      if (distancia <= 35) return 135;
+      if (distancia <= 40) return 150;
+      if (distancia <= 45) return 165;
+      if (distancia <= 50) return 180;
+      if (distancia <= 55) return 195;
+      if (distancia <= 60) return 210;
+      if (distancia <= 65) return 225;
+      if (distancia <= 70) return 240;
+      if (distancia <= 75) return 255;
+      if (distancia <= 80) return 270;
+      if (distancia <= 85) return 285;
+      if (distancia <= 90) return 300;
+      if (distancia <= 95) return 315;
+      if (distancia <= 100) return 330;
+      
+      // Acima de 100km = sempre fora do prazo (prazo 0)
+      return 0;
     };
     
     // Funções auxiliares de parsing
@@ -6455,22 +6603,53 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     const entregas = await pool.query(`SELECT id, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp FROM bi_entregas`);
     console.log(`🔄 Total de entregas: ${entregas.rows.length}`);
     
+    // Função para encontrar prazo - REGRAS DAX
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
+      // Cliente 767 tem prazo fixo de 120 minutos
+      if (codCliente === 767 || codCliente === '767') {
+        return 120;
+      }
+      
+      // Primeiro tenta buscar do banco (configurações personalizadas)
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
       if (faixas.length === 0) {
         faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
       }
-      if (faixas.length === 0) {
-        faixas = prazoPadrao.rows;
-      }
-      for (const faixa of faixas) {
-        const kmMin = parseFloat(faixa.km_min) || 0;
-        const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
-        if (distancia >= kmMin && distancia < kmMax) {
-          return parseInt(faixa.prazo_minutos);
+      
+      // Se tem configuração personalizada, usa ela
+      if (faixas.length > 0) {
+        for (const faixa of faixas) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
         }
       }
-      return null;
+      
+      // Regras DAX padrão
+      if (distancia <= 10) return 60;
+      if (distancia <= 15) return 75;
+      if (distancia <= 20) return 90;
+      if (distancia <= 25) return 105;
+      if (distancia <= 30) return 120;
+      if (distancia <= 35) return 135;
+      if (distancia <= 40) return 150;
+      if (distancia <= 45) return 165;
+      if (distancia <= 50) return 180;
+      if (distancia <= 55) return 195;
+      if (distancia <= 60) return 210;
+      if (distancia <= 65) return 225;
+      if (distancia <= 70) return 240;
+      if (distancia <= 75) return 255;
+      if (distancia <= 80) return 270;
+      if (distancia <= 85) return 285;
+      if (distancia <= 90) return 300;
+      if (distancia <= 95) return 315;
+      if (distancia <= 100) return 330;
+      
+      // Acima de 100km = sempre fora do prazo
+      return 0;
     };
     
     // Calcular tempo em minutos
