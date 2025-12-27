@@ -9827,7 +9827,9 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
-    let whereClause = 'WHERE ponto >= 2'; // REGRA: apenas entregas (ponto >= 2)
+    // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
+    // Cada métrica filtra pelo ponto apropriado internamente
+    let whereClause = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
     
@@ -9869,37 +9871,46 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
       SELECT 
         data_solicitado,
         TO_CHAR(data_solicitado, 'DD/MM') as data_formatada,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
-        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_motoboy,
-        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END), 0), 2) as ticket_medio,
+        
+        -- TEMPO MÉDIO ENTREGA (Ponto <> 1 = entregas, usa Solicitado -> Finalizado)
+        -- Regra: Se não é mesma data, início = 08:00 do dia do finalizado
         ROUND(AVG(
           CASE 
-            WHEN ponto >= 2 
+            WHEN COALESCE(ponto, 1) <> 1 
                  AND data_hora IS NOT NULL 
-                 AND hora_saida IS NOT NULL 
-                 AND data_saida IS NOT NULL
-                 AND (data_saida + hora_saida)::timestamp >= data_hora
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
             THEN
               EXTRACT(EPOCH FROM (
-                (data_saida + hora_saida)::timestamp - 
+                finalizado - 
                 CASE 
-                  WHEN DATE(data_saida) <> DATE(data_hora)
-                  THEN data_saida + TIME '08:00:00'
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
                   ELSE data_hora
                 END
               )) / 60
             ELSE NULL
           END
         ), 1) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1 = coleta, usa Solicitado -> Alocado)
+        -- Regra: Se solicitado após 17h E alocado no dia seguinte, início = 08:00 do dia alocado
         ROUND(AVG(
           CASE 
-            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL THEN
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora IS NOT NULL 
+                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
               EXTRACT(EPOCH FROM (
                 data_hora_alocado - 
                 CASE 
@@ -9912,27 +9923,31 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
             ELSE NULL
           END
         ), 1) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1, usa Alocado -> Finalizado)
+        -- Regra: Se alocado após 17h E finalizado no dia seguinte, início = 08:00 do dia finalizado
         ROUND(AVG(
           CASE 
-            WHEN data_hora_alocado IS NOT NULL 
-                 AND hora_saida IS NOT NULL 
-                 AND data_saida IS NOT NULL
-                 AND (data_saida + hora_saida)::timestamp >= data_hora_alocado
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora_alocado
             THEN
               EXTRACT(EPOCH FROM (
-                (data_saida + hora_saida)::timestamp - 
+                finalizado - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                       AND data_saida > DATE(data_hora_alocado)
-                  THEN data_saida + TIME '08:00:00'
+                       AND DATE(finalizado) > DATE(data_hora_alocado)
+                  THEN DATE(finalizado) + TIME '08:00:00'
                   ELSE data_hora_alocado
                 END
               )) / 60
             ELSE NULL
           END
         ), 1) as tempo_medio_coleta,
-        COUNT(DISTINCT cod_prof) as total_entregadores,
-        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
+        
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as total_entregadores,
+        ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as media_ent_profissional
       FROM bi_entregas
       ${whereClause}
       GROUP BY data_solicitado
