@@ -6197,6 +6197,34 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return isNaN(num) ? null : num;
     };
     
+    // Função para parsear hora (HH:MM:SS ou HH:MM)
+    const parseHora = (valor) => {
+      if (!valor) return null;
+      try {
+        // Se for string no formato HH:MM:SS ou HH:MM
+        if (typeof valor === 'string') {
+          const match = valor.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+          if (match) {
+            const h = match[1].padStart(2, '0');
+            const m = match[2].padStart(2, '0');
+            const s = match[3] ? match[3].padStart(2, '0') : '00';
+            return `${h}:${m}:${s}`;
+          }
+        }
+        // Se for número decimal do Excel (fração do dia)
+        if (typeof valor === 'number' && valor < 1) {
+          const totalSeconds = Math.round(valor * 24 * 60 * 60);
+          const hours = Math.floor(totalSeconds / 3600);
+          const minutes = Math.floor((totalSeconds % 3600) / 60);
+          const seconds = totalSeconds % 60;
+          return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    };
+    
     const truncar = (str, max) => str ? String(str).substring(0, max) : null;
     
     // ============================================
@@ -6259,6 +6287,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['DataHoraAlocado']),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
+            data_chegada: parseData(e.data_chegada || e['Data Chegada'] || e['Data chegada']),
+            hora_chegada: parseHora(e.hora_chegada || e['Hora Chegada'] || e['Hora chegada']),
+            data_saida: parseData(e.data_saida || e['Data Saida'] || e['Data Saída'] || e['Data saida']),
+            hora_saida: parseHora(e.hora_saida || e['Hora Saida'] || e['Hora Saída'] || e['Hora saida']),
             categoria: truncar(e.categoria, 100),
             valor: parseNum(e.valor),
             distancia: distancia,
@@ -6290,16 +6322,18 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 nome_fantasia, centro_custo, cidade_p1, endereco,
                 bairro, cidade, estado, cod_prof, nome_prof,
                 data_hora, data_hora_alocado, finalizado, data_solicitado,
+                data_chegada, hora_chegada, data_saida, hora_saida,
                 categoria, valor, distancia, valor_prof,
                 execucao_comp, status, motivo, ocorrencia, velocidade_media,
                 dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
                 latitude, longitude
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
               d.data_hora, d.data_hora_alocado, d.finalizado, d.data_solicitado,
+              d.data_chegada, d.hora_chegada, d.data_saida, d.hora_saida,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
@@ -9860,11 +9894,25 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
             ELSE NULL
           END
         ), 1) as tempo_medio_alocacao,
-        ROUND(AVG(EXTRACT(EPOCH FROM (
-          CASE WHEN hora_chegada IS NOT NULL AND data_chegada IS NOT NULL 
-          THEN (data_chegada + hora_chegada)::timestamp - data_hora_alocado 
-          ELSE NULL END
-        )) / 60), 1) as tempo_medio_coleta,
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora_alocado IS NOT NULL 
+                 AND hora_saida IS NOT NULL 
+                 AND data_saida IS NOT NULL
+                 AND (data_saida + hora_saida)::timestamp >= data_hora_alocado
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_saida + hora_saida)::timestamp - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND data_saida > DATE(data_hora_alocado)
+                  THEN data_saida + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_coleta,
         COUNT(DISTINCT cod_prof) as total_entregadores,
         ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
       FROM bi_entregas
