@@ -9487,7 +9487,6 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
       AND longitude != 0
       GROUP BY lat_group, lng_group, bairro, cidade
       ORDER BY total_entregas DESC
-      LIMIT 500
     `, params);
     
     // Buscar dados agrupados por cidade (para o ranking lateral)
