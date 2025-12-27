@@ -5976,19 +5976,52 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-09-v4-varchar-aumentado';
+    const versao = '2025-12-27-v5-tempo-alocacao-fix';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
     
     // Verificar entregas
     const entregas = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas`);
-    const amostra = await pool.query(`SELECT id, os, cod_cliente, centro_custo, distancia, data_hora, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
+    const amostra = await pool.query(`SELECT id, os, ponto, cod_cliente, centro_custo, distancia, data_hora, data_hora_alocado, finalizado, execucao_comp, dentro_prazo, prazo_minutos, tempo_execucao_minutos FROM bi_entregas LIMIT 5`);
     
     // Verificar quantos têm prazo calculado
     const comPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo IS NOT NULL`);
     const dentroPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = true`);
     const foraPrazo = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE dentro_prazo = false`);
+    
+    // === NOVO: Diagnóstico de Alocação e Pontos ===
+    const distribuicaoPontos = await pool.query(`
+      SELECT COALESCE(ponto, 1) as ponto, COUNT(*) as total 
+      FROM bi_entregas 
+      GROUP BY COALESCE(ponto, 1) 
+      ORDER BY ponto
+    `);
+    
+    const comAlocado = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE data_hora_alocado IS NOT NULL`);
+    const comFinalizado = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE finalizado IS NOT NULL`);
+    const ponto1ComAlocado = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE COALESCE(ponto, 1) = 1 AND data_hora_alocado IS NOT NULL`);
+    const ponto2PlusComFinalizado = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL`);
+    
+    // Amostra de cálculo de tempo
+    const amostraTempos = await pool.query(`
+      SELECT 
+        os, ponto, cod_cliente,
+        data_hora,
+        data_hora_alocado,
+        finalizado,
+        CASE WHEN COALESCE(ponto, 1) = 1 AND data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+          ELSE NULL
+        END as tempo_alocacao_min,
+        CASE WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (finalizado - data_hora)) / 60
+          ELSE NULL
+        END as tempo_entrega_min
+      FROM bi_entregas
+      WHERE data_hora IS NOT NULL
+      LIMIT 10
+    `);
     
     // Verificar centros de custo
     const comCentroCusto = await pool.query(`SELECT COUNT(*) as total FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != ''`);
@@ -6013,13 +6046,26 @@ app.get('/api/bi/diagnostico', async (req, res) => {
     const ocorrenciasUnicas = await pool.query(`SELECT DISTINCT ocorrencia, COUNT(*) as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 30`);
     
     res.json({
-      prazoPadrao: prazoPadrao.rows,
+      versao: versao,
       totalEntregas: entregas.rows[0].total,
+      // Diagnóstico de tempos
+      diagnosticoTempos: {
+        distribuicaoPontos: distribuicaoPontos.rows,
+        comDataHoraAlocado: comAlocado.rows[0].total,
+        comFinalizado: comFinalizado.rows[0].total,
+        ponto1ComAlocado: ponto1ComAlocado.rows[0].total,
+        ponto2PlusComFinalizado: ponto2PlusComFinalizado.rows[0].total,
+        amostraTempos: amostraTempos.rows
+      },
+      // Prazo
       comPrazoCalculado: comPrazo.rows[0].total,
       dentroPrazo: dentroPrazo.rows[0].total,
       foraPrazo: foraPrazo.rows[0].total,
+      prazoPadrao: prazoPadrao.rows,
+      // Centro de custo
       comCentroCusto: comCentroCusto.rows[0].total,
       centrosUnicos: centrosUnicos.rows,
+      // Motivos e Ocorrências
       comMotivo: comMotivo.rows[0].total,
       motivosComErro: motivosErro.rows[0].total,
       motivosUnicos: motivosUnicos.rows,
@@ -6027,8 +6073,7 @@ app.get('/api/bi/diagnostico', async (req, res) => {
       comOcorrencia: comOcorrencia.rows[0].total,
       ocorrenciasRetorno: ocorrenciasRetorno.rows[0].total,
       ocorrenciasUnicas: ocorrenciasUnicas.rows,
-      amostraEntregas: amostra.rows,
-      versao: versao
+      amostraEntregas: amostra.rows
     });
   } catch (err) {
     console.error('❌ Erro no diagnóstico:', err);
@@ -6260,9 +6305,11 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           if (dentroPrazo === true) dentroPrazoCount++;
           if (dentroPrazo === false) foraPrazoCount++;
           
+          // Extrair ponto - primeiro tenta campo direto, depois extrai do endereço
           let ponto = parseInt(e.ponto || e.Ponto || e.seq || e.Seq || e.sequencia || e.Sequencia || e.pt || e.Pt || 0) || 0;
-          if (ponto === 0 && e.endereco) {
-            const matchPonto = String(e.endereco).match(/^Ponto\s*(\d+)/i);
+          const enderecoStr = e.endereco || e['Endereço'] || e.Endereco || '';
+          if (ponto === 0 && enderecoStr) {
+            const matchPonto = String(enderecoStr).match(/^Ponto\s*(\d+)/i);
             if (matchPonto) ponto = parseInt(matchPonto[1]) || 1;
           }
           if (ponto === 0) ponto = 1;
@@ -6271,13 +6318,13 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             os,
             ponto,
             num_pedido: truncar(e.num_pedido || e['Num Pedido'] || e['Num pedido'] || e['num pedido'], 100),
-            cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente']) || null,
+            cod_cliente: parseInt(e.cod_cliente || e['Cod Cliente'] || e['Cod cliente'] || e['cod cliente'] || e['Cód Cliente'] || e['Cód. cliente']) || null,
             nome_cliente: truncar(e.nome_cliente || e['Nome cliente'] || e['Nome Cliente'], 255),
             empresa: truncar(e.empresa || e.Empresa, 255),
             nome_fantasia: truncar(e.nome_fantasia || e['Nome Fantasia'] || e['Nome fantasia'], 255),
             centro_custo: truncar(e.centro_custo || e['Centro Custo'] || e['Centro custo'] || e['centro custo'] || e['Centro de Custo'] || e['Centro de custo'] || e.CentroCusto, 255),
             cidade_p1: truncar(e.cidade_p1 || e['Cidade P1'] || e['Cidade p1'], 100),
-            endereco: e.endereco || null,
+            endereco: enderecoStr || null,
             bairro: truncar(e.bairro, 100),
             cidade: truncar(e.cidade, 100),
             estado: truncar(e.estado, 50),
