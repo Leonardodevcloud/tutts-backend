@@ -6639,16 +6639,78 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const mapMascaras = {};
     mascaras.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
     
+    // ============================================
+    // BUSCAR TODOS OS CLIENTES EXISTENTES NO SISTEMA
+    // ============================================
+    const todosClientesQuery = await pool.query(`
+      SELECT DISTINCT cod_cliente, nome_cliente 
+      FROM bi_entregas 
+      WHERE cod_cliente IS NOT NULL
+      ORDER BY cod_cliente
+    `);
+    const todosClientes = todosClientesQuery.rows;
+    console.log('📊 Total de clientes no sistema:', todosClientes.length);
+    
     // Buscar todos os dados filtrados
     const dadosQuery = await pool.query(`
       SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
         cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
-        valor, valor_prof, distancia, ocorrencia, centro_custo, motivo, finalizado
+        valor, valor_prof, distancia, ocorrencia, centro_custo, motivo, finalizado,
+        data_hora, data_hora_alocado
       FROM bi_entregas ${where}
     `, params);
     
     const dados = dadosQuery.rows;
     console.log('📊 Total registros retornados:', dados.length);
+    
+    // ============================================
+    // FUNÇÃO: Calcular tempo de alocação seguindo regra do BI (DAX)
+    // Regra: Se solicitado após 17h E alocação no dia seguinte,
+    //        início da contagem = 08:00 do dia da alocação
+    // ============================================
+    const calcularTempoAlocacao = (dataHora, dataHoraAlocado, ponto) => {
+      // Ignora: Ponto != 1 OU dados inválidos
+      if (!dataHora || !dataHoraAlocado) return null;
+      if (parseInt(ponto) !== 1) return null;
+      
+      const solicitado = new Date(dataHora);
+      const alocado = new Date(dataHoraAlocado);
+      
+      // Ignora se alocado < solicitado (dados invertidos)
+      if (alocado < solicitado) return null;
+      
+      // Hora da solicitação
+      const horaSolicitado = solicitado.getHours();
+      
+      // Verifica se foi solicitado após 17h
+      const depoisDas17 = horaSolicitado >= 17;
+      
+      // Verifica se a alocação foi no dia seguinte
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaAlocado;
+      
+      let inicioContagem;
+      
+      if (depoisDas17 && !mesmaData) {
+        // Se solicitado após 17h E alocação no dia seguinte,
+        // início = 08:00 do dia da alocação
+        inicioContagem = new Date(alocado);
+        inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        // Caso contrário, início = data/hora solicitado
+        inicioContagem = solicitado;
+      }
+      
+      // Calcula diferença em minutos
+      const difMs = alocado - inicioContagem;
+      const difMinutos = difMs / (1000 * 60);
+      
+      // Retorna null se negativo ou inválido
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      
+      return difMinutos;
+    };
     
     // LÓGICA DE CONTAGEM:
     // Cliente SEM regra: 1 OS = 1 entrega (conta OS únicas)
@@ -6692,6 +6754,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     let totalOS = new Set();
     let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0, semPrazo = 0;
     let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
+    let somaTempoAlocacao = 0, countTempoAlocacao = 0; // Nova métrica de alocação
     let profissionais = new Set();
     let totalRetornos = 0;
     let ultimaEntrega = null;
@@ -6734,6 +6797,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             if (!ultimaEntrega || dataFin > ultimaEntrega) {
               ultimaEntrega = dataFin;
             }
+          }
+          
+          // Calcular tempo de alocação (apenas para Ponto 1)
+          const tempoAloc = calcularTempoAlocacao(row.data_hora, row.data_hora_alocado, row.ponto);
+          if (tempoAloc !== null) {
+            somaTempoAlocacao += tempoAloc;
+            countTempoAlocacao++;
           }
         });
         
@@ -6779,6 +6849,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
       tempo_medio: countTempoExec > 0 ? (somaTempoExec / countTempoExec).toFixed(2) : 0,
+      tempo_medio_alocacao: countTempoAlocacao > 0 ? (somaTempoAlocacao / countTempoAlocacao).toFixed(2) : 0,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -6805,7 +6876,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           profissionais_set: new Set(),
           centros_custo_map: {}, // Mapa de centros de custo com dados
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0,
-          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0,
+          soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0, soma_dist: 0,
+          soma_tempo_alocacao: 0, count_tempo_alocacao: 0, // Novo: tempo de alocação
           total_retornos: 0, ultima_entrega: null
         };
       }
@@ -6842,6 +6914,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               c.ultima_entrega = dataFin;
             }
           }
+          
+          // Calcular tempo de alocação por cliente (apenas para Ponto 1)
+          const tempoAlocCliente = calcularTempoAlocacao(l.data_hora, l.data_hora_alocado, l.ponto);
+          if (tempoAlocCliente !== null) {
+            c.soma_tempo_alocacao += tempoAlocCliente;
+            c.count_tempo_alocacao++;
+          }
         });
         
         const entregasOS = calcularEntregasOS(linhasOS);
@@ -6861,6 +6940,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         
         c.soma_valor += parseFloat(linhaValor?.valor) || 0;
         c.soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+        c.soma_dist += parseFloat(linhaValor?.distancia) || 0;
         
         // Centro de custo para valores - pega do linhaValor
         const ccValor = linhaValor?.centro_custo || 'Sem Centro';
@@ -6936,6 +7016,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       const totalProfs = c.profissionais_set.size;
       const ticketMedio = c.total_entregas > 0 ? (c.soma_valor / c.total_entregas) : 0;
       const incentivo = totalProfs > 0 ? (c.total_entregas / totalProfs) : 0;
+      const tempoMedioAlocacao = c.count_tempo_alocacao > 0 ? (c.soma_tempo_alocacao / c.count_tempo_alocacao) : 0;
       
       return {
         cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
@@ -6944,26 +7025,70 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         centros_custo: centros_custo_dados, // Agora é array com dados completos
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
         tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
+        tempo_medio_alocacao: tempoMedioAlocacao.toFixed(2), // Novo: tempo médio de alocação
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
+        distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
         // Novas métricas
         ticket_medio: ticketMedio.toFixed(2),
         total_profissionais: totalProfs,
         entregas_por_prof: incentivo.toFixed(2),
         incentivo: incentivo.toFixed(2),
         total_retornos: c.total_retornos,
+        retornos: c.total_retornos,
         ultima_entrega: c.ultima_entrega ? c.ultima_entrega.toISOString() : null
       };
-    }).sort((a, b) => b.total_entregas - a.total_entregas);
+    });
+    
+    // ============================================
+    // ADICIONAR CLIENTES QUE NÃO TÊM ENTREGAS NO PERÍODO
+    // (apenas se não houver filtro de cliente específico)
+    // ============================================
+    if (!cod_cliente || cod_cliente.length === 0) {
+      const clientesComDados = new Set(porCliente.map(c => String(c.cod_cliente)));
+      
+      todosClientes.forEach(tc => {
+        const codCli = String(tc.cod_cliente);
+        if (!clientesComDados.has(codCli)) {
+          porCliente.push({
+            cod_cliente: tc.cod_cliente,
+            nome_cliente: tc.nome_cliente,
+            nome_display: mapMascaras[codCli] || tc.nome_cliente,
+            tem_mascara: !!mapMascaras[codCli],
+            total_os: 0,
+            total_entregas: 0,
+            centros_custo: [],
+            dentro_prazo: 0,
+            fora_prazo: 0,
+            sem_prazo: 0,
+            tempo_medio: null,
+            tempo_medio_alocacao: "0.00",
+            valor_total: "0.00",
+            valor_prof: "0.00",
+            distancia_total: "0.00",
+            ticket_medio: "0.00",
+            total_profissionais: 0,
+            entregas_por_prof: "0.00",
+            incentivo: "0.00",
+            total_retornos: 0,
+            retornos: 0,
+            ultima_entrega: null
+          });
+        }
+      });
+    }
+    
+    // Ordenar por total de entregas (decrescente)
+    porCliente.sort((a, b) => b.total_entregas - a.total_entregas);
     
     // Log centros de custo encontrados
     console.log('📁 CENTROS DE CUSTO POR CLIENTE:');
-    porCliente.forEach(c => {
-      console.log(`   - ${c.cod_cliente}: ${c.centros_custo.length} centros -> [${c.centros_custo.join(', ')}]`);
+    porCliente.slice(0, 10).forEach(c => {
+      console.log(`   - ${c.cod_cliente}: ${c.centros_custo?.length || 0} centros`);
     });
     
     // Log resultado por cliente
-    console.log('📊 RESULTADO POR CLIENTE:');
-    porCliente.forEach(c => {
+    console.log('📊 RESULTADO POR CLIENTE (total:', porCliente.length, '):');
+    porCliente.slice(0, 5).forEach(c => {
       const temRegra = clientesComRegra.has(String(c.cod_cliente));
       console.log(`   - ${c.cod_cliente} (${c.nome_display}): ${c.total_os} OS, ${c.total_entregas} entregas, regra: ${temRegra}`);
     });
