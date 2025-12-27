@@ -6094,7 +6094,7 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-27-v6-prazo-dax-rules';
+    const versao = '2025-12-27-v7-agrupa-nome-fantasia';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -10245,11 +10245,13 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
 });
 
 // GET - Dados agrupados por cliente para tabela de acompanhamento
+// IMPORTANTE: Agrupa por NOME_FANTASIA (como o Power BI) e não por cod_cliente
 app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
-    let whereClause = 'WHERE ponto >= 2';
+    // Filtra apenas Ponto >= 2 (entregas, não coletas)
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
     const params = [];
     let paramIndex = 1;
     
@@ -10285,13 +10287,16 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       paramIndex++;
     }
     
-    // Buscar dados agrupados por cliente
+    // Buscar dados agrupados por NOME_FANTASIA (como o Power BI faz)
+    // Tempo de entrega usa regra DAX: Se data diferente, início = 08:00 do dia finalizado
     const clientesQuery = await pool.query(`
       SELECT 
         COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
-        cod_cliente,
+        MIN(cod_cliente) as cod_cliente,
         COUNT(DISTINCT os) as total_os,
         COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
         SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
@@ -10299,20 +10304,49 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
         COALESCE(SUM(valor_prof), 0) as valor_prof,
         COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_execucao_minutos), 0) as tempo_medio_entrega_min,
-        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 0) as tempo_medio_alocacao_min,
+        
+        -- TEMPO MÉDIO ENTREGA - Regra DAX: Se data diferente, início = 08:00 do dia finalizado
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega_min,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (simples, sem regra DAX especial aqui)
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao_min,
+        
         COUNT(DISTINCT cod_prof) as total_profissionais
       FROM bi_entregas
       ${whereClause}
-      GROUP BY cod_cliente, nome_fantasia, nome_cliente
+      GROUP BY COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
       ORDER BY total_entregas DESC
     `, params);
     
-    // Calcular totais
+    // Calcular totais com mesma lógica DAX
     const totaisQuery = await pool.query(`
       SELECT 
         COUNT(DISTINCT os) as total_os,
         COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
         ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
         SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
@@ -10320,8 +10354,34 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
         COALESCE(SUM(valor_prof), 0) as valor_prof,
         COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_execucao_minutos), 0) as tempo_medio_entrega_min,
-        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 0) as tempo_medio_alocacao_min,
+        
+        -- TEMPO MÉDIO ENTREGA - Regra DAX
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega_min,
+        
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao_min,
+        
         COUNT(DISTINCT cod_prof) as total_profissionais
       FROM bi_entregas
       ${whereClause}
@@ -10330,9 +10390,10 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     // Formatar tempo em HH:MM:SS
     const formatarTempo = (minutos) => {
       if (!minutos || minutos <= 0) return '00:00:00';
-      const h = Math.floor(minutos / 60);
-      const m = Math.floor(minutos % 60);
-      const s = Math.floor((minutos % 1) * 60);
+      const totalSeg = Math.round(minutos * 60);
+      const h = Math.floor(totalSeg / 3600);
+      const m = Math.floor((totalSeg % 3600) / 60);
+      const s = totalSeg % 60;
       return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
     };
     
@@ -10341,6 +10402,8 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       cod_cliente: c.cod_cliente,
       os: parseInt(c.total_os) || 0,
       entregas: parseInt(c.total_entregas) || 0,
+      entregasNoPrazo: parseInt(c.entregas_no_prazo) || 0,
+      entregasForaPrazo: parseInt(c.entregas_fora_prazo) || 0,
       noPrazo: parseFloat(c.taxa_no_prazo) || 0,
       foraPrazo: parseFloat(c.taxa_fora_prazo) || 0,
       retornos: parseInt(c.retornos) || 0,
@@ -10356,6 +10419,8 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     const totais = {
       os: parseInt(totaisQuery.rows[0]?.total_os) || 0,
       entregas: parseInt(totaisQuery.rows[0]?.total_entregas) || 0,
+      entregasNoPrazo: parseInt(totaisQuery.rows[0]?.entregas_no_prazo) || 0,
+      entregasForaPrazo: parseInt(totaisQuery.rows[0]?.entregas_fora_prazo) || 0,
       noPrazo: parseFloat(totaisQuery.rows[0]?.taxa_no_prazo) || 0,
       foraPrazo: parseFloat(totaisQuery.rows[0]?.taxa_fora_prazo) || 0,
       retornos: parseInt(totaisQuery.rows[0]?.retornos) || 0,
