@@ -9830,6 +9830,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
     }
     
     // Dados por data
+    // REGRA ALOCAÇÃO: Se solicitado após 17h E alocação no dia seguinte, início = 08:00 do dia da alocação
     const porDataQuery = await pool.query(`
       SELECT 
         data_solicitado,
@@ -9844,7 +9845,21 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         COALESCE(SUM(valor_prof), 0) as valor_motoboy,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
         ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
-        ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60), 1) as tempo_medio_alocacao,
+        ROUND(AVG(
+          CASE 
+            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_alocacao,
         ROUND(AVG(EXTRACT(EPOCH FROM (
           CASE WHEN hora_chegada IS NOT NULL AND data_chegada IS NOT NULL 
           THEN (data_chegada + hora_chegada)::timestamp - data_hora_alocado 
