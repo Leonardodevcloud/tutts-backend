@@ -6094,7 +6094,7 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-27-v8-media-por-os';
+    const versao = '2025-12-27-v9-tempo-ate-chegada';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -10247,6 +10247,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
 // GET - Dados agrupados por cliente para tabela de acompanhamento
 // IMPORTANTE: Agrupa por NOME_FANTASIA (como o Power BI) e não por cod_cliente
 // IMPORTANTE: Calcula média de tempo POR OS (não por linha/ponto)
+// IMPORTANTE: Tempo de entrega usa Data Chegada + Hora Chegada (não Finalizado)
 app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
@@ -10289,11 +10290,9 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     }
     
     // Buscar dados agrupados por NOME_FANTASIA (como o Power BI faz)
-    // IMPORTANTE: Tempo de entrega é calculado POR OS (não por linha)
-    // Isso evita inflar a média quando uma OS tem múltiplos pontos
+    // IMPORTANTE: Tempo de entrega é calculado POR OS usando Data Chegada + Hora Chegada
     const clientesQuery = await pool.query(`
       WITH tempo_por_os AS (
-        -- Primeiro, calcular o tempo de cada OS (apenas 1 valor por OS)
         SELECT 
           os,
           COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
@@ -10303,9 +10302,23 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
           SUM(valor) as valor_os,
           SUM(valor_prof) as valor_prof_os,
           MIN(cod_prof) as cod_prof,
-          -- Tempo de entrega (regra DAX): 1 valor por OS
-          MIN(
+          -- TEMPO DE ENTREGA: Data/Hora -> (Data Chegada + Hora Chegada)
+          -- Regra DAX: Se dia diferente, início = 08:00 do dia da chegada
+          AVG(
             CASE 
+              WHEN data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+              THEN
+                EXTRACT(EPOCH FROM (
+                  (data_chegada + hora_chegada) - 
+                  CASE 
+                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    THEN DATE(data_chegada) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              -- Fallback: usar Finalizado se não tiver Data Chegada
               WHEN data_hora IS NOT NULL 
                    AND finalizado IS NOT NULL
                    AND finalizado >= data_hora
@@ -10347,7 +10360,7 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
         COALESCE(SUM(valor_prof_os), 0) as valor_prof,
         COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
         ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        -- Média do tempo POR OS (não por linha)
+        -- Média do tempo POR OS
         ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
         ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
@@ -10366,8 +10379,20 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
           SUM(valor) as valor_os,
           SUM(valor_prof) as valor_prof_os,
           MIN(cod_prof) as cod_prof,
-          MIN(
+          AVG(
             CASE 
+              WHEN data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+              THEN
+                EXTRACT(EPOCH FROM (
+                  (data_chegada + hora_chegada) - 
+                  CASE 
+                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    THEN DATE(data_chegada) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
               WHEN data_hora IS NOT NULL 
                    AND finalizado IS NOT NULL
                    AND finalizado >= data_hora
