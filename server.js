@@ -9878,7 +9878,25 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         COALESCE(SUM(valor), 0) as valor_total,
         COALESCE(SUM(valor_prof), 0) as valor_motoboy,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
+        ROUND(AVG(
+          CASE 
+            WHEN ponto >= 2 
+                 AND data_hora IS NOT NULL 
+                 AND hora_saida IS NOT NULL 
+                 AND data_saida IS NOT NULL
+                 AND (data_saida + hora_saida)::timestamp >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_saida + hora_saida)::timestamp - 
+                CASE 
+                  WHEN DATE(data_saida) <> DATE(data_hora)
+                  THEN data_saida + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_entrega,
         ROUND(AVG(
           CASE 
             WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL THEN
