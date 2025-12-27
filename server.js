@@ -6094,7 +6094,7 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-27-v7-agrupa-nome-fantasia';
+    const versao = '2025-12-27-v8-media-por-os';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -10246,6 +10246,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
 
 // GET - Dados agrupados por cliente para tabela de acompanhamento
 // IMPORTANTE: Agrupa por NOME_FANTASIA (como o Power BI) e não por cod_cliente
+// IMPORTANTE: Calcula média de tempo POR OS (não por linha/ponto)
 app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
@@ -10288,103 +10289,127 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     }
     
     // Buscar dados agrupados por NOME_FANTASIA (como o Power BI faz)
-    // Tempo de entrega usa regra DAX: Se data diferente, início = 08:00 do dia finalizado
+    // IMPORTANTE: Tempo de entrega é calculado POR OS (não por linha)
+    // Isso evita inflar a média quando uma OS tem múltiplos pontos
     const clientesQuery = await pool.query(`
+      WITH tempo_por_os AS (
+        -- Primeiro, calcular o tempo de cada OS (apenas 1 valor por OS)
+        SELECT 
+          os,
+          COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
+          MIN(cod_cliente) as cod_cliente,
+          MIN(dentro_prazo::int) as dentro_prazo,
+          MAX(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as eh_retorno,
+          SUM(valor) as valor_os,
+          SUM(valor_prof) as valor_prof_os,
+          MIN(cod_prof) as cod_prof,
+          -- Tempo de entrega (regra DAX): 1 valor por OS
+          MIN(
+            CASE 
+              WHEN data_hora IS NOT NULL 
+                   AND finalizado IS NOT NULL
+                   AND finalizado >= data_hora
+              THEN
+                EXTRACT(EPOCH FROM (
+                  finalizado - 
+                  CASE 
+                    WHEN DATE(finalizado) <> DATE(data_hora)
+                    THEN DATE(finalizado) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              ELSE NULL
+            END
+          ) as tempo_entrega_min,
+          -- Tempo de alocação
+          MIN(
+            CASE 
+              WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
+              THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+              ELSE NULL
+            END
+          ) as tempo_alocacao_min
+        FROM bi_entregas
+        ${whereClause}
+        GROUP BY os, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
+      )
       SELECT 
-        COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
+        cliente,
         MIN(cod_cliente) as cod_cliente,
         COUNT(DISTINCT os) as total_os,
         COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
-        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_prof,
-        COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
-        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        
-        -- TEMPO MÉDIO ENTREGA - Regra DAX: Se data diferente, início = 08:00 do dia finalizado
-        ROUND(AVG(
-          CASE 
-            WHEN data_hora IS NOT NULL 
-                 AND finalizado IS NOT NULL
-                 AND finalizado >= data_hora
-            THEN
-              EXTRACT(EPOCH FROM (
-                finalizado - 
-                CASE 
-                  WHEN DATE(finalizado) <> DATE(data_hora)
-                  THEN DATE(finalizado) + TIME '08:00:00'
-                  ELSE data_hora
-                END
-              )) / 60
-            ELSE NULL
-          END
-        ), 2) as tempo_medio_entrega_min,
-        
-        -- TEMPO MÉDIO ALOCAÇÃO (simples, sem regra DAX especial aqui)
-        ROUND(AVG(
-          CASE 
-            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
-            ELSE NULL
-          END
-        ), 2) as tempo_medio_alocacao_min,
-        
+        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(eh_retorno) as retornos,
+        COALESCE(SUM(valor_os), 0) as valor_total,
+        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
+        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        -- Média do tempo POR OS (não por linha)
+        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
+        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
-      FROM bi_entregas
-      ${whereClause}
-      GROUP BY COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
+      FROM tempo_por_os
+      GROUP BY cliente
       ORDER BY total_entregas DESC
     `, params);
     
-    // Calcular totais com mesma lógica DAX
+    // Calcular totais com mesma lógica
     const totaisQuery = await pool.query(`
+      WITH tempo_por_os AS (
+        SELECT 
+          os,
+          MIN(dentro_prazo::int) as dentro_prazo,
+          MAX(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as eh_retorno,
+          SUM(valor) as valor_os,
+          SUM(valor_prof) as valor_prof_os,
+          MIN(cod_prof) as cod_prof,
+          MIN(
+            CASE 
+              WHEN data_hora IS NOT NULL 
+                   AND finalizado IS NOT NULL
+                   AND finalizado >= data_hora
+              THEN
+                EXTRACT(EPOCH FROM (
+                  finalizado - 
+                  CASE 
+                    WHEN DATE(finalizado) <> DATE(data_hora)
+                    THEN DATE(finalizado) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              ELSE NULL
+            END
+          ) as tempo_entrega_min,
+          MIN(
+            CASE 
+              WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
+              THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+              ELSE NULL
+            END
+          ) as tempo_alocacao_min
+        FROM bi_entregas
+        ${whereClause}
+        GROUP BY os
+      )
       SELECT 
         COUNT(DISTINCT os) as total_os,
         COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
-        SUM(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as retornos,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_prof,
-        COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as faturamento_total,
-        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        
-        -- TEMPO MÉDIO ENTREGA - Regra DAX
-        ROUND(AVG(
-          CASE 
-            WHEN data_hora IS NOT NULL 
-                 AND finalizado IS NOT NULL
-                 AND finalizado >= data_hora
-            THEN
-              EXTRACT(EPOCH FROM (
-                finalizado - 
-                CASE 
-                  WHEN DATE(finalizado) <> DATE(data_hora)
-                  THEN DATE(finalizado) + TIME '08:00:00'
-                  ELSE data_hora
-                END
-              )) / 60
-            ELSE NULL
-          END
-        ), 2) as tempo_medio_entrega_min,
-        
-        ROUND(AVG(
-          CASE 
-            WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
-            ELSE NULL
-          END
-        ), 2) as tempo_medio_alocacao_min,
-        
+        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(eh_retorno) as retornos,
+        COALESCE(SUM(valor_os), 0) as valor_total,
+        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
+        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
+        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
-      FROM bi_entregas
-      ${whereClause}
+      FROM tempo_por_os
     `, params);
     
     // Formatar tempo em HH:MM:SS
