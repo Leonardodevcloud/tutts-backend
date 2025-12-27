@@ -6094,7 +6094,7 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
-    const versao = '2025-12-27-v9-tempo-ate-chegada';
+    const versao = '2025-12-27-v11-fix-coleta-ponto';
     
     // Verificar prazo padrão
     const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_padrao ORDER BY km_min`);
@@ -10252,8 +10252,8 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
-    // Filtra apenas Ponto >= 2 (entregas, não coletas)
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
+    // Não filtramos por Ponto aqui para incluir coletas (Ponto 1) e entregas (Ponto >= 2)
+    let whereClause = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
     
@@ -10297,16 +10297,19 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
           os,
           COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
           MIN(cod_cliente) as cod_cliente,
-          MIN(dentro_prazo::int) as dentro_prazo,
-          MAX(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as eh_retorno,
-          SUM(valor) as valor_os,
-          SUM(valor_prof) as valor_prof_os,
+          -- Métricas de ENTREGA (Ponto >= 2)
+          MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
+          MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END) as valor_os,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_prof_os,
           MIN(cod_prof) as cod_prof,
-          -- TEMPO DE ENTREGA: Data/Hora -> (Data Chegada + Hora Chegada)
-          -- Regra DAX: Se dia diferente, início = 08:00 do dia da chegada
+          -- Contagem de entregas (Ponto >= 2)
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_os,
+          -- TEMPO DE ENTREGA: Data/Hora -> (Data Chegada + Hora Chegada) para Ponto >= 2
           AVG(
             CASE 
-              WHEN data_hora IS NOT NULL 
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
               THEN
@@ -10318,8 +10321,9 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                     ELSE data_hora
                   END
                 )) / 60
-              -- Fallback: usar Finalizado se não tiver Data Chegada
-              WHEN data_hora IS NOT NULL 
+              -- Fallback: usar Finalizado se não tiver Data Chegada (para Ponto >= 2)
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
                    AND finalizado IS NOT NULL
                    AND finalizado >= data_hora
               THEN
@@ -10341,47 +10345,12 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
               THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
               ELSE NULL
             END
-          ) as tempo_alocacao_min
-        FROM bi_entregas
-        ${whereClause}
-        GROUP BY os, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
-      )
-      SELECT 
-        cliente,
-        MIN(cod_cliente) as cod_cliente,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
-        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
-        SUM(eh_retorno) as retornos,
-        COALESCE(SUM(valor_os), 0) as valor_total,
-        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
-        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
-        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        -- Média do tempo POR OS
-        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
-        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
-        COUNT(DISTINCT cod_prof) as total_profissionais
-      FROM tempo_por_os
-      GROUP BY cliente
-      ORDER BY total_entregas DESC
-    `, params);
-    
-    // Calcular totais com mesma lógica
-    const totaisQuery = await pool.query(`
-      WITH tempo_por_os AS (
-        SELECT 
-          os,
-          MIN(dentro_prazo::int) as dentro_prazo,
-          MAX(CASE WHEN LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%' THEN 1 ELSE 0 END) as eh_retorno,
-          SUM(valor) as valor_os,
-          SUM(valor_prof) as valor_prof_os,
-          MIN(cod_prof) as cod_prof,
+          ) as tempo_alocacao_min,
+          -- Tempo de coleta: quando Ponto = 1, tempo até chegada
           AVG(
             CASE 
-              WHEN data_hora IS NOT NULL 
+              WHEN COALESCE(ponto, 1)::int = 1 
+                   AND data_hora IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
               THEN
@@ -10393,7 +10362,67 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                     ELSE data_hora
                   END
                 )) / 60
-              WHEN data_hora IS NOT NULL 
+              ELSE NULL
+            END
+          ) as tempo_coleta_min
+        FROM bi_entregas
+        ${whereClause}
+        GROUP BY os, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
+      )
+      SELECT 
+        cliente,
+        MIN(cod_cliente) as cod_cliente,
+        COUNT(DISTINCT os) as total_os,
+        SUM(total_entregas_os) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(eh_retorno) as retornos,
+        COALESCE(SUM(valor_os), 0) as valor_total,
+        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
+        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        -- Média do tempo POR OS
+        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
+        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
+        ROUND(AVG(tempo_coleta_min), 2) as tempo_medio_coleta_min,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM tempo_por_os
+      GROUP BY cliente
+      ORDER BY total_entregas DESC
+    `, params);
+    
+    // Calcular totais com mesma lógica
+    const totaisQuery = await pool.query(`
+      WITH tempo_por_os AS (
+        SELECT 
+          os,
+          -- Métricas de ENTREGA (Ponto >= 2)
+          MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
+          MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END) as valor_os,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_prof_os,
+          MIN(cod_prof) as cod_prof,
+          -- Contagem de entregas (Ponto >= 2)
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_os,
+          AVG(
+            CASE 
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+              THEN
+                EXTRACT(EPOCH FROM (
+                  (data_chegada + hora_chegada) - 
+                  CASE 
+                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    THEN DATE(data_chegada) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
                    AND finalizado IS NOT NULL
                    AND finalizado >= data_hora
               THEN
@@ -10414,18 +10443,37 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
               THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
               ELSE NULL
             END
-          ) as tempo_alocacao_min
+          ) as tempo_alocacao_min,
+          -- Tempo de coleta: quando Ponto = 1, tempo até chegada
+          AVG(
+            CASE 
+              WHEN COALESCE(ponto, 1)::int = 1 
+                   AND data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+              THEN
+                EXTRACT(EPOCH FROM (
+                  (data_chegada + hora_chegada) - 
+                  CASE 
+                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    THEN DATE(data_chegada) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              ELSE NULL
+            END
+          ) as tempo_coleta_min
         FROM bi_entregas
         ${whereClause}
         GROUP BY os
       )
       SELECT 
         COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
+        SUM(total_entregas_os) as total_entregas,
         SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
         SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_fora_prazo,
         SUM(eh_retorno) as retornos,
         COALESCE(SUM(valor_os), 0) as valor_total,
         COALESCE(SUM(valor_prof_os), 0) as valor_prof,
@@ -10433,6 +10481,7 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
         ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
         ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
         ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
+        ROUND(AVG(tempo_coleta_min), 2) as tempo_medio_coleta_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
       FROM tempo_por_os
     `, params);
@@ -10463,7 +10512,9 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       ticketMedio: parseFloat(c.ticket_medio) || 0,
       tempoMedioEntrega: formatarTempo(parseFloat(c.tempo_medio_entrega_min)),
       tempoMedioAlocacao: formatarTempo(parseFloat(c.tempo_medio_alocacao_min)),
-      totalProfissionais: parseInt(c.total_profissionais) || 0
+      tempoMedioColeta: formatarTempo(parseFloat(c.tempo_medio_coleta_min)),
+      totalProfissionais: parseInt(c.total_profissionais) || 0,
+      mediaEntProfissional: ((parseInt(c.total_entregas) || 0) / Math.max(parseInt(c.total_profissionais) || 1, 1)).toFixed(1)
     }));
     
     const totais = {
@@ -10480,7 +10531,9 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       ticketMedio: parseFloat(totaisQuery.rows[0]?.ticket_medio) || 0,
       tempoMedioEntrega: formatarTempo(parseFloat(totaisQuery.rows[0]?.tempo_medio_entrega_min)),
       tempoMedioAlocacao: formatarTempo(parseFloat(totaisQuery.rows[0]?.tempo_medio_alocacao_min)),
-      totalProfissionais: parseInt(totaisQuery.rows[0]?.total_profissionais) || 0
+      tempoMedioColeta: formatarTempo(parseFloat(totaisQuery.rows[0]?.tempo_medio_coleta_min)),
+      totalProfissionais: parseInt(totaisQuery.rows[0]?.total_profissionais) || 0,
+      mediaEntProfissional: ((parseInt(totaisQuery.rows[0]?.total_entregas) || 0) / Math.max(parseInt(totaisQuery.rows[0]?.total_profissionais) || 1, 1)).toFixed(1)
     };
     
     res.json({ clientes, totais });
