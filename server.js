@@ -10475,8 +10475,8 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
             WHEN COALESCE(ponto, 1) <> 1 
                  AND data_hora IS NOT NULL 
                  AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora)
                  )
             THEN
               EXTRACT(EPOCH FROM (
@@ -10521,8 +10521,8 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
             WHEN COALESCE(ponto, 1) = 1
                  AND data_hora_alocado IS NOT NULL 
                  AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora_alocado)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora_alocado)
                  )
             THEN
               EXTRACT(EPOCH FROM (
@@ -10678,9 +10678,10 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                    AND data_hora IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
+                   AND (data_chegada + hora_chegada::time) >= data_hora
               THEN
                 EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada) - 
+                  (data_chegada + hora_chegada::time) - 
                   CASE 
                     WHEN DATE(data_chegada) <> DATE(data_hora)
                     THEN DATE(data_chegada) + TIME '08:00:00'
@@ -10733,6 +10734,7 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                    AND data_hora_alocado IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
+                   AND (data_chegada + hora_chegada::time) >= data_hora_alocado
               THEN
                 EXTRACT(EPOCH FROM (
                   (data_chegada + hora_chegada::time) - 
@@ -10793,9 +10795,10 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                    AND data_hora IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
+                   AND (data_chegada + hora_chegada::time) >= data_hora
               THEN
                 EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada) - 
+                  (data_chegada + hora_chegada::time) - 
                   CASE 
                     WHEN DATE(data_chegada) <> DATE(data_hora)
                     THEN DATE(data_chegada) + TIME '08:00:00'
@@ -10845,6 +10848,7 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
                    AND data_hora_alocado IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
+                   AND (data_chegada + hora_chegada::time) >= data_hora_alocado
               THEN
                 EXTRACT(EPOCH FROM (
                   (data_chegada + hora_chegada::time) - 
