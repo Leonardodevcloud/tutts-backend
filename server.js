@@ -10657,234 +10657,201 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       paramIndex++;
     }
     
-    // Buscar dados agrupados por COD_CLIENTE (igual ao Dashboard)
-    // IMPORTANTE: Tempo de entrega é calculado POR OS usando Data Chegada + Hora Chegada
+    // Buscar dados agrupados por COD_CLIENTE - Média direta de todas as linhas (igual ao Dashboard)
     const clientesQuery = await pool.query(`
-      WITH tempo_por_os AS (
-        SELECT 
-          os,
-          cod_cliente,
-          COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as nome_display,
-          -- Métricas de ENTREGA (Ponto >= 2)
-          MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
-          MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END) as valor_os,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_prof_os,
-          MIN(cod_prof) as cod_prof,
-          -- Contagem de entregas (Ponto >= 2)
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_os,
-          -- TEMPO DE ENTREGA: Data/Hora -> (Data Chegada + Hora Chegada) para Ponto >= 2
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1) >= 2
-                   AND data_hora IS NOT NULL 
-                   AND data_chegada IS NOT NULL 
-                   AND hora_chegada IS NOT NULL
-                   AND (data_chegada + hora_chegada::time) >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada::time) - 
-                  CASE 
-                    WHEN DATE(data_chegada) <> DATE(data_hora)
-                    THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              -- Fallback: usar Finalizado se não tiver Data Chegada (para Ponto >= 2)
-              WHEN COALESCE(ponto, 1) >= 2
-                   AND data_hora IS NOT NULL 
-                   AND finalizado IS NOT NULL
-                   AND finalizado >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  finalizado - 
-                  CASE 
-                    WHEN DATE(finalizado) <> DATE(data_hora)
-                    THEN DATE(finalizado) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_entrega_min,
-          -- Tempo de alocação (Ponto = 1: Solicitado -> Alocado)
-          -- Regra: Se solicitado após 17h E alocado no dia seguinte, início = 08:00 do dia alocado
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1)::int = 1
-                   AND data_hora_alocado IS NOT NULL 
-                   AND data_hora IS NOT NULL
-                   AND data_hora_alocado >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  data_hora_alocado - 
-                  CASE 
-                    WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                         AND DATE(data_hora_alocado) > DATE(data_hora)
-                    THEN DATE(data_hora_alocado) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_alocacao_min,
-          -- Tempo de coleta (Ponto = 1: Alocado -> Saída conforme DAX)
-          -- Regra: Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1)::int = 1 
-                   AND data_hora_alocado IS NOT NULL 
-                   AND data_chegada IS NOT NULL 
-                   AND hora_chegada IS NOT NULL
-                   AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-              THEN
-                EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada::time) - 
-                  CASE 
-                    WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                         AND DATE(data_chegada) > DATE(data_hora_alocado)
-                    THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora_alocado
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_coleta_min
-        FROM bi_entregas
-        ${whereClause}
-        GROUP BY os, cod_cliente, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
-      )
       SELECT 
         cod_cliente,
-        MAX(nome_display) as nome_display,
+        MAX(COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)) as nome_display,
         COUNT(DISTINCT os) as total_os,
-        SUM(total_entregas_os) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
-        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_fora_prazo,
-        SUM(eh_retorno) as retornos,
-        COALESCE(SUM(valor_os), 0) as valor_total,
-        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
-        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
-        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        -- Média do tempo POR OS
-        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
-        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
-        ROUND(AVG(tempo_coleta_min), 2) as tempo_medio_coleta_min,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 ELSE 0 END), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 ELSE 0 END), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) - 
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / 
+              NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        -- TEMPO MÉDIO ENTREGA: média direta de todas as linhas (Ponto >= 2)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega_min,
+        -- TEMPO MÉDIO ALOCAÇÃO: média direta de todas as linhas (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao_min,
+        -- TEMPO MÉDIO COLETA: média direta de todas as linhas (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1 
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_coleta_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
-      FROM tempo_por_os
+      FROM bi_entregas
+      ${whereClause}
       GROUP BY cod_cliente
       ORDER BY total_entregas DESC
     `, params);
     
-    // Calcular totais com mesma lógica
+    // Calcular totais com média direta (igual ao Dashboard)
     const totaisQuery = await pool.query(`
-      WITH tempo_por_os AS (
-        SELECT 
-          os,
-          -- Métricas de ENTREGA (Ponto >= 2)
-          MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
-          MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END) as valor_os,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_prof_os,
-          MIN(cod_prof) as cod_prof,
-          -- Contagem de entregas (Ponto >= 2)
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_os,
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1) >= 2
-                   AND data_hora IS NOT NULL 
-                   AND data_chegada IS NOT NULL 
-                   AND hora_chegada IS NOT NULL
-                   AND (data_chegada + hora_chegada::time) >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada::time) - 
-                  CASE 
-                    WHEN DATE(data_chegada) <> DATE(data_hora)
-                    THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              WHEN COALESCE(ponto, 1) >= 2
-                   AND data_hora IS NOT NULL 
-                   AND finalizado IS NOT NULL
-                   AND finalizado >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  finalizado - 
-                  CASE 
-                    WHEN DATE(finalizado) <> DATE(data_hora)
-                    THEN DATE(finalizado) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_entrega_min,
-          -- Tempo de alocação (Ponto = 1: Solicitado -> Alocado)
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1)::int = 1
-                   AND data_hora_alocado IS NOT NULL 
-                   AND data_hora IS NOT NULL
-                   AND data_hora_alocado >= data_hora
-              THEN
-                EXTRACT(EPOCH FROM (
-                  data_hora_alocado - 
-                  CASE 
-                    WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                         AND DATE(data_hora_alocado) > DATE(data_hora)
-                    THEN DATE(data_hora_alocado) + TIME '08:00:00'
-                    ELSE data_hora
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_alocacao_min,
-          -- Tempo de coleta (Ponto = 1: Alocado -> Saída)
-          AVG(
-            CASE 
-              WHEN COALESCE(ponto, 1)::int = 1 
-                   AND data_hora_alocado IS NOT NULL 
-                   AND data_chegada IS NOT NULL 
-                   AND hora_chegada IS NOT NULL
-                   AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-              THEN
-                EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada::time) - 
-                  CASE 
-                    WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                         AND DATE(data_chegada) > DATE(data_hora_alocado)
-                    THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora_alocado
-                  END
-                )) / 60
-              ELSE NULL
-            END
-          ) as tempo_coleta_min
-        FROM bi_entregas
-        ${whereClause}
-        GROUP BY os
-      )
       SELECT 
         COUNT(DISTINCT os) as total_os,
-        SUM(total_entregas_os) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
-        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_no_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_fora_prazo,
-        SUM(eh_retorno) as retornos,
-        COALESCE(SUM(valor_os), 0) as valor_total,
-        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
-        COALESCE(SUM(valor_os), 0) - COALESCE(SUM(valor_prof_os), 0) as faturamento_total,
-        ROUND(COALESCE(SUM(valor_os), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min,
-        ROUND(AVG(tempo_alocacao_min), 2) as tempo_medio_alocacao_min,
-        ROUND(AVG(tempo_coleta_min), 2) as tempo_medio_coleta_min,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 ELSE 0 END), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 ELSE 0 END), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) - 
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as faturamento_total,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(DISTINCT os), 0), 2) as ticket_medio,
+        -- TEMPO MÉDIO ENTREGA: média direta de todas as linhas
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega_min,
+        -- TEMPO MÉDIO ALOCAÇÃO
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao_min,
+        -- TEMPO MÉDIO COLETA
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1 
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_coleta_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
-      FROM tempo_por_os
+      FROM bi_entregas
+      ${whereClause}
     `, params);
     
     // Formatar tempo em HH:MM:SS
