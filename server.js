@@ -7551,7 +7551,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           cod_prof: primeiraLinha.cod_prof,
           nome_prof: primeiraLinha.nome_prof,
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
-          soma_tempo: 0, count_tempo: 0, soma_dist: 0, soma_valor_prof: 0, retornos: 0
+          soma_tempo: 0, count_tempo: 0, 
+          soma_tempo_alocacao: 0, count_tempo_alocacao: 0,
+          soma_tempo_coleta: 0, count_tempo_coleta: 0,
+          soma_dist: 0, soma_valor_prof: 0, retornos: 0
         };
       }
       
@@ -7591,6 +7594,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
               p.count_tempo++;
             }
+            // Tempo de alocação
+            if (l.tempo_alocacao_minutos != null) {
+              p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
+              p.count_tempo_alocacao++;
+            }
+            // Tempo de coleta
+            if (l.tempo_coleta_minutos != null) {
+              p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
+              p.count_tempo_coleta++;
+            }
           });
         } else if (linhas.length > 1) {
           linhas.slice(1).forEach(l => {
@@ -7601,6 +7614,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             if (l.tempo_execucao_minutos != null) {
               p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
               p.count_tempo++;
+            }
+            // Tempo de alocação
+            if (l.tempo_alocacao_minutos != null) {
+              p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
+              p.count_tempo_alocacao++;
+            }
+            // Tempo de coleta
+            if (l.tempo_coleta_minutos != null) {
+              p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
+              p.count_tempo_coleta++;
             }
           });
         } else {
@@ -7613,6 +7636,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
             p.count_tempo++;
           }
+          // Tempo de alocação
+          if (l.tempo_alocacao_minutos != null) {
+            p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
+            p.count_tempo_alocacao++;
+          }
+          // Tempo de coleta
+          if (l.tempo_coleta_minutos != null) {
+            p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
+            p.count_tempo_coleta++;
+          }
         }
       });
     });
@@ -7621,6 +7654,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       cod_prof: p.cod_prof, nome_prof: p.nome_prof,
       total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
       tempo_medio: p.count_tempo > 0 ? (p.soma_tempo / p.count_tempo).toFixed(2) : null,
+      tempo_alocado: p.count_tempo_alocacao > 0 ? (p.soma_tempo_alocacao / p.count_tempo_alocacao).toFixed(2) : null,
+      tempo_coleta: p.count_tempo_coleta > 0 ? (p.soma_tempo_coleta / p.count_tempo_coleta).toFixed(2) : null,
       distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
       retornos: p.retornos
     })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7690,7 +7725,10 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
         hora_chegada,
         finalizado,
         ocorrencia,
-        motivo
+        motivo,
+        tempo_alocacao_minutos,
+        tempo_coleta_minutos,
+        tempo_execucao_minutos
       FROM bi_entregas
       ${whereClause}
       ORDER BY data_solicitado DESC, os DESC
@@ -7699,12 +7737,13 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
     
     // Calcular tempo para cada OS
     const oss = query.rows.map(row => {
-      let tempoEntrega = null;
-      let tempoAlocacao = null;
-      let tempoColeta = null;
+      let tempoEntrega = row.tempo_execucao_minutos ? parseFloat(row.tempo_execucao_minutos) : null;
+      let tempoAlocacao = row.tempo_alocacao_minutos ? parseFloat(row.tempo_alocacao_minutos) : null;
+      let tempoColeta = row.tempo_coleta_minutos ? parseFloat(row.tempo_coleta_minutos) : null;
       
+      // Se não tiver os campos calculados, calcula manualmente
       // Tempo de alocação: data_hora -> data_hora_alocado
-      if (row.data_hora && row.data_hora_alocado) {
+      if (tempoAlocacao === null && row.data_hora && row.data_hora_alocado) {
         const solicitado = new Date(row.data_hora);
         const alocado = new Date(row.data_hora_alocado);
         if (alocado >= solicitado) {
@@ -7713,7 +7752,7 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
       }
       
       // Tempo de entrega: data_hora -> (data_chegada + hora_chegada) ou finalizado
-      if (row.data_hora) {
+      if (tempoEntrega === null && row.data_hora) {
         const solicitado = new Date(row.data_hora);
         let chegada = null;
         
@@ -7752,6 +7791,7 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
         dentro_prazo: row.dentro_prazo,
         data_solicitado: row.data_solicitado,
         tempo_alocacao: tempoAlocacao,
+        tempo_coleta: tempoColeta,
         tempo_entrega: tempoEntrega,
         ocorrencia: row.ocorrencia,
         motivo: row.motivo
