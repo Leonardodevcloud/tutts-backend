@@ -7028,48 +7028,47 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       if (!row.data_hora) return null;
       const solicitado = new Date(row.data_hora);
+      if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
+      let dataChegadaBase = null;
       
-      // Prioridade: data_chegada + hora_chegada
+      // Verificar se temos data_chegada + hora_chegada válidos E >= solicitado
       if (row.data_chegada && row.hora_chegada) {
-        // Combinar data_chegada com hora_chegada
         const dataChegada = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
-        dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        chegada = dataChegada;
-      } 
-      // Fallback: usar finalizado
-      else if (row.finalizado) {
-        chegada = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+          chegada = dataChegada;
+          dataChegadaBase = new Date(row.data_chegada);
+        }
+      }
+      
+      // Fallback: usar finalizado se válido E >= solicitado
+      if (!chegada && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= solicitado) {
+          chegada = fin;
+          dataChegadaBase = fin;
+        }
       }
       
       if (!chegada) return null;
       
-      // Ignora se chegada < solicitado (dados invertidos)
-      if (chegada < solicitado) return null;
-      
       // Verifica se é mesma data
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = chegada.toISOString().split('T')[0];
-      const mesmaData = diaSolicitado === diaChegada;
+      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      
-      if (!mesmaData) {
+      if (diaSolicitado !== diaChegada) {
         // Se não é mesma data, início = 08:00 do dia da chegada
-        inicioContagem = new Date(chegada);
+        inicioContagem = new Date(dataChegadaBase);
         inicioContagem.setHours(8, 0, 0, 0);
       } else {
-        // Mesma data, início = data/hora solicitado
         inicioContagem = solicitado;
       }
       
-      // Calcula diferença em minutos
-      const difMs = chegada - inicioContagem;
-      const difMinutos = difMs / (1000 * 60);
-      
-      // Retorna null se negativo ou inválido
+      const difMinutos = (chegada - inicioContagem) / (1000 * 60);
       if (difMinutos < 0 || isNaN(difMinutos)) return null;
       
       return difMinutos;
@@ -7084,25 +7083,34 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       const pontoNum = parseInt(row.ponto) || 1;
       if (pontoNum !== 1) return null; // Apenas ponto 1 (coleta)
       
-      // Precisa de data_hora_alocado (Alocado)
       if (!row.data_hora_alocado) return null;
       const alocado = new Date(row.data_hora_alocado);
+      if (isNaN(alocado.getTime())) return null;
       
-      // Saída = data_chegada + hora_chegada ou finalizado
       let saida = null;
+      let dataSaidaBase = null;
+      
+      // Verificar se temos data_chegada + hora_chegada válidos E >= alocado
       if (row.data_chegada && row.hora_chegada) {
         const dataSaida = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        saida = dataSaida;
-      } else if (row.finalizado) {
-        saida = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+          saida = dataSaida;
+          dataSaidaBase = new Date(row.data_chegada);
+        }
+      }
+      
+      // Fallback: usar finalizado se válido E >= alocado
+      if (!saida && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= alocado) {
+          saida = fin;
+          dataSaidaBase = fin;
+        }
       }
       
       if (!saida) return null;
-      
-      // Ignora se saída < alocado (dados invertidos)
-      if (saida < alocado) return null;
       
       // Verifica hora da alocação (se depois das 17h)
       const horaAlocado = alocado.getHours();
@@ -7110,26 +7118,18 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       // Verifica se é mesma data
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = saida.toISOString().split('T')[0];
-      const mesmaData = diaAlocado === diaSaida;
+      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      
-      if (depoisDas17 && !mesmaData) {
-        // Se alocado após 17h E saída no dia seguinte,
-        // início = 08:00 do dia da saída
-        inicioContagem = new Date(saida);
+      if (depoisDas17 && diaAlocado !== diaSaida) {
+        // Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
+        inicioContagem = new Date(dataSaidaBase);
         inicioContagem.setHours(8, 0, 0, 0);
       } else {
-        // Caso contrário, início = data/hora alocado
         inicioContagem = alocado;
       }
       
-      // Calcula diferença em minutos
-      const difMs = saida - inicioContagem;
-      const difMinutos = difMs / (1000 * 60);
-      
-      // Retorna null se negativo ou inválido
+      const difMinutos = (saida - inicioContagem) / (1000 * 60);
       if (difMinutos < 0 || isNaN(difMinutos)) return null;
       
       return difMinutos;
@@ -7760,29 +7760,41 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
     
     const calcularTempoEntrega = (row) => {
       const pontoNum = parseInt(row.ponto) || 1;
-      if (pontoNum === 1) return null; // Só para entregas (ponto <> 1)
+      if (pontoNum === 1) return null;
       
       if (!row.data_hora) return null;
       const solicitado = new Date(row.data_hora);
+      if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
+      let dataChegadaBase = null;
+      
       if (row.data_chegada && row.hora_chegada) {
         const dataChegada = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        chegada = dataChegada;
-      } else if (row.finalizado) {
-        chegada = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+          chegada = dataChegada;
+          dataChegadaBase = new Date(row.data_chegada);
+        }
       }
       
-      if (!chegada || chegada < solicitado || isNaN(chegada.getTime()) || isNaN(solicitado.getTime())) return null;
+      if (!chegada && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= solicitado) {
+          chegada = fin;
+          dataChegadaBase = fin;
+        }
+      }
+      
+      if (!chegada) return null;
       
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = chegada.toISOString().split('T')[0];
+      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
       let inicioContagem;
       if (diaSolicitado !== diaChegada) {
-        inicioContagem = new Date(chegada);
+        inicioContagem = new Date(dataChegadaBase);
         inicioContagem.setHours(8, 0, 0, 0);
       } else {
         inicioContagem = solicitado;
@@ -7795,36 +7807,43 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
     
     const calcularTempoColeta = (row) => {
       const pontoNum = parseInt(row.ponto) || 1;
-      if (pontoNum !== 1) return null; // Só para coleta (ponto = 1)
+      if (pontoNum !== 1) return null;
       
-      // Precisa de data_hora_alocado (Alocado)
       if (!row.data_hora_alocado) return null;
       const alocado = new Date(row.data_hora_alocado);
+      if (isNaN(alocado.getTime())) return null;
       
-      // Saída = data_chegada + hora_chegada ou finalizado
       let saida = null;
+      let dataSaidaBase = null;
+      
       if (row.data_chegada && row.hora_chegada) {
         const dataSaida = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        saida = dataSaida;
-      } else if (row.finalizado) {
-        saida = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+          saida = dataSaida;
+          dataSaidaBase = new Date(row.data_chegada);
+        }
       }
       
-      if (!saida || saida < alocado || isNaN(saida.getTime()) || isNaN(alocado.getTime())) return null;
+      if (!saida && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= alocado) {
+          saida = fin;
+          dataSaidaBase = fin;
+        }
+      }
       
-      // Verifica hora da alocação (se depois das 17h)
+      if (!saida) return null;
+      
       const horaAlocado = alocado.getHours();
       const depoisDas17 = horaAlocado >= 17;
-      
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = saida.toISOString().split('T')[0];
-      const mesmaData = diaAlocado === diaSaida;
+      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (depoisDas17 && !mesmaData) {
-        inicioContagem = new Date(saida);
+      if (depoisDas17 && diaAlocado !== diaSaida) {
+        inicioContagem = new Date(dataSaidaBase);
         inicioContagem.setHours(8, 0, 0, 0);
       } else {
         inicioContagem = alocado;
@@ -11080,29 +11099,45 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       
       if (!row.data_hora) return null;
       const solicitado = new Date(row.data_hora);
+      if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
+      let dataChegadaBase = null;
       
       if (row.data_chegada && row.hora_chegada) {
         const dataChegada = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
-        dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        chegada = dataChegada;
-      } else if (row.finalizado) {
-        chegada = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+          chegada = dataChegada;
+          dataChegadaBase = new Date(row.data_chegada);
+        }
       }
       
-      if (!chegada || chegada < solicitado) return null;
+      if (!chegada && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= solicitado) {
+          chegada = fin;
+          dataChegadaBase = fin;
+        }
+      }
+      
+      if (!chegada) return null;
       
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = chegada.toISOString().split('T')[0];
-      const mesmaData = diaSolicitado === diaChegada;
+      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
-      let inicioContagem = mesmaData ? solicitado : new Date(chegada);
-      if (!mesmaData) inicioContagem.setHours(8, 0, 0, 0);
+      let inicioContagem;
+      if (diaSolicitado !== diaChegada) {
+        inicioContagem = new Date(dataChegadaBase);
+        inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        inicioContagem = solicitado;
+      }
       
       const difMinutos = (chegada - inicioContagem) / (1000 * 60);
-      return difMinutos >= 0 ? difMinutos : null;
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      return difMinutos;
     };
     
     // Função para calcular tempo de coleta (Alocado -> Saída conforme DAX)
@@ -11112,34 +11147,47 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       
       if (!row.data_hora_alocado) return null;
       const alocado = new Date(row.data_hora_alocado);
+      if (isNaN(alocado.getTime())) return null;
       
       let saida = null;
+      let dataSaidaBase = null;
       
       if (row.data_chegada && row.hora_chegada) {
         const dataSaida = new Date(row.data_chegada);
-        const [horas, minutos, segundos] = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-        saida = dataSaida;
-      } else if (row.finalizado) {
-        saida = new Date(row.finalizado);
+        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
+        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+          saida = dataSaida;
+          dataSaidaBase = new Date(row.data_chegada);
+        }
       }
       
-      if (!saida || saida < alocado) return null;
+      if (!saida && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= alocado) {
+          saida = fin;
+          dataSaidaBase = fin;
+        }
+      }
+      
+      if (!saida) return null;
       
       const horaAlocado = alocado.getHours();
       const depoisDas17 = horaAlocado >= 17;
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = saida.toISOString().split('T')[0];
-      const mesmaData = diaAlocado === diaSaida;
+      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
-      let inicioContagem = alocado;
-      if (depoisDas17 && !mesmaData) {
-        inicioContagem = new Date(saida);
+      let inicioContagem;
+      if (depoisDas17 && diaAlocado !== diaSaida) {
+        inicioContagem = new Date(dataSaidaBase);
         inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        inicioContagem = alocado;
       }
       
       const difMinutos = (saida - inicioContagem) / (1000 * 60);
-      return difMinutos >= 0 ? difMinutos : null;
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      return difMinutos;
     };
     
     // Função para calcular tempo de alocação
