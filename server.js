@@ -7031,16 +7031,26 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
-      let dataChegadaBase = null;
+      let dataParaComparacao = null;
       
-      // Verificar se temos data_chegada + hora_chegada válidos E >= solicitado
+      // Verificar se temos data_chegada + hora_chegada válidos
       if (row.data_chegada && row.hora_chegada) {
-        const dataChegada = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
-          chegada = dataChegada;
-          dataChegadaBase = new Date(row.data_chegada);
+        try {
+          // data_chegada pode ser Date ou string
+          const dataChegadaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataChegada = new Date(dataChegadaStr + 'T00:00:00');
+          dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+            chegada = dataChegada;
+            dataParaComparacao = dataChegadaStr;
+          }
+        } catch (e) {
+          // Ignorar erro de parsing
         }
       }
       
@@ -7049,21 +7059,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= solicitado) {
           chegada = fin;
-          dataChegadaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!chegada) return null;
+      if (!chegada || !dataParaComparacao) return null;
       
       // Verifica se é mesma data
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (diaSolicitado !== diaChegada) {
+      if (diaSolicitado !== dataParaComparacao) {
         // Se não é mesma data, início = 08:00 do dia da chegada
-        inicioContagem = new Date(dataChegadaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = solicitado;
       }
@@ -7088,16 +7096,25 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       if (isNaN(alocado.getTime())) return null;
       
       let saida = null;
-      let dataSaidaBase = null;
+      let dataParaComparacao = null;
       
-      // Verificar se temos data_chegada + hora_chegada válidos E >= alocado
+      // Verificar se temos data_chegada + hora_chegada válidos
       if (row.data_chegada && row.hora_chegada) {
-        const dataSaida = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
-          saida = dataSaida;
-          dataSaidaBase = new Date(row.data_chegada);
+        try {
+          const dataSaidaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataSaida = new Date(dataSaidaStr + 'T00:00:00');
+          dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+            saida = dataSaida;
+            dataParaComparacao = dataSaidaStr;
+          }
+        } catch (e) {
+          // Ignorar erro de parsing
         }
       }
       
@@ -7106,25 +7123,21 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= alocado) {
           saida = fin;
-          dataSaidaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!saida) return null;
+      if (!saida || !dataParaComparacao) return null;
       
       // Verifica hora da alocação (se depois das 17h)
       const horaAlocado = alocado.getHours();
       const depoisDas17 = horaAlocado >= 17;
-      
-      // Verifica se é mesma data
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (depoisDas17 && diaAlocado !== diaSaida) {
+      if (depoisDas17 && diaAlocado !== dataParaComparacao) {
         // Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
-        inicioContagem = new Date(dataSaidaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = alocado;
       }
@@ -7777,35 +7790,40 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
       if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
-      let dataChegadaBase = null;
+      let dataParaComparacao = null;
       
       if (row.data_chegada && row.hora_chegada) {
-        const dataChegada = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
-          chegada = dataChegada;
-          dataChegadaBase = new Date(row.data_chegada);
-        }
+        try {
+          const dataChegadaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataChegada = new Date(dataChegadaStr + 'T00:00:00');
+          dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+            chegada = dataChegada;
+            dataParaComparacao = dataChegadaStr;
+          }
+        } catch (e) {}
       }
       
       if (!chegada && row.finalizado) {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= solicitado) {
           chegada = fin;
-          dataChegadaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!chegada) return null;
+      if (!chegada || !dataParaComparacao) return null;
       
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (diaSolicitado !== diaChegada) {
-        inicioContagem = new Date(dataChegadaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+      if (diaSolicitado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = solicitado;
       }
@@ -7824,37 +7842,42 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
       if (isNaN(alocado.getTime())) return null;
       
       let saida = null;
-      let dataSaidaBase = null;
+      let dataParaComparacao = null;
       
       if (row.data_chegada && row.hora_chegada) {
-        const dataSaida = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
-          saida = dataSaida;
-          dataSaidaBase = new Date(row.data_chegada);
-        }
+        try {
+          const dataSaidaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataSaida = new Date(dataSaidaStr + 'T00:00:00');
+          dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+            saida = dataSaida;
+            dataParaComparacao = dataSaidaStr;
+          }
+        } catch (e) {}
       }
       
       if (!saida && row.finalizado) {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= alocado) {
           saida = fin;
-          dataSaidaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!saida) return null;
+      if (!saida || !dataParaComparacao) return null;
       
       const horaAlocado = alocado.getHours();
       const depoisDas17 = horaAlocado >= 17;
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (depoisDas17 && diaAlocado !== diaSaida) {
-        inicioContagem = new Date(dataSaidaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+      if (depoisDas17 && diaAlocado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = alocado;
       }
@@ -11112,35 +11135,40 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       if (isNaN(solicitado.getTime())) return null;
       
       let chegada = null;
-      let dataChegadaBase = null;
+      let dataParaComparacao = null;
       
       if (row.data_chegada && row.hora_chegada) {
-        const dataChegada = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
-          chegada = dataChegada;
-          dataChegadaBase = new Date(row.data_chegada);
-        }
+        try {
+          const dataChegadaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataChegada = new Date(dataChegadaStr + 'T00:00:00');
+          dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+            chegada = dataChegada;
+            dataParaComparacao = dataChegadaStr;
+          }
+        } catch (e) {}
       }
       
       if (!chegada && row.finalizado) {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= solicitado) {
           chegada = fin;
-          dataChegadaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!chegada) return null;
+      if (!chegada || !dataParaComparacao) return null;
       
       const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaChegada = dataChegadaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (diaSolicitado !== diaChegada) {
-        inicioContagem = new Date(dataChegadaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+      if (diaSolicitado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = solicitado;
       }
@@ -11160,37 +11188,42 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       if (isNaN(alocado.getTime())) return null;
       
       let saida = null;
-      let dataSaidaBase = null;
+      let dataParaComparacao = null;
       
       if (row.data_chegada && row.hora_chegada) {
-        const dataSaida = new Date(row.data_chegada);
-        const partes = (row.hora_chegada || '0:0:0').split(':').map(Number);
-        dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-        if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
-          saida = dataSaida;
-          dataSaidaBase = new Date(row.data_chegada);
-        }
+        try {
+          const dataSaidaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataSaida = new Date(dataSaidaStr + 'T00:00:00');
+          dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+            saida = dataSaida;
+            dataParaComparacao = dataSaidaStr;
+          }
+        } catch (e) {}
       }
       
       if (!saida && row.finalizado) {
         const fin = new Date(row.finalizado);
         if (!isNaN(fin.getTime()) && fin >= alocado) {
           saida = fin;
-          dataSaidaBase = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
         }
       }
       
-      if (!saida) return null;
+      if (!saida || !dataParaComparacao) return null;
       
       const horaAlocado = alocado.getHours();
       const depoisDas17 = horaAlocado >= 17;
       const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaSaida = dataSaidaBase.toISOString().split('T')[0];
       
       let inicioContagem;
-      if (depoisDas17 && diaAlocado !== diaSaida) {
-        inicioContagem = new Date(dataSaidaBase);
-        inicioContagem.setHours(8, 0, 0, 0);
+      if (depoisDas17 && diaAlocado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
       } else {
         inicioContagem = alocado;
       }
