@@ -7397,8 +7397,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           else if (l.dentro_prazo === false) c.fora_prazo++;
           else c.sem_prazo++;
           
-          if (l.tempo_execucao_minutos != null) {
-            c.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+          // Usar cálculo manual de tempo de entrega (conforme DAX)
+          const tempoEntCalc = calcularTempoEntrega(l);
+          if (tempoEntCalc !== null) {
+            c.soma_tempo += tempoEntCalc;
             c.count_tempo++;
           }
           
@@ -7417,8 +7419,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
           else ccData.sem_prazo++;
-          if (l.tempo_execucao_minutos != null) {
-            ccData.soma_tempo += parseFloat(l.tempo_execucao_minutos);
+          if (tempoEntCalc !== null) {
+            ccData.soma_tempo += tempoEntCalc;
             ccData.count_tempo++;
           }
         });
