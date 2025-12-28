@@ -7276,15 +7276,25 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       });
     });
     
+    // Função para formatar tempo em HH:MM:SS (igual ao Acompanhamento)
+    const formatarTempo = (minutos) => {
+      if (!minutos || minutos <= 0 || isNaN(minutos)) return '00:00:00';
+      const totalSeg = Math.round(minutos * 60);
+      const h = Math.floor(totalSeg / 3600);
+      const m = Math.floor((totalSeg % 3600) / 60);
+      const s = totalSeg % 60;
+      return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    };
+    
     const metricas = {
       total_os: totalOS.size,
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
-      tempo_medio: countTempoEntrega > 0 ? (somaTempoEntrega / countTempoEntrega).toFixed(2) : 0,
-      tempo_medio_alocacao: countTempoAlocacao > 0 ? (somaTempoAlocacao / countTempoAlocacao).toFixed(2) : 0,
-      tempo_medio_coleta: countTempoColeta > 0 ? (somaTempoColeta / countTempoColeta).toFixed(2) : 0,
+      tempo_medio: countTempoEntrega > 0 ? formatarTempo(somaTempoEntrega / countTempoEntrega) : '00:00:00',
+      tempo_medio_alocacao: countTempoAlocacao > 0 ? formatarTempo(somaTempoAlocacao / countTempoAlocacao) : '00:00:00',
+      tempo_medio_coleta: countTempoColeta > 0 ? formatarTempo(somaTempoColeta / countTempoColeta) : '00:00:00',
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -7445,7 +7455,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         sem_prazo: cc.sem_prazo,
-        tempo_medio: cc.count_tempo > 0 ? (cc.soma_tempo / cc.count_tempo).toFixed(2) : null,
+        tempo_medio: cc.count_tempo > 0 ? formatarTempo(cc.soma_tempo / cc.count_tempo) : '00:00:00',
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
       })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7461,8 +7471,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         total_os: c.os_set.size, total_entregas: c.total_entregas,
         centros_custo: centros_custo_dados, // Agora é array com dados completos
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
-        tempo_medio: c.count_tempo > 0 ? (c.soma_tempo / c.count_tempo).toFixed(2) : null,
-        tempo_medio_alocacao: tempoMedioAlocacao.toFixed(2), // Novo: tempo médio de alocação
+        tempo_medio: c.count_tempo > 0 ? formatarTempo(c.soma_tempo / c.count_tempo) : '00:00:00',
+        tempo_medio_alocacao: formatarTempo(tempoMedioAlocacao),
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
         distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
         // Novas métricas
@@ -7652,9 +7662,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const porProfissional = Object.values(porProfMap).map(p => ({
       cod_prof: p.cod_prof, nome_prof: p.nome_prof,
       total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
-      tempo_medio: p.count_tempo > 0 ? (p.soma_tempo / p.count_tempo).toFixed(2) : null,
-      tempo_alocado: p.count_tempo_alocacao > 0 ? (p.soma_tempo_alocacao / p.count_tempo_alocacao).toFixed(2) : null,
-      tempo_coleta: p.count_tempo_coleta > 0 ? (p.soma_tempo_coleta / p.count_tempo_coleta).toFixed(2) : null,
+      tempo_medio: p.count_tempo > 0 ? formatarTempo(p.soma_tempo / p.count_tempo) : '00:00:00',
+      tempo_alocado: p.count_tempo_alocacao > 0 ? formatarTempo(p.soma_tempo_alocacao / p.count_tempo_alocacao) : '00:00:00',
+      tempo_coleta: p.count_tempo_coleta > 0 ? formatarTempo(p.soma_tempo_coleta / p.count_tempo_coleta) : '00:00:00',
       distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
       retornos: p.retornos
     })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -11218,6 +11228,16 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       return difMinutos >= 0 ? difMinutos : null;
     };
     
+    // Função para formatar tempo em HH:MM:SS (igual ao Acompanhamento)
+    const formatarTempo = (minutos) => {
+      if (!minutos || minutos <= 0 || isNaN(minutos)) return '00:00:00';
+      const totalSeg = Math.round(minutos * 60);
+      const h = Math.floor(totalSeg / 3600);
+      const m = Math.floor((totalSeg % 3600) / 60);
+      const s = totalSeg % 60;
+      return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    };
+    
     // Agrupar por OS
     const osPorOS = {};
     dados.forEach(row => {
@@ -11361,9 +11381,9 @@ app.get('/api/bi/cliente-767', async (req, res) => {
         dentro_prazo: d.dentro_prazo,
         fora_prazo: d.fora_prazo,
         taxa_prazo: d.count_tempo_entrega > 0 ? ((d.dentro_prazo / d.count_tempo_entrega) * 100).toFixed(1) : 0,
-        tempo_medio_entrega: d.count_tempo_entrega > 0 ? (d.soma_tempo_entrega / d.count_tempo_entrega).toFixed(1) : 0,
-        tempo_medio_alocacao: d.count_tempo_alocacao > 0 ? (d.soma_tempo_alocacao / d.count_tempo_alocacao).toFixed(1) : 0,
-        tempo_medio_coleta: d.count_tempo_coleta > 0 ? (d.soma_tempo_coleta / d.count_tempo_coleta).toFixed(1) : 0,
+        tempo_medio_entrega: d.count_tempo_entrega > 0 ? formatarTempo(d.soma_tempo_entrega / d.count_tempo_entrega) : '00:00:00',
+        tempo_medio_alocacao: d.count_tempo_alocacao > 0 ? formatarTempo(d.soma_tempo_alocacao / d.count_tempo_alocacao) : '00:00:00',
+        tempo_medio_coleta: d.count_tempo_coleta > 0 ? formatarTempo(d.soma_tempo_coleta / d.count_tempo_coleta) : '00:00:00',
         valor_total: d.soma_valor,
         valor_motoboy: d.soma_valor_prof,
         ticket_medio: d.total_os.size > 0 ? (d.soma_valor / d.total_os.size).toFixed(2) : 0,
@@ -11529,9 +11549,9 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       taxa_prazo: countTempoEntrega > 0 ? ((dentroPrazo / countTempoEntrega) * 100).toFixed(1) : 0,
-      tempo_medio: countTempoEntrega > 0 ? (somaTempoEntrega / countTempoEntrega).toFixed(2) : 0,
-      tempo_medio_alocacao: countTempoAlocacao > 0 ? (somaTempoAlocacao / countTempoAlocacao).toFixed(2) : 0,
-      tempo_medio_coleta: countTempoColeta > 0 ? (somaTempoColeta / countTempoColeta).toFixed(2) : 0,
+      tempo_medio: countTempoEntrega > 0 ? formatarTempo(somaTempoEntrega / countTempoEntrega) : '00:00:00',
+      tempo_medio_alocacao: countTempoAlocacao > 0 ? formatarTempo(somaTempoAlocacao / countTempoAlocacao) : '00:00:00',
+      tempo_medio_coleta: countTempoColeta > 0 ? formatarTempo(somaTempoColeta / countTempoColeta) : '00:00:00',
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalOS.size > 0 ? (somaValor / totalOS.size).toFixed(2) : 0,
