@@ -10608,8 +10608,96 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       tempoMedioAlocacao: formatarTempo(parseFloat(c.tempo_medio_alocacao_min)),
       tempoMedioColeta: formatarTempo(parseFloat(c.tempo_medio_coleta_min)),
       totalProfissionais: parseInt(c.total_profissionais) || 0,
-      mediaEntProfissional: ((parseInt(c.total_entregas) || 0) / Math.max(parseInt(c.total_profissionais) || 1, 1)).toFixed(1)
+      mediaEntProfissional: ((parseInt(c.total_entregas) || 0) / Math.max(parseInt(c.total_profissionais) || 1, 1)).toFixed(1),
+      centros_custo: [] // Será preenchido abaixo
     }));
+    
+    // Buscar centros de custo por cliente
+    const centrosCustoQuery = await pool.query(`
+      WITH tempo_por_os AS (
+        SELECT 
+          os,
+          cod_cliente,
+          centro_custo,
+          -- Métricas de ENTREGA (Ponto >= 2)
+          MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
+          MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END) as valor_os,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_prof_os,
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_os,
+          AVG(
+            CASE 
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+              THEN
+                EXTRACT(EPOCH FROM (
+                  (data_chegada + hora_chegada) - 
+                  CASE 
+                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    THEN DATE(data_chegada) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
+                   AND finalizado IS NOT NULL
+                   AND finalizado >= data_hora
+              THEN
+                EXTRACT(EPOCH FROM (
+                  finalizado - 
+                  CASE 
+                    WHEN DATE(finalizado) <> DATE(data_hora)
+                    THEN DATE(finalizado) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
+              ELSE NULL
+            END
+          ) as tempo_entrega_min
+        FROM bi_entregas
+        ${whereClause}
+        AND centro_custo IS NOT NULL AND centro_custo != ''
+        GROUP BY os, cod_cliente, centro_custo
+      )
+      SELECT 
+        cod_cliente,
+        centro_custo,
+        COUNT(DISTINCT os) as total_os,
+        SUM(total_entregas_os) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_no_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = 0 THEN 1 ELSE 0 END)::numeric / NULLIF(SUM(total_entregas_os), 0) * 100, 2) as taxa_fora_prazo,
+        SUM(eh_retorno) as retornos,
+        COALESCE(SUM(valor_os), 0) as valor_total,
+        COALESCE(SUM(valor_prof_os), 0) as valor_prof,
+        ROUND(AVG(tempo_entrega_min), 2) as tempo_medio_entrega_min
+      FROM tempo_por_os
+      GROUP BY cod_cliente, centro_custo
+      ORDER BY cod_cliente, total_entregas DESC
+    `, params);
+    
+    // Mapear centros de custo para os clientes
+    centrosCustoQuery.rows.forEach(cc => {
+      const cliente = clientes.find(c => c.cod_cliente === cc.cod_cliente);
+      if (cliente) {
+        cliente.centros_custo.push({
+          centro_custo: cc.centro_custo,
+          total_os: parseInt(cc.total_os) || 0,
+          total_entregas: parseInt(cc.total_entregas) || 0,
+          dentro_prazo: parseInt(cc.entregas_no_prazo) || 0,
+          fora_prazo: parseInt(cc.entregas_fora_prazo) || 0,
+          taxa_no_prazo: parseFloat(cc.taxa_no_prazo) || 0,
+          taxa_fora_prazo: parseFloat(cc.taxa_fora_prazo) || 0,
+          retornos: parseInt(cc.retornos) || 0,
+          valor_total: parseFloat(cc.valor_total) || 0,
+          valor_prof: parseFloat(cc.valor_prof) || 0,
+          tempo_medio: formatarTempo(parseFloat(cc.tempo_medio_entrega_min))
+        });
+      }
+    });
     
     const totais = {
       os: parseInt(totaisQuery.rows[0]?.total_os) || 0,
