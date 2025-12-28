@@ -10991,6 +10991,12 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     // =============================================
     const META_MENSAL = 95; // Meta de 95%
     
+    // Usar sempre a data atual para o cálculo de dias restantes
+    const hoje = new Date();
+    const diaAtual = hoje.getDate();
+    const mesAtual = hoje.getMonth();
+    const anoAtual = hoje.getFullYear();
+    
     // Determinar o mês de referência (do filtro ou mês atual)
     let mesReferencia, anoReferencia;
     if (data_inicio) {
@@ -10998,16 +11004,26 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       mesReferencia = dataRef.getMonth();
       anoReferencia = dataRef.getFullYear();
     } else {
-      const hoje = new Date();
-      mesReferencia = hoje.getMonth();
-      anoReferencia = hoje.getFullYear();
+      mesReferencia = mesAtual;
+      anoReferencia = anoAtual;
     }
     
     // Calcular dias do mês e dias restantes
     const ultimoDiaMes = new Date(anoReferencia, mesReferencia + 1, 0).getDate();
-    const hoje = new Date();
-    const diaAtual = hoje.getDate();
-    const diasPassados = porData.length || diaAtual;
+    
+    // Dias passados = dia atual do mês (se estivermos no mesmo mês) ou dias com dados
+    let diasPassados;
+    if (mesReferencia === mesAtual && anoReferencia === anoAtual) {
+      // Estamos no mês atual - usar o dia de hoje
+      diasPassados = diaAtual;
+    } else if (mesReferencia < mesAtual || anoReferencia < anoAtual) {
+      // Mês passado - todos os dias já passaram
+      diasPassados = ultimoDiaMes;
+    } else {
+      // Mês futuro - nenhum dia passou
+      diasPassados = 0;
+    }
+    
     const diasRestantes = Math.max(0, ultimoDiaMes - diasPassados);
     
     // Total de entregas e dentro do prazo até agora
@@ -11015,8 +11031,9 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     const dentroPrazoAteAgora = dentroPrazo;
     const taxaAtual = totalEntregasAteAgora > 0 ? (dentroPrazoAteAgora / totalEntregasAteAgora) * 100 : 0;
     
-    // Estimar média de entregas por dia
-    const mediaEntregasPorDia = diasPassados > 0 ? totalEntregasAteAgora / diasPassados : 0;
+    // Estimar média de entregas por dia (baseado nos dias que tiveram entregas)
+    const diasComDados = porData.length || 1;
+    const mediaEntregasPorDia = diasComDados > 0 ? totalEntregasAteAgora / diasComDados : 0;
     const entregasEstimadasRestantes = Math.round(mediaEntregasPorDia * diasRestantes);
     const totalEntregasEstimadoMes = totalEntregasAteAgora + entregasEstimadasRestantes;
     
