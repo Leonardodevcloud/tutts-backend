@@ -10467,20 +10467,23 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
         ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END), 0), 2) as ticket_medio,
         
-        -- TEMPO MÉDIO ENTREGA (Ponto <> 1 = entregas, usa Solicitado -> Finalizado)
-        -- Regra: Se não é mesma data, início = 08:00 do dia do finalizado
+        -- TEMPO MÉDIO ENTREGA (Ponto <> 1 = entregas, usa Solicitado -> Saída)
+        -- Saída = data_chegada + hora_chegada (conforme DAX), fallback para finalizado
+        -- Regra: Se não é mesma data, início = 08:00 do dia da saída
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) <> 1 
                  AND data_hora IS NOT NULL 
-                 AND finalizado IS NOT NULL
-                 AND finalizado >= data_hora
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
+                   OR finalizado IS NOT NULL
+                 )
             THEN
               EXTRACT(EPOCH FROM (
-                finalizado - 
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
                 CASE 
-                  WHEN DATE(finalizado) <> DATE(data_hora)
-                  THEN DATE(finalizado) + TIME '08:00:00'
+                  WHEN DATE(COALESCE(data_chegada, finalizado::date)) <> DATE(data_hora)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
                   ELSE data_hora
                 END
               )) / 60
@@ -10510,21 +10513,24 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
           END
         ), 1) as tempo_medio_alocacao,
         
-        -- TEMPO MÉDIO COLETA (Ponto = 1, usa Alocado -> Finalizado)
-        -- Regra: Se alocado após 17h E finalizado no dia seguinte, início = 08:00 do dia finalizado
+        -- TEMPO MÉDIO COLETA (Ponto = 1, usa Alocado -> Saída)
+        -- Saída = data_chegada + hora_chegada (conforme DAX), fallback para finalizado
+        -- Regra: Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) = 1
                  AND data_hora_alocado IS NOT NULL 
-                 AND finalizado IS NOT NULL
-                 AND finalizado >= data_hora_alocado
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
+                   OR finalizado IS NOT NULL
+                 )
             THEN
               EXTRACT(EPOCH FROM (
-                finalizado - 
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                       AND DATE(finalizado) > DATE(data_hora_alocado)
-                  THEN DATE(finalizado) + TIME '08:00:00'
+                       AND DATE(COALESCE(data_chegada, finalizado::date)) > DATE(data_hora_alocado)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
                   ELSE data_hora_alocado
                 END
               )) / 60
@@ -10698,28 +10704,43 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
               ELSE NULL
             END
           ) as tempo_entrega_min,
-          -- Tempo de alocação
-          MIN(
+          -- Tempo de alocação (Ponto = 1: Solicitado -> Alocado)
+          -- Regra: Se solicitado após 17h E alocado no dia seguinte, início = 08:00 do dia alocado
+          AVG(
             CASE 
-              WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
-              THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+              WHEN COALESCE(ponto, 1)::int = 1
+                   AND data_hora_alocado IS NOT NULL 
+                   AND data_hora IS NOT NULL
+                   AND data_hora_alocado >= data_hora
+              THEN
+                EXTRACT(EPOCH FROM (
+                  data_hora_alocado - 
+                  CASE 
+                    WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                         AND DATE(data_hora_alocado) > DATE(data_hora)
+                    THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
               ELSE NULL
             END
           ) as tempo_alocacao_min,
-          -- Tempo de coleta: quando Ponto = 1, tempo até chegada
+          -- Tempo de coleta (Ponto = 1: Alocado -> Saída conforme DAX)
+          -- Regra: Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
           AVG(
             CASE 
               WHEN COALESCE(ponto, 1)::int = 1 
-                   AND data_hora IS NOT NULL 
+                   AND data_hora_alocado IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
               THEN
                 EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada) - 
+                  (data_chegada + hora_chegada::time) - 
                   CASE 
-                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                         AND DATE(data_chegada) > DATE(data_hora_alocado)
                     THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora
+                    ELSE data_hora_alocado
                   END
                 )) / 60
               ELSE NULL
@@ -10797,27 +10818,41 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
               ELSE NULL
             END
           ) as tempo_entrega_min,
-          MIN(
+          -- Tempo de alocação (Ponto = 1: Solicitado -> Alocado)
+          AVG(
             CASE 
-              WHEN data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL
-              THEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60
+              WHEN COALESCE(ponto, 1)::int = 1
+                   AND data_hora_alocado IS NOT NULL 
+                   AND data_hora IS NOT NULL
+                   AND data_hora_alocado >= data_hora
+              THEN
+                EXTRACT(EPOCH FROM (
+                  data_hora_alocado - 
+                  CASE 
+                    WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                         AND DATE(data_hora_alocado) > DATE(data_hora)
+                    THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                    ELSE data_hora
+                  END
+                )) / 60
               ELSE NULL
             END
           ) as tempo_alocacao_min,
-          -- Tempo de coleta: quando Ponto = 1, tempo até chegada
+          -- Tempo de coleta (Ponto = 1: Alocado -> Saída)
           AVG(
             CASE 
               WHEN COALESCE(ponto, 1)::int = 1 
-                   AND data_hora IS NOT NULL 
+                   AND data_hora_alocado IS NOT NULL 
                    AND data_chegada IS NOT NULL 
                    AND hora_chegada IS NOT NULL
               THEN
                 EXTRACT(EPOCH FROM (
-                  (data_chegada + hora_chegada) - 
+                  (data_chegada + hora_chegada::time) - 
                   CASE 
-                    WHEN DATE(data_chegada) <> DATE(data_hora)
+                    WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                         AND DATE(data_chegada) > DATE(data_hora_alocado)
                     THEN DATE(data_chegada) + TIME '08:00:00'
-                    ELSE data_hora
+                    ELSE data_hora_alocado
                   END
                 )) / 60
               ELSE NULL
