@@ -10935,6 +10935,136 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       };
     });
     
+    // =============================================
+    // DADOS POR CENTRO DE CUSTO
+    // =============================================
+    const porCentroCustoMap = {};
+    
+    Object.keys(osPorOS).forEach(os => {
+      const linhasOS = osPorOS[os];
+      
+      linhasOS.forEach(row => {
+        const centroCusto = row.centro_custo || 'Sem Centro de Custo';
+        
+        if (!porCentroCustoMap[centroCusto]) {
+          porCentroCustoMap[centroCusto] = {
+            centro_custo: centroCusto,
+            total_os: new Set(),
+            total_entregas: 0,
+            dentro_prazo: 0,
+            fora_prazo: 0,
+            count_tempo: 0
+          };
+        }
+        
+        porCentroCustoMap[centroCusto].total_os.add(os);
+        
+        if ((parseInt(row.ponto) || 1) >= 2) {
+          porCentroCustoMap[centroCusto].total_entregas++;
+        }
+        
+        // Calcular tempo de entrega para verificar prazo
+        const tempoEnt = calcularTempoEntrega(row);
+        if (tempoEnt !== null) {
+          porCentroCustoMap[centroCusto].count_tempo++;
+          if (tempoEnt <= PRAZO_767) {
+            porCentroCustoMap[centroCusto].dentro_prazo++;
+          } else {
+            porCentroCustoMap[centroCusto].fora_prazo++;
+          }
+        }
+      });
+    });
+    
+    // Formatar dados por centro de custo
+    const porCentroCusto = Object.values(porCentroCustoMap).map(cc => ({
+      centro_custo: cc.centro_custo,
+      total_os: cc.total_os.size,
+      total_entregas: cc.total_entregas,
+      dentro_prazo: cc.dentro_prazo,
+      fora_prazo: cc.fora_prazo,
+      taxa_prazo: cc.count_tempo > 0 ? ((cc.dentro_prazo / cc.count_tempo) * 100).toFixed(1) : 0
+    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // =============================================
+    // CÁLCULO DE META MENSAL (95%)
+    // =============================================
+    const META_MENSAL = 95; // Meta de 95%
+    
+    // Determinar o mês de referência (do filtro ou mês atual)
+    let mesReferencia, anoReferencia;
+    if (data_inicio) {
+      const dataRef = new Date(data_inicio);
+      mesReferencia = dataRef.getMonth();
+      anoReferencia = dataRef.getFullYear();
+    } else {
+      const hoje = new Date();
+      mesReferencia = hoje.getMonth();
+      anoReferencia = hoje.getFullYear();
+    }
+    
+    // Calcular dias do mês e dias restantes
+    const ultimoDiaMes = new Date(anoReferencia, mesReferencia + 1, 0).getDate();
+    const hoje = new Date();
+    const diaAtual = hoje.getDate();
+    const diasPassados = porData.length || diaAtual;
+    const diasRestantes = Math.max(0, ultimoDiaMes - diasPassados);
+    
+    // Total de entregas e dentro do prazo até agora
+    const totalEntregasAteAgora = countTempoEntrega;
+    const dentroPrazoAteAgora = dentroPrazo;
+    const taxaAtual = totalEntregasAteAgora > 0 ? (dentroPrazoAteAgora / totalEntregasAteAgora) * 100 : 0;
+    
+    // Estimar média de entregas por dia
+    const mediaEntregasPorDia = diasPassados > 0 ? totalEntregasAteAgora / diasPassados : 0;
+    const entregasEstimadasRestantes = Math.round(mediaEntregasPorDia * diasRestantes);
+    const totalEntregasEstimadoMes = totalEntregasAteAgora + entregasEstimadasRestantes;
+    
+    // Calcular quantas entregas no prazo são necessárias para atingir 95%
+    const entregasNoPrazoNecessariasMes = Math.ceil(totalEntregasEstimadoMes * (META_MENSAL / 100));
+    const entregasNoPrazoFaltam = Math.max(0, entregasNoPrazoNecessariasMes - dentroPrazoAteAgora);
+    
+    // Calcular a taxa mínima necessária nos dias restantes
+    let taxaMinimaRestante = 0;
+    let metaAtingivel = true;
+    let mensagemMeta = '';
+    
+    if (diasRestantes > 0 && entregasEstimadasRestantes > 0) {
+      taxaMinimaRestante = (entregasNoPrazoFaltam / entregasEstimadasRestantes) * 100;
+      
+      if (taxaMinimaRestante > 100) {
+        metaAtingivel = false;
+        mensagemMeta = 'Meta de 95% não é mais atingível este mês';
+      } else if (taxaMinimaRestante <= 0) {
+        taxaMinimaRestante = 0;
+        mensagemMeta = 'Meta de 95% já foi atingida!';
+      } else {
+        mensagemMeta = `Precisa de ${taxaMinimaRestante.toFixed(1)}% nos próximos ${diasRestantes} dias`;
+      }
+    } else if (diasRestantes === 0) {
+      mensagemMeta = taxaAtual >= META_MENSAL ? 'Meta atingida!' : 'Mês encerrado - meta não atingida';
+      metaAtingivel = taxaAtual >= META_MENSAL;
+    }
+    
+    const indicadorMeta = {
+      meta_mensal: META_MENSAL,
+      mes_referencia: new Date(anoReferencia, mesReferencia, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
+      dias_mes: ultimoDiaMes,
+      dias_passados: diasPassados,
+      dias_restantes: diasRestantes,
+      taxa_atual: parseFloat(taxaAtual.toFixed(1)),
+      total_entregas_ate_agora: totalEntregasAteAgora,
+      dentro_prazo_ate_agora: dentroPrazoAteAgora,
+      media_entregas_dia: parseFloat(mediaEntregasPorDia.toFixed(1)),
+      entregas_estimadas_restantes: entregasEstimadasRestantes,
+      total_estimado_mes: totalEntregasEstimadoMes,
+      entregas_no_prazo_necessarias: entregasNoPrazoNecessariasMes,
+      entregas_no_prazo_faltam: entregasNoPrazoFaltam,
+      taxa_minima_restante: parseFloat(taxaMinimaRestante.toFixed(1)),
+      meta_atingivel: metaAtingivel,
+      mensagem: mensagemMeta
+    };
+    
     // Métricas gerais
     const metricas = {
       total_os: totalOS.size,
@@ -10957,6 +11087,8 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     res.json({
       metricas,
       porData,
+      porCentroCusto,
+      indicadorMeta,
       prazo: PRAZO_767,
       cliente: {
         cod_cliente: 767,
