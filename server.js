@@ -6949,6 +6949,82 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const todosClientes = todosClientesQuery.rows;
     console.log('📊 Total de clientes no sistema:', todosClientes.length);
     
+    // ============================================
+    // QUERY SQL PARA TEMPOS MÉDIOS (igual ao Acompanhamento)
+    // ============================================
+    const temposQuery = await pool.query(`
+      SELECT 
+        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) <> 1 
+                 AND data_hora IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN DATE(COALESCE(data_chegada, finalizado::date)) <> DATE(data_hora)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora IS NOT NULL 
+                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora_alocado)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora_alocado)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(COALESCE(data_chegada, finalizado::date)) > DATE(data_hora_alocado)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_coleta
+      FROM bi_entregas ${where}
+    `, params);
+    
+    const temposSQL = temposQuery.rows[0] || {};
+    console.log('📊 Tempos calculados via SQL:', temposSQL);
+    
     // Buscar todos os dados filtrados
     const dadosQuery = await pool.query(`
       SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
@@ -7304,16 +7380,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       });
     });
     
-    // DEBUG: Ver contadores de tempo
-    console.log('📊 DEBUG Contadores de tempo:', {
-      somaTempoEntrega,
-      countTempoEntrega,
-      somaTempoAlocacao,
-      countTempoAlocacao,
-      somaTempoColeta,
-      countTempoColeta
-    });
-    
     // Função para formatar tempo em HH:MM:SS (igual ao Acompanhamento)
     const formatarTempo = (minutos) => {
       if (!minutos || minutos <= 0 || isNaN(minutos)) return '00:00:00';
@@ -7324,15 +7390,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
     };
     
+    // USAR TEMPOS DA QUERY SQL (igual ao Acompanhamento)
     const metricas = {
       total_os: totalOS.size,
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
-      tempo_medio: countTempoEntrega > 0 ? formatarTempo(somaTempoEntrega / countTempoEntrega) : '00:00:00',
-      tempo_medio_alocacao: countTempoAlocacao > 0 ? formatarTempo(somaTempoAlocacao / countTempoAlocacao) : '00:00:00',
-      tempo_medio_coleta: countTempoColeta > 0 ? formatarTempo(somaTempoColeta / countTempoColeta) : '00:00:00',
+      tempo_medio: formatarTempo(parseFloat(temposSQL.tempo_medio_entrega) || 0),
+      tempo_medio_alocacao: formatarTempo(parseFloat(temposSQL.tempo_medio_alocacao) || 0),
+      tempo_medio_coleta: formatarTempo(parseFloat(temposSQL.tempo_medio_coleta) || 0),
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -7342,6 +7409,91 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       incentivo: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
       ultima_entrega: ultimaEntrega ? ultimaEntrega.toISOString() : null
     };
+    
+    // ============================================
+    // QUERY SQL PARA TEMPOS POR CLIENTE (igual ao Acompanhamento)
+    // ============================================
+    const temposPorClienteQuery = await pool.query(`
+      SELECT 
+        cod_cliente,
+        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) <> 1 
+                 AND data_hora IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN DATE(COALESCE(data_chegada, finalizado::date)) <> DATE(data_hora)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora IS NOT NULL 
+                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora_alocado)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora_alocado)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(COALESCE(data_chegada, finalizado::date)) > DATE(data_hora_alocado)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_coleta
+      FROM bi_entregas ${where}
+      GROUP BY cod_cliente
+    `, params);
+    
+    // Criar mapa de tempos por cliente
+    const temposPorClienteMap = {};
+    temposPorClienteQuery.rows.forEach(row => {
+      temposPorClienteMap[row.cod_cliente] = {
+        tempo_entrega: parseFloat(row.tempo_medio_entrega) || 0,
+        tempo_alocacao: parseFloat(row.tempo_medio_alocacao) || 0,
+        tempo_coleta: parseFloat(row.tempo_medio_coleta) || 0
+      };
+    });
     
     // Agrupar por cliente - usando mesma lógica
     const porClienteMap = {};
@@ -7484,6 +7636,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     });
     
     const porCliente = Object.values(porClienteMap).map(c => {
+      // Usar tempos da query SQL em vez dos cálculos JS
+      const temposCliente = temposPorClienteMap[c.cod_cliente] || {};
+      
       // Converter centros_custo_map em array com dados
       const centros_custo_dados = Object.values(c.centros_custo_map).map(cc => ({
         centro_custo: cc.centro_custo,
@@ -7493,7 +7648,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         sem_prazo: cc.sem_prazo,
-        tempo_medio: cc.count_tempo > 0 ? formatarTempo(cc.soma_tempo / cc.count_tempo) : '00:00:00',
+        tempo_medio: formatarTempo(temposCliente.tempo_entrega || 0), // Usar tempo do cliente
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
       })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7501,7 +7656,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       const totalProfs = c.profissionais_set.size;
       const ticketMedio = c.total_entregas > 0 ? (c.soma_valor / c.total_entregas) : 0;
       const incentivo = totalProfs > 0 ? (c.total_entregas / totalProfs) : 0;
-      const tempoMedioAlocacao = c.count_tempo_alocacao > 0 ? (c.soma_tempo_alocacao / c.count_tempo_alocacao) : 0;
       
       return {
         cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
@@ -7509,8 +7663,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         total_os: c.os_set.size, total_entregas: c.total_entregas,
         centros_custo: centros_custo_dados, // Agora é array com dados completos
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
-        tempo_medio: c.count_tempo > 0 ? formatarTempo(c.soma_tempo / c.count_tempo) : '00:00:00',
-        tempo_medio_alocacao: formatarTempo(tempoMedioAlocacao),
+        tempo_medio: formatarTempo(temposCliente.tempo_entrega || 0),
+        tempo_medio_alocacao: formatarTempo(temposCliente.tempo_alocacao || 0),
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
         distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
         // Novas métricas
@@ -7593,6 +7747,91 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       if (!osPorProf[codProf]) osPorProf[codProf] = {};
       if (!osPorProf[codProf][os]) osPorProf[codProf][os] = { codCliente, linhas: [] };
       osPorProf[codProf][os].linhas.push(row);
+    });
+    
+    // ============================================
+    // QUERY SQL PARA TEMPOS POR PROFISSIONAL (igual ao Acompanhamento)
+    // ============================================
+    const temposPorProfQuery = await pool.query(`
+      SELECT 
+        cod_prof,
+        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) <> 1 
+                 AND data_hora IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN DATE(COALESCE(data_chegada, finalizado::date)) <> DATE(data_hora)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora IS NOT NULL 
+                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND (
+                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL AND (data_chegada + hora_chegada::time) >= data_hora_alocado)
+                   OR (finalizado IS NOT NULL AND finalizado >= data_hora_alocado)
+                 )
+            THEN
+              EXTRACT(EPOCH FROM (
+                COALESCE(data_chegada + hora_chegada::time, finalizado) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(COALESCE(data_chegada, finalizado::date)) > DATE(data_hora_alocado)
+                  THEN DATE(COALESCE(data_chegada, finalizado::date)) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 2) as tempo_medio_coleta
+      FROM bi_entregas ${where}
+      GROUP BY cod_prof
+    `, params);
+    
+    // Criar mapa de tempos por profissional
+    const temposPorProfMap = {};
+    temposPorProfQuery.rows.forEach(row => {
+      temposPorProfMap[row.cod_prof] = {
+        tempo_entrega: parseFloat(row.tempo_medio_entrega) || 0,
+        tempo_alocacao: parseFloat(row.tempo_medio_alocacao) || 0,
+        tempo_coleta: parseFloat(row.tempo_medio_coleta) || 0
+      };
     });
     
     Object.keys(osPorProf).forEach(codProf => {
@@ -7697,15 +7936,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       });
     });
     
-    const porProfissional = Object.values(porProfMap).map(p => ({
-      cod_prof: p.cod_prof, nome_prof: p.nome_prof,
-      total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
-      tempo_medio: p.count_tempo > 0 ? formatarTempo(p.soma_tempo / p.count_tempo) : '00:00:00',
-      tempo_alocado: p.count_tempo_alocacao > 0 ? formatarTempo(p.soma_tempo_alocacao / p.count_tempo_alocacao) : '00:00:00',
-      tempo_coleta: p.count_tempo_coleta > 0 ? formatarTempo(p.soma_tempo_coleta / p.count_tempo_coleta) : '00:00:00',
-      distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
-      retornos: p.retornos
-    })).sort((a, b) => b.total_entregas - a.total_entregas);
+    const porProfissional = Object.values(porProfMap).map(p => {
+      // Usar tempos da query SQL em vez dos cálculos JS
+      const temposProf = temposPorProfMap[p.cod_prof] || {};
+      return {
+        cod_prof: p.cod_prof, nome_prof: p.nome_prof,
+        total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
+        tempo_medio: formatarTempo(temposProf.tempo_entrega || 0),
+        tempo_alocado: formatarTempo(temposProf.tempo_alocacao || 0),
+        tempo_coleta: formatarTempo(temposProf.tempo_coleta || 0),
+        distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
+        retornos: p.retornos
+      };
+    }).sort((a, b) => b.total_entregas - a.total_entregas);
     
     // Gráficos - retorna dados brutos para o frontend agrupar nas faixas que quiser
     const dadosGraficos = await pool.query(`
