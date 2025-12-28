@@ -7009,7 +7009,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const calcularTempoAlocacao = (dataHora, dataHoraAlocado, ponto) => {
       // Ignora: Ponto != 1 OU dados inválidos
       if (!dataHora || !dataHoraAlocado) return null;
-      if (parseInt(ponto) !== 1) return null;
+      const pontoNum = parseInt(ponto) || 1; // COALESCE(ponto, 1)
+      if (pontoNum !== 1) return null;
       
       const solicitado = new Date(dataHora);
       const alocado = new Date(dataHoraAlocado);
@@ -7051,12 +7052,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     };
     
     // ============================================
-    // FUNÇÃO: Calcular tempo de entrega (Ponto >= 2: Solicitado -> Finalizado)
+    // FUNÇÃO: Calcular tempo de entrega (Ponto <> 1: Solicitado -> Finalizado)
     // Regra: Se não é mesma data, início = 08:00 do dia do finalizado
     // ============================================
     const calcularTempoEntrega = (dataHora, finalizado, ponto) => {
       if (!dataHora || !finalizado) return null;
-      if (parseInt(ponto) < 2) return null; // Apenas pontos de entrega (>= 2)
+      const pontoNum = parseInt(ponto) || 1; // COALESCE(ponto, 1)
+      if (pontoNum === 1) return null; // Apenas pontos de entrega (<> 1)
       
       const solicitado = new Date(dataHora);
       const finalizadoDt = new Date(finalizado);
@@ -7096,7 +7098,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // ============================================
     const calcularTempoColeta = (dataHoraAlocado, finalizado, ponto) => {
       if (!dataHoraAlocado || !finalizado) return null;
-      if (parseInt(ponto) !== 1) return null; // Apenas ponto 1 (coleta)
+      const pontoNum = parseInt(ponto) || 1; // COALESCE(ponto, 1)
+      if (pontoNum !== 1) return null; // Apenas ponto 1 (coleta)
       
       const alocado = new Date(dataHoraAlocado);
       const finalizadoDt = new Date(finalizado);
