@@ -6012,35 +6012,12 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
       );
     }
     
-    // Cliente 767 tem prazo fixo de 7200 segundos (120 minutos) para qualquer distância
-    // Verificar se já existe
-    let cliente767 = await pool.query(`SELECT id FROM bi_prazos_cliente WHERE tipo = 'cliente' AND codigo = '767'`);
-    
-    if (cliente767.rows.length === 0) {
-      // Criar cliente 767
-      const novoCliente = await pool.query(
-        `INSERT INTO bi_prazos_cliente (tipo, codigo, nome, updated_at) VALUES ('cliente', '767', 'Cliente 767 - Prazo Fixo 2h', NOW()) RETURNING id`
-      );
-      cliente767 = { rows: [{ id: novoCliente.rows[0].id }] };
-    }
-    
-    // Limpar faixas antigas do cliente 767
-    await pool.query(`DELETE FROM bi_faixas_prazo WHERE prazo_cliente_id = $1`, [cliente767.rows[0].id]);
-    
-    // Inserir prazo fixo de 120 minutos para cliente 767 (qualquer distância)
-    await pool.query(
-      `INSERT INTO bi_faixas_prazo (prazo_cliente_id, km_min, km_max, prazo_minutos) VALUES ($1, $2, $3, $4)`,
-      [cliente767.rows[0].id, 0, null, 120]
-    );
-    
     // Recalcular prazo para todos os registros
     const totalAtualizados = await pool.query(`
       WITH prazo_calc AS (
         SELECT 
           e.id,
           CASE 
-            -- Cliente 767 tem prazo fixo de 120 minutos
-            WHEN e.cod_cliente = 767 THEN 120
             -- Faixas padrão baseadas na distância
             WHEN e.distancia <= 10 THEN 60
             WHEN e.distancia <= 15 THEN 75
@@ -6082,7 +6059,6 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
       success: true,
       message: 'Prazos inicializados com valores do DAX',
       faixasPadrao: faixasPadrao.length,
-      cliente767: 'Prazo fixo 120 minutos',
       registrosAtualizados: totalAtualizados.rowCount
     });
   } catch (error) {
@@ -6273,11 +6249,6 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     
     // Função para encontrar prazo baseado na distância - REGRAS DAX
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
-      // Cliente 767 tem prazo fixo de 120 minutos
-      if (codCliente === 767 || codCliente === '767') {
-        return 120;
-      }
-      
       // Primeiro tenta buscar do banco (configurações personalizadas)
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
       if (faixas.length === 0) {
@@ -6605,11 +6576,6 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     
     // Função para encontrar prazo - REGRAS DAX
     const encontrarPrazo = (codCliente, centroCusto, distancia) => {
-      // Cliente 767 tem prazo fixo de 120 minutos
-      if (codCliente === 767 || codCliente === '767') {
-        return 120;
-      }
-      
       // Primeiro tenta buscar do banco (configurações personalizadas)
       let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
       if (faixas.length === 0) {
