@@ -10646,6 +10646,15 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     const { data_inicio, data_fim } = req.query;
     const PRAZO_767 = 120; // Prazo específico de 120 minutos para cliente 767
     
+    // Primeiro, buscar todos os centros de custo disponíveis para o cliente 767
+    const centrosCustoQuery = await pool.query(`
+      SELECT DISTINCT centro_custo 
+      FROM bi_entregas 
+      WHERE cod_cliente = 767 AND centro_custo IS NOT NULL AND centro_custo != ''
+      ORDER BY centro_custo
+    `);
+    const centrosCustoDisponiveis = centrosCustoQuery.rows.map(r => r.centro_custo);
+    
     let whereClause = 'WHERE cod_cliente = 767';
     const params = [];
     let paramIndex = 1;
@@ -10659,6 +10668,17 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       whereClause += ` AND data_solicitado <= $${paramIndex}`;
       params.push(data_fim);
       paramIndex++;
+    }
+    
+    // Filtro por centro de custo (pode ser um ou vários separados por vírgula)
+    const { centro_custo } = req.query;
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo IN (${centros.map((_, i) => `$${paramIndex + i}`).join(',')})`;
+        params.push(...centros);
+        paramIndex += centros.length;
+      }
     }
     
     // Buscar dados do cliente 767
@@ -11008,15 +11028,17 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       anoReferencia = anoAtual;
     }
     
-    // Calcular dias do mês e dias restantes
+    // Calcular dias do mês
     const ultimoDiaMes = new Date(anoReferencia, mesReferencia + 1, 0).getDate();
     
-    // Dias passados = dia atual do mês (se estivermos no mesmo mês) ou dias com dados
+    // Dias passados baseado no dia atual do mês
     let diasPassados;
-    if (mesReferencia === mesAtual && anoReferencia === anoAtual) {
+    const mesmoMesAno = (mesReferencia === mesAtual && anoReferencia === anoAtual);
+    
+    if (mesmoMesAno) {
       // Estamos no mês atual - usar o dia de hoje
       diasPassados = diaAtual;
-    } else if (mesReferencia < mesAtual || anoReferencia < anoAtual) {
+    } else if (anoReferencia < anoAtual || (anoReferencia === anoAtual && mesReferencia < mesAtual)) {
       // Mês passado - todos os dias já passaram
       diasPassados = ultimoDiaMes;
     } else {
@@ -11024,6 +11046,7 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       diasPassados = 0;
     }
     
+    // Dias restantes = total de dias do mês - dia atual
     const diasRestantes = Math.max(0, ultimoDiaMes - diasPassados);
     
     // Total de entregas e dentro do prazo até agora
@@ -11066,6 +11089,7 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     const indicadorMeta = {
       meta_mensal: META_MENSAL,
       mes_referencia: new Date(anoReferencia, mesReferencia, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
+      dia_atual: diaAtual,
       dias_mes: ultimoDiaMes,
       dias_passados: diasPassados,
       dias_restantes: diasRestantes,
@@ -11106,6 +11130,7 @@ app.get('/api/bi/cliente-767', async (req, res) => {
       porData,
       porCentroCusto,
       indicadorMeta,
+      centrosCustoDisponiveis,
       prazo: PRAZO_767,
       cliente: {
         cod_cliente: 767,
