@@ -7391,15 +7391,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     };
     
     // USAR TEMPOS DA QUERY SQL (igual ao Acompanhamento)
+    // Frontend espera minutos como número, ele mesmo formata para HH:MM:SS
     const metricas = {
       total_os: totalOS.size,
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
-      tempo_medio: formatarTempo(parseFloat(temposSQL.tempo_medio_entrega) || 0),
-      tempo_medio_alocacao: formatarTempo(parseFloat(temposSQL.tempo_medio_alocacao) || 0),
-      tempo_medio_coleta: formatarTempo(parseFloat(temposSQL.tempo_medio_coleta) || 0),
+      tempo_medio: parseFloat(temposSQL.tempo_medio_entrega) || 0,
+      tempo_medio_alocacao: parseFloat(temposSQL.tempo_medio_alocacao) || 0,
+      tempo_medio_coleta: parseFloat(temposSQL.tempo_medio_coleta) || 0,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -7637,6 +7638,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     const porCliente = Object.values(porClienteMap).map(c => {
       // Usar tempos da query SQL em vez dos cálculos JS
+      // Frontend espera minutos como número, ele mesmo formata
       const temposCliente = temposPorClienteMap[c.cod_cliente] || {};
       
       // Converter centros_custo_map em array com dados
@@ -7648,7 +7650,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         sem_prazo: cc.sem_prazo,
-        tempo_medio: formatarTempo(temposCliente.tempo_entrega || 0), // Usar tempo do cliente
+        tempo_medio: temposCliente.tempo_entrega || 0,
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
       })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7661,13 +7663,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         cod_cliente: c.cod_cliente, nome_cliente: c.nome_cliente,
         nome_display: c.nome_display, tem_mascara: c.tem_mascara,
         total_os: c.os_set.size, total_entregas: c.total_entregas,
-        centros_custo: centros_custo_dados, // Agora é array com dados completos
+        centros_custo: centros_custo_dados,
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
-        tempo_medio: formatarTempo(temposCliente.tempo_entrega || 0),
-        tempo_medio_alocacao: formatarTempo(temposCliente.tempo_alocacao || 0),
+        tempo_medio: temposCliente.tempo_entrega || 0,
+        tempo_medio_alocacao: temposCliente.tempo_alocacao || 0,
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
         distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
-        // Novas métricas
         ticket_medio: ticketMedio.toFixed(2),
         total_profissionais: totalProfs,
         entregas_por_prof: incentivo.toFixed(2),
@@ -7938,13 +7939,14 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     const porProfissional = Object.values(porProfMap).map(p => {
       // Usar tempos da query SQL em vez dos cálculos JS
+      // Frontend espera minutos como número, ele mesmo formata
       const temposProf = temposPorProfMap[p.cod_prof] || {};
       return {
         cod_prof: p.cod_prof, nome_prof: p.nome_prof,
         total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
-        tempo_medio: formatarTempo(temposProf.tempo_entrega || 0),
-        tempo_alocado: formatarTempo(temposProf.tempo_alocacao || 0),
-        tempo_coleta: formatarTempo(temposProf.tempo_coleta || 0),
+        tempo_medio: temposProf.tempo_entrega || 0,
+        tempo_alocado: temposProf.tempo_alocacao || 0,
+        tempo_coleta: temposProf.tempo_coleta || 0,
         distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
         retornos: p.retornos
       };
