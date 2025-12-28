@@ -7050,6 +7050,93 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       return difMinutos;
     };
     
+    // ============================================
+    // FUNÇÃO: Calcular tempo de entrega (Ponto >= 2: Solicitado -> Finalizado)
+    // Regra: Se não é mesma data, início = 08:00 do dia do finalizado
+    // ============================================
+    const calcularTempoEntrega = (dataHora, finalizado, ponto) => {
+      if (!dataHora || !finalizado) return null;
+      if (parseInt(ponto) < 2) return null; // Apenas pontos de entrega (>= 2)
+      
+      const solicitado = new Date(dataHora);
+      const finalizadoDt = new Date(finalizado);
+      
+      // Ignora se finalizado < solicitado (dados invertidos)
+      if (finalizadoDt < solicitado) return null;
+      
+      // Verifica se é mesma data
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaFinalizado = finalizadoDt.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaFinalizado;
+      
+      let inicioContagem;
+      
+      if (!mesmaData) {
+        // Se não é mesma data, início = 08:00 do dia do finalizado
+        inicioContagem = new Date(finalizadoDt);
+        inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        // Mesma data, início = data/hora solicitado
+        inicioContagem = solicitado;
+      }
+      
+      // Calcula diferença em minutos
+      const difMs = finalizadoDt - inicioContagem;
+      const difMinutos = difMs / (1000 * 60);
+      
+      // Retorna null se negativo ou inválido
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      
+      return difMinutos;
+    };
+    
+    // ============================================
+    // FUNÇÃO: Calcular tempo de coleta (Ponto = 1: Alocado -> Finalizado)
+    // Regra: Se alocado após 17h E finalizado no dia seguinte, início = 08:00 do dia finalizado
+    // ============================================
+    const calcularTempoColeta = (dataHoraAlocado, finalizado, ponto) => {
+      if (!dataHoraAlocado || !finalizado) return null;
+      if (parseInt(ponto) !== 1) return null; // Apenas ponto 1 (coleta)
+      
+      const alocado = new Date(dataHoraAlocado);
+      const finalizadoDt = new Date(finalizado);
+      
+      // Ignora se finalizado < alocado (dados invertidos)
+      if (finalizadoDt < alocado) return null;
+      
+      // Hora da alocação
+      const horaAlocado = alocado.getHours();
+      
+      // Verifica se foi alocado após 17h
+      const depoisDas17 = horaAlocado >= 17;
+      
+      // Verifica se finalizado foi no dia seguinte
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      const diaFinalizado = finalizadoDt.toISOString().split('T')[0];
+      const mesmaData = diaAlocado === diaFinalizado;
+      
+      let inicioContagem;
+      
+      if (depoisDas17 && !mesmaData) {
+        // Se alocado após 17h E finalizado no dia seguinte,
+        // início = 08:00 do dia do finalizado
+        inicioContagem = new Date(finalizadoDt);
+        inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        // Caso contrário, início = data/hora alocado
+        inicioContagem = alocado;
+      }
+      
+      // Calcula diferença em minutos
+      const difMs = finalizadoDt - inicioContagem;
+      const difMinutos = difMs / (1000 * 60);
+      
+      // Retorna null se negativo ou inválido
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      
+      return difMinutos;
+    };
+    
     // LÓGICA DE CONTAGEM:
     // Cliente SEM regra: 1 OS = 1 entrega (conta OS únicas)
     // Cliente COM regra: conta pontos > 1 (cada ponto de entrega conta, exclui coleta)
@@ -7091,8 +7178,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // Calcular métricas gerais - usando a lógica por OS
     let totalOS = new Set();
     let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0, semPrazo = 0;
-    let somaValor = 0, somaValorProf = 0, somaTempoExec = 0, countTempoExec = 0;
-    let somaTempoAlocacao = 0, countTempoAlocacao = 0; // Nova métrica de alocação
+    let somaValor = 0, somaValorProf = 0;
+    let somaTempoEntrega = 0, countTempoEntrega = 0; // Tempo de entrega (Ponto >= 2)
+    let somaTempoAlocacao = 0, countTempoAlocacao = 0; // Tempo de alocação (Ponto = 1)
+    let somaTempoColeta = 0, countTempoColeta = 0; // Tempo de coleta (Ponto = 1)
     let profissionais = new Set();
     let totalRetornos = 0;
     let ultimaEntrega = null;
@@ -7143,6 +7232,20 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             somaTempoAlocacao += tempoAloc;
             countTempoAlocacao++;
           }
+          
+          // Calcular tempo de entrega (apenas para Ponto >= 2)
+          const tempoEnt = calcularTempoEntrega(row.data_hora, row.finalizado, row.ponto);
+          if (tempoEnt !== null) {
+            somaTempoEntrega += tempoEnt;
+            countTempoEntrega++;
+          }
+          
+          // Calcular tempo de coleta (apenas para Ponto = 1)
+          const tempoCol = calcularTempoColeta(row.data_hora_alocado, row.finalizado, row.ponto);
+          if (tempoCol !== null) {
+            somaTempoColeta += tempoCol;
+            countTempoColeta++;
+          }
         });
         
         // REGRA UNIVERSAL: métricas apenas das linhas com ponto >= 2 (entregas)
@@ -7153,11 +7256,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) dentroPrazo++;
           else if (l.dentro_prazo === false) foraPrazo++;
           else semPrazo++; // null ou undefined
-          
-          if (l.tempo_execucao_minutos != null) {
-            somaTempoExec += parseFloat(l.tempo_execucao_minutos);
-            countTempoExec++;
-          }
         };
         
         // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
@@ -7186,8 +7284,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
-      tempo_medio: countTempoExec > 0 ? (somaTempoExec / countTempoExec).toFixed(2) : 0,
+      tempo_medio: countTempoEntrega > 0 ? (somaTempoEntrega / countTempoEntrega).toFixed(2) : 0,
       tempo_medio_alocacao: countTempoAlocacao > 0 ? (somaTempoAlocacao / countTempoAlocacao).toFixed(2) : 0,
+      tempo_medio_coleta: countTempoColeta > 0 ? (somaTempoColeta / countTempoColeta).toFixed(2) : 0,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
