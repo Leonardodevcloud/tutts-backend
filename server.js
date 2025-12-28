@@ -7646,6 +7646,126 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
   }
 });
 
+// ============================================
+// ENDPOINT: OS por Profissional (para expandir na aba profissionais)
+// ============================================
+app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
+  try {
+    const { cod_prof } = req.params;
+    const { data_inicio, data_fim } = req.query;
+    
+    let whereClause = 'WHERE cod_prof = $1';
+    const params = [cod_prof];
+    let paramIndex = 2;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    // Buscar apenas linhas com ponto >= 2 (entregas)
+    whereClause += ' AND COALESCE(ponto, 1) >= 2';
+    
+    const query = await pool.query(`
+      SELECT 
+        os,
+        COALESCE(ponto, 1) as ponto,
+        cod_cliente,
+        COALESCE(nome_fantasia, nome_cliente) as cliente,
+        centro_custo,
+        distancia,
+        valor,
+        valor_prof,
+        dentro_prazo,
+        data_solicitado,
+        data_hora,
+        data_hora_alocado,
+        data_chegada,
+        hora_chegada,
+        finalizado,
+        ocorrencia,
+        motivo
+      FROM bi_entregas
+      ${whereClause}
+      ORDER BY data_solicitado DESC, os DESC
+      LIMIT 100
+    `, params);
+    
+    // Calcular tempo para cada OS
+    const oss = query.rows.map(row => {
+      let tempoEntrega = null;
+      let tempoAlocacao = null;
+      let tempoColeta = null;
+      
+      // Tempo de alocação: data_hora -> data_hora_alocado
+      if (row.data_hora && row.data_hora_alocado) {
+        const solicitado = new Date(row.data_hora);
+        const alocado = new Date(row.data_hora_alocado);
+        if (alocado >= solicitado) {
+          tempoAlocacao = Math.round((alocado - solicitado) / 60000); // minutos
+        }
+      }
+      
+      // Tempo de entrega: data_hora -> (data_chegada + hora_chegada) ou finalizado
+      if (row.data_hora) {
+        const solicitado = new Date(row.data_hora);
+        let chegada = null;
+        
+        if (row.data_chegada && row.hora_chegada) {
+          const dataChegada = new Date(row.data_chegada);
+          const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
+          dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
+          chegada = dataChegada;
+        } else if (row.finalizado) {
+          chegada = new Date(row.finalizado);
+        }
+        
+        if (chegada && chegada >= solicitado) {
+          const diaSolicitado = solicitado.toISOString().split('T')[0];
+          const diaChegada = chegada.toISOString().split('T')[0];
+          
+          let inicioContagem = solicitado;
+          if (diaSolicitado !== diaChegada) {
+            inicioContagem = new Date(chegada);
+            inicioContagem.setHours(8, 0, 0, 0);
+          }
+          
+          tempoEntrega = Math.round((chegada - inicioContagem) / 60000); // minutos
+        }
+      }
+      
+      return {
+        os: row.os,
+        ponto: row.ponto,
+        cod_cliente: row.cod_cliente,
+        cliente: row.cliente,
+        centro_custo: row.centro_custo,
+        distancia: parseFloat(row.distancia) || 0,
+        valor: parseFloat(row.valor) || 0,
+        valor_prof: parseFloat(row.valor_prof) || 0,
+        dentro_prazo: row.dentro_prazo,
+        data_solicitado: row.data_solicitado,
+        tempo_alocacao: tempoAlocacao,
+        tempo_entrega: tempoEntrega,
+        ocorrencia: row.ocorrencia,
+        motivo: row.motivo
+      };
+    });
+    
+    res.json({ oss, total: oss.length });
+    
+  } catch (error) {
+    console.error('Erro OS profissional:', error);
+    res.status(500).json({ error: 'Erro ao buscar OS do profissional', details: error.message });
+  }
+});
+
 
 // Lista de entregas detalhada (para análise por OS)
 app.get('/api/bi/entregas-lista', async (req, res) => {
