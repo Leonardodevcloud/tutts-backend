@@ -10383,14 +10383,14 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       paramIndex++;
     }
     
-    // Buscar dados agrupados por NOME_FANTASIA (como o Power BI faz)
+    // Buscar dados agrupados por COD_CLIENTE (igual ao Dashboard)
     // IMPORTANTE: Tempo de entrega é calculado POR OS usando Data Chegada + Hora Chegada
     const clientesQuery = await pool.query(`
       WITH tempo_por_os AS (
         SELECT 
           os,
-          COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as cliente,
-          MIN(cod_cliente) as cod_cliente,
+          cod_cliente,
+          COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente) as nome_display,
           -- Métricas de ENTREGA (Ponto >= 2)
           MIN(CASE WHEN COALESCE(ponto, 1) >= 2 THEN dentro_prazo::int END) as dentro_prazo,
           MAX(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(motivo) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%retorno%') THEN 1 ELSE 0 END) as eh_retorno,
@@ -10461,11 +10461,11 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
           ) as tempo_coleta_min
         FROM bi_entregas
         ${whereClause}
-        GROUP BY os, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
+        GROUP BY os, cod_cliente, COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente)
       )
       SELECT 
-        cliente,
-        MIN(cod_cliente) as cod_cliente,
+        cod_cliente,
+        MAX(nome_display) as nome_display,
         COUNT(DISTINCT os) as total_os,
         SUM(total_entregas_os) as total_entregas,
         SUM(CASE WHEN dentro_prazo = 1 THEN 1 ELSE 0 END) as entregas_no_prazo,
@@ -10483,7 +10483,7 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
         ROUND(AVG(tempo_coleta_min), 2) as tempo_medio_coleta_min,
         COUNT(DISTINCT cod_prof) as total_profissionais
       FROM tempo_por_os
-      GROUP BY cliente
+      GROUP BY cod_cliente
       ORDER BY total_entregas DESC
     `, params);
     
@@ -10591,8 +10591,8 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     };
     
     const clientes = clientesQuery.rows.map(c => ({
-      cliente: c.cliente,
-      cod_cliente: c.cod_cliente,
+      cliente: c.nome_display,
+      cod_cliente: parseInt(c.cod_cliente),
       os: parseInt(c.total_os) || 0,
       entregas: parseInt(c.total_entregas) || 0,
       entregasNoPrazo: parseInt(c.entregas_no_prazo) || 0,
@@ -10681,7 +10681,8 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     
     // Mapear centros de custo para os clientes
     centrosCustoQuery.rows.forEach(cc => {
-      const cliente = clientes.find(c => c.cod_cliente === cc.cod_cliente);
+      const codCliente = parseInt(cc.cod_cliente);
+      const cliente = clientes.find(c => c.cod_cliente === codCliente);
       if (cliente) {
         cliente.centros_custo.push({
           centro_custo: cc.centro_custo,
