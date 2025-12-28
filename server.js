@@ -7033,6 +7033,20 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       let chegada = null;
       let dataParaComparacao = null;
       
+      // DEBUG: Log primeiro registro para ver estrutura dos dados
+      if (!calcularTempoEntrega.logged) {
+        console.log('📊 DEBUG calcularTempoEntrega - Exemplo de row:', {
+          ponto: row.ponto,
+          data_hora: row.data_hora,
+          data_chegada: row.data_chegada,
+          hora_chegada: row.hora_chegada,
+          finalizado: row.finalizado,
+          tipo_data_chegada: typeof row.data_chegada,
+          tipo_hora_chegada: typeof row.hora_chegada
+        });
+        calcularTempoEntrega.logged = true;
+      }
+      
       // Verificar se temos data_chegada + hora_chegada válidos
       if (row.data_chegada && row.hora_chegada) {
         try {
@@ -7050,7 +7064,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             dataParaComparacao = dataChegadaStr;
           }
         } catch (e) {
-          // Ignorar erro de parsing
+          console.log('📊 DEBUG calcularTempoEntrega - Erro:', e.message);
         }
       }
       
@@ -7081,6 +7095,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       
       return difMinutos;
     };
+    calcularTempoEntrega.logged = false;
     
     // ============================================
     // FUNÇÃO: Calcular tempo de coleta (Ponto = 1: Alocado -> Saída)
@@ -7287,6 +7302,16 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           processarPrazo(linhasOS[0]);
         }
       });
+    });
+    
+    // DEBUG: Ver contadores de tempo
+    console.log('📊 DEBUG Contadores de tempo:', {
+      somaTempoEntrega,
+      countTempoEntrega,
+      somaTempoAlocacao,
+      countTempoAlocacao,
+      somaTempoColeta,
+      countTempoColeta
     });
     
     // Função para formatar tempo em HH:MM:SS (igual ao Acompanhamento)
