@@ -7553,7 +7553,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
           soma_tempo: 0, count_tempo: 0, 
           soma_tempo_alocacao: 0, count_tempo_alocacao: 0,
-          soma_tempo_coleta: 0, count_tempo_coleta: 0,
           soma_dist: 0, soma_valor_prof: 0, retornos: 0
         };
       }
@@ -7594,15 +7593,19 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               p.soma_tempo += parseFloat(l.tempo_execucao_minutos);
               p.count_tempo++;
             }
-            // Tempo de alocação
-            if (l.tempo_alocacao_minutos != null) {
-              p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
-              p.count_tempo_alocacao++;
-            }
-            // Tempo de coleta
-            if (l.tempo_coleta_minutos != null) {
-              p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
-              p.count_tempo_coleta++;
+            // Tempo de alocação: calcular a partir de data_hora e data_hora_alocado
+            if (l.data_hora && l.data_hora_alocado) {
+              try {
+                const solicitado = new Date(l.data_hora);
+                const alocado = new Date(l.data_hora_alocado);
+                if (alocado >= solicitado && !isNaN(alocado.getTime()) && !isNaN(solicitado.getTime())) {
+                  const minutos = (alocado - solicitado) / 60000;
+                  if (minutos >= 0 && minutos < 1440) { // máximo 24 horas
+                    p.soma_tempo_alocacao += minutos;
+                    p.count_tempo_alocacao++;
+                  }
+                }
+              } catch(e) {}
             }
           });
         } else if (linhas.length > 1) {
@@ -7616,14 +7619,18 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               p.count_tempo++;
             }
             // Tempo de alocação
-            if (l.tempo_alocacao_minutos != null) {
-              p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
-              p.count_tempo_alocacao++;
-            }
-            // Tempo de coleta
-            if (l.tempo_coleta_minutos != null) {
-              p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
-              p.count_tempo_coleta++;
+            if (l.data_hora && l.data_hora_alocado) {
+              try {
+                const solicitado = new Date(l.data_hora);
+                const alocado = new Date(l.data_hora_alocado);
+                if (alocado >= solicitado && !isNaN(alocado.getTime()) && !isNaN(solicitado.getTime())) {
+                  const minutos = (alocado - solicitado) / 60000;
+                  if (minutos >= 0 && minutos < 1440) {
+                    p.soma_tempo_alocacao += minutos;
+                    p.count_tempo_alocacao++;
+                  }
+                }
+              } catch(e) {}
             }
           });
         } else {
@@ -7637,14 +7644,18 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             p.count_tempo++;
           }
           // Tempo de alocação
-          if (l.tempo_alocacao_minutos != null) {
-            p.soma_tempo_alocacao += parseFloat(l.tempo_alocacao_minutos);
-            p.count_tempo_alocacao++;
-          }
-          // Tempo de coleta
-          if (l.tempo_coleta_minutos != null) {
-            p.soma_tempo_coleta += parseFloat(l.tempo_coleta_minutos);
-            p.count_tempo_coleta++;
+          if (l.data_hora && l.data_hora_alocado) {
+            try {
+              const solicitado = new Date(l.data_hora);
+              const alocado = new Date(l.data_hora_alocado);
+              if (alocado >= solicitado && !isNaN(alocado.getTime()) && !isNaN(solicitado.getTime())) {
+                const minutos = (alocado - solicitado) / 60000;
+                if (minutos >= 0 && minutos < 1440) {
+                  p.soma_tempo_alocacao += minutos;
+                  p.count_tempo_alocacao++;
+                }
+              }
+            } catch(e) {}
           }
         }
       });
@@ -7655,7 +7666,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
       tempo_medio: p.count_tempo > 0 ? (p.soma_tempo / p.count_tempo).toFixed(2) : null,
       tempo_alocado: p.count_tempo_alocacao > 0 ? (p.soma_tempo_alocacao / p.count_tempo_alocacao).toFixed(2) : null,
-      tempo_coleta: p.count_tempo_coleta > 0 ? (p.soma_tempo_coleta / p.count_tempo_coleta).toFixed(2) : null,
+      tempo_coleta: null, // Não temos esse dado calculado
       distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
       retornos: p.retornos
     })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7726,8 +7737,6 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
         finalizado,
         ocorrencia,
         motivo,
-        tempo_alocacao_minutos,
-        tempo_coleta_minutos,
         tempo_execucao_minutos
       FROM bi_entregas
       ${whereClause}
@@ -7738,45 +7747,51 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
     // Calcular tempo para cada OS
     const oss = query.rows.map(row => {
       let tempoEntrega = row.tempo_execucao_minutos ? parseFloat(row.tempo_execucao_minutos) : null;
-      let tempoAlocacao = row.tempo_alocacao_minutos ? parseFloat(row.tempo_alocacao_minutos) : null;
-      let tempoColeta = row.tempo_coleta_minutos ? parseFloat(row.tempo_coleta_minutos) : null;
+      let tempoAlocacao = null;
+      let tempoColeta = null;
       
-      // Se não tiver os campos calculados, calcula manualmente
       // Tempo de alocação: data_hora -> data_hora_alocado
-      if (tempoAlocacao === null && row.data_hora && row.data_hora_alocado) {
-        const solicitado = new Date(row.data_hora);
-        const alocado = new Date(row.data_hora_alocado);
-        if (alocado >= solicitado) {
-          tempoAlocacao = Math.round((alocado - solicitado) / 60000); // minutos
-        }
+      if (row.data_hora && row.data_hora_alocado) {
+        try {
+          const solicitado = new Date(row.data_hora);
+          const alocado = new Date(row.data_hora_alocado);
+          if (alocado >= solicitado && !isNaN(alocado.getTime()) && !isNaN(solicitado.getTime())) {
+            tempoAlocacao = Math.round((alocado - solicitado) / 60000); // minutos
+          }
+        } catch(e) {}
       }
       
       // Tempo de entrega: data_hora -> (data_chegada + hora_chegada) ou finalizado
       if (tempoEntrega === null && row.data_hora) {
-        const solicitado = new Date(row.data_hora);
-        let chegada = null;
-        
-        if (row.data_chegada && row.hora_chegada) {
-          const dataChegada = new Date(row.data_chegada);
-          const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
-          dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
-          chegada = dataChegada;
-        } else if (row.finalizado) {
-          chegada = new Date(row.finalizado);
-        }
-        
-        if (chegada && chegada >= solicitado) {
-          const diaSolicitado = solicitado.toISOString().split('T')[0];
-          const diaChegada = chegada.toISOString().split('T')[0];
+        try {
+          const solicitado = new Date(row.data_hora);
+          let chegada = null;
           
-          let inicioContagem = solicitado;
-          if (diaSolicitado !== diaChegada) {
-            inicioContagem = new Date(chegada);
-            inicioContagem.setHours(8, 0, 0, 0);
+          if (row.data_chegada && row.hora_chegada) {
+            const dataChegada = new Date(row.data_chegada);
+            const partes = (row.hora_chegada || '').split(':');
+            const horas = parseInt(partes[0]) || 0;
+            const minutos = parseInt(partes[1]) || 0;
+            const segundos = parseInt(partes[2]) || 0;
+            dataChegada.setHours(horas, minutos, segundos, 0);
+            chegada = dataChegada;
+          } else if (row.finalizado) {
+            chegada = new Date(row.finalizado);
           }
           
-          tempoEntrega = Math.round((chegada - inicioContagem) / 60000); // minutos
-        }
+          if (chegada && chegada >= solicitado && !isNaN(chegada.getTime()) && !isNaN(solicitado.getTime())) {
+            const diaSolicitado = solicitado.toISOString().split('T')[0];
+            const diaChegada = chegada.toISOString().split('T')[0];
+            
+            let inicioContagem = solicitado;
+            if (diaSolicitado !== diaChegada) {
+              inicioContagem = new Date(chegada);
+              inicioContagem.setHours(8, 0, 0, 0);
+            }
+            
+            tempoEntrega = Math.round((chegada - inicioContagem) / 60000); // minutos
+          }
+        } catch(e) {}
       }
       
       return {
