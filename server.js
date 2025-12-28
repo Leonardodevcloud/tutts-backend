@@ -10671,3 +10671,335 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
     res.status(500).json({ error: 'Erro ao buscar dados de clientes', details: error.message });
   }
 });
+
+// ============================================
+// ENDPOINT ESPECIAL: Cliente 767 com prazo de 120 minutos
+// ============================================
+app.get('/api/bi/cliente-767', async (req, res) => {
+  try {
+    const { data_inicio, data_fim } = req.query;
+    const PRAZO_767 = 120; // Prazo específico de 120 minutos para cliente 767
+    
+    let whereClause = 'WHERE cod_cliente = 767';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    // Buscar dados do cliente 767
+    const dadosQuery = await pool.query(`
+      SELECT 
+        os, 
+        COALESCE(ponto, 1) as ponto, 
+        cod_cliente, 
+        nome_cliente,
+        nome_fantasia,
+        cod_prof, 
+        nome_prof, 
+        valor, 
+        valor_prof, 
+        distancia,
+        ocorrencia, 
+        centro_custo, 
+        motivo, 
+        finalizado,
+        data_hora, 
+        data_hora_alocado, 
+        data_chegada, 
+        hora_chegada,
+        data_solicitado
+      FROM bi_entregas 
+      ${whereClause}
+    `, params);
+    
+    const dados = dadosQuery.rows;
+    console.log('📊 Cliente 767: Total registros:', dados.length);
+    
+    // Função para calcular tempo de entrega
+    const calcularTempoEntrega = (row) => {
+      const pontoNum = parseInt(row.ponto) || 1;
+      if (pontoNum === 1) return null;
+      
+      if (!row.data_hora) return null;
+      const solicitado = new Date(row.data_hora);
+      
+      let chegada = null;
+      
+      if (row.data_chegada && row.hora_chegada) {
+        const dataChegada = new Date(row.data_chegada);
+        const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
+        dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
+        chegada = dataChegada;
+      } else if (row.finalizado) {
+        chegada = new Date(row.finalizado);
+      }
+      
+      if (!chegada || chegada < solicitado) return null;
+      
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaChegada = chegada.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaChegada;
+      
+      let inicioContagem = mesmaData ? solicitado : new Date(chegada);
+      if (!mesmaData) inicioContagem.setHours(8, 0, 0, 0);
+      
+      const difMinutos = (chegada - inicioContagem) / (1000 * 60);
+      return difMinutos >= 0 ? difMinutos : null;
+    };
+    
+    // Função para calcular tempo de coleta
+    const calcularTempoColeta = (row) => {
+      const pontoNum = parseInt(row.ponto) || 1;
+      if (pontoNum !== 1) return null;
+      
+      if (!row.data_hora) return null;
+      const solicitado = new Date(row.data_hora);
+      
+      let chegada = null;
+      
+      if (row.data_chegada && row.hora_chegada) {
+        const dataChegada = new Date(row.data_chegada);
+        const [horas, minutos, segundos] = row.hora_chegada.split(':').map(Number);
+        dataChegada.setHours(horas || 0, minutos || 0, segundos || 0, 0);
+        chegada = dataChegada;
+      } else if (row.finalizado) {
+        chegada = new Date(row.finalizado);
+      }
+      
+      if (!chegada || chegada < solicitado) return null;
+      
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaChegada = chegada.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaChegada;
+      
+      let inicioContagem = mesmaData ? solicitado : new Date(chegada);
+      if (!mesmaData) inicioContagem.setHours(8, 0, 0, 0);
+      
+      const difMinutos = (chegada - inicioContagem) / (1000 * 60);
+      return difMinutos >= 0 ? difMinutos : null;
+    };
+    
+    // Função para calcular tempo de alocação
+    const calcularTempoAlocacao = (row) => {
+      const pontoNum = parseInt(row.ponto) || 1;
+      if (pontoNum !== 1) return null;
+      
+      if (!row.data_hora || !row.data_hora_alocado) return null;
+      
+      const solicitado = new Date(row.data_hora);
+      const alocado = new Date(row.data_hora_alocado);
+      
+      if (alocado < solicitado) return null;
+      
+      const horaSolicitado = solicitado.getHours();
+      const depoisDas17 = horaSolicitado >= 17;
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaAlocado;
+      
+      let inicioContagem = solicitado;
+      if (depoisDas17 && !mesmaData) {
+        inicioContagem = new Date(alocado);
+        inicioContagem.setHours(8, 0, 0, 0);
+      }
+      
+      const difMinutos = (alocado - inicioContagem) / (1000 * 60);
+      return difMinutos >= 0 ? difMinutos : null;
+    };
+    
+    // Agrupar por OS
+    const osPorOS = {};
+    dados.forEach(row => {
+      const os = row.os;
+      if (!osPorOS[os]) osPorOS[os] = [];
+      osPorOS[os].push(row);
+    });
+    
+    // Calcular métricas com prazo de 120 minutos
+    let totalOS = new Set();
+    let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0;
+    let somaValor = 0, somaValorProf = 0;
+    let somaTempoEntrega = 0, countTempoEntrega = 0;
+    let somaTempoAlocacao = 0, countTempoAlocacao = 0;
+    let somaTempoColeta = 0, countTempoColeta = 0;
+    let profissionais = new Set();
+    let totalRetornos = 0;
+    
+    // Dados por data para gráfico
+    const porDataMap = {};
+    
+    Object.keys(osPorOS).forEach(os => {
+      const linhasOS = osPorOS[os];
+      totalOS.add(os);
+      
+      // Contagem de entregas (pontos >= 2)
+      const entregasOS = linhasOS.filter(l => (parseInt(l.ponto) || 1) >= 2).length || 1;
+      totalEntregas += entregasOS;
+      
+      linhasOS.forEach(row => {
+        profissionais.add(row.cod_prof);
+        
+        const ocorrencia = (row.ocorrencia || '').toLowerCase();
+        if (ocorrencia.includes('cliente fechado') || ocorrencia.includes('cliente ausente') || 
+            ocorrencia.includes('loja fechada') || ocorrencia.includes('produto incorreto')) {
+          totalRetornos++;
+        }
+        
+        // Calcular tempos
+        const tempoEnt = calcularTempoEntrega(row);
+        if (tempoEnt !== null) {
+          somaTempoEntrega += tempoEnt;
+          countTempoEntrega++;
+          
+          // Verificar prazo de 120 minutos
+          if (tempoEnt <= PRAZO_767) {
+            dentroPrazo++;
+          } else {
+            foraPrazo++;
+          }
+        }
+        
+        const tempoAloc = calcularTempoAlocacao(row);
+        if (tempoAloc !== null) {
+          somaTempoAlocacao += tempoAloc;
+          countTempoAlocacao++;
+        }
+        
+        const tempoCol = calcularTempoColeta(row);
+        if (tempoCol !== null) {
+          somaTempoColeta += tempoCol;
+          countTempoColeta++;
+        }
+        
+        // Agrupar por data
+        const data = row.data_solicitado;
+        if (data) {
+          if (!porDataMap[data]) {
+            porDataMap[data] = {
+              data_solicitado: data,
+              total_os: new Set(),
+              total_entregas: 0,
+              dentro_prazo: 0,
+              fora_prazo: 0,
+              soma_tempo_entrega: 0,
+              count_tempo_entrega: 0,
+              soma_tempo_alocacao: 0,
+              count_tempo_alocacao: 0,
+              soma_tempo_coleta: 0,
+              count_tempo_coleta: 0,
+              soma_valor: 0,
+              soma_valor_prof: 0,
+              retornos: 0,
+              profissionais: new Set()
+            };
+          }
+          porDataMap[data].total_os.add(os);
+          porDataMap[data].profissionais.add(row.cod_prof);
+          
+          if ((parseInt(row.ponto) || 1) >= 2) {
+            porDataMap[data].total_entregas++;
+          }
+          
+          if (tempoEnt !== null) {
+            porDataMap[data].soma_tempo_entrega += tempoEnt;
+            porDataMap[data].count_tempo_entrega++;
+            if (tempoEnt <= PRAZO_767) {
+              porDataMap[data].dentro_prazo++;
+            } else {
+              porDataMap[data].fora_prazo++;
+            }
+          }
+          
+          if (tempoAloc !== null) {
+            porDataMap[data].soma_tempo_alocacao += tempoAloc;
+            porDataMap[data].count_tempo_alocacao++;
+          }
+          
+          if (tempoCol !== null) {
+            porDataMap[data].soma_tempo_coleta += tempoCol;
+            porDataMap[data].count_tempo_coleta++;
+          }
+        }
+      });
+      
+      // Valores (1x por OS)
+      const linhaValor = linhasOS.reduce((maior, atual) => {
+        return (parseInt(atual.ponto) || 0) > (parseInt(maior?.ponto) || 0) ? atual : maior;
+      }, linhasOS[0]);
+      
+      somaValor += parseFloat(linhaValor?.valor) || 0;
+      somaValorProf += parseFloat(linhaValor?.valor_prof) || 0;
+      
+      // Valor por data
+      const data = linhaValor?.data_solicitado;
+      if (data && porDataMap[data]) {
+        porDataMap[data].soma_valor += parseFloat(linhaValor?.valor) || 0;
+        porDataMap[data].soma_valor_prof += parseFloat(linhaValor?.valor_prof) || 0;
+      }
+    });
+    
+    // Formatar dados por data
+    const porData = Object.keys(porDataMap).sort().map(data => {
+      const d = porDataMap[data];
+      const totalEnt = d.total_entregas || 1;
+      return {
+        data_solicitado: data,
+        data_formatada: new Date(data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }),
+        total_os: d.total_os.size,
+        total_entregas: d.total_entregas,
+        dentro_prazo: d.dentro_prazo,
+        fora_prazo: d.fora_prazo,
+        taxa_prazo: d.count_tempo_entrega > 0 ? ((d.dentro_prazo / d.count_tempo_entrega) * 100).toFixed(1) : 0,
+        tempo_medio_entrega: d.count_tempo_entrega > 0 ? (d.soma_tempo_entrega / d.count_tempo_entrega).toFixed(1) : 0,
+        tempo_medio_alocacao: d.count_tempo_alocacao > 0 ? (d.soma_tempo_alocacao / d.count_tempo_alocacao).toFixed(1) : 0,
+        tempo_medio_coleta: d.count_tempo_coleta > 0 ? (d.soma_tempo_coleta / d.count_tempo_coleta).toFixed(1) : 0,
+        valor_total: d.soma_valor,
+        valor_motoboy: d.soma_valor_prof,
+        ticket_medio: d.total_os.size > 0 ? (d.soma_valor / d.total_os.size).toFixed(2) : 0,
+        total_entregadores: d.profissionais.size
+      };
+    });
+    
+    // Métricas gerais
+    const metricas = {
+      total_os: totalOS.size,
+      total_entregas: totalEntregas,
+      dentro_prazo: dentroPrazo,
+      fora_prazo: foraPrazo,
+      taxa_prazo: countTempoEntrega > 0 ? ((dentroPrazo / countTempoEntrega) * 100).toFixed(1) : 0,
+      tempo_medio: countTempoEntrega > 0 ? (somaTempoEntrega / countTempoEntrega).toFixed(2) : 0,
+      tempo_medio_alocacao: countTempoAlocacao > 0 ? (somaTempoAlocacao / countTempoAlocacao).toFixed(2) : 0,
+      tempo_medio_coleta: countTempoColeta > 0 ? (somaTempoColeta / countTempoColeta).toFixed(2) : 0,
+      valor_total: somaValor.toFixed(2),
+      valor_prof_total: somaValorProf.toFixed(2),
+      ticket_medio: totalOS.size > 0 ? (somaValor / totalOS.size).toFixed(2) : 0,
+      total_profissionais: profissionais.size,
+      media_entregas_por_prof: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
+      total_retornos: totalRetornos,
+      prazo_minutos: PRAZO_767
+    };
+    
+    res.json({
+      metricas,
+      porData,
+      prazo: PRAZO_767,
+      cliente: {
+        cod_cliente: 767,
+        nome: dados[0]?.nome_cliente || dados[0]?.nome_fantasia || 'Cliente 767'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erro cliente 767:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados do cliente 767', details: error.message });
+  }
+});
