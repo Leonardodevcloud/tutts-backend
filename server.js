@@ -7286,10 +7286,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       if (!dataHoraAlocado || !finalizado) return null;
       
       // Extrair data e hora como strings para evitar problemas de timezone
+      // Aceita formatos: "2025-12-01T18:12:19" ou "2025-12-01 18:12:19"
       const parseDateTime = (str) => {
         if (!str) return null;
         const s = String(str);
-        const match = s.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+        const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
         if (!match) return null;
         return {
           dataStr: match[1] + '-' + match[2] + '-' + match[3],
