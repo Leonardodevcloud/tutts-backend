@@ -8841,6 +8841,24 @@ app.get('/api/bi/centros-custo', async (req, res) => {
   }
 });
 
+// Listar centros de custo de um cliente específico
+app.get('/api/bi/centros-custo/:cod_cliente', async (req, res) => {
+  try {
+    const { cod_cliente } = req.params;
+    const result = await pool.query(`
+      SELECT DISTINCT centro_custo, COUNT(*) as total_entregas
+      FROM bi_entregas 
+      WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
+      GROUP BY centro_custo
+      ORDER BY centro_custo
+    `, [cod_cliente]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar centros do cliente:', err);
+    res.status(500).json({ error: 'Erro ao listar centros do cliente' });
+  }
+});
+
 // Listar profissionais únicos (para dropdown)
 app.get('/api/bi/profissionais', async (req, res) => {
   try {
@@ -10366,19 +10384,32 @@ app.get('/api/bi/regioes', async (req, res) => {
   }
 });
 
-// Criar região
+// Criar região - Suporta novo formato com cliente + centro de custo
 app.post('/api/bi/regioes', async (req, res) => {
   try {
-    const { nome, clientes } = req.body;
+    const { nome, clientes, itens } = req.body;
     if (!nome) {
       return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    // Se vier no novo formato (itens), usa ele. Senão, usa o formato antigo (clientes)
+    let dadosParaSalvar;
+    if (itens && itens.length > 0) {
+      // Novo formato: array de {cod_cliente, centro_custo}
+      dadosParaSalvar = itens;
+    } else if (clientes && clientes.length > 0) {
+      // Formato antigo: array de cod_cliente
+      // Converte para novo formato (sem centro_custo especificado = todos)
+      dadosParaSalvar = clientes.map(c => ({ cod_cliente: c, centro_custo: null }));
+    } else {
+      return res.status(400).json({ error: 'Adicione pelo menos um cliente/centro de custo' });
     }
     
     const result = await pool.query(`
       INSERT INTO bi_regioes (nome, clientes) 
       VALUES ($1, $2)
       RETURNING *
-    `, [nome, JSON.stringify(clientes || [])]);
+    `, [nome, JSON.stringify(dadosParaSalvar)]);
     
     res.json({ success: true, regiao: result.rows[0] });
   } catch (err) {
