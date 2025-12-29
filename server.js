@@ -8326,7 +8326,7 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
 // Lista de entregas detalhada (para análise por OS)
 app.get('/api/bi/entregas-lista', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -8343,13 +8343,40 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       where += ` AND data_solicitado <= $${paramIndex++}`; 
       params.push(dataFim); 
     }
-    if (cod_cliente) { where += ` AND cod_cliente = $${paramIndex++}`; params.push(cod_cliente); }
-    if (centro_custo) { where += ` AND centro_custo = $${paramIndex++}`; params.push(centro_custo); }
+    if (cod_cliente) { 
+      // Suporta múltiplos clientes separados por vírgula
+      const clientes = cod_cliente.split(',').map(c => c.trim()).filter(c => c);
+      if (clientes.length === 1) {
+        where += ` AND cod_cliente = $${paramIndex++}`; 
+        params.push(clientes[0]);
+      } else if (clientes.length > 1) {
+        where += ` AND cod_cliente = ANY($${paramIndex++}::text[])`; 
+        params.push(clientes);
+      }
+    }
+    if (centro_custo) { 
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length === 1) {
+        where += ` AND centro_custo = $${paramIndex++}`; 
+        params.push(centros[0]);
+      } else if (centros.length > 1) {
+        where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
+        params.push(centros);
+      }
+    }
     if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
     if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
     if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
     else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
     if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    
+    // Filtro de retorno - filtra por OS que tem/não tem retorno
+    let retornoFilter = '';
+    if (status_retorno === 'com_retorno') {
+      retornoFilter = ` AND os IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
+    } else if (status_retorno === 'sem_retorno') {
+      retornoFilter = ` AND os NOT IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
+    }
     
     const result = await pool.query(`
       SELECT 
@@ -8378,7 +8405,7 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
         ocorrencia,
         motivo,
         status
-      FROM bi_entregas ${where}
+      FROM bi_entregas ${where}${retornoFilter}
       ORDER BY os DESC, COALESCE(ponto, 1) ASC
       LIMIT 2000
     `, params);
