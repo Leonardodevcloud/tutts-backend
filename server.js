@@ -6950,66 +6950,58 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     console.log('📊 Total de clientes no sistema:', todosClientes.length);
     
     // ============================================
-    // QUERY SQL PARA TEMPOS MÉDIOS (igual ao Acompanhamento)
-    // IMPORTANTE: Usar COALESCE para evitar NULL e conversão segura de hora_chegada
+    // QUERY SQL PARA TEMPOS MÉDIOS 
+    // LÓGICA IDÊNTICA AO ACOMPANHAMENTO-CLIENTES
     // ============================================
     const temposQuery = await pool.query(`
       SELECT 
-        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
-        -- Regra: Solicitado -> Saída (Data/Hora Chegada ou Finalizado)
-        -- Se não é mesma data, início = 08:00 do dia da saída
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2): Solicitado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) <> 1 
+            WHEN COALESCE(ponto, 1) >= 2
                  AND data_hora IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN DATE(data_chegada) <> DATE(data_hora)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN DATE(finalizado) <> DATE(data_hora)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_entrega,
         
-        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
-        -- Regra: Solicitado -> Alocado
-        -- Se solicitado após 17h E alocação no dia seguinte, início = 08:00 do dia alocado
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) = 1
-                 AND data_hora IS NOT NULL 
-                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
                  AND data_hora_alocado >= data_hora
             THEN
               EXTRACT(EPOCH FROM (
                 data_hora_alocado - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
                   THEN DATE(data_hora_alocado) + TIME '08:00:00'
                   ELSE data_hora
                 END
@@ -7018,44 +7010,24 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           END
         ), 2) as tempo_medio_alocacao,
         
-        -- TEMPO MÉDIO COLETA (Ponto = 1)
-        -- Regra: Alocado -> Saída (Data/Hora Chegada ou Finalizado)
-        -- Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) = 1
+            WHEN COALESCE(ponto, 1) = 1 
                  AND data_hora_alocado IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(data_chegada) > DATE(data_hora_alocado)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(finalizado) > DATE(data_hora_alocado)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_coleta
@@ -7476,62 +7448,59 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     };
     
     // ============================================
-    // QUERY SQL PARA TEMPOS POR CLIENTE (igual ao Acompanhamento)
+    // QUERY SQL PARA TEMPOS POR CLIENTE
+    // LÓGICA IDÊNTICA AO ACOMPANHAMENTO-CLIENTES
     // ============================================
     const temposPorClienteQuery = await pool.query(`
       SELECT 
         cod_cliente,
-        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2): Solicitado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) <> 1 
+            WHEN COALESCE(ponto, 1) >= 2
                  AND data_hora IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN DATE(data_chegada) <> DATE(data_hora)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN DATE(finalizado) <> DATE(data_hora)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_entrega,
         
-        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) = 1
-                 AND data_hora IS NOT NULL 
-                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
                  AND data_hora_alocado >= data_hora
             THEN
               EXTRACT(EPOCH FROM (
                 data_hora_alocado - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
                   THEN DATE(data_hora_alocado) + TIME '08:00:00'
                   ELSE data_hora
                 END
@@ -7540,42 +7509,24 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           END
         ), 2) as tempo_medio_alocacao,
         
-        -- TEMPO MÉDIO COLETA (Ponto = 1)
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) = 1
+            WHEN COALESCE(ponto, 1) = 1 
                  AND data_hora_alocado IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(data_chegada) > DATE(data_hora_alocado)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(finalizado) > DATE(data_hora_alocado)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_coleta
@@ -7853,62 +7804,59 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     });
     
     // ============================================
-    // QUERY SQL PARA TEMPOS POR PROFISSIONAL (igual ao Acompanhamento)
+    // QUERY SQL PARA TEMPOS POR PROFISSIONAL
+    // LÓGICA IDÊNTICA AO ACOMPANHAMENTO-CLIENTES
     // ============================================
     const temposPorProfQuery = await pool.query(`
       SELECT 
         cod_prof,
-        -- TEMPO MÉDIO ENTREGA (Ponto <> 1)
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2): Solicitado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) <> 1 
+            WHEN COALESCE(ponto, 1) >= 2
                  AND data_hora IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN DATE(data_chegada) <> DATE(data_hora)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN DATE(finalizado) <> DATE(data_hora)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_entrega,
         
-        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1)
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) = 1
-                 AND data_hora IS NOT NULL 
-                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
                  AND data_hora_alocado >= data_hora
             THEN
               EXTRACT(EPOCH FROM (
                 data_hora_alocado - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
                   THEN DATE(data_hora_alocado) + TIME '08:00:00'
                   ELSE data_hora
                 END
@@ -7917,42 +7865,24 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           END
         ), 2) as tempo_medio_alocacao,
         
-        -- TEMPO MÉDIO COLETA (Ponto = 1)
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) = 1
+            WHEN COALESCE(ponto, 1) = 1 
                  AND data_hora_alocado IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(data_chegada) > DATE(data_hora_alocado)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(finalizado) > DATE(data_hora_alocado)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
             ELSE NULL
           END
         ), 2) as tempo_medio_coleta
@@ -10947,60 +10877,53 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_motoboy,
         ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END), 0), 2) as ticket_medio,
         
-        -- TEMPO MÉDIO ENTREGA (Ponto <> 1 = entregas, usa Solicitado -> Saída)
-        -- Saída = data_chegada + hora_chegada (conforme DAX), fallback para finalizado
-        -- Regra: Se não é mesma data, início = 08:00 do dia da saída
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2): Solicitado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) <> 1 
+            WHEN COALESCE(ponto, 1) >= 2
                  AND data_hora IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN DATE(data_chegada) <> DATE(data_hora)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN DATE(finalizado) <> DATE(data_hora)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
             ELSE NULL
           END
         ), 1) as tempo_medio_entrega,
         
-        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1 = coleta, usa Solicitado -> Alocado)
-        -- Regra: Se solicitado após 17h E alocado no dia seguinte, início = 08:00 do dia alocado
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) = 1
-                 AND data_hora IS NOT NULL 
-                 AND data_hora_alocado IS NOT NULL
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
                  AND data_hora_alocado >= data_hora
             THEN
               EXTRACT(EPOCH FROM (
                 data_hora_alocado - 
                 CASE 
                   WHEN EXTRACT(HOUR FROM data_hora) >= 17 
-                       AND DATE(data_hora_alocado) > DATE(data_hora) 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
                   THEN DATE(data_hora_alocado) + TIME '08:00:00'
                   ELSE data_hora
                 END
@@ -11009,44 +10932,24 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
           END
         ), 1) as tempo_medio_alocacao,
         
-        -- TEMPO MÉDIO COLETA (Ponto = 1, usa Alocado -> Saída)
-        -- Saída = data_chegada + hora_chegada (conforme DAX), fallback para finalizado
-        -- Regra: Se alocado após 17h E saída no dia seguinte, início = 08:00 do dia da saída
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
         ROUND(AVG(
           CASE 
-            WHEN COALESCE(ponto, 1) = 1
+            WHEN COALESCE(ponto, 1) = 1 
                  AND data_hora_alocado IS NOT NULL 
-                 AND (
-                   (data_chegada IS NOT NULL AND hora_chegada IS NOT NULL)
-                   OR finalizado IS NOT NULL
-                 )
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
             THEN
-              CASE 
-                WHEN data_chegada IS NOT NULL AND hora_chegada IS NOT NULL 
-                     AND (data_chegada + hora_chegada::time) >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    (data_chegada + hora_chegada::time) - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(data_chegada) > DATE(data_hora_alocado)
-                      THEN DATE(data_chegada) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                WHEN finalizado IS NOT NULL AND finalizado >= data_hora_alocado
-                THEN
-                  EXTRACT(EPOCH FROM (
-                    finalizado - 
-                    CASE 
-                      WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
-                           AND DATE(finalizado) > DATE(data_hora_alocado)
-                      THEN DATE(finalizado) + TIME '08:00:00'
-                      ELSE data_hora_alocado
-                    END
-                  )) / 60
-                ELSE NULL
-              END
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
             ELSE NULL
           END
         ), 1) as tempo_medio_coleta,
