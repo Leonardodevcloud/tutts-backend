@@ -6747,7 +6747,7 @@ app.post('/api/bi/entregas/atualizar-alocado', async (req, res) => {
 // Dashboard BI - Métricas gerais COMPLETO
 app.get('/api/bi/dashboard', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, cidade } = req.query;
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -6785,6 +6785,12 @@ app.get('/api/bi/dashboard', async (req, res) => {
     if (cidade) {
       where += ` AND cidade = $${paramIndex++}`;
       params.push(cidade);
+    }
+    // Filtro de retorno
+    if (status_retorno === 'com_retorno') {
+      where += ` AND os IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
+    } else if (status_retorno === 'sem_retorno') {
+      where += ` AND os NOT IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
     }
     
     // Métricas gerais completas
@@ -6882,7 +6888,7 @@ app.get('/api/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
-    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, cidade } = req.query;
+    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
     // Suporte a múltiplos clientes e centros de custo
     let cod_cliente = req.query.cod_cliente;
     let centro_custo = req.query.centro_custo;
@@ -6891,7 +6897,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     if (cod_cliente && !Array.isArray(cod_cliente)) cod_cliente = [cod_cliente];
     if (centro_custo && !Array.isArray(centro_custo)) centro_custo = [centro_custo];
     
-    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof });
+    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, status_retorno });
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -6923,6 +6929,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
     else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
     if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
+    // Filtro de retorno
+    if (status_retorno === 'com_retorno') {
+      where += ` AND os IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
+    } else if (status_retorno === 'sem_retorno') {
+      where += ` AND os NOT IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%retorno%')`;
+    }
     
     console.log('📊 WHERE:', where, 'Params:', params);
     
