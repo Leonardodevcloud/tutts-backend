@@ -7280,30 +7280,48 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // FUNÇÃO: Calcular T. Entrega Prof (Alocado -> Finalizado da OS)
     // Este é o tempo que o profissional leva desde que é alocado até finalizar
     // Regra: Se dias diferentes, início = 08:00 do dia do finalizado
+    // NOTA: Os dados vêm em horário de Brasília, tratamos como strings para evitar problemas de timezone
     // ============================================
     const calcularTempoEntregaProf = (dataHoraAlocado, finalizado) => {
       if (!dataHoraAlocado || !finalizado) return null;
       
-      const alocado = new Date(dataHoraAlocado);
-      const fim = new Date(finalizado);
+      // Extrair data e hora como strings para evitar problemas de timezone
+      const parseDateTime = (str) => {
+        if (!str) return null;
+        const s = String(str);
+        const match = s.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+        if (!match) return null;
+        return {
+          dataStr: match[1] + '-' + match[2] + '-' + match[3],
+          hora: parseInt(match[4]),
+          min: parseInt(match[5]),
+          seg: parseInt(match[6])
+        };
+      };
       
-      if (isNaN(alocado.getTime()) || isNaN(fim.getTime())) return null;
-      if (fim < alocado) return null;
+      const alocado = parseDateTime(dataHoraAlocado);
+      const fim = parseDateTime(finalizado);
       
-      const diaAlocado = alocado.toISOString().split('T')[0];
-      const diaFim = fim.toISOString().split('T')[0];
-      const mesmaData = diaAlocado === diaFim;
+      if (!alocado || !fim) return null;
       
-      let inicioContagem;
+      const mesmaData = alocado.dataStr === fim.dataStr;
+      
+      let inicioMinutos, fimMinutos;
+      
+      // Fim sempre é a hora real do fim
+      fimMinutos = fim.hora * 60 + fim.min + fim.seg / 60;
+      
       if (!mesmaData) {
         // Dias diferentes - começa às 8h do dia do fim
-        inicioContagem = new Date(diaFim + 'T08:00:00');
+        inicioMinutos = 8 * 60; // 8:00 = 480 minutos
       } else {
-        inicioContagem = alocado;
+        inicioMinutos = alocado.hora * 60 + alocado.min + alocado.seg / 60;
       }
       
-      const difMinutos = (fim - inicioContagem) / (1000 * 60);
-      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      const difMinutos = fimMinutos - inicioMinutos;
+      
+      // Se negativo, algo está errado
+      if (difMinutos < 0) return null;
       
       return difMinutos;
     };
