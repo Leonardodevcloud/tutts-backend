@@ -8354,11 +8354,19 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
     const result = await pool.query(`
       SELECT 
         os,
+        COALESCE(ponto, 1) as ponto,
+        cod_prof,
         nome_prof,
         endereco,
         cidade,
         data_solicitado,
+        hora_solicitado,
         data_hora,
+        data_hora_alocado,
+        data_chegada,
+        hora_chegada,
+        data_saida,
+        hora_saida,
         finalizado,
         distancia,
         dentro_prazo,
@@ -8368,10 +8376,11 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
         valor_prof,
         categoria,
         ocorrencia,
+        motivo,
         status
       FROM bi_entregas ${where}
-      ORDER BY data_hora DESC
-      LIMIT 500
+      ORDER BY os DESC, COALESCE(ponto, 1) ASC
+      LIMIT 2000
     `, params);
     
     res.json(result.rows);
