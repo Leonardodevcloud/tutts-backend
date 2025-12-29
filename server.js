@@ -6888,7 +6888,7 @@ app.get('/api/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
-    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
+    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
     // Suporte a múltiplos clientes e centros de custo
     let cod_cliente = req.query.cod_cliente;
     let centro_custo = req.query.centro_custo;
@@ -6897,7 +6897,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     if (cod_cliente && !Array.isArray(cod_cliente)) cod_cliente = [cod_cliente];
     if (centro_custo && !Array.isArray(centro_custo)) centro_custo = [centro_custo];
     
-    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, status_retorno });
+    // Clientes que não devem ter filtro de centro de custo (mostrar todos CC)
+    let clientesSemFiltroCC = [];
+    if (clientes_sem_filtro_cc) {
+      clientesSemFiltroCC = clientes_sem_filtro_cc.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+    }
+    
+    console.log('📊 Dashboard-completo:', { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, status_retorno, clientesSemFiltroCC });
     
     let where = 'WHERE 1=1';
     const params = [];
@@ -6919,10 +6925,17 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       where += ` AND cod_cliente = ANY($${paramIndex++}::int[])`; 
       params.push(cod_cliente.map(c => parseInt(c))); 
     }
-    // Múltiplos centros de custo
-    if (centro_custo && centro_custo.length > 0) { 
-      where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
-      params.push(centro_custo); 
+    // Múltiplos centros de custo - COM exceção para clientes sem filtro
+    if (centro_custo && centro_custo.length > 0) {
+      if (clientesSemFiltroCC.length > 0) {
+        // Filtrar por CC OU ser um cliente sem filtro de CC
+        where += ` AND (centro_custo = ANY($${paramIndex++}::text[]) OR cod_cliente = ANY($${paramIndex++}::int[]))`;
+        params.push(centro_custo);
+        params.push(clientesSemFiltroCC);
+      } else {
+        where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
+        params.push(centro_custo); 
+      }
     }
     if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
     if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
@@ -8375,42 +8388,49 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
 // Lista de entregas detalhada (para análise por OS)
 app.get('/api/bi/entregas-lista', async (req, res) => {
   try {
-    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
+    const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
     
     let where = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
     
+    // Clientes que não devem ter filtro de centro de custo
+    let clientesSemFiltroCC = [];
+    if (clientes_sem_filtro_cc) {
+      clientesSemFiltroCC = clientes_sem_filtro_cc.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+    }
+    
     // Converter datas ISO para YYYY-MM-DD
     if (data_inicio) { 
-      const dataIni = data_inicio.split('T')[0];
+      const dataIni = data_inicio.includes('T') ? data_inicio.split('T')[0] : data_inicio;
       where += ` AND data_solicitado >= $${paramIndex++}`; 
       params.push(dataIni); 
     }
     if (data_fim) { 
-      const dataFim = data_fim.split('T')[0];
+      const dataFim = data_fim.includes('T') ? data_fim.split('T')[0] : data_fim;
       where += ` AND data_solicitado <= $${paramIndex++}`; 
       params.push(dataFim); 
     }
     if (cod_cliente) { 
       // Suporta múltiplos clientes separados por vírgula
-      const clientes = cod_cliente.split(',').map(c => c.trim()).filter(c => c);
-      if (clientes.length === 1) {
-        where += ` AND cod_cliente = $${paramIndex++}`; 
-        params.push(clientes[0]);
-      } else if (clientes.length > 1) {
-        where += ` AND cod_cliente = ANY($${paramIndex++}::text[])`; 
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        where += ` AND cod_cliente = ANY($${paramIndex++}::int[])`; 
         params.push(clientes);
       }
     }
     if (centro_custo) { 
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
-      if (centros.length === 1) {
-        where += ` AND centro_custo = $${paramIndex++}`; 
-        params.push(centros[0]);
-      } else if (centros.length > 1) {
-        where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
-        params.push(centros);
+      if (centros.length > 0) {
+        if (clientesSemFiltroCC.length > 0) {
+          // Filtrar por CC OU ser um cliente sem filtro de CC
+          where += ` AND (centro_custo = ANY($${paramIndex++}::text[]) OR cod_cliente = ANY($${paramIndex++}::int[]))`;
+          params.push(centros);
+          params.push(clientesSemFiltroCC);
+        } else {
+          where += ` AND centro_custo = ANY($${paramIndex++}::text[])`; 
+          params.push(centros);
+        }
       }
     }
     if (cod_prof) { where += ` AND cod_prof = $${paramIndex++}`; params.push(cod_prof); }
@@ -8433,6 +8453,9 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
         COALESCE(ponto, 1) as ponto,
         cod_prof,
         nome_prof,
+        cod_cliente,
+        COALESCE(nome_fantasia, nome_cliente) as cliente,
+        centro_custo,
         endereco,
         cidade,
         data_solicitado,
