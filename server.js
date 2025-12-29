@@ -8077,7 +8077,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
 app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
   try {
     const { cod_prof } = req.params;
-    const { data_inicio, data_fim } = req.query;
+    const { data_inicio, data_fim, cod_cliente, centro_custo, categoria, status_prazo, status_retorno, cidade } = req.query;
     
     let whereClause = 'WHERE cod_prof = $1';
     const params = [cod_prof];
@@ -8092,6 +8092,43 @@ app.get('/api/bi/os-profissional/:cod_prof', async (req, res) => {
       whereClause += ` AND data_solicitado <= $${paramIndex}`;
       params.push(data_fim);
       paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    if (categoria) {
+      whereClause += ` AND categoria ILIKE $${paramIndex}`;
+      params.push(`%${categoria}%`);
+      paramIndex++;
+    }
+    if (status_prazo === 'dentro') {
+      whereClause += ` AND dentro_prazo = true`;
+    } else if (status_prazo === 'fora') {
+      whereClause += ` AND dentro_prazo = false`;
+    }
+    if (cidade) {
+      whereClause += ` AND cidade ILIKE $${paramIndex}`;
+      params.push(`%${cidade}%`);
+      paramIndex++;
+    }
+    // Filtro de retorno - usar mesma lógica da função isRetorno
+    if (status_retorno === 'com_retorno') {
+      whereClause += ` AND os IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%')`;
+    } else if (status_retorno === 'sem_retorno') {
+      whereClause += ` AND os NOT IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%')`;
     }
     
     // Buscar TODAS as linhas do profissional (incluindo ponto 1 para calcular tempos)
