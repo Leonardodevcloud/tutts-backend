@@ -7489,10 +7489,22 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const primeiroReg = linhasOS[0];
         const ultimoReg = linhasOS[linhasOS.length - 1];
         
-        // Função para extrair data/hora de string (sem problemas de timezone)
-        const parseDateTime = (str) => {
-          if (!str) return null;
-          const s = String(str);
+        // Função para extrair data/hora (aceita string ou objeto Date)
+        const parseDateTime = (valor) => {
+          if (!valor) return null;
+          
+          // Se for objeto Date
+          if (valor instanceof Date) {
+            return {
+              dataStr: valor.toISOString().split('T')[0],
+              hora: valor.getHours(),
+              min: valor.getMinutes(),
+              seg: valor.getSeconds()
+            };
+          }
+          
+          // Se for string
+          const s = String(valor);
           const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
           if (!match) return null;
           return {
@@ -7506,8 +7518,24 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const alocadoStr = primeiroReg?.data_hora_alocado;
         const finalizadoStr = ultimoReg?.finalizado || primeiroReg?.finalizado;
         
+        // Debug: log das primeiras 3 OS
+        if (totalOS.size <= 3) {
+          console.log('📊 DEBUG T.Entrega Prof - OS:', os, {
+            alocadoStr: alocadoStr,
+            finalizadoStr: finalizadoStr,
+            tipoAlocado: typeof alocadoStr,
+            tipoFinalizado: typeof finalizadoStr,
+            isDateAlocado: alocadoStr instanceof Date,
+            isDateFinalizado: finalizadoStr instanceof Date
+          });
+        }
+        
         const alocado = parseDateTime(alocadoStr);
         const finalizado = parseDateTime(finalizadoStr);
+        
+        if (totalOS.size <= 3) {
+          console.log('📊 DEBUG Parsed:', { alocado, finalizado });
+        }
         
         if (alocado && finalizado) {
           const mesmaData = alocado.dataStr === finalizado.dataStr;
@@ -7525,6 +7553,10 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           }
           
           const tempoEntProf = fimMinutos - inicioMinutos;
+          
+          if (totalOS.size <= 3) {
+            console.log('📊 DEBUG Tempo:', { mesmaData, inicioMinutos, fimMinutos, tempoEntProf });
+          }
           
           if (tempoEntProf >= 0) {
             somaTempoEntregaProf += tempoEntProf;
