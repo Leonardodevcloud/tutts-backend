@@ -8482,7 +8482,193 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       LIMIT 2000
     `, params);
     
-    res.json(result.rows);
+    // ========== CALCULAR TEMPOS CONSOLIDADOS POR OS (mesma lógica do endpoint os-profissional) ==========
+    
+    // Funções de cálculo de tempo (idênticas às usadas em os-profissional)
+    const calcularTempoAlocacao = (dataHora, dataHoraAlocado, ponto) => {
+      if (!dataHora || !dataHoraAlocado) return null;
+      const pontoNum = parseInt(ponto) || 1;
+      if (pontoNum !== 1) return null;
+      
+      const solicitado = new Date(dataHora);
+      const alocado = new Date(dataHoraAlocado);
+      
+      if (alocado < solicitado || isNaN(alocado.getTime()) || isNaN(solicitado.getTime())) return null;
+      
+      const horaSolicitado = solicitado.getHours();
+      const depoisDas17 = horaSolicitado >= 17;
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      const mesmaData = diaSolicitado === diaAlocado;
+      
+      let inicioContagem;
+      if (depoisDas17 && !mesmaData) {
+        inicioContagem = new Date(alocado);
+        inicioContagem.setHours(8, 0, 0, 0);
+      } else {
+        inicioContagem = solicitado;
+      }
+      
+      const difMinutos = (alocado - inicioContagem) / (1000 * 60);
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      return difMinutos;
+    };
+    
+    const calcularTempoEntrega = (row) => {
+      const pontoNum = parseInt(row.ponto) || 1;
+      if (pontoNum === 1) return null;
+      
+      if (!row.data_hora) return null;
+      const solicitado = new Date(row.data_hora);
+      if (isNaN(solicitado.getTime())) return null;
+      
+      let chegada = null;
+      let dataParaComparacao = null;
+      
+      if (row.data_chegada && row.hora_chegada) {
+        try {
+          const dataChegadaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataChegada = new Date(dataChegadaStr + 'T00:00:00');
+          dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
+            chegada = dataChegada;
+            dataParaComparacao = dataChegadaStr;
+          }
+        } catch (e) {}
+      }
+      
+      if (!chegada && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= solicitado) {
+          chegada = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
+        }
+      }
+      
+      if (!chegada || !dataParaComparacao) return null;
+      
+      const diaSolicitado = solicitado.toISOString().split('T')[0];
+      
+      let inicioContagem;
+      if (diaSolicitado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
+      } else {
+        inicioContagem = solicitado;
+      }
+      
+      const difMinutos = (chegada - inicioContagem) / (1000 * 60);
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      return difMinutos;
+    };
+    
+    const calcularTempoColeta = (row) => {
+      const pontoNum = parseInt(row.ponto) || 1;
+      if (pontoNum !== 1) return null;
+      
+      if (!row.data_hora_alocado) return null;
+      const alocado = new Date(row.data_hora_alocado);
+      if (isNaN(alocado.getTime())) return null;
+      
+      let saida = null;
+      let dataParaComparacao = null;
+      
+      if (row.data_chegada && row.hora_chegada) {
+        try {
+          const dataSaidaStr = row.data_chegada instanceof Date 
+            ? row.data_chegada.toISOString().split('T')[0]
+            : String(row.data_chegada).split('T')[0];
+          
+          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
+          const dataSaida = new Date(dataSaidaStr + 'T00:00:00');
+          dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
+          
+          if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
+            saida = dataSaida;
+            dataParaComparacao = dataSaidaStr;
+          }
+        } catch (e) {}
+      }
+      
+      if (!saida && row.finalizado) {
+        const fin = new Date(row.finalizado);
+        if (!isNaN(fin.getTime()) && fin >= alocado) {
+          saida = fin;
+          dataParaComparacao = fin.toISOString().split('T')[0];
+        }
+      }
+      
+      if (!saida || !dataParaComparacao) return null;
+      
+      const horaAlocado = alocado.getHours();
+      const depoisDas17 = horaAlocado >= 17;
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      
+      let inicioContagem;
+      if (depoisDas17 && diaAlocado !== dataParaComparacao) {
+        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
+      } else {
+        inicioContagem = alocado;
+      }
+      
+      const difMinutos = (saida - inicioContagem) / (1000 * 60);
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      return difMinutos;
+    };
+    
+    // Agrupar linhas por OS para calcular tempos consolidados
+    const osPorNumero = {};
+    result.rows.forEach(row => {
+      const osNum = row.os;
+      if (!osPorNumero[osNum]) {
+        osPorNumero[osNum] = [];
+      }
+      osPorNumero[osNum].push(row);
+    });
+    
+    // Calcular tempos consolidados para cada OS
+    const temposConsolidados = {};
+    Object.keys(osPorNumero).forEach(osNum => {
+      const linhas = osPorNumero[osNum];
+      const linhaPonto1 = linhas.find(l => parseInt(l.ponto) === 1);
+      const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
+      
+      let tempoAlocacao = null;
+      let tempoColeta = null;
+      let tempoEntrega = null;
+      
+      // Tempo de alocação e coleta (do ponto 1)
+      if (linhaPonto1) {
+        tempoAlocacao = calcularTempoAlocacao(linhaPonto1.data_hora, linhaPonto1.data_hora_alocado, 1);
+        tempoColeta = calcularTempoColeta(linhaPonto1);
+      }
+      
+      // Tempo de entrega (da primeira entrega - ponto >= 2)
+      if (linhasEntrega.length > 0) {
+        const primeiraEntrega = linhasEntrega[0];
+        tempoEntrega = calcularTempoEntrega(primeiraEntrega);
+      }
+      
+      temposConsolidados[osNum] = {
+        tempo_alocacao_os: tempoAlocacao,
+        tempo_coleta_os: tempoColeta,
+        tempo_entrega_os: tempoEntrega
+      };
+    });
+    
+    // Adicionar tempos consolidados a cada linha
+    const rowsComTempos = result.rows.map(row => ({
+      ...row,
+      tempo_alocacao_os: temposConsolidados[row.os]?.tempo_alocacao_os || null,
+      tempo_coleta_os: temposConsolidados[row.os]?.tempo_coleta_os || null,
+      tempo_entrega_os: temposConsolidados[row.os]?.tempo_entrega_os || null
+    }));
+    
+    res.json(rowsComTempos);
   } catch (err) {
     console.error('❌ Erro ao listar entregas:', err);
     res.status(500).json({ error: 'Erro ao listar entregas' });
