@@ -7484,21 +7484,60 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         };
         
         // ===== CALCULAR T. ENTREGA PROF E PRAZO PROF POR OS =====
-        // Usar os dados que já vieram do banco (calculados no upload)
+        // T. Entrega Prof = data_hora_alocado (ponto 1) → finalizado (último ponto)
+        // Com regra: se dias diferentes, começa às 8h do dia do finalizado
         const primeiroReg = linhasOS[0];
+        const ultimoReg = linhasOS[linhasOS.length - 1];
         
-        // tempo_entrega_prof_minutos vem do campo "Execução - Espera" do Excel
-        const tempoEntProfDB = parseFloat(primeiroReg?.tempo_entrega_prof_minutos);
-        if (!isNaN(tempoEntProfDB) && tempoEntProfDB > 0) {
-          somaTempoEntregaProf += tempoEntProfDB;
-          countTempoEntregaProf++;
-        }
+        // Função para extrair data/hora de string (sem problemas de timezone)
+        const parseDateTime = (str) => {
+          if (!str) return null;
+          const s = String(str);
+          const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
+          if (!match) return null;
+          return {
+            dataStr: match[1] + '-' + match[2] + '-' + match[3],
+            hora: parseInt(match[4]),
+            min: parseInt(match[5]),
+            seg: parseInt(match[6])
+          };
+        };
         
-        // dentro_prazo_prof já vem calculado do banco
-        if (primeiroReg?.dentro_prazo_prof === true) {
-          dentroPrazoProf++;
-        } else if (primeiroReg?.dentro_prazo_prof === false) {
-          foraPrazoProf++;
+        const alocadoStr = primeiroReg?.data_hora_alocado;
+        const finalizadoStr = ultimoReg?.finalizado || primeiroReg?.finalizado;
+        
+        const alocado = parseDateTime(alocadoStr);
+        const finalizado = parseDateTime(finalizadoStr);
+        
+        if (alocado && finalizado) {
+          const mesmaData = alocado.dataStr === finalizado.dataStr;
+          
+          let inicioMinutos, fimMinutos;
+          
+          // Fim sempre é a hora real do finalizado
+          fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
+          
+          if (!mesmaData) {
+            // Dias diferentes - começa às 8h do dia do finalizado
+            inicioMinutos = 8 * 60; // 8:00 = 480 minutos
+          } else {
+            inicioMinutos = alocado.hora * 60 + alocado.min + alocado.seg / 60;
+          }
+          
+          const tempoEntProf = fimMinutos - inicioMinutos;
+          
+          if (tempoEntProf >= 0) {
+            somaTempoEntregaProf += tempoEntProf;
+            countTempoEntregaProf++;
+            
+            // Prazo Prof: verifica se T. Entrega Prof <= prazo_minutos
+            const prazoMinutos = parseFloat(primeiroReg?.prazo_minutos) || 60;
+            if (tempoEntProf <= prazoMinutos) {
+              dentroPrazoProf++;
+            } else {
+              foraPrazoProf++;
+            }
+          }
         }
         // ===== FIM CALCULAR T. ENTREGA PROF =====
         
