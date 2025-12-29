@@ -10441,6 +10441,38 @@ app.post('/api/bi/regioes', async (req, res) => {
   }
 });
 
+// Atualizar região existente
+app.put('/api/bi/regioes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, itens } = req.body;
+    
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    if (!itens || itens.length === 0) {
+      return res.status(400).json({ error: 'Adicione pelo menos um cliente/centro de custo' });
+    }
+    
+    const result = await pool.query(`
+      UPDATE bi_regioes 
+      SET nome = $1, clientes = $2
+      WHERE id = $3
+      RETURNING *
+    `, [nome, JSON.stringify(itens), id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Região não encontrada' });
+    }
+    
+    res.json({ success: true, regiao: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar região:', err);
+    res.status(500).json({ error: 'Erro ao atualizar região' });
+  }
+});
+
 // Excluir região
 app.delete('/api/bi/regioes/:id', async (req, res) => {
   try {
@@ -10449,6 +10481,44 @@ app.delete('/api/bi/regioes/:id', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao excluir região:', err);
     res.status(500).json({ error: 'Erro ao excluir região' });
+  }
+});
+
+// Atualizar região existente
+app.put('/api/bi/regioes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, clientes, itens } = req.body;
+    
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    // Se vier no novo formato (itens), usa ele. Senão, usa o formato antigo (clientes)
+    let dadosParaSalvar;
+    if (itens && itens.length > 0) {
+      dadosParaSalvar = itens;
+    } else if (clientes && clientes.length > 0) {
+      dadosParaSalvar = clientes.map(c => ({ cod_cliente: c, centro_custo: null }));
+    } else {
+      return res.status(400).json({ error: 'Adicione pelo menos um cliente/centro de custo' });
+    }
+    
+    const result = await pool.query(`
+      UPDATE bi_regioes 
+      SET nome = $1, clientes = $2
+      WHERE id = $3
+      RETURNING *
+    `, [nome, JSON.stringify(dadosParaSalvar), id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Região não encontrada' });
+    }
+    
+    res.json({ success: true, regiao: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar região:', err);
+    res.status(500).json({ error: 'Erro ao atualizar região' });
   }
 });
 
