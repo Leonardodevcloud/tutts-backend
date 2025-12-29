@@ -847,6 +847,10 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto ON bi_entregas(os, ponto)`).catch(() => {});
     // Índice UNIQUE para UPSERT (ON CONFLICT)
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bi_entregas_os_ponto_unique ON bi_entregas(os, ponto)`).catch(() => {});
+    
+    // Migration: Adicionar coluna tempo_entrega_prof_minutos para T. Entrega Prof
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS tempo_entrega_prof_minutos INTEGER`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS dentro_prazo_prof BOOLEAN`).catch(() => {});
 
     // Tabela de histórico de uploads
     await pool.query(`
@@ -6332,6 +6336,25 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
+    // Função para calcular T. Entrega Prof a partir de "Execução - Espera" do Excel
+    const calcularTempoEntregaProf = (execucaoEspera) => {
+      if (execucaoEspera === null || execucaoEspera === undefined || execucaoEspera === '') {
+        return null;
+      }
+      // Se for número do Excel (fração do dia)
+      if (typeof execucaoEspera === 'number') {
+        return Math.round(execucaoEspera * 24 * 60);
+      }
+      // Se for string no formato HH:MM:SS ou HH:MM
+      if (typeof execucaoEspera === 'string' && execucaoEspera.includes(':')) {
+        const partes = execucaoEspera.split(':');
+        if (partes.length >= 2) {
+          return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+        }
+      }
+      return null;
+    };
+    
     const parseData = (valor) => {
       if (!valor) return null;
       if (typeof valor === 'number') {
@@ -6421,6 +6444,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
           const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
           
+          // Calcular T. Entrega Prof a partir de "Execução - Espera"
+          const tempoEntregaProf = calcularTempoEntregaProf(e.execucao_espera);
+          const dentroPrazoProf = (prazoMinutos !== null && tempoEntregaProf !== null) ? tempoEntregaProf <= prazoMinutos : null;
+          
           if (dentroPrazo === true) dentroPrazoCount++;
           if (dentroPrazo === false) foraPrazoCount++;
           
@@ -6462,6 +6489,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             distancia: distancia,
             valor_prof: parseNum(e.valor_prof),
             execucao_comp: truncar(e.execucao_comp ? String(e.execucao_comp) : null, 50),
+            execucao_espera: truncar(e.execucao_espera ? String(e.execucao_espera) : null, 50),
             status: truncar(e.status, 100),
             motivo: truncar(e.motivo, 255),
             ocorrencia: truncar(e.ocorrencia, 255),
@@ -6469,6 +6497,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             dentro_prazo: dentroPrazo,
             prazo_minutos: prazoMinutos,
             tempo_execucao_minutos: tempoExecucao,
+            tempo_entrega_prof_minutos: tempoEntregaProf,
+            dentro_prazo_prof: dentroPrazoProf,
             data_upload: data_referencia || new Date().toISOString().split('T')[0],
             latitude: parseNum(e.latitude || e.Latitude || e.lat || e.Lat || e.LAT || e.LATITUDE),
             longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long)
@@ -6490,10 +6520,11 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 data_hora, data_hora_alocado, finalizado, data_solicitado,
                 data_chegada, hora_chegada, data_saida, hora_saida,
                 categoria, valor, distancia, valor_prof,
-                execucao_comp, status, motivo, ocorrencia, velocidade_media,
-                dentro_prazo, prazo_minutos, tempo_execucao_minutos, data_upload,
-                latitude, longitude
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
+                execucao_comp, execucao_espera, status, motivo, ocorrencia, velocidade_media,
+                dentro_prazo, prazo_minutos, tempo_execucao_minutos, 
+                tempo_entrega_prof_minutos, dentro_prazo_prof,
+                data_upload, latitude, longitude
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
@@ -6501,9 +6532,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.data_hora, d.data_hora_alocado, d.finalizado, d.data_solicitado,
               d.data_chegada, d.hora_chegada, d.data_saida, d.hora_saida,
               d.categoria, d.valor, d.distancia, d.valor_prof,
-              d.execucao_comp, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
-              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos, d.data_upload,
-              d.latitude, d.longitude
+              d.execucao_comp, d.execucao_espera, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
+              d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos,
+              d.tempo_entrega_prof_minutos, d.dentro_prazo_prof,
+              d.data_upload, d.latitude, d.longitude
             ]);
             inseridos++;
           } catch (singleErr) {
@@ -7066,6 +7098,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     const dadosQuery = await pool.query(`
       SELECT os, COALESCE(ponto, 1) as ponto, cod_cliente, nome_cliente, 
         cod_prof, nome_prof, dentro_prazo, tempo_execucao_minutos,
+        tempo_entrega_prof_minutos, dentro_prazo_prof,
         valor, valor_prof, distancia, ocorrencia, centro_custo, motivo, finalizado,
         data_hora, data_hora_alocado, data_chegada, hora_chegada
       FROM bi_entregas ${where}
@@ -7451,40 +7484,21 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         };
         
         // ===== CALCULAR T. ENTREGA PROF E PRAZO PROF POR OS =====
-        // T. Entrega Prof = Alocado (ponto 1) -> Finalizado (último ponto)
+        // Usar os dados que já vieram do banco (calculados no upload)
         const primeiroReg = linhasOS[0];
-        const ultimoReg = linhasOS[linhasOS.length - 1];
-        const finalizadoOS = ultimoReg?.finalizado || primeiroReg?.finalizado;
         
-        // DEBUG: Log para verificar os dados (apenas primeiras 3 OS)
-        if (countTempoEntregaProf < 3) {
-          console.log('📊 DEBUG Prazo Prof OS:', {
-            os: os,
-            data_hora_alocado: primeiroReg?.data_hora_alocado,
-            finalizado: finalizadoOS,
-            tipo_alocado: typeof primeiroReg?.data_hora_alocado,
-            tipo_finalizado: typeof finalizadoOS
-          });
-        }
-        
-        const tempoEntProf = calcularTempoEntregaProf(primeiroReg?.data_hora_alocado, finalizadoOS);
-        
-        // DEBUG: Log do resultado
-        if (countTempoEntregaProf < 3 || tempoEntProf !== null) {
-          console.log('📊 DEBUG Resultado:', { os, tempoEntProf });
-        }
-        
-        if (tempoEntProf !== null) {
-          somaTempoEntregaProf += tempoEntProf;
+        // tempo_entrega_prof_minutos vem do campo "Execução - Espera" do Excel
+        const tempoEntProfDB = parseFloat(primeiroReg?.tempo_entrega_prof_minutos);
+        if (!isNaN(tempoEntProfDB) && tempoEntProfDB > 0) {
+          somaTempoEntregaProf += tempoEntProfDB;
           countTempoEntregaProf++;
-          
-          // Prazo Prof: verifica se T. Entrega Prof <= prazo_minutos
-          const prazoMinutos = parseFloat(primeiroReg?.prazo_minutos) || 60;
-          if (tempoEntProf <= prazoMinutos) {
-            dentroPrazoProf++;
-          } else {
-            foraPrazoProf++;
-          }
+        }
+        
+        // dentro_prazo_prof já vem calculado do banco
+        if (primeiroReg?.dentro_prazo_prof === true) {
+          dentroPrazoProf++;
+        } else if (primeiroReg?.dentro_prazo_prof === false) {
+          foraPrazoProf++;
         }
         // ===== FIM CALCULAR T. ENTREGA PROF =====
         
