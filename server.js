@@ -7276,6 +7276,38 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       return difMinutos;
     };
     
+    // ============================================
+    // FUNÇÃO: Calcular T. Entrega Prof (Alocado -> Finalizado da OS)
+    // Este é o tempo que o profissional leva desde que é alocado até finalizar
+    // Regra: Se dias diferentes, início = 08:00 do dia do finalizado
+    // ============================================
+    const calcularTempoEntregaProf = (dataHoraAlocado, finalizado) => {
+      if (!dataHoraAlocado || !finalizado) return null;
+      
+      const alocado = new Date(dataHoraAlocado);
+      const fim = new Date(finalizado);
+      
+      if (isNaN(alocado.getTime()) || isNaN(fim.getTime())) return null;
+      if (fim < alocado) return null;
+      
+      const diaAlocado = alocado.toISOString().split('T')[0];
+      const diaFim = fim.toISOString().split('T')[0];
+      const mesmaData = diaAlocado === diaFim;
+      
+      let inicioContagem;
+      if (!mesmaData) {
+        // Dias diferentes - começa às 8h do dia do fim
+        inicioContagem = new Date(diaFim + 'T08:00:00');
+      } else {
+        inicioContagem = alocado;
+      }
+      
+      const difMinutos = (fim - inicioContagem) / (1000 * 60);
+      if (difMinutos < 0 || isNaN(difMinutos)) return null;
+      
+      return difMinutos;
+    };
+    
     // LÓGICA DE CONTAGEM:
     // Cliente SEM regra: 1 OS = 1 entrega (conta OS únicas)
     // Cliente COM regra: conta pontos > 1 (cada ponto de entrega conta, exclui coleta)
@@ -7317,10 +7349,12 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     // Calcular métricas gerais - usando a lógica por OS
     let totalOS = new Set();
     let totalEntregas = 0, dentroPrazo = 0, foraPrazo = 0, semPrazo = 0;
+    let dentroPrazoProf = 0, foraPrazoProf = 0; // Prazo Prof (baseado em Alocado -> Finalizado)
     let somaValor = 0, somaValorProf = 0;
     let somaTempoEntrega = 0, countTempoEntrega = 0; // Tempo de entrega (Ponto >= 2)
     let somaTempoAlocacao = 0, countTempoAlocacao = 0; // Tempo de alocação (Ponto = 1)
     let somaTempoColeta = 0, countTempoColeta = 0; // Tempo de coleta (Ponto = 1)
+    let somaTempoEntregaProf = 0, countTempoEntregaProf = 0; // T. Entrega Prof (Alocado -> Finalizado)
     let profissionais = new Set();
     let totalRetornos = 0;
     let ultimaEntrega = null;
@@ -7397,6 +7431,27 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           else semPrazo++; // null ou undefined
         };
         
+        // ===== CALCULAR T. ENTREGA PROF E PRAZO PROF POR OS =====
+        // T. Entrega Prof = Alocado (ponto 1) -> Finalizado (último ponto)
+        const primeiroReg = linhasOS[0];
+        const ultimoReg = linhasOS[linhasOS.length - 1];
+        const finalizadoOS = ultimoReg?.finalizado || primeiroReg?.finalizado;
+        
+        const tempoEntProf = calcularTempoEntregaProf(primeiroReg?.data_hora_alocado, finalizadoOS);
+        if (tempoEntProf !== null) {
+          somaTempoEntregaProf += tempoEntProf;
+          countTempoEntregaProf++;
+          
+          // Prazo Prof: verifica se T. Entrega Prof <= prazo_minutos
+          const prazoMinutos = parseFloat(primeiroReg?.prazo_minutos) || 60;
+          if (tempoEntProf <= prazoMinutos) {
+            dentroPrazoProf++;
+          } else {
+            foraPrazoProf++;
+          }
+        }
+        // ===== FIM CALCULAR T. ENTREGA PROF =====
+        
         // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
         const linhaValor = linhasOS.reduce((maior, atual) => {
           const pontoAtual = parseInt(atual.ponto) || 0;
@@ -7453,15 +7508,30 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       countTempoColeta
     });
     
+    // Calcular tempo médio de entrega do profissional
+    const tempoMedioEntregaProf = countTempoEntregaProf > 0 
+      ? somaTempoEntregaProf / countTempoEntregaProf 
+      : 0;
+    
+    console.log('📊 DEBUG T. Entrega Prof:', {
+      tempo_medio_entrega_prof: tempoMedioEntregaProf,
+      dentro_prazo_prof: dentroPrazoProf,
+      fora_prazo_prof: foraPrazoProf,
+      countTempoEntregaProf
+    });
+    
     const metricas = {
       total_os: totalOS.size,
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
+      dentro_prazo_prof: dentroPrazoProf,
+      fora_prazo_prof: foraPrazoProf,
       tempo_medio: tempoMedioEntrega,
       tempo_medio_alocacao: tempoMedioAlocacao,
       tempo_medio_coleta: tempoMedioColeta,
+      tempo_medio_entrega_prof: tempoMedioEntregaProf,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -8482,193 +8552,7 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       LIMIT 2000
     `, params);
     
-    // ========== CALCULAR TEMPOS CONSOLIDADOS POR OS (mesma lógica do endpoint os-profissional) ==========
-    
-    // Funções de cálculo de tempo (idênticas às usadas em os-profissional)
-    const calcularTempoAlocacao = (dataHora, dataHoraAlocado, ponto) => {
-      if (!dataHora || !dataHoraAlocado) return null;
-      const pontoNum = parseInt(ponto) || 1;
-      if (pontoNum !== 1) return null;
-      
-      const solicitado = new Date(dataHora);
-      const alocado = new Date(dataHoraAlocado);
-      
-      if (alocado < solicitado || isNaN(alocado.getTime()) || isNaN(solicitado.getTime())) return null;
-      
-      const horaSolicitado = solicitado.getHours();
-      const depoisDas17 = horaSolicitado >= 17;
-      const diaSolicitado = solicitado.toISOString().split('T')[0];
-      const diaAlocado = alocado.toISOString().split('T')[0];
-      const mesmaData = diaSolicitado === diaAlocado;
-      
-      let inicioContagem;
-      if (depoisDas17 && !mesmaData) {
-        inicioContagem = new Date(alocado);
-        inicioContagem.setHours(8, 0, 0, 0);
-      } else {
-        inicioContagem = solicitado;
-      }
-      
-      const difMinutos = (alocado - inicioContagem) / (1000 * 60);
-      if (difMinutos < 0 || isNaN(difMinutos)) return null;
-      return difMinutos;
-    };
-    
-    const calcularTempoEntrega = (row) => {
-      const pontoNum = parseInt(row.ponto) || 1;
-      if (pontoNum === 1) return null;
-      
-      if (!row.data_hora) return null;
-      const solicitado = new Date(row.data_hora);
-      if (isNaN(solicitado.getTime())) return null;
-      
-      let chegada = null;
-      let dataParaComparacao = null;
-      
-      if (row.data_chegada && row.hora_chegada) {
-        try {
-          const dataChegadaStr = row.data_chegada instanceof Date 
-            ? row.data_chegada.toISOString().split('T')[0]
-            : String(row.data_chegada).split('T')[0];
-          
-          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
-          const dataChegada = new Date(dataChegadaStr + 'T00:00:00');
-          dataChegada.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-          
-          if (!isNaN(dataChegada.getTime()) && dataChegada >= solicitado) {
-            chegada = dataChegada;
-            dataParaComparacao = dataChegadaStr;
-          }
-        } catch (e) {}
-      }
-      
-      if (!chegada && row.finalizado) {
-        const fin = new Date(row.finalizado);
-        if (!isNaN(fin.getTime()) && fin >= solicitado) {
-          chegada = fin;
-          dataParaComparacao = fin.toISOString().split('T')[0];
-        }
-      }
-      
-      if (!chegada || !dataParaComparacao) return null;
-      
-      const diaSolicitado = solicitado.toISOString().split('T')[0];
-      
-      let inicioContagem;
-      if (diaSolicitado !== dataParaComparacao) {
-        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
-      } else {
-        inicioContagem = solicitado;
-      }
-      
-      const difMinutos = (chegada - inicioContagem) / (1000 * 60);
-      if (difMinutos < 0 || isNaN(difMinutos)) return null;
-      return difMinutos;
-    };
-    
-    const calcularTempoColeta = (row) => {
-      const pontoNum = parseInt(row.ponto) || 1;
-      if (pontoNum !== 1) return null;
-      
-      if (!row.data_hora_alocado) return null;
-      const alocado = new Date(row.data_hora_alocado);
-      if (isNaN(alocado.getTime())) return null;
-      
-      let saida = null;
-      let dataParaComparacao = null;
-      
-      if (row.data_chegada && row.hora_chegada) {
-        try {
-          const dataSaidaStr = row.data_chegada instanceof Date 
-            ? row.data_chegada.toISOString().split('T')[0]
-            : String(row.data_chegada).split('T')[0];
-          
-          const partes = String(row.hora_chegada || '0:0:0').split(':').map(Number);
-          const dataSaida = new Date(dataSaidaStr + 'T00:00:00');
-          dataSaida.setHours(partes[0] || 0, partes[1] || 0, partes[2] || 0, 0);
-          
-          if (!isNaN(dataSaida.getTime()) && dataSaida >= alocado) {
-            saida = dataSaida;
-            dataParaComparacao = dataSaidaStr;
-          }
-        } catch (e) {}
-      }
-      
-      if (!saida && row.finalizado) {
-        const fin = new Date(row.finalizado);
-        if (!isNaN(fin.getTime()) && fin >= alocado) {
-          saida = fin;
-          dataParaComparacao = fin.toISOString().split('T')[0];
-        }
-      }
-      
-      if (!saida || !dataParaComparacao) return null;
-      
-      const horaAlocado = alocado.getHours();
-      const depoisDas17 = horaAlocado >= 17;
-      const diaAlocado = alocado.toISOString().split('T')[0];
-      
-      let inicioContagem;
-      if (depoisDas17 && diaAlocado !== dataParaComparacao) {
-        inicioContagem = new Date(dataParaComparacao + 'T08:00:00');
-      } else {
-        inicioContagem = alocado;
-      }
-      
-      const difMinutos = (saida - inicioContagem) / (1000 * 60);
-      if (difMinutos < 0 || isNaN(difMinutos)) return null;
-      return difMinutos;
-    };
-    
-    // Agrupar linhas por OS para calcular tempos consolidados
-    const osPorNumero = {};
-    result.rows.forEach(row => {
-      const osNum = row.os;
-      if (!osPorNumero[osNum]) {
-        osPorNumero[osNum] = [];
-      }
-      osPorNumero[osNum].push(row);
-    });
-    
-    // Calcular tempos consolidados para cada OS
-    const temposConsolidados = {};
-    Object.keys(osPorNumero).forEach(osNum => {
-      const linhas = osPorNumero[osNum];
-      const linhaPonto1 = linhas.find(l => parseInt(l.ponto) === 1);
-      const linhasEntrega = linhas.filter(l => parseInt(l.ponto) >= 2);
-      
-      let tempoAlocacao = null;
-      let tempoColeta = null;
-      let tempoEntrega = null;
-      
-      // Tempo de alocação e coleta (do ponto 1)
-      if (linhaPonto1) {
-        tempoAlocacao = calcularTempoAlocacao(linhaPonto1.data_hora, linhaPonto1.data_hora_alocado, 1);
-        tempoColeta = calcularTempoColeta(linhaPonto1);
-      }
-      
-      // Tempo de entrega (da primeira entrega - ponto >= 2)
-      if (linhasEntrega.length > 0) {
-        const primeiraEntrega = linhasEntrega[0];
-        tempoEntrega = calcularTempoEntrega(primeiraEntrega);
-      }
-      
-      temposConsolidados[osNum] = {
-        tempo_alocacao_os: tempoAlocacao,
-        tempo_coleta_os: tempoColeta,
-        tempo_entrega_os: tempoEntrega
-      };
-    });
-    
-    // Adicionar tempos consolidados a cada linha
-    const rowsComTempos = result.rows.map(row => ({
-      ...row,
-      tempo_alocacao_os: temposConsolidados[row.os]?.tempo_alocacao_os || null,
-      tempo_coleta_os: temposConsolidados[row.os]?.tempo_coleta_os || null,
-      tempo_entrega_os: temposConsolidados[row.os]?.tempo_entrega_os || null
-    }));
-    
-    res.json(rowsComTempos);
+    res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao listar entregas:', err);
     res.status(500).json({ error: 'Erro ao listar entregas' });
