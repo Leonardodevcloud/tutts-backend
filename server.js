@@ -7392,15 +7392,39 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     
     // USAR TEMPOS DA QUERY SQL (igual ao Acompanhamento)
     // Frontend espera minutos como número, ele mesmo formata para HH:MM:SS
+    // DEBUG: Log dos tempos para verificar
+    console.log('📊 DEBUG Tempos SQL:', {
+      tempo_medio_entrega: temposSQL.tempo_medio_entrega,
+      tempo_medio_alocacao: temposSQL.tempo_medio_alocacao,
+      tempo_medio_coleta: temposSQL.tempo_medio_coleta
+    });
+    
+    // Se SQL não retornar tempos válidos, usar os cálculos JS como fallback
+    const tempoMedioEntrega = parseFloat(temposSQL.tempo_medio_entrega) || 
+      (countTempoEntrega > 0 ? somaTempoEntrega / countTempoEntrega : 0);
+    const tempoMedioAlocacao = parseFloat(temposSQL.tempo_medio_alocacao) || 
+      (countTempoAlocacao > 0 ? somaTempoAlocacao / countTempoAlocacao : 0);
+    const tempoMedioColeta = parseFloat(temposSQL.tempo_medio_coleta) || 
+      (countTempoColeta > 0 ? somaTempoColeta / countTempoColeta : 0);
+    
+    console.log('📊 DEBUG Tempos Finais (minutos):', {
+      tempo_medio: tempoMedioEntrega,
+      tempo_medio_alocacao: tempoMedioAlocacao,
+      tempo_medio_coleta: tempoMedioColeta,
+      countTempoEntrega,
+      countTempoAlocacao,
+      countTempoColeta
+    });
+    
     const metricas = {
       total_os: totalOS.size,
       total_entregas: totalEntregas,
       dentro_prazo: dentroPrazo,
       fora_prazo: foraPrazo,
       sem_prazo: semPrazo,
-      tempo_medio: parseFloat(temposSQL.tempo_medio_entrega) || 0,
-      tempo_medio_alocacao: parseFloat(temposSQL.tempo_medio_alocacao) || 0,
-      tempo_medio_coleta: parseFloat(temposSQL.tempo_medio_coleta) || 0,
+      tempo_medio: tempoMedioEntrega,
+      tempo_medio_alocacao: tempoMedioAlocacao,
+      tempo_medio_coleta: tempoMedioColeta,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
       ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
@@ -7637,9 +7661,14 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     });
     
     const porCliente = Object.values(porClienteMap).map(c => {
-      // Usar tempos da query SQL em vez dos cálculos JS
+      // Usar tempos da query SQL, com fallback para cálculos JS
       // Frontend espera minutos como número, ele mesmo formata
       const temposCliente = temposPorClienteMap[c.cod_cliente] || {};
+      
+      // Fallback: usar cálculos JS se SQL não retornar
+      const tempoMedioCliente = temposCliente.tempo_entrega || 
+        (c.count_tempo > 0 ? c.soma_tempo / c.count_tempo : 0);
+      const tempoAlocacaoCliente = temposCliente.tempo_alocacao || 0;
       
       // Converter centros_custo_map em array com dados
       const centros_custo_dados = Object.values(c.centros_custo_map).map(cc => ({
@@ -7650,7 +7679,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         sem_prazo: cc.sem_prazo,
-        tempo_medio: temposCliente.tempo_entrega || 0,
+        tempo_medio: cc.count_tempo > 0 ? cc.soma_tempo / cc.count_tempo : 0,
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
       })).sort((a, b) => b.total_entregas - a.total_entregas);
@@ -7665,8 +7694,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         total_os: c.os_set.size, total_entregas: c.total_entregas,
         centros_custo: centros_custo_dados,
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
-        tempo_medio: temposCliente.tempo_entrega || 0,
-        tempo_medio_alocacao: temposCliente.tempo_alocacao || 0,
+        tempo_medio: tempoMedioCliente,
+        tempo_medio_alocacao: tempoAlocacaoCliente,
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
         distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
         ticket_medio: ticketMedio.toFixed(2),
@@ -7938,19 +7967,40 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     });
     
     const porProfissional = Object.values(porProfMap).map(p => {
-      // Usar tempos da query SQL em vez dos cálculos JS
+      // Usar tempos da query SQL, com fallback para cálculos JS
       // Frontend espera minutos como número, ele mesmo formata
       const temposProf = temposPorProfMap[p.cod_prof] || {};
+      
+      // Fallback: usar cálculos JS se SQL não retornar
+      const tempoMedioProf = temposProf.tempo_entrega || 
+        (p.count_tempo > 0 ? p.soma_tempo / p.count_tempo : 0);
+      const tempoAlocadoProf = temposProf.tempo_alocacao || 
+        (p.count_tempo_alocacao > 0 ? p.soma_tempo_alocacao / p.count_tempo_alocacao : 0);
+      const tempoColetaProf = temposProf.tempo_coleta || 
+        (p.count_tempo_coleta > 0 ? p.soma_tempo_coleta / p.count_tempo_coleta : 0);
+      
       return {
         cod_prof: p.cod_prof, nome_prof: p.nome_prof,
         total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
-        tempo_medio: temposProf.tempo_entrega || 0,
-        tempo_alocado: temposProf.tempo_alocacao || 0,
-        tempo_coleta: temposProf.tempo_coleta || 0,
+        tempo_medio: tempoMedioProf,
+        tempo_alocado: tempoAlocadoProf,
+        tempo_coleta: tempoColetaProf,
         distancia_total: p.soma_dist.toFixed(2), valor_prof: p.soma_valor_prof.toFixed(2),
         retornos: p.retornos
       };
     }).sort((a, b) => b.total_entregas - a.total_entregas);
+    
+    // DEBUG: Log dos primeiros profissionais para verificar tempos
+    if (porProfissional.length > 0) {
+      console.log('📊 DEBUG - Primeiro profissional:', {
+        cod_prof: porProfissional[0].cod_prof,
+        nome_prof: porProfissional[0].nome_prof,
+        tempo_medio: porProfissional[0].tempo_medio,
+        tempo_alocado: porProfissional[0].tempo_alocado,
+        tempo_coleta: porProfissional[0].tempo_coleta,
+        temposSQL: temposPorProfMap[porProfissional[0].cod_prof]
+      });
+    }
     
     // Gráficos - retorna dados brutos para o frontend agrupar nas faixas que quiser
     const dadosGraficos = await pool.query(`
