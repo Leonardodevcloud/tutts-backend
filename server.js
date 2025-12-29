@@ -7456,7 +7456,24 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         const ultimoReg = linhasOS[linhasOS.length - 1];
         const finalizadoOS = ultimoReg?.finalizado || primeiroReg?.finalizado;
         
+        // DEBUG: Log para verificar os dados (apenas primeiras 3 OS)
+        if (countTempoEntregaProf < 3) {
+          console.log('📊 DEBUG Prazo Prof OS:', {
+            os: os,
+            data_hora_alocado: primeiroReg?.data_hora_alocado,
+            finalizado: finalizadoOS,
+            tipo_alocado: typeof primeiroReg?.data_hora_alocado,
+            tipo_finalizado: typeof finalizadoOS
+          });
+        }
+        
         const tempoEntProf = calcularTempoEntregaProf(primeiroReg?.data_hora_alocado, finalizadoOS);
+        
+        // DEBUG: Log do resultado
+        if (countTempoEntregaProf < 3 || tempoEntProf !== null) {
+          console.log('📊 DEBUG Resultado:', { os, tempoEntProf });
+        }
+        
         if (tempoEntProf !== null) {
           somaTempoEntregaProf += tempoEntProf;
           countTempoEntregaProf++;
