@@ -7562,8 +7562,36 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             somaTempoEntregaProf += tempoEntProf;
             countTempoEntregaProf++;
             
-            // Prazo Prof: verifica se T. Entrega Prof <= prazo_minutos
-            const prazoMinutos = parseFloat(primeiroReg?.prazo_minutos) || 60;
+            // Prazo Prof: calcular baseado na DISTÂNCIA usando faixas de KM
+            // Pegar a distância da OS (do primeiro registro ou do registro com maior ponto)
+            const distanciaOS = parseFloat(primeiroReg?.distancia) || 0;
+            
+            // Função para encontrar prazo baseado na distância (mesma lógica das faixas)
+            const calcularPrazoPorDistancia = (dist) => {
+              if (dist <= 10) return 60;
+              if (dist <= 15) return 75;
+              if (dist <= 20) return 90;
+              if (dist <= 25) return 105;
+              if (dist <= 30) return 135;
+              if (dist <= 35) return 150;
+              if (dist <= 40) return 165;
+              if (dist <= 45) return 180;
+              if (dist <= 50) return 195;
+              if (dist <= 55) return 210;
+              if (dist <= 60) return 225;
+              if (dist <= 65) return 240;
+              if (dist <= 70) return 255;
+              if (dist <= 75) return 270;
+              if (dist <= 80) return 285;
+              return 300; // Acima de 80km
+            };
+            
+            const prazoMinutos = calcularPrazoPorDistancia(distanciaOS);
+            
+            if (totalOS.size <= 5) {
+              console.log('📊 DEBUG Prazo Prof:', { os, distanciaOS, prazoMinutos, tempoEntProf, dentro: tempoEntProf <= prazoMinutos });
+            }
+            
             if (tempoEntProf <= prazoMinutos) {
               dentroPrazoProf++;
             } else {
