@@ -9257,26 +9257,66 @@ pool.query(`
 // Listar relatórios diários com visualizações
 app.get('/api/relatorios-diarios', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT 
-        r.*,
-        COALESCE(
-          json_agg(
-            json_build_object(
-              'usuario_id', rv.usuario_id,
-              'usuario_nome', rv.usuario_nome,
-              'usuario_foto', rv.usuario_foto,
-              'visualizado_em', rv.visualizado_em
-            )
-          ) FILTER (WHERE rv.id IS NOT NULL),
-          '[]'
-        ) as visualizacoes
-      FROM relatorios_diarios r
-      LEFT JOIN relatorios_visualizacoes rv ON r.id = rv.relatorio_id
-      GROUP BY r.id
-      ORDER BY r.created_at DESC 
-      LIMIT 100
-    `);
+    const { setor_id, usuario_id } = req.query;
+    
+    // Se passar setor_id, filtra relatórios que o usuário pode ver
+    // Se não passar, retorna todos (para admin ver tudo)
+    let query;
+    let params = [];
+    
+    if (setor_id || usuario_id) {
+      // Usuário comum: só vê relatórios para todos OU para seu setor
+      query = `
+        SELECT 
+          r.*,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'usuario_id', rv.usuario_id,
+                'usuario_nome', rv.usuario_nome,
+                'usuario_foto', rv.usuario_foto,
+                'visualizado_em', rv.visualizado_em
+              )
+            ) FILTER (WHERE rv.id IS NOT NULL),
+            '[]'
+          ) as visualizacoes
+        FROM relatorios_diarios r
+        LEFT JOIN relatorios_visualizacoes rv ON r.id = rv.relatorio_id
+        WHERE (
+          r.para_todos = true 
+          OR ($1::integer IS NOT NULL AND $1 = ANY(r.setores_destino))
+          OR r.usuario_id = $2
+        )
+        GROUP BY r.id
+        ORDER BY r.created_at DESC 
+        LIMIT 100
+      `;
+      params = [setor_id || null, usuario_id || ''];
+    } else {
+      // Admin sem filtro: vê todos os relatórios
+      query = `
+        SELECT 
+          r.*,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'usuario_id', rv.usuario_id,
+                'usuario_nome', rv.usuario_nome,
+                'usuario_foto', rv.usuario_foto,
+                'visualizado_em', rv.visualizado_em
+              )
+            ) FILTER (WHERE rv.id IS NOT NULL),
+            '[]'
+          ) as visualizacoes
+        FROM relatorios_diarios r
+        LEFT JOIN relatorios_visualizacoes rv ON r.id = rv.relatorio_id
+        GROUP BY r.id
+        ORDER BY r.created_at DESC 
+        LIMIT 100
+      `;
+    }
+    
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao listar relatórios:', err);
