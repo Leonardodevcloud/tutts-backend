@@ -7795,6 +7795,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           profissionais_set: new Set(),
           centros_custo_map: {}, // Mapa de centros de custo com dados
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0,
+          dentro_prazo_prof: 0, fora_prazo_prof: 0, // Novo: prazo profissional
           soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0, soma_dist: 0,
           soma_tempo_alocacao: 0, count_tempo_alocacao: 0, // Novo: tempo de alocação
           total_retornos: 0, ultima_entrega: null
@@ -7814,9 +7815,56 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
                oc.includes('produto incorreto');
       };
       
+      // Função para extrair data/hora (para cálculo do prazo prof)
+      const parseDateTimeCliente = (valor) => {
+        if (!valor) return null;
+        if (valor instanceof Date) {
+          return {
+            dataStr: valor.toISOString().split('T')[0],
+            hora: valor.getHours(),
+            min: valor.getMinutes(),
+            seg: valor.getSeconds()
+          };
+        }
+        const s = String(valor);
+        const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
+        if (!match) return null;
+        return {
+          dataStr: match[1] + '-' + match[2] + '-' + match[3],
+          hora: parseInt(match[4]),
+          min: parseInt(match[5]),
+          seg: parseInt(match[6])
+        };
+      };
+      
+      // Função para encontrar prazo por distância
+      const calcularPrazoPorDistanciaCliente = (dist) => {
+        if (dist <= 10) return 60;
+        if (dist <= 15) return 75;
+        if (dist <= 20) return 90;
+        if (dist <= 25) return 105;
+        if (dist <= 30) return 135;
+        if (dist <= 35) return 150;
+        if (dist <= 40) return 165;
+        if (dist <= 45) return 180;
+        if (dist <= 50) return 195;
+        if (dist <= 55) return 210;
+        if (dist <= 60) return 225;
+        if (dist <= 65) return 240;
+        if (dist <= 70) return 255;
+        if (dist <= 75) return 270;
+        if (dist <= 80) return 285;
+        return 300;
+      };
+      
       Object.keys(osDoCliente).forEach(os => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
+        
+        // Pegar data_hora_alocado do ponto 1 para cálculo do prazo prof
+        const primeiroReg = linhasOS[0];
+        const alocadoStr = primeiroReg?.data_hora_alocado;
+        const alocado = parseDateTimeCliente(alocadoStr);
         
         // Coletar profissionais, última entrega e RETORNOS (em todas as linhas)
         linhasOS.forEach(l => {
@@ -7868,6 +7916,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             centro_custo: ccValor,
             os_set: new Set(),
             total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
+            dentro_prazo_prof: 0, fora_prazo_prof: 0, // Novo: prazo prof por centro
             soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
           };
         }
@@ -7880,6 +7929,33 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) c.dentro_prazo++;
           else if (l.dentro_prazo === false) c.fora_prazo++;
           else c.sem_prazo++;
+          
+          // ===== CALCULAR PRAZO PROF POR CLIENTE =====
+          const finalizadoStr = l.finalizado;
+          const finalizado = parseDateTimeCliente(finalizadoStr);
+          
+          if (alocado && finalizado) {
+            const mesmaData = alocado.dataStr === finalizado.dataStr;
+            let inicioMinutos, fimMinutos;
+            fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
+            inicioMinutos = !mesmaData ? 8 * 60 : alocado.hora * 60 + alocado.min + alocado.seg / 60;
+            const tempoEntProf = fimMinutos - inicioMinutos;
+            
+            if (tempoEntProf >= 0) {
+              const distanciaEntrega = parseFloat(l.distancia) || 0;
+              const prazoMinutos = calcularPrazoPorDistanciaCliente(distanciaEntrega);
+              if (tempoEntProf <= prazoMinutos) {
+                c.dentro_prazo_prof++;
+              } else {
+                c.fora_prazo_prof++;
+              }
+            } else {
+              c.fora_prazo_prof++;
+            }
+          } else {
+            c.fora_prazo_prof++;
+          }
+          // ===== FIM PRAZO PROF =====
           
           // Usar cálculo manual de tempo de entrega (conforme DAX)
           const tempoEntCalc = calcularTempoEntrega(l);
@@ -7895,6 +7971,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               centro_custo: cc,
               os_set: new Set(),
               total_entregas: 0, dentro_prazo: 0, fora_prazo: 0, sem_prazo: 0, total_retornos: 0,
+              dentro_prazo_prof: 0, fora_prazo_prof: 0,
               soma_tempo: 0, count_tempo: 0, soma_valor: 0, soma_valor_prof: 0
             };
           }
@@ -7903,6 +7980,29 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           if (l.dentro_prazo === true) ccData.dentro_prazo++;
           else if (l.dentro_prazo === false) ccData.fora_prazo++;
           else ccData.sem_prazo++;
+          
+          // Prazo prof por centro de custo
+          if (alocado && finalizado) {
+            const mesmaData = alocado.dataStr === finalizado.dataStr;
+            let inicioMinutos, fimMinutos;
+            fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
+            inicioMinutos = !mesmaData ? 8 * 60 : alocado.hora * 60 + alocado.min + alocado.seg / 60;
+            const tempoEntProf = fimMinutos - inicioMinutos;
+            if (tempoEntProf >= 0) {
+              const distanciaEntrega = parseFloat(l.distancia) || 0;
+              const prazoMinutos = calcularPrazoPorDistanciaCliente(distanciaEntrega);
+              if (tempoEntProf <= prazoMinutos) {
+                ccData.dentro_prazo_prof++;
+              } else {
+                ccData.fora_prazo_prof++;
+              }
+            } else {
+              ccData.fora_prazo_prof++;
+            }
+          } else {
+            ccData.fora_prazo_prof++;
+          }
+          
           if (tempoEntCalc !== null) {
             ccData.soma_tempo += tempoEntCalc;
             ccData.count_tempo++;
@@ -7938,6 +8038,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         dentro_prazo: cc.dentro_prazo,
         fora_prazo: cc.fora_prazo,
         sem_prazo: cc.sem_prazo,
+        dentro_prazo_prof: cc.dentro_prazo_prof || 0,
+        fora_prazo_prof: cc.fora_prazo_prof || 0,
         tempo_medio: cc.count_tempo > 0 ? cc.soma_tempo / cc.count_tempo : 0,
         valor_total: cc.soma_valor.toFixed(2),
         valor_prof: cc.soma_valor_prof.toFixed(2)
@@ -7953,6 +8055,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         total_os: c.os_set.size, total_entregas: c.total_entregas,
         centros_custo: centros_custo_dados,
         dentro_prazo: c.dentro_prazo, fora_prazo: c.fora_prazo, sem_prazo: c.sem_prazo,
+        dentro_prazo_prof: c.dentro_prazo_prof, fora_prazo_prof: c.fora_prazo_prof,
         tempo_medio: tempoMedioCliente,
         tempo_medio_alocacao: tempoAlocacaoCliente,
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
@@ -7999,6 +8102,8 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             incentivo: "0.00",
             total_retornos: 0,
             retornos: 0,
+            dentro_prazo_prof: 0,
+            fora_prazo_prof: 0,
             ultima_entrega: null
           });
         }
