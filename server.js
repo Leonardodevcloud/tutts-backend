@@ -8905,19 +8905,24 @@ app.delete('/api/bi/mascaras/:id', async (req, res) => {
 // Endpoint para listar clientes com seus endereços de coleta (Ponto 1) e coordenadas
 app.get('/api/bi/localizacao-clientes', async (req, res) => {
   try {
-    // Buscar clientes únicos com seus endereços de Ponto 1
-    // Normaliza o endereço removendo "Ponto 1 - ", convertendo para maiúsculas e removendo espaços extras
-    const result = await pool.query(`
+    // Clientes que devem ter endereços separados por centro de custo
+    const clientesSeparadosPorCC = ['767', '1046', '713'];
+    
+    // Query para clientes NORMAIS (agrupa todos os endereços semelhantes)
+    const resultNormal = await pool.query(`
       WITH endereco_normalizado AS (
         SELECT 
           cod_cliente,
           nome_cliente,
-          -- Normaliza o endereço: remove "Ponto 1 - " do início, converte para maiúsculas, remove espaços extras
+          centro_custo,
+          -- Normaliza: remove "Ponto X - ", maiúsculas, remove espaços extras, remove sufixos como "- GALPAO"
           UPPER(TRIM(REGEXP_REPLACE(
-            REGEXP_REPLACE(endereco, '^Ponto\\s*\\d+\\s*-\\s*', '', 'i'),
+            REGEXP_REPLACE(
+              REGEXP_REPLACE(endereco, '^Ponto\\s*\\d+\\s*-\\s*', '', 'i'),
+              '\\s*-\\s*(GALPAO|GALPÃO|DEPOSITO|DEPÓSITO|CD|LOJA|FILIAL).*$', '', 'i'
+            ),
             '\\s+', ' ', 'g'
           ))) as endereco_normalizado,
-          -- Mantém o endereço original mais comum para exibição
           endereco as endereco_original,
           bairro,
           cidade,
@@ -8929,13 +8934,14 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
           AND cod_cliente IS NOT NULL
           AND endereco IS NOT NULL
           AND endereco != ''
+          AND cod_cliente::text NOT IN ('767', '1046', '713')
       ),
+      -- Agrupa por endereço normalizado (pega os primeiros 50 caracteres para agrupar endereços muito semelhantes)
       cliente_enderecos AS (
         SELECT 
           cod_cliente,
           MAX(nome_cliente) as nome_cliente,
-          endereco_normalizado,
-          -- Pega o endereço original mais frequente para exibição
+          LEFT(endereco_normalizado, 50) as endereco_grupo,
           MODE() WITHIN GROUP (ORDER BY endereco_original) as endereco,
           MAX(bairro) as bairro,
           MAX(cidade) as cidade,
@@ -8944,11 +8950,12 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
           AVG(NULLIF(longitude, 0)) as longitude,
           COUNT(*) as total_entregas
         FROM endereco_normalizado
-        GROUP BY cod_cliente, endereco_normalizado
+        GROUP BY cod_cliente, LEFT(endereco_normalizado, 50)
       )
       SELECT 
         ce.cod_cliente,
         COALESCE(m.mascara, ce.nome_cliente) as nome_cliente,
+        NULL as centro_custo,
         jsonb_agg(
           jsonb_build_object(
             'endereco', ce.endereco,
@@ -8957,16 +8964,84 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
             'estado', ce.estado,
             'latitude', ce.latitude,
             'longitude', ce.longitude,
-            'total_entregas', ce.total_entregas
+            'total_entregas', ce.total_entregas,
+            'centro_custo', NULL
           ) ORDER BY ce.total_entregas DESC
         ) as enderecos
       FROM cliente_enderecos ce
       LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
       GROUP BY ce.cod_cliente, COALESCE(m.mascara, ce.nome_cliente)
-      ORDER BY ce.cod_cliente::INTEGER
     `);
     
-    res.json(result.rows);
+    // Query para clientes ESPECIAIS (767, 1046, 713) - separados por centro de custo
+    const resultEspecial = await pool.query(`
+      WITH endereco_normalizado AS (
+        SELECT 
+          cod_cliente,
+          nome_cliente,
+          centro_custo,
+          UPPER(TRIM(REGEXP_REPLACE(
+            REGEXP_REPLACE(
+              REGEXP_REPLACE(endereco, '^Ponto\\s*\\d+\\s*-\\s*', '', 'i'),
+              '\\s*-\\s*(GALPAO|GALPÃO|DEPOSITO|DEPÓSITO|CD|LOJA|FILIAL).*$', '', 'i'
+            ),
+            '\\s+', ' ', 'g'
+          ))) as endereco_normalizado,
+          endereco as endereco_original,
+          bairro,
+          cidade,
+          estado,
+          latitude,
+          longitude
+        FROM bi_entregas
+        WHERE ponto = 1 
+          AND cod_cliente IS NOT NULL
+          AND endereco IS NOT NULL
+          AND endereco != ''
+          AND cod_cliente::text IN ('767', '1046', '713')
+      ),
+      cliente_enderecos AS (
+        SELECT 
+          cod_cliente,
+          MAX(nome_cliente) as nome_cliente,
+          centro_custo,
+          LEFT(endereco_normalizado, 50) as endereco_grupo,
+          MODE() WITHIN GROUP (ORDER BY endereco_original) as endereco,
+          MAX(bairro) as bairro,
+          MAX(cidade) as cidade,
+          MAX(estado) as estado,
+          AVG(NULLIF(latitude, 0)) as latitude,
+          AVG(NULLIF(longitude, 0)) as longitude,
+          COUNT(*) as total_entregas
+        FROM endereco_normalizado
+        GROUP BY cod_cliente, centro_custo, LEFT(endereco_normalizado, 50)
+      )
+      SELECT 
+        ce.cod_cliente,
+        COALESCE(m.mascara, ce.nome_cliente) as nome_cliente,
+        ce.centro_custo,
+        jsonb_agg(
+          jsonb_build_object(
+            'endereco', ce.endereco,
+            'bairro', ce.bairro,
+            'cidade', ce.cidade,
+            'estado', ce.estado,
+            'latitude', ce.latitude,
+            'longitude', ce.longitude,
+            'total_entregas', ce.total_entregas,
+            'centro_custo', ce.centro_custo
+          ) ORDER BY ce.total_entregas DESC
+        ) as enderecos
+      FROM cliente_enderecos ce
+      LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
+      GROUP BY ce.cod_cliente, COALESCE(m.mascara, ce.nome_cliente), ce.centro_custo
+    `);
+    
+    // Combina os resultados e ordena
+    const todosClientes = [...resultNormal.rows, ...resultEspecial.rows]
+      .sort((a, b) => parseInt(a.cod_cliente) - parseInt(b.cod_cliente));
+    
+    res.json(todosClientes);
   } catch (err) {
     console.error('❌ Erro ao buscar localização clientes:', err);
     res.status(500).json({ error: 'Erro ao buscar dados' });
