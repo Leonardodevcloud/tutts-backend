@@ -9080,7 +9080,7 @@ pool.query(`
     id SERIAL PRIMARY KEY,
     titulo VARCHAR(255) NOT NULL,
     conteudo TEXT,
-    usuario_id INTEGER,
+    usuario_id VARCHAR(100),
     usuario_nome VARCHAR(255),
     usuario_foto TEXT,
     imagem_url TEXT,
@@ -9094,7 +9094,7 @@ pool.query(`
   CREATE TABLE IF NOT EXISTS relatorios_visualizacoes (
     id SERIAL PRIMARY KEY,
     relatorio_id INTEGER NOT NULL REFERENCES relatorios_diarios(id) ON DELETE CASCADE,
-    usuario_id INTEGER NOT NULL,
+    usuario_id VARCHAR(100) NOT NULL,
     usuario_nome VARCHAR(255),
     usuario_foto TEXT,
     visualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
