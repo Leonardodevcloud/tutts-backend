@@ -1089,6 +1089,30 @@ async function createTables() {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB DEFAULT '{}'`).catch(() => {});
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`).catch(() => {});
     console.log('✅ Colunas de permissões adicionadas à tabela users');
+    
+    // ===== SISTEMA DE SETORES =====
+    // Tabela de setores
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS setores (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL UNIQUE,
+        descricao TEXT,
+        cor VARCHAR(20) DEFAULT '#6366f1',
+        ativo BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela setores criada');
+    
+    // Adicionar coluna setor_id na tabela users
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS setor_id INTEGER REFERENCES setores(id)`).catch(() => {});
+    console.log('✅ Coluna setor_id adicionada à tabela users');
+    
+    // Adicionar coluna setores_destino na tabela relatorios_diarios
+    await pool.query(`ALTER TABLE relatorios_diarios ADD COLUMN IF NOT EXISTS setores_destino INTEGER[] DEFAULT '{}'`).catch(() => {});
+    await pool.query(`ALTER TABLE relatorios_diarios ADD COLUMN IF NOT EXISTS para_todos BOOLEAN DEFAULT true`).catch(() => {});
+    console.log('✅ Colunas setores_destino e para_todos adicionadas à tabela relatorios_diarios');
 
     // ==================== MÓDULO SOCIAL ====================
     // Tabela de perfis sociais (foto e nome de exibição)
@@ -1323,7 +1347,7 @@ app.post('/api/users/login', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, password, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      'SELECT id, cod_profissional, full_name, role, password, setor_id, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
@@ -1346,9 +1370,13 @@ app.post('/api/users/login', async (req, res) => {
 // Listar todos os usuários
 app.get('/api/users', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, created_at FROM users ORDER BY created_at DESC'
-    );
+    const result = await pool.query(`
+      SELECT u.id, u.cod_profissional, u.full_name, u.role, u.setor_id, u.created_at,
+        s.nome as setor_nome, s.cor as setor_cor
+      FROM users u
+      LEFT JOIN setores s ON u.setor_id = s.id
+      ORDER BY u.created_at DESC
+    `);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar usuários:', error);
@@ -9073,6 +9101,130 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
   }
 });
 
+// ===== SISTEMA DE SETORES =====
+
+// Listar todos os setores
+app.get('/api/setores', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.*, 
+        (SELECT COUNT(*) FROM users u WHERE u.setor_id = s.id) as total_usuarios
+      FROM setores s 
+      ORDER BY s.nome ASC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar setores:', err);
+    res.status(500).json({ error: 'Erro ao listar setores' });
+  }
+});
+
+// Criar setor
+app.post('/api/setores', async (req, res) => {
+  try {
+    const { nome, descricao, cor } = req.body;
+    
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO setores (nome, descricao, cor)
+      VALUES ($1, $2, $3)
+      RETURNING *
+    `, [nome, descricao || '', cor || '#6366f1']);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'Já existe um setor com este nome' });
+    }
+    console.error('❌ Erro ao criar setor:', err);
+    res.status(500).json({ error: 'Erro ao criar setor' });
+  }
+});
+
+// Atualizar setor
+app.put('/api/setores/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, cor, ativo } = req.body;
+    
+    if (!nome) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    
+    const result = await pool.query(`
+      UPDATE setores 
+      SET nome = $1, descricao = $2, cor = $3, ativo = $4, updated_at = NOW()
+      WHERE id = $5
+      RETURNING *
+    `, [nome, descricao || '', cor || '#6366f1', ativo !== false, id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Setor não encontrado' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'Já existe um setor com este nome' });
+    }
+    console.error('❌ Erro ao atualizar setor:', err);
+    res.status(500).json({ error: 'Erro ao atualizar setor' });
+  }
+});
+
+// Excluir setor
+app.delete('/api/setores/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verificar se há usuários vinculados
+    const usuarios = await pool.query('SELECT COUNT(*) FROM users WHERE setor_id = $1', [id]);
+    if (parseInt(usuarios.rows[0].count) > 0) {
+      return res.status(400).json({ 
+        error: `Não é possível excluir. Existem ${usuarios.rows[0].count} usuário(s) vinculado(s) a este setor.` 
+      });
+    }
+    
+    const result = await pool.query('DELETE FROM setores WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Setor não encontrado' });
+    }
+    
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao excluir setor:', err);
+    res.status(500).json({ error: 'Erro ao excluir setor' });
+  }
+});
+
+// Atualizar setor do usuário
+app.patch('/api/users/:codProfissional/setor', async (req, res) => {
+  try {
+    const { codProfissional } = req.params;
+    const { setor_id } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE users 
+      SET setor_id = $1, updated_at = NOW()
+      WHERE LOWER(cod_profissional) = LOWER($2)
+      RETURNING id, cod_profissional, full_name, setor_id
+    `, [setor_id || null, codProfissional]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar setor do usuário:', err);
+    res.status(500).json({ error: 'Erro ao atualizar setor' });
+  }
+});
+
 // ===== RELATÓRIOS DIÁRIOS =====
 // Criar tabela se não existir
 pool.query(`
@@ -9132,11 +9284,15 @@ app.get('/api/relatorios-diarios', async (req, res) => {
   }
 });
 
-// Buscar relatórios não lidos por um usuário
+// Buscar relatórios não lidos por um usuário (filtrado por setor)
 app.get('/api/relatorios-diarios/nao-lidos/:usuario_id', async (req, res) => {
   try {
     const { usuario_id } = req.params;
+    const { setor_id } = req.query;
     
+    // Query que considera:
+    // 1. Relatórios para todos (para_todos = true)
+    // 2. Relatórios onde o setor do usuário está na lista de setores_destino
     const result = await pool.query(`
       SELECT r.* 
       FROM relatorios_diarios r
@@ -9145,8 +9301,12 @@ app.get('/api/relatorios-diarios/nao-lidos/:usuario_id', async (req, res) => {
         WHERE rv.relatorio_id = r.id AND rv.usuario_id = $1
       )
       AND r.usuario_id != $1
+      AND (
+        r.para_todos = true 
+        OR ($2::integer IS NOT NULL AND $2 = ANY(r.setores_destino))
+      )
       ORDER BY r.created_at DESC
-    `, [usuario_id]);
+    `, [usuario_id, setor_id || null]);
     
     res.json(result.rows);
   } catch (err) {
@@ -9182,17 +9342,20 @@ app.post('/api/relatorios-diarios/:id/visualizar', async (req, res) => {
 // Criar relatório diário
 app.post('/api/relatorios-diarios', async (req, res) => {
   try {
-    const { titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_base64 } = req.body;
+    const { titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_base64, setores_destino, para_todos } = req.body;
     
     if (!titulo) {
       return res.status(400).json({ error: 'Título é obrigatório' });
     }
     
+    // Converter array de setores para formato PostgreSQL
+    const setoresArray = Array.isArray(setores_destino) ? setores_destino : [];
+    
     const result = await pool.query(`
-      INSERT INTO relatorios_diarios (titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_url)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO relatorios_diarios (titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_url, setores_destino, para_todos)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
-    `, [titulo, conteudo || '', usuario_id, usuario_nome, usuario_foto, imagem_base64 || null]);
+    `, [titulo, conteudo || '', usuario_id, usuario_nome, usuario_foto, imagem_base64 || null, setoresArray, para_todos !== false]);
     
     res.json(result.rows[0]);
   } catch (err) {
