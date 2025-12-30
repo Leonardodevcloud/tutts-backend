@@ -8901,6 +8901,56 @@ app.delete('/api/bi/mascaras/:id', async (req, res) => {
   }
 });
 
+// ===== LOCALIZAÇÃO DE CLIENTES (Ponto 1) =====
+// Endpoint para listar clientes com seus endereços de coleta (Ponto 1) e coordenadas
+app.get('/api/bi/localizacao-clientes', async (req, res) => {
+  try {
+    // Buscar clientes únicos com seus endereços de Ponto 1
+    const result = await pool.query(`
+      WITH cliente_enderecos AS (
+        SELECT 
+          cod_cliente,
+          MAX(nome_cliente) as nome_cliente,
+          endereco,
+          MAX(bairro) as bairro,
+          MAX(cidade) as cidade,
+          MAX(estado) as estado,
+          AVG(NULLIF(latitude, 0)) as latitude,
+          AVG(NULLIF(longitude, 0)) as longitude,
+          COUNT(*) as total_entregas
+        FROM bi_entregas
+        WHERE ponto = 1 
+          AND cod_cliente IS NOT NULL
+          AND endereco IS NOT NULL
+          AND endereco != ''
+        GROUP BY cod_cliente, endereco
+      )
+      SELECT 
+        cod_cliente,
+        nome_cliente,
+        jsonb_agg(
+          jsonb_build_object(
+            'endereco', endereco,
+            'bairro', bairro,
+            'cidade', cidade,
+            'estado', estado,
+            'latitude', latitude,
+            'longitude', longitude,
+            'total_entregas', total_entregas
+          ) ORDER BY total_entregas DESC
+        ) as enderecos
+      FROM cliente_enderecos
+      GROUP BY cod_cliente, nome_cliente
+      ORDER BY cod_cliente::INTEGER
+    `);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar localização clientes:', err);
+    res.status(500).json({ error: 'Erro ao buscar dados' });
+  }
+});
+
 // ===== REGRAS DE CONTAGEM DE ENTREGAS =====
 // Criar tabela se não existir
 pool.query(`
