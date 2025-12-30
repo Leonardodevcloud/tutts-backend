@@ -9105,25 +9105,19 @@ app.get('/api/relatorios-diarios', async (req, res) => {
 });
 
 // Criar relatório diário
-app.post('/api/relatorios-diarios', upload.single('imagem'), async (req, res) => {
+app.post('/api/relatorios-diarios', async (req, res) => {
   try {
-    const { titulo, conteudo, usuario_id, usuario_nome, usuario_foto } = req.body;
+    const { titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_base64 } = req.body;
     
     if (!titulo) {
       return res.status(400).json({ error: 'Título é obrigatório' });
-    }
-    
-    let imagem_url = null;
-    if (req.file) {
-      // Salvar imagem em base64 ou caminho
-      imagem_url = `/uploads/${req.file.filename}`;
     }
     
     const result = await pool.query(`
       INSERT INTO relatorios_diarios (titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_url)
       VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
-    `, [titulo, conteudo || '', usuario_id, usuario_nome, usuario_foto, imagem_url]);
+    `, [titulo, conteudo || '', usuario_id, usuario_nome, usuario_foto, imagem_base64 || null]);
     
     res.json(result.rows[0]);
   } catch (err) {
@@ -9133,30 +9127,34 @@ app.post('/api/relatorios-diarios', upload.single('imagem'), async (req, res) =>
 });
 
 // Atualizar relatório diário
-app.put('/api/relatorios-diarios/:id', upload.single('imagem'), async (req, res) => {
+app.put('/api/relatorios-diarios/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { titulo, conteudo } = req.body;
+    const { titulo, conteudo, imagem_base64 } = req.body;
     
     if (!titulo) {
       return res.status(400).json({ error: 'Título é obrigatório' });
     }
     
-    let updateQuery = `
-      UPDATE relatorios_diarios 
-      SET titulo = $1, conteudo = $2, updated_at = CURRENT_TIMESTAMP
-    `;
-    let params = [titulo, conteudo || ''];
+    let updateQuery, params;
     
-    if (req.file) {
-      updateQuery += `, imagem_url = $3 WHERE id = $4`;
-      params.push(`/uploads/${req.file.filename}`, id);
+    if (imagem_base64) {
+      updateQuery = `
+        UPDATE relatorios_diarios 
+        SET titulo = $1, conteudo = $2, imagem_url = $3, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $4
+        RETURNING *
+      `;
+      params = [titulo, conteudo || '', imagem_base64, id];
     } else {
-      updateQuery += ` WHERE id = $3`;
-      params.push(id);
+      updateQuery = `
+        UPDATE relatorios_diarios 
+        SET titulo = $1, conteudo = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $3
+        RETURNING *
+      `;
+      params = [titulo, conteudo || '', id];
     }
-    
-    updateQuery += ' RETURNING *';
     
     const result = await pool.query(updateQuery, params);
     
