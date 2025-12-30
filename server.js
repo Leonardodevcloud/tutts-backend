@@ -924,6 +924,7 @@ async function createTables() {
         tipo VARCHAR(20) DEFAULT 'compartilhado',
         criado_por VARCHAR(50) NOT NULL,
         criado_por_nome VARCHAR(255),
+        criado_por_foto TEXT,
         responsaveis JSONB DEFAULT '[]',
         ordem INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT NOW(),
@@ -932,6 +933,8 @@ async function createTables() {
         concluido_por_nome VARCHAR(255)
       )
     `);
+    // Adicionar coluna criado_por_foto se não existir
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS criado_por_foto TEXT`).catch(() => {});
     console.log('✅ Tabela todo_tarefas verificada');
 
     // Tabela de Anexos das Tarefas
@@ -10082,21 +10085,21 @@ app.post('/api/todo/tarefas', async (req, res) => {
     const { 
       grupo_id, titulo, descricao, prioridade, data_prazo, 
       recorrente, tipo_recorrencia, tipo, 
-      criado_por, criado_por_nome, responsaveis 
+      criado_por, criado_por_nome, criado_por_foto, responsaveis 
     } = req.body;
     
     const result = await pool.query(`
       INSERT INTO todo_tarefas (
         grupo_id, titulo, descricao, prioridade, data_prazo,
         recorrente, tipo_recorrencia, tipo,
-        criado_por, criado_por_nome, responsaveis
+        criado_por, criado_por_nome, criado_por_foto, responsaveis
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
     `, [
       grupo_id, titulo, descricao, prioridade || 'media', data_prazo,
       recorrente || false, tipo_recorrencia, tipo || 'compartilhado',
-      criado_por, criado_por_nome, JSON.stringify(responsaveis || [])
+      criado_por, criado_por_nome, criado_por_foto || null, JSON.stringify(responsaveis || [])
     ]);
     
     await pool.query(`
@@ -10398,15 +10401,20 @@ app.get('/api/todo/metricas/ranking', async (req, res) => {
 // Listar admins para o TO-DO
 app.get('/api/todo/admins', async (req, res) => {
   try {
+    // Retorna TODOS os usuários com foto do perfil social
     const result = await pool.query(`
-      SELECT cod_profissional as cod, full_name as nome 
-      FROM users 
-      WHERE role IN ('admin', 'admin_master')
-      ORDER BY full_name
+      SELECT 
+        u.cod_profissional as cod, 
+        u.full_name as nome,
+        u.role,
+        sp.profile_photo as foto
+      FROM users u
+      LEFT JOIN social_profiles sp ON u.cod_profissional = sp.user_cod
+      ORDER BY u.full_name
     `);
     res.json(result.rows);
   } catch (err) {
-    console.error('❌ Erro ao listar admins:', err);
+    console.error('❌ Erro ao listar usuários para TODO:', err);
     res.json([]);
   }
 });
