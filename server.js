@@ -8908,14 +8908,13 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
     // Clientes que devem ter endereços separados por centro de custo
     const clientesSeparadosPorCC = ['767', '1046', '713'];
     
-    // Query para clientes NORMAIS (agrupa todos os endereços semelhantes)
+    // Query para clientes NORMAIS - retorna apenas o endereço com mais entregas
     const resultNormal = await pool.query(`
       WITH endereco_normalizado AS (
         SELECT 
           cod_cliente,
           nome_cliente,
           centro_custo,
-          -- Normaliza: remove "Ponto X - ", maiúsculas, remove espaços extras, remove sufixos como "- GALPAO"
           UPPER(TRIM(REGEXP_REPLACE(
             REGEXP_REPLACE(
               REGEXP_REPLACE(endereco, '^Ponto\\s*\\d+\\s*-\\s*', '', 'i'),
@@ -8936,7 +8935,6 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
           AND endereco != ''
           AND cod_cliente::text NOT IN ('767', '1046', '713')
       ),
-      -- Agrupa por endereço normalizado (pega os primeiros 50 caracteres para agrupar endereços muito semelhantes)
       cliente_enderecos AS (
         SELECT 
           cod_cliente,
@@ -8951,12 +8949,27 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
           COUNT(*) as total_entregas
         FROM endereco_normalizado
         GROUP BY cod_cliente, LEFT(endereco_normalizado, 50)
+      ),
+      -- Pega apenas o endereço com mais entregas por cliente
+      cliente_top_endereco AS (
+        SELECT DISTINCT ON (cod_cliente)
+          cod_cliente,
+          nome_cliente,
+          endereco,
+          bairro,
+          cidade,
+          estado,
+          latitude,
+          longitude,
+          total_entregas
+        FROM cliente_enderecos
+        ORDER BY cod_cliente, total_entregas DESC
       )
       SELECT 
         ce.cod_cliente,
         COALESCE(m.mascara, ce.nome_cliente) as nome_cliente,
         NULL as centro_custo,
-        jsonb_agg(
+        jsonb_build_array(
           jsonb_build_object(
             'endereco', ce.endereco,
             'bairro', ce.bairro,
@@ -8966,14 +8979,13 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
             'longitude', ce.longitude,
             'total_entregas', ce.total_entregas,
             'centro_custo', NULL
-          ) ORDER BY ce.total_entregas DESC
+          )
         ) as enderecos
-      FROM cliente_enderecos ce
+      FROM cliente_top_endereco ce
       LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
-      GROUP BY ce.cod_cliente, COALESCE(m.mascara, ce.nome_cliente)
     `);
     
-    // Query para clientes ESPECIAIS (767, 1046, 713) - separados por centro de custo
+    // Query para clientes ESPECIAIS (767, 1046, 713) - separados por centro de custo, 1 endereço por CC
     const resultEspecial = await pool.query(`
       WITH endereco_normalizado AS (
         SELECT 
@@ -9015,12 +9027,28 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
           COUNT(*) as total_entregas
         FROM endereco_normalizado
         GROUP BY cod_cliente, centro_custo, LEFT(endereco_normalizado, 50)
+      ),
+      -- Pega apenas o endereço com mais entregas por cliente + centro de custo
+      cliente_cc_top_endereco AS (
+        SELECT DISTINCT ON (cod_cliente, centro_custo)
+          cod_cliente,
+          nome_cliente,
+          centro_custo,
+          endereco,
+          bairro,
+          cidade,
+          estado,
+          latitude,
+          longitude,
+          total_entregas
+        FROM cliente_enderecos
+        ORDER BY cod_cliente, centro_custo, total_entregas DESC
       )
       SELECT 
         ce.cod_cliente,
         COALESCE(m.mascara, ce.nome_cliente) as nome_cliente,
         ce.centro_custo,
-        jsonb_agg(
+        jsonb_build_array(
           jsonb_build_object(
             'endereco', ce.endereco,
             'bairro', ce.bairro,
@@ -9030,11 +9058,10 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
             'longitude', ce.longitude,
             'total_entregas', ce.total_entregas,
             'centro_custo', ce.centro_custo
-          ) ORDER BY ce.total_entregas DESC
+          )
         ) as enderecos
-      FROM cliente_enderecos ce
+      FROM cliente_cc_top_endereco ce
       LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
-      GROUP BY ce.cod_cliente, COALESCE(m.mascara, ce.nome_cliente), ce.centro_custo
     `);
     
     // Combina os resultados e ordena
