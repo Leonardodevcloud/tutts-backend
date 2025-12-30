@@ -7579,7 +7579,13 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               } else {
                 foraPrazoProf++;
               }
+            } else {
+              // Tempo negativo = dados inconsistentes = fora do prazo
+              foraPrazoProf++;
             }
+          } else {
+            // Sem dados de alocado ou finalizado = conta como fora do prazo
+            foraPrazoProf++;
           }
         });
         // ===== FIM CALCULAR T. ENTREGA PROF =====
@@ -7649,7 +7655,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       tempo_medio_entrega_prof: tempoMedioEntregaProf,
       dentro_prazo_prof: dentroPrazoProf,
       fora_prazo_prof: foraPrazoProf,
-      countTempoEntregaProf
+      countTempoEntregaProf,
+      totalEntregas,
+      diferenca: totalEntregas - (dentroPrazoProf + foraPrazoProf)
     });
     
     const metricas = {
