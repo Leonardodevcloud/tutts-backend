@@ -920,6 +920,7 @@ async function createTables() {
         data_conclusao TIMESTAMP,
         recorrente BOOLEAN DEFAULT FALSE,
         tipo_recorrencia VARCHAR(20),
+        intervalo_recorrencia INT DEFAULT 1,
         proxima_recorrencia TIMESTAMP,
         tipo VARCHAR(20) DEFAULT 'compartilhado',
         criado_por VARCHAR(50) NOT NULL,
@@ -933,8 +934,9 @@ async function createTables() {
         concluido_por_nome VARCHAR(255)
       )
     `);
-    // Adicionar coluna criado_por_foto se não existir
+    // Adicionar colunas se não existirem
     await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS criado_por_foto TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE todo_tarefas ADD COLUMN IF NOT EXISTS intervalo_recorrencia INT DEFAULT 1`).catch(() => {});
     console.log('✅ Tabela todo_tarefas verificada');
 
     // Tabela de Anexos das Tarefas
@@ -10079,26 +10081,113 @@ app.get('/api/todo/tarefas/:id', async (req, res) => {
   }
 });
 
+// Função para calcular próxima data de recorrência
+function calcularProximaRecorrencia(dataBase, tipoRecorrencia, intervalo = 1) {
+  const data = new Date(dataBase);
+  data.setHours(0, 0, 0, 0);
+  
+  switch (tipoRecorrencia) {
+    case 'diaria':
+    case 'diario':
+      data.setDate(data.getDate() + intervalo);
+      break;
+    case 'semanal':
+      data.setDate(data.getDate() + (7 * intervalo));
+      break;
+    case 'mensal':
+      data.setMonth(data.getMonth() + intervalo);
+      break;
+    case 'personalizado':
+      data.setDate(data.getDate() + intervalo);
+      break;
+    default:
+      data.setDate(data.getDate() + 1);
+  }
+  
+  return data;
+}
+
+// Endpoint para processar tarefas recorrentes (chamado por cron ou manualmente)
+app.post('/api/todo/processar-recorrencias', async (req, res) => {
+  try {
+    const agora = new Date();
+    
+    // Buscar tarefas recorrentes concluídas que precisam ser reabertas
+    const tarefasRecorrentes = await pool.query(`
+      SELECT * FROM todo_tarefas 
+      WHERE recorrente = true 
+      AND status = 'concluida'
+      AND proxima_recorrencia IS NOT NULL 
+      AND proxima_recorrencia <= $1
+    `, [agora]);
+    
+    let reabertas = 0;
+    
+    for (const tarefa of tarefasRecorrentes.rows) {
+      // Calcular próxima recorrência
+      const proximaData = calcularProximaRecorrencia(
+        new Date(), 
+        tarefa.tipo_recorrencia, 
+        tarefa.intervalo_recorrencia || 1
+      );
+      
+      // Reabrir a tarefa
+      await pool.query(`
+        UPDATE todo_tarefas 
+        SET status = 'pendente',
+            data_conclusao = NULL,
+            concluido_por = NULL,
+            concluido_por_nome = NULL,
+            proxima_recorrencia = $1,
+            updated_at = NOW()
+        WHERE id = $2
+      `, [proximaData, tarefa.id]);
+      
+      // Registrar no histórico
+      await pool.query(`
+        INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+        VALUES ($1, 'reaberta', 'Tarefa reaberta automaticamente (recorrência)', 'sistema', 'Sistema')
+      `, [tarefa.id]);
+      
+      reabertas++;
+    }
+    
+    console.log(`✅ Processamento de recorrências: ${reabertas} tarefa(s) reaberta(s)`);
+    res.json({ success: true, reabertas });
+  } catch (err) {
+    console.error('❌ Erro ao processar recorrências:', err);
+    res.status(500).json({ error: 'Erro ao processar recorrências' });
+  }
+});
+
 // Criar tarefa
 app.post('/api/todo/tarefas', async (req, res) => {
   try {
     const { 
       grupo_id, titulo, descricao, prioridade, data_prazo, 
-      recorrente, tipo_recorrencia, tipo, 
+      recorrente, tipo_recorrencia, intervalo_recorrencia, tipo, 
       criado_por, criado_por_nome, criado_por_foto, responsaveis 
     } = req.body;
+    
+    // Calcular próxima recorrência se for recorrente
+    let proxima_recorrencia = null;
+    if (recorrente && tipo_recorrencia) {
+      const hoje = new Date();
+      hoje.setHours(0, 0, 0, 0);
+      proxima_recorrencia = calcularProximaRecorrencia(hoje, tipo_recorrencia, intervalo_recorrencia || 1);
+    }
     
     const result = await pool.query(`
       INSERT INTO todo_tarefas (
         grupo_id, titulo, descricao, prioridade, data_prazo,
-        recorrente, tipo_recorrencia, tipo,
+        recorrente, tipo_recorrencia, intervalo_recorrencia, proxima_recorrencia, tipo,
         criado_por, criado_por_nome, criado_por_foto, responsaveis
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING *
     `, [
       grupo_id, titulo, descricao, prioridade || 'media', data_prazo,
-      recorrente || false, tipo_recorrencia, tipo || 'compartilhado',
+      recorrente || false, tipo_recorrencia, intervalo_recorrencia || 1, proxima_recorrencia, tipo || 'compartilhado',
       criado_por, criado_por_nome, criado_por_foto || null, JSON.stringify(responsaveis || [])
     ]);
     
@@ -10120,20 +10209,32 @@ app.put('/api/todo/tarefas/:id', async (req, res) => {
     const { id } = req.params;
     const { 
       titulo, descricao, status, prioridade, data_prazo,
-      recorrente, tipo_recorrencia, responsaveis,
+      recorrente, tipo_recorrencia, intervalo_recorrencia, responsaveis,
       user_cod, user_name
     } = req.body;
     
     const anterior = await pool.query('SELECT * FROM todo_tarefas WHERE id = $1', [id]);
+    const tarefaAnterior = anterior.rows[0];
     
     let concluido_por = null;
     let concluido_por_nome = null;
     let data_conclusao = null;
+    let proxima_recorrencia = tarefaAnterior?.proxima_recorrencia;
     
-    if (status === 'concluida' && anterior.rows[0]?.status !== 'concluida') {
+    // Se está sendo concluída
+    if (status === 'concluida' && tarefaAnterior?.status !== 'concluida') {
       concluido_por = user_cod;
       concluido_por_nome = user_name;
       data_conclusao = new Date();
+      
+      // Se é recorrente, calcular próxima data
+      if (tarefaAnterior?.recorrente) {
+        proxima_recorrencia = calcularProximaRecorrencia(
+          new Date(), 
+          tarefaAnterior.tipo_recorrencia, 
+          tarefaAnterior.intervalo_recorrencia || 1
+        );
+      }
     }
     
     const result = await pool.query(`
@@ -10145,17 +10246,20 @@ app.put('/api/todo/tarefas/:id', async (req, res) => {
           data_prazo = COALESCE($5, data_prazo),
           recorrente = COALESCE($6, recorrente),
           tipo_recorrencia = COALESCE($7, tipo_recorrencia),
-          responsaveis = COALESCE($8, responsaveis),
-          concluido_por = COALESCE($9, concluido_por),
-          concluido_por_nome = COALESCE($10, concluido_por_nome),
-          data_conclusao = COALESCE($11, data_conclusao),
+          intervalo_recorrencia = COALESCE($8, intervalo_recorrencia),
+          responsaveis = COALESCE($9, responsaveis),
+          concluido_por = COALESCE($10, concluido_por),
+          concluido_por_nome = COALESCE($11, concluido_por_nome),
+          data_conclusao = COALESCE($12, data_conclusao),
+          proxima_recorrencia = $13,
           updated_at = NOW()
-      WHERE id = $12
+      WHERE id = $14
       RETURNING *
     `, [
       titulo, descricao, status, prioridade, data_prazo,
-      recorrente, tipo_recorrencia, responsaveis ? JSON.stringify(responsaveis) : null,
-      concluido_por, concluido_por_nome, data_conclusao, id
+      recorrente, tipo_recorrencia, intervalo_recorrencia,
+      responsaveis ? JSON.stringify(responsaveis) : null,
+      concluido_por, concluido_por_nome, data_conclusao, proxima_recorrencia, id
     ]);
     
     let acaoDesc = 'Tarefa atualizada';
@@ -10171,31 +10275,37 @@ app.put('/api/todo/tarefas/:id', async (req, res) => {
     // Se tarefa recorrente foi concluída, criar próxima
     if (status === 'concluida' && result.rows[0].recorrente && result.rows[0].tipo_recorrencia) {
       const tarefa = result.rows[0];
-      let proximoPrazo = new Date(tarefa.data_prazo || new Date());
+      let proximoPrazo = new Date();
+      proximoPrazo.setHours(0, 0, 0, 0); // Começa à meia-noite
+      
+      const intervalo = tarefa.intervalo_recorrencia || 1;
       
       switch (tarefa.tipo_recorrencia) {
         case 'diario':
-          proximoPrazo.setDate(proximoPrazo.getDate() + 1);
+          proximoPrazo.setDate(proximoPrazo.getDate() + 1); // Próximo dia às 00:00
           break;
         case 'semanal':
-          proximoPrazo.setDate(proximoPrazo.getDate() + 7);
+          proximoPrazo.setDate(proximoPrazo.getDate() + (7 * intervalo));
           break;
         case 'mensal':
-          proximoPrazo.setMonth(proximoPrazo.getMonth() + 1);
+          proximoPrazo.setMonth(proximoPrazo.getMonth() + intervalo);
+          break;
+        case 'personalizado':
+          proximoPrazo.setDate(proximoPrazo.getDate() + intervalo);
           break;
       }
       
       await pool.query(`
         INSERT INTO todo_tarefas (
           grupo_id, titulo, descricao, prioridade, data_prazo,
-          recorrente, tipo_recorrencia, tipo,
-          criado_por, criado_por_nome, responsaveis
+          recorrente, tipo_recorrencia, intervalo_recorrencia, tipo,
+          criado_por, criado_por_nome, criado_por_foto, responsaveis
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `, [
         tarefa.grupo_id, tarefa.titulo, tarefa.descricao, tarefa.prioridade, proximoPrazo,
-        true, tarefa.tipo_recorrencia, tarefa.tipo,
-        tarefa.criado_por, tarefa.criado_por_nome, tarefa.responsaveis
+        true, tarefa.tipo_recorrencia, intervalo, tarefa.tipo,
+        tarefa.criado_por, tarefa.criado_por_nome, tarefa.criado_por_foto, tarefa.responsaveis
       ]);
       console.log('✅ Tarefa recorrente criada para:', proximoPrazo);
     }
@@ -10401,7 +10511,7 @@ app.get('/api/todo/metricas/ranking', async (req, res) => {
 // Listar admins para o TO-DO
 app.get('/api/todo/admins', async (req, res) => {
   try {
-    // Retorna TODOS os usuários com foto do perfil social
+    // Retorna apenas ADMINS e ADMIN_MASTER com foto do perfil social
     const result = await pool.query(`
       SELECT 
         u.cod_profissional as cod, 
@@ -10410,11 +10520,12 @@ app.get('/api/todo/admins', async (req, res) => {
         sp.profile_photo as foto
       FROM users u
       LEFT JOIN social_profiles sp ON u.cod_profissional = sp.user_cod
+      WHERE u.role IN ('admin', 'admin_master')
       ORDER BY u.full_name
     `);
     res.json(result.rows);
   } catch (err) {
-    console.error('❌ Erro ao listar usuários para TODO:', err);
+    console.error('❌ Erro ao listar admins para TODO:', err);
     res.json([]);
   }
 });
@@ -11266,10 +11377,66 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 
 // ==================== FIM ROTAS MÓDULO AVISOS ====================
 
+// Função para processar recorrências
+async function processarRecorrenciasInterno() {
+  try {
+    const agora = new Date();
+    
+    const tarefasRecorrentes = await pool.query(`
+      SELECT * FROM todo_tarefas 
+      WHERE recorrente = true 
+      AND status = 'concluida'
+      AND proxima_recorrencia IS NOT NULL 
+      AND proxima_recorrencia <= $1
+    `, [agora]);
+    
+    let reabertas = 0;
+    
+    for (const tarefa of tarefasRecorrentes.rows) {
+      const proximaData = calcularProximaRecorrencia(
+        new Date(), 
+        tarefa.tipo_recorrencia, 
+        tarefa.intervalo_recorrencia || 1
+      );
+      
+      await pool.query(`
+        UPDATE todo_tarefas 
+        SET status = 'pendente',
+            data_conclusao = NULL,
+            concluido_por = NULL,
+            concluido_por_nome = NULL,
+            proxima_recorrencia = $1,
+            updated_at = NOW()
+        WHERE id = $2
+      `, [proximaData, tarefa.id]);
+      
+      await pool.query(`
+        INSERT INTO todo_historico (tarefa_id, acao, descricao, user_cod, user_name)
+        VALUES ($1, 'reaberta', 'Tarefa reaberta automaticamente (recorrência)', 'sistema', 'Sistema')
+      `, [tarefa.id]);
+      
+      reabertas++;
+    }
+    
+    if (reabertas > 0) {
+      console.log(`🔄 Recorrências: ${reabertas} tarefa(s) reaberta(s)`);
+    }
+  } catch (err) {
+    console.error('❌ Erro ao processar recorrências:', err);
+  }
+}
+
 // Iniciar servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`📡 API: http://localhost:${port}/api/health`);
+  
+  // Processar recorrências a cada hora (para garantir que tarefas não fiquem presas)
+  setInterval(processarRecorrenciasInterno, 60 * 60 * 1000); // 1 hora
+  
+  // Processar imediatamente ao iniciar
+  setTimeout(processarRecorrenciasInterno, 10000); // 10 segundos após iniciar
+  console.log('⏰ Processamento de recorrências ativado (a cada 1h)');
 });
 
 // ===== REGIÕES =====
