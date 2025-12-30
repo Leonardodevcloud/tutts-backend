@@ -9089,18 +9089,93 @@ pool.query(`
   )
 `).catch(err => console.log('Tabela relatorios_diarios já existe ou erro:', err.message));
 
-// Listar relatórios diários
+// Criar tabela de visualizações
+pool.query(`
+  CREATE TABLE IF NOT EXISTS relatorios_visualizacoes (
+    id SERIAL PRIMARY KEY,
+    relatorio_id INTEGER NOT NULL REFERENCES relatorios_diarios(id) ON DELETE CASCADE,
+    usuario_id INTEGER NOT NULL,
+    usuario_nome VARCHAR(255),
+    usuario_foto TEXT,
+    visualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(relatorio_id, usuario_id)
+  )
+`).catch(err => console.log('Tabela relatorios_visualizacoes já existe ou erro:', err.message));
+
+// Listar relatórios diários com visualizações
 app.get('/api/relatorios-diarios', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT * FROM relatorios_diarios 
-      ORDER BY created_at DESC 
+      SELECT 
+        r.*,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'usuario_id', rv.usuario_id,
+              'usuario_nome', rv.usuario_nome,
+              'usuario_foto', rv.usuario_foto,
+              'visualizado_em', rv.visualizado_em
+            )
+          ) FILTER (WHERE rv.id IS NOT NULL),
+          '[]'
+        ) as visualizacoes
+      FROM relatorios_diarios r
+      LEFT JOIN relatorios_visualizacoes rv ON r.id = rv.relatorio_id
+      GROUP BY r.id
+      ORDER BY r.created_at DESC 
       LIMIT 100
     `);
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao listar relatórios:', err);
     res.status(500).json({ error: 'Erro ao listar relatórios' });
+  }
+});
+
+// Buscar relatórios não lidos por um usuário
+app.get('/api/relatorios-diarios/nao-lidos/:usuario_id', async (req, res) => {
+  try {
+    const { usuario_id } = req.params;
+    
+    const result = await pool.query(`
+      SELECT r.* 
+      FROM relatorios_diarios r
+      WHERE NOT EXISTS (
+        SELECT 1 FROM relatorios_visualizacoes rv 
+        WHERE rv.relatorio_id = r.id AND rv.usuario_id = $1
+      )
+      AND r.usuario_id != $1
+      ORDER BY r.created_at DESC
+    `, [usuario_id]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar relatórios não lidos:', err);
+    res.status(500).json({ error: 'Erro ao buscar relatórios não lidos' });
+  }
+});
+
+// Marcar relatório como lido
+app.post('/api/relatorios-diarios/:id/visualizar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { usuario_id, usuario_nome, usuario_foto } = req.body;
+    
+    if (!usuario_id) {
+      return res.status(400).json({ error: 'usuario_id é obrigatório' });
+    }
+    
+    // Inserir ou ignorar se já existe
+    await pool.query(`
+      INSERT INTO relatorios_visualizacoes (relatorio_id, usuario_id, usuario_nome, usuario_foto)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (relatorio_id, usuario_id) DO NOTHING
+    `, [id, usuario_id, usuario_nome, usuario_foto]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao marcar como lido:', err);
+    res.status(500).json({ error: 'Erro ao marcar como lido' });
   }
 });
 
