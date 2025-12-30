@@ -9075,6 +9075,122 @@ app.get('/api/bi/localizacao-clientes', async (req, res) => {
   }
 });
 
+// ===== RELATÓRIOS DIÁRIOS =====
+// Criar tabela se não existir
+pool.query(`
+  CREATE TABLE IF NOT EXISTS relatorios_diarios (
+    id SERIAL PRIMARY KEY,
+    titulo VARCHAR(255) NOT NULL,
+    conteudo TEXT,
+    usuario_id INTEGER,
+    usuario_nome VARCHAR(255),
+    usuario_foto TEXT,
+    imagem_url TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.log('Tabela relatorios_diarios já existe ou erro:', err.message));
+
+// Listar relatórios diários
+app.get('/api/relatorios-diarios', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM relatorios_diarios 
+      ORDER BY created_at DESC 
+      LIMIT 100
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar relatórios:', err);
+    res.status(500).json({ error: 'Erro ao listar relatórios' });
+  }
+});
+
+// Criar relatório diário
+app.post('/api/relatorios-diarios', upload.single('imagem'), async (req, res) => {
+  try {
+    const { titulo, conteudo, usuario_id, usuario_nome, usuario_foto } = req.body;
+    
+    if (!titulo) {
+      return res.status(400).json({ error: 'Título é obrigatório' });
+    }
+    
+    let imagem_url = null;
+    if (req.file) {
+      // Salvar imagem em base64 ou caminho
+      imagem_url = `/uploads/${req.file.filename}`;
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO relatorios_diarios (titulo, conteudo, usuario_id, usuario_nome, usuario_foto, imagem_url)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [titulo, conteudo || '', usuario_id, usuario_nome, usuario_foto, imagem_url]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar relatório:', err);
+    res.status(500).json({ error: 'Erro ao criar relatório' });
+  }
+});
+
+// Atualizar relatório diário
+app.put('/api/relatorios-diarios/:id', upload.single('imagem'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { titulo, conteudo } = req.body;
+    
+    if (!titulo) {
+      return res.status(400).json({ error: 'Título é obrigatório' });
+    }
+    
+    let updateQuery = `
+      UPDATE relatorios_diarios 
+      SET titulo = $1, conteudo = $2, updated_at = CURRENT_TIMESTAMP
+    `;
+    let params = [titulo, conteudo || ''];
+    
+    if (req.file) {
+      updateQuery += `, imagem_url = $3 WHERE id = $4`;
+      params.push(`/uploads/${req.file.filename}`, id);
+    } else {
+      updateQuery += ` WHERE id = $3`;
+      params.push(id);
+    }
+    
+    updateQuery += ' RETURNING *';
+    
+    const result = await pool.query(updateQuery, params);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Relatório não encontrado' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar relatório:', err);
+    res.status(500).json({ error: 'Erro ao atualizar relatório' });
+  }
+});
+
+// Excluir relatório diário
+app.delete('/api/relatorios-diarios/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query('DELETE FROM relatorios_diarios WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Relatório não encontrado' });
+    }
+    
+    res.json({ success: true, message: 'Relatório excluído' });
+  } catch (err) {
+    console.error('❌ Erro ao excluir relatório:', err);
+    res.status(500).json({ error: 'Erro ao excluir relatório' });
+  }
+});
+
 // ===== REGRAS DE CONTAGEM DE ENTREGAS =====
 // Criar tabela se não existir
 pool.query(`
