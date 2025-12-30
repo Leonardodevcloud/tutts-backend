@@ -8906,42 +8906,64 @@ app.delete('/api/bi/mascaras/:id', async (req, res) => {
 app.get('/api/bi/localizacao-clientes', async (req, res) => {
   try {
     // Buscar clientes únicos com seus endereços de Ponto 1
+    // Normaliza o endereço removendo "Ponto 1 - ", convertendo para maiúsculas e removendo espaços extras
     const result = await pool.query(`
-      WITH cliente_enderecos AS (
+      WITH endereco_normalizado AS (
+        SELECT 
+          cod_cliente,
+          nome_cliente,
+          -- Normaliza o endereço: remove "Ponto 1 - " do início, converte para maiúsculas, remove espaços extras
+          UPPER(TRIM(REGEXP_REPLACE(
+            REGEXP_REPLACE(endereco, '^Ponto\\s*\\d+\\s*-\\s*', '', 'i'),
+            '\\s+', ' ', 'g'
+          ))) as endereco_normalizado,
+          -- Mantém o endereço original mais comum para exibição
+          endereco as endereco_original,
+          bairro,
+          cidade,
+          estado,
+          latitude,
+          longitude
+        FROM bi_entregas
+        WHERE ponto = 1 
+          AND cod_cliente IS NOT NULL
+          AND endereco IS NOT NULL
+          AND endereco != ''
+      ),
+      cliente_enderecos AS (
         SELECT 
           cod_cliente,
           MAX(nome_cliente) as nome_cliente,
-          endereco,
+          endereco_normalizado,
+          -- Pega o endereço original mais frequente para exibição
+          MODE() WITHIN GROUP (ORDER BY endereco_original) as endereco,
           MAX(bairro) as bairro,
           MAX(cidade) as cidade,
           MAX(estado) as estado,
           AVG(NULLIF(latitude, 0)) as latitude,
           AVG(NULLIF(longitude, 0)) as longitude,
           COUNT(*) as total_entregas
-        FROM bi_entregas
-        WHERE ponto = 1 
-          AND cod_cliente IS NOT NULL
-          AND endereco IS NOT NULL
-          AND endereco != ''
-        GROUP BY cod_cliente, endereco
+        FROM endereco_normalizado
+        GROUP BY cod_cliente, endereco_normalizado
       )
       SELECT 
-        cod_cliente,
-        nome_cliente,
+        ce.cod_cliente,
+        COALESCE(m.mascara, ce.nome_cliente) as nome_cliente,
         jsonb_agg(
           jsonb_build_object(
-            'endereco', endereco,
-            'bairro', bairro,
-            'cidade', cidade,
-            'estado', estado,
-            'latitude', latitude,
-            'longitude', longitude,
-            'total_entregas', total_entregas
-          ) ORDER BY total_entregas DESC
+            'endereco', ce.endereco,
+            'bairro', ce.bairro,
+            'cidade', ce.cidade,
+            'estado', ce.estado,
+            'latitude', ce.latitude,
+            'longitude', ce.longitude,
+            'total_entregas', ce.total_entregas
+          ) ORDER BY ce.total_entregas DESC
         ) as enderecos
-      FROM cliente_enderecos
-      GROUP BY cod_cliente, nome_cliente
-      ORDER BY cod_cliente::INTEGER
+      FROM cliente_enderecos ce
+      LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
+      GROUP BY ce.cod_cliente, COALESCE(m.mascara, ce.nome_cliente)
+      ORDER BY ce.cod_cliente::INTEGER
     `);
     
     res.json(result.rows);
