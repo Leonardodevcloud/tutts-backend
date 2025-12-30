@@ -7483,11 +7483,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           else semPrazo++; // null ou undefined
         };
         
-        // ===== CALCULAR T. ENTREGA PROF E PRAZO PROF POR OS =====
-        // T. Entrega Prof = data_hora_alocado (ponto 1) → finalizado (último ponto)
+        // ===== CALCULAR T. ENTREGA PROF E PRAZO PROF POR ENTREGA =====
+        // Para cada linha de entrega (ponto >= 2), calcular o tempo prof
+        // T. Entrega Prof = data_hora_alocado (ponto 1) → finalizado (desta entrega)
         // Com regra: se dias diferentes, começa às 8h do dia do finalizado
-        const primeiroReg = linhasOS[0];
-        const ultimoReg = linhasOS[linhasOS.length - 1];
+        const primeiroReg = linhasOS[0]; // Ponto 1 - tem o data_hora_alocado
         
         // Função para extrair data/hora (aceita string ou objeto Date)
         const parseDateTime = (valor) => {
@@ -7515,90 +7515,73 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           };
         };
         
+        // Função para encontrar prazo baseado na distância (mesma lógica das faixas)
+        const calcularPrazoPorDistancia = (dist) => {
+          if (dist <= 10) return 60;
+          if (dist <= 15) return 75;
+          if (dist <= 20) return 90;
+          if (dist <= 25) return 105;
+          if (dist <= 30) return 135;
+          if (dist <= 35) return 150;
+          if (dist <= 40) return 165;
+          if (dist <= 45) return 180;
+          if (dist <= 50) return 195;
+          if (dist <= 55) return 210;
+          if (dist <= 60) return 225;
+          if (dist <= 65) return 240;
+          if (dist <= 70) return 255;
+          if (dist <= 75) return 270;
+          if (dist <= 80) return 285;
+          return 300; // Acima de 80km
+        };
+        
         const alocadoStr = primeiroReg?.data_hora_alocado;
-        const finalizadoStr = ultimoReg?.finalizado || primeiroReg?.finalizado;
-        
-        // Debug: log das primeiras 3 OS
-        if (totalOS.size <= 3) {
-          console.log('📊 DEBUG T.Entrega Prof - OS:', os, {
-            alocadoStr: alocadoStr,
-            finalizadoStr: finalizadoStr,
-            tipoAlocado: typeof alocadoStr,
-            tipoFinalizado: typeof finalizadoStr,
-            isDateAlocado: alocadoStr instanceof Date,
-            isDateFinalizado: finalizadoStr instanceof Date
-          });
-        }
-        
         const alocado = parseDateTime(alocadoStr);
-        const finalizado = parseDateTime(finalizadoStr);
         
-        if (totalOS.size <= 3) {
-          console.log('📊 DEBUG Parsed:', { alocado, finalizado });
-        }
+        // Determinar quais linhas processar para Prazo Prof
+        // Se tem linhas com ponto >= 2, usa elas. Senão, usa todas exceto a primeira (coleta)
+        const linhasParaPrazoProf = linhasEntrega.length > 0 
+          ? linhasEntrega 
+          : (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
         
-        if (alocado && finalizado) {
-          const mesmaData = alocado.dataStr === finalizado.dataStr;
+        // Processar CADA ENTREGA para o Prazo Prof
+        linhasParaPrazoProf.forEach((entrega) => {
+          const finalizadoStr = entrega.finalizado;
+          const finalizado = parseDateTime(finalizadoStr);
           
-          let inicioMinutos, fimMinutos;
-          
-          // Fim sempre é a hora real do finalizado
-          fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
-          
-          if (!mesmaData) {
-            // Dias diferentes - começa às 8h do dia do finalizado
-            inicioMinutos = 8 * 60; // 8:00 = 480 minutos
-          } else {
-            inicioMinutos = alocado.hora * 60 + alocado.min + alocado.seg / 60;
-          }
-          
-          const tempoEntProf = fimMinutos - inicioMinutos;
-          
-          if (totalOS.size <= 3) {
-            console.log('📊 DEBUG Tempo:', { mesmaData, inicioMinutos, fimMinutos, tempoEntProf });
-          }
-          
-          if (tempoEntProf >= 0) {
-            somaTempoEntregaProf += tempoEntProf;
-            countTempoEntregaProf++;
+          if (alocado && finalizado) {
+            const mesmaData = alocado.dataStr === finalizado.dataStr;
             
-            // Prazo Prof: calcular baseado na DISTÂNCIA usando faixas de KM
-            // Pegar a distância da OS (do primeiro registro ou do registro com maior ponto)
-            const distanciaOS = parseFloat(primeiroReg?.distancia) || 0;
+            let inicioMinutos, fimMinutos;
             
-            // Função para encontrar prazo baseado na distância (mesma lógica das faixas)
-            const calcularPrazoPorDistancia = (dist) => {
-              if (dist <= 10) return 60;
-              if (dist <= 15) return 75;
-              if (dist <= 20) return 90;
-              if (dist <= 25) return 105;
-              if (dist <= 30) return 135;
-              if (dist <= 35) return 150;
-              if (dist <= 40) return 165;
-              if (dist <= 45) return 180;
-              if (dist <= 50) return 195;
-              if (dist <= 55) return 210;
-              if (dist <= 60) return 225;
-              if (dist <= 65) return 240;
-              if (dist <= 70) return 255;
-              if (dist <= 75) return 270;
-              if (dist <= 80) return 285;
-              return 300; // Acima de 80km
-            };
+            // Fim sempre é a hora real do finalizado
+            fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
             
-            const prazoMinutos = calcularPrazoPorDistancia(distanciaOS);
-            
-            if (totalOS.size <= 5) {
-              console.log('📊 DEBUG Prazo Prof:', { os, distanciaOS, prazoMinutos, tempoEntProf, dentro: tempoEntProf <= prazoMinutos });
-            }
-            
-            if (tempoEntProf <= prazoMinutos) {
-              dentroPrazoProf++;
+            if (!mesmaData) {
+              // Dias diferentes - começa às 8h do dia do finalizado
+              inicioMinutos = 8 * 60; // 8:00 = 480 minutos
             } else {
-              foraPrazoProf++;
+              inicioMinutos = alocado.hora * 60 + alocado.min + alocado.seg / 60;
+            }
+            
+            const tempoEntProf = fimMinutos - inicioMinutos;
+            
+            if (tempoEntProf >= 0) {
+              somaTempoEntregaProf += tempoEntProf;
+              countTempoEntregaProf++;
+              
+              // Prazo Prof: calcular baseado na DISTÂNCIA desta entrega
+              const distanciaEntrega = parseFloat(entrega.distancia) || 0;
+              const prazoMinutos = calcularPrazoPorDistancia(distanciaEntrega);
+              
+              if (tempoEntProf <= prazoMinutos) {
+                dentroPrazoProf++;
+              } else {
+                foraPrazoProf++;
+              }
             }
           }
-        }
+        });
         // ===== FIM CALCULAR T. ENTREGA PROF =====
         
         // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
