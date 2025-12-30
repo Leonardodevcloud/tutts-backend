@@ -1212,8 +1212,8 @@ const allowedOrigins = [
   'http://127.0.0.1:5500'
 ];
 
-// Responder imediatamente a requisições OPTIONS (preflight) - ANTES de tudo
-app.options('*', (req, res) => {
+// Função para setar headers CORS
+const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
   if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -1221,23 +1221,21 @@ app.options('*', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma');
   res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
+};
+
+// Responder imediatamente a requisições OPTIONS (preflight) - ANTES de tudo
+app.options('*', (req, res) => {
+  setCorsHeaders(req, res);
   return res.status(200).end();
 });
 
 // CORS para todas requisições
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+  setCorsHeaders(req, res);
   next();
 });
 
