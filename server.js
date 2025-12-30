@@ -10011,10 +10011,22 @@ app.get('/api/todo/tarefas', async (req, res) => {
     const params = [];
     let paramIndex = 1;
     
+    // Se um grupo específico for selecionado, mostra TODAS as tarefas desse grupo
     if (grupo_id) {
       query += ` AND t.grupo_id = $${paramIndex}`;
       params.push(grupo_id);
       paramIndex++;
+      // Não aplica filtro de usuário quando visualizando um grupo específico
+    } else {
+      // Se não for admin_master e não tiver grupo específico, filtra por permissões
+      if (role !== 'admin_master') {
+        query += ` AND (
+          t.tipo = 'compartilhado' 
+          OR t.criado_por = '${user_cod}'
+          OR t.responsaveis @> '[{"user_cod":"${user_cod}"}]'
+          OR t.responsaveis::text LIKE '%${user_cod}%'
+        )`;
+      }
     }
     
     if (status && status !== 'todas') {
@@ -10033,14 +10045,6 @@ app.get('/api/todo/tarefas', async (req, res) => {
       query += ` AND t.responsaveis @> $${paramIndex}::jsonb`;
       params.push(JSON.stringify([{ user_cod: responsavel }]));
       paramIndex++;
-    }
-    
-    if (role !== 'admin_master') {
-      query += ` AND (
-        t.tipo = 'compartilhado' 
-        OR t.criado_por = '${user_cod}'
-        OR t.responsaveis @> '[{"user_cod":"${user_cod}"}]'
-      )`;
     }
     
     query += ' ORDER BY t.ordem ASC, CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
