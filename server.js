@@ -7408,6 +7408,288 @@ app.get('/api/bi/dashboard-rapido', async (req, res) => {
   }
 });
 
+// ============================================
+// RELATÓRIO IA COM GEMINI
+// ============================================
+app.get('/api/bi/relatorio-ia', async (req, res) => {
+  try {
+    const { tipo, data_inicio, data_fim, prompt_custom } = req.query;
+    const cod_cliente = req.query.cod_cliente ? (Array.isArray(req.query.cod_cliente) ? req.query.cod_cliente : [req.query.cod_cliente]) : [];
+    const centro_custo = req.query.centro_custo ? (Array.isArray(req.query.centro_custo) ? req.query.centro_custo : [req.query.centro_custo]) : [];
+    
+    console.log(`🤖 Gerando relatório IA: tipo=${tipo}, período=${data_inicio} a ${data_fim}`);
+    
+    // Verificar se tem API key do Gemini
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    if (!GEMINI_API_KEY) {
+      return res.status(400).json({ error: 'API Key do Gemini não configurada. Adicione GEMINI_API_KEY nas variáveis de ambiente.' });
+    }
+    
+    // Construir filtro WHERE
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente.length > 0) {
+      whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+      params.push(cod_cliente.map(c => parseInt(c)));
+      paramIndex++;
+    }
+    if (centro_custo.length > 0) {
+      whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+      params.push(centro_custo);
+      paramIndex++;
+    }
+    
+    // 1. Buscar métricas gerais
+    const metricasQuery = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 2) as taxa_prazo,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 2) as tempo_medio_entrega,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as total_profissionais,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_cliente END) as total_clientes,
+        MIN(data_solicitado) as data_inicio_real,
+        MAX(data_solicitado) as data_fim_real
+      FROM bi_entregas
+      ${whereClause}
+    `, params);
+    
+    const metricas = metricasQuery.rows[0];
+    
+    // 2. Buscar dados por dia
+    const porDiaQuery = await pool.query(`
+      SELECT 
+        data_solicitado as data,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY data_solicitado
+      ORDER BY data_solicitado
+    `, params);
+    
+    // 3. Buscar top clientes
+    const topClientesQuery = await pool.query(`
+      SELECT 
+        nome_fantasia as cliente,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY nome_fantasia
+      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
+      LIMIT 10
+    `, params);
+    
+    // 4. Buscar top profissionais
+    const topProfsQuery = await pool.query(`
+      SELECT 
+        nome_prof as profissional,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY nome_prof
+      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
+      LIMIT 10
+    `, params);
+    
+    // 5. Buscar distribuição por dia da semana
+    const porDiaSemanaQuery = await pool.query(`
+      SELECT 
+        EXTRACT(DOW FROM data_solicitado) as dia_semana,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY EXTRACT(DOW FROM data_solicitado)
+      ORDER BY EXTRACT(DOW FROM data_solicitado)
+    `, params);
+    
+    const diasSemana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+    const dadosDiaSemana = porDiaSemanaQuery.rows.map(r => ({
+      dia: diasSemana[parseInt(r.dia_semana)],
+      entregas: parseInt(r.entregas),
+      taxa_prazo: parseFloat(r.taxa_prazo)
+    }));
+    
+    // Montar contexto para a IA
+    const contexto = {
+      periodo: { inicio: data_inicio || metricas.data_inicio_real, fim: data_fim || metricas.data_fim_real },
+      metricas_gerais: {
+        total_entregas: parseInt(metricas.total_entregas) || 0,
+        taxa_prazo: parseFloat(metricas.taxa_prazo) || 0,
+        entregas_no_prazo: parseInt(metricas.entregas_no_prazo) || 0,
+        entregas_fora_prazo: parseInt(metricas.entregas_fora_prazo) || 0,
+        valor_total: parseFloat(metricas.valor_total) || 0,
+        valor_profissionais: parseFloat(metricas.valor_prof) || 0,
+        lucro_estimado: (parseFloat(metricas.valor_total) || 0) - (parseFloat(metricas.valor_prof) || 0),
+        tempo_medio_entrega_minutos: parseFloat(metricas.tempo_medio_entrega) || 0,
+        total_profissionais: parseInt(metricas.total_profissionais) || 0,
+        total_clientes: parseInt(metricas.total_clientes) || 0
+      },
+      evolucao_diaria: porDiaQuery.rows.slice(-14).map(r => ({
+        data: r.data,
+        entregas: parseInt(r.entregas),
+        taxa_prazo: parseFloat(r.taxa) || 0,
+        valor: parseFloat(r.valor) || 0
+      })),
+      top_clientes: topClientesQuery.rows.map(r => ({
+        cliente: r.cliente,
+        entregas: parseInt(r.entregas),
+        taxa_prazo: parseFloat(r.taxa_prazo) || 0,
+        valor: parseFloat(r.valor) || 0
+      })),
+      top_profissionais: topProfsQuery.rows.map(r => ({
+        profissional: r.profissional,
+        entregas: parseInt(r.entregas),
+        taxa_prazo: parseFloat(r.taxa_prazo) || 0,
+        tempo_medio: parseFloat(r.tempo_medio) || 0
+      })),
+      distribuicao_dia_semana: dadosDiaSemana
+    };
+    
+    // Definir prompt base por tipo
+    const promptsBase = {
+      performance: `Analise a performance geral desta operação de entregas. 
+        Destaque pontos fortes e fracos. 
+        Compare a taxa de prazo atual com benchmarks do setor (geralmente 85%+ é bom).
+        Avalie se o tempo médio de entrega está adequado.
+        Dê uma nota geral de 0 a 10 para a operação.`,
+      
+      tendencias: `Identifique tendências e padrões nos dados.
+        Analise a evolução diária - está melhorando ou piorando?
+        Identifique padrões por dia da semana.
+        Preveja como será o desempenho nas próximas semanas se a tendência continuar.
+        Destaque comportamentos recorrentes.`,
+      
+      alertas: `Identifique problemas e anomalias que precisam de atenção urgente.
+        Destaque clientes com performance muito abaixo da média.
+        Identifique profissionais com desempenho preocupante.
+        Aponte dias com quedas bruscas de performance.
+        Liste as 3 maiores prioridades de correção.`,
+      
+      financeiro: `Faça uma análise financeira detalhada.
+        Calcule a margem de lucro (valor total - valor profissionais).
+        Analise se o ticket médio está adequado.
+        Identifique clientes mais e menos rentáveis.
+        Sugira formas de aumentar a rentabilidade.`,
+      
+      comparativo: `Compare o desempenho entre clientes e profissionais.
+        Crie um ranking dos melhores e piores clientes.
+        Identifique os profissionais mais eficientes.
+        Compare a performance entre dias da semana.
+        Destaque quem está acima e abaixo da média.`,
+      
+      personalizado: prompt_custom || 'Faça uma análise geral dos dados.'
+    };
+    
+    const promptTipo = promptsBase[tipo] || promptsBase.performance;
+    
+    const promptCompleto = `Você é um analista de dados especialista em operações de delivery e logística.
+    
+Analise os seguintes dados de uma operação de entregas por motoboys:
+
+=== PERÍODO ===
+${contexto.periodo.inicio} a ${contexto.periodo.fim}
+
+=== MÉTRICAS GERAIS ===
+- Total de entregas: ${contexto.metricas_gerais.total_entregas}
+- Taxa de prazo: ${contexto.metricas_gerais.taxa_prazo}%
+- Entregas no prazo: ${contexto.metricas_gerais.entregas_no_prazo}
+- Entregas fora do prazo: ${contexto.metricas_gerais.entregas_fora_prazo}
+- Valor total faturado: R$ ${contexto.metricas_gerais.valor_total.toLocaleString('pt-BR')}
+- Valor pago aos profissionais: R$ ${contexto.metricas_gerais.valor_profissionais.toLocaleString('pt-BR')}
+- Lucro bruto estimado: R$ ${contexto.metricas_gerais.lucro_estimado.toLocaleString('pt-BR')}
+- Tempo médio de entrega: ${contexto.metricas_gerais.tempo_medio_entrega_minutos} minutos
+- Total de profissionais ativos: ${contexto.metricas_gerais.total_profissionais}
+- Total de clientes atendidos: ${contexto.metricas_gerais.total_clientes}
+
+=== EVOLUÇÃO DIÁRIA (últimos dias) ===
+${contexto.evolucao_diaria.map(d => `${d.data}: ${d.entregas} entregas, ${d.taxa_prazo}% no prazo, R$ ${d.valor.toLocaleString('pt-BR')}`).join('\n')}
+
+=== TOP 10 CLIENTES ===
+${contexto.top_clientes.map((c, i) => `${i+1}. ${c.cliente}: ${c.entregas} entregas, ${c.taxa_prazo}% prazo, R$ ${c.valor.toLocaleString('pt-BR')}`).join('\n')}
+
+=== TOP 10 PROFISSIONAIS ===
+${contexto.top_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.entregas} entregas, ${p.taxa_prazo}% prazo, ${p.tempo_medio} min/entrega`).join('\n')}
+
+=== DISTRIBUIÇÃO POR DIA DA SEMANA ===
+${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} entregas, ${d.taxa_prazo}% no prazo`).join('\n')}
+
+=== SUA TAREFA ===
+${promptTipo}
+
+Responda em português brasileiro, de forma clara e objetiva.
+Use **negrito** para destacar pontos importantes.
+Organize a resposta em seções claras.
+Seja direto e dê insights acionáveis.`;
+
+    console.log('🤖 Chamando API Gemini...');
+    
+    // Chamar API do Gemini
+    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: promptCompleto }] }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 2048
+        }
+      })
+    });
+    
+    const geminiData = await geminiResponse.json();
+    
+    if (geminiData.error) {
+      console.error('❌ Erro Gemini:', geminiData.error);
+      return res.status(500).json({ error: 'Erro na API Gemini: ' + geminiData.error.message });
+    }
+    
+    const relatorio = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível gerar o relatório.';
+    
+    console.log('✅ Relatório IA gerado com sucesso');
+    
+    res.json({
+      success: true,
+      tipo_analise: tipo,
+      periodo: contexto.periodo,
+      metricas: contexto.metricas_gerais,
+      relatorio
+    });
+    
+  } catch (err) {
+    console.error('❌ Erro ao gerar relatório IA:', err);
+    res.status(500).json({ error: 'Erro ao gerar relatório: ' + err.message });
+  }
+});
+
 // Atualizar data_hora_alocado em massa (para registros existentes)
 app.post('/api/bi/entregas/atualizar-alocado', async (req, res) => {
   try {
