@@ -12736,7 +12736,9 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
     
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
+    // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
+    // Cada métrica filtra pelo ponto apropriado internamente
+    let whereClause = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
     
@@ -12775,20 +12777,20 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
         MIN(data_solicitado) as data_inicio_semana,
         MAX(data_solicitado) as data_fim_semana,
         TO_CHAR(MIN(data_solicitado), 'DD/MM') || ' - ' || TO_CHAR(MAX(data_solicitado), 'DD/MM') as periodo,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
-        SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
-        SUM(CASE WHEN dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_prof,
-        SUM(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 ELSE 0 END) as retornos,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_prof,
-        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo_prof,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0), 2) as ticket_medio,
         
-        -- TEMPO MÉDIO ENTREGA (mesma lógica do acompanhamento-periodico)
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2)
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) >= 2
@@ -12865,10 +12867,10 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
           END
         ), 1) as tempo_medio_coleta,
         
-        ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
-        COUNT(DISTINCT cod_prof) as total_entregadores,
-        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional,
-        ROUND(COALESCE(SUM(distancia), 0)::numeric, 1) as km_total
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_entrega_prof_minutos END), 1) as tempo_medio_prof,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as total_entregadores,
+        ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as media_ent_profissional,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0)::numeric, 1) as km_total
       FROM bi_entregas
       ${whereClause}
       GROUP BY EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
@@ -12956,7 +12958,8 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
     
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
+    // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
+    let whereClause = 'WHERE 1=1';
     const params = [];
     let paramIndex = 1;
     
@@ -12997,20 +13000,20 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
         MIN(data_solicitado) as data_inicio_semana,
         MAX(data_solicitado) as data_fim_semana,
         TO_CHAR(MIN(data_solicitado), 'DD/MM') || ' - ' || TO_CHAR(MAX(data_solicitado), 'DD/MM') as periodo,
-        COUNT(DISTINCT os) as total_os,
-        COUNT(*) as total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
-        SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
-        SUM(CASE WHEN dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
-        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
-        ROUND(SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_prof,
-        SUM(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 ELSE 0 END) as retornos,
-        COALESCE(SUM(valor), 0) as valor_total,
-        COALESCE(SUM(valor_prof), 0) as valor_prof,
-        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo_prof,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0), 2) as ticket_medio,
         
-        -- TEMPO MÉDIO ENTREGA (mesma lógica do acompanhamento-periodico)
+        -- TEMPO MÉDIO ENTREGA (Ponto >= 2)
         ROUND(AVG(
           CASE 
             WHEN COALESCE(ponto, 1) >= 2
@@ -13087,9 +13090,9 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
           END
         ), 1) as tempo_medio_coleta,
         
-        ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
-        COUNT(DISTINCT cod_prof) as total_entregadores,
-        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_entrega_prof_minutos END), 1) as tempo_medio_prof,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as total_entregadores,
+        ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as media_ent_profissional
       FROM bi_entregas
       ${whereClause}
       GROUP BY cod_cliente, nome_fantasia, EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
