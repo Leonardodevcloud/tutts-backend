@@ -8639,6 +8639,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           cod_prof: primeiraLinha.cod_prof,
           nome_prof: primeiraLinha.nome_prof,
           total_entregas: 0, dentro_prazo: 0, fora_prazo: 0,
+          dentro_prazo_prof: 0, fora_prazo_prof: 0,
           soma_tempo: 0, count_tempo: 0, 
           soma_tempo_alocacao: 0, count_tempo_alocacao: 0,
           soma_tempo_coleta: 0, count_tempo_coleta: 0,
@@ -8657,6 +8658,28 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
                oc.includes('cliente ausente') ||
                oc.includes('loja fechada') ||
                oc.includes('produto incorreto');
+      };
+      
+      // Função para parsear data/hora
+      const parseDateTimeProf = (valor) => {
+        if (!valor) return null;
+        if (valor instanceof Date) {
+          return {
+            dataStr: valor.toISOString().split('T')[0],
+            hora: valor.getHours(),
+            min: valor.getMinutes(),
+            seg: valor.getSeconds()
+          };
+        }
+        const s = String(valor);
+        const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
+        if (!match) return null;
+        return {
+          dataStr: match[1] + '-' + match[2] + '-' + match[3],
+          hora: parseInt(match[4]),
+          min: parseInt(match[5]),
+          seg: parseInt(match[6])
+        };
       };
       
       Object.keys(osDoProf).forEach(os => {
@@ -8688,6 +8711,41 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           }
         }
         
+        // Pegar data_hora_alocado do ponto 1 para cálculo do prazo prof
+        const alocadoStr = linhaPonto1?.data_hora_alocado;
+        const alocado = parseDateTimeProf(alocadoStr);
+        
+        // Função para calcular prazo prof de uma entrega
+        const calcularPrazoProfEntrega = (entrega) => {
+          const finalizadoStr = entrega.finalizado;
+          const finalizado = parseDateTimeProf(finalizadoStr);
+          
+          if (alocado && finalizado) {
+            const mesmaData = alocado.dataStr === finalizado.dataStr;
+            let inicioMinutos, fimMinutos;
+            fimMinutos = finalizado.hora * 60 + finalizado.min + finalizado.seg / 60;
+            inicioMinutos = !mesmaData ? 8 * 60 : alocado.hora * 60 + alocado.min + alocado.seg / 60;
+            const tempoEntProf = fimMinutos - inicioMinutos;
+            
+            if (tempoEntProf >= 0) {
+              const distanciaEntrega = parseFloat(entrega.distancia) || 0;
+              const codClienteEntrega = entrega.cod_cliente;
+              const centroCustoEntrega = entrega.centro_custo;
+              const prazoMinutos = encontrarPrazoProfissional(codClienteEntrega, centroCustoEntrega, distanciaEntrega);
+              
+              if (tempoEntProf <= prazoMinutos) {
+                p.dentro_prazo_prof++;
+              } else {
+                p.fora_prazo_prof++;
+              }
+            } else {
+              p.fora_prazo_prof++;
+            }
+          } else {
+            p.fora_prazo_prof++;
+          }
+        };
+        
         // Métricas das entregas (ponto >= 2)
         if (linhasEntrega.length > 0) {
           linhasEntrega.forEach(l => {
@@ -8702,6 +8760,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               p.soma_tempo += tempoEnt;
               p.count_tempo++;
             }
+            
+            // Prazo profissional
+            calcularPrazoProfEntrega(l);
           });
         } else if (linhas.length > 1) {
           linhas.slice(1).forEach(l => {
@@ -8715,6 +8776,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               p.soma_tempo += tempoEnt;
               p.count_tempo++;
             }
+            
+            // Prazo profissional
+            calcularPrazoProfEntrega(l);
           });
         } else {
           const l = linhas[0];
@@ -8728,6 +8792,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             p.soma_tempo += tempoEnt;
             p.count_tempo++;
           }
+          
+          // Prazo profissional
+          calcularPrazoProfEntrega(l);
         }
       });
     });
@@ -8748,6 +8815,7 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       return {
         cod_prof: p.cod_prof, nome_prof: p.nome_prof,
         total_entregas: p.total_entregas, dentro_prazo: p.dentro_prazo, fora_prazo: p.fora_prazo,
+        dentro_prazo_prof: p.dentro_prazo_prof, fora_prazo_prof: p.fora_prazo_prof,
         tempo_medio: tempoMedioProf,
         tempo_alocado: tempoAlocadoProf,
         tempo_coleta: tempoColetaProf,
