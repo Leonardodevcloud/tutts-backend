@@ -7337,6 +7337,83 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     mascaras.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
     
     // ============================================
+    // BUSCAR CONFIGURAÇÕES DE PRAZO PROFISSIONAL
+    // ============================================
+    let prazosProfCliente = [];
+    let prazoProfPadrao = [];
+    try {
+      const prazosProfQuery = await pool.query(`
+        SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+        FROM bi_prazos_prof_cliente pc
+        JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id
+      `);
+      prazosProfCliente = prazosProfQuery.rows;
+      
+      const prazoProfPadraoQuery = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+      prazoProfPadrao = prazoProfPadraoQuery.rows;
+      
+      console.log('📊 Prazos Prof carregados:', { 
+        especificos: prazosProfCliente.length, 
+        padrao: prazoProfPadrao.length,
+        faixasPadrao: prazoProfPadrao.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', ')
+      });
+    } catch (err) {
+      console.log('⚠️ Tabelas de prazo profissional não encontradas, usando fallback hardcoded');
+    }
+    
+    // Função para encontrar prazo profissional baseado no cliente/centro e distância
+    const encontrarPrazoProfissional = (codCliente, centroCusto, distancia) => {
+      // 1. Primeiro busca configuração específica por cliente
+      let faixas = prazosProfCliente.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+      
+      // 2. Se não achou, busca por centro de custo
+      if (faixas.length === 0 && centroCusto) {
+        faixas = prazosProfCliente.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
+      }
+      
+      // 3. Se tem configuração específica, usa ela
+      if (faixas.length > 0) {
+        for (const faixa of faixas) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+        // Se não encontrou faixa adequada nas específicas, continua para o padrão
+      }
+      
+      // 4. Usa prazo padrão profissional do banco
+      if (prazoProfPadrao.length > 0) {
+        for (const faixa of prazoProfPadrao) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+      }
+      
+      // 5. Fallback hardcoded (se nada configurado no banco)
+      if (distancia <= 10) return 60;
+      if (distancia <= 15) return 75;
+      if (distancia <= 20) return 90;
+      if (distancia <= 25) return 105;
+      if (distancia <= 30) return 135;
+      if (distancia <= 35) return 150;
+      if (distancia <= 40) return 165;
+      if (distancia <= 45) return 180;
+      if (distancia <= 50) return 195;
+      if (distancia <= 55) return 210;
+      if (distancia <= 60) return 225;
+      if (distancia <= 65) return 240;
+      if (distancia <= 70) return 255;
+      if (distancia <= 75) return 270;
+      if (distancia <= 80) return 285;
+      return 300;
+    };
+    
+    // ============================================
     // BUSCAR TODOS OS CLIENTES EXISTENTES NO SISTEMA
     // ============================================
     const todosClientesQuery = await pool.query(`
@@ -7857,26 +7934,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
           };
         };
         
-        // Função para encontrar prazo baseado na distância (mesma lógica das faixas)
-        const calcularPrazoPorDistancia = (dist) => {
-          if (dist <= 10) return 60;
-          if (dist <= 15) return 75;
-          if (dist <= 20) return 90;
-          if (dist <= 25) return 105;
-          if (dist <= 30) return 135;
-          if (dist <= 35) return 150;
-          if (dist <= 40) return 165;
-          if (dist <= 45) return 180;
-          if (dist <= 50) return 195;
-          if (dist <= 55) return 210;
-          if (dist <= 60) return 225;
-          if (dist <= 65) return 240;
-          if (dist <= 70) return 255;
-          if (dist <= 75) return 270;
-          if (dist <= 80) return 285;
-          return 300; // Acima de 80km
-        };
-        
         const alocadoStr = primeiroReg?.data_hora_alocado;
         const alocado = parseDateTime(alocadoStr);
         
@@ -7912,9 +7969,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               somaTempoEntregaProf += tempoEntProf;
               countTempoEntregaProf++;
               
-              // Prazo Prof: calcular baseado na DISTÂNCIA desta entrega
+              // Prazo Prof: calcular baseado no CLIENTE/CENTRO e DISTÂNCIA desta entrega
               const distanciaEntrega = parseFloat(entrega.distancia) || 0;
-              const prazoMinutos = calcularPrazoPorDistancia(distanciaEntrega);
+              const codClienteEntrega = entrega.cod_cliente;
+              const centroCustoEntrega = entrega.centro_custo;
+              const prazoMinutos = encontrarPrazoProfissional(codClienteEntrega, centroCustoEntrega, distanciaEntrega);
               
               if (tempoEntProf <= prazoMinutos) {
                 dentroPrazoProf++;
@@ -8179,26 +8238,6 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
         };
       };
       
-      // Função para encontrar prazo por distância
-      const calcularPrazoPorDistanciaCliente = (dist) => {
-        if (dist <= 10) return 60;
-        if (dist <= 15) return 75;
-        if (dist <= 20) return 90;
-        if (dist <= 25) return 105;
-        if (dist <= 30) return 135;
-        if (dist <= 35) return 150;
-        if (dist <= 40) return 165;
-        if (dist <= 45) return 180;
-        if (dist <= 50) return 195;
-        if (dist <= 55) return 210;
-        if (dist <= 60) return 225;
-        if (dist <= 65) return 240;
-        if (dist <= 70) return 255;
-        if (dist <= 75) return 270;
-        if (dist <= 80) return 285;
-        return 300;
-      };
-      
       Object.keys(osDoCliente).forEach(os => {
         const linhasOS = osDoCliente[os];
         c.os_set.add(os);
@@ -8285,7 +8324,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             
             if (tempoEntProf >= 0) {
               const distanciaEntrega = parseFloat(l.distancia) || 0;
-              const prazoMinutos = calcularPrazoPorDistanciaCliente(distanciaEntrega);
+              const codClienteEntrega = l.cod_cliente;
+              const centroCustoEntrega = l.centro_custo;
+              const prazoMinutos = encontrarPrazoProfissional(codClienteEntrega, centroCustoEntrega, distanciaEntrega);
               if (tempoEntProf <= prazoMinutos) {
                 c.dentro_prazo_prof++;
               } else {
@@ -8332,7 +8373,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
             const tempoEntProf = fimMinutos - inicioMinutos;
             if (tempoEntProf >= 0) {
               const distanciaEntrega = parseFloat(l.distancia) || 0;
-              const prazoMinutos = calcularPrazoPorDistanciaCliente(distanciaEntrega);
+              const codClienteEntrega = l.cod_cliente;
+              const centroCustoEntrega = l.centro_custo;
+              const prazoMinutos = encontrarPrazoProfissional(codClienteEntrega, centroCustoEntrega, distanciaEntrega);
               if (tempoEntProf <= prazoMinutos) {
                 ccData.dentro_prazo_prof++;
               } else {
