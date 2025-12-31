@@ -12933,9 +12933,13 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
         SUM(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 ELSE 0 END) as retornos,
         COALESCE(SUM(valor), 0) as valor_total,
         COALESCE(SUM(valor_prof), 0) as valor_prof,
-        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio,
+        ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
+        ROUND(AVG(tempo_alocacao_minutos), 1) as tempo_medio_alocacao,
+        ROUND(AVG(tempo_coleta_minutos), 1) as tempo_medio_coleta,
         ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
-        COUNT(DISTINCT cod_prof) as total_profissionais
+        COUNT(DISTINCT cod_prof) as total_entregadores,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
       FROM bi_entregas
       ${whereClause}
       GROUP BY cod_cliente, nome_fantasia, EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
@@ -12979,9 +12983,13 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
           retornos: parseInt(row.retornos) || 0,
           valor_total: parseFloat(row.valor_total) || 0,
           valor_prof: parseFloat(row.valor_prof) || 0,
-          tempo_medio: parseFloat(row.tempo_medio) || 0,
+          ticket_medio: parseFloat(row.ticket_medio) || 0,
+          tempo_medio_entrega: parseFloat(row.tempo_medio_entrega) || 0,
+          tempo_medio_alocacao: parseFloat(row.tempo_medio_alocacao) || 0,
+          tempo_medio_coleta: parseFloat(row.tempo_medio_coleta) || 0,
           tempo_medio_prof: parseFloat(row.tempo_medio_prof) || 0,
-          total_profissionais: parseInt(row.total_profissionais) || 0,
+          total_entregadores: parseInt(row.total_entregadores) || 0,
+          media_ent_profissional: parseFloat(row.media_ent_profissional) || 0,
           var_entregas: calcVariacao(parseInt(row.total_entregas), semanaAnterior ? parseInt(semanaAnterior.total_entregas) : null),
           var_valor: calcVariacao(parseFloat(row.valor_total), semanaAnterior ? parseFloat(semanaAnterior.valor_total) : null),
           var_prazo: semanaAnterior ? (parseFloat(row.taxa_prazo) - parseFloat(semanaAnterior.taxa_prazo)).toFixed(1) : null,
