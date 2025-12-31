@@ -924,6 +924,97 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_coords ON bi_entregas(latitude, longitude) WHERE latitude IS NOT NULL`).catch(() => {});
     console.log('✅ Colunas latitude/longitude verificadas');
 
+    // ============================================
+    // TABELAS DE RESUMO PRÉ-CALCULADAS (OTIMIZAÇÃO)
+    // ============================================
+    
+    // Resumo diário geral
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_resumo_diario (
+        id SERIAL PRIMARY KEY,
+        data DATE NOT NULL UNIQUE,
+        total_os INTEGER DEFAULT 0,
+        total_entregas INTEGER DEFAULT 0,
+        entregas_no_prazo INTEGER DEFAULT 0,
+        entregas_fora_prazo INTEGER DEFAULT 0,
+        taxa_prazo DECIMAL(5,2) DEFAULT 0,
+        total_retornos INTEGER DEFAULT 0,
+        valor_total DECIMAL(12,2) DEFAULT 0,
+        valor_prof DECIMAL(12,2) DEFAULT 0,
+        ticket_medio DECIMAL(10,2) DEFAULT 0,
+        tempo_medio_entrega DECIMAL(8,2) DEFAULT 0,
+        tempo_medio_alocacao DECIMAL(8,2) DEFAULT 0,
+        tempo_medio_coleta DECIMAL(8,2) DEFAULT 0,
+        total_profissionais INTEGER DEFAULT 0,
+        media_ent_profissional DECIMAL(8,2) DEFAULT 0,
+        km_total DECIMAL(12,2) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_resumo_diario verificada');
+    
+    // Resumo por cliente (por dia)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_resumo_cliente (
+        id SERIAL PRIMARY KEY,
+        data DATE NOT NULL,
+        cod_cliente INTEGER NOT NULL,
+        nome_fantasia VARCHAR(255),
+        total_os INTEGER DEFAULT 0,
+        total_entregas INTEGER DEFAULT 0,
+        entregas_no_prazo INTEGER DEFAULT 0,
+        entregas_fora_prazo INTEGER DEFAULT 0,
+        taxa_prazo DECIMAL(5,2) DEFAULT 0,
+        total_retornos INTEGER DEFAULT 0,
+        valor_total DECIMAL(12,2) DEFAULT 0,
+        valor_prof DECIMAL(12,2) DEFAULT 0,
+        ticket_medio DECIMAL(10,2) DEFAULT 0,
+        tempo_medio_entrega DECIMAL(8,2) DEFAULT 0,
+        total_profissionais INTEGER DEFAULT 0,
+        media_ent_profissional DECIMAL(8,2) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(data, cod_cliente)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_resumo_cliente_data ON bi_resumo_cliente(data)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_resumo_cliente_cod ON bi_resumo_cliente(cod_cliente)`).catch(() => {});
+    console.log('✅ Tabela bi_resumo_cliente verificada');
+    
+    // Resumo por profissional (por dia)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_resumo_profissional (
+        id SERIAL PRIMARY KEY,
+        data DATE NOT NULL,
+        cod_prof INTEGER NOT NULL,
+        nome_prof VARCHAR(255),
+        total_os INTEGER DEFAULT 0,
+        total_entregas INTEGER DEFAULT 0,
+        entregas_no_prazo INTEGER DEFAULT 0,
+        entregas_fora_prazo INTEGER DEFAULT 0,
+        taxa_prazo DECIMAL(5,2) DEFAULT 0,
+        valor_total DECIMAL(12,2) DEFAULT 0,
+        valor_prof DECIMAL(12,2) DEFAULT 0,
+        tempo_medio_entrega DECIMAL(8,2) DEFAULT 0,
+        km_total DECIMAL(12,2) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(data, cod_prof)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_resumo_prof_data ON bi_resumo_profissional(data)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_resumo_prof_cod ON bi_resumo_profissional(cod_prof)`).catch(() => {});
+    console.log('✅ Tabela bi_resumo_profissional verificada');
+    
+    // Resumo geral (métricas totais - atualizado a cada upload)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_resumo_geral (
+        id SERIAL PRIMARY KEY,
+        tipo VARCHAR(50) NOT NULL UNIQUE,
+        valor_json JSONB,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_resumo_geral verificada');
+
     // Índices da loja
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_estoque_status ON loja_estoque(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_produtos_status ON loja_produtos(status)`).catch(() => {});
@@ -1276,6 +1367,192 @@ async function createTables() {
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
+  }
+}
+
+// ============================================
+// FUNÇÃO PARA ATUALIZAR RESUMOS PRÉ-CALCULADOS
+// ============================================
+async function atualizarResumos(datasAfetadas = null) {
+  try {
+    console.log('📊 Iniciando atualização dos resumos pré-calculados...');
+    const inicio = Date.now();
+    
+    // Se não especificou datas, pegar todas as datas distintas
+    let datas = datasAfetadas;
+    if (!datas || datas.length === 0) {
+      const datasQuery = await pool.query(`
+        SELECT DISTINCT data_solicitado FROM bi_entregas 
+        WHERE data_solicitado IS NOT NULL 
+        ORDER BY data_solicitado
+      `);
+      datas = datasQuery.rows.map(r => r.data_solicitado);
+    }
+    
+    console.log(`📊 Atualizando resumos para ${datas.length} data(s)...`);
+    
+    // 1. RESUMO DIÁRIO
+    for (const data of datas) {
+      await pool.query(`
+        INSERT INTO bi_resumo_diario (
+          data, total_os, total_entregas, entregas_no_prazo, entregas_fora_prazo,
+          taxa_prazo, total_retornos, valor_total, valor_prof, ticket_medio,
+          tempo_medio_entrega, tempo_medio_alocacao, tempo_medio_coleta,
+          total_profissionais, media_ent_profissional, km_total, updated_at
+        )
+        SELECT 
+          data_solicitado,
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END),
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END),
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 2),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+            LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+            LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+            LOWER(ocorrencia) LIKE '%cliente ausente%'
+          ) THEN 1 ELSE 0 END),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0),
+          ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / 
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0), 2),
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 2),
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END), 2),
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_entrega_prof_minutos END), 2),
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END),
+          ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+                NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 2),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0),
+          NOW()
+        FROM bi_entregas
+        WHERE data_solicitado = $1
+        GROUP BY data_solicitado
+        ON CONFLICT (data) DO UPDATE SET
+          total_os = EXCLUDED.total_os,
+          total_entregas = EXCLUDED.total_entregas,
+          entregas_no_prazo = EXCLUDED.entregas_no_prazo,
+          entregas_fora_prazo = EXCLUDED.entregas_fora_prazo,
+          taxa_prazo = EXCLUDED.taxa_prazo,
+          total_retornos = EXCLUDED.total_retornos,
+          valor_total = EXCLUDED.valor_total,
+          valor_prof = EXCLUDED.valor_prof,
+          ticket_medio = EXCLUDED.ticket_medio,
+          tempo_medio_entrega = EXCLUDED.tempo_medio_entrega,
+          tempo_medio_alocacao = EXCLUDED.tempo_medio_alocacao,
+          tempo_medio_coleta = EXCLUDED.tempo_medio_coleta,
+          total_profissionais = EXCLUDED.total_profissionais,
+          media_ent_profissional = EXCLUDED.media_ent_profissional,
+          km_total = EXCLUDED.km_total,
+          updated_at = NOW()
+      `, [data]);
+    }
+    console.log('📊 Resumo diário atualizado');
+    
+    // 2. RESUMO POR CLIENTE
+    for (const data of datas) {
+      await pool.query(`
+        INSERT INTO bi_resumo_cliente (
+          data, cod_cliente, nome_fantasia, total_os, total_entregas,
+          entregas_no_prazo, entregas_fora_prazo, taxa_prazo, total_retornos,
+          valor_total, valor_prof, ticket_medio, tempo_medio_entrega,
+          total_profissionais, media_ent_profissional, updated_at
+        )
+        SELECT 
+          data_solicitado,
+          cod_cliente,
+          MAX(nome_fantasia),
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END),
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END),
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 2),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+            LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+            LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+            LOWER(ocorrencia) LIKE '%cliente ausente%'
+          ) THEN 1 ELSE 0 END),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0),
+          ROUND(COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0)::numeric / 
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0), 2),
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 2),
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END),
+          ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+                NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 2),
+          NOW()
+        FROM bi_entregas
+        WHERE data_solicitado = $1 AND cod_cliente IS NOT NULL
+        GROUP BY data_solicitado, cod_cliente
+        ON CONFLICT (data, cod_cliente) DO UPDATE SET
+          nome_fantasia = EXCLUDED.nome_fantasia,
+          total_os = EXCLUDED.total_os,
+          total_entregas = EXCLUDED.total_entregas,
+          entregas_no_prazo = EXCLUDED.entregas_no_prazo,
+          entregas_fora_prazo = EXCLUDED.entregas_fora_prazo,
+          taxa_prazo = EXCLUDED.taxa_prazo,
+          total_retornos = EXCLUDED.total_retornos,
+          valor_total = EXCLUDED.valor_total,
+          valor_prof = EXCLUDED.valor_prof,
+          ticket_medio = EXCLUDED.ticket_medio,
+          tempo_medio_entrega = EXCLUDED.tempo_medio_entrega,
+          total_profissionais = EXCLUDED.total_profissionais,
+          media_ent_profissional = EXCLUDED.media_ent_profissional,
+          updated_at = NOW()
+      `, [data]);
+    }
+    console.log('📊 Resumo por cliente atualizado');
+    
+    // 3. RESUMO POR PROFISSIONAL
+    for (const data of datas) {
+      await pool.query(`
+        INSERT INTO bi_resumo_profissional (
+          data, cod_prof, nome_prof, total_os, total_entregas,
+          entregas_no_prazo, entregas_fora_prazo, taxa_prazo,
+          valor_total, valor_prof, tempo_medio_entrega, km_total, updated_at
+        )
+        SELECT 
+          data_solicitado,
+          cod_prof,
+          MAX(nome_prof),
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END),
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END),
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END),
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 2),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0),
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 2),
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0),
+          NOW()
+        FROM bi_entregas
+        WHERE data_solicitado = $1 AND cod_prof IS NOT NULL
+        GROUP BY data_solicitado, cod_prof
+        ON CONFLICT (data, cod_prof) DO UPDATE SET
+          nome_prof = EXCLUDED.nome_prof,
+          total_os = EXCLUDED.total_os,
+          total_entregas = EXCLUDED.total_entregas,
+          entregas_no_prazo = EXCLUDED.entregas_no_prazo,
+          entregas_fora_prazo = EXCLUDED.entregas_fora_prazo,
+          taxa_prazo = EXCLUDED.taxa_prazo,
+          valor_total = EXCLUDED.valor_total,
+          valor_prof = EXCLUDED.valor_prof,
+          tempo_medio_entrega = EXCLUDED.tempo_medio_entrega,
+          km_total = EXCLUDED.km_total,
+          updated_at = NOW()
+      `, [data]);
+    }
+    console.log('📊 Resumo por profissional atualizado');
+    
+    const tempo = ((Date.now() - inicio) / 1000).toFixed(2);
+    console.log(`✅ Resumos atualizados em ${tempo}s`);
+    
+    return { success: true, datas: datas.length, tempo };
+  } catch (error) {
+    console.error('❌ Erro ao atualizar resumos:', error);
+    return { success: false, error: error.message };
   }
 }
 
@@ -6893,6 +7170,20 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     console.log(`✅ Upload concluído: ${inseridos} inseridos, ${linhasIgnoradas} ignorados (OS duplicada), ${erros} erros`);
     console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
     
+    // ============================================
+    // PASSO 7: Atualizar resumos pré-calculados
+    // ============================================
+    // Extrair datas únicas das entregas inseridas para atualizar apenas essas datas
+    const datasAfetadas = [...new Set(entregasNovas.map(e => e.data_solicitado).filter(d => d))];
+    console.log(`📊 Atualizando resumos para ${datasAfetadas.length} data(s)...`);
+    
+    // Atualizar resumos em background (não bloqueia a resposta)
+    atualizarResumos(datasAfetadas).then(resultado => {
+      console.log('📊 Resumos atualizados:', resultado);
+    }).catch(err => {
+      console.error('❌ Erro ao atualizar resumos:', err);
+    });
+    
     res.json({
       success: true,
       inseridos,
@@ -7028,6 +7319,100 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
     res.status(500).json({ error: 'Erro ao recalcular' });
+  }
+});
+
+// Atualizar resumos pré-calculados (forçar recálculo)
+app.post('/api/bi/atualizar-resumos', async (req, res) => {
+  try {
+    console.log('📊 Forçando atualização de resumos...');
+    const resultado = await atualizarResumos();
+    res.json(resultado);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar resumos:', err);
+    res.status(500).json({ error: 'Erro ao atualizar resumos: ' + err.message });
+  }
+});
+
+// Obter métricas do dashboard usando resumos pré-calculados (OTIMIZADO)
+app.get('/api/bi/dashboard-rapido', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
+    
+    // Usar resumo diário para métricas gerais
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    // Se tem filtro de cliente, usar bi_resumo_cliente
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        // Buscar métricas por cliente
+        const clienteQuery = await pool.query(`
+          SELECT 
+            SUM(total_os) as total_os,
+            SUM(total_entregas) as total_entregas,
+            SUM(entregas_no_prazo) as entregas_no_prazo,
+            SUM(entregas_fora_prazo) as entregas_fora_prazo,
+            ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 2) as taxa_prazo,
+            SUM(total_retornos) as total_retornos,
+            SUM(valor_total) as valor_total,
+            SUM(valor_prof) as valor_prof,
+            ROUND(SUM(valor_total)::numeric / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
+            ROUND(AVG(tempo_medio_entrega), 2) as tempo_medio_entrega,
+            SUM(total_profissionais) as total_profissionais
+          FROM bi_resumo_cliente
+          ${whereClause} AND cod_cliente = ANY($${paramIndex}::int[])
+        `, [...params, clientes]);
+        
+        return res.json({
+          metricas: clienteQuery.rows[0] || {},
+          fonte: 'resumo_cliente'
+        });
+      }
+    }
+    
+    // Sem filtro de cliente, usar resumo diário
+    const diarioQuery = await pool.query(`
+      SELECT 
+        SUM(total_os) as total_os,
+        SUM(total_entregas) as total_entregas,
+        SUM(entregas_no_prazo) as entregas_no_prazo,
+        SUM(entregas_fora_prazo) as entregas_fora_prazo,
+        ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 2) as taxa_prazo,
+        SUM(total_retornos) as total_retornos,
+        SUM(valor_total) as valor_total,
+        SUM(valor_prof) as valor_prof,
+        ROUND(SUM(valor_total)::numeric / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
+        ROUND(AVG(tempo_medio_entrega), 2) as tempo_medio_entrega,
+        ROUND(AVG(tempo_medio_alocacao), 2) as tempo_medio_alocacao,
+        ROUND(AVG(tempo_medio_coleta), 2) as tempo_medio_coleta,
+        SUM(total_profissionais) as total_profissionais,
+        ROUND(AVG(media_ent_profissional), 2) as media_ent_profissional,
+        SUM(km_total) as km_total
+      FROM bi_resumo_diario
+      ${whereClause}
+    `, params);
+    
+    res.json({
+      metricas: diarioQuery.rows[0] || {},
+      fonte: 'resumo_diario'
+    });
+  } catch (err) {
+    console.error('❌ Erro dashboard rápido:', err);
+    res.status(500).json({ error: 'Erro ao carregar dashboard' });
   }
 });
 
