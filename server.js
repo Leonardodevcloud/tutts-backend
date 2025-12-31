@@ -12730,6 +12730,146 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   }
 });
 
+// GET - Comparativo Semanal para aba Acompanhamento
+// Agrupa dados por semana e calcula variações entre semanas
+app.get('/api/bi/comparativo-semanal', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
+    
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    
+    // Agrupa por semana do ano
+    const semanalQuery = await pool.query(`
+      SELECT 
+        EXTRACT(ISOYEAR FROM data_solicitado) as ano,
+        EXTRACT(WEEK FROM data_solicitado) as semana,
+        MIN(data_solicitado) as data_inicio_semana,
+        MAX(data_solicitado) as data_fim_semana,
+        TO_CHAR(MIN(data_solicitado), 'DD/MM') || ' - ' || TO_CHAR(MAX(data_solicitado), 'DD/MM') as periodo,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
+        SUM(CASE WHEN dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_prof,
+        SUM(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_prof,
+        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio,
+        ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
+        COUNT(DISTINCT cod_prof) as total_profissionais,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional,
+        ROUND(COALESCE(SUM(distancia), 0)::numeric, 1) as km_total
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
+      ORDER BY ano DESC, semana DESC
+    `, params);
+    
+    // Processar dados para calcular variações
+    const semanas = semanalQuery.rows.map((row, idx, arr) => {
+      const semanaAnterior = arr[idx + 1]; // próximo no array é a semana anterior (ordenado DESC)
+      
+      // Calcular variações percentuais
+      const calcVariacao = (atual, anterior) => {
+        if (!anterior || anterior === 0) return null;
+        return ((atual - anterior) / anterior * 100).toFixed(1);
+      };
+      
+      return {
+        ano: parseInt(row.ano),
+        semana: parseInt(row.semana),
+        periodo: row.periodo,
+        data_inicio_semana: row.data_inicio_semana,
+        data_fim_semana: row.data_fim_semana,
+        total_os: parseInt(row.total_os) || 0,
+        total_entregas: parseInt(row.total_entregas) || 0,
+        dentro_prazo: parseInt(row.dentro_prazo) || 0,
+        fora_prazo: parseInt(row.fora_prazo) || 0,
+        dentro_prazo_prof: parseInt(row.dentro_prazo_prof) || 0,
+        fora_prazo_prof: parseInt(row.fora_prazo_prof) || 0,
+        taxa_prazo: parseFloat(row.taxa_prazo) || 0,
+        taxa_prazo_prof: parseFloat(row.taxa_prazo_prof) || 0,
+        retornos: parseInt(row.retornos) || 0,
+        valor_total: parseFloat(row.valor_total) || 0,
+        valor_prof: parseFloat(row.valor_prof) || 0,
+        tempo_medio: parseFloat(row.tempo_medio) || 0,
+        tempo_medio_prof: parseFloat(row.tempo_medio_prof) || 0,
+        total_profissionais: parseInt(row.total_profissionais) || 0,
+        media_ent_profissional: parseFloat(row.media_ent_profissional) || 0,
+        km_total: parseFloat(row.km_total) || 0,
+        // Variações em relação à semana anterior
+        var_entregas: calcVariacao(parseInt(row.total_entregas), semanaAnterior ? parseInt(semanaAnterior.total_entregas) : null),
+        var_os: calcVariacao(parseInt(row.total_os), semanaAnterior ? parseInt(semanaAnterior.total_os) : null),
+        var_valor: calcVariacao(parseFloat(row.valor_total), semanaAnterior ? parseFloat(semanaAnterior.valor_total) : null),
+        var_prazo: semanaAnterior ? (parseFloat(row.taxa_prazo) - parseFloat(semanaAnterior.taxa_prazo)).toFixed(1) : null,
+        var_prazo_prof: semanaAnterior ? (parseFloat(row.taxa_prazo_prof) - parseFloat(semanaAnterior.taxa_prazo_prof)).toFixed(1) : null,
+        var_retornos: calcVariacao(parseInt(row.retornos), semanaAnterior ? parseInt(semanaAnterior.retornos) : null),
+        // Dados da semana anterior para comparativo lado a lado
+        anterior: semanaAnterior ? {
+          total_entregas: parseInt(semanaAnterior.total_entregas) || 0,
+          total_os: parseInt(semanaAnterior.total_os) || 0,
+          taxa_prazo: parseFloat(semanaAnterior.taxa_prazo) || 0,
+          taxa_prazo_prof: parseFloat(semanaAnterior.taxa_prazo_prof) || 0,
+          valor_total: parseFloat(semanaAnterior.valor_total) || 0,
+          retornos: parseInt(semanaAnterior.retornos) || 0
+        } : null
+      };
+    });
+    
+    // Resumo geral (todas as semanas)
+    const totalSemanas = semanas.length;
+    const mediaEntregasSemana = totalSemanas > 0 ? Math.round(semanas.reduce((a, s) => a + s.total_entregas, 0) / totalSemanas) : 0;
+    const melhorSemana = semanas.reduce((best, s) => (!best || s.total_entregas > best.total_entregas) ? s : best, null);
+    const piorSemana = semanas.reduce((worst, s) => (!worst || s.total_entregas < worst.total_entregas) ? s : worst, null);
+    
+    res.json({
+      semanas: semanas,
+      resumo: {
+        total_semanas: totalSemanas,
+        media_entregas_semana: mediaEntregasSemana,
+        melhor_semana: melhorSemana ? { periodo: melhorSemana.periodo, entregas: melhorSemana.total_entregas } : null,
+        pior_semana: piorSemana ? { periodo: piorSemana.periodo, entregas: piorSemana.total_entregas } : null
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erro comparativo semanal:', error);
+    res.status(500).json({ error: 'Erro ao gerar comparativo semanal', details: error.message });
+  }
+});
+
 // GET - Dados agrupados por cliente para tabela de acompanhamento
 // IMPORTANTE: Agrupa por NOME_FANTASIA (como o Power BI) e não por cod_cliente
 // IMPORTANTE: Calcula média de tempo POR OS (não por linha/ponto)
