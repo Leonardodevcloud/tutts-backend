@@ -9255,7 +9255,19 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       LIMIT 2000
     `, params);
     
-    res.json(result.rows);
+    // Buscar configurações de prazo profissional para o frontend usar
+    let prazoProfConfig = [];
+    try {
+      const prazoProfResult = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+      prazoProfConfig = prazoProfResult.rows;
+    } catch (e) {
+      console.log('⚠️ Tabela bi_prazo_prof_padrao não encontrada');
+    }
+    
+    res.json({
+      entregas: result.rows,
+      prazoProfConfig: prazoProfConfig
+    });
   } catch (err) {
     console.error('❌ Erro ao listar entregas:', err);
     res.status(500).json({ error: 'Erro ao listar entregas' });
