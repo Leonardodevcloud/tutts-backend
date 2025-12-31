@@ -780,6 +780,46 @@ async function createTables() {
     `);
     console.log('✅ Tabela bi_prazo_padrao verificada');
 
+    // ========== TABELAS PARA PRAZO PROFISSIONAL ==========
+    
+    // Tabela de prazos profissionais por cliente/centro
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_prazos_prof_cliente (
+        id SERIAL PRIMARY KEY,
+        tipo VARCHAR(20) NOT NULL, -- 'cliente' ou 'centro_custo'
+        codigo VARCHAR(100) NOT NULL,
+        nome VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(tipo, codigo)
+      )
+    `);
+    console.log('✅ Tabela bi_prazos_prof_cliente verificada');
+
+    // Faixas de km para prazo profissional por cliente/centro
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_faixas_prazo_prof (
+        id SERIAL PRIMARY KEY,
+        prazo_prof_cliente_id INTEGER REFERENCES bi_prazos_prof_cliente(id) ON DELETE CASCADE,
+        km_min DECIMAL(10,2) NOT NULL DEFAULT 0,
+        km_max DECIMAL(10,2),
+        prazo_minutos INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_faixas_prazo_prof verificada');
+
+    // Prazo profissional padrão
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_prazo_prof_padrao (
+        id SERIAL PRIMARY KEY,
+        km_min DECIMAL(10,2) NOT NULL DEFAULT 0,
+        km_max DECIMAL(10,2),
+        prazo_minutos INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_prazo_prof_padrao verificada');
+
     // Tabela de entregas (dados importados do Excel)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS bi_entregas (
@@ -822,6 +862,9 @@ async function createTables() {
         dentro_prazo BOOLEAN,
         prazo_minutos INTEGER,
         tempo_execucao_minutos INTEGER,
+        dentro_prazo_prof BOOLEAN,
+        prazo_prof_minutos INTEGER,
+        tempo_execucao_prof_minutos INTEGER,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -829,6 +872,11 @@ async function createTables() {
 
     // Migration: Adicionar coluna ponto se não existir
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS ponto INTEGER DEFAULT 1`).catch(() => {});
+    
+    // Migration: Adicionar colunas de prazo profissional
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS dentro_prazo_prof BOOLEAN`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS prazo_prof_minutos INTEGER`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS tempo_execucao_prof_minutos INTEGER`).catch(() => {});
     
     // Migration: Aumentar tamanho de campos VARCHAR que podem ser pequenos demais
     await pool.query(`ALTER TABLE bi_entregas ALTER COLUMN estado TYPE VARCHAR(50)`).catch(() => {});
@@ -6007,6 +6055,209 @@ app.delete('/api/bi/prazos/:id', async (req, res) => {
   }
 });
 
+// ========== ROTAS DE PRAZO PROFISSIONAL ==========
+
+// Listar prazos profissionais
+app.get('/api/bi/prazos-prof', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT pc.id, pc.tipo, pc.codigo, pc.nome,
+        json_agg(
+          json_build_object('id', fp.id, 'km_min', fp.km_min, 'km_max', fp.km_max, 'prazo_minutos', fp.prazo_minutos)
+        ) as faixas
+      FROM bi_prazos_prof_cliente pc
+      LEFT JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id
+      GROUP BY pc.id
+      ORDER BY pc.tipo, pc.nome
+    `);
+    res.json({ success: true, prazos: result.rows });
+  } catch (err) {
+    console.error('❌ Erro ao listar prazos profissionais:', err);
+    res.status(500).json({ error: 'Erro ao listar prazos profissionais' });
+  }
+});
+
+// Buscar prazo profissional padrão
+app.get('/api/bi/prazo-prof-padrao', async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar prazo prof padrão:', err);
+    res.status(500).json({ error: 'Erro ao buscar prazo prof padrão' });
+  }
+});
+
+// Salvar prazo profissional padrão
+app.post('/api/bi/prazo-prof-padrao', async (req, res) => {
+  try {
+    const { faixas } = req.body;
+    
+    // Limpar faixas anteriores
+    await pool.query(`DELETE FROM bi_prazo_prof_padrao`);
+    
+    // Inserir novas faixas
+    for (const faixa of faixas) {
+      await pool.query(
+        `INSERT INTO bi_prazo_prof_padrao (km_min, km_max, prazo_minutos) VALUES ($1, $2, $3)`,
+        [faixa.km_min, faixa.km_max, faixa.prazo_minutos]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao salvar prazo prof padrão:', err);
+    res.status(500).json({ error: 'Erro ao salvar prazo prof padrão' });
+  }
+});
+
+// Criar/Atualizar configuração de prazo profissional para cliente/centro
+app.post('/api/bi/prazos-prof', async (req, res) => {
+  try {
+    const { tipo, codigo, nome, faixas } = req.body;
+    
+    // Inserir ou atualizar cliente
+    const result = await pool.query(`
+      INSERT INTO bi_prazos_prof_cliente (tipo, codigo, nome)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (tipo, codigo) DO UPDATE SET nome = $3
+      RETURNING id
+    `, [tipo, codigo, nome]);
+    
+    const clienteId = result.rows[0].id;
+    
+    // Limpar faixas anteriores
+    await pool.query(`DELETE FROM bi_faixas_prazo_prof WHERE prazo_prof_cliente_id = $1`, [clienteId]);
+    
+    // Inserir novas faixas
+    for (const faixa of faixas) {
+      await pool.query(
+        `INSERT INTO bi_faixas_prazo_prof (prazo_prof_cliente_id, km_min, km_max, prazo_minutos) VALUES ($1, $2, $3, $4)`,
+        [clienteId, faixa.km_min, faixa.km_max, faixa.prazo_minutos]
+      );
+    }
+    
+    res.json({ success: true, id: clienteId });
+  } catch (err) {
+    console.error('❌ Erro ao salvar prazo profissional:', err);
+    res.status(500).json({ error: 'Erro ao salvar prazo profissional' });
+  }
+});
+
+// Remover configuração de prazo profissional
+app.delete('/api/bi/prazos-prof/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM bi_prazos_prof_cliente WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover prazo profissional:', err);
+    res.status(500).json({ error: 'Erro ao remover prazo profissional' });
+  }
+});
+
+// Recalcular prazos profissionais de todas as entregas
+app.post('/api/bi/entregas/recalcular-prazo-prof', async (req, res) => {
+  try {
+    // Buscar configurações de prazo profissional
+    const prazosCliente = await pool.query(`
+      SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+      FROM bi_prazos_prof_cliente pc
+      JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id
+    `);
+    
+    const prazoPadrao = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+    
+    console.log(`🔄 Recalculando Prazo Prof - Prazos cliente: ${prazosCliente.rows.length}, Prazo padrão: ${prazoPadrao.rows.length} faixas`);
+    
+    // Buscar todas as entregas com data_hora_alocado
+    const entregas = await pool.query(`
+      SELECT id, cod_cliente, centro_custo, distancia, data_hora_alocado, finalizado 
+      FROM bi_entregas 
+      WHERE data_hora_alocado IS NOT NULL
+    `);
+    console.log(`🔄 Total de entregas com alocação: ${entregas.rows.length}`);
+    
+    // Função para encontrar prazo profissional
+    const encontrarPrazoProf = (codCliente, centroCusto, distancia) => {
+      // Primeiro busca configuração específica
+      let faixas = prazosCliente.rows.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+      if (faixas.length === 0) {
+        faixas = prazosCliente.rows.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
+      }
+      
+      // Se tem configuração específica, usa ela
+      if (faixas.length > 0) {
+        for (const faixa of faixas) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+      }
+      
+      // Usa prazo padrão profissional
+      if (prazoPadrao.rows.length > 0) {
+        for (const faixa of prazoPadrao.rows) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+      }
+      
+      // Fallback: 60 minutos para qualquer distância
+      return 60;
+    };
+    
+    // Calcular tempo de execução profissional (alocado -> finalizado)
+    const calcularTempoExecucaoProf = (dataHoraAlocado, finalizado) => {
+      if (!dataHoraAlocado || !finalizado) return null;
+      const inicio = new Date(dataHoraAlocado);
+      const fim = new Date(finalizado);
+      if (isNaN(inicio.getTime()) || isNaN(fim.getTime())) return null;
+      const diffMs = fim.getTime() - inicio.getTime();
+      if (diffMs < 0) return null;
+      return Math.round(diffMs / 60000); // ms para minutos
+    };
+    
+    let atualizados = 0;
+    let dentroPrazoCount = 0;
+    let foraPrazoCount = 0;
+    let semPrazoCount = 0;
+    
+    for (const e of entregas.rows) {
+      const distancia = parseFloat(e.distancia) || 0;
+      const prazoMinutos = encontrarPrazoProf(e.cod_cliente, e.centro_custo, distancia);
+      const tempoExecucao = calcularTempoExecucaoProf(e.data_hora_alocado, e.finalizado);
+      const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
+      
+      if (dentroPrazo === true) dentroPrazoCount++;
+      else if (dentroPrazo === false) foraPrazoCount++;
+      else semPrazoCount++;
+      
+      // Log para debug (primeiras 5)
+      if (atualizados < 5) {
+        console.log(`🔄 ID ${e.id}: dist=${distancia}km, alocado=${e.data_hora_alocado}, finalizado=${e.finalizado}, prazo=${prazoMinutos}min, tempo=${tempoExecucao}min, dentro=${dentroPrazo}`);
+      }
+      
+      await pool.query(`
+        UPDATE bi_entregas SET dentro_prazo_prof = $1, prazo_prof_minutos = $2, tempo_execucao_prof_minutos = $3 WHERE id = $4
+      `, [dentroPrazo, prazoMinutos, tempoExecucao, e.id]);
+      atualizados++;
+    }
+    
+    console.log(`✅ Prazo Prof Recalculado: ${atualizados} entregas`);
+    console.log(`   ✅ Dentro: ${dentroPrazoCount} | ❌ Fora: ${foraPrazoCount} | ⚠️ Sem dados: ${semPrazoCount}`);
+    res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount, semDados: semPrazoCount });
+  } catch (err) {
+    console.error('❌ Erro ao recalcular prazo prof:', err);
+    res.status(500).json({ error: 'Erro ao recalcular prazo profissional' });
+  }
+});
+
 // DIAGNÓSTICO - verificar dados do BI
 // Endpoint para inicializar prazos com valores do DAX
 app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
@@ -6367,23 +6618,66 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       return null;
     };
     
-    // Função para calcular T. Entrega Prof a partir de "Execução - Espera" do Excel
-    const calcularTempoEntregaProf = (execucaoEspera) => {
-      if (execucaoEspera === null || execucaoEspera === undefined || execucaoEspera === '') {
-        return null;
+    // Função para calcular T. Entrega Prof a partir de Data/Hora Alocado até Finalizado
+    const calcularTempoEntregaProf = (dataHoraAlocado, finalizado) => {
+      if (!dataHoraAlocado || !finalizado) return null;
+      const inicio = parseDataHora(dataHoraAlocado);
+      const fim = parseDataHora(finalizado);
+      if (!inicio || !fim) return null;
+      const diffMs = fim.getTime() - inicio.getTime();
+      if (diffMs < 0) return null;
+      return Math.round(diffMs / 60000); // ms para minutos
+    };
+    
+    // Buscar configurações de prazo profissional
+    let prazosProfCliente = [];
+    let prazoProfPadrao = [];
+    try {
+      const prazosProf = await pool.query(`
+        SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
+        FROM bi_prazos_prof_cliente pc
+        JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id
+      `);
+      prazosProfCliente = prazosProf.rows;
+      
+      const prazoProfPadraoResult = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+      prazoProfPadrao = prazoProfPadraoResult.rows;
+    } catch (err) {
+      console.log('⚠️ Tabelas de prazo profissional não encontradas, usando fallback');
+    }
+    
+    // Função para encontrar prazo profissional
+    const encontrarPrazoProf = (codCliente, centroCusto, distancia) => {
+      // Primeiro busca configuração específica
+      let faixas = prazosProfCliente.filter(p => p.tipo === 'cliente' && p.codigo === String(codCliente));
+      if (faixas.length === 0) {
+        faixas = prazosProfCliente.filter(p => p.tipo === 'centro_custo' && p.codigo === centroCusto);
       }
-      // Se for número do Excel (fração do dia)
-      if (typeof execucaoEspera === 'number') {
-        return Math.round(execucaoEspera * 24 * 60);
-      }
-      // Se for string no formato HH:MM:SS ou HH:MM
-      if (typeof execucaoEspera === 'string' && execucaoEspera.includes(':')) {
-        const partes = execucaoEspera.split(':');
-        if (partes.length >= 2) {
-          return (parseInt(partes[0]) || 0) * 60 + (parseInt(partes[1]) || 0);
+      
+      // Se tem configuração específica, usa ela
+      if (faixas.length > 0) {
+        for (const faixa of faixas) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
         }
       }
-      return null;
+      
+      // Usa prazo padrão profissional
+      if (prazoProfPadrao.length > 0) {
+        for (const faixa of prazoProfPadrao) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : Infinity;
+          if (distancia >= kmMin && distancia < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+      }
+      
+      // Fallback: 60 minutos para qualquer distância
+      return 60;
     };
     
     const parseData = (valor) => {
@@ -6475,9 +6769,10 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
           const tempoExecucao = calcularTempoExecucao(e.execucao_comp, e.data_hora, e.finalizado);
           const dentroPrazo = (prazoMinutos !== null && tempoExecucao !== null) ? tempoExecucao <= prazoMinutos : null;
           
-          // Calcular T. Entrega Prof a partir de "Execução - Espera"
-          const tempoEntregaProf = calcularTempoEntregaProf(e.execucao_espera);
-          const dentroPrazoProf = (prazoMinutos !== null && tempoEntregaProf !== null) ? tempoEntregaProf <= prazoMinutos : null;
+          // Calcular Prazo Profissional: Data/Hora Alocado → Finalizado
+          const prazoMinutosProf = encontrarPrazoProf(e.cod_cliente, e.centro_custo, distancia);
+          const tempoEntregaProf = calcularTempoEntregaProf(e.data_hora_alocado, e.finalizado);
+          const dentroPrazoProf = (prazoMinutosProf !== null && tempoEntregaProf !== null) ? tempoEntregaProf <= prazoMinutosProf : null;
           
           if (dentroPrazo === true) dentroPrazoCount++;
           if (dentroPrazo === false) foraPrazoCount++;
@@ -6845,6 +7140,13 @@ app.get('/api/bi/dashboard', async (req, res) => {
     } else if (status_prazo === 'fora') {
       where += ` AND dentro_prazo = false`;
     }
+    // Filtro de prazo profissional
+    const status_prazo_prof = req.query.status_prazo_prof;
+    if (status_prazo_prof === 'dentro') {
+      where += ` AND dentro_prazo_prof = true`;
+    } else if (status_prazo_prof === 'fora') {
+      where += ` AND dentro_prazo_prof = false`;
+    }
     if (cidade) {
       where += ` AND cidade = $${paramIndex++}`;
       params.push(cidade);
@@ -6951,7 +7253,7 @@ app.get('/api/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
-    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
+    let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_prazo_prof, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
     // Suporte a múltiplos clientes e centros de custo
     let cod_cliente = req.query.cod_cliente;
     let centro_custo = req.query.centro_custo;
@@ -7004,6 +7306,9 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
     if (categoria) { where += ` AND categoria ILIKE $${paramIndex++}`; params.push(`%${categoria}%`); }
     if (status_prazo === 'dentro') { where += ` AND dentro_prazo = true`; }
     else if (status_prazo === 'fora') { where += ` AND dentro_prazo = false`; }
+    // Filtro de prazo profissional
+    if (status_prazo_prof === 'dentro') { where += ` AND dentro_prazo_prof = true`; }
+    else if (status_prazo_prof === 'fora') { where += ` AND dentro_prazo_prof = false`; }
     if (cidade) { where += ` AND cidade ILIKE $${paramIndex++}`; params.push(`%${cidade}%`); }
     // Filtro de retorno - usar mesma lógica da função isRetorno
     if (status_retorno === 'com_retorno') {
