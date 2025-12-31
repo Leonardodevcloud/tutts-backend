@@ -9220,6 +9220,97 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       retornoFilter = ` AND os NOT IN (SELECT DISTINCT os FROM bi_entregas WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%')`;
     }
     
+    // Buscar configurações de prazo profissional
+    let prazoProfConfig = [];
+    try {
+      const prazoProfResult = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
+      prazoProfConfig = prazoProfResult.rows;
+      console.log('📊 Prazo Prof Config para entregas-lista:', prazoProfConfig.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', '));
+    } catch (e) {
+      console.log('⚠️ Tabela bi_prazo_prof_padrao não encontrada');
+    }
+    
+    // Função para encontrar prazo prof baseado na distância
+    const encontrarPrazoProfPorKm = (distancia) => {
+      const dist = parseFloat(distancia) || 0;
+      
+      // Usar configurações do banco
+      if (prazoProfConfig.length > 0) {
+        for (const faixa of prazoProfConfig) {
+          const kmMin = parseFloat(faixa.km_min) || 0;
+          const kmMax = faixa.km_max ? parseFloat(faixa.km_max) : 999999;
+          if (dist >= kmMin && dist < kmMax) {
+            return parseInt(faixa.prazo_minutos);
+          }
+        }
+        // Se não encontrou faixa, pegar o último valor
+        return parseInt(prazoProfConfig[prazoProfConfig.length - 1].prazo_minutos) || 300;
+      }
+      
+      // Fallback hardcoded
+      if (dist <= 10) return 60;
+      if (dist <= 15) return 75;
+      if (dist <= 20) return 90;
+      if (dist <= 25) return 105;
+      if (dist <= 30) return 135;
+      if (dist <= 35) return 150;
+      if (dist <= 40) return 165;
+      if (dist <= 45) return 180;
+      if (dist <= 50) return 195;
+      if (dist <= 55) return 210;
+      if (dist <= 60) return 225;
+      if (dist <= 65) return 240;
+      if (dist <= 70) return 255;
+      if (dist <= 75) return 270;
+      if (dist <= 80) return 285;
+      return 300;
+    };
+    
+    // Função para parsear data/hora
+    const parseDateTime = (valor) => {
+      if (!valor) return null;
+      if (valor instanceof Date) {
+        return {
+          dataStr: valor.toISOString().split('T')[0],
+          hora: valor.getHours(),
+          min: valor.getMinutes(),
+          seg: valor.getSeconds()
+        };
+      }
+      const s = String(valor);
+      const match = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
+      if (!match) return null;
+      return {
+        dataStr: match[1] + '-' + match[2] + '-' + match[3],
+        hora: parseInt(match[4]),
+        min: parseInt(match[5]),
+        seg: parseInt(match[6])
+      };
+    };
+    
+    // Função para calcular tempo em minutos (Alocado → Finalizado)
+    const calcularTempoProf = (dataHoraAlocado, finalizado) => {
+      const alocado = parseDateTime(dataHoraAlocado);
+      const fim = parseDateTime(finalizado);
+      
+      if (!alocado || !fim) return null;
+      
+      const mesmaData = alocado.dataStr === fim.dataStr;
+      let inicioMinutos, fimMinutos;
+      
+      fimMinutos = fim.hora * 60 + fim.min + fim.seg / 60;
+      
+      if (!mesmaData) {
+        // Dias diferentes - começa às 8h
+        inicioMinutos = 8 * 60;
+      } else {
+        inicioMinutos = alocado.hora * 60 + alocado.min + alocado.seg / 60;
+      }
+      
+      const tempoMin = fimMinutos - inicioMinutos;
+      return tempoMin >= 0 ? tempoMin : null;
+    };
+    
     const result = await pool.query(`
       SELECT 
         os,
@@ -9255,19 +9346,26 @@ app.get('/api/bi/entregas-lista', async (req, res) => {
       LIMIT 2000
     `, params);
     
-    // Buscar configurações de prazo profissional para o frontend usar
-    let prazoProfConfig = [];
-    try {
-      const prazoProfResult = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
-      prazoProfConfig = prazoProfResult.rows;
-    } catch (e) {
-      console.log('⚠️ Tabela bi_prazo_prof_padrao não encontrada');
-    }
-    
-    res.json({
-      entregas: result.rows,
-      prazoProfConfig: prazoProfConfig
+    // Processar entregas para adicionar campos de prazo prof calculados
+    const entregas = result.rows.map(row => {
+      const distancia = parseFloat(row.distancia) || 0;
+      const prazoProfMinutos = encontrarPrazoProfPorKm(distancia);
+      const tempoEntregaProf = calcularTempoProf(row.data_hora_alocado, row.finalizado);
+      
+      let dentroPrazoProf = null;
+      if (tempoEntregaProf !== null && prazoProfMinutos > 0) {
+        dentroPrazoProf = tempoEntregaProf <= prazoProfMinutos;
+      }
+      
+      return {
+        ...row,
+        prazo_prof_minutos: prazoProfMinutos,
+        tempo_entrega_prof: tempoEntregaProf,
+        dentro_prazo_prof: dentroPrazoProf
+      };
     });
+    
+    res.json(entregas);
   } catch (err) {
     console.error('❌ Erro ao listar entregas:', err);
     res.status(500).json({ error: 'Erro ao listar entregas' });
