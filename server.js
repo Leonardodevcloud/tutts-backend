@@ -7975,6 +7975,11 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
               const centroCustoEntrega = entrega.centro_custo;
               const prazoMinutos = encontrarPrazoProfissional(codClienteEntrega, centroCustoEntrega, distanciaEntrega);
               
+              // Log de debug (primeiras 5 entregas)
+              if (countTempoEntregaProf <= 5) {
+                console.log(`📊 DEBUG Prazo Prof - OS ${entrega.os}: dist=${distanciaEntrega.toFixed(1)}km, tempo=${tempoEntProf.toFixed(0)}min, prazo=${prazoMinutos}min, ${tempoEntProf <= prazoMinutos ? '✅ DENTRO' : '❌ FORA'}`);
+              }
+              
               if (tempoEntProf <= prazoMinutos) {
                 dentroPrazoProf++;
               } else {
