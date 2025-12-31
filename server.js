@@ -12870,6 +12870,151 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
   }
 });
 
+// GET - Comparativo semanal POR CLIENTE (detalhado)
+app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
+    
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    if (cod_cliente) {
+      const clientes = cod_cliente.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      if (clientes.length > 0) {
+        whereClause += ` AND cod_cliente = ANY($${paramIndex}::int[])`;
+        params.push(clientes);
+        paramIndex++;
+      }
+    }
+    if (centro_custo) {
+      const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
+      if (centros.length > 0) {
+        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+        params.push(centros);
+        paramIndex++;
+      }
+    }
+    
+    // Agrupa por cliente E semana do ano
+    const semanalQuery = await pool.query(`
+      SELECT 
+        cod_cliente,
+        nome_fantasia,
+        EXTRACT(ISOYEAR FROM data_solicitado) as ano,
+        EXTRACT(WEEK FROM data_solicitado) as semana,
+        MIN(data_solicitado) as data_inicio_semana,
+        MAX(data_solicitado) as data_fim_semana,
+        TO_CHAR(MIN(data_solicitado), 'DD/MM') || ' - ' || TO_CHAR(MAX(data_solicitado), 'DD/MM') as periodo,
+        COUNT(DISTINCT os) as total_os,
+        COUNT(*) as total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as dentro_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as fora_prazo,
+        SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END) as dentro_prazo_prof,
+        SUM(CASE WHEN dentro_prazo_prof = false THEN 1 ELSE 0 END) as fora_prazo_prof,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo_prof = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo_prof,
+        SUM(CASE WHEN LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' THEN 1 ELSE 0 END) as retornos,
+        COALESCE(SUM(valor), 0) as valor_total,
+        COALESCE(SUM(valor_prof), 0) as valor_prof,
+        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio,
+        ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
+        COUNT(DISTINCT cod_prof) as total_profissionais
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY cod_cliente, nome_fantasia, EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
+      ORDER BY nome_fantasia, ano DESC, semana DESC
+    `, params);
+    
+    // Agrupar por cliente
+    const clientesMap = {};
+    semanalQuery.rows.forEach(row => {
+      const key = row.cod_cliente;
+      if (!clientesMap[key]) {
+        clientesMap[key] = {
+          cod_cliente: parseInt(row.cod_cliente),
+          nome_fantasia: row.nome_fantasia,
+          semanas: []
+        };
+      }
+      clientesMap[key].semanas.push(row);
+    });
+    
+    // Processar dados para calcular variações por cliente
+    const clientes = Object.values(clientesMap).map(cliente => {
+      const semanas = cliente.semanas.map((row, idx, arr) => {
+        const semanaAnterior = arr[idx + 1];
+        
+        const calcVariacao = (atual, anterior) => {
+          if (!anterior || anterior === 0) return null;
+          return ((atual - anterior) / anterior * 100).toFixed(1);
+        };
+        
+        return {
+          ano: parseInt(row.ano),
+          semana: parseInt(row.semana),
+          periodo: row.periodo,
+          total_os: parseInt(row.total_os) || 0,
+          total_entregas: parseInt(row.total_entregas) || 0,
+          dentro_prazo: parseInt(row.dentro_prazo) || 0,
+          fora_prazo: parseInt(row.fora_prazo) || 0,
+          taxa_prazo: parseFloat(row.taxa_prazo) || 0,
+          taxa_prazo_prof: parseFloat(row.taxa_prazo_prof) || 0,
+          retornos: parseInt(row.retornos) || 0,
+          valor_total: parseFloat(row.valor_total) || 0,
+          valor_prof: parseFloat(row.valor_prof) || 0,
+          tempo_medio: parseFloat(row.tempo_medio) || 0,
+          tempo_medio_prof: parseFloat(row.tempo_medio_prof) || 0,
+          total_profissionais: parseInt(row.total_profissionais) || 0,
+          var_entregas: calcVariacao(parseInt(row.total_entregas), semanaAnterior ? parseInt(semanaAnterior.total_entregas) : null),
+          var_valor: calcVariacao(parseFloat(row.valor_total), semanaAnterior ? parseFloat(semanaAnterior.valor_total) : null),
+          var_prazo: semanaAnterior ? (parseFloat(row.taxa_prazo) - parseFloat(semanaAnterior.taxa_prazo)).toFixed(1) : null,
+          var_retornos: calcVariacao(parseInt(row.retornos), semanaAnterior ? parseInt(semanaAnterior.retornos) : null)
+        };
+      });
+      
+      // Calcular totais do cliente
+      const totalEntregas = semanas.reduce((a, s) => a + s.total_entregas, 0);
+      const mediaEntregas = semanas.length > 0 ? Math.round(totalEntregas / semanas.length) : 0;
+      const mediaPrazo = semanas.length > 0 ? (semanas.reduce((a, s) => a + s.taxa_prazo, 0) / semanas.length).toFixed(1) : 0;
+      
+      return {
+        cod_cliente: cliente.cod_cliente,
+        nome_fantasia: cliente.nome_fantasia,
+        semanas: semanas,
+        resumo: {
+          total_semanas: semanas.length,
+          total_entregas: totalEntregas,
+          media_entregas_semana: mediaEntregas,
+          media_taxa_prazo: parseFloat(mediaPrazo)
+        }
+      };
+    });
+    
+    // Ordenar por total de entregas (maiores primeiro)
+    clientes.sort((a, b) => b.resumo.total_entregas - a.resumo.total_entregas);
+    
+    res.json({
+      clientes: clientes,
+      total_clientes: clientes.length
+    });
+    
+  } catch (error) {
+    console.error('Erro comparativo semanal por cliente:', error);
+    res.status(500).json({ error: 'Erro ao gerar comparativo semanal por cliente', details: error.message });
+  }
+});
+
 // GET - Dados agrupados por cliente para tabela de acompanhamento
 // IMPORTANTE: Agrupa por NOME_FANTASIA (como o Power BI) e não por cod_cliente
 // IMPORTANTE: Calcula média de tempo POR OS (não por linha/ponto)
