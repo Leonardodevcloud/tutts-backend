@@ -12787,7 +12787,84 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
         COALESCE(SUM(valor), 0) as valor_total,
         COALESCE(SUM(valor_prof), 0) as valor_prof,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ENTREGA (mesma lógica do acompanhamento-periodico)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND data_hora IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1 
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_coleta,
+        
         ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
         COUNT(DISTINCT cod_prof) as total_entregadores,
         ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional,
@@ -12827,6 +12904,8 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
         valor_prof: parseFloat(row.valor_prof) || 0,
         ticket_medio: parseFloat(row.ticket_medio) || 0,
         tempo_medio_entrega: parseFloat(row.tempo_medio_entrega) || 0,
+        tempo_medio_alocacao: parseFloat(row.tempo_medio_alocacao) || 0,
+        tempo_medio_coleta: parseFloat(row.tempo_medio_coleta) || 0,
         tempo_medio_prof: parseFloat(row.tempo_medio_prof) || 0,
         total_entregadores: parseInt(row.total_entregadores) || 0,
         media_ent_profissional: parseFloat(row.media_ent_profissional) || 0,
@@ -12930,7 +13009,84 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
         COALESCE(SUM(valor), 0) as valor_total,
         COALESCE(SUM(valor_prof), 0) as valor_prof,
         ROUND(COALESCE(SUM(valor), 0)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
-        ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ENTREGA (mesma lógica do acompanhamento-periodico)
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND data_hora IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN DATE(data_chegada) <> DATE(data_hora)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            WHEN COALESCE(ponto, 1) >= 2
+                 AND data_hora IS NOT NULL 
+                 AND finalizado IS NOT NULL
+                 AND finalizado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE 
+                  WHEN DATE(finalizado) <> DATE(data_hora)
+                  THEN DATE(finalizado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_entrega,
+        
+        -- TEMPO MÉDIO ALOCAÇÃO (Ponto = 1): Solicitado -> Alocado
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_hora IS NOT NULL
+                 AND data_hora_alocado >= data_hora
+            THEN
+              EXTRACT(EPOCH FROM (
+                data_hora_alocado - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora) >= 17 
+                       AND DATE(data_hora_alocado) > DATE(data_hora)
+                  THEN DATE(data_hora_alocado) + TIME '08:00:00'
+                  ELSE data_hora
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_alocacao,
+        
+        -- TEMPO MÉDIO COLETA (Ponto = 1): Alocado -> Chegada
+        ROUND(AVG(
+          CASE 
+            WHEN COALESCE(ponto, 1) = 1 
+                 AND data_hora_alocado IS NOT NULL 
+                 AND data_chegada IS NOT NULL 
+                 AND hora_chegada IS NOT NULL
+                 AND (data_chegada + hora_chegada::time) >= data_hora_alocado
+            THEN
+              EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE 
+                  WHEN EXTRACT(HOUR FROM data_hora_alocado) >= 17 
+                       AND DATE(data_chegada) > DATE(data_hora_alocado)
+                  THEN DATE(data_chegada) + TIME '08:00:00'
+                  ELSE data_hora_alocado
+                END
+              )) / 60
+            ELSE NULL
+          END
+        ), 1) as tempo_medio_coleta,
+        
         ROUND(AVG(tempo_entrega_prof_minutos), 1) as tempo_medio_prof,
         COUNT(DISTINCT cod_prof) as total_entregadores,
         ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as media_ent_profissional
@@ -12979,6 +13135,8 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
           valor_prof: parseFloat(row.valor_prof) || 0,
           ticket_medio: parseFloat(row.ticket_medio) || 0,
           tempo_medio_entrega: parseFloat(row.tempo_medio_entrega) || 0,
+          tempo_medio_alocacao: parseFloat(row.tempo_medio_alocacao) || 0,
+          tempo_medio_coleta: parseFloat(row.tempo_medio_coleta) || 0,
           tempo_medio_prof: parseFloat(row.tempo_medio_prof) || 0,
           total_entregadores: parseInt(row.total_entregadores) || 0,
           media_ent_profissional: parseFloat(row.media_ent_profissional) || 0,
