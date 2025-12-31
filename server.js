@@ -12990,10 +12990,9 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
       }
     }
     
-    // Agrupa por cliente E semana do ano
+    // Agrupa por nome_fantasia E semana do ano (como Power BI)
     const semanalQuery = await pool.query(`
       SELECT 
-        cod_cliente,
         nome_fantasia,
         EXTRACT(ISOYEAR FROM data_solicitado) as ano,
         EXTRACT(WEEK FROM data_solicitado) as semana,
@@ -13095,17 +13094,16 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
         ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as media_ent_profissional
       FROM bi_entregas
       ${whereClause}
-      GROUP BY cod_cliente, nome_fantasia, EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
+      GROUP BY nome_fantasia, EXTRACT(ISOYEAR FROM data_solicitado), EXTRACT(WEEK FROM data_solicitado)
       ORDER BY nome_fantasia, ano DESC, semana DESC
     `, params);
     
-    // Agrupar por cliente
+    // Agrupar por nome_fantasia (não por cod_cliente)
     const clientesMap = {};
     semanalQuery.rows.forEach(row => {
-      const key = row.cod_cliente;
+      const key = row.nome_fantasia;
       if (!clientesMap[key]) {
         clientesMap[key] = {
-          cod_cliente: parseInt(row.cod_cliente),
           nome_fantasia: row.nome_fantasia,
           semanas: []
         };
@@ -13156,7 +13154,6 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
       const mediaPrazo = semanas.length > 0 ? (semanas.reduce((a, s) => a + s.taxa_prazo, 0) / semanas.length).toFixed(1) : 0;
       
       return {
-        cod_cliente: cliente.cod_cliente,
         nome_fantasia: cliente.nome_fantasia,
         semanas: semanas,
         resumo: {
