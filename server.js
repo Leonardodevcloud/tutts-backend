@@ -7696,19 +7696,16 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         hora: horarioPico.hora,
         entregas: horarioPico.entregas,
         percentual: totalEntregasHora > 0 ? ((horarioPico.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
-        profissionais_necessarios: Math.ceil(horarioPico.entregas / 10)
+        profissionais_necessarios: Math.ceil(horarioPico.entregas / (porDiaQuery.rows.length || 1) / 10)
       } : null,
       janela_pico: {
         inicio: melhorJanela.inicio,
         fim: melhorJanela.fim,
         entregas: melhorJanela.entregas,
         percentual: totalEntregasHora > 0 ? ((melhorJanela.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
-        profissionais_necessarios: Math.ceil(melhorJanela.entregas / 10 / contexto?.metricas_gerais?.total_dias_periodo || 1)
+        profissionais_necessarios: Math.ceil(melhorJanela.entregas / (porDiaQuery.rows.length || 1) / 10)
       }
     };
-    
-    // Recalcular profissionais para janela de pico com dias corretos
-    contexto.janela_pico.profissionais_necessarios = Math.ceil((melhorJanela.entregas / (porDiaQuery.rows.length || 1)) / 10);
     
     // Definir prompt base por tipo
     const promptsBase = {
