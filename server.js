@@ -7635,6 +7635,9 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         km_medio: parseFloat(metricas.km_medio) || 0,
         total_profissionais: parseInt(metricas.total_profissionais) || 0,
         total_clientes: parseInt(metricas.total_clientes) || 0,
+        total_dias_periodo: porDiaQuery.rows.length || 1,
+        media_entregas_por_dia: porDiaQuery.rows.length > 0 ? (parseInt(metricas.total_entregas) / porDiaQuery.rows.length).toFixed(1) : 0,
+        profissionais_ideais_por_dia: porDiaQuery.rows.length > 0 ? Math.ceil((parseInt(metricas.total_entregas) / porDiaQuery.rows.length) / 10) : 0,
         media_entregas_por_profissional: parseInt(metricas.total_profissionais) > 0 ? (parseInt(metricas.total_entregas) / parseInt(metricas.total_profissionais)).toFixed(1) : 0,
         ticket_medio: parseInt(metricas.total_entregas) > 0 ? (parseFloat(metricas.valor_total) / parseInt(metricas.total_entregas)).toFixed(2) : 0
       },
@@ -7680,20 +7683,35 @@ Analise a performance da operação de forma DIRETA:
 - Pontos fracos (máx 3)
 - **NOTA GERAL: X/10**`,
       
-      tendencias: `## 📉 TENDÊNCIAS E DEMANDA
-**Análise de Demanda:**
-- A demanda está: 📈 CRESCENDO | 📉 CAINDO | ➡️ ESTÁVEL
-- Se houver queda significativa (>15%), ALERTE com 🔴
-- Variação percentual do período
+      tendencias: `## 📉 TENDÊNCIAS E PREDIÇÃO
 
-**Padrões Identificados:**
-- Dias com MAIOR demanda (ranking)
-- Horários de PICO (ranking)
-- Quantidade ideal de profissionais para atender o pico
+**1️⃣ COMPORTAMENTO DA DEMANDA**
+- Tendência: 📈 CRESCIMENTO | 📉 QUEDA | ➡️ ESTÁVEL
+- Variação no período: +X% ou -X%
+- Se queda acentuada (>15%): 🔴 ALERTA - Retração de X%
 
-**Previsão:**
-- Tendência para próximas semanas
-- Recomendações de escala`,
+**2️⃣ SAZONALIDADE E PICOS**
+| Ranking | Dia da Semana | Volume | % do Total |
+|---------|---------------|--------|------------|
+| 🥇 | [dia] | X ent | X% |
+| 🥈 | [dia] | X ent | X% |
+| 🥉 | [dia] | X ent | X% |
+
+**Horário de Pico:** XX:00 às XX:00
+- Volume no pico: X entregas
+- % das entregas concentradas no pico: X%
+
+**3️⃣ DIMENSIONAMENTO PREDITIVO PARA O PICO**
+- Entregas no horário de pico: X
+- Meta por profissional: 10 entregas
+- **👥 Profissionais necessários no pico: X motoboys**
+- Cálculo: (Entregas no pico ÷ 10 = X profissionais)
+
+**4️⃣ INSIGHTS ESTRATÉGICOS**
+Conclusão sobre a saúde da operação:
+- Status geral: 🟢 SAUDÁVEL | 🟡 ATENÇÃO | 🔴 CRÍTICO
+- Principais pontos de atenção para o próximo período
+- Recomendação de ação (1-2 frases)`,
       
       alertas: `## ⚠️ ALERTAS URGENTES
 Liste APENAS problemas críticos:
@@ -7704,21 +7722,25 @@ Máximo 5 alertas.`,
       
       gestao_profissionais: `## 👥 GESTÃO DE PROFISSIONAIS
 
-**1️⃣ EQUILÍBRIO DE CARGA (Meta: 10 entregas/profissional)**
-- Média atual: X entregas/profissional
-- Status: ✅ IDEAL | ⚠️ ABAIXO | 🔴 ACIMA
-- **Qtd ideal de motoboys para o período:** X profissionais
-- Cálculo: (Total entregas ÷ 10 = X profissionais necessários)
+**1️⃣ EQUILÍBRIO DE CARGA (Meta: 10 entregas/profissional/DIA)**
+- Média atual: X entregas/profissional/dia
+- Status: ✅ IDEAL (8-12) | ⚠️ ABAIXO (<8) | 🔴 ACIMA (>12)
+- Total de entregas no período: X
+- Total de dias no período: X
+- Média de entregas por dia: X
+- **👥 Qtd ideal de profissionais/dia:** (Entregas por dia ÷ 10)
+- Cálculo detalhado: X entregas/dia ÷ 10 = X profissionais necessários por dia
 
 **2️⃣ ANÁLISE DE ROTATIVIDADE (CHURN)**
 - Total de profissionais distintos no período: X
 - Profissionais necessários por dia (estimado): X
-- Status: ✅ NORMAL | ⚠️ ALTA ROTATIVIDADE | 🔴 ROTATIVIDADE CRÍTICA
+- Proporção: X distintos para X necessários/dia
+- Status: ✅ NORMAL (<2x) | ⚠️ ALTA ROTATIVIDADE (2-4x) | 🔴 ROTATIVIDADE CRÍTICA (>4x)
 - Se rotatividade alta: impacto na operação e recomendação
 
 **3️⃣ DISPARIDADE DE CARGA/REMUNERAÇÃO**
 Identificar OUTLIERS (muito acima ou abaixo da média):
-| Profissional | Entregas | Valor | Status |
+| Profissional | Entregas | Média/Dia | Valor | Status |
 Se houver disparidade grande (>50% da média), sinalize com ⚠️
 
 **4️⃣ RANKING DE PERFORMANCE**
@@ -7767,6 +7789,15 @@ Se houver disparidade grande (>50% da média), sinalize com ⚠️
 | 🚗 KM Médio | ${contexto.metricas_gerais.km_medio} km |
 | 👥 Profissionais | ${contexto.metricas_gerais.total_profissionais} |
 | 🏢 Clientes | ${contexto.metricas_gerais.total_clientes} |
+
+📊 **MÉTRICAS DE DIMENSIONAMENTO**
+| Métrica | Valor |
+|---------|-------|
+| Total de dias no período | ${contexto.metricas_gerais.total_dias_periodo} dias |
+| Média de entregas/dia | ${contexto.metricas_gerais.media_entregas_por_dia} ent/dia |
+| Meta por profissional | 10 ent/dia |
+| **👥 Profissionais ideais/dia** | ${contexto.metricas_gerais.profissionais_ideais_por_dia} motoboys |
+| Profissionais distintos no período | ${contexto.metricas_gerais.total_profissionais} |
 
 💵 **FINANCEIRO**
 | Métrica | Valor |
