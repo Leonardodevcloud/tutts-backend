@@ -7971,6 +7971,23 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
     
     console.log('✅ Relatório IA gerado com sucesso');
     
+    // Buscar nome do cliente se filtrado
+    let clienteInfo = null;
+    if (cod_cliente.length > 0) {
+      const clienteQuery = await pool.query(`
+        SELECT DISTINCT cod_cliente, cliente 
+        FROM bi_entregas 
+        WHERE cod_cliente = ANY($1::int[])
+        LIMIT 1
+      `, [cod_cliente.map(c => parseInt(c))]);
+      if (clienteQuery.rows.length > 0) {
+        clienteInfo = {
+          codigo: clienteQuery.rows[0].cod_cliente,
+          nome: clienteQuery.rows[0].cliente
+        };
+      }
+    }
+    
     res.json({
       success: true,
       tipo_analise: tiposLabel,
@@ -7978,6 +7995,11 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
       periodo: contexto.periodo,
       metricas: contexto.metricas_gerais,
       relatorio,
+      // Filtros aplicados
+      filtros: {
+        cliente: clienteInfo,
+        centro_custo: centro_custo.length > 0 ? centro_custo : null
+      },
       // Dados para gráficos
       graficos: {
         evolucao_diaria: contexto.evolucao_diaria,
@@ -7993,6 +8015,255 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
   } catch (err) {
     console.error('❌ Erro ao gerar relatório IA:', err);
     res.status(500).json({ error: 'Erro ao gerar relatório: ' + err.message });
+  }
+});
+
+// Endpoint para gerar relatório Word
+app.post('/api/bi/relatorio-ia/word', async (req, res) => {
+  try {
+    const { tipo_analise, periodo, metricas, relatorio, filtros } = req.body;
+    
+    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
+            Header, Footer, AlignmentType, BorderStyle, WidthType, 
+            ShadingType, PageNumber, HeadingLevel } = require('docx');
+    
+    // Montar título dinâmico
+    let tituloRelatorio = "RELATÓRIO OPERACIONAL";
+    let subtituloCliente = "";
+    
+    if (filtros?.cliente) {
+      tituloRelatorio += ` - ${filtros.cliente.codigo}`;
+      subtituloCliente = filtros.cliente.nome || "";
+      if (filtros.centro_custo && filtros.centro_custo.length > 0) {
+        subtituloCliente += ` | Centro de Custo: ${filtros.centro_custo.join(', ')}`;
+      }
+    } else if (filtros?.centro_custo && filtros.centro_custo.length > 0) {
+      subtituloCliente = `Centro de Custo: ${filtros.centro_custo.join(', ')}`;
+    }
+    
+    // Cores
+    const corVerde = "059669";
+    const corVerdeClaro = "D1FAE5";
+    const corVermelho = "DC2626";
+    const corAmarelo = "FEF3C7";
+    const corCinza = "64748B";
+    
+    // Processar texto do relatório em parágrafos
+    const processarRelatorio = (texto) => {
+      if (!texto) return [];
+      
+      const paragrafos = [];
+      const linhas = texto.split('\n');
+      
+      linhas.forEach(linha => {
+        linha = linha.trim();
+        if (!linha) return;
+        
+        // Detectar tipo de linha
+        const isTituloSecao = /^##\s/.test(linha) || /^[📊📈📉⚠️👥🏆🔥⏰📅]/.test(linha);
+        const isSubtitulo = /^\*\*[^*]+\*\*$/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
+        const isAlertaCritico = /🔴|CRÍTICO/i.test(linha);
+        const isAlertaAtencao = /🟡|ATENÇÃO/i.test(linha);
+        const isAlertaOk = /🟢|✅|OK/i.test(linha);
+        const isItem = /^[-•*]\s/.test(linha) || /^[🥇🥈🥉]/.test(linha) || /^\d+\.\s/.test(linha);
+        const isTabela = /^\|/.test(linha);
+        
+        // Limpar markdown
+        let textoLimpo = linha
+          .replace(/^##\s*/, '')
+          .replace(/\*\*(.*?)\*\*/g, '$1')
+          .replace(/^\|\s*|\s*\|$/g, '')
+          .replace(/\|/g, ' | ')
+          .replace(/-{3,}/g, '');
+        
+        if (isTabela && /^[-\s|]+$/.test(textoLimpo)) return; // Pular linhas de separação de tabela
+        
+        if (isTituloSecao) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 300, after: 100 },
+            shading: { fill: corVerdeClaro, type: ShadingType.CLEAR },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 24, color: corVerde })]
+          }));
+        } else if (isSubtitulo) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 200, after: 80 },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 22, color: "333333" })]
+          }));
+        } else if (isAlertaCritico) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 100, after: 100 },
+            shading: { fill: "FEE2E2", type: ShadingType.CLEAR },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: corVermelho })]
+          }));
+        } else if (isAlertaAtencao) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 100, after: 100 },
+            shading: { fill: corAmarelo, type: ShadingType.CLEAR },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "B45309" })]
+          }));
+        } else if (isAlertaOk) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 60, after: 60 },
+            children: [new TextRun({ text: textoLimpo, size: 20, color: corVerde })]
+          }));
+        } else if (isItem) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 40, after: 40 },
+            indent: { left: 400 },
+            children: [new TextRun({ text: textoLimpo, size: 20 })]
+          }));
+        } else {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 60, after: 60 },
+            children: [new TextRun({ text: textoLimpo, size: 20 })]
+          }));
+        }
+      });
+      
+      return paragrafos;
+    };
+    
+    // Criar tabela de métricas
+    const criarTabelaMetricas = (m) => {
+      const borda = { style: BorderStyle.SINGLE, size: 1, color: "E2E8F0" };
+      const bordas = { top: borda, bottom: borda, left: borda, right: borda };
+      
+      return new Table({
+        columnWidths: [2340, 2340, 2340, 2340],
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                borders: bordas,
+                shading: { fill: "EFF6FF", type: ShadingType.CLEAR },
+                width: { size: 2340, type: WidthType.DXA },
+                children: [
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String((m.total_entregas || 0).toLocaleString('pt-BR')), bold: true, size: 28, color: "2563EB" })] }),
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Entregas", size: 16, color: corCinza })] })
+                ]
+              }),
+              new TableCell({
+                borders: bordas,
+                shading: { fill: "ECFDF5", type: ShadingType.CLEAR },
+                width: { size: 2340, type: WidthType.DXA },
+                children: [
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: (m.taxa_prazo || 0).toFixed(1) + "%", bold: true, size: 28, color: corVerde })] }),
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Taxa Prazo", size: 16, color: corCinza })] })
+                ]
+              }),
+              new TableCell({
+                borders: bordas,
+                shading: { fill: "F5F3FF", type: ShadingType.CLEAR },
+                width: { size: 2340, type: WidthType.DXA },
+                children: [
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: (m.tempo_medio_entrega || 0).toFixed(0) + " min", bold: true, size: 28, color: "7C3AED" })] }),
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Tempo Médio", size: 16, color: corCinza })] })
+                ]
+              }),
+              new TableCell({
+                borders: bordas,
+                shading: { fill: "FFF7ED", type: ShadingType.CLEAR },
+                width: { size: 2340, type: WidthType.DXA },
+                children: [
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(m.media_profissionais_por_dia || 0), bold: true, size: 28, color: "EA580C" })] }),
+                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Motos/Dia", size: 16, color: corCinza })] })
+                ]
+              })
+            ]
+          })
+        ]
+      });
+    };
+    
+    // Criar documento
+    const doc = new Document({
+      styles: {
+        default: { document: { run: { font: "Arial", size: 22 } } }
+      },
+      sections: [{
+        properties: {
+          page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } }
+        },
+        headers: {
+          default: new Header({
+            children: [new Paragraph({
+              alignment: AlignmentType.CENTER,
+              shading: { fill: corVerde, type: ShadingType.CLEAR },
+              spacing: { after: 200 },
+              children: [
+                new TextRun({ text: tituloRelatorio, bold: true, size: 32, color: "FFFFFF" })
+              ]
+            })]
+          })
+        },
+        footers: {
+          default: new Footer({
+            children: [new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({ text: "Sistema Tutts - Business Intelligence  |  Página ", size: 16, color: corCinza }),
+                new TextRun({ children: [PageNumber.CURRENT], size: 16, color: corCinza }),
+                new TextRun({ text: " de ", size: 16, color: corCinza }),
+                new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 16, color: corCinza })
+              ]
+            })]
+          })
+        },
+        children: [
+          // Nome do cliente (se houver)
+          ...(subtituloCliente ? [new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 100 },
+            children: [new TextRun({ text: subtituloCliente, bold: true, size: 24, color: "333333" })]
+          })] : []),
+          // Informações do relatório
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 100 },
+            children: [new TextRun({ text: "Análise: " + (tipo_analise || "Geral"), size: 22, color: corCinza })]
+          }),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 100 },
+            children: [new TextRun({ text: "Período: " + (periodo?.inicio || "") + " a " + (periodo?.fim || ""), size: 22, color: corCinza })]
+          }),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 300 },
+            children: [new TextRun({ text: "Gerado em: " + new Date().toLocaleString('pt-BR'), size: 20, color: corCinza })]
+          }),
+          
+          // Tabela de métricas
+          criarTabelaMetricas(metricas || {}),
+          
+          // Espaço
+          new Paragraph({ spacing: { before: 400, after: 200 }, children: [] }),
+          
+          // Título do conteúdo
+          new Paragraph({
+            spacing: { after: 200 },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: corVerde } },
+            children: [new TextRun({ text: "ANÁLISE DETALHADA", bold: true, size: 26, color: corVerde })]
+          }),
+          
+          // Conteúdo do relatório
+          ...processarRelatorio(relatorio)
+        ]
+      }]
+    });
+    
+    // Gerar buffer
+    const buffer = await Packer.toBuffer(doc);
+    
+    // Enviar arquivo
+    const nomeArquivo = 'relatorio-ia-' + new Date().toISOString().split('T')[0] + '.docx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', 'attachment; filename=' + nomeArquivo);
+    res.send(buffer);
+    
+  } catch (err) {
+    console.error('❌ Erro ao gerar Word:', err);
+    res.status(500).json({ error: 'Erro ao gerar documento: ' + err.message });
   }
 });
 
