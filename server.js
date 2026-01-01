@@ -8032,12 +8032,36 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
   try {
     const { tipo_analise, periodo, metricas, relatorio, filtros } = req.body;
     
-    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
-            Header, Footer, AlignmentType, BorderStyle, WidthType, 
-            ShadingType, PageNumber, HeadingLevel } = require('docx');
+    console.log('📄 Gerando relatório Word...');
+    
+    let Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
+        Header, Footer, AlignmentType, BorderStyle, WidthType, 
+        ShadingType, PageNumber, HeadingLevel;
+    
+    try {
+      const docx = require('docx');
+      Document = docx.Document;
+      Packer = docx.Packer;
+      Paragraph = docx.Paragraph;
+      TextRun = docx.TextRun;
+      Table = docx.Table;
+      TableRow = docx.TableRow;
+      TableCell = docx.TableCell;
+      Header = docx.Header;
+      Footer = docx.Footer;
+      AlignmentType = docx.AlignmentType;
+      BorderStyle = docx.BorderStyle;
+      WidthType = docx.WidthType;
+      ShadingType = docx.ShadingType;
+      PageNumber = docx.PageNumber;
+      HeadingLevel = docx.HeadingLevel;
+    } catch (e) {
+      console.error('❌ Biblioteca docx não instalada:', e.message);
+      return res.status(500).json({ error: 'Biblioteca docx não está instalada. Execute: npm install docx' });
+    }
     
     // Montar título dinâmico
-    let tituloRelatorio = "RELATÓRIO OPERACIONAL";
+    let tituloRelatorio = "RELATORIO OPERACIONAL";
     let subtituloCliente = "";
     
     if (filtros?.cliente) {
@@ -8271,7 +8295,8 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
     res.send(buffer);
     
   } catch (err) {
-    console.error('❌ Erro ao gerar Word:', err);
+    console.error('❌ Erro ao gerar Word:', err.message);
+    console.error('Stack:', err.stack);
     res.status(500).json({ error: 'Erro ao gerar documento: ' + err.message });
   }
 });
