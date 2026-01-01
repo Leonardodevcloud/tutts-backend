@@ -8115,7 +8115,7 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         new TableRow({
           children: [
             criarCelulaMetrica((m.total_entregas || 0).toLocaleString('pt-BR'), "ENTREGAS", "2563EB", "DBEAFE"),
-            criarCelulaMetrica((m.taxa_prazo || 0).toFixed(1) + "%", "TAXA PRAZO", "059669", "D1FAE5"),
+            criarCelulaMetrica((m.taxa_prazo || 0).toFixed(1) + "%", "TAXA PRAZO", "16A34A", "DCFCE7"),
             criarCelulaMetrica((m.tempo_medio_entrega || 0).toFixed(0) + " min", "TEMPO MÉDIO", "7C3AED", "EDE9FE"),
             criarCelulaMetrica(String(m.media_profissionais_por_dia || 0), "MOTOS/DIA", "EA580C", "FFEDD5")
           ]
@@ -8157,13 +8157,13 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
           paragrafos.push(new Paragraph({
             spacing: { before: 0, after: 200 },
             border: {
-              top: { style: BorderStyle.SINGLE, size: 24, color: "059669" },
-              bottom: { style: BorderStyle.SINGLE, size: 24, color: "059669" },
-              left: { style: BorderStyle.SINGLE, size: 24, color: "059669" },
-              right: { style: BorderStyle.SINGLE, size: 24, color: "059669" }
+              top: { style: BorderStyle.SINGLE, size: 24, color: "7C3AED" },
+              bottom: { style: BorderStyle.SINGLE, size: 24, color: "7C3AED" },
+              left: { style: BorderStyle.SINGLE, size: 24, color: "7C3AED" },
+              right: { style: BorderStyle.SINGLE, size: 24, color: "7C3AED" }
             },
-            shading: { fill: "D1FAE5", type: ShadingType.CLEAR },
-            children: [new TextRun({ text: "  " + textoLimpo + "  ", bold: true, size: 26, color: "047857" })]
+            shading: { fill: "EDE9FE", type: ShadingType.CLEAR },
+            children: [new TextRun({ text: "  " + textoLimpo + "  ", bold: true, size: 26, color: "6D28D9" })]
           }));
         } else if (isAlertaCritico) {
           paragrafos.push(new Paragraph({
@@ -8184,17 +8184,17 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         } else if (isAlertaOk) {
           paragrafos.push(new Paragraph({
             spacing: { before: 200, after: 200 },
-            shading: { fill: "D1FAE5", type: ShadingType.CLEAR },
-            border: { left: { style: BorderStyle.SINGLE, size: 30, color: "059669" } },
+            shading: { fill: "EDE9FE", type: ShadingType.CLEAR },
+            border: { left: { style: BorderStyle.SINGLE, size: 30, color: "7C3AED" } },
             indent: { left: 200 },
-            children: [new TextRun({ text: " " + textoLimpo, size: 22, color: "047857" })]
+            children: [new TextRun({ text: " " + textoLimpo, size: 22, color: "6D28D9" })]
           }));
         } else if (isSubtitulo) {
           paragrafos.push(new Paragraph({ spacing: { before: 350, after: 0 }, children: [] }));
           paragrafos.push(new Paragraph({
             spacing: { before: 0, after: 150 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "059669" } },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 26, color: "059669" })]
+            border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "7C3AED" } },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 26, color: "7C3AED" })]
           }));
         } else if (isItemLista) {
           paragrafos.push(new Paragraph({
@@ -8244,7 +8244,7 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 300 },
-          children: [new TextRun({ text: tituloRelatorio, bold: true, size: 56, color: "059669" })]
+          children: [new TextRun({ text: tituloRelatorio, bold: true, size: 56, color: "7C3AED" })]
         }),
         
         // Subtítulo cliente
@@ -8260,7 +8260,7 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         // Linha decorativa
         new Paragraph({
           alignment: AlignmentType.CENTER,
-          border: { bottom: { style: BorderStyle.SINGLE, size: 20, color: "059669" } },
+          border: { bottom: { style: BorderStyle.SINGLE, size: 20, color: "7C3AED" } },
           spacing: { after: 400 },
           children: [new TextRun({ text: "                                                                                    ", size: 8 })]
         }),
@@ -8340,8 +8340,8 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         // Título do relatório
         new Paragraph({
           spacing: { after: 100 },
-          border: { bottom: { style: BorderStyle.SINGLE, size: 20, color: "059669" } },
-          children: [new TextRun({ text: "📋 " + tituloRelatorio, bold: true, size: 36, color: "059669" })]
+          border: { bottom: { style: BorderStyle.SINGLE, size: 20, color: "7C3AED" } },
+          children: [new TextRun({ text: "📋 " + tituloRelatorio, bold: true, size: 36, color: "7C3AED" })]
         }),
         
         // Info
@@ -8359,8 +8359,8 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         // Título análise detalhada
         new Paragraph({
           spacing: { after: 300 },
-          border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: "059669" } },
-          children: [new TextRun({ text: "📊 ANÁLISE DETALHADA", bold: true, size: 32, color: "059669" })]
+          border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: "7C3AED" } },
+          children: [new TextRun({ text: "📊 ANÁLISE DETALHADA", bold: true, size: 32, color: "7C3AED" })]
         }),
         
         // Espaço
