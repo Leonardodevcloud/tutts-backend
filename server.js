@@ -8043,7 +8043,24 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
     
     const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
             Header, Footer, AlignmentType, BorderStyle, WidthType, 
-            ShadingType, PageNumber, HeadingLevel, convertInchesToTwip } = require('docx');
+            ShadingType, PageNumber, ImageRun } = require('docx');
+    const https = require('https');
+    
+    // Baixar logo
+    let logoBuffer = null;
+    try {
+      logoBuffer = await new Promise((resolve, reject) => {
+        https.get('https://raw.githubusercontent.com/Leonardodevcloud/tutts-frontend/main/Gemini_Generated_Image_s64zrms64zrms64z.png', (response) => {
+          const chunks = [];
+          response.on('data', chunk => chunks.push(chunk));
+          response.on('end', () => resolve(Buffer.concat(chunks)));
+          response.on('error', reject);
+        }).on('error', reject);
+      });
+      console.log('✅ Logo baixada com sucesso');
+    } catch (e) {
+      console.log('⚠️ Não foi possível baixar a logo:', e.message);
+    }
     
     // Montar título dinâmico
     let tituloRelatorio = "RELATÓRIO OPERACIONAL";
@@ -8066,16 +8083,16 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
       return new TableCell({
         width: { size: 2340, type: WidthType.DXA },
         shading: { fill: corFundo, type: ShadingType.CLEAR },
-        margins: { top: 150, bottom: 150, left: 100, right: 100 },
+        margins: { top: 200, bottom: 200, left: 100, right: 100 },
         children: [
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { after: 50 },
-            children: [new TextRun({ text: valor, bold: true, size: 36, color: corValor })]
+            spacing: { after: 80 },
+            children: [new TextRun({ text: valor, bold: true, size: 40, color: corValor })]
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            children: [new TextRun({ text: label, size: 16, color: "64748B" })]
+            children: [new TextRun({ text: label, size: 18, color: "64748B" })]
           })
         ]
       });
@@ -8091,7 +8108,7 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         left: { style: BorderStyle.NONE },
         right: { style: BorderStyle.NONE },
         insideHorizontal: { style: BorderStyle.NONE },
-        insideVertical: { style: BorderStyle.SINGLE, size: 8, color: "FFFFFF" }
+        insideVertical: { style: BorderStyle.NONE }
       },
       rows: [
         new TableRow({
@@ -8114,7 +8131,11 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
       
       for (let i = 0; i < linhas.length; i++) {
         const linha = linhas[i];
-        if (!linha.trim()) continue;
+        if (!linha.trim()) {
+          // Linha em branco = quebra de parágrafo
+          paragrafos.push(new Paragraph({ spacing: { before: 100, after: 100 }, children: [] }));
+          continue;
+        }
         
         // Detectar tipo de linha
         const isTituloSecao = /^##\s/.test(linha);
@@ -8133,51 +8154,54 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
           .replace(/\*\*/g, '');
         
         if (isTituloSecao) {
+          // Espaço antes do título
+          paragrafos.push(new Paragraph({ spacing: { before: 400, after: 0 }, children: [] }));
           paragrafos.push(new Paragraph({
-            spacing: { before: 300, after: 150 },
+            spacing: { before: 0, after: 200 },
             shading: { fill: "059669", type: ShadingType.CLEAR },
-            children: [new TextRun({ text: "  " + textoLimpo, bold: true, size: 24, color: "FFFFFF" })]
+            children: [new TextRun({ text: "  " + textoLimpo + "  ", bold: true, size: 26, color: "FFFFFF" })]
           }));
         } else if (isAlertaCritico) {
           paragrafos.push(new Paragraph({
-            spacing: { before: 150, after: 150 },
+            spacing: { before: 200, after: 200 },
             shading: { fill: "FEE2E2", type: ShadingType.CLEAR },
-            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "DC2626" } },
+            border: { left: { style: BorderStyle.SINGLE, size: 30, color: "DC2626" } },
             indent: { left: 200 },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "DC2626" })]
+            children: [new TextRun({ text: " " + textoLimpo, bold: true, size: 22, color: "DC2626" })]
           }));
         } else if (isAlertaAtencao) {
           paragrafos.push(new Paragraph({
-            spacing: { before: 150, after: 150 },
+            spacing: { before: 200, after: 200 },
             shading: { fill: "FEF3C7", type: ShadingType.CLEAR },
-            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "F59E0B" } },
+            border: { left: { style: BorderStyle.SINGLE, size: 30, color: "F59E0B" } },
             indent: { left: 200 },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "B45309" })]
+            children: [new TextRun({ text: " " + textoLimpo, bold: true, size: 22, color: "B45309" })]
           }));
         } else if (isAlertaOk) {
           paragrafos.push(new Paragraph({
-            spacing: { before: 150, after: 150 },
+            spacing: { before: 200, after: 200 },
             shading: { fill: "D1FAE5", type: ShadingType.CLEAR },
-            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "059669" } },
+            border: { left: { style: BorderStyle.SINGLE, size: 30, color: "059669" } },
             indent: { left: 200 },
-            children: [new TextRun({ text: textoLimpo, size: 20, color: "059669" })]
+            children: [new TextRun({ text: " " + textoLimpo, size: 22, color: "047857" })]
           }));
         } else if (isSubtitulo) {
+          paragrafos.push(new Paragraph({ spacing: { before: 300, after: 0 }, children: [] }));
           paragrafos.push(new Paragraph({
-            spacing: { before: 250, after: 100 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: "059669" } },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 22, color: "059669" })]
+            spacing: { before: 0, after: 150 },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: "059669" } },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 24, color: "059669" })]
           }));
         } else if (isItemLista) {
           paragrafos.push(new Paragraph({
-            spacing: { before: 50, after: 50 },
-            indent: { left: 400 },
-            children: [new TextRun({ text: textoLimpo, size: 20 })]
+            spacing: { before: 80, after: 80 },
+            indent: { left: 500 },
+            children: [new TextRun({ text: textoLimpo, size: 22, color: "374151" })]
           }));
         } else {
           paragrafos.push(new Paragraph({
-            spacing: { before: 80, after: 80 },
-            children: [new TextRun({ text: textoLimpo, size: 20 })]
+            spacing: { before: 100, after: 100 },
+            children: [new TextRun({ text: textoLimpo, size: 22, color: "374151" })]
           }));
         }
       }
@@ -8185,12 +8209,61 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
       return paragrafos;
     };
     
+    // Criar header com logo
+    const headerChildren = [];
+    
+    // Tabela para posicionar logo à direita
+    if (logoBuffer) {
+      headerChildren.push(new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: { style: BorderStyle.NONE },
+          bottom: { style: BorderStyle.NONE },
+          left: { style: BorderStyle.NONE },
+          right: { style: BorderStyle.NONE },
+          insideHorizontal: { style: BorderStyle.NONE },
+          insideVertical: { style: BorderStyle.NONE }
+        },
+        rows: [new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 70, type: WidthType.PERCENTAGE },
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE }
+              },
+              children: [new Paragraph({ children: [] })]
+            }),
+            new TableCell({
+              width: { size: 30, type: WidthType.PERCENTAGE },
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE }
+              },
+              children: [new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [new ImageRun({
+                  data: logoBuffer,
+                  transformation: { width: 80, height: 80 },
+                  type: 'png'
+                })]
+              })]
+            })
+          ]
+        })]
+      }));
+    }
+    
     // Criar documento
     const doc = new Document({
       styles: {
         default: {
           document: {
-            run: { font: "Arial", size: 22 }
+            run: { font: "Arial", size: 22, color: "374151" }
           }
         }
       },
@@ -8202,13 +8275,7 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
         },
         headers: {
           default: new Header({
-            children: [
-              new Paragraph({
-                shading: { fill: "059669", type: ShadingType.CLEAR },
-                spacing: { after: 0 },
-                children: [new TextRun({ text: " ", size: 8 })]
-              })
-            ]
+            children: headerChildren
           })
         },
         footers: {
@@ -8219,60 +8286,63 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
                 border: { top: { style: BorderStyle.SINGLE, size: 6, color: "E5E7EB" } },
                 spacing: { before: 200 },
                 children: [
-                  new TextRun({ text: "Sistema Tutts - Business Intelligence  •  Página ", size: 16, color: "9CA3AF" }),
-                  new TextRun({ children: [PageNumber.CURRENT], size: 16, color: "9CA3AF" }),
-                  new TextRun({ text: " de ", size: 16, color: "9CA3AF" }),
-                  new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 16, color: "9CA3AF" })
+                  new TextRun({ text: "Sistema Tutts - Business Intelligence  •  Página ", size: 18, color: "9CA3AF" }),
+                  new TextRun({ children: [PageNumber.CURRENT], size: 18, color: "9CA3AF" }),
+                  new TextRun({ text: " de ", size: 18, color: "9CA3AF" }),
+                  new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 18, color: "9CA3AF" })
                 ]
               })
             ]
           })
         },
         children: [
-          // Header verde
+          // Header com informações
           new Paragraph({
             shading: { fill: "059669", type: ShadingType.CLEAR },
-            spacing: { after: 0 },
-            children: [new TextRun({ text: "📋 Relatório Gerado", size: 18, color: "FFFFFF" })]
+            spacing: { after: 100 },
+            children: [new TextRun({ text: "  📋 Relatório Gerado", size: 20, color: "FFFFFF" })]
           }),
           new Paragraph({
             shading: { fill: "059669", type: ShadingType.CLEAR },
-            spacing: { after: 0 },
-            children: [new TextRun({ text: tituloRelatorio, bold: true, size: 36, color: "FFFFFF" })]
+            spacing: { after: 100 },
+            children: [new TextRun({ text: "  " + tituloRelatorio, bold: true, size: 40, color: "FFFFFF" })]
           }),
           ...(subtituloCliente ? [new Paragraph({
             shading: { fill: "059669", type: ShadingType.CLEAR },
-            spacing: { after: 0 },
-            children: [new TextRun({ text: subtituloCliente, bold: true, size: 24, color: "FFFFFF" })]
+            spacing: { after: 100 },
+            children: [new TextRun({ text: "  " + subtituloCliente, bold: true, size: 26, color: "FFFFFF" })]
           })] : []),
           new Paragraph({
             shading: { fill: "059669", type: ShadingType.CLEAR },
-            spacing: { after: 0 },
-            children: [new TextRun({ text: `${tipo_analise || 'Análise Geral'} • ${new Date().toLocaleString('pt-BR')}`, size: 20, color: "FFFFFF" })]
+            spacing: { after: 100 },
+            children: [new TextRun({ text: `  ${tipo_analise || 'Análise Geral'} • ${new Date().toLocaleString('pt-BR')}`, size: 22, color: "FFFFFF" })]
           }),
           new Paragraph({
             shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 0 },
+            children: [new TextRun({ text: `  Período: ${periodo?.inicio || ''} a ${periodo?.fim || ''}`, size: 22, color: "FFFFFF" })]
+          }),
+          
+          // Espaço após header
+          new Paragraph({ spacing: { before: 400, after: 300 }, children: [] }),
+          
+          // Métricas
+          tabelaMetricas,
+          
+          // Espaço após métricas
+          new Paragraph({ spacing: { before: 400, after: 300 }, children: [] }),
+          
+          // Título análise detalhada
+          new Paragraph({
             spacing: { after: 300 },
-            children: [new TextRun({ text: `Período: ${periodo?.inicio || ''} a ${periodo?.fim || ''}`, size: 20, color: "FFFFFF" })]
+            border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: "059669" } },
+            children: [new TextRun({ text: "📊 ANÁLISE DETALHADA", bold: true, size: 32, color: "059669" })]
           }),
           
           // Espaço
           new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
           
-          // Métricas
-          tabelaMetricas,
-          
-          // Espaço
-          new Paragraph({ spacing: { before: 300, after: 200 }, children: [] }),
-          
-          // Título análise
-          new Paragraph({
-            spacing: { after: 200 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "059669" } },
-            children: [new TextRun({ text: "📊 ANÁLISE DETALHADA", bold: true, size: 28, color: "059669" })]
-          }),
-          
-          // Conteúdo
+          // Conteúdo do relatório
           ...processarRelatorio(relatorio)
         ]
       }]
