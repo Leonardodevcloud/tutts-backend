@@ -7413,11 +7413,13 @@ app.get('/api/bi/dashboard-rapido', async (req, res) => {
 // ============================================
 app.get('/api/bi/relatorio-ia', async (req, res) => {
   try {
-    const { tipo, data_inicio, data_fim, prompt_custom } = req.query;
+    const { data_inicio, data_fim, prompt_custom } = req.query;
+    // Suportar múltiplos tipos
+    const tipos = req.query.tipo ? (Array.isArray(req.query.tipo) ? req.query.tipo : [req.query.tipo]) : ['performance'];
     const cod_cliente = req.query.cod_cliente ? (Array.isArray(req.query.cod_cliente) ? req.query.cod_cliente : [req.query.cod_cliente]) : [];
     const centro_custo = req.query.centro_custo ? (Array.isArray(req.query.centro_custo) ? req.query.centro_custo : [req.query.centro_custo]) : [];
     
-    console.log(`🤖 Gerando relatório IA: tipo=${tipo}, período=${data_inicio} a ${data_fim}`);
+    console.log(`🤖 Gerando relatório IA: tipos=${tipos.join(', ')}, período=${data_inicio} a ${data_fim}`);
     
     // Verificar se tem API key do Gemini
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -7576,40 +7578,54 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
     
     // Definir prompt base por tipo
     const promptsBase = {
-      performance: `Analise a performance geral desta operação de entregas. 
+      performance: `## ANÁLISE DE PERFORMANCE
+        Analise a performance geral desta operação de entregas. 
         Destaque pontos fortes e fracos. 
         Compare a taxa de prazo atual com benchmarks do setor (geralmente 85%+ é bom).
         Avalie se o tempo médio de entrega está adequado.
         Dê uma nota geral de 0 a 10 para a operação.`,
       
-      tendencias: `Identifique tendências e padrões nos dados.
+      tendencias: `## ANÁLISE DE TENDÊNCIAS
+        Identifique tendências e padrões nos dados.
         Analise a evolução diária - está melhorando ou piorando?
         Identifique padrões por dia da semana.
         Preveja como será o desempenho nas próximas semanas se a tendência continuar.
         Destaque comportamentos recorrentes.`,
       
-      alertas: `Identifique problemas e anomalias que precisam de atenção urgente.
+      alertas: `## ALERTAS E ANOMALIAS
+        Identifique problemas e anomalias que precisam de atenção urgente.
         Destaque clientes com performance muito abaixo da média.
         Identifique profissionais com desempenho preocupante.
         Aponte dias com quedas bruscas de performance.
         Liste as 3 maiores prioridades de correção.`,
       
-      financeiro: `Faça uma análise financeira detalhada.
+      financeiro: `## ANÁLISE FINANCEIRA
+        Faça uma análise financeira detalhada.
         Calcule a margem de lucro (valor total - valor profissionais).
         Analise se o ticket médio está adequado.
         Identifique clientes mais e menos rentáveis.
         Sugira formas de aumentar a rentabilidade.`,
       
-      comparativo: `Compare o desempenho entre clientes e profissionais.
+      comparativo: `## ANÁLISE COMPARATIVA
+        Compare o desempenho entre clientes e profissionais.
         Crie um ranking dos melhores e piores clientes.
         Identifique os profissionais mais eficientes.
         Compare a performance entre dias da semana.
         Destaque quem está acima e abaixo da média.`,
       
-      personalizado: prompt_custom || 'Faça uma análise geral dos dados.'
+      personalizado: prompt_custom ? `## ANÁLISE PERSONALIZADA\n${prompt_custom}` : null
     };
     
-    const promptTipo = promptsBase[tipo] || promptsBase.performance;
+    // Combinar prompts dos tipos selecionados
+    const promptsCombinados = tipos
+      .map(t => promptsBase[t])
+      .filter(p => p !== null)
+      .join('\n\n');
+    
+    const tiposLabel = tipos.map(t => {
+      const labels = {performance: 'Performance', tendencias: 'Tendências', alertas: 'Alertas', financeiro: 'Financeiro', comparativo: 'Comparativo', personalizado: 'Personalizado'};
+      return labels[t] || t;
+    }).join(', ');
     
     const promptCompleto = `Você é um analista de dados especialista em operações de delivery e logística.
     
@@ -7642,17 +7658,19 @@ ${contexto.top_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.entre
 === DISTRIBUIÇÃO POR DIA DA SEMANA ===
 ${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} entregas, ${d.taxa_prazo}% no prazo`).join('\n')}
 
-=== SUA TAREFA ===
-${promptTipo}
+=== SUAS TAREFAS (${tipos.length} análise(s) solicitada(s)) ===
+${promptsCombinados}
 
 Responda em português brasileiro, de forma clara e objetiva.
 Use **negrito** para destacar pontos importantes.
-Organize a resposta em seções claras.
-Seja direto e dê insights acionáveis.`;
+Organize a resposta em seções claras separadas para cada tipo de análise solicitada.
+Seja direto e dê insights acionáveis.
+${tipos.length > 1 ? 'IMPORTANTE: Faça TODAS as análises solicitadas acima, uma seção para cada.' : ''}`;
 
     console.log('🤖 Chamando API Gemini...');
     
-    // Chamar API do Gemini
+    // Chamar API do Gemini - aumentar tokens para múltiplas análises
+    const maxTokens = tipos.length > 1 ? 4096 : 2048;
     const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -7660,7 +7678,7 @@ Seja direto e dê insights acionáveis.`;
         contents: [{ parts: [{ text: promptCompleto }] }],
         generationConfig: {
           temperature: 0.7,
-          maxOutputTokens: 2048
+          maxOutputTokens: maxTokens
         }
       })
     });
@@ -7678,7 +7696,8 @@ Seja direto e dê insights acionáveis.`;
     
     res.json({
       success: true,
-      tipo_analise: tipo,
+      tipo_analise: tiposLabel,
+      tipos_selecionados: tipos,
       periodo: contexto.periodo,
       metricas: contexto.metricas_gerais,
       relatorio
