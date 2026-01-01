@@ -7699,16 +7699,21 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         hora: horarioPico.hora,
         entregas_total_periodo: horarioPico.entregas,
         entregas_media_dia: (horarioPico.entregas / (porDiaQuery.rows.length || 1)).toFixed(1),
-        percentual: totalEntregasHora > 0 ? ((horarioPico.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
-        profissionais_necessarios: Math.ceil(horarioPico.entregas / (porDiaQuery.rows.length || 1) / 10)
+        percentual_do_total: totalEntregasHora > 0 ? ((horarioPico.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
+        // Profissionais para o pico: 3 pedidos por moto (considerando retorno e nova coleta)
+        profissionais_necessarios: Math.ceil(horarioPico.entregas / (porDiaQuery.rows.length || 1) / 3)
       } : null,
       janela_pico: {
         inicio: melhorJanela.inicio,
         fim: melhorJanela.fim,
+        duracao_horas: melhorJanela.fim - melhorJanela.inicio + 1,
         entregas_total_periodo: melhorJanela.entregas,
         entregas_media_dia: (melhorJanela.entregas / (porDiaQuery.rows.length || 1)).toFixed(1),
-        percentual: totalEntregasHora > 0 ? ((melhorJanela.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
-        profissionais_necessarios: Math.ceil(melhorJanela.entregas / (porDiaQuery.rows.length || 1) / 10)
+        percentual_do_total: totalEntregasHora > 0 ? ((melhorJanela.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
+        // Profissionais para o pico: 3 pedidos por moto por hora (ida + volta + nova coleta ~20min cada)
+        // Em uma janela de 3 horas, cada moto pode fazer ~3 entregas por hora = 9 entregas na janela
+        // Mas para ser conservador, consideramos 3 entregas por moto na janela toda
+        profissionais_necessarios: Math.ceil(melhorJanela.entregas / (porDiaQuery.rows.length || 1) / 3)
       }
     };
     
@@ -7742,13 +7747,14 @@ Use EXATAMENTE os dados da seção "POR DIA DA SEMANA":
 **Horário de Pico:** Copie EXATAMENTE da seção "JANELA DE PICO"
 - Janela: [copie inicio]h às [copie fim]h
 - Média diária no pico: [copie entregas_media_dia] entregas/dia
+- % do total diário: [copie percentual_do_total]%
 
 **3️⃣ DIMENSIONAMENTO PREDITIVO PARA O PICO**
 COPIE os valores da seção "JANELA DE PICO":
 - Média de entregas/dia no pico: [entregas_media_dia do contexto]
-- Meta por profissional: 10 entregas/dia
+- Regra: 3 pedidos por motoboy no pico (moto faz ida, volta e pega novo pedido)
 - **👥 Profissionais necessários:** [profissionais_necessarios do contexto] motoboys
-- Cálculo: [entregas_media_dia] ÷ 10 = [profissionais_necessarios]
+- Cálculo: [entregas_media_dia] ÷ 3 = [profissionais_necessarios]
 
 **4️⃣ INSIGHTS ESTRATÉGICOS**
 - Status geral: 🟢 SAUDÁVEL | 🟡 ATENÇÃO | 🔴 CRÍTICO
@@ -7881,21 +7887,21 @@ ${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} ent | ${d.t
 ⏰ **DISTRIBUIÇÃO POR HORÁRIO**
 ${contexto.distribuicao_hora.filter(h => h.entregas > 0).map(h => `${h.hora}h: ${h.entregas} ent | ${h.taxa_prazo}%`).join('\n')}
 
-🔥 **HORÁRIO DE PICO (hora com maior volume)**
+🔥 **HORÁRIO DE PICO (hora única com maior volume)**
 ${contexto.horario_pico ? `- Hora: ${contexto.horario_pico.hora}h
-- Total no período: ${contexto.horario_pico.entregas_total_periodo} entregas
-- **Média por dia: ${contexto.horario_pico.entregas_media_dia} entregas/dia**
-- % do total: ${contexto.horario_pico.percentual}%
-- **👥 Profissionais necessários: ${contexto.horario_pico.profissionais_necessarios} motoboys**
-- Cálculo: ${contexto.horario_pico.entregas_media_dia} entregas/dia ÷ 10 = ${contexto.horario_pico.profissionais_necessarios} profissionais` : '- Sem dados de horário disponíveis'}
+- Média por dia: ${contexto.horario_pico.entregas_media_dia} entregas/dia
+- % do total diário: ${contexto.horario_pico.percentual_do_total}%
+- **👥 Profissionais necessários no pico: ${contexto.horario_pico.profissionais_necessarios} motoboys**
+- Regra: 3 pedidos/moto no horário de pico (ida + volta + nova coleta)
+- Cálculo: ${contexto.horario_pico.entregas_media_dia} ÷ 3 = ${contexto.horario_pico.profissionais_necessarios}` : '- Sem dados de horário disponíveis'}
 
-🔥 **JANELA DE PICO (3 horas consecutivas com maior volume)**
-${contexto.janela_pico ? `- Janela: ${contexto.janela_pico.inicio}h às ${contexto.janela_pico.fim + 1}h
-- Total no período: ${contexto.janela_pico.entregas_total_periodo} entregas
-- **Média por dia: ${contexto.janela_pico.entregas_media_dia} entregas/dia**
-- % do total: ${contexto.janela_pico.percentual}%
-- **👥 Profissionais necessários: ${contexto.janela_pico.profissionais_necessarios} motoboys**
-- Cálculo: ${contexto.janela_pico.entregas_media_dia} entregas/dia ÷ 10 = ${contexto.janela_pico.profissionais_necessarios} profissionais` : '- Sem dados disponíveis'}
+🔥 **JANELA DE PICO (${contexto.janela_pico ? contexto.janela_pico.duracao_horas : 3} horas consecutivas com maior volume)**
+${contexto.janela_pico ? `- Janela: ${contexto.janela_pico.inicio}h às ${contexto.janela_pico.fim + 1}h (${contexto.janela_pico.duracao_horas}h de duração)
+- Média por dia nesta janela: ${contexto.janela_pico.entregas_media_dia} entregas/dia
+- % do total diário: ${contexto.janela_pico.percentual_do_total}% das entregas do dia
+- **👥 Profissionais necessários na janela: ${contexto.janela_pico.profissionais_necessarios} motoboys**
+- Regra: 3 pedidos/moto durante a janela de pico
+- Cálculo: ${contexto.janela_pico.entregas_media_dia} ÷ 3 = ${contexto.janela_pico.profissionais_necessarios}` : '- Sem dados disponíveis'}
 
 ---
 🎯 **SUAS TAREFAS:**
@@ -7905,7 +7911,7 @@ ${promptsCombinados}
 📝 **REGRAS OBRIGATÓRIAS:**
 🚨 **CRÍTICO: Use SOMENTE os números fornecidos acima. NÃO invente dados!**
 - Para HORÁRIO DE PICO: copie os valores das seções "HORÁRIO DE PICO" e "JANELA DE PICO"
-- Para PROFISSIONAIS NECESSÁRIOS: use o cálculo (média_dia ÷ 10), não o total do período
+- Para PROFISSIONAIS NO PICO: use o cálculo (média_dia ÷ 3), pois cada moto faz 3 pedidos no pico
 - Seja DIRETO, sem enrolação
 - Use emojis para facilitar leitura
 - Use tabelas quando possível
