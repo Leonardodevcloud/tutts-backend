@@ -7724,33 +7724,35 @@ Analise a performance da operação de forma DIRETA:
       
       tendencias: `## 📉 TENDÊNCIAS E PREDIÇÃO
 
+⚠️ IMPORTANTE: Use EXATAMENTE os dados fornecidos na seção "HORÁRIO DE PICO" e "JANELA DE PICO". NÃO invente números.
+
 **1️⃣ COMPORTAMENTO DA DEMANDA**
-- Tendência: 📈 CRESCIMENTO | 📉 QUEDA | ➡️ ESTÁVEL
-- Variação no período: +X% ou -X%
-- Se queda acentuada (>15%): 🔴 ALERTA - Retração de X%
+- Analise a seção "TENDÊNCIA" do contexto
+- Informe se está: 📈 CRESCIMENTO | 📉 QUEDA | ➡️ ESTÁVEL
+- Se queda >15%: emita 🔴 ALERTA
 
 **2️⃣ SAZONALIDADE E PICOS**
-| Ranking | Dia da Semana | Volume | % do Total |
-|---------|---------------|--------|------------|
-| 🥇 | [dia] | X ent | X% |
-| 🥈 | [dia] | X ent | X% |
-| 🥉 | [dia] | X ent | X% |
+Use EXATAMENTE os dados da seção "POR DIA DA SEMANA":
+| Ranking | Dia | Volume | 
+|---------|-----|--------|
+| 🥇 | [copie do contexto] | X ent |
+| 🥈 | [copie do contexto] | X ent |
+| 🥉 | [copie do contexto] | X ent |
 
-**Horário de Pico:** XX:00 às XX:00
-- Volume no pico: X entregas
-- % das entregas concentradas no pico: X%
+**Horário de Pico:** Copie EXATAMENTE da seção "JANELA DE PICO"
+- Janela: [copie inicio]h às [copie fim]h
+- Média diária no pico: [copie entregas_media_dia] entregas/dia
 
 **3️⃣ DIMENSIONAMENTO PREDITIVO PARA O PICO**
-- Entregas no horário de pico: X
-- Meta por profissional: 10 entregas
-- **👥 Profissionais necessários no pico: X motoboys**
-- Cálculo: (Entregas no pico ÷ 10 = X profissionais)
+COPIE os valores da seção "JANELA DE PICO":
+- Média de entregas/dia no pico: [entregas_media_dia do contexto]
+- Meta por profissional: 10 entregas/dia
+- **👥 Profissionais necessários:** [profissionais_necessarios do contexto] motoboys
+- Cálculo: [entregas_media_dia] ÷ 10 = [profissionais_necessarios]
 
 **4️⃣ INSIGHTS ESTRATÉGICOS**
-Conclusão sobre a saúde da operação:
 - Status geral: 🟢 SAUDÁVEL | 🟡 ATENÇÃO | 🔴 CRÍTICO
-- Principais pontos de atenção para o próximo período
-- Recomendação de ação (1-2 frases)`,
+- Recomendação (1-2 frases)`,
       
       alertas: `## ⚠️ ALERTAS URGENTES
 Liste APENAS problemas críticos:
@@ -7900,7 +7902,10 @@ ${contexto.janela_pico ? `- Janela: ${contexto.janela_pico.inicio}h às ${contex
 ${promptsCombinados}
 
 ---
-📝 **REGRAS DE FORMATAÇÃO:**
+📝 **REGRAS OBRIGATÓRIAS:**
+🚨 **CRÍTICO: Use SOMENTE os números fornecidos acima. NÃO invente dados!**
+- Para HORÁRIO DE PICO: copie os valores das seções "HORÁRIO DE PICO" e "JANELA DE PICO"
+- Para PROFISSIONAIS NECESSÁRIOS: use o cálculo (média_dia ÷ 10), não o total do período
 - Seja DIRETO, sem enrolação
 - Use emojis para facilitar leitura
 - Use tabelas quando possível
@@ -7908,7 +7913,6 @@ ${promptsCombinados}
 - Destaque números importantes em **negrito**
 - Para rankings use 🥇🥈🥉
 - Para status use ✅❌⚠️🔴🟡🟢
-- Evite explicações longas, vá direto ao ponto
 ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seção' : ''}`;
 
     console.log('🤖 Chamando API Gemini...');
