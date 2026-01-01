@@ -7595,7 +7595,28 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       hora: parseInt(r.hora),
       entregas: parseInt(r.entregas),
       taxa_prazo: parseFloat(r.taxa_prazo) || 0
-    }));
+    })).sort((a, b) => a.hora - b.hora);
+    
+    // Calcular horário de pico
+    const horarioPico = dadosPorHora.length > 0 
+      ? dadosPorHora.reduce((max, h) => h.entregas > max.entregas ? h : max, dadosPorHora[0])
+      : null;
+    
+    // Calcular total de entregas para % do pico
+    const totalEntregasHora = dadosPorHora.reduce((sum, h) => sum + h.entregas, 0);
+    
+    // Identificar janela de pico (3 horas consecutivas com maior volume)
+    let melhorJanela = { inicio: 0, fim: 0, entregas: 0 };
+    for (let i = 0; i < dadosPorHora.length - 2; i++) {
+      const somaJanela = dadosPorHora[i].entregas + (dadosPorHora[i+1]?.entregas || 0) + (dadosPorHora[i+2]?.entregas || 0);
+      if (somaJanela > melhorJanela.entregas) {
+        melhorJanela = { 
+          inicio: dadosPorHora[i].hora, 
+          fim: dadosPorHora[i+2]?.hora || dadosPorHora[i].hora, 
+          entregas: somaJanela 
+        };
+      }
+    }
     
     // Calcular variações e tendências
     const evolucaoDiaria = porDiaQuery.rows.slice(-14).map(r => ({
@@ -7670,8 +7691,24 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         tempo_medio: parseFloat(r.tempo_medio) || 0
       })),
       distribuicao_dia_semana: dadosDiaSemana,
-      distribuicao_hora: dadosPorHora
+      distribuicao_hora: dadosPorHora,
+      horario_pico: horarioPico ? {
+        hora: horarioPico.hora,
+        entregas: horarioPico.entregas,
+        percentual: totalEntregasHora > 0 ? ((horarioPico.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
+        profissionais_necessarios: Math.ceil(horarioPico.entregas / 10)
+      } : null,
+      janela_pico: {
+        inicio: melhorJanela.inicio,
+        fim: melhorJanela.fim,
+        entregas: melhorJanela.entregas,
+        percentual: totalEntregasHora > 0 ? ((melhorJanela.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
+        profissionais_necessarios: Math.ceil(melhorJanela.entregas / 10 / contexto?.metricas_gerais?.total_dias_periodo || 1)
+      }
     };
+    
+    // Recalcular profissionais para janela de pico com dias corretos
+    contexto.janela_pico.profissionais_necessarios = Math.ceil((melhorJanela.entregas / (porDiaQuery.rows.length || 1)) / 10);
     
     // Definir prompt base por tipo
     const promptsBase = {
@@ -7837,8 +7874,20 @@ ${contexto.piores_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.ta
 📆 **POR DIA DA SEMANA**
 ${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} ent | ${d.taxa_prazo}% | ${d.tempo_medio}min`).join('\n')}
 
-⏰ **POR HORÁRIO (pico)**
-${contexto.distribuicao_hora.filter(h => h.entregas > 0).slice(0, 10).map(h => `${h.hora}h: ${h.entregas} ent | ${h.taxa_prazo}%`).join('\n')}
+⏰ **DISTRIBUIÇÃO POR HORÁRIO**
+${contexto.distribuicao_hora.filter(h => h.entregas > 0).map(h => `${h.hora}h: ${h.entregas} ent | ${h.taxa_prazo}%`).join('\n')}
+
+🔥 **HORÁRIO DE PICO**
+${contexto.horario_pico ? `- Hora com maior volume: ${contexto.horario_pico.hora}h
+- Entregas neste horário (total período): ${contexto.horario_pico.entregas}
+- % do total: ${contexto.horario_pico.percentual}%` : '- Sem dados de horário disponíveis'}
+
+🔥 **JANELA DE PICO (3 horas consecutivas com maior volume)**
+${contexto.janela_pico ? `- Janela: ${contexto.janela_pico.inicio}h às ${contexto.janela_pico.fim + 1}h
+- Entregas na janela (total período): ${contexto.janela_pico.entregas}
+- % do total: ${contexto.janela_pico.percentual}%
+- Média de entregas/dia nesta janela: ${(contexto.janela_pico.entregas / contexto.metricas_gerais.total_dias_periodo).toFixed(1)}
+- **👥 Profissionais necessários no pico:** ${contexto.janela_pico.profissionais_necessarios} motoboys` : '- Sem dados disponíveis'}
 
 ---
 🎯 **SUAS TAREFAS:**
