@@ -7453,7 +7453,7 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       paramIndex++;
     }
     
-    // 1. Buscar métricas gerais
+    // 1. Buscar métricas gerais (EXPANDIDO)
     const metricasQuery = await pool.query(`
       SELECT 
         COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
@@ -7465,8 +7465,17 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
         COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
         ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 2) as tempo_medio_entrega,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_execucao_minutos END), 2) as tempo_medio_alocacao,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 THEN tempo_entrega_prof_minutos END), 2) as tempo_medio_coleta,
         COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as total_profissionais,
         COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_cliente END) as total_clientes,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as km_total,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 2) as km_medio,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+          LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+          LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+          LOWER(ocorrencia) LIKE '%cliente ausente%'
+        ) THEN 1 ELSE 0 END) as total_retornos,
         MIN(data_solicitado) as data_inicio_real,
         MAX(data_solicitado) as data_fim_real
       FROM bi_entregas
@@ -7483,21 +7492,29 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
         ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
               NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor,
+        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
       FROM bi_entregas
       ${whereClause}
       GROUP BY data_solicitado
       ORDER BY data_solicitado
     `, params);
     
-    // 3. Buscar top clientes
+    // 3. Buscar top clientes (com mais dados)
     const topClientesQuery = await pool.query(`
       SELECT 
         nome_fantasia as cliente,
         COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
         ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
               NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
+        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+          LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+          LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+          LOWER(ocorrencia) LIKE '%cliente ausente%'
+        ) THEN 1 ELSE 0 END) as retornos
       FROM bi_entregas
       ${whereClause}
       GROUP BY nome_fantasia
@@ -7505,8 +7522,25 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       LIMIT 10
     `, params);
     
-    // 4. Buscar top profissionais
+    // 4. Buscar top profissionais (com mais dados)
     const topProfsQuery = await pool.query(`
+      SELECT 
+        nome_prof as profissional,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as km_total,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_recebido
+      FROM bi_entregas
+      ${whereClause}
+      GROUP BY nome_prof
+      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
+      LIMIT 10
+    `, params);
+    
+    // 5. Buscar piores profissionais (taxa baixa)
+    const pioresProfsQuery = await pool.query(`
       SELECT 
         nome_prof as profissional,
         COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
@@ -7516,64 +7550,124 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       FROM bi_entregas
       ${whereClause}
       GROUP BY nome_prof
-      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
-      LIMIT 10
+      HAVING COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) >= 10
+      ORDER BY ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) ASC
+      LIMIT 5
     `, params);
     
-    // 5. Buscar distribuição por dia da semana
+    // 6. Buscar distribuição por dia da semana
     const porDiaSemanaQuery = await pool.query(`
       SELECT 
         EXTRACT(DOW FROM data_solicitado) as dia_semana,
         COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
         ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
-              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio
       FROM bi_entregas
       ${whereClause}
       GROUP BY EXTRACT(DOW FROM data_solicitado)
       ORDER BY EXTRACT(DOW FROM data_solicitado)
     `, params);
     
+    // 7. Buscar distribuição por hora do dia
+    const porHoraQuery = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM hora_solicitado) as hora,
+        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo
+      FROM bi_entregas
+      ${whereClause} AND hora_solicitado IS NOT NULL
+      GROUP BY EXTRACT(HOUR FROM hora_solicitado)
+      ORDER BY EXTRACT(HOUR FROM hora_solicitado)
+    `, params);
+    
     const diasSemana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
     const dadosDiaSemana = porDiaSemanaQuery.rows.map(r => ({
       dia: diasSemana[parseInt(r.dia_semana)],
       entregas: parseInt(r.entregas),
-      taxa_prazo: parseFloat(r.taxa_prazo)
+      taxa_prazo: parseFloat(r.taxa_prazo) || 0,
+      tempo_medio: parseFloat(r.tempo_medio) || 0
     }));
     
-    // Montar contexto para a IA
+    const dadosPorHora = porHoraQuery.rows.map(r => ({
+      hora: parseInt(r.hora),
+      entregas: parseInt(r.entregas),
+      taxa_prazo: parseFloat(r.taxa_prazo) || 0
+    }));
+    
+    // Calcular variações e tendências
+    const evolucaoDiaria = porDiaQuery.rows.slice(-14).map(r => ({
+      data: r.data,
+      entregas: parseInt(r.entregas),
+      taxa_prazo: parseFloat(r.taxa) || 0,
+      valor: parseFloat(r.valor) || 0,
+      profissionais: parseInt(r.profissionais) || 0
+    }));
+    
+    // Calcular tendência (comparar primeira metade com segunda metade)
+    const metade = Math.floor(evolucaoDiaria.length / 2);
+    const primeiraParte = evolucaoDiaria.slice(0, metade);
+    const segundaParte = evolucaoDiaria.slice(metade);
+    const mediaPrimeira = primeiraParte.length > 0 ? primeiraParte.reduce((a, b) => a + b.taxa_prazo, 0) / primeiraParte.length : 0;
+    const mediaSegunda = segundaParte.length > 0 ? segundaParte.reduce((a, b) => a + b.taxa_prazo, 0) / segundaParte.length : 0;
+    const tendencia = mediaSegunda - mediaPrimeira;
+    
+    // Montar contexto para a IA (EXPANDIDO)
     const contexto = {
       periodo: { inicio: data_inicio || metricas.data_inicio_real, fim: data_fim || metricas.data_fim_real },
       metricas_gerais: {
+        total_os: parseInt(metricas.total_os) || 0,
         total_entregas: parseInt(metricas.total_entregas) || 0,
         taxa_prazo: parseFloat(metricas.taxa_prazo) || 0,
         entregas_no_prazo: parseInt(metricas.entregas_no_prazo) || 0,
         entregas_fora_prazo: parseInt(metricas.entregas_fora_prazo) || 0,
+        total_retornos: parseInt(metricas.total_retornos) || 0,
         valor_total: parseFloat(metricas.valor_total) || 0,
         valor_profissionais: parseFloat(metricas.valor_prof) || 0,
-        lucro_estimado: (parseFloat(metricas.valor_total) || 0) - (parseFloat(metricas.valor_prof) || 0),
-        tempo_medio_entrega_minutos: parseFloat(metricas.tempo_medio_entrega) || 0,
+        lucro_bruto: (parseFloat(metricas.valor_total) || 0) - (parseFloat(metricas.valor_prof) || 0),
+        margem_percentual: parseFloat(metricas.valor_total) > 0 ? (((parseFloat(metricas.valor_total) - parseFloat(metricas.valor_prof)) / parseFloat(metricas.valor_total)) * 100).toFixed(1) : 0,
+        tempo_medio_entrega: parseFloat(metricas.tempo_medio_entrega) || 0,
+        tempo_medio_alocacao: parseFloat(metricas.tempo_medio_alocacao) || 0,
+        tempo_medio_coleta: parseFloat(metricas.tempo_medio_coleta) || 0,
+        km_total: parseFloat(metricas.km_total) || 0,
+        km_medio: parseFloat(metricas.km_medio) || 0,
         total_profissionais: parseInt(metricas.total_profissionais) || 0,
-        total_clientes: parseInt(metricas.total_clientes) || 0
+        total_clientes: parseInt(metricas.total_clientes) || 0,
+        media_entregas_por_profissional: parseInt(metricas.total_profissionais) > 0 ? (parseInt(metricas.total_entregas) / parseInt(metricas.total_profissionais)).toFixed(1) : 0,
+        ticket_medio: parseInt(metricas.total_entregas) > 0 ? (parseFloat(metricas.valor_total) / parseInt(metricas.total_entregas)).toFixed(2) : 0
       },
-      evolucao_diaria: porDiaQuery.rows.slice(-14).map(r => ({
-        data: r.data,
-        entregas: parseInt(r.entregas),
-        taxa_prazo: parseFloat(r.taxa) || 0,
-        valor: parseFloat(r.valor) || 0
-      })),
+      tendencia: {
+        variacao_taxa: tendencia.toFixed(1),
+        direcao: tendencia > 1 ? 'MELHORANDO' : tendencia < -1 ? 'PIORANDO' : 'ESTÁVEL'
+      },
+      evolucao_diaria: evolucaoDiaria,
       top_clientes: topClientesQuery.rows.map(r => ({
         cliente: r.cliente,
         entregas: parseInt(r.entregas),
         taxa_prazo: parseFloat(r.taxa_prazo) || 0,
-        valor: parseFloat(r.valor) || 0
+        valor: parseFloat(r.valor) || 0,
+        tempo_medio: parseFloat(r.tempo_medio) || 0,
+        km_medio: parseFloat(r.km_medio) || 0,
+        retornos: parseInt(r.retornos) || 0
       })),
       top_profissionais: topProfsQuery.rows.map(r => ({
         profissional: r.profissional,
         entregas: parseInt(r.entregas),
         taxa_prazo: parseFloat(r.taxa_prazo) || 0,
+        tempo_medio: parseFloat(r.tempo_medio) || 0,
+        km_total: parseFloat(r.km_total) || 0,
+        valor_recebido: parseFloat(r.valor_recebido) || 0
+      })),
+      piores_profissionais: pioresProfsQuery.rows.map(r => ({
+        profissional: r.profissional,
+        entregas: parseInt(r.entregas),
+        taxa_prazo: parseFloat(r.taxa_prazo) || 0,
         tempo_medio: parseFloat(r.tempo_medio) || 0
       })),
-      distribuicao_dia_semana: dadosDiaSemana
+      distribuicao_dia_semana: dadosDiaSemana,
+      distribuicao_hora: dadosPorHora
     };
     
     // Definir prompt base por tipo
@@ -7585,35 +7679,42 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         Avalie se o tempo médio de entrega está adequado.
         Dê uma nota geral de 0 a 10 para a operação.`,
       
-      tendencias: `## ANÁLISE DE TENDÊNCIAS
-        Identifique tendências e padrões nos dados.
-        Analise a evolução diária - está melhorando ou piorando?
-        Identifique padrões por dia da semana.
-        Preveja como será o desempenho nas próximas semanas se a tendência continuar.
-        Destaque comportamentos recorrentes.`,
+      tendencias: `## 📉 TENDÊNCIAS
+Analise a evolução e identifique padrões.
+- A operação está melhorando ou piorando?
+- Quais dias/horários têm mais problemas?
+- Previsão para próximas semanas
+Use gráficos ASCII simples se ajudar a visualizar.`,
       
-      alertas: `## ALERTAS E ANOMALIAS
-        Identifique problemas e anomalias que precisam de atenção urgente.
-        Destaque clientes com performance muito abaixo da média.
-        Identifique profissionais com desempenho preocupante.
-        Aponte dias com quedas bruscas de performance.
-        Liste as 3 maiores prioridades de correção.`,
+      alertas: `## ⚠️ ALERTAS URGENTES
+Liste APENAS problemas críticos que precisam de ação IMEDIATA.
+Formato:
+🔴 CRÍTICO: [problema] → [ação sugerida]
+🟡 ATENÇÃO: [problema] → [ação sugerida]
+🟢 MONITORAR: [problema] → [ação sugerida]
+Máximo 5 alertas, ordenados por urgência.`,
       
-      financeiro: `## ANÁLISE FINANCEIRA
-        Faça uma análise financeira detalhada.
-        Calcule a margem de lucro (valor total - valor profissionais).
-        Analise se o ticket médio está adequado.
-        Identifique clientes mais e menos rentáveis.
-        Sugira formas de aumentar a rentabilidade.`,
+      financeiro: `## 💰 ANÁLISE FINANCEIRA
+Apresente em formato de tabela:
+| Métrica | Valor | Status |
+Inclua: Faturamento, Custos, Margem, Ticket Médio, Custo por Entrega
+Destaque oportunidades de economia e aumento de receita.`,
       
-      comparativo: `## ANÁLISE COMPARATIVA
-        Compare o desempenho entre clientes e profissionais.
-        Crie um ranking dos melhores e piores clientes.
-        Identifique os profissionais mais eficientes.
-        Compare a performance entre dias da semana.
-        Destaque quem está acima e abaixo da média.`,
+      comparativo: `## 🏆 RANKINGS
+**TOP 3 Melhores:**
+🥇 [nome] - [métrica principal]
+🥈 [nome] - [métrica]
+🥉 [nome] - [métrica]
+
+**⚠️ 3 que precisam melhorar:**
+1. [nome] - [problema] - [sugestão]
+2. [nome] - [problema] - [sugestão]
+3. [nome] - [problema] - [sugestão]
+
+**Comparativo Dias da Semana:**
+Melhor dia: [dia] | Pior dia: [dia]`,
       
-      personalizado: prompt_custom ? `## ANÁLISE PERSONALIZADA\n${prompt_custom}` : null
+      personalizado: prompt_custom ? `## ✨ ANÁLISE PERSONALIZADA\n${prompt_custom}` : null
     };
     
     // Combinar prompts dos tipos selecionados
@@ -7627,45 +7728,67 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       return labels[t] || t;
     }).join(', ');
     
-    const promptCompleto = `Você é um analista de dados especialista em operações de delivery e logística.
-    
-Analise os seguintes dados de uma operação de entregas por motoboys:
+    const promptCompleto = `Você é um analista de operações de delivery. Seja DIRETO e VISUAL. Use emojis, tabelas e formatação para facilitar a leitura. Evite textos longos.
 
-=== PERÍODO ===
-${contexto.periodo.inicio} a ${contexto.periodo.fim}
+📊 **DADOS DA OPERAÇÃO** (${contexto.periodo.inicio} a ${contexto.periodo.fim})
 
-=== MÉTRICAS GERAIS ===
-- Total de entregas: ${contexto.metricas_gerais.total_entregas}
-- Taxa de prazo: ${contexto.metricas_gerais.taxa_prazo}%
-- Entregas no prazo: ${contexto.metricas_gerais.entregas_no_prazo}
-- Entregas fora do prazo: ${contexto.metricas_gerais.entregas_fora_prazo}
-- Valor total faturado: R$ ${contexto.metricas_gerais.valor_total.toLocaleString('pt-BR')}
-- Valor pago aos profissionais: R$ ${contexto.metricas_gerais.valor_profissionais.toLocaleString('pt-BR')}
-- Lucro bruto estimado: R$ ${contexto.metricas_gerais.lucro_estimado.toLocaleString('pt-BR')}
-- Tempo médio de entrega: ${contexto.metricas_gerais.tempo_medio_entrega_minutos} minutos
-- Total de profissionais ativos: ${contexto.metricas_gerais.total_profissionais}
-- Total de clientes atendidos: ${contexto.metricas_gerais.total_clientes}
+📦 **RESUMO GERAL**
+| Métrica | Valor |
+|---------|-------|
+| Total Entregas | ${contexto.metricas_gerais.total_entregas.toLocaleString()} |
+| ✅ No Prazo | ${contexto.metricas_gerais.entregas_no_prazo.toLocaleString()} (${contexto.metricas_gerais.taxa_prazo}%) |
+| ❌ Fora Prazo | ${contexto.metricas_gerais.entregas_fora_prazo.toLocaleString()} |
+| 🔄 Retornos | ${contexto.metricas_gerais.total_retornos.toLocaleString()} |
+| ⏱️ Tempo Médio | ${contexto.metricas_gerais.tempo_medio_entrega} min |
+| 🚗 KM Médio | ${contexto.metricas_gerais.km_medio} km |
+| 👥 Profissionais | ${contexto.metricas_gerais.total_profissionais} |
+| 🏢 Clientes | ${contexto.metricas_gerais.total_clientes} |
 
-=== EVOLUÇÃO DIÁRIA (últimos dias) ===
-${contexto.evolucao_diaria.map(d => `${d.data}: ${d.entregas} entregas, ${d.taxa_prazo}% no prazo, R$ ${d.valor.toLocaleString('pt-BR')}`).join('\n')}
+💵 **FINANCEIRO**
+| Métrica | Valor |
+|---------|-------|
+| Faturamento | R$ ${contexto.metricas_gerais.valor_total.toLocaleString('pt-BR')} |
+| Custo Profissionais | R$ ${contexto.metricas_gerais.valor_profissionais.toLocaleString('pt-BR')} |
+| Lucro Bruto | R$ ${contexto.metricas_gerais.lucro_bruto.toLocaleString('pt-BR')} |
+| Margem | ${contexto.metricas_gerais.margem_percentual}% |
+| Ticket Médio | R$ ${contexto.metricas_gerais.ticket_medio} |
+| Média/Profissional | ${contexto.metricas_gerais.media_entregas_por_profissional} entregas |
 
-=== TOP 10 CLIENTES ===
-${contexto.top_clientes.map((c, i) => `${i+1}. ${c.cliente}: ${c.entregas} entregas, ${c.taxa_prazo}% prazo, R$ ${c.valor.toLocaleString('pt-BR')}`).join('\n')}
+📈 **TENDÊNCIA:** ${contexto.tendencia.direcao} (${contexto.tendencia.variacao_taxa > 0 ? '+' : ''}${contexto.tendencia.variacao_taxa}%)
 
-=== TOP 10 PROFISSIONAIS ===
-${contexto.top_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.entregas} entregas, ${p.taxa_prazo}% prazo, ${p.tempo_medio} min/entrega`).join('\n')}
+📅 **EVOLUÇÃO DIÁRIA (últimos ${contexto.evolucao_diaria.length} dias)**
+${contexto.evolucao_diaria.map(d => `${d.data}: ${d.entregas} ent | ${d.taxa_prazo}% ✓ | R$${d.valor.toLocaleString('pt-BR')}`).join('\n')}
 
-=== DISTRIBUIÇÃO POR DIA DA SEMANA ===
-${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} entregas, ${d.taxa_prazo}% no prazo`).join('\n')}
+🏢 **TOP CLIENTES**
+${contexto.top_clientes.map((c, i) => `${i+1}. ${c.cliente}: ${c.entregas} ent | ${c.taxa_prazo}% | R$${c.valor.toLocaleString('pt-BR')} | ${c.tempo_medio}min | ${c.retornos} ret`).join('\n')}
 
-=== SUAS TAREFAS (${tipos.length} análise(s) solicitada(s)) ===
+👤 **TOP PROFISSIONAIS**
+${contexto.top_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.entregas} ent | ${p.taxa_prazo}% | ${p.tempo_medio}min | ${p.km_total.toLocaleString()}km | R$${p.valor_recebido.toLocaleString('pt-BR')}`).join('\n')}
+
+⚠️ **PROFISSIONAIS COM BAIXA PERFORMANCE** (mín 10 entregas)
+${contexto.piores_profissionais.map((p, i) => `${i+1}. ${p.profissional}: ${p.taxa_prazo}% prazo | ${p.tempo_medio}min | ${p.entregas} ent`).join('\n')}
+
+📆 **POR DIA DA SEMANA**
+${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} ent | ${d.taxa_prazo}% | ${d.tempo_medio}min`).join('\n')}
+
+⏰ **POR HORÁRIO (pico)**
+${contexto.distribuicao_hora.filter(h => h.entregas > 0).slice(0, 10).map(h => `${h.hora}h: ${h.entregas} ent | ${h.taxa_prazo}%`).join('\n')}
+
+---
+🎯 **SUAS TAREFAS:**
 ${promptsCombinados}
 
-Responda em português brasileiro, de forma clara e objetiva.
-Use **negrito** para destacar pontos importantes.
-Organize a resposta em seções claras separadas para cada tipo de análise solicitada.
-Seja direto e dê insights acionáveis.
-${tipos.length > 1 ? 'IMPORTANTE: Faça TODAS as análises solicitadas acima, uma seção para cada.' : ''}`;
+---
+📝 **REGRAS DE FORMATAÇÃO:**
+- Seja DIRETO, sem enrolação
+- Use emojis para facilitar leitura
+- Use tabelas quando possível
+- Bullets curtos, máximo 1 linha
+- Destaque números importantes em **negrito**
+- Para rankings use 🥇🥈🥉
+- Para status use ✅❌⚠️🔴🟡🟢
+- Evite explicações longas, vá direto ao ponto
+${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seção' : ''}`;
 
     console.log('🤖 Chamando API Gemini...');
     
