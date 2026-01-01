@@ -7697,14 +7697,16 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       distribuicao_hora: dadosPorHora,
       horario_pico: horarioPico ? {
         hora: horarioPico.hora,
-        entregas: horarioPico.entregas,
+        entregas_total_periodo: horarioPico.entregas,
+        entregas_media_dia: (horarioPico.entregas / (porDiaQuery.rows.length || 1)).toFixed(1),
         percentual: totalEntregasHora > 0 ? ((horarioPico.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
         profissionais_necessarios: Math.ceil(horarioPico.entregas / (porDiaQuery.rows.length || 1) / 10)
       } : null,
       janela_pico: {
         inicio: melhorJanela.inicio,
         fim: melhorJanela.fim,
-        entregas: melhorJanela.entregas,
+        entregas_total_periodo: melhorJanela.entregas,
+        entregas_media_dia: (melhorJanela.entregas / (porDiaQuery.rows.length || 1)).toFixed(1),
         percentual: totalEntregasHora > 0 ? ((melhorJanela.entregas / totalEntregasHora) * 100).toFixed(1) : 0,
         profissionais_necessarios: Math.ceil(melhorJanela.entregas / (porDiaQuery.rows.length || 1) / 10)
       }
@@ -7877,17 +7879,21 @@ ${contexto.distribuicao_dia_semana.map(d => `${d.dia}: ${d.entregas} ent | ${d.t
 ⏰ **DISTRIBUIÇÃO POR HORÁRIO**
 ${contexto.distribuicao_hora.filter(h => h.entregas > 0).map(h => `${h.hora}h: ${h.entregas} ent | ${h.taxa_prazo}%`).join('\n')}
 
-🔥 **HORÁRIO DE PICO**
-${contexto.horario_pico ? `- Hora com maior volume: ${contexto.horario_pico.hora}h
-- Entregas neste horário (total período): ${contexto.horario_pico.entregas}
-- % do total: ${contexto.horario_pico.percentual}%` : '- Sem dados de horário disponíveis'}
+🔥 **HORÁRIO DE PICO (hora com maior volume)**
+${contexto.horario_pico ? `- Hora: ${contexto.horario_pico.hora}h
+- Total no período: ${contexto.horario_pico.entregas_total_periodo} entregas
+- **Média por dia: ${contexto.horario_pico.entregas_media_dia} entregas/dia**
+- % do total: ${contexto.horario_pico.percentual}%
+- **👥 Profissionais necessários: ${contexto.horario_pico.profissionais_necessarios} motoboys**
+- Cálculo: ${contexto.horario_pico.entregas_media_dia} entregas/dia ÷ 10 = ${contexto.horario_pico.profissionais_necessarios} profissionais` : '- Sem dados de horário disponíveis'}
 
 🔥 **JANELA DE PICO (3 horas consecutivas com maior volume)**
 ${contexto.janela_pico ? `- Janela: ${contexto.janela_pico.inicio}h às ${contexto.janela_pico.fim + 1}h
-- Entregas na janela (total período): ${contexto.janela_pico.entregas}
+- Total no período: ${contexto.janela_pico.entregas_total_periodo} entregas
+- **Média por dia: ${contexto.janela_pico.entregas_media_dia} entregas/dia**
 - % do total: ${contexto.janela_pico.percentual}%
-- Média de entregas/dia nesta janela: ${(contexto.janela_pico.entregas / contexto.metricas_gerais.total_dias_periodo).toFixed(1)}
-- **👥 Profissionais necessários no pico:** ${contexto.janela_pico.profissionais_necessarios} motoboys` : '- Sem dados disponíveis'}
+- **👥 Profissionais necessários: ${contexto.janela_pico.profissionais_necessarios} motoboys**
+- Cálculo: ${contexto.janela_pico.entregas_media_dia} entregas/dia ÷ 10 = ${contexto.janela_pico.profissionais_necessarios} profissionais` : '- Sem dados disponíveis'}
 
 ---
 🎯 **SUAS TAREFAS:**
