@@ -7974,16 +7974,25 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
     // Buscar nome do cliente se filtrado
     let clienteInfo = null;
     if (cod_cliente.length > 0) {
-      const clienteQuery = await pool.query(`
-        SELECT DISTINCT cod_cliente, cliente 
-        FROM bi_entregas 
-        WHERE cod_cliente = ANY($1::int[])
-        LIMIT 1
-      `, [cod_cliente.map(c => parseInt(c))]);
-      if (clienteQuery.rows.length > 0) {
+      try {
+        const clienteQuery = await pool.query(`
+          SELECT DISTINCT cod_cliente, 
+                 COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente::text) as nome
+          FROM bi_entregas 
+          WHERE cod_cliente = ANY($1::int[])
+          LIMIT 1
+        `, [cod_cliente.map(c => parseInt(c))]);
+        if (clienteQuery.rows.length > 0) {
+          clienteInfo = {
+            codigo: clienteQuery.rows[0].cod_cliente,
+            nome: clienteQuery.rows[0].nome
+          };
+        }
+      } catch (e) {
+        console.log('⚠️ Não foi possível buscar nome do cliente:', e.message);
         clienteInfo = {
-          codigo: clienteQuery.rows[0].cod_cliente,
-          nome: clienteQuery.rows[0].cliente
+          codigo: cod_cliente[0],
+          nome: null
         };
       }
     }
