@@ -8027,41 +8027,15 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
   }
 });
 
-// Endpoint para gerar relatório Word
+// Endpoint para gerar relatório Word (via HTML)
 app.post('/api/bi/relatorio-ia/word', async (req, res) => {
   try {
     const { tipo_analise, periodo, metricas, relatorio, filtros } = req.body;
     
     console.log('📄 Gerando relatório Word...');
     
-    let Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
-        Header, Footer, AlignmentType, BorderStyle, WidthType, 
-        ShadingType, PageNumber, HeadingLevel;
-    
-    try {
-      const docx = require('docx');
-      Document = docx.Document;
-      Packer = docx.Packer;
-      Paragraph = docx.Paragraph;
-      TextRun = docx.TextRun;
-      Table = docx.Table;
-      TableRow = docx.TableRow;
-      TableCell = docx.TableCell;
-      Header = docx.Header;
-      Footer = docx.Footer;
-      AlignmentType = docx.AlignmentType;
-      BorderStyle = docx.BorderStyle;
-      WidthType = docx.WidthType;
-      ShadingType = docx.ShadingType;
-      PageNumber = docx.PageNumber;
-      HeadingLevel = docx.HeadingLevel;
-    } catch (e) {
-      console.error('❌ Biblioteca docx não instalada:', e.message);
-      return res.status(500).json({ error: 'Biblioteca docx não está instalada. Execute: npm install docx' });
-    }
-    
     // Montar título dinâmico
-    let tituloRelatorio = "RELATORIO OPERACIONAL";
+    let tituloRelatorio = "RELATÓRIO OPERACIONAL";
     let subtituloCliente = "";
     
     if (filtros?.cliente) {
@@ -8074,225 +8048,162 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
       subtituloCliente = `Centro de Custo: ${filtros.centro_custo.join(', ')}`;
     }
     
-    // Cores
-    const corVerde = "059669";
-    const corVerdeClaro = "D1FAE5";
-    const corVermelho = "DC2626";
-    const corAmarelo = "FEF3C7";
-    const corCinza = "64748B";
+    const m = metricas || {};
     
-    // Processar texto do relatório em parágrafos
-    const processarRelatorio = (texto) => {
-      if (!texto) return [];
+    // Processar relatório para HTML
+    const processarRelatorioHTML = (texto) => {
+      if (!texto) return '';
       
-      const paragrafos = [];
-      const linhas = texto.split('\n');
-      
-      linhas.forEach(linha => {
-        linha = linha.trim();
-        if (!linha) return;
-        
-        // Detectar tipo de linha
-        const isTituloSecao = /^##\s/.test(linha) || /^[📊📈📉⚠️👥🏆🔥⏰📅]/.test(linha);
-        const isSubtitulo = /^\*\*[^*]+\*\*$/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
-        const isAlertaCritico = /🔴|CRÍTICO/i.test(linha);
-        const isAlertaAtencao = /🟡|ATENÇÃO/i.test(linha);
-        const isAlertaOk = /🟢|✅|OK/i.test(linha);
-        const isItem = /^[-•*]\s/.test(linha) || /^[🥇🥈🥉]/.test(linha) || /^\d+\.\s/.test(linha);
-        const isTabela = /^\|/.test(linha);
-        
-        // Limpar markdown
-        let textoLimpo = linha
-          .replace(/^##\s*/, '')
-          .replace(/\*\*(.*?)\*\*/g, '$1')
-          .replace(/^\|\s*|\s*\|$/g, '')
-          .replace(/\|/g, ' | ')
-          .replace(/-{3,}/g, '');
-        
-        if (isTabela && /^[-\s|]+$/.test(textoLimpo)) return; // Pular linhas de separação de tabela
-        
-        if (isTituloSecao) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 300, after: 100 },
-            shading: { fill: corVerdeClaro, type: ShadingType.CLEAR },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 24, color: corVerde })]
-          }));
-        } else if (isSubtitulo) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 200, after: 80 },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 22, color: "333333" })]
-          }));
-        } else if (isAlertaCritico) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 100, after: 100 },
-            shading: { fill: "FEE2E2", type: ShadingType.CLEAR },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: corVermelho })]
-          }));
-        } else if (isAlertaAtencao) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 100, after: 100 },
-            shading: { fill: corAmarelo, type: ShadingType.CLEAR },
-            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "B45309" })]
-          }));
-        } else if (isAlertaOk) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 60, after: 60 },
-            children: [new TextRun({ text: textoLimpo, size: 20, color: corVerde })]
-          }));
-        } else if (isItem) {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 40, after: 40 },
-            indent: { left: 400 },
-            children: [new TextRun({ text: textoLimpo, size: 20 })]
-          }));
-        } else {
-          paragrafos.push(new Paragraph({
-            spacing: { before: 60, after: 60 },
-            children: [new TextRun({ text: textoLimpo, size: 20 })]
-          }));
-        }
-      });
-      
-      return paragrafos;
+      return texto
+        .split('\n')
+        .map(linha => {
+          linha = linha.trim();
+          if (!linha) return '<p style="margin:5px 0;">&nbsp;</p>';
+          
+          // Detectar tipo de linha
+          const isTituloSecao = /^##\s/.test(linha) || /^[📊📈📉⚠️👥🏆🔥⏰📅]/.test(linha);
+          const isSubtitulo = /^\*\*[^*]+\*\*$/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
+          const isAlertaCritico = /🔴|CRÍTICO/i.test(linha);
+          const isAlertaAtencao = /🟡|ATENÇÃO/i.test(linha);
+          const isAlertaOk = /🟢|✅|OK\b/i.test(linha);
+          const isItem = /^[-•*]\s/.test(linha) || /^[🥇🥈🥉]/.test(linha) || /^\d+\.\s/.test(linha);
+          const isTabela = /^\|/.test(linha);
+          
+          // Limpar markdown
+          let textoLimpo = linha
+            .replace(/^##\s*/, '')
+            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+          
+          // Pular linhas de separação de tabela
+          if (isTabela && /^[\|\-\s]+$/.test(linha.replace(/\|/g, '').replace(/-/g, '').trim())) {
+            return '';
+          }
+          
+          if (isTituloSecao) {
+            return `<p style="background:#D1FAE5;padding:8px 12px;margin:15px 0 8px 0;border-radius:4px;"><b style="color:#059669;font-size:14pt;">${textoLimpo}</b></p>`;
+          } else if (isSubtitulo) {
+            return `<p style="margin:12px 0 6px 0;"><b style="color:#333;font-size:12pt;">${textoLimpo}</b></p>`;
+          } else if (isAlertaCritico) {
+            return `<p style="background:#FEE2E2;padding:6px 12px;margin:8px 0;border-radius:4px;border-left:4px solid #DC2626;"><b style="color:#DC2626;">${textoLimpo}</b></p>`;
+          } else if (isAlertaAtencao) {
+            return `<p style="background:#FEF3C7;padding:6px 12px;margin:8px 0;border-radius:4px;border-left:4px solid #D97706;"><b style="color:#B45309;">${textoLimpo}</b></p>`;
+          } else if (isAlertaOk) {
+            return `<p style="margin:4px 0;color:#059669;">${textoLimpo}</p>`;
+          } else if (isItem) {
+            return `<p style="margin:4px 0 4px 20px;">${textoLimpo}</p>`;
+          } else if (isTabela) {
+            return `<p style="margin:2px 0;font-family:monospace;font-size:10pt;">${textoLimpo}</p>`;
+          } else {
+            return `<p style="margin:6px 0;">${textoLimpo}</p>`;
+          }
+        })
+        .filter(l => l)
+        .join('\n');
     };
     
-    // Criar tabela de métricas
-    const criarTabelaMetricas = (m) => {
-      const borda = { style: BorderStyle.SINGLE, size: 1, color: "E2E8F0" };
-      const bordas = { top: borda, bottom: borda, left: borda, right: borda };
-      
-      return new Table({
-        columnWidths: [2340, 2340, 2340, 2340],
-        rows: [
-          new TableRow({
-            children: [
-              new TableCell({
-                borders: bordas,
-                shading: { fill: "EFF6FF", type: ShadingType.CLEAR },
-                width: { size: 2340, type: WidthType.DXA },
-                children: [
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String((m.total_entregas || 0).toLocaleString('pt-BR')), bold: true, size: 28, color: "2563EB" })] }),
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Entregas", size: 16, color: corCinza })] })
-                ]
-              }),
-              new TableCell({
-                borders: bordas,
-                shading: { fill: "ECFDF5", type: ShadingType.CLEAR },
-                width: { size: 2340, type: WidthType.DXA },
-                children: [
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: (m.taxa_prazo || 0).toFixed(1) + "%", bold: true, size: 28, color: corVerde })] }),
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Taxa Prazo", size: 16, color: corCinza })] })
-                ]
-              }),
-              new TableCell({
-                borders: bordas,
-                shading: { fill: "F5F3FF", type: ShadingType.CLEAR },
-                width: { size: 2340, type: WidthType.DXA },
-                children: [
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: (m.tempo_medio_entrega || 0).toFixed(0) + " min", bold: true, size: 28, color: "7C3AED" })] }),
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Tempo Médio", size: 16, color: corCinza })] })
-                ]
-              }),
-              new TableCell({
-                borders: bordas,
-                shading: { fill: "FFF7ED", type: ShadingType.CLEAR },
-                width: { size: 2340, type: WidthType.DXA },
-                children: [
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(m.media_profissionais_por_dia || 0), bold: true, size: 28, color: "EA580C" })] }),
-                  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Motos/Dia", size: 16, color: corCinza })] })
-                ]
-              })
-            ]
-          })
-        ]
-      });
-    };
+    // Gerar HTML compatível com Word
+    const html = `
+<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<!--[if gte mso 9]>
+<xml>
+<w:WordDocument>
+<w:View>Print</w:View>
+<w:Zoom>100</w:Zoom>
+</w:WordDocument>
+</xml>
+<![endif]-->
+<style>
+@page { margin: 2cm; }
+body { font-family: Arial, sans-serif; font-size: 11pt; color: #333; line-height: 1.5; }
+.header { background: #059669; color: white; padding: 20px; text-align: center; margin: -2cm -2cm 20px -2cm; }
+.header h1 { margin: 0; font-size: 20pt; }
+.header p { margin: 5px 0 0 0; font-size: 10pt; opacity: 0.9; }
+.subtitulo { text-align: center; font-size: 14pt; color: #333; margin-bottom: 10px; }
+.info { text-align: center; color: #64748B; font-size: 10pt; margin-bottom: 20px; }
+.metricas { width: 100%; border-collapse: collapse; margin-bottom: 25px; }
+.metricas td { width: 25%; text-align: center; padding: 15px 10px; border: 1px solid #E2E8F0; }
+.metricas .valor { font-size: 18pt; font-weight: bold; }
+.metricas .label { font-size: 9pt; color: #64748B; margin-top: 5px; }
+.metricas td:nth-child(1) { background: #EFF6FF; }
+.metricas td:nth-child(1) .valor { color: #2563EB; }
+.metricas td:nth-child(2) { background: #ECFDF5; }
+.metricas td:nth-child(2) .valor { color: #059669; }
+.metricas td:nth-child(3) { background: #F5F3FF; }
+.metricas td:nth-child(3) .valor { color: #7C3AED; }
+.metricas td:nth-child(4) { background: #FFF7ED; }
+.metricas td:nth-child(4) .valor { color: #EA580C; }
+.titulo-secao { border-bottom: 3px solid #059669; padding-bottom: 8px; margin: 25px 0 15px 0; }
+.titulo-secao span { color: #059669; font-size: 14pt; font-weight: bold; }
+.conteudo { margin-top: 15px; }
+.footer { text-align: center; color: #94A3B8; font-size: 9pt; margin-top: 30px; padding-top: 15px; border-top: 1px solid #E2E8F0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>${tituloRelatorio}</h1>
+  ${subtituloCliente ? `<p><b>${subtituloCliente}</b></p>` : ''}
+</div>
+
+<p class="info">
+  <b>Análise:</b> ${tipo_analise || 'Geral'} &nbsp;|&nbsp; 
+  <b>Período:</b> ${periodo?.inicio || ''} a ${periodo?.fim || ''} &nbsp;|&nbsp; 
+  <b>Gerado em:</b> ${new Date().toLocaleString('pt-BR')}
+</p>
+
+<table class="metricas">
+  <tr>
+    <td>
+      <div class="valor">${(m.total_entregas || 0).toLocaleString('pt-BR')}</div>
+      <div class="label">ENTREGAS</div>
+    </td>
+    <td>
+      <div class="valor">${(m.taxa_prazo || 0).toFixed(1)}%</div>
+      <div class="label">TAXA PRAZO</div>
+    </td>
+    <td>
+      <div class="valor">${(m.tempo_medio_entrega || 0).toFixed(0)} min</div>
+      <div class="label">TEMPO MÉDIO</div>
+    </td>
+    <td>
+      <div class="valor">${m.media_profissionais_por_dia || 0}</div>
+      <div class="label">MOTOS/DIA</div>
+    </td>
+  </tr>
+</table>
+
+<div class="titulo-secao">
+  <span>ANÁLISE DETALHADA</span>
+</div>
+
+<div class="conteudo">
+${processarRelatorioHTML(relatorio)}
+</div>
+
+<div class="footer">
+  Sistema Tutts - Business Intelligence
+</div>
+
+</body>
+</html>`;
     
-    // Criar documento
-    const doc = new Document({
-      styles: {
-        default: { document: { run: { font: "Arial", size: 22 } } }
-      },
-      sections: [{
-        properties: {
-          page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } }
-        },
-        headers: {
-          default: new Header({
-            children: [new Paragraph({
-              alignment: AlignmentType.CENTER,
-              shading: { fill: corVerde, type: ShadingType.CLEAR },
-              spacing: { after: 200 },
-              children: [
-                new TextRun({ text: tituloRelatorio, bold: true, size: 32, color: "FFFFFF" })
-              ]
-            })]
-          })
-        },
-        footers: {
-          default: new Footer({
-            children: [new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [
-                new TextRun({ text: "Sistema Tutts - Business Intelligence  |  Página ", size: 16, color: corCinza }),
-                new TextRun({ children: [PageNumber.CURRENT], size: 16, color: corCinza }),
-                new TextRun({ text: " de ", size: 16, color: corCinza }),
-                new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 16, color: corCinza })
-              ]
-            })]
-          })
-        },
-        children: [
-          // Nome do cliente (se houver)
-          ...(subtituloCliente ? [new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 100 },
-            children: [new TextRun({ text: subtituloCliente, bold: true, size: 24, color: "333333" })]
-          })] : []),
-          // Informações do relatório
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 100 },
-            children: [new TextRun({ text: "Análise: " + (tipo_analise || "Geral"), size: 22, color: corCinza })]
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 100 },
-            children: [new TextRun({ text: "Período: " + (periodo?.inicio || "") + " a " + (periodo?.fim || ""), size: 22, color: corCinza })]
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 300 },
-            children: [new TextRun({ text: "Gerado em: " + new Date().toLocaleString('pt-BR'), size: 20, color: corCinza })]
-          }),
-          
-          // Tabela de métricas
-          criarTabelaMetricas(metricas || {}),
-          
-          // Espaço
-          new Paragraph({ spacing: { before: 400, after: 200 }, children: [] }),
-          
-          // Título do conteúdo
-          new Paragraph({
-            spacing: { after: 200 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: corVerde } },
-            children: [new TextRun({ text: "ANÁLISE DETALHADA", bold: true, size: 26, color: corVerde })]
-          }),
-          
-          // Conteúdo do relatório
-          ...processarRelatorio(relatorio)
-        ]
-      }]
-    });
+    // Montar nome do arquivo
+    let nomeArquivo = 'relatorio-operacional';
+    if (filtros?.cliente) {
+      nomeArquivo += '-' + filtros.cliente.codigo;
+    }
+    nomeArquivo += '-' + new Date().toISOString().split('T')[0] + '.doc';
     
-    // Gerar buffer
-    const buffer = await Packer.toBuffer(doc);
-    
-    // Enviar arquivo
-    const nomeArquivo = 'relatorio-ia-' + new Date().toISOString().split('T')[0] + '.docx';
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    // Enviar como Word
+    res.setHeader('Content-Type', 'application/msword');
     res.setHeader('Content-Disposition', 'attachment; filename=' + nomeArquivo);
-    res.send(buffer);
+    res.send(html);
+    
+    console.log('✅ Relatório Word gerado com sucesso');
     
   } catch (err) {
     console.error('❌ Erro ao gerar Word:', err.message);
