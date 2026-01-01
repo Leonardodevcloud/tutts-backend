@@ -7836,8 +7836,15 @@ Sinalize com ⚠️ quem está >50% acima ou abaixo da média do grupo.
       personalizado: prompt_custom ? `## ✨ ANÁLISE PERSONALIZADA\n${prompt_custom}` : null
     };
     
+    // Reordenar tipos para alertas vir sempre por último
+    const tiposOrdenados = [...tipos].sort((a, b) => {
+      if (a === 'alertas') return 1;
+      if (b === 'alertas') return -1;
+      return 0;
+    });
+    
     // Combinar prompts dos tipos selecionados
-    const promptsCombinados = tipos
+    const promptsCombinados = tiposOrdenados
       .map(t => promptsBase[t])
       .filter(p => p !== null)
       .join('\n\n');
