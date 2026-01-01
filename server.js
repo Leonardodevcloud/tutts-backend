@@ -8034,12 +8034,16 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
   }
 });
 
-// Endpoint para gerar relatório Word (via HTML)
+// Endpoint para gerar relatório Word (.docx nativo)
 app.post('/api/bi/relatorio-ia/word', async (req, res) => {
   try {
     const { tipo_analise, periodo, metricas, relatorio, filtros } = req.body;
     
-    console.log('📄 Gerando relatório Word...');
+    console.log('📄 Gerando relatório Word (.docx)...');
+    
+    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, 
+            Header, Footer, AlignmentType, BorderStyle, WidthType, 
+            ShadingType, PageNumber, HeadingLevel, convertInchesToTwip } = require('docx');
     
     // Montar título dinâmico
     let tituloRelatorio = "RELATÓRIO OPERACIONAL";
@@ -8057,167 +8061,239 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
     
     const m = metricas || {};
     
-    // Processar relatório para HTML - Replicando exatamente o visual do sistema
-    const processarRelatorioHTML = (texto) => {
-      if (!texto) return '';
+    // Função para criar célula de métrica
+    const criarCelulaMetrica = (valor, label, corValor, corFundo) => {
+      return new TableCell({
+        width: { size: 2340, type: WidthType.DXA },
+        shading: { fill: corFundo, type: ShadingType.CLEAR },
+        margins: { top: 150, bottom: 150, left: 100, right: 100 },
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 50 },
+            children: [new TextRun({ text: valor, bold: true, size: 36, color: corValor })]
+          }),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [new TextRun({ text: label, size: 16, color: "64748B" })]
+          })
+        ]
+      });
+    };
+    
+    // Criar tabela de métricas
+    const tabelaMetricas = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      columnWidths: [2340, 2340, 2340, 2340],
+      borders: {
+        top: { style: BorderStyle.NONE },
+        bottom: { style: BorderStyle.NONE },
+        left: { style: BorderStyle.NONE },
+        right: { style: BorderStyle.NONE },
+        insideHorizontal: { style: BorderStyle.NONE },
+        insideVertical: { style: BorderStyle.SINGLE, size: 8, color: "FFFFFF" }
+      },
+      rows: [
+        new TableRow({
+          children: [
+            criarCelulaMetrica((m.total_entregas || 0).toLocaleString('pt-BR'), "ENTREGAS", "2563EB", "EFF6FF"),
+            criarCelulaMetrica((m.taxa_prazo || 0).toFixed(1) + "%", "TAXA PRAZO", "059669", "ECFDF5"),
+            criarCelulaMetrica((m.tempo_medio_entrega || 0).toFixed(0) + " min", "TEMPO MÉDIO", "7C3AED", "F5F3FF"),
+            criarCelulaMetrica(String(m.media_profissionais_por_dia || 0), "MOTOS/DIA", "EA580C", "FFF7ED")
+          ]
+        })
+      ]
+    });
+    
+    // Processar relatório em parágrafos
+    const processarRelatorio = (texto) => {
+      if (!texto) return [];
       
-      let html = '';
+      const paragrafos = [];
       const linhas = texto.split('\n');
       
       for (let i = 0; i < linhas.length; i++) {
-        let linha = linhas[i];
-        if (!linha.trim()) {
-          html += '<br/>';
-          continue;
-        }
+        const linha = linhas[i];
+        if (!linha.trim()) continue;
         
         // Detectar tipo de linha
         const isTituloSecao = /^##\s/.test(linha);
-        const isSubtitulo = /^\*\*\d️⃣/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
         const isAlertaCritico = /🔴/.test(linha);
         const isAlertaAtencao = /🟡/.test(linha);
         const isAlertaOk = /🟢|✅/.test(linha);
-        const isTabelaHeader = /^\|.*\|$/.test(linha) && linhas[i+1] && /^\|[-\s|]+\|$/.test(linhas[i+1]);
-        const isTabelaSeparador = /^\|[-\s|]+\|$/.test(linha);
-        const isTabelaLinha = /^\|.*\|$/.test(linha) && !isTabelaSeparador;
+        const isSubtitulo = /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
         const isItemLista = /^[-*•]\s/.test(linha.trim()) || /^[🥇🥈🥉]/.test(linha);
+        const isTabelaSeparador = /^\|[-\s|]+\|$/.test(linha);
         
-        // Processar markdown para HTML
-        let textoProcessado = linha
-          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-          .replace(/^##\s*/, '');
+        if (isTabelaSeparador) continue;
         
-        if (isTabelaSeparador) {
-          continue; // Pular separadores de tabela markdown
-        }
+        // Limpar markdown
+        let textoLimpo = linha
+          .replace(/^##\s*/, '')
+          .replace(/\*\*/g, '');
         
         if (isTituloSecao) {
-          html += `<div style="background:linear-gradient(135deg,#059669,#0d9488);color:white;padding:12px 16px;margin:20px 0 12px 0;border-radius:8px;font-size:14pt;font-weight:bold;">${textoProcessado}</div>`;
-        } else if (isSubtitulo) {
-          html += `<div style="color:#059669;font-weight:bold;font-size:12pt;margin:16px 0 8px 0;padding-bottom:4px;border-bottom:2px solid #059669;">${textoProcessado}</div>`;
+          paragrafos.push(new Paragraph({
+            spacing: { before: 300, after: 150 },
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            children: [new TextRun({ text: "  " + textoLimpo, bold: true, size: 24, color: "FFFFFF" })]
+          }));
         } else if (isAlertaCritico) {
-          html += `<div style="background:#FEE2E2;border-left:4px solid #DC2626;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#DC2626;font-weight:bold;">${textoProcessado}</span></div>`;
+          paragrafos.push(new Paragraph({
+            spacing: { before: 150, after: 150 },
+            shading: { fill: "FEE2E2", type: ShadingType.CLEAR },
+            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "DC2626" } },
+            indent: { left: 200 },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "DC2626" })]
+          }));
         } else if (isAlertaAtencao) {
-          html += `<div style="background:#FEF3C7;border-left:4px solid #F59E0B;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#B45309;font-weight:bold;">${textoProcessado}</span></div>`;
+          paragrafos.push(new Paragraph({
+            spacing: { before: 150, after: 150 },
+            shading: { fill: "FEF3C7", type: ShadingType.CLEAR },
+            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "F59E0B" } },
+            indent: { left: 200 },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 20, color: "B45309" })]
+          }));
         } else if (isAlertaOk) {
-          html += `<div style="background:#D1FAE5;border-left:4px solid #059669;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#059669;">${textoProcessado}</span></div>`;
-        } else if (isTabelaHeader || isTabelaLinha) {
-          // Converter tabela markdown para HTML
-          const colunas = linha.split('|').filter(c => c.trim());
-          const isHeader = isTabelaHeader;
-          const tag = isHeader ? 'th' : 'td';
-          const bgColor = isHeader ? '#F1F5F9' : 'white';
-          const fontWeight = isHeader ? 'bold' : 'normal';
-          
-          if (isHeader) {
-            html += '<table style="width:100%;border-collapse:collapse;margin:10px 0;font-size:10pt;">';
-          }
-          
-          html += '<tr>';
-          colunas.forEach(col => {
-            html += `<${tag} style="border:1px solid #E2E8F0;padding:8px 12px;background:${bgColor};font-weight:${fontWeight};text-align:left;">${col.trim()}</${tag}>`;
-          });
-          html += '</tr>';
-          
-          // Verificar se próxima linha é o fim da tabela
-          const proximaLinha = linhas[i + 1];
-          const proximaETabela = proximaLinha && /^\|.*\|$/.test(proximaLinha);
-          const proximaESeparador = proximaLinha && /^\|[-\s|]+\|$/.test(proximaLinha);
-          
-          if (!proximaETabela || (proximaESeparador && !linhas[i + 2]?.startsWith('|'))) {
-            // Fechar tabela se próxima não for linha de tabela
-            if (!proximaESeparador) {
-              html += '</table>';
-            }
-          }
+          paragrafos.push(new Paragraph({
+            spacing: { before: 150, after: 150 },
+            shading: { fill: "D1FAE5", type: ShadingType.CLEAR },
+            border: { left: { style: BorderStyle.SINGLE, size: 24, color: "059669" } },
+            indent: { left: 200 },
+            children: [new TextRun({ text: textoLimpo, size: 20, color: "059669" })]
+          }));
+        } else if (isSubtitulo) {
+          paragrafos.push(new Paragraph({
+            spacing: { before: 250, after: 100 },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: "059669" } },
+            children: [new TextRun({ text: textoLimpo, bold: true, size: 22, color: "059669" })]
+          }));
         } else if (isItemLista) {
-          html += `<div style="margin:4px 0 4px 24px;padding-left:8px;border-left:2px solid #E2E8F0;">${textoProcessado}</div>`;
+          paragrafos.push(new Paragraph({
+            spacing: { before: 50, after: 50 },
+            indent: { left: 400 },
+            children: [new TextRun({ text: textoLimpo, size: 20 })]
+          }));
         } else {
-          html += `<div style="margin:6px 0;line-height:1.6;">${textoProcessado}</div>`;
+          paragrafos.push(new Paragraph({
+            spacing: { before: 80, after: 80 },
+            children: [new TextRun({ text: textoLimpo, size: 20 })]
+          }));
         }
       }
       
-      return html;
+      return paragrafos;
     };
     
-    // Gerar HTML compatível com Word - Visual igual ao sistema
-    const html = `<!DOCTYPE html>
-<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-<!--[if gte mso 9]>
-<xml>
-<w:WordDocument>
-<w:View>Print</w:View>
-<w:Zoom>100</w:Zoom>
-</w:WordDocument>
-</xml>
-<![endif]-->
-<style>
-@page { margin: 1.5cm; }
-body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #374151; line-height: 1.5; margin: 0; padding: 0; }
-</style>
-</head>
-<body>
-
-<!-- Header verde igual ao sistema -->
-<div style="background:linear-gradient(135deg,#059669 0%,#0d9488 100%);color:white;padding:24px 30px;margin:-1.5cm -1.5cm 24px -1.5cm;">
-  <div style="font-size:9pt;opacity:0.9;margin-bottom:4px;">📋 Relatório Gerado</div>
-  <div style="font-size:18pt;font-weight:bold;margin-bottom:8px;">${tituloRelatorio}</div>
-  ${subtituloCliente ? `<div style="font-size:12pt;font-weight:bold;margin-bottom:8px;">${subtituloCliente}</div>` : ''}
-  <div style="font-size:10pt;opacity:0.9;">${tipo_analise || 'Análise Geral'} • ${new Date().toLocaleString('pt-BR')}</div>
-  <div style="font-size:10pt;opacity:0.9;">Período: ${periodo?.inicio || ''} a ${periodo?.fim || ''}</div>
-</div>
-
-<!-- Cards de métricas igual ao sistema -->
-<table style="width:100%;border-collapse:separate;border-spacing:12px;margin-bottom:24px;">
-  <tr>
-    <td style="background:#EFF6FF;border-radius:12px;padding:16px;text-align:center;width:25%;">
-      <div style="font-size:22pt;font-weight:bold;color:#2563EB;">${(m.total_entregas || 0).toLocaleString('pt-BR')}</div>
-      <div style="font-size:9pt;color:#1E40AF;margin-top:4px;">Entregas</div>
-    </td>
-    <td style="background:#ECFDF5;border-radius:12px;padding:16px;text-align:center;width:25%;">
-      <div style="font-size:22pt;font-weight:bold;color:#059669;">${(m.taxa_prazo || 0).toFixed(1)}%</div>
-      <div style="font-size:9pt;color:#047857;margin-top:4px;">No Prazo</div>
-    </td>
-    <td style="background:#F5F3FF;border-radius:12px;padding:16px;text-align:center;width:25%;">
-      <div style="font-size:22pt;font-weight:bold;color:#7C3AED;">${(m.tempo_medio_entrega || 0).toFixed(0)} min</div>
-      <div style="font-size:9pt;color:#6D28D9;margin-top:4px;">Tempo Médio</div>
-    </td>
-    <td style="background:#FFF7ED;border-radius:12px;padding:16px;text-align:center;width:25%;">
-      <div style="font-size:22pt;font-weight:bold;color:#EA580C;">${m.media_profissionais_por_dia || 0}</div>
-      <div style="font-size:9pt;color:#C2410C;margin-top:4px;">Motos/Dia</div>
-    </td>
-  </tr>
-</table>
-
-<!-- Conteúdo do relatório -->
-<div style="background:white;border-radius:12px;padding:20px;border:1px solid #E5E7EB;">
-${processarRelatorioHTML(relatorio)}
-</div>
-
-<!-- Footer -->
-<div style="text-align:center;color:#9CA3AF;font-size:9pt;margin-top:30px;padding-top:16px;border-top:1px solid #E5E7EB;">
-  Sistema Tutts - Business Intelligence • Relatório gerado automaticamente
-</div>
-
-</body>
-</html>`;
+    // Criar documento
+    const doc = new Document({
+      styles: {
+        default: {
+          document: {
+            run: { font: "Arial", size: 22 }
+          }
+        }
+      },
+      sections: [{
+        properties: {
+          page: {
+            margin: { top: 720, right: 720, bottom: 720, left: 720 }
+          }
+        },
+        headers: {
+          default: new Header({
+            children: [
+              new Paragraph({
+                shading: { fill: "059669", type: ShadingType.CLEAR },
+                spacing: { after: 0 },
+                children: [new TextRun({ text: " ", size: 8 })]
+              })
+            ]
+          })
+        },
+        footers: {
+          default: new Footer({
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                border: { top: { style: BorderStyle.SINGLE, size: 6, color: "E5E7EB" } },
+                spacing: { before: 200 },
+                children: [
+                  new TextRun({ text: "Sistema Tutts - Business Intelligence  •  Página ", size: 16, color: "9CA3AF" }),
+                  new TextRun({ children: [PageNumber.CURRENT], size: 16, color: "9CA3AF" }),
+                  new TextRun({ text: " de ", size: 16, color: "9CA3AF" }),
+                  new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 16, color: "9CA3AF" })
+                ]
+              })
+            ]
+          })
+        },
+        children: [
+          // Header verde
+          new Paragraph({
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 0 },
+            children: [new TextRun({ text: "📋 Relatório Gerado", size: 18, color: "FFFFFF" })]
+          }),
+          new Paragraph({
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 0 },
+            children: [new TextRun({ text: tituloRelatorio, bold: true, size: 36, color: "FFFFFF" })]
+          }),
+          ...(subtituloCliente ? [new Paragraph({
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 0 },
+            children: [new TextRun({ text: subtituloCliente, bold: true, size: 24, color: "FFFFFF" })]
+          })] : []),
+          new Paragraph({
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 0 },
+            children: [new TextRun({ text: `${tipo_analise || 'Análise Geral'} • ${new Date().toLocaleString('pt-BR')}`, size: 20, color: "FFFFFF" })]
+          }),
+          new Paragraph({
+            shading: { fill: "059669", type: ShadingType.CLEAR },
+            spacing: { after: 300 },
+            children: [new TextRun({ text: `Período: ${periodo?.inicio || ''} a ${periodo?.fim || ''}`, size: 20, color: "FFFFFF" })]
+          }),
+          
+          // Espaço
+          new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
+          
+          // Métricas
+          tabelaMetricas,
+          
+          // Espaço
+          new Paragraph({ spacing: { before: 300, after: 200 }, children: [] }),
+          
+          // Título análise
+          new Paragraph({
+            spacing: { after: 200 },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "059669" } },
+            children: [new TextRun({ text: "📊 ANÁLISE DETALHADA", bold: true, size: 28, color: "059669" })]
+          }),
+          
+          // Conteúdo
+          ...processarRelatorio(relatorio)
+        ]
+      }]
+    });
+    
+    // Gerar buffer
+    const buffer = await Packer.toBuffer(doc);
     
     // Montar nome do arquivo
     let nomeArquivo = 'relatorio-operacional';
     if (filtros?.cliente) {
       nomeArquivo += '-' + filtros.cliente.codigo;
     }
-    nomeArquivo += '-' + new Date().toISOString().split('T')[0] + '.doc';
+    nomeArquivo += '-' + new Date().toISOString().split('T')[0] + '.docx';
     
-    // Enviar como Word
-    res.setHeader('Content-Type', 'application/msword');
+    // Enviar arquivo
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', 'attachment; filename=' + nomeArquivo);
-    res.send(html);
+    res.send(buffer);
     
-    console.log('✅ Relatório Word gerado com sucesso');
+    console.log('✅ Relatório Word (.docx) gerado com sucesso');
     
   } catch (err) {
     console.error('❌ Erro ao gerar Word:', err.message);
