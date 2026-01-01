@@ -7672,47 +7672,71 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
     
     // Definir prompt base por tipo
     const promptsBase = {
-      performance: `## ANÁLISE DE PERFORMANCE
-        Analise a performance geral desta operação de entregas. 
-        Destaque pontos fortes e fracos. 
-        Compare a taxa de prazo atual com benchmarks do setor (geralmente 85%+ é bom).
-        Avalie se o tempo médio de entrega está adequado.
-        Dê uma nota geral de 0 a 10 para a operação.`,
+      performance: `## 📈 PERFORMANCE GERAL
+Analise a performance da operação de forma DIRETA:
+- Taxa de prazo atual vs benchmark (85%+ é bom)
+- Tempo médio de entrega (adequado ou não)
+- Pontos fortes (máx 3)
+- Pontos fracos (máx 3)
+- **NOTA GERAL: X/10**`,
       
-      tendencias: `## 📉 TENDÊNCIAS
-Analise a evolução e identifique padrões.
-- A operação está melhorando ou piorando?
-- Quais dias/horários têm mais problemas?
-- Previsão para próximas semanas
-Use gráficos ASCII simples se ajudar a visualizar.`,
+      tendencias: `## 📉 TENDÊNCIAS E DEMANDA
+**Análise de Demanda:**
+- A demanda está: 📈 CRESCENDO | 📉 CAINDO | ➡️ ESTÁVEL
+- Se houver queda significativa (>15%), ALERTE com 🔴
+- Variação percentual do período
+
+**Padrões Identificados:**
+- Dias com MAIOR demanda (ranking)
+- Horários de PICO (ranking)
+- Quantidade ideal de profissionais para atender o pico
+
+**Previsão:**
+- Tendência para próximas semanas
+- Recomendações de escala`,
       
       alertas: `## ⚠️ ALERTAS URGENTES
-Liste APENAS problemas críticos que precisam de ação IMEDIATA.
-Formato:
-🔴 CRÍTICO: [problema] → [ação sugerida]
-🟡 ATENÇÃO: [problema] → [ação sugerida]
-🟢 MONITORAR: [problema] → [ação sugerida]
-Máximo 5 alertas, ordenados por urgência.`,
+Liste APENAS problemas críticos:
+🔴 CRÍTICO: [problema] → [ação]
+🟡 ATENÇÃO: [problema] → [ação]
+🟢 MONITORAR: [problema] → [ação]
+Máximo 5 alertas.`,
       
-      financeiro: `## 💰 ANÁLISE FINANCEIRA
-Apresente em formato de tabela:
-| Métrica | Valor | Status |
-Inclua: Faturamento, Custos, Margem, Ticket Médio, Custo por Entrega
-Destaque oportunidades de economia e aumento de receita.`,
-      
-      comparativo: `## 🏆 RANKINGS
-**TOP 3 Melhores:**
-🥇 [nome] - [métrica principal]
-🥈 [nome] - [métrica]
-🥉 [nome] - [métrica]
+      gestao_profissionais: `## 👥 GESTÃO DE PROFISSIONAIS
 
-**⚠️ 3 que precisam melhorar:**
-1. [nome] - [problema] - [sugestão]
-2. [nome] - [problema] - [sugestão]
-3. [nome] - [problema] - [sugestão]
+**1️⃣ EQUILÍBRIO DE CARGA (Meta: 10 entregas/profissional)**
+- Média atual: X entregas/profissional
+- Status: ✅ IDEAL | ⚠️ ABAIXO | 🔴 ACIMA
+- **Qtd ideal de motoboys para o período:** X profissionais
+- Cálculo: (Total entregas ÷ 10 = X profissionais necessários)
 
-**Comparativo Dias da Semana:**
-Melhor dia: [dia] | Pior dia: [dia]`,
+**2️⃣ ANÁLISE DE ROTATIVIDADE (CHURN)**
+- Total de profissionais distintos no período: X
+- Profissionais necessários por dia (estimado): X
+- Status: ✅ NORMAL | ⚠️ ALTA ROTATIVIDADE | 🔴 ROTATIVIDADE CRÍTICA
+- Se rotatividade alta: impacto na operação e recomendação
+
+**3️⃣ DISPARIDADE DE CARGA/REMUNERAÇÃO**
+Identificar OUTLIERS (muito acima ou abaixo da média):
+| Profissional | Entregas | Valor | Status |
+Se houver disparidade grande (>50% da média), sinalize com ⚠️
+
+**4️⃣ RANKING DE PERFORMANCE**
+🏆 **TOP 3 - Melhores Tempos:**
+🥇 [nome] - [tempo médio] - [entregas]
+🥈 [nome] - [tempo médio] - [entregas]
+🥉 [nome] - [tempo médio] - [entregas]
+
+⚠️ **DETRATORES - Piores Tempos:**
+1. [nome] - [tempo médio] - [problema identificado]
+2. [nome] - [tempo médio] - [problema identificado]
+3. [nome] - [tempo médio] - [problema identificado]
+
+**Se TODOS estiverem com baixa performance, emita:**
+🔴 **ALERTA: BAIXA PERFORMANCE GERAL DA EQUIPE**
+- Performance média: X%
+- Meta: 85%
+- Ação recomendada: [sugestão]`,
       
       personalizado: prompt_custom ? `## ✨ ANÁLISE PERSONALIZADA\n${prompt_custom}` : null
     };
@@ -7724,7 +7748,7 @@ Melhor dia: [dia] | Pior dia: [dia]`,
       .join('\n\n');
     
     const tiposLabel = tipos.map(t => {
-      const labels = {performance: 'Performance', tendencias: 'Tendências', alertas: 'Alertas', financeiro: 'Financeiro', comparativo: 'Comparativo', personalizado: 'Personalizado'};
+      const labels = {performance: 'Performance', tendencias: 'Tendências', alertas: 'Alertas', gestao_profissionais: 'Gestão de Profissionais', personalizado: 'Personalizado'};
       return labels[t] || t;
     }).join(', ');
     
