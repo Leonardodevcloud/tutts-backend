@@ -7630,6 +7630,12 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       profissionais: parseInt(r.profissionais) || 0
     }));
     
+    // Calcular média de profissionais por dia
+    const todosDias = porDiaQuery.rows.map(r => parseInt(r.profissionais) || 0);
+    const mediaProfissionaisDia = todosDias.length > 0 
+      ? (todosDias.reduce((a, b) => a + b, 0) / todosDias.length).toFixed(1) 
+      : 0;
+    
     // Calcular tendência (comparar primeira metade com segunda metade)
     const metade = Math.floor(evolucaoDiaria.length / 2);
     const primeiraParte = evolucaoDiaria.slice(0, metade);
@@ -7657,12 +7663,13 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
         tempo_medio_coleta: parseFloat(metricas.tempo_medio_coleta) || 0,
         km_total: parseFloat(metricas.km_total) || 0,
         km_medio: parseFloat(metricas.km_medio) || 0,
-        total_profissionais: parseInt(metricas.total_profissionais) || 0,
+        total_profissionais_distintos: parseInt(metricas.total_profissionais) || 0,
         total_clientes: parseInt(metricas.total_clientes) || 0,
         total_dias_periodo: porDiaQuery.rows.length || 1,
         media_entregas_por_dia: porDiaQuery.rows.length > 0 ? (parseInt(metricas.total_entregas) / porDiaQuery.rows.length).toFixed(1) : 0,
+        media_profissionais_por_dia: mediaProfissionaisDia,
         profissionais_ideais_por_dia: porDiaQuery.rows.length > 0 ? Math.ceil((parseInt(metricas.total_entregas) / porDiaQuery.rows.length) / 10) : 0,
-        media_entregas_por_profissional: parseInt(metricas.total_profissionais) > 0 ? (parseInt(metricas.total_entregas) / parseInt(metricas.total_profissionais)).toFixed(1) : 0,
+        media_entregas_por_profissional_dia: mediaProfissionaisDia > 0 ? ((parseInt(metricas.total_entregas) / porDiaQuery.rows.length) / mediaProfissionaisDia).toFixed(1) : 0,
         ticket_medio: parseInt(metricas.total_entregas) > 0 ? (parseFloat(metricas.valor_total) / parseInt(metricas.total_entregas)).toFixed(2) : 0
       },
       tendencia: {
@@ -7770,19 +7777,25 @@ Máximo 5 alertas.`,
       gestao_profissionais: `## 👥 GESTÃO DE PROFISSIONAIS
 
 **1️⃣ EQUILÍBRIO DE CARGA (Meta: 10 entregas/profissional/DIA)**
-Use os dados de "MÉTRICAS DE DIMENSIONAMENTO" para calcular:
-- Média de entregas por dia: [valor do contexto]
-- Profissionais ideais por dia: (Média entregas/dia ÷ 10)
-- Status da operação:
-  - ✅ ADEQUADO: se profissionais atuais ≈ profissionais ideais
-  - ⚠️ SUBDIMENSIONADO: se precisam de MAIS motoboys (poucos profissionais para muita demanda)
-  - 🔴 SUPERDIMENSIONADO: se há motoboys DEMAIS para a demanda
+Use os dados de "MÉTRICAS DE DIMENSIONAMENTO":
+- Média de entregas/dia: [media_entregas_por_dia do contexto]
+- Média de profissionais/dia (real): [media_profissionais_por_dia do contexto]
+- Profissionais ideais/dia: [profissionais_ideais_por_dia do contexto]
+- Média entregas/moto/dia: [media_entregas_por_profissional_dia do contexto]
+
+**Status da operação:**
+Compare "Média de profissionais/dia (real)" com "Profissionais ideais/dia":
+- ✅ ADEQUADO: se real ≈ ideal (diferença < 20%)
+- ⚠️ SUBDIMENSIONADO: se real < ideal (poucos motoboys, cada um faz mais de 10/dia)
+- 🔴 SUPERDIMENSIONADO: se real > ideal (muitos motoboys, cada um faz menos de 10/dia)
 
 **Apresente:**
 | Métrica | Valor |
 |---------|-------|
-| Entregas/dia (média) | X |
-| Profissionais ideais/dia | X (cálculo: entregas÷10) |
+| Entregas/dia (média) | [copie do contexto] |
+| Profissionais/dia (real) | [copie do contexto] |
+| Profissionais ideais/dia | [copie do contexto] |
+| Entregas/moto/dia | [copie do contexto] |
 | Status | ✅/⚠️/🔴 |
 | Recomendação | [ação se necessário] |
 
@@ -7845,7 +7858,7 @@ Sinalize com ⚠️ quem está >50% acima ou abaixo da média do grupo.
 | 🔄 Retornos | ${contexto.metricas_gerais.total_retornos.toLocaleString()} |
 | ⏱️ Tempo Médio | ${contexto.metricas_gerais.tempo_medio_entrega} min |
 | 🚗 KM Médio | ${contexto.metricas_gerais.km_medio} km |
-| 👥 Profissionais | ${contexto.metricas_gerais.total_profissionais} |
+| 👥 Profissionais distintos | ${contexto.metricas_gerais.total_profissionais_distintos} |
 | 🏢 Clientes | ${contexto.metricas_gerais.total_clientes} |
 
 📊 **MÉTRICAS DE DIMENSIONAMENTO**
@@ -7853,9 +7866,11 @@ Sinalize com ⚠️ quem está >50% acima ou abaixo da média do grupo.
 |---------|-------|
 | Total de dias no período | ${contexto.metricas_gerais.total_dias_periodo} dias |
 | Média de entregas/dia | ${contexto.metricas_gerais.media_entregas_por_dia} ent/dia |
-| Meta por profissional | 10 ent/dia |
+| **👥 Média de profissionais/dia (real)** | ${contexto.metricas_gerais.media_profissionais_por_dia} motoboys |
 | **👥 Profissionais ideais/dia** | ${contexto.metricas_gerais.profissionais_ideais_por_dia} motoboys |
-| Profissionais distintos no período | ${contexto.metricas_gerais.total_profissionais} |
+| Média entregas/profissional/dia | ${contexto.metricas_gerais.media_entregas_por_profissional_dia} ent/moto/dia |
+| Meta por profissional | 10 ent/dia |
+| Profissionais distintos no período | ${contexto.metricas_gerais.total_profissionais_distintos} |
 
 💵 **FINANCEIRO**
 | Métrica | Valor |
@@ -7865,7 +7880,6 @@ Sinalize com ⚠️ quem está >50% acima ou abaixo da média do grupo.
 | Lucro Bruto | R$ ${contexto.metricas_gerais.lucro_bruto.toLocaleString('pt-BR')} |
 | Margem | ${contexto.metricas_gerais.margem_percentual}% |
 | Ticket Médio | R$ ${contexto.metricas_gerais.ticket_medio} |
-| Média/Profissional | ${contexto.metricas_gerais.media_entregas_por_profissional} entregas |
 
 📈 **TENDÊNCIA:** ${contexto.tendencia.direcao} (${contexto.tendencia.variacao_taxa > 0 ? '+' : ''}${contexto.tendencia.variacao_taxa}%)
 
