@@ -7727,12 +7727,14 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
     // Definir prompt base por tipo
     const promptsBase = {
       performance: `## 📈 PERFORMANCE GERAL
-Analise a performance da operação de forma DIRETA:
+Analise a performance OPERACIONAL (NÃO mencione valores financeiros, faturamento ou margem):
 - Taxa de prazo atual vs benchmark (85%+ é bom)
-- Tempo médio de entrega (adequado ou não)
-- Pontos fortes (máx 3)
-- Pontos fracos (máx 3)
-- **NOTA GERAL: X/10**`,
+- Tempo médio de entrega (adequado ou não, ideal < 60min)
+- Pontos fortes operacionais (máx 3) - ex: taxa de prazo, tempo, eficiência
+- Pontos fracos operacionais (máx 3) - ex: atrasos, tempo alto, retornos
+- **NOTA GERAL: X/10** (baseada apenas em métricas operacionais)
+
+⚠️ NÃO inclua informações de faturamento, valores, lucro ou margem nesta seção.`,
       
       tendencias: `## 📉 TENDÊNCIAS E PREDIÇÃO
 
