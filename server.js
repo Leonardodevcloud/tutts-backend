@@ -7743,20 +7743,20 @@ Identificar OUTLIERS (muito acima ou abaixo da média):
 | Profissional | Entregas | Média/Dia | Valor | Status |
 Se houver disparidade grande (>50% da média), sinalize com ⚠️
 
-**4️⃣ RANKING DE PERFORMANCE**
-🏆 **TOP 3 - Melhores Tempos:**
-🥇 [nome] - [tempo médio] - [entregas]
-🥈 [nome] - [tempo médio] - [entregas]
-🥉 [nome] - [tempo médio] - [entregas]
+**4️⃣ RANKING DE PERFORMANCE (por % de entregas no prazo)**
+🏆 **TOP 3 - Melhores Taxas de Prazo:**
+🥇 [nome] - [X]% no prazo - [X] entregas
+🥈 [nome] - [X]% no prazo - [X] entregas
+🥉 [nome] - [X]% no prazo - [X] entregas
 
-⚠️ **DETRATORES - Piores Tempos:**
-1. [nome] - [tempo médio] - [problema identificado]
-2. [nome] - [tempo médio] - [problema identificado]
-3. [nome] - [tempo médio] - [problema identificado]
+⚠️ **DETRATORES - Piores Taxas de Prazo:**
+1. [nome] - [X]% no prazo - [problema identificado] - [sugestão de ação]
+2. [nome] - [X]% no prazo - [problema identificado] - [sugestão de ação]
+3. [nome] - [X]% no prazo - [problema identificado] - [sugestão de ação]
 
-**Se TODOS estiverem com baixa performance, emita:**
+**Se TODOS estiverem com baixa performance (<85% no prazo), emita:**
 🔴 **ALERTA: BAIXA PERFORMANCE GERAL DA EQUIPE**
-- Performance média: X%
+- Taxa média de prazo: X%
 - Meta: 85%
 - Ação recomendada: [sugestão]`,
       
