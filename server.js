@@ -7723,25 +7723,36 @@ Máximo 5 alertas.`,
       gestao_profissionais: `## 👥 GESTÃO DE PROFISSIONAIS
 
 **1️⃣ EQUILÍBRIO DE CARGA (Meta: 10 entregas/profissional/DIA)**
-- Média atual: X entregas/profissional/dia
-- Status: ✅ IDEAL (8-12) | ⚠️ ABAIXO (<8) | 🔴 ACIMA (>12)
-- Total de entregas no período: X
-- Total de dias no período: X
-- Média de entregas por dia: X
-- **👥 Qtd ideal de profissionais/dia:** (Entregas por dia ÷ 10)
-- Cálculo detalhado: X entregas/dia ÷ 10 = X profissionais necessários por dia
+Use os dados de "MÉTRICAS DE DIMENSIONAMENTO" para calcular:
+- Média de entregas por dia: [valor do contexto]
+- Profissionais ideais por dia: (Média entregas/dia ÷ 10)
+- Status da operação:
+  - ✅ ADEQUADO: se profissionais atuais ≈ profissionais ideais
+  - ⚠️ SUBDIMENSIONADO: se precisam de MAIS motoboys (poucos profissionais para muita demanda)
+  - 🔴 SUPERDIMENSIONADO: se há motoboys DEMAIS para a demanda
+
+**Apresente:**
+| Métrica | Valor |
+|---------|-------|
+| Entregas/dia (média) | X |
+| Profissionais ideais/dia | X (cálculo: entregas÷10) |
+| Status | ✅/⚠️/🔴 |
+| Recomendação | [ação se necessário] |
 
 **2️⃣ ANÁLISE DE ROTATIVIDADE (CHURN)**
-- Total de profissionais distintos no período: X
-- Profissionais necessários por dia (estimado): X
-- Proporção: X distintos para X necessários/dia
-- Status: ✅ NORMAL (<2x) | ⚠️ ALTA ROTATIVIDADE (2-4x) | 🔴 ROTATIVIDADE CRÍTICA (>4x)
-- Se rotatividade alta: impacto na operação e recomendação
+- Total de profissionais distintos que trabalharam no período: X
+- Profissionais necessários por dia: X
+- Proporção: (distintos ÷ necessários/dia)
+- Status:
+  - ✅ NORMAL: proporção < 2x
+  - ⚠️ ALTA ROTATIVIDADE: proporção entre 2x e 4x
+  - 🔴 ROTATIVIDADE CRÍTICA: proporção > 4x
+- Se alta rotatividade: explicar impacto e recomendar ação
 
 **3️⃣ DISPARIDADE DE CARGA/REMUNERAÇÃO**
-Identificar OUTLIERS (muito acima ou abaixo da média):
-| Profissional | Entregas | Média/Dia | Valor | Status |
-Se houver disparidade grande (>50% da média), sinalize com ⚠️
+Identificar OUTLIERS (profissionais com volume muito diferente da média):
+| Profissional | Entregas | Desvio da Média | Status |
+Sinalize com ⚠️ quem está >50% acima ou abaixo da média do grupo.
 
 **4️⃣ RANKING DE PERFORMANCE (por % de entregas no prazo)**
 🏆 **TOP 3 - Melhores Taxas de Prazo:**
