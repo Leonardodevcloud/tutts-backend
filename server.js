@@ -7570,18 +7570,21 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
       ORDER BY EXTRACT(DOW FROM data_solicitado)
     `, params);
     
-    // 7. Buscar distribuição por hora do dia
-    const porHoraQuery = await pool.query(`
+    // 7. Buscar distribuição por hora do dia (usando data_hora que é TIMESTAMP)
+    let porHoraQuery = await pool.query(`
       SELECT 
-        EXTRACT(HOUR FROM hora_solicitado) as hora,
+        EXTRACT(HOUR FROM data_hora) as hora,
         COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
         ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
               NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo
       FROM bi_entregas
-      ${whereClause} AND hora_solicitado IS NOT NULL
-      GROUP BY EXTRACT(HOUR FROM hora_solicitado)
-      ORDER BY EXTRACT(HOUR FROM hora_solicitado)
+      ${whereClause} AND data_hora IS NOT NULL
+      GROUP BY EXTRACT(HOUR FROM data_hora)
+      HAVING COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) > 0
+      ORDER BY EXTRACT(HOUR FROM data_hora)
     `, params);
+    
+    console.log('📊 Dados por hora (data_hora):', porHoraQuery.rows.length, 'registros');
     
     const diasSemana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
     const dadosDiaSemana = porDiaSemanaQuery.rows.map(r => ({
