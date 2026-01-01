@@ -7622,8 +7622,15 @@ app.get('/api/bi/relatorio-ia', async (req, res) => {
     }
     
     // Calcular variações e tendências
+    // Função para formatar data
+    const formatarData = (d) => {
+      if (!d) return '';
+      const data = new Date(d);
+      return data.toLocaleDateString('pt-BR');
+    };
+    
     const evolucaoDiaria = porDiaQuery.rows.slice(-14).map(r => ({
-      data: r.data,
+      data: formatarData(r.data),
       entregas: parseInt(r.entregas),
       taxa_prazo: parseFloat(r.taxa) || 0,
       valor: parseFloat(r.valor) || 0,
@@ -8050,60 +8057,91 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
     
     const m = metricas || {};
     
-    // Processar relatório para HTML
+    // Processar relatório para HTML - Replicando exatamente o visual do sistema
     const processarRelatorioHTML = (texto) => {
       if (!texto) return '';
       
-      return texto
-        .split('\n')
-        .map(linha => {
-          linha = linha.trim();
-          if (!linha) return '<p style="margin:5px 0;">&nbsp;</p>';
+      let html = '';
+      const linhas = texto.split('\n');
+      
+      for (let i = 0; i < linhas.length; i++) {
+        let linha = linhas[i];
+        if (!linha.trim()) {
+          html += '<br/>';
+          continue;
+        }
+        
+        // Detectar tipo de linha
+        const isTituloSecao = /^##\s/.test(linha);
+        const isSubtitulo = /^\*\*\d️⃣/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
+        const isAlertaCritico = /🔴/.test(linha);
+        const isAlertaAtencao = /🟡/.test(linha);
+        const isAlertaOk = /🟢|✅/.test(linha);
+        const isTabelaHeader = /^\|.*\|$/.test(linha) && linhas[i+1] && /^\|[-\s|]+\|$/.test(linhas[i+1]);
+        const isTabelaSeparador = /^\|[-\s|]+\|$/.test(linha);
+        const isTabelaLinha = /^\|.*\|$/.test(linha) && !isTabelaSeparador;
+        const isItemLista = /^[-*•]\s/.test(linha.trim()) || /^[🥇🥈🥉]/.test(linha);
+        
+        // Processar markdown para HTML
+        let textoProcessado = linha
+          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+          .replace(/^##\s*/, '');
+        
+        if (isTabelaSeparador) {
+          continue; // Pular separadores de tabela markdown
+        }
+        
+        if (isTituloSecao) {
+          html += `<div style="background:linear-gradient(135deg,#059669,#0d9488);color:white;padding:12px 16px;margin:20px 0 12px 0;border-radius:8px;font-size:14pt;font-weight:bold;">${textoProcessado}</div>`;
+        } else if (isSubtitulo) {
+          html += `<div style="color:#059669;font-weight:bold;font-size:12pt;margin:16px 0 8px 0;padding-bottom:4px;border-bottom:2px solid #059669;">${textoProcessado}</div>`;
+        } else if (isAlertaCritico) {
+          html += `<div style="background:#FEE2E2;border-left:4px solid #DC2626;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#DC2626;font-weight:bold;">${textoProcessado}</span></div>`;
+        } else if (isAlertaAtencao) {
+          html += `<div style="background:#FEF3C7;border-left:4px solid #F59E0B;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#B45309;font-weight:bold;">${textoProcessado}</span></div>`;
+        } else if (isAlertaOk) {
+          html += `<div style="background:#D1FAE5;border-left:4px solid #059669;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0;"><span style="color:#059669;">${textoProcessado}</span></div>`;
+        } else if (isTabelaHeader || isTabelaLinha) {
+          // Converter tabela markdown para HTML
+          const colunas = linha.split('|').filter(c => c.trim());
+          const isHeader = isTabelaHeader;
+          const tag = isHeader ? 'th' : 'td';
+          const bgColor = isHeader ? '#F1F5F9' : 'white';
+          const fontWeight = isHeader ? 'bold' : 'normal';
           
-          // Detectar tipo de linha
-          const isTituloSecao = /^##\s/.test(linha) || /^[📊📈📉⚠️👥🏆🔥⏰📅]/.test(linha);
-          const isSubtitulo = /^\*\*[^*]+\*\*$/.test(linha) || /^[1️⃣2️⃣3️⃣4️⃣]/.test(linha);
-          const isAlertaCritico = /🔴|CRÍTICO/i.test(linha);
-          const isAlertaAtencao = /🟡|ATENÇÃO/i.test(linha);
-          const isAlertaOk = /🟢|✅|OK\b/i.test(linha);
-          const isItem = /^[-•*]\s/.test(linha) || /^[🥇🥈🥉]/.test(linha) || /^\d+\.\s/.test(linha);
-          const isTabela = /^\|/.test(linha);
-          
-          // Limpar markdown
-          let textoLimpo = linha
-            .replace(/^##\s*/, '')
-            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-          
-          // Pular linhas de separação de tabela
-          if (isTabela && /^[\|\-\s]+$/.test(linha.replace(/\|/g, '').replace(/-/g, '').trim())) {
-            return '';
+          if (isHeader) {
+            html += '<table style="width:100%;border-collapse:collapse;margin:10px 0;font-size:10pt;">';
           }
           
-          if (isTituloSecao) {
-            return `<p style="background:#D1FAE5;padding:8px 12px;margin:15px 0 8px 0;border-radius:4px;"><b style="color:#059669;font-size:14pt;">${textoLimpo}</b></p>`;
-          } else if (isSubtitulo) {
-            return `<p style="margin:12px 0 6px 0;"><b style="color:#333;font-size:12pt;">${textoLimpo}</b></p>`;
-          } else if (isAlertaCritico) {
-            return `<p style="background:#FEE2E2;padding:6px 12px;margin:8px 0;border-radius:4px;border-left:4px solid #DC2626;"><b style="color:#DC2626;">${textoLimpo}</b></p>`;
-          } else if (isAlertaAtencao) {
-            return `<p style="background:#FEF3C7;padding:6px 12px;margin:8px 0;border-radius:4px;border-left:4px solid #D97706;"><b style="color:#B45309;">${textoLimpo}</b></p>`;
-          } else if (isAlertaOk) {
-            return `<p style="margin:4px 0;color:#059669;">${textoLimpo}</p>`;
-          } else if (isItem) {
-            return `<p style="margin:4px 0 4px 20px;">${textoLimpo}</p>`;
-          } else if (isTabela) {
-            return `<p style="margin:2px 0;font-family:monospace;font-size:10pt;">${textoLimpo}</p>`;
-          } else {
-            return `<p style="margin:6px 0;">${textoLimpo}</p>`;
+          html += '<tr>';
+          colunas.forEach(col => {
+            html += `<${tag} style="border:1px solid #E2E8F0;padding:8px 12px;background:${bgColor};font-weight:${fontWeight};text-align:left;">${col.trim()}</${tag}>`;
+          });
+          html += '</tr>';
+          
+          // Verificar se próxima linha é o fim da tabela
+          const proximaLinha = linhas[i + 1];
+          const proximaETabela = proximaLinha && /^\|.*\|$/.test(proximaLinha);
+          const proximaESeparador = proximaLinha && /^\|[-\s|]+\|$/.test(proximaLinha);
+          
+          if (!proximaETabela || (proximaESeparador && !linhas[i + 2]?.startsWith('|'))) {
+            // Fechar tabela se próxima não for linha de tabela
+            if (!proximaESeparador) {
+              html += '</table>';
+            }
           }
-        })
-        .filter(l => l)
-        .join('\n');
+        } else if (isItemLista) {
+          html += `<div style="margin:4px 0 4px 24px;padding-left:8px;border-left:2px solid #E2E8F0;">${textoProcessado}</div>`;
+        } else {
+          html += `<div style="margin:6px 0;line-height:1.6;">${textoProcessado}</div>`;
+        }
+      }
+      
+      return html;
     };
     
-    // Gerar HTML compatível com Word
-    const html = `
-<!DOCTYPE html>
+    // Gerar HTML compatível com Word - Visual igual ao sistema
+    const html = `<!DOCTYPE html>
 <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
 <head>
 <meta charset="UTF-8">
@@ -8117,75 +8155,51 @@ app.post('/api/bi/relatorio-ia/word', async (req, res) => {
 </xml>
 <![endif]-->
 <style>
-@page { margin: 2cm; }
-body { font-family: Arial, sans-serif; font-size: 11pt; color: #333; line-height: 1.5; }
-.header { background: #059669; color: white; padding: 20px; text-align: center; margin: -2cm -2cm 20px -2cm; }
-.header h1 { margin: 0; font-size: 20pt; }
-.header p { margin: 5px 0 0 0; font-size: 10pt; opacity: 0.9; }
-.subtitulo { text-align: center; font-size: 14pt; color: #333; margin-bottom: 10px; }
-.info { text-align: center; color: #64748B; font-size: 10pt; margin-bottom: 20px; }
-.metricas { width: 100%; border-collapse: collapse; margin-bottom: 25px; }
-.metricas td { width: 25%; text-align: center; padding: 15px 10px; border: 1px solid #E2E8F0; }
-.metricas .valor { font-size: 18pt; font-weight: bold; }
-.metricas .label { font-size: 9pt; color: #64748B; margin-top: 5px; }
-.metricas td:nth-child(1) { background: #EFF6FF; }
-.metricas td:nth-child(1) .valor { color: #2563EB; }
-.metricas td:nth-child(2) { background: #ECFDF5; }
-.metricas td:nth-child(2) .valor { color: #059669; }
-.metricas td:nth-child(3) { background: #F5F3FF; }
-.metricas td:nth-child(3) .valor { color: #7C3AED; }
-.metricas td:nth-child(4) { background: #FFF7ED; }
-.metricas td:nth-child(4) .valor { color: #EA580C; }
-.titulo-secao { border-bottom: 3px solid #059669; padding-bottom: 8px; margin: 25px 0 15px 0; }
-.titulo-secao span { color: #059669; font-size: 14pt; font-weight: bold; }
-.conteudo { margin-top: 15px; }
-.footer { text-align: center; color: #94A3B8; font-size: 9pt; margin-top: 30px; padding-top: 15px; border-top: 1px solid #E2E8F0; }
+@page { margin: 1.5cm; }
+body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #374151; line-height: 1.5; margin: 0; padding: 0; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>${tituloRelatorio}</h1>
-  ${subtituloCliente ? `<p><b>${subtituloCliente}</b></p>` : ''}
+<!-- Header verde igual ao sistema -->
+<div style="background:linear-gradient(135deg,#059669 0%,#0d9488 100%);color:white;padding:24px 30px;margin:-1.5cm -1.5cm 24px -1.5cm;">
+  <div style="font-size:9pt;opacity:0.9;margin-bottom:4px;">📋 Relatório Gerado</div>
+  <div style="font-size:18pt;font-weight:bold;margin-bottom:8px;">${tituloRelatorio}</div>
+  ${subtituloCliente ? `<div style="font-size:12pt;font-weight:bold;margin-bottom:8px;">${subtituloCliente}</div>` : ''}
+  <div style="font-size:10pt;opacity:0.9;">${tipo_analise || 'Análise Geral'} • ${new Date().toLocaleString('pt-BR')}</div>
+  <div style="font-size:10pt;opacity:0.9;">Período: ${periodo?.inicio || ''} a ${periodo?.fim || ''}</div>
 </div>
 
-<p class="info">
-  <b>Análise:</b> ${tipo_analise || 'Geral'} &nbsp;|&nbsp; 
-  <b>Período:</b> ${periodo?.inicio || ''} a ${periodo?.fim || ''} &nbsp;|&nbsp; 
-  <b>Gerado em:</b> ${new Date().toLocaleString('pt-BR')}
-</p>
-
-<table class="metricas">
+<!-- Cards de métricas igual ao sistema -->
+<table style="width:100%;border-collapse:separate;border-spacing:12px;margin-bottom:24px;">
   <tr>
-    <td>
-      <div class="valor">${(m.total_entregas || 0).toLocaleString('pt-BR')}</div>
-      <div class="label">ENTREGAS</div>
+    <td style="background:#EFF6FF;border-radius:12px;padding:16px;text-align:center;width:25%;">
+      <div style="font-size:22pt;font-weight:bold;color:#2563EB;">${(m.total_entregas || 0).toLocaleString('pt-BR')}</div>
+      <div style="font-size:9pt;color:#1E40AF;margin-top:4px;">Entregas</div>
     </td>
-    <td>
-      <div class="valor">${(m.taxa_prazo || 0).toFixed(1)}%</div>
-      <div class="label">TAXA PRAZO</div>
+    <td style="background:#ECFDF5;border-radius:12px;padding:16px;text-align:center;width:25%;">
+      <div style="font-size:22pt;font-weight:bold;color:#059669;">${(m.taxa_prazo || 0).toFixed(1)}%</div>
+      <div style="font-size:9pt;color:#047857;margin-top:4px;">No Prazo</div>
     </td>
-    <td>
-      <div class="valor">${(m.tempo_medio_entrega || 0).toFixed(0)} min</div>
-      <div class="label">TEMPO MÉDIO</div>
+    <td style="background:#F5F3FF;border-radius:12px;padding:16px;text-align:center;width:25%;">
+      <div style="font-size:22pt;font-weight:bold;color:#7C3AED;">${(m.tempo_medio_entrega || 0).toFixed(0)} min</div>
+      <div style="font-size:9pt;color:#6D28D9;margin-top:4px;">Tempo Médio</div>
     </td>
-    <td>
-      <div class="valor">${m.media_profissionais_por_dia || 0}</div>
-      <div class="label">MOTOS/DIA</div>
+    <td style="background:#FFF7ED;border-radius:12px;padding:16px;text-align:center;width:25%;">
+      <div style="font-size:22pt;font-weight:bold;color:#EA580C;">${m.media_profissionais_por_dia || 0}</div>
+      <div style="font-size:9pt;color:#C2410C;margin-top:4px;">Motos/Dia</div>
     </td>
   </tr>
 </table>
 
-<div class="titulo-secao">
-  <span>ANÁLISE DETALHADA</span>
-</div>
-
-<div class="conteudo">
+<!-- Conteúdo do relatório -->
+<div style="background:white;border-radius:12px;padding:20px;border:1px solid #E5E7EB;">
 ${processarRelatorioHTML(relatorio)}
 </div>
 
-<div class="footer">
-  Sistema Tutts - Business Intelligence
+<!-- Footer -->
+<div style="text-align:center;color:#9CA3AF;font-size:9pt;margin-top:30px;padding-top:16px;border-top:1px solid #E5E7EB;">
+  Sistema Tutts - Business Intelligence • Relatório gerado automaticamente
 </div>
 
 </body>
