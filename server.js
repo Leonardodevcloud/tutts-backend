@@ -7970,7 +7970,17 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
       tipos_selecionados: tipos,
       periodo: contexto.periodo,
       metricas: contexto.metricas_gerais,
-      relatorio
+      relatorio,
+      // Dados para gráficos
+      graficos: {
+        evolucao_diaria: contexto.evolucao_diaria,
+        distribuicao_dia_semana: contexto.distribuicao_dia_semana,
+        distribuicao_hora: contexto.distribuicao_hora,
+        top_clientes: contexto.top_clientes.slice(0, 5),
+        top_profissionais: contexto.top_profissionais.slice(0, 5),
+        horario_pico: contexto.horario_pico,
+        janela_pico: contexto.janela_pico
+      }
     });
     
   } catch (err) {
