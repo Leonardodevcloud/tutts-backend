@@ -917,6 +917,26 @@ async function createTables() {
     `);
     console.log('✅ Tabela bi_upload_historico verificada');
 
+    // Tabela de histórico de relatórios IA
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_relatorios_ia (
+        id SERIAL PRIMARY KEY,
+        usuario_id VARCHAR(100),
+        usuario_nome VARCHAR(255),
+        cod_cliente INTEGER,
+        nome_cliente VARCHAR(255),
+        centro_custo VARCHAR(255),
+        tipo_analise VARCHAR(500),
+        data_inicio DATE,
+        data_fim DATE,
+        metricas JSONB,
+        relatorio TEXT,
+        filtros JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela bi_relatorios_ia verificada');
+
 
     // Colunas de coordenadas para mapa de calor
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8)`).catch(() => {});
@@ -8004,6 +8024,36 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
       }
     }
     
+    // Salvar no histórico
+    const usuario_id = req.query.usuario_id || null;
+    const usuario_nome = req.query.usuario_nome || null;
+    
+    try {
+      await pool.query(`
+        INSERT INTO bi_relatorios_ia 
+        (usuario_id, usuario_nome, cod_cliente, nome_cliente, centro_custo, tipo_analise, data_inicio, data_fim, metricas, relatorio, filtros)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `, [
+        usuario_id,
+        usuario_nome,
+        clienteInfo?.codigo || null,
+        clienteInfo?.nome || null,
+        centro_custo.length > 0 ? centro_custo.join(', ') : null,
+        tiposLabel,
+        data_inicio || null,
+        data_fim || null,
+        JSON.stringify(contexto.metricas_gerais),
+        relatorio,
+        JSON.stringify({
+          cliente: clienteInfo,
+          centro_custo: centro_custo.length > 0 ? centro_custo : null
+        })
+      ]);
+      console.log('✅ Relatório salvo no histórico');
+    } catch (histErr) {
+      console.error('⚠️ Erro ao salvar histórico:', histErr.message);
+    }
+    
     res.json({
       success: true,
       tipo_analise: tiposLabel,
@@ -8031,6 +8081,54 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
   } catch (err) {
     console.error('❌ Erro ao gerar relatório IA:', err);
     res.status(500).json({ error: 'Erro ao gerar relatório: ' + err.message });
+  }
+});
+
+// Endpoint para listar histórico de relatórios IA
+app.get('/api/bi/relatorio-ia/historico', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, usuario_id, usuario_nome, cod_cliente, nome_cliente, centro_custo, 
+             tipo_analise, data_inicio, data_fim, metricas, filtros, created_at
+      FROM bi_relatorios_ia 
+      ORDER BY created_at DESC 
+      LIMIT 50
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar histórico:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para buscar relatório específico do histórico
+app.get('/api/bi/relatorio-ia/historico/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM bi_relatorios_ia WHERE id = $1
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Relatório não encontrado' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao buscar relatório:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para deletar relatório do histórico
+app.delete('/api/bi/relatorio-ia/historico/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM bi_relatorios_ia WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar relatório:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
