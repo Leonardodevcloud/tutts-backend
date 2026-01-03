@@ -13434,9 +13434,40 @@ app.get('/api/bi/garantido', async (req, res) => {
       return result;
     };
     
-    // Normalizar quebras de linha e dividir em linhas
-    sheetText = sheetText.replace(/\r\n/g, '\n');
-    const sheetLines = sheetText.split('\n').slice(1); // pular header
+    // Função para juntar linhas que foram quebradas por campos com aspas
+    const parseCSVWithMultilineFields = (text) => {
+      const lines = [];
+      let currentLine = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        
+        if (char === '"') {
+          inQuotes = !inQuotes;
+          currentLine += char;
+        } else if ((char === '\n' || char === '\r') && !inQuotes) {
+          if (currentLine.trim()) {
+            lines.push(currentLine.replace(/\r/g, ''));
+          }
+          currentLine = '';
+          // Pular \r\n como uma única quebra
+          if (char === '\r' && text[i + 1] === '\n') {
+            i++;
+          }
+        } else if (char !== '\r') {
+          currentLine += char;
+        }
+      }
+      if (currentLine.trim()) {
+        lines.push(currentLine.replace(/\r/g, ''));
+      }
+      
+      return lines;
+    };
+    
+    // Parsear CSV corretamente (lidar com campos multiline)
+    const sheetLines = parseCSVWithMultilineFields(sheetText).slice(1); // pular header
     
     console.log(`📊 Garantido: ${sheetLines.length} linhas na planilha (sem header)`);
     
@@ -13694,8 +13725,29 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       return result;
     };
     
-    sheetText = sheetText.replace(/\r\n/g, '\n');
-    const sheetLines = sheetText.split('\n').slice(1);
+    // Função para juntar linhas que foram quebradas por campos com aspas
+    const parseCSVWithMultilineFields = (text) => {
+      const lines = [];
+      let currentLine = '';
+      let inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+          currentLine += char;
+        } else if ((char === '\n' || char === '\r') && !inQuotes) {
+          if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+          currentLine = '';
+          if (char === '\r' && text[i + 1] === '\n') i++;
+        } else if (char !== '\r') {
+          currentLine += char;
+        }
+      }
+      if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+      return lines;
+    };
+    
+    const sheetLines = parseCSVWithMultilineFields(sheetText).slice(1);
     
     // Buscar nomes de clientes
     const clientesResult = await pool.query(`
@@ -13878,8 +13930,29 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       return result;
     };
     
-    sheetText = sheetText.replace(/\r\n/g, '\n');
-    const sheetLines = sheetText.split('\n').slice(1);
+    // Função para juntar linhas que foram quebradas por campos com aspas
+    const parseCSVWithMultilineFields = (text) => {
+      const lines = [];
+      let currentLine = '';
+      let inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+          currentLine += char;
+        } else if ((char === '\n' || char === '\r') && !inQuotes) {
+          if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+          currentLine = '';
+          if (char === '\r' && text[i + 1] === '\n') i++;
+        } else if (char !== '\r') {
+          currentLine += char;
+        }
+      }
+      if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+      return lines;
+    };
+    
+    const sheetLines = parseCSVWithMultilineFields(sheetText).slice(1);
     
     // Buscar nomes de clientes
     const clientesResult = await pool.query(`
