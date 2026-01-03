@@ -13977,6 +13977,10 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const dataStr = cols[1];
       const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
+      const statusPlanilha = (cols[5] || '').trim().toLowerCase();
+      
+      // Na aba "Por Cliente" ignorar status "Não rodou" - mostrar apenas quem rodou
+      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
