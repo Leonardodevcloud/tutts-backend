@@ -13391,7 +13391,11 @@ app.get('/api/bi/garantido', async (req, res) => {
     // 1. Buscar dados da planilha de garantido
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
     const sheetResponse = await fetch(sheetUrl);
-    const sheetText = await sheetResponse.text();
+    let sheetText = await sheetResponse.text();
+    
+    // Limpar caracteres problemáticos: remover \r dentro de campos e normalizar quebras de linha
+    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
+    
     const sheetLines = sheetText.split('\n').slice(1); // pular header
     
     // Parsear dados da planilha
@@ -13401,13 +13405,13 @@ app.get('/api/bi/garantido', async (req, res) => {
     for (const line of sheetLines) {
       if (!line.trim()) continue;
       
-      // Parser simples de CSV (split por vírgula)
-      const cols = line.split(',');
-      const codClientePlan = cols[0]?.trim();
-      const dataStr = cols[1]?.trim();
-      const profissional = cols[2]?.trim();
-      const codProfPlan = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
+      // Parser simples de CSV - remove aspas dos campos
+      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const codClientePlan = cols[0];
+      const dataStr = cols[1];
+      const profissional = cols[2];
+      const codProfPlan = cols[3];
+      const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
       if (!codProfPlan || !dataStr || valorNegociado <= 0) continue;
       
@@ -13592,7 +13596,10 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     // Buscar dados da planilha
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
     const sheetResponse = await fetch(sheetUrl);
-    const sheetText = await sheetResponse.text();
+    let sheetText = await sheetResponse.text();
+    
+    // Limpar caracteres problemáticos
+    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
     const sheetLines = sheetText.split('\n').slice(1);
     
     // Buscar nomes de clientes
@@ -13611,11 +13618,11 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',');
-      const codCliente = cols[0]?.trim();
-      const dataStr = cols[1]?.trim();
-      const codProf = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
+      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const codCliente = cols[0];
+      const dataStr = cols[1];
+      const codProf = cols[3];
+      const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
       if (!codProf || !dataStr || valorNegociado <= 0) continue;
       
@@ -13688,7 +13695,10 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     // Buscar dados da planilha
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
     const sheetResponse = await fetch(sheetUrl);
-    const sheetText = await sheetResponse.text();
+    let sheetText = await sheetResponse.text();
+    
+    // Limpar caracteres problemáticos
+    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
     const sheetLines = sheetText.split('\n').slice(1);
     
     // Buscar nomes de clientes
@@ -13707,11 +13717,11 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',');
-      const codCliente = cols[0]?.trim();
-      const dataStr = cols[1]?.trim();
-      const codProf = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
+      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const codCliente = cols[0];
+      const dataStr = cols[1];
+      const codProf = cols[3];
+      const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
       if (!codProf || !dataStr || valorNegociado <= 0) continue;
       
