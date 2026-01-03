@@ -13388,25 +13388,50 @@ app.get('/api/bi/garantido', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, cod_prof, filtro_status } = req.query;
     
+    console.log('📊 Garantido - Filtros recebidos:', { data_inicio, data_fim, cod_cliente, cod_prof, filtro_status });
+    
     // 1. Buscar dados da planilha de garantido
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
     const sheetResponse = await fetch(sheetUrl);
     let sheetText = await sheetResponse.text();
     
-    // Limpar caracteres problemáticos: remover \r dentro de campos e normalizar quebras de linha
-    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
+    // Função para parsear CSV corretamente (lida com campos entre aspas)
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+      
+      return result;
+    };
     
+    // Normalizar quebras de linha e dividir em linhas
+    sheetText = sheetText.replace(/\r\n/g, '\n');
     const sheetLines = sheetText.split('\n').slice(1); // pular header
+    
+    console.log(`📊 Garantido: ${sheetLines.length} linhas na planilha (sem header)`);
     
     // Parsear dados da planilha
     const garantidoPlanilha = [];
-    const chavesProcessadas = new Set(); // Para evitar duplicatas
+    const chavesProcessadas = new Set();
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
       
-      // Parser simples de CSV - remove aspas dos campos
-      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const cols = parseCSVLine(line);
       const codClientePlan = cols[0];
       const dataStr = cols[1];
       const profissional = cols[2];
@@ -13428,10 +13453,7 @@ app.get('/api/bi/garantido', async (req, res) => {
       
       // Chave única: cod_prof + data + cod_cliente
       const chaveUnica = `${codProfPlan}_${dataFormatada}_${codClientePlan}`;
-      if (chavesProcessadas.has(chaveUnica)) {
-        console.log(`⚠️ Duplicata ignorada: ${profissional} - ${dataStr} - Cliente ${codClientePlan}`);
-        continue;
-      }
+      if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
       garantidoPlanilha.push({
@@ -13443,7 +13465,10 @@ app.get('/api/bi/garantido', async (req, res) => {
       });
     }
     
-    console.log(`📊 Garantido: ${garantidoPlanilha.length} registros encontrados na planilha`);
+    console.log(`📊 Garantido: ${garantidoPlanilha.length} registros únicos na planilha`);
+    if (garantidoPlanilha.length > 0) {
+      console.log(`📊 Exemplo primeiro registro:`, garantidoPlanilha[0]);
+    }
     
     // 2. Buscar nome do cliente da planilha (onde tem garantido)
     const clientesGarantido = {};
@@ -13598,8 +13623,24 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     const sheetResponse = await fetch(sheetUrl);
     let sheetText = await sheetResponse.text();
     
-    // Limpar caracteres problemáticos
-    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
+    // Função para parsear CSV corretamente
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') { inQuotes = !inQuotes; }
+        else if (char === ',' && !inQuotes) {
+          result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+          current = '';
+        } else { current += char; }
+      }
+      result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+      return result;
+    };
+    
+    sheetText = sheetText.replace(/\r\n/g, '\n');
     const sheetLines = sheetText.split('\n').slice(1);
     
     // Buscar nomes de clientes
@@ -13614,11 +13655,11 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     
     // Agrupar por cliente do garantido + semana
     const porClienteSemana = {};
-    const chavesProcessadas = new Set(); // Para evitar duplicatas
+    const chavesProcessadas = new Set();
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const cols = parseCSVLine(line);
       const codCliente = cols[0];
       const dataStr = cols[1];
       const codProf = cols[3];
@@ -13697,8 +13738,24 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     const sheetResponse = await fetch(sheetUrl);
     let sheetText = await sheetResponse.text();
     
-    // Limpar caracteres problemáticos
-    sheetText = sheetText.replace(/\r\n/g, '\n').replace(/\r/g, '');
+    // Função para parsear CSV corretamente
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') { inQuotes = !inQuotes; }
+        else if (char === ',' && !inQuotes) {
+          result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+          current = '';
+        } else { current += char; }
+      }
+      result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+      return result;
+    };
+    
+    sheetText = sheetText.replace(/\r\n/g, '\n');
     const sheetLines = sheetText.split('\n').slice(1);
     
     // Buscar nomes de clientes
@@ -13713,11 +13770,11 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     
     // Agrupar por cliente do garantido
     const porCliente = {};
-    const chavesProcessadas = new Set(); // Para evitar duplicatas
+    const chavesProcessadas = new Set();
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g, '').trim());
+      const cols = parseCSVLine(line);
       const codCliente = cols[0];
       const dataStr = cols[1];
       const codProf = cols[3];
