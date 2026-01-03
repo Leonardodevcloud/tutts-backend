@@ -13379,6 +13379,389 @@ async function processarRecorrenciasInterno() {
 // ROTAS DE RECRUTAMENTO
 // ============================================
 
+// ============================================
+// ROTAS DO MÓDULO GARANTIDO (BI)
+// ============================================
+
+// GET /api/bi/garantido - Análise de mínimo garantido
+app.get('/api/bi/garantido', async (req, res) => {
+  try {
+    const { data_inicio, data_fim, cod_cliente, cod_prof, filtro_status } = req.query;
+    
+    // 1. Buscar dados da planilha de garantido
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    const sheetText = await sheetResponse.text();
+    const sheetLines = sheetText.split('\n').slice(1); // pular header
+    
+    // Parsear dados da planilha
+    const garantidoPlanilha = [];
+    for (const line of sheetLines) {
+      if (!line.trim()) continue;
+      const cols = line.split(',');
+      const codCliente = cols[0]?.trim();
+      const dataStr = cols[1]?.trim();
+      const profissional = cols[2]?.trim();
+      const codProf = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      
+      if (!codProf || !dataStr) continue;
+      
+      // Converter data DD/MM/YYYY para YYYY-MM-DD
+      let dataFormatada = null;
+      if (dataStr) {
+        const partes = dataStr.split('/');
+        if (partes.length === 3) {
+          dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+        }
+      }
+      
+      if (!dataFormatada) continue;
+      
+      garantidoPlanilha.push({
+        cod_cliente: codCliente,
+        data: dataFormatada,
+        profissional,
+        cod_prof: codProf,
+        valor_negociado: valorNegociado
+      });
+    }
+    
+    // 2. Para cada registro da planilha, buscar dados de produção no BI
+    const resultados = [];
+    
+    for (const g of garantidoPlanilha) {
+      // Aplicar filtros
+      if (data_inicio && g.data < data_inicio) continue;
+      if (data_fim && g.data > data_fim) continue;
+      if (cod_cliente && g.cod_cliente !== cod_cliente) continue;
+      if (cod_prof && g.cod_prof !== cod_prof) continue;
+      
+      // Buscar produção do profissional nessa data
+      const producaoResult = await pool.query(`
+        SELECT 
+          cod_cliente,
+          nome_cliente,
+          nome_fantasia,
+          centro_custo,
+          COUNT(DISTINCT os) as total_os,
+          COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as total_entregas,
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as distancia_total,
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido,
+          AVG(CASE 
+            WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL 
+            THEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 
+          END) as tempo_medio_entrega
+        FROM bi_entregas
+        WHERE cod_prof = $1 AND data_solicitado = $2
+        GROUP BY cod_cliente, nome_cliente, nome_fantasia, centro_custo
+      `, [parseInt(g.cod_prof), g.data]);
+      
+      // Se não produziu nada
+      if (producaoResult.rows.length === 0) {
+        const complemento = g.valor_negociado;
+        
+        // Aplicar filtro de status
+        if (filtro_status === 'rodou') continue;
+        if (filtro_status === 'abaixo') continue;
+        if (filtro_status === 'acima') continue;
+        
+        resultados.push({
+          data: g.data,
+          cod_prof: g.cod_prof,
+          profissional: g.profissional,
+          cod_cliente_garantido: g.cod_cliente,
+          onde_rodou: '- NÃO RODOU',
+          entregas: 0,
+          tempo_entrega: null,
+          distancia: 0,
+          valor_negociado: g.valor_negociado,
+          valor_produzido: 0,
+          complemento: complemento,
+          status: 'nao_rodou'
+        });
+      } else {
+        // Produziu em um ou mais locais
+        for (const prod of producaoResult.rows) {
+          const valorProduzido = parseFloat(prod.valor_produzido) || 0;
+          const complemento = Math.max(0, g.valor_negociado - valorProduzido);
+          const status = valorProduzido === 0 ? 'nao_rodou' : 
+                        valorProduzido < g.valor_negociado ? 'abaixo' : 'acima';
+          
+          // Aplicar filtro de status
+          if (filtro_status === 'nao_rodou' && status !== 'nao_rodou') continue;
+          if (filtro_status === 'abaixo' && status !== 'abaixo') continue;
+          if (filtro_status === 'acima' && status !== 'acima') continue;
+          if (filtro_status === 'rodou' && status === 'nao_rodou') continue;
+          
+          // Formatar onde rodou
+          const ondeRodou = prod.cod_cliente 
+            ? `${prod.cod_cliente} - ${prod.nome_fantasia || prod.nome_cliente || prod.centro_custo || 'N/A'}`
+            : prod.centro_custo || 'N/A';
+          
+          // Formatar tempo de entrega
+          let tempoEntregaFormatado = null;
+          if (prod.tempo_medio_entrega) {
+            const minutos = Math.round(prod.tempo_medio_entrega);
+            const horas = Math.floor(minutos / 60);
+            const mins = minutos % 60;
+            tempoEntregaFormatado = `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}:00`;
+          }
+          
+          resultados.push({
+            data: g.data,
+            cod_prof: g.cod_prof,
+            profissional: g.profissional,
+            cod_cliente_garantido: g.cod_cliente,
+            onde_rodou: ondeRodou,
+            entregas: parseInt(prod.total_entregas) || 0,
+            tempo_entrega: tempoEntregaFormatado,
+            distancia: parseFloat(prod.distancia_total) || 0,
+            valor_negociado: g.valor_negociado,
+            valor_produzido: valorProduzido,
+            complemento: complemento,
+            status: status
+          });
+        }
+      }
+    }
+    
+    // Ordenar por data desc, depois por profissional
+    resultados.sort((a, b) => {
+      if (b.data !== a.data) return b.data.localeCompare(a.data);
+      return a.profissional.localeCompare(b.profissional);
+    });
+    
+    // Calcular totais
+    const totais = {
+      total_registros: resultados.length,
+      total_entregas: resultados.reduce((sum, r) => sum + r.entregas, 0),
+      total_negociado: resultados.reduce((sum, r) => sum + r.valor_negociado, 0),
+      total_produzido: resultados.reduce((sum, r) => sum + r.valor_produzido, 0),
+      total_complemento: resultados.reduce((sum, r) => sum + r.complemento, 0),
+      total_distancia: resultados.reduce((sum, r) => sum + r.distancia, 0),
+      qtd_abaixo: resultados.filter(r => r.status === 'abaixo').length,
+      qtd_acima: resultados.filter(r => r.status === 'acima').length,
+      qtd_nao_rodou: resultados.filter(r => r.status === 'nao_rodou').length,
+      qtd_rodou: resultados.filter(r => r.status !== 'nao_rodou').length
+    };
+    
+    res.json({ dados: resultados, totais });
+  } catch (error) {
+    console.error('Erro ao buscar dados garantido:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados de garantido', details: error.message });
+  }
+});
+
+// GET /api/bi/garantido/semanal - Análise semanal por local
+app.get('/api/bi/garantido/semanal', async (req, res) => {
+  try {
+    const { data_inicio, data_fim } = req.query;
+    
+    // Buscar dados da planilha
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    const sheetText = await sheetResponse.text();
+    const sheetLines = sheetText.split('\n').slice(1);
+    
+    // Parsear dados da planilha
+    const garantidoMap = new Map(); // cod_prof_data -> valor_negociado
+    
+    for (const line of sheetLines) {
+      if (!line.trim()) continue;
+      const cols = line.split(',');
+      const dataStr = cols[1]?.trim();
+      const codProf = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      
+      if (!codProf || !dataStr) continue;
+      
+      const partes = dataStr.split('/');
+      if (partes.length !== 3) continue;
+      const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+      
+      if (data_inicio && dataFormatada < data_inicio) continue;
+      if (data_fim && dataFormatada > data_fim) continue;
+      
+      const key = `${codProf}_${dataFormatada}`;
+      garantidoMap.set(key, (garantidoMap.get(key) || 0) + valorNegociado);
+    }
+    
+    // Buscar produções agrupadas por semana e local
+    let query = `
+      SELECT 
+        COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A') as onde_rodou,
+        DATE_TRUNC('week', data_solicitado) as semana,
+        cod_prof,
+        data_solicitado,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
+      FROM bi_entregas
+      WHERE data_solicitado IS NOT NULL
+    `;
+    
+    const params = [];
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND data_solicitado >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND data_solicitado <= $${params.length}`;
+    }
+    
+    query += ` GROUP BY onde_rodou, semana, cod_prof, data_solicitado ORDER BY onde_rodou, semana`;
+    
+    const producaoResult = await pool.query(query, params);
+    
+    // Agrupar por local e semana
+    const porLocalSemana = {};
+    
+    for (const row of producaoResult.rows) {
+      const local = row.onde_rodou;
+      const semana = row.semana?.toISOString().split('T')[0];
+      const codProf = row.cod_prof;
+      const data = row.data_solicitado?.toISOString().split('T')[0];
+      const valorProduzido = parseFloat(row.valor_produzido) || 0;
+      
+      // Buscar valor negociado
+      const key = `${codProf}_${data}`;
+      const valorNegociado = garantidoMap.get(key) || 0;
+      
+      if (!porLocalSemana[local]) {
+        porLocalSemana[local] = {};
+      }
+      if (!porLocalSemana[local][semana]) {
+        porLocalSemana[local][semana] = { negociado: 0, produzido: 0, complemento: 0 };
+      }
+      
+      porLocalSemana[local][semana].negociado += valorNegociado;
+      porLocalSemana[local][semana].produzido += valorProduzido;
+      porLocalSemana[local][semana].complemento += Math.max(0, valorNegociado - valorProduzido);
+    }
+    
+    // Formatar resultado
+    const resultado = Object.entries(porLocalSemana).map(([local, semanas]) => ({
+      onde_rodou: local,
+      semanas: Object.entries(semanas).map(([semana, valores]) => ({
+        semana,
+        ...valores
+      })).sort((a, b) => a.semana.localeCompare(b.semana))
+    })).sort((a, b) => a.onde_rodou.localeCompare(b.onde_rodou));
+    
+    res.json(resultado);
+  } catch (error) {
+    console.error('Erro ao buscar análise semanal garantido:', error);
+    res.status(500).json({ error: 'Erro ao buscar análise semanal' });
+  }
+});
+
+// GET /api/bi/garantido/por-cliente - Resumo por cliente/local
+app.get('/api/bi/garantido/por-cliente', async (req, res) => {
+  try {
+    const { data_inicio, data_fim } = req.query;
+    
+    // Buscar dados da planilha
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    const sheetText = await sheetResponse.text();
+    const sheetLines = sheetText.split('\n').slice(1);
+    
+    // Criar mapa de garantidos
+    const garantidoMap = new Map();
+    
+    for (const line of sheetLines) {
+      if (!line.trim()) continue;
+      const cols = line.split(',');
+      const codCliente = cols[0]?.trim();
+      const dataStr = cols[1]?.trim();
+      const codProf = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      
+      if (!codProf || !dataStr) continue;
+      
+      const partes = dataStr.split('/');
+      if (partes.length !== 3) continue;
+      const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+      
+      if (data_inicio && dataFormatada < data_inicio) continue;
+      if (data_fim && dataFormatada > data_fim) continue;
+      
+      const key = `${codProf}_${dataFormatada}`;
+      if (!garantidoMap.has(key)) {
+        garantidoMap.set(key, { cod_cliente: codCliente, valor: 0 });
+      }
+      garantidoMap.get(key).valor += valorNegociado;
+    }
+    
+    // Buscar produções do BI
+    let query = `
+      SELECT 
+        cod_cliente,
+        COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A') as onde_rodou,
+        cod_prof,
+        data_solicitado,
+        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
+      FROM bi_entregas
+      WHERE data_solicitado IS NOT NULL
+    `;
+    
+    const params = [];
+    if (data_inicio) {
+      params.push(data_inicio);
+      query += ` AND data_solicitado >= $${params.length}`;
+    }
+    if (data_fim) {
+      params.push(data_fim);
+      query += ` AND data_solicitado <= $${params.length}`;
+    }
+    
+    query += ` GROUP BY cod_cliente, onde_rodou, cod_prof, data_solicitado`;
+    
+    const producaoResult = await pool.query(query, params);
+    
+    // Agrupar por local
+    const porCliente = {};
+    
+    for (const row of producaoResult.rows) {
+      const local = row.onde_rodou;
+      const codProf = row.cod_prof;
+      const data = row.data_solicitado?.toISOString().split('T')[0];
+      const valorProduzido = parseFloat(row.valor_produzido) || 0;
+      
+      const key = `${codProf}_${data}`;
+      const garantidoInfo = garantidoMap.get(key);
+      const valorNegociado = garantidoInfo?.valor || 0;
+      
+      if (!porCliente[local]) {
+        porCliente[local] = { negociado: 0, produzido: 0, complemento: 0 };
+      }
+      
+      porCliente[local].negociado += valorNegociado;
+      porCliente[local].produzido += valorProduzido;
+      porCliente[local].complemento += Math.max(0, valorNegociado - valorProduzido);
+    }
+    
+    // Formatar e calcular totais
+    const resultado = Object.entries(porCliente)
+      .map(([local, valores]) => ({
+        onde_rodou: local,
+        ...valores
+      }))
+      .sort((a, b) => b.complemento - a.complemento);
+    
+    const totais = {
+      total_negociado: resultado.reduce((sum, r) => sum + r.negociado, 0),
+      total_produzido: resultado.reduce((sum, r) => sum + r.produzido, 0),
+      total_complemento: resultado.reduce((sum, r) => sum + r.complemento, 0)
+    };
+    
+    res.json({ dados: resultado, totais });
+  } catch (error) {
+    console.error('Erro ao buscar garantido por cliente:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados por cliente' });
+  }
+});
+
 // GET /api/recrutamento - Listar todas as necessidades
 app.get('/api/recrutamento', async (req, res) => {
   try {
