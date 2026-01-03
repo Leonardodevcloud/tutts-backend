@@ -13453,6 +13453,10 @@ app.get('/api/bi/garantido', async (req, res) => {
       const profissional = cols[2] || '(Vazio)';
       const codProfPlan = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
+      const statusPlanilha = (cols[5] || '').trim().toLowerCase();
+      
+      // Ignorar status "Não rodou" (igual BI antigo)
+      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem cod_prof (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
@@ -13716,7 +13720,8 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const statusPlanilha = (cols[5] || '').trim().toLowerCase();
       
       // Ignorar status "Não rodou" na análise semanal (igual BI antigo)
-      if (statusPlanilha === 'não rodou' || statusPlanilha === 'nao rodou') continue;
+      // Usando includes para pegar variações com/sem acento
+      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
@@ -13896,6 +13901,10 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const dataStr = cols[1];
       const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
+      const statusPlanilha = (cols[5] || '').trim().toLowerCase();
+      
+      // Ignorar status "Não rodou" (igual BI antigo)
+      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
