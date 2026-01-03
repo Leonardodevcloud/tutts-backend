@@ -13450,11 +13450,12 @@ app.get('/api/bi/garantido', async (req, res) => {
       const cols = parseCSVLine(line);
       const codClientePlan = cols[0];
       const dataStr = cols[1];
-      const profissional = cols[2];
-      const codProfPlan = cols[3];
+      const profissional = cols[2] || '(Vazio)';
+      const codProfPlan = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
-      if (!codProfPlan || !dataStr || valorNegociado <= 0) continue;
+      // Aceitar linhas mesmo sem cod_prof (linhas vazias) - igual BI atual
+      if (!dataStr || valorNegociado <= 0) continue;
       
       // Converter data DD/MM/YYYY para YYYY-MM-DD
       let dataFormatada = null;
@@ -13467,8 +13468,8 @@ app.get('/api/bi/garantido', async (req, res) => {
       
       if (!dataFormatada) continue;
       
-      // Chave única: cod_prof + data + cod_cliente
-      const chaveUnica = `${codProfPlan}_${dataFormatada}_${codClientePlan}`;
+      // Chave única: cod_prof + data + cod_cliente (ou profissional se cod_prof vazio)
+      const chaveUnica = `${codProfPlan || profissional}_${dataFormatada}_${codClientePlan}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
@@ -13514,9 +13515,14 @@ app.get('/api/bi/garantido', async (req, res) => {
       // Buscar TODA produção do profissional nessa data (soma de TODOS os clientes/centros)
       // IMPORTANTE: valor_prof é por OS, não por ponto. Cada OS tem várias linhas com o mesmo valor_prof.
       // Precisamos somar apenas uma vez por OS (usar MAX para pegar o valor da OS).
-      const codProfNum = parseInt(g.cod_prof);
       
-      const producaoResult = await pool.query(`
+      let prod = { total_os: 0, total_entregas: 0, distancia_total: 0, valor_produzido: 0, tempo_medio_entrega: null, locais_rodou: null };
+      
+      // Se tem cod_prof, buscar produção
+      if (g.cod_prof) {
+        const codProfNum = parseInt(g.cod_prof);
+        
+        const producaoResult = await pool.query(`
         WITH os_dados AS (
           SELECT 
             os,
@@ -13541,8 +13547,11 @@ app.get('/api/bi/garantido', async (req, res) => {
           STRING_AGG(DISTINCT local_os, ', ') as locais_rodou
         FROM os_dados
       `, [codProfNum, g.data]);
+        
+        prod = producaoResult.rows[0] || prod;
+      }
+      // Se não tem cod_prof, prod fica zerado (linha vazia/não rodou)
       
-      const prod = producaoResult.rows[0];
       const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
       const totalEntregas = parseInt(prod?.total_entregas) || 0;
       const distanciaTotal = parseFloat(prod?.distancia_total) || 0;
@@ -13619,7 +13628,9 @@ app.get('/api/bi/garantido', async (req, res) => {
       qtd_abaixo: resultados.filter(r => r.status === 'abaixo').length,
       qtd_acima: resultados.filter(r => r.status === 'acima').length,
       qtd_nao_rodou: resultados.filter(r => r.status === 'nao_rodou').length,
-      qtd_rodou: resultados.filter(r => r.status !== 'nao_rodou').length
+      qtd_rodou: resultados.filter(r => r.status !== 'nao_rodou').length,
+      // Valor total dos profissionais que não rodaram (negociado deles)
+      valor_nao_rodou: resultados.filter(r => r.status === 'nao_rodou').reduce((sum, r) => sum + r.valor_negociado, 0)
     };
     
     // Calcular tempo médio geral (formatado)
@@ -13693,17 +13704,18 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const cols = parseCSVLine(line);
       const codCliente = cols[0];
       const dataStr = cols[1];
-      const codProf = cols[3];
+      const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
-      if (!codProf || !dataStr || valorNegociado <= 0) continue;
+      // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
+      if (!dataStr || valorNegociado <= 0) continue;
       
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
       
       // Verificar duplicata
-      const chaveUnica = `${codProf}_${dataFormatada}_${codCliente}`;
+      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}_${codCliente}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
@@ -13719,17 +13731,20 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       
       // Buscar produção TOTAL do profissional no dia (soma de TODOS os clientes)
       // valor_prof é por OS, não por ponto
-      const producaoResult = await pool.query(`
-        SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
-        FROM (
-          SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
-          FROM bi_entregas
-          WHERE cod_prof = $1 AND data_solicitado::date = $2::date
-          GROUP BY os
-        ) os_dados
-      `, [parseInt(codProf), dataFormatada]);
+      let valorProduzido = 0;
+      if (codProf) {
+        const producaoResult = await pool.query(`
+          SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+          FROM (
+            SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+            FROM bi_entregas
+            WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+            GROUP BY os
+          ) os_dados
+        `, [parseInt(codProf), dataFormatada]);
+        valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+      }
       
-      const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
       // Agrupar por cliente do garantido (da planilha)
@@ -13813,17 +13828,18 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const cols = parseCSVLine(line);
       const codCliente = cols[0];
       const dataStr = cols[1];
-      const codProf = cols[3];
+      const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       
-      if (!codProf || !dataStr || valorNegociado <= 0) continue;
+      // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
+      if (!dataStr || valorNegociado <= 0) continue;
       
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
       
       // Verificar duplicata
-      const chaveUnica = `${codProf}_${dataFormatada}_${codCliente}`;
+      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}_${codCliente}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
@@ -13832,17 +13848,20 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       
       // Buscar produção TOTAL do profissional no dia
       // valor_prof é por OS, não por ponto
-      const producaoResult = await pool.query(`
-        SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
-        FROM (
-          SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
-          FROM bi_entregas
-          WHERE cod_prof = $1 AND data_solicitado::date = $2::date
-          GROUP BY os
-        ) os_dados
-      `, [parseInt(codProf), dataFormatada]);
+      let valorProduzido = 0;
+      if (codProf) {
+        const producaoResult = await pool.query(`
+          SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+          FROM (
+            SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+            FROM bi_entregas
+            WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+            GROUP BY os
+          ) os_dados
+        `, [parseInt(codProf), dataFormatada]);
+        valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+      }
       
-      const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
       // Agrupar por cliente do garantido (da planilha)
