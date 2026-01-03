@@ -13695,6 +13695,13 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       clientesNomes[c.cod_cliente] = c.nome_fantasia || c.nome_cliente || `Cliente ${c.cod_cliente}`;
     });
     
+    // Buscar máscaras configuradas
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
     // Agrupar por cliente do garantido + semana
     const porClienteSemana = {};
     const chavesProcessadas = new Set();
@@ -13769,14 +13776,16 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
       // Determinar a chave de agrupamento
-      // Cliente 767: agrupa por centro de custo (exceto se não tiver centro, usa o nome padrão)
-      // Cliente 949: agrupa pelo cliente
-      // Outros: agrupa pelo cliente
+      // Cliente 949: agrupa apenas pelo cliente (exceção)
+      // Todos os outros: cod_cliente - nome_cliente (ou máscara) - centro_custo
       let clienteKey;
-      if (codCliente === '767' && centroCusto) {
-        clienteKey = `767 - ${centroCusto}`;
+      const nomeCliente = mascaras[codCliente] || clientesNomes[codCliente] || `Cliente ${codCliente}`;
+      
+      if (codCliente === '949') {
+        clienteKey = `${codCliente} - ${nomeCliente}`;
+      } else if (centroCusto) {
+        clienteKey = `${codCliente} - ${nomeCliente} - ${centroCusto}`;
       } else {
-        const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
         clienteKey = `${codCliente} - ${nomeCliente}`;
       }
       
@@ -13865,6 +13874,13 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       clientesNomes[c.cod_cliente] = c.nome_fantasia || c.nome_cliente || `Cliente ${c.cod_cliente}`;
     });
     
+    // Buscar máscaras configuradas
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
     // Agrupar por cliente do garantido
     const porCliente = {};
     const chavesProcessadas = new Set();
@@ -13919,14 +13935,16 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
       // Determinar a chave de agrupamento
-      // Cliente 767: agrupa por centro de custo (exceto se não tiver centro, usa o nome padrão)
-      // Cliente 949: agrupa pelo cliente
-      // Outros: agrupa pelo cliente
+      // Cliente 949: agrupa apenas pelo cliente (exceção)
+      // Todos os outros: cod_cliente - nome_cliente (ou máscara) - centro_custo
       let clienteKey;
-      if (codCliente === '767' && centroCusto) {
-        clienteKey = `767 - ${centroCusto}`;
+      const nomeCliente = mascaras[codCliente] || clientesNomes[codCliente] || `Cliente ${codCliente}`;
+      
+      if (codCliente === '949') {
+        clienteKey = `${codCliente} - ${nomeCliente}`;
+      } else if (centroCusto) {
+        clienteKey = `${codCliente} - ${nomeCliente} - ${centroCusto}`;
       } else {
-        const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
         clienteKey = `${codCliente} - ${nomeCliente}`;
       }
       
