@@ -609,6 +609,46 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_disp_restricoes_loja ON disponibilidade_restricoes(loja_id)`).catch(() => {});
 
     // ============================================
+    // TABELAS DE RECRUTAMENTO
+    // ============================================
+
+    // Tabela de necessidades de recrutamento
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS recrutamento_necessidades (
+        id SERIAL PRIMARY KEY,
+        nome_cliente VARCHAR(255) NOT NULL,
+        data_conclusao DATE NOT NULL,
+        quantidade_motos INTEGER NOT NULL DEFAULT 1,
+        quantidade_backup INTEGER NOT NULL DEFAULT 0,
+        observacao TEXT,
+        status VARCHAR(50) DEFAULT 'em_andamento',
+        criado_por VARCHAR(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela recrutamento_necessidades verificada');
+
+    // Tabela de motos atribuídas ao recrutamento
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS recrutamento_atribuicoes (
+        id SERIAL PRIMARY KEY,
+        necessidade_id INTEGER REFERENCES recrutamento_necessidades(id) ON DELETE CASCADE,
+        tipo VARCHAR(20) NOT NULL DEFAULT 'titular',
+        cod_profissional VARCHAR(50) NOT NULL,
+        nome_profissional VARCHAR(200),
+        atribuido_por VARCHAR(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela recrutamento_atribuicoes verificada');
+
+    // Índices para recrutamento
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_recrutamento_necessidade_status ON recrutamento_necessidades(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_recrutamento_atribuicoes_necessidade ON recrutamento_atribuicoes(necessidade_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_recrutamento_atribuicoes_cod ON recrutamento_atribuicoes(cod_profissional)`).catch(() => {});
+
+    // ============================================
     // TABELAS DA LOJA
     // ============================================
 
@@ -13334,6 +13374,309 @@ async function processarRecorrenciasInterno() {
     console.error('❌ Erro ao processar recorrências:', err);
   }
 }
+
+// ============================================
+// ROTAS DE RECRUTAMENTO
+// ============================================
+
+// GET /api/recrutamento - Listar todas as necessidades
+app.get('/api/recrutamento', async (req, res) => {
+  try {
+    const { status } = req.query;
+    
+    let query = `
+      SELECT n.*, 
+        COALESCE(
+          (SELECT COUNT(*) FROM recrutamento_atribuicoes WHERE necessidade_id = n.id AND tipo = 'titular'),
+          0
+        ) as motos_atribuidas,
+        COALESCE(
+          (SELECT COUNT(*) FROM recrutamento_atribuicoes WHERE necessidade_id = n.id AND tipo = 'backup'),
+          0
+        ) as backups_atribuidos
+      FROM recrutamento_necessidades n
+    `;
+    
+    const params = [];
+    if (status) {
+      params.push(status);
+      query += ` WHERE n.status = $1`;
+    }
+    
+    query += ` ORDER BY n.data_conclusao ASC, n.created_at DESC`;
+    
+    const result = await pool.query(query, params);
+    
+    // Para cada necessidade, buscar as atribuições
+    const necessidades = [];
+    for (const nec of result.rows) {
+      const atribuicoes = await pool.query(
+        `SELECT * FROM recrutamento_atribuicoes WHERE necessidade_id = $1 ORDER BY tipo, created_at`,
+        [nec.id]
+      );
+      necessidades.push({
+        ...nec,
+        atribuicoes: atribuicoes.rows
+      });
+    }
+    
+    res.json(necessidades);
+  } catch (error) {
+    console.error('Erro ao listar recrutamento:', error);
+    res.status(500).json({ error: 'Erro ao listar necessidades de recrutamento' });
+  }
+});
+
+// POST /api/recrutamento - Criar nova necessidade
+app.post('/api/recrutamento', async (req, res) => {
+  try {
+    const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, criado_por } = req.body;
+    
+    if (!nome_cliente || !data_conclusao || !quantidade_motos) {
+      return res.status(400).json({ error: 'Nome do cliente, data de conclusão e quantidade de motos são obrigatórios' });
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO recrutamento_necessidades 
+        (nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, criado_por)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [nome_cliente, data_conclusao, quantidade_motos, quantidade_backup || 0, observacao || null, criado_por]
+    );
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erro ao criar necessidade:', error);
+    res.status(500).json({ error: 'Erro ao criar necessidade de recrutamento' });
+  }
+});
+
+// PUT /api/recrutamento/:id - Atualizar necessidade
+app.put('/api/recrutamento/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, status } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE recrutamento_necessidades 
+       SET nome_cliente = COALESCE($1, nome_cliente),
+           data_conclusao = COALESCE($2, data_conclusao),
+           quantidade_motos = COALESCE($3, quantidade_motos),
+           quantidade_backup = COALESCE($4, quantidade_backup),
+           observacao = $5,
+           status = COALESCE($6, status),
+           updated_at = NOW()
+       WHERE id = $7
+       RETURNING *`,
+      [nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, status, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Necessidade não encontrada' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erro ao atualizar necessidade:', error);
+    res.status(500).json({ error: 'Erro ao atualizar necessidade' });
+  }
+});
+
+// DELETE /api/recrutamento/:id - Deletar necessidade
+app.delete('/api/recrutamento/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'DELETE FROM recrutamento_necessidades WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Necessidade não encontrada' });
+    }
+    
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (error) {
+    console.error('Erro ao deletar necessidade:', error);
+    res.status(500).json({ error: 'Erro ao deletar necessidade' });
+  }
+});
+
+// POST /api/recrutamento/:id/atribuir - Atribuir moto a uma necessidade
+app.post('/api/recrutamento/:id/atribuir', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cod_profissional, tipo, atribuido_por } = req.body;
+    
+    if (!cod_profissional) {
+      return res.status(400).json({ error: 'Código do profissional é obrigatório' });
+    }
+    
+    // Verificar se a necessidade existe
+    const necessidade = await pool.query(
+      'SELECT * FROM recrutamento_necessidades WHERE id = $1',
+      [id]
+    );
+    
+    if (necessidade.rows.length === 0) {
+      return res.status(404).json({ error: 'Necessidade não encontrada' });
+    }
+    
+    // Verificar se já está atribuído nesta necessidade
+    const jaAtribuido = await pool.query(
+      'SELECT * FROM recrutamento_atribuicoes WHERE necessidade_id = $1 AND cod_profissional = $2',
+      [id, cod_profissional]
+    );
+    
+    if (jaAtribuido.rows.length > 0) {
+      return res.status(400).json({ error: 'Este profissional já está atribuído a esta necessidade' });
+    }
+    
+    // Buscar nome do profissional na tabela de disponibilidade
+    const profResult = await pool.query(
+      `SELECT DISTINCT nome_profissional 
+       FROM disponibilidade_linhas 
+       WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
+       LIMIT 1`,
+      [cod_profissional]
+    );
+    
+    const nome_profissional = profResult.rows[0]?.nome_profissional || null;
+    
+    // Inserir atribuição
+    const result = await pool.query(
+      `INSERT INTO recrutamento_atribuicoes 
+        (necessidade_id, tipo, cod_profissional, nome_profissional, atribuido_por)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [id, tipo || 'titular', cod_profissional, nome_profissional, atribuido_por]
+    );
+    
+    // Verificar se a necessidade foi completada
+    const atribuicoes = await pool.query(
+      `SELECT 
+        COUNT(*) FILTER (WHERE tipo = 'titular') as titulares,
+        COUNT(*) FILTER (WHERE tipo = 'backup') as backups
+       FROM recrutamento_atribuicoes 
+       WHERE necessidade_id = $1`,
+      [id]
+    );
+    
+    const nec = necessidade.rows[0];
+    const stats = atribuicoes.rows[0];
+    
+    // Se atingiu o total necessário, atualizar status para concluído
+    if (parseInt(stats.titulares) >= nec.quantidade_motos && 
+        parseInt(stats.backups) >= nec.quantidade_backup) {
+      await pool.query(
+        `UPDATE recrutamento_necessidades SET status = 'concluido', updated_at = NOW() WHERE id = $1`,
+        [id]
+      );
+    }
+    
+    res.json({ 
+      atribuicao: result.rows[0],
+      nome_profissional: nome_profissional
+    });
+  } catch (error) {
+    console.error('Erro ao atribuir profissional:', error);
+    res.status(500).json({ error: 'Erro ao atribuir profissional' });
+  }
+});
+
+// DELETE /api/recrutamento/atribuicao/:id - Remover atribuição
+app.delete('/api/recrutamento/atribuicao/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Buscar a atribuição para saber qual necessidade
+    const atribuicao = await pool.query(
+      'SELECT * FROM recrutamento_atribuicoes WHERE id = $1',
+      [id]
+    );
+    
+    if (atribuicao.rows.length === 0) {
+      return res.status(404).json({ error: 'Atribuição não encontrada' });
+    }
+    
+    const necessidadeId = atribuicao.rows[0].necessidade_id;
+    
+    // Deletar atribuição
+    await pool.query('DELETE FROM recrutamento_atribuicoes WHERE id = $1', [id]);
+    
+    // Atualizar status da necessidade para em_andamento se estava concluída
+    await pool.query(
+      `UPDATE recrutamento_necessidades 
+       SET status = 'em_andamento', updated_at = NOW() 
+       WHERE id = $1 AND status = 'concluido'`,
+      [necessidadeId]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao remover atribuição:', error);
+    res.status(500).json({ error: 'Erro ao remover atribuição' });
+  }
+});
+
+// GET /api/recrutamento/buscar-profissional/:cod - Buscar profissional por código
+app.get('/api/recrutamento/buscar-profissional/:cod', async (req, res) => {
+  try {
+    const { cod } = req.params;
+    
+    // Buscar na tabela de disponibilidade
+    const result = await pool.query(
+      `SELECT DISTINCT cod_profissional, nome_profissional
+       FROM disponibilidade_linhas 
+       WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
+       LIMIT 1`,
+      [cod]
+    );
+    
+    if (result.rows.length === 0) {
+      // Tentar buscar na tabela de usuários
+      const userResult = await pool.query(
+        'SELECT cod_profissional, full_name as nome_profissional FROM users WHERE cod_profissional = $1',
+        [cod]
+      );
+      
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Profissional não encontrado' });
+      }
+      
+      return res.json(userResult.rows[0]);
+    }
+    
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erro ao buscar profissional:', error);
+    res.status(500).json({ error: 'Erro ao buscar profissional' });
+  }
+});
+
+// GET /api/recrutamento/estatisticas - Estatísticas gerais de recrutamento
+app.get('/api/recrutamento/estatisticas', async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_necessidades,
+        COUNT(*) FILTER (WHERE status = 'em_andamento') as em_andamento,
+        COUNT(*) FILTER (WHERE status = 'concluido') as concluidas,
+        COUNT(*) FILTER (WHERE status = 'cancelado') as canceladas,
+        SUM(quantidade_motos) as total_motos_necessarias,
+        SUM(quantidade_backup) as total_backups_necessarios,
+        (SELECT COUNT(*) FROM recrutamento_atribuicoes WHERE tipo = 'titular') as total_motos_atribuidas,
+        (SELECT COUNT(*) FROM recrutamento_atribuicoes WHERE tipo = 'backup') as total_backups_atribuidos
+      FROM recrutamento_necessidades
+    `);
+    
+    res.json(stats.rows[0]);
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas:', error);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas' });
+  }
+});
 
 // Iniciar servidor
 app.listen(port, () => {
