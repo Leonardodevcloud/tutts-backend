@@ -13383,6 +13383,22 @@ async function processarRecorrenciasInterno() {
 // ROTAS DO MÓDULO GARANTIDO (BI)
 // ============================================
 
+// Criar tabela de status do garantido (se não existir)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS garantido_status (
+    id SERIAL PRIMARY KEY,
+    cod_prof VARCHAR(20) NOT NULL,
+    data DATE NOT NULL,
+    cod_cliente VARCHAR(20) NOT NULL,
+    status VARCHAR(20) DEFAULT 'analise',
+    motivo_reprovado TEXT,
+    alterado_por VARCHAR(100),
+    alterado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(cod_prof, data, cod_cliente)
+  )
+`).then(() => console.log('✅ Tabela garantido_status verificada'))
+  .catch(err => console.log('Erro ao criar tabela garantido_status:', err.message));
+
 // GET /api/bi/garantido - Análise de mínimo garantido
 app.get('/api/bi/garantido', async (req, res) => {
   try {
@@ -13860,6 +13876,61 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
   } catch (error) {
     console.error('Erro ao buscar garantido por cliente:', error);
     res.status(500).json({ error: 'Erro ao buscar dados por cliente' });
+  }
+});
+
+// PUT /api/bi/garantido/status - Atualizar status de um registro de garantido
+app.put('/api/bi/garantido/status', async (req, res) => {
+  try {
+    const { cod_prof, data, cod_cliente, status, motivo_reprovado, alterado_por } = req.body;
+    
+    if (!cod_prof || !data || !cod_cliente || !status) {
+      return res.status(400).json({ error: 'Campos obrigatórios: cod_prof, data, cod_cliente, status' });
+    }
+    
+    if (status === 'reprovado' && !motivo_reprovado) {
+      return res.status(400).json({ error: 'Motivo é obrigatório quando status é reprovado' });
+    }
+    
+    // Upsert - inserir ou atualizar
+    const result = await pool.query(`
+      INSERT INTO garantido_status (cod_prof, data, cod_cliente, status, motivo_reprovado, alterado_por, alterado_em)
+      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+      ON CONFLICT (cod_prof, data, cod_cliente)
+      DO UPDATE SET 
+        status = $4,
+        motivo_reprovado = $5,
+        alterado_por = $6,
+        alterado_em = CURRENT_TIMESTAMP
+      RETURNING *
+    `, [cod_prof, data, cod_cliente, status, status === 'reprovado' ? motivo_reprovado : null, alterado_por]);
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Erro ao atualizar status garantido:', error);
+    res.status(500).json({ error: 'Erro ao atualizar status', details: error.message });
+  }
+});
+
+// GET /api/bi/garantido/status - Buscar todos os status salvos
+app.get('/api/bi/garantido/status', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cod_prof, data::text, cod_cliente, status, motivo_reprovado, alterado_por, alterado_em
+      FROM garantido_status
+    `);
+    
+    // Criar um mapa para fácil acesso: cod_prof_data_cod_cliente -> status
+    const statusMap = {};
+    result.rows.forEach(row => {
+      const key = `${row.cod_prof}_${row.data}_${row.cod_cliente}`;
+      statusMap[key] = row;
+    });
+    
+    res.json(statusMap);
+  } catch (error) {
+    console.error('Erro ao buscar status garantido:', error);
+    res.status(500).json({ error: 'Erro ao buscar status' });
   }
 });
 
