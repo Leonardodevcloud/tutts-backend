@@ -13545,6 +13545,17 @@ app.get('/api/bi/garantido', async (req, res) => {
       console.log('Erro ao buscar nomes de clientes:', e.message);
     }
     
+    // 2.1 Buscar máscaras configuradas
+    const mascaras = {};
+    try {
+      const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+      mascarasResult.rows.forEach(m => {
+        mascaras[String(m.cod_cliente)] = m.mascara;
+      });
+    } catch (e) {
+      console.log('Erro ao buscar máscaras:', e.message);
+    }
+    
     // 3. Para cada registro da planilha, buscar TODA produção do profissional no dia
     const resultados = [];
     
@@ -13559,7 +13570,7 @@ app.get('/api/bi/garantido', async (req, res) => {
       // IMPORTANTE: valor_prof é por OS, não por ponto. Cada OS tem várias linhas com o mesmo valor_prof.
       // Precisamos somar apenas uma vez por OS (usar MAX para pegar o valor da OS).
       
-      let prod = { total_os: 0, total_entregas: 0, distancia_total: 0, valor_produzido: 0, tempo_medio_entrega: null, locais_rodou: null };
+      let prod = { total_os: 0, total_entregas: 0, distancia_total: 0, valor_produzido: 0, tempo_medio_entrega: null, locais_rodou: null, cod_cliente_rodou: null, centro_custo_rodou: null };
       
       // Se tem cod_prof, buscar produção
       if (g.cod_prof) {
@@ -13571,7 +13582,8 @@ app.get('/api/bi/garantido', async (req, res) => {
             os,
             MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
             MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END) as distancia_os,
-            MAX(COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A')) as local_os,
+            MAX(cod_cliente) as cod_cliente_os,
+            MAX(centro_custo) as centro_custo_os,
             COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as entregas_os,
             AVG(CASE 
               WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL 
@@ -13587,7 +13599,8 @@ app.get('/api/bi/garantido', async (req, res) => {
           COALESCE(SUM(distancia_os), 0) as distancia_total,
           COALESCE(SUM(valor_os), 0) as valor_produzido,
           AVG(tempo_os) as tempo_medio_entrega,
-          STRING_AGG(DISTINCT local_os, ', ') as locais_rodou
+          STRING_AGG(DISTINCT cod_cliente_os::text, ', ') as cod_clientes_rodou,
+          STRING_AGG(DISTINCT centro_custo_os, ', ') as centros_custo_rodou
         FROM os_dados
       `, [codProfNum, g.data]);
         
@@ -13598,7 +13611,6 @@ app.get('/api/bi/garantido', async (req, res) => {
       const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
       const totalEntregas = parseInt(prod?.total_entregas) || 0;
       const distanciaTotal = parseFloat(prod?.distancia_total) || 0;
-      const locaisRodou = prod?.locais_rodou || '- NÃO RODOU';
       
       // Calcular complemento
       const complemento = Math.max(0, g.valor_negociado - valorProduzido);
@@ -13629,11 +13641,25 @@ app.get('/api/bi/garantido', async (req, res) => {
         tempoEntregaFormatado = `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(segs).padStart(2, '0')}`;
       }
       
-      // "Onde Rodou" - mostrar centro de custo real onde o profissional rodou
-      // Se tem entregas, usar os locais reais do banco; se não, mostrar "NÃO RODOU"
+      // "Onde Rodou" - Formato: cod_cliente + nome (com máscara) + centro de custo
+      // Exceção: cliente 949 não mostra centro de custo
       let ondeRodou = '- NÃO RODOU';
-      if (totalEntregas > 0 && prod?.locais_rodou) {
-        ondeRodou = `${g.cod_cliente} - ${prod.locais_rodou}`;
+      if (totalEntregas > 0 && prod?.cod_clientes_rodou) {
+        const codClienteRodou = prod.cod_clientes_rodou.split(',')[0]?.trim(); // Pega o primeiro se houver vários
+        const centroCusto = prod.centros_custo_rodou?.split(',')[0]?.trim() || '';
+        
+        // Buscar nome do cliente (máscara tem prioridade)
+        const nomeCliente = mascaras[codClienteRodou] || clientesGarantido[codClienteRodou] || `Cliente ${codClienteRodou}`;
+        
+        // Cliente 949: apenas cod + nome
+        // Outros clientes: cod + nome + centro de custo
+        if (codClienteRodou === '949') {
+          ondeRodou = `${codClienteRodou} - ${nomeCliente}`;
+        } else {
+          ondeRodou = centroCusto 
+            ? `${codClienteRodou} - ${nomeCliente} ${centroCusto}`
+            : `${codClienteRodou} - ${nomeCliente}`;
+        }
       }
       
       resultados.push({
@@ -13642,7 +13668,6 @@ app.get('/api/bi/garantido', async (req, res) => {
         profissional: g.profissional,
         cod_cliente_garantido: g.cod_cliente,
         onde_rodou: ondeRodou,
-        locais_producao: locaisRodou,
         entregas: totalEntregas,
         tempo_entrega: tempoEntregaFormatado,
         distancia: distanciaTotal,
