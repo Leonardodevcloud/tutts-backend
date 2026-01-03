@@ -13398,12 +13398,13 @@ app.get('/api/bi/garantido', async (req, res) => {
     const garantidoPlanilha = [];
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',');
-      const codCliente = cols[0]?.trim();
-      const dataStr = cols[1]?.trim();
-      const profissional = cols[2]?.trim();
-      const codProf = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      // Tratar CSV com possíveis vírgulas dentro de campos entre aspas
+      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
+      const codCliente = cols[0]?.trim().replace(/"/g, '');
+      const dataStr = cols[1]?.trim().replace(/"/g, '');
+      const profissional = cols[2]?.trim().replace(/"/g, '');
+      const codProf = cols[3]?.trim().replace(/"/g, '');
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
       
       if (!codProf || !dataStr) continue;
       
@@ -13427,7 +13428,24 @@ app.get('/api/bi/garantido', async (req, res) => {
       });
     }
     
-    // 2. Para cada registro da planilha, buscar dados de produção no BI
+    // 2. Buscar nome do cliente da planilha (onde tem garantido)
+    const clientesGarantido = {};
+    try {
+      const clienteSheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+      // Buscar nomes de clientes do BI se necessário
+      const clientesResult = await pool.query(`
+        SELECT DISTINCT cod_cliente, nome_fantasia, nome_cliente 
+        FROM bi_entregas 
+        WHERE cod_cliente IS NOT NULL
+      `);
+      clientesResult.rows.forEach(c => {
+        clientesGarantido[c.cod_cliente] = c.nome_fantasia || c.nome_cliente || `Cliente ${c.cod_cliente}`;
+      });
+    } catch (e) {
+      console.log('Erro ao buscar nomes de clientes:', e.message);
+    }
+    
+    // 3. Para cada registro da planilha, buscar TODA produção do profissional no dia
     const resultados = [];
     
     for (const g of garantidoPlanilha) {
@@ -13437,13 +13455,9 @@ app.get('/api/bi/garantido', async (req, res) => {
       if (cod_cliente && g.cod_cliente !== cod_cliente) continue;
       if (cod_prof && g.cod_prof !== cod_prof) continue;
       
-      // Buscar produção do profissional nessa data
+      // Buscar TODA produção do profissional nessa data (soma de TODOS os clientes/centros)
       const producaoResult = await pool.query(`
         SELECT 
-          cod_cliente,
-          nome_cliente,
-          nome_fantasia,
-          centro_custo,
           COUNT(DISTINCT os) as total_os,
           COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as total_entregas,
           COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as distancia_total,
@@ -13451,79 +13465,68 @@ app.get('/api/bi/garantido', async (req, res) => {
           AVG(CASE 
             WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL 
             THEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 
-          END) as tempo_medio_entrega
+          END) as tempo_medio_entrega,
+          STRING_AGG(DISTINCT COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A'), ', ') as locais_rodou
         FROM bi_entregas
         WHERE cod_prof = $1 AND data_solicitado = $2
-        GROUP BY cod_cliente, nome_cliente, nome_fantasia, centro_custo
       `, [parseInt(g.cod_prof), g.data]);
       
-      // Se não produziu nada
-      if (producaoResult.rows.length === 0) {
-        const complemento = g.valor_negociado;
-        
-        // Aplicar filtro de status
-        if (filtro_status === 'rodou') continue;
-        if (filtro_status === 'abaixo') continue;
-        if (filtro_status === 'acima') continue;
-        
-        resultados.push({
-          data: g.data,
-          cod_prof: g.cod_prof,
-          profissional: g.profissional,
-          cod_cliente_garantido: g.cod_cliente,
-          onde_rodou: '- NÃO RODOU',
-          entregas: 0,
-          tempo_entrega: null,
-          distancia: 0,
-          valor_negociado: g.valor_negociado,
-          valor_produzido: 0,
-          complemento: complemento,
-          status: 'nao_rodou'
-        });
+      const prod = producaoResult.rows[0];
+      const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
+      const totalEntregas = parseInt(prod?.total_entregas) || 0;
+      const distanciaTotal = parseFloat(prod?.distancia_total) || 0;
+      const locaisRodou = prod?.locais_rodou || '- NÃO RODOU';
+      
+      // Calcular complemento
+      const complemento = Math.max(0, g.valor_negociado - valorProduzido);
+      
+      // Determinar status
+      let status;
+      if (totalEntregas === 0) {
+        status = 'nao_rodou';
+      } else if (valorProduzido < g.valor_negociado) {
+        status = 'abaixo';
       } else {
-        // Produziu em um ou mais locais
-        for (const prod of producaoResult.rows) {
-          const valorProduzido = parseFloat(prod.valor_produzido) || 0;
-          const complemento = Math.max(0, g.valor_negociado - valorProduzido);
-          const status = valorProduzido === 0 ? 'nao_rodou' : 
-                        valorProduzido < g.valor_negociado ? 'abaixo' : 'acima';
-          
-          // Aplicar filtro de status
-          if (filtro_status === 'nao_rodou' && status !== 'nao_rodou') continue;
-          if (filtro_status === 'abaixo' && status !== 'abaixo') continue;
-          if (filtro_status === 'acima' && status !== 'acima') continue;
-          if (filtro_status === 'rodou' && status === 'nao_rodou') continue;
-          
-          // Formatar onde rodou
-          const ondeRodou = prod.cod_cliente 
-            ? `${prod.cod_cliente} - ${prod.nome_fantasia || prod.nome_cliente || prod.centro_custo || 'N/A'}`
-            : prod.centro_custo || 'N/A';
-          
-          // Formatar tempo de entrega
-          let tempoEntregaFormatado = null;
-          if (prod.tempo_medio_entrega) {
-            const minutos = Math.round(prod.tempo_medio_entrega);
-            const horas = Math.floor(minutos / 60);
-            const mins = minutos % 60;
-            tempoEntregaFormatado = `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}:00`;
-          }
-          
-          resultados.push({
-            data: g.data,
-            cod_prof: g.cod_prof,
-            profissional: g.profissional,
-            cod_cliente_garantido: g.cod_cliente,
-            onde_rodou: ondeRodou,
-            entregas: parseInt(prod.total_entregas) || 0,
-            tempo_entrega: tempoEntregaFormatado,
-            distancia: parseFloat(prod.distancia_total) || 0,
-            valor_negociado: g.valor_negociado,
-            valor_produzido: valorProduzido,
-            complemento: complemento,
-            status: status
-          });
-        }
+        status = 'acima';
       }
+      
+      // Aplicar filtro de status
+      if (filtro_status === 'nao_rodou' && status !== 'nao_rodou') continue;
+      if (filtro_status === 'abaixo' && status !== 'abaixo') continue;
+      if (filtro_status === 'acima' && status !== 'acima') continue;
+      if (filtro_status === 'rodou' && status === 'nao_rodou') continue;
+      
+      // Formatar tempo de entrega
+      let tempoEntregaFormatado = null;
+      if (prod?.tempo_medio_entrega) {
+        const minutos = Math.round(prod.tempo_medio_entrega);
+        const horas = Math.floor(minutos / 60);
+        const mins = minutos % 60;
+        const segs = 0;
+        tempoEntregaFormatado = `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(segs).padStart(2, '0')}`;
+      }
+      
+      // "Onde Rodou" vem da PLANILHA (cliente do garantido)
+      const nomeClienteGarantido = clientesGarantido[g.cod_cliente] || `Cliente ${g.cod_cliente}`;
+      const ondeRodou = totalEntregas > 0 
+        ? `${g.cod_cliente} - ${nomeClienteGarantido}`
+        : '- NÃO RODOU';
+      
+      resultados.push({
+        data: g.data,
+        cod_prof: g.cod_prof,
+        profissional: g.profissional,
+        cod_cliente_garantido: g.cod_cliente,
+        onde_rodou: ondeRodou,
+        locais_producao: locaisRodou, // onde realmente produziu
+        entregas: totalEntregas,
+        tempo_entrega: tempoEntregaFormatado,
+        distancia: distanciaTotal,
+        valor_negociado: g.valor_negociado,
+        valor_produzido: valorProduzido,
+        complemento: complemento,
+        status: status
+      });
     }
     
     // Ordenar por data desc, depois por profissional
@@ -13546,6 +13549,21 @@ app.get('/api/bi/garantido', async (req, res) => {
       qtd_rodou: resultados.filter(r => r.status !== 'nao_rodou').length
     };
     
+    // Calcular tempo médio geral (formatado)
+    const temposValidos = resultados.filter(r => r.tempo_entrega).map(r => {
+      const [h, m, s] = r.tempo_entrega.split(':').map(Number);
+      return h * 3600 + m * 60 + s;
+    });
+    let tempoMedioGeral = null;
+    if (temposValidos.length > 0) {
+      const mediaSegs = temposValidos.reduce((a, b) => a + b, 0) / temposValidos.length;
+      const h = Math.floor(mediaSegs / 3600);
+      const m = Math.floor((mediaSegs % 3600) / 60);
+      const s = Math.floor(mediaSegs % 60);
+      tempoMedioGeral = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    totais.tempo_medio_geral = tempoMedioGeral;
+    
     res.json({ dados: resultados, totais });
   } catch (error) {
     console.error('Erro ao buscar dados garantido:', error);
@@ -13553,7 +13571,7 @@ app.get('/api/bi/garantido', async (req, res) => {
   }
 });
 
-// GET /api/bi/garantido/semanal - Análise semanal por local
+// GET /api/bi/garantido/semanal - Análise semanal por cliente do garantido
 app.get('/api/bi/garantido/semanal', async (req, res) => {
   try {
     const { data_inicio, data_fim } = req.query;
@@ -13564,15 +13582,26 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     const sheetText = await sheetResponse.text();
     const sheetLines = sheetText.split('\n').slice(1);
     
-    // Parsear dados da planilha
-    const garantidoMap = new Map(); // cod_prof_data -> valor_negociado
+    // Buscar nomes de clientes
+    const clientesResult = await pool.query(`
+      SELECT DISTINCT cod_cliente, nome_fantasia, nome_cliente 
+      FROM bi_entregas WHERE cod_cliente IS NOT NULL
+    `);
+    const clientesNomes = {};
+    clientesResult.rows.forEach(c => {
+      clientesNomes[c.cod_cliente] = c.nome_fantasia || c.nome_cliente || `Cliente ${c.cod_cliente}`;
+    });
+    
+    // Agrupar por cliente do garantido + semana
+    const porClienteSemana = {};
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',');
-      const dataStr = cols[1]?.trim();
-      const codProf = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
+      const codCliente = cols[0]?.trim().replace(/"/g, '');
+      const dataStr = cols[1]?.trim().replace(/"/g, '');
+      const codProf = cols[3]?.trim().replace(/"/g, '');
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
       
       if (!codProf || !dataStr) continue;
       
@@ -13583,65 +13612,42 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
       
-      const key = `${codProf}_${dataFormatada}`;
-      garantidoMap.set(key, (garantidoMap.get(key) || 0) + valorNegociado);
-    }
-    
-    // Buscar produções agrupadas por semana e local
-    let query = `
-      SELECT 
-        COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A') as onde_rodou,
-        DATE_TRUNC('week', data_solicitado) as semana,
-        cod_prof,
-        data_solicitado,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
-      FROM bi_entregas
-      WHERE data_solicitado IS NOT NULL
-    `;
-    
-    const params = [];
-    if (data_inicio) {
-      params.push(data_inicio);
-      query += ` AND data_solicitado >= $${params.length}`;
-    }
-    if (data_fim) {
-      params.push(data_fim);
-      query += ` AND data_solicitado <= $${params.length}`;
-    }
-    
-    query += ` GROUP BY onde_rodou, semana, cod_prof, data_solicitado ORDER BY onde_rodou, semana`;
-    
-    const producaoResult = await pool.query(query, params);
-    
-    // Agrupar por local e semana
-    const porLocalSemana = {};
-    
-    for (const row of producaoResult.rows) {
-      const local = row.onde_rodou;
-      const semana = row.semana?.toISOString().split('T')[0];
-      const codProf = row.cod_prof;
-      const data = row.data_solicitado?.toISOString().split('T')[0];
-      const valorProduzido = parseFloat(row.valor_produzido) || 0;
+      // Calcular início da semana (domingo)
+      const dataObj = new Date(dataFormatada + 'T12:00:00');
+      const diaSemana = dataObj.getDay();
+      const inicioSemana = new Date(dataObj);
+      inicioSemana.setDate(dataObj.getDate() - diaSemana);
+      const semanaKey = inicioSemana.toISOString().split('T')[0];
       
-      // Buscar valor negociado
-      const key = `${codProf}_${data}`;
-      const valorNegociado = garantidoMap.get(key) || 0;
+      // Buscar produção TOTAL do profissional no dia (soma de TODOS os clientes)
+      const producaoResult = await pool.query(`
+        SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
+        FROM bi_entregas
+        WHERE cod_prof = $1 AND data_solicitado = $2
+      `, [parseInt(codProf), dataFormatada]);
       
-      if (!porLocalSemana[local]) {
-        porLocalSemana[local] = {};
+      const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+      const complemento = Math.max(0, valorNegociado - valorProduzido);
+      
+      // Agrupar por cliente do garantido (da planilha)
+      const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
+      const clienteKey = `${codCliente} - ${nomeCliente}`;
+      
+      if (!porClienteSemana[clienteKey]) {
+        porClienteSemana[clienteKey] = {};
       }
-      if (!porLocalSemana[local][semana]) {
-        porLocalSemana[local][semana] = { negociado: 0, produzido: 0, complemento: 0 };
+      if (!porClienteSemana[clienteKey][semanaKey]) {
+        porClienteSemana[clienteKey][semanaKey] = { negociado: 0, produzido: 0, complemento: 0 };
       }
       
-      porLocalSemana[local][semana].negociado += valorNegociado;
-      porLocalSemana[local][semana].produzido += valorProduzido;
-      porLocalSemana[local][semana].complemento += Math.max(0, valorNegociado - valorProduzido);
+      porClienteSemana[clienteKey][semanaKey].negociado += valorNegociado;
+      porClienteSemana[clienteKey][semanaKey].produzido += valorProduzido;
+      porClienteSemana[clienteKey][semanaKey].complemento += complemento;
     }
     
     // Formatar resultado
-    const resultado = Object.entries(porLocalSemana).map(([local, semanas]) => ({
-      onde_rodou: local,
+    const resultado = Object.entries(porClienteSemana).map(([cliente, semanas]) => ({
+      onde_rodou: cliente,
       semanas: Object.entries(semanas).map(([semana, valores]) => ({
         semana,
         ...valores
@@ -13655,7 +13661,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
   }
 });
 
-// GET /api/bi/garantido/por-cliente - Resumo por cliente/local
+// GET /api/bi/garantido/por-cliente - Resumo por cliente do garantido
 app.get('/api/bi/garantido/por-cliente', async (req, res) => {
   try {
     const { data_inicio, data_fim } = req.query;
@@ -13666,16 +13672,26 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     const sheetText = await sheetResponse.text();
     const sheetLines = sheetText.split('\n').slice(1);
     
-    // Criar mapa de garantidos
-    const garantidoMap = new Map();
+    // Buscar nomes de clientes
+    const clientesResult = await pool.query(`
+      SELECT DISTINCT cod_cliente, nome_fantasia, nome_cliente 
+      FROM bi_entregas WHERE cod_cliente IS NOT NULL
+    `);
+    const clientesNomes = {};
+    clientesResult.rows.forEach(c => {
+      clientesNomes[c.cod_cliente] = c.nome_fantasia || c.nome_cliente || `Cliente ${c.cod_cliente}`;
+    });
+    
+    // Agrupar por cliente do garantido
+    const porCliente = {};
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.split(',');
-      const codCliente = cols[0]?.trim();
-      const dataStr = cols[1]?.trim();
-      const codProf = cols[3]?.trim();
-      const valorNegociado = parseFloat(cols[4]?.trim()) || 0;
+      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
+      const codCliente = cols[0]?.trim().replace(/"/g, '');
+      const dataStr = cols[1]?.trim().replace(/"/g, '');
+      const codProf = cols[3]?.trim().replace(/"/g, '');
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
       
       if (!codProf || !dataStr) continue;
       
@@ -13686,65 +13702,33 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
       
-      const key = `${codProf}_${dataFormatada}`;
-      if (!garantidoMap.has(key)) {
-        garantidoMap.set(key, { cod_cliente: codCliente, valor: 0 });
-      }
-      garantidoMap.get(key).valor += valorNegociado;
-    }
-    
-    // Buscar produções do BI
-    let query = `
-      SELECT 
-        cod_cliente,
-        COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A') as onde_rodou,
-        cod_prof,
-        data_solicitado,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
-      FROM bi_entregas
-      WHERE data_solicitado IS NOT NULL
-    `;
-    
-    const params = [];
-    if (data_inicio) {
-      params.push(data_inicio);
-      query += ` AND data_solicitado >= $${params.length}`;
-    }
-    if (data_fim) {
-      params.push(data_fim);
-      query += ` AND data_solicitado <= $${params.length}`;
-    }
-    
-    query += ` GROUP BY cod_cliente, onde_rodou, cod_prof, data_solicitado`;
-    
-    const producaoResult = await pool.query(query, params);
-    
-    // Agrupar por local
-    const porCliente = {};
-    
-    for (const row of producaoResult.rows) {
-      const local = row.onde_rodou;
-      const codProf = row.cod_prof;
-      const data = row.data_solicitado?.toISOString().split('T')[0];
-      const valorProduzido = parseFloat(row.valor_produzido) || 0;
+      // Buscar produção TOTAL do profissional no dia
+      const producaoResult = await pool.query(`
+        SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
+        FROM bi_entregas
+        WHERE cod_prof = $1 AND data_solicitado = $2
+      `, [parseInt(codProf), dataFormatada]);
       
-      const key = `${codProf}_${data}`;
-      const garantidoInfo = garantidoMap.get(key);
-      const valorNegociado = garantidoInfo?.valor || 0;
+      const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+      const complemento = Math.max(0, valorNegociado - valorProduzido);
       
-      if (!porCliente[local]) {
-        porCliente[local] = { negociado: 0, produzido: 0, complemento: 0 };
+      // Agrupar por cliente do garantido (da planilha)
+      const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
+      const clienteKey = `${codCliente} - ${nomeCliente}`;
+      
+      if (!porCliente[clienteKey]) {
+        porCliente[clienteKey] = { negociado: 0, produzido: 0, complemento: 0 };
       }
       
-      porCliente[local].negociado += valorNegociado;
-      porCliente[local].produzido += valorProduzido;
-      porCliente[local].complemento += Math.max(0, valorNegociado - valorProduzido);
+      porCliente[clienteKey].negociado += valorNegociado;
+      porCliente[clienteKey].produzido += valorProduzido;
+      porCliente[clienteKey].complemento += complemento;
     }
     
     // Formatar e calcular totais
     const resultado = Object.entries(porCliente)
-      .map(([local, valores]) => ({
-        onde_rodou: local,
+      .map(([cliente, valores]) => ({
+        onde_rodou: cliente,
         ...valores
       }))
       .sort((a, b) => b.complemento - a.complemento);
