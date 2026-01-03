@@ -13396,6 +13396,8 @@ app.get('/api/bi/garantido', async (req, res) => {
     
     // Parsear dados da planilha
     const garantidoPlanilha = [];
+    const chavesProcessadas = new Set(); // Para evitar duplicatas
+    
     for (const line of sheetLines) {
       if (!line.trim()) continue;
       
@@ -13419,6 +13421,14 @@ app.get('/api/bi/garantido', async (req, res) => {
       }
       
       if (!dataFormatada) continue;
+      
+      // Chave única: cod_prof + data + cod_cliente
+      const chaveUnica = `${codProfPlan}_${dataFormatada}_${codClientePlan}`;
+      if (chavesProcessadas.has(chaveUnica)) {
+        console.log(`⚠️ Duplicata ignorada: ${profissional} - ${dataStr} - Cliente ${codClientePlan}`);
+        continue;
+      }
+      chavesProcessadas.add(chaveUnica);
       
       garantidoPlanilha.push({
         cod_cliente: codClientePlan,
@@ -13597,6 +13607,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     
     // Agrupar por cliente do garantido + semana
     const porClienteSemana = {};
+    const chavesProcessadas = new Set(); // Para evitar duplicatas
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
@@ -13611,6 +13622,11 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+      
+      // Verificar duplicata
+      const chaveUnica = `${codProf}_${dataFormatada}_${codCliente}`;
+      if (chavesProcessadas.has(chaveUnica)) continue;
+      chavesProcessadas.add(chaveUnica);
       
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
@@ -13687,6 +13703,7 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     
     // Agrupar por cliente do garantido
     const porCliente = {};
+    const chavesProcessadas = new Set(); // Para evitar duplicatas
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
@@ -13701,6 +13718,11 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+      
+      // Verificar duplicata
+      const chaveUnica = `${codProf}_${dataFormatada}_${codCliente}`;
+      if (chavesProcessadas.has(chaveUnica)) continue;
+      chavesProcessadas.add(chaveUnica);
       
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
