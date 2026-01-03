@@ -13496,38 +13496,35 @@ app.get('/api/bi/garantido', async (req, res) => {
       if (cod_prof && g.cod_prof !== cod_prof) continue;
       
       // Buscar TODA produção do profissional nessa data (soma de TODOS os clientes/centros)
+      // IMPORTANTE: valor_prof é por OS, não por ponto. Cada OS tem várias linhas com o mesmo valor_prof.
+      // Precisamos somar apenas uma vez por OS (usar MAX para pegar o valor da OS).
       const codProfNum = parseInt(g.cod_prof);
-      console.log(`🔍 Buscando produção: cod_prof=${g.cod_prof} (${codProfNum}), data=${g.data}, profissional=${g.profissional}`);
-      
-      // DEBUG: Verificar quais datas existem para esse profissional
-      if (g.cod_prof === '10339' || g.cod_prof === '11146') {
-        const debugDatas = await pool.query(`
-          SELECT DISTINCT data_solicitado::date as data, COUNT(*) as qtd
-          FROM bi_entregas
-          WHERE cod_prof = $1
-          GROUP BY data_solicitado::date
-          ORDER BY data DESC
-          LIMIT 10
-        `, [codProfNum]);
-        console.log(`🔍 DEBUG - Datas disponíveis para ${g.profissional} (${codProfNum}):`, debugDatas.rows);
-      }
       
       const producaoResult = await pool.query(`
+        WITH os_dados AS (
+          SELECT 
+            os,
+            MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
+            MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END) as distancia_os,
+            MAX(COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A')) as local_os,
+            COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as entregas_os,
+            AVG(CASE 
+              WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL 
+              THEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 
+            END) as tempo_os
+          FROM bi_entregas
+          WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+          GROUP BY os
+        )
         SELECT 
-          COUNT(DISTINCT os) as total_os,
-          COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as total_entregas,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as distancia_total,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido,
-          AVG(CASE 
-            WHEN COALESCE(ponto, 1) >= 2 AND finalizado IS NOT NULL AND data_hora IS NOT NULL 
-            THEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 
-          END) as tempo_medio_entrega,
-          STRING_AGG(DISTINCT COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A'), ', ') as locais_rodou
-        FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+          COUNT(os) as total_os,
+          COALESCE(SUM(entregas_os), 0) as total_entregas,
+          COALESCE(SUM(distancia_os), 0) as distancia_total,
+          COALESCE(SUM(valor_os), 0) as valor_produzido,
+          AVG(tempo_os) as tempo_medio_entrega,
+          STRING_AGG(DISTINCT local_os, ', ') as locais_rodou
+        FROM os_dados
       `, [codProfNum, g.data]);
-      
-      console.log(`🔍 Resultado query para ${g.profissional}:`, JSON.stringify(producaoResult.rows[0]));
       
       const prod = producaoResult.rows[0];
       const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
@@ -13705,10 +13702,15 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const semanaKey = inicioSemana.toISOString().split('T')[0];
       
       // Buscar produção TOTAL do profissional no dia (soma de TODOS os clientes)
+      // valor_prof é por OS, não por ponto
       const producaoResult = await pool.query(`
-        SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
-        FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+        SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+        FROM (
+          SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+          FROM bi_entregas
+          WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+          GROUP BY os
+        ) os_dados
       `, [parseInt(codProf), dataFormatada]);
       
       const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
@@ -13813,10 +13815,15 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       if (data_fim && dataFormatada > data_fim) continue;
       
       // Buscar produção TOTAL do profissional no dia
+      // valor_prof é por OS, não por ponto
       const producaoResult = await pool.query(`
-        SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
-        FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+        SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+        FROM (
+          SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+          FROM bi_entregas
+          WHERE cod_prof = $1 AND data_solicitado::date = $2::date
+          GROUP BY os
+        ) os_dados
       `, [parseInt(codProf), dataFormatada]);
       
       const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
