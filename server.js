@@ -13443,6 +13443,7 @@ app.get('/api/bi/garantido', async (req, res) => {
     // Parsear dados da planilha
     const garantidoPlanilha = [];
     const chavesProcessadas = new Set();
+    let valorTotalNaoRodouPlanilha = 0; // Para o card - soma dos status "Não rodou" da planilha
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
@@ -13454,9 +13455,6 @@ app.get('/api/bi/garantido', async (req, res) => {
       const codProfPlan = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       const statusPlanilha = (cols[5] || '').trim().toLowerCase();
-      
-      // Ignorar status "Não rodou" (igual BI antigo)
-      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem cod_prof (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
@@ -13471,6 +13469,16 @@ app.get('/api/bi/garantido', async (req, res) => {
       }
       
       if (!dataFormatada) continue;
+      
+      // Aplicar filtros de data para o cálculo do "Não rodou"
+      if (data_inicio && dataFormatada < data_inicio) continue;
+      if (data_fim && dataFormatada > data_fim) continue;
+      
+      // Se é "Não rodou", somar para o card mas não processar na tabela
+      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) {
+        valorTotalNaoRodouPlanilha += valorNegociado;
+        continue;
+      }
       
       // Chave única: cod_prof + data + cod_cliente (ou profissional se cod_prof vazio)
       const chaveUnica = `${codProfPlan || profissional}_${dataFormatada}_${codClientePlan}`;
@@ -13633,8 +13641,8 @@ app.get('/api/bi/garantido', async (req, res) => {
       qtd_acima: resultados.filter(r => r.status === 'acima').length,
       qtd_nao_rodou: resultados.filter(r => r.status === 'nao_rodou').length,
       qtd_rodou: resultados.filter(r => r.status !== 'nao_rodou').length,
-      // Valor total dos profissionais que não rodaram (negociado deles)
-      valor_nao_rodou: resultados.filter(r => r.status === 'nao_rodou').reduce((sum, r) => sum + r.valor_negociado, 0)
+      // Valor total dos profissionais com status "Não rodou" NA PLANILHA
+      valor_nao_rodou: valorTotalNaoRodouPlanilha
     };
     
     // Calcular tempo médio geral (formatado)
