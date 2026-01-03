@@ -13501,14 +13501,14 @@ app.get('/api/bi/garantido', async (req, res) => {
       
       if (!dataFormatada) continue;
       
-      // Aplicar filtros de data para o cálculo do "Não rodou"
+      // Aplicar filtros de data
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
       
-      // Se é "Não rodou", somar para o card mas não processar na tabela
-      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) {
+      // Verificar se é "Não rodou" para somar no card separado
+      const isNaoRodou = statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'));
+      if (isNaoRodou) {
         valorTotalNaoRodouPlanilha += valorNegociado;
-        continue;
       }
       
       // Chave única: cod_prof + data + cod_cliente (ou profissional se cod_prof vazio)
@@ -13777,11 +13777,6 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const dataStr = cols[1];
       const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
-      const statusPlanilha = (cols[5] || '').trim().toLowerCase();
-      
-      // Ignorar status "Não rodou" na análise semanal (igual BI antigo)
-      // Usando includes para pegar variações com/sem acento
-      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
@@ -13982,10 +13977,6 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const dataStr = cols[1];
       const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
-      const statusPlanilha = (cols[5] || '').trim().toLowerCase();
-      
-      // Ignorar status "Não rodou" (igual BI antigo)
-      if (statusPlanilha.includes('rodou') && (statusPlanilha.includes('não') || statusPlanilha.includes('nao'))) continue;
       
       // Aceitar linhas mesmo sem codProf (linhas vazias) - igual BI atual
       if (!dataStr || valorNegociado <= 0) continue;
