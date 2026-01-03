@@ -13398,19 +13398,20 @@ app.get('/api/bi/garantido', async (req, res) => {
     const garantidoPlanilha = [];
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      // Tratar CSV com possíveis vírgulas dentro de campos entre aspas
-      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-      const codCliente = cols[0]?.trim().replace(/"/g, '');
-      const dataStr = cols[1]?.trim().replace(/"/g, '');
-      const profissional = cols[2]?.trim().replace(/"/g, '');
-      const codProf = cols[3]?.trim().replace(/"/g, '');
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
       
-      if (!codProf || !dataStr) continue;
+      // Parser simples de CSV (split por vírgula)
+      const cols = line.split(',');
+      const codClientePlan = cols[0]?.trim();
+      const dataStr = cols[1]?.trim();
+      const profissional = cols[2]?.trim();
+      const codProfPlan = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
+      
+      if (!codProfPlan || !dataStr || valorNegociado <= 0) continue;
       
       // Converter data DD/MM/YYYY para YYYY-MM-DD
       let dataFormatada = null;
-      if (dataStr) {
+      if (dataStr && dataStr.includes('/')) {
         const partes = dataStr.split('/');
         if (partes.length === 3) {
           dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
@@ -13420,19 +13421,19 @@ app.get('/api/bi/garantido', async (req, res) => {
       if (!dataFormatada) continue;
       
       garantidoPlanilha.push({
-        cod_cliente: codCliente,
+        cod_cliente: codClientePlan,
         data: dataFormatada,
-        profissional,
-        cod_prof: codProf,
+        profissional: profissional,
+        cod_prof: codProfPlan,
         valor_negociado: valorNegociado
       });
     }
     
+    console.log(`📊 Garantido: ${garantidoPlanilha.length} registros encontrados na planilha`);
+    
     // 2. Buscar nome do cliente da planilha (onde tem garantido)
     const clientesGarantido = {};
     try {
-      const clienteSheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-      // Buscar nomes de clientes do BI se necessário
       const clientesResult = await pool.query(`
         SELECT DISTINCT cod_cliente, nome_fantasia, nome_cliente 
         FROM bi_entregas 
@@ -13518,7 +13519,7 @@ app.get('/api/bi/garantido', async (req, res) => {
         profissional: g.profissional,
         cod_cliente_garantido: g.cod_cliente,
         onde_rodou: ondeRodou,
-        locais_producao: locaisRodou, // onde realmente produziu
+        locais_producao: locaisRodou,
         entregas: totalEntregas,
         tempo_entrega: tempoEntregaFormatado,
         distancia: distanciaTotal,
@@ -13528,6 +13529,8 @@ app.get('/api/bi/garantido', async (req, res) => {
         status: status
       });
     }
+    
+    console.log(`📊 Garantido: ${resultados.length} resultados após filtros`);
     
     // Ordenar por data desc, depois por profissional
     resultados.sort((a, b) => {
@@ -13597,13 +13600,13 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-      const codCliente = cols[0]?.trim().replace(/"/g, '');
-      const dataStr = cols[1]?.trim().replace(/"/g, '');
-      const codProf = cols[3]?.trim().replace(/"/g, '');
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
+      const cols = line.split(',');
+      const codCliente = cols[0]?.trim();
+      const dataStr = cols[1]?.trim();
+      const codProf = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
       
-      if (!codProf || !dataStr) continue;
+      if (!codProf || !dataStr || valorNegociado <= 0) continue;
       
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
@@ -13687,13 +13690,13 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
     
     for (const line of sheetLines) {
       if (!line.trim()) continue;
-      const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-      const codCliente = cols[0]?.trim().replace(/"/g, '');
-      const dataStr = cols[1]?.trim().replace(/"/g, '');
-      const codProf = cols[3]?.trim().replace(/"/g, '');
-      const valorNegociado = parseFloat(cols[4]?.trim().replace(/"/g, '').replace(',', '.')) || 0;
+      const cols = line.split(',');
+      const codCliente = cols[0]?.trim();
+      const dataStr = cols[1]?.trim();
+      const codProf = cols[3]?.trim();
+      const valorNegociado = parseFloat(cols[4]?.trim().replace(',', '.')) || 0;
       
-      if (!codProf || !dataStr) continue;
+      if (!codProf || !dataStr || valorNegociado <= 0) continue;
       
       const partes = dataStr.split('/');
       if (partes.length !== 3) continue;
