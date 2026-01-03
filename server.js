@@ -13742,27 +13742,43 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const semanaKey = `${diaInicio} a ${diaFim}/${mesFim}`;
       const semanaSort = inicioSemana.toISOString().split('T')[0]; // Para ordenação
       
-      // Buscar produção TOTAL do profissional no dia (soma de TODOS os clientes)
-      // valor_prof é por OS, não por ponto
+      // Buscar produção TOTAL do profissional no dia
+      // E também o centro de custo onde rodou (para cliente 767)
       let valorProduzido = 0;
+      let centroCusto = null;
+      
       if (codProf) {
         const producaoResult = await pool.query(`
-          SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+          SELECT 
+            COALESCE(SUM(valor_os), 0) as valor_produzido,
+            MAX(centro_custo) as centro_custo
           FROM (
-            SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+            SELECT 
+              os, 
+              MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
+              MAX(centro_custo) as centro_custo
             FROM bi_entregas
             WHERE cod_prof = $1 AND data_solicitado::date = $2::date
             GROUP BY os
           ) os_dados
         `, [parseInt(codProf), dataFormatada]);
         valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+        centroCusto = producaoResult.rows[0]?.centro_custo;
       }
       
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
-      // Agrupar por cliente do garantido (da planilha)
-      const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
-      const clienteKey = `${codCliente} - ${nomeCliente}`;
+      // Determinar a chave de agrupamento
+      // Cliente 767: agrupa por centro de custo (exceto se não tiver centro, usa o nome padrão)
+      // Cliente 949: agrupa pelo cliente
+      // Outros: agrupa pelo cliente
+      let clienteKey;
+      if (codCliente === '767' && centroCusto) {
+        clienteKey = `767 - ${centroCusto}`;
+      } else {
+        const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
+        clienteKey = `${codCliente} - ${nomeCliente}`;
+      }
       
       if (!porClienteSemana[clienteKey]) {
         porClienteSemana[clienteKey] = {};
@@ -13877,26 +13893,42 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       if (data_fim && dataFormatada > data_fim) continue;
       
       // Buscar produção TOTAL do profissional no dia
-      // valor_prof é por OS, não por ponto
+      // E também o centro de custo onde rodou (para cliente 767)
       let valorProduzido = 0;
+      let centroCusto = null;
+      
       if (codProf) {
         const producaoResult = await pool.query(`
-          SELECT COALESCE(SUM(valor_os), 0) as valor_produzido
+          SELECT 
+            COALESCE(SUM(valor_os), 0) as valor_produzido,
+            MAX(centro_custo) as centro_custo
           FROM (
-            SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os
+            SELECT 
+              os, 
+              MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
+              MAX(centro_custo) as centro_custo
             FROM bi_entregas
             WHERE cod_prof = $1 AND data_solicitado::date = $2::date
             GROUP BY os
           ) os_dados
         `, [parseInt(codProf), dataFormatada]);
         valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
+        centroCusto = producaoResult.rows[0]?.centro_custo;
       }
       
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
-      // Agrupar por cliente do garantido (da planilha)
-      const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
-      const clienteKey = `${codCliente} - ${nomeCliente}`;
+      // Determinar a chave de agrupamento
+      // Cliente 767: agrupa por centro de custo (exceto se não tiver centro, usa o nome padrão)
+      // Cliente 949: agrupa pelo cliente
+      // Outros: agrupa pelo cliente
+      let clienteKey;
+      if (codCliente === '767' && centroCusto) {
+        clienteKey = `767 - ${centroCusto}`;
+      } else {
+        const nomeCliente = clientesNomes[codCliente] || `Cliente ${codCliente}`;
+        clienteKey = `${codCliente} - ${nomeCliente}`;
+      }
       
       if (!porCliente[clienteKey]) {
         porCliente[clienteKey] = { negociado: 0, produzido: 0, complemento: 0 };
