@@ -13533,16 +13533,36 @@ app.post('/api/recrutamento/:id/atribuir', async (req, res) => {
       return res.status(400).json({ error: 'Este profissional já está atribuído a esta necessidade' });
     }
     
-    // Buscar nome do profissional na tabela de disponibilidade
-    const profResult = await pool.query(
-      `SELECT DISTINCT nome_profissional 
-       FROM disponibilidade_linhas 
-       WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
-       LIMIT 1`,
-      [cod_profissional]
-    );
+    // Buscar nome do profissional na planilha do Google Sheets
+    let nome_profissional = null;
+    try {
+      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+      const response = await fetch(sheetUrl);
+      const text = await response.text();
+      const lines = text.split('\n').slice(1);
+      
+      for (const line of lines) {
+        const cols = line.split(',');
+        if (cols[0]?.trim() === cod_profissional) {
+          nome_profissional = cols[1]?.trim() || null;
+          break;
+        }
+      }
+    } catch (sheetErr) {
+      console.log('Erro ao buscar na planilha, tentando fallback:', sheetErr.message);
+    }
     
-    const nome_profissional = profResult.rows[0]?.nome_profissional || null;
+    // Fallback: buscar na tabela de disponibilidade se não achou na planilha
+    if (!nome_profissional) {
+      const profResult = await pool.query(
+        `SELECT DISTINCT nome_profissional 
+         FROM disponibilidade_linhas 
+         WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
+         LIMIT 1`,
+        [cod_profissional]
+      );
+      nome_profissional = profResult.rows[0]?.nome_profissional || null;
+    }
     
     // Inserir atribuição
     const result = await pool.query(
@@ -13625,30 +13645,54 @@ app.get('/api/recrutamento/buscar-profissional/:cod', async (req, res) => {
   try {
     const { cod } = req.params;
     
-    // Buscar na tabela de disponibilidade
-    const result = await pool.query(
-      `SELECT DISTINCT cod_profissional, nome_profissional
-       FROM disponibilidade_linhas 
-       WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
-       LIMIT 1`,
-      [cod]
-    );
+    // Buscar na planilha do Google Sheets (mesma usada no módulo de disponibilidade)
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+    const response = await fetch(sheetUrl);
+    const text = await response.text();
+    const lines = text.split('\n').slice(1); // pular header
     
-    if (result.rows.length === 0) {
-      // Tentar buscar na tabela de usuários
+    let profissional = null;
+    for (const line of lines) {
+      const cols = line.split(',');
+      const codigo = cols[0]?.trim();
+      if (codigo === cod) {
+        profissional = {
+          cod_profissional: codigo,
+          nome_profissional: cols[1]?.trim() || null,
+          cidade: cols[3]?.trim() || null
+        };
+        break;
+      }
+    }
+    
+    if (!profissional) {
+      // Fallback: tentar buscar na tabela de disponibilidade
+      const dispResult = await pool.query(
+        `SELECT DISTINCT cod_profissional, nome_profissional
+         FROM disponibilidade_linhas 
+         WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
+         LIMIT 1`,
+        [cod]
+      );
+      
+      if (dispResult.rows.length > 0) {
+        return res.json(dispResult.rows[0]);
+      }
+      
+      // Fallback 2: tentar buscar na tabela de usuários
       const userResult = await pool.query(
         'SELECT cod_profissional, full_name as nome_profissional FROM users WHERE cod_profissional = $1',
         [cod]
       );
       
-      if (userResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Profissional não encontrado' });
+      if (userResult.rows.length > 0) {
+        return res.json(userResult.rows[0]);
       }
       
-      return res.json(userResult.rows[0]);
+      return res.status(404).json({ error: 'Profissional não encontrado' });
     }
     
-    res.json(result.rows[0]);
+    res.json(profissional);
   } catch (error) {
     console.error('Erro ao buscar profissional:', error);
     res.status(500).json({ error: 'Erro ao buscar profissional' });
