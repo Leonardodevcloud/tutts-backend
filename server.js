@@ -13657,7 +13657,7 @@ app.get('/api/bi/garantido', async (req, res) => {
           ondeRodou = `${codClienteRodou} - ${nomeCliente}`;
         } else {
           ondeRodou = centroCusto 
-            ? `${codClienteRodou} - ${nomeCliente} ${centroCusto}`
+            ? `${codClienteRodou} - ${nomeCliente} / ${centroCusto}`
             : `${codClienteRodou} - ${nomeCliente}`;
         }
       }
