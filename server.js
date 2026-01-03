@@ -13629,11 +13629,12 @@ app.get('/api/bi/garantido', async (req, res) => {
         tempoEntregaFormatado = `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(segs).padStart(2, '0')}`;
       }
       
-      // "Onde Rodou" vem da PLANILHA (cliente do garantido)
-      const nomeClienteGarantido = clientesGarantido[g.cod_cliente] || `Cliente ${g.cod_cliente}`;
-      const ondeRodou = totalEntregas > 0 
-        ? `${g.cod_cliente} - ${nomeClienteGarantido}`
-        : '- NÃO RODOU';
+      // "Onde Rodou" - mostrar centro de custo real onde o profissional rodou
+      // Se tem entregas, usar os locais reais do banco; se não, mostrar "NÃO RODOU"
+      let ondeRodou = '- NÃO RODOU';
+      if (totalEntregas > 0 && prod?.locais_rodou) {
+        ondeRodou = `${g.cod_cliente} - ${prod.locais_rodou}`;
+      }
       
       resultados.push({
         data: g.data,
