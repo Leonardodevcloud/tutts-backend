@@ -13724,7 +13724,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       
       // Calcular início da semana (domingo)
       const dataObj = new Date(dataFormatada + 'T12:00:00');
-      const diaSemana = dataObj.getDay();
+      const diaSemana = dataObj.getDay(); // 0 = domingo, 1 = segunda...
       const inicioSemana = new Date(dataObj);
       inicioSemana.setDate(dataObj.getDate() - diaSemana);
       const semanaKey = inicioSemana.toISOString().split('T')[0];
@@ -13763,13 +13763,22 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       porClienteSemana[clienteKey][semanaKey].complemento += complemento;
     }
     
-    // Formatar resultado
+    // Formatar resultado - normalizar semanas para todos os clientes terem as mesmas
+    const todasSemanas = new Set();
+    Object.values(porClienteSemana).forEach(semanas => {
+      Object.keys(semanas).forEach(semana => todasSemanas.add(semana));
+    });
+    const semanasOrdenadas = Array.from(todasSemanas).sort();
+    
+    // Formatar resultado garantindo que todos tenham todas as semanas
     const resultado = Object.entries(porClienteSemana).map(([cliente, semanas]) => ({
       onde_rodou: cliente,
-      semanas: Object.entries(semanas).map(([semana, valores]) => ({
+      semanas: semanasOrdenadas.map(semana => ({
         semana,
-        ...valores
-      })).sort((a, b) => a.semana.localeCompare(b.semana))
+        negociado: semanas[semana]?.negociado || 0,
+        produzido: semanas[semana]?.produzido || 0,
+        complemento: semanas[semana]?.complemento || 0
+      }))
     })).sort((a, b) => a.onde_rodou.localeCompare(b.onde_rodou));
     
     res.json(resultado);
