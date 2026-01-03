@@ -13978,6 +13978,26 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
   }
 });
 
+// GET /api/bi/garantido/meta - Retorna metadados do garantido (última data, etc)
+app.get('/api/bi/garantido/meta', async (req, res) => {
+  try {
+    // Buscar última data disponível na tabela bi_entregas
+    const result = await pool.query(`
+      SELECT MAX(data_solicitado::date) as ultima_data,
+             MIN(data_solicitado::date) as primeira_data
+      FROM bi_entregas
+    `);
+    
+    res.json({
+      ultima_data: result.rows[0]?.ultima_data,
+      primeira_data: result.rows[0]?.primeira_data
+    });
+  } catch (error) {
+    console.error('Erro ao buscar meta garantido:', error);
+    res.status(500).json({ error: 'Erro ao buscar metadados' });
+  }
+});
+
 // PUT /api/bi/garantido/status - Atualizar status de um registro de garantido
 app.put('/api/bi/garantido/status', async (req, res) => {
   try {
