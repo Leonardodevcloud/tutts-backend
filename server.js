@@ -13496,6 +13496,9 @@ app.get('/api/bi/garantido', async (req, res) => {
       if (cod_prof && g.cod_prof !== cod_prof) continue;
       
       // Buscar TODA produção do profissional nessa data (soma de TODOS os clientes/centros)
+      const codProfNum = parseInt(g.cod_prof);
+      console.log(`🔍 Buscando produção: cod_prof=${g.cod_prof} (${codProfNum}), data=${g.data}, profissional=${g.profissional}`);
+      
       const producaoResult = await pool.query(`
         SELECT 
           COUNT(DISTINCT os) as total_os,
@@ -13509,7 +13512,9 @@ app.get('/api/bi/garantido', async (req, res) => {
           STRING_AGG(DISTINCT COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A'), ', ') as locais_rodou
         FROM bi_entregas
         WHERE cod_prof = $1 AND data_solicitado = $2
-      `, [parseInt(g.cod_prof), g.data]);
+      `, [codProfNum, g.data]);
+      
+      console.log(`🔍 Resultado query:`, producaoResult.rows[0]);
       
       const prod = producaoResult.rows[0];
       const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
