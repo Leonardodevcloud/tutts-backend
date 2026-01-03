@@ -13722,12 +13722,25 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
       
-      // Calcular início da semana (domingo)
+      // Calcular início e fim da semana (segunda a domingo)
       const dataObj = new Date(dataFormatada + 'T12:00:00');
       const diaSemana = dataObj.getDay(); // 0 = domingo, 1 = segunda...
+      
+      // Calcular segunda-feira da semana
       const inicioSemana = new Date(dataObj);
-      inicioSemana.setDate(dataObj.getDate() - diaSemana);
-      const semanaKey = inicioSemana.toISOString().split('T')[0];
+      const offsetSegunda = diaSemana === 0 ? -6 : 1 - diaSemana; // Se domingo, volta 6 dias
+      inicioSemana.setDate(dataObj.getDate() + offsetSegunda);
+      
+      // Calcular domingo da semana
+      const fimSemana = new Date(inicioSemana);
+      fimSemana.setDate(inicioSemana.getDate() + 6);
+      
+      // Formato da chave: "01 a 07/11"
+      const diaInicio = inicioSemana.getDate().toString().padStart(2, '0');
+      const diaFim = fimSemana.getDate().toString().padStart(2, '0');
+      const mesFim = (fimSemana.getMonth() + 1).toString().padStart(2, '0');
+      const semanaKey = `${diaInicio} a ${diaFim}/${mesFim}`;
+      const semanaSort = inicioSemana.toISOString().split('T')[0]; // Para ordenação
       
       // Buscar produção TOTAL do profissional no dia (soma de TODOS os clientes)
       // valor_prof é por OS, não por ponto
@@ -13755,7 +13768,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
         porClienteSemana[clienteKey] = {};
       }
       if (!porClienteSemana[clienteKey][semanaKey]) {
-        porClienteSemana[clienteKey][semanaKey] = { negociado: 0, produzido: 0, complemento: 0 };
+        porClienteSemana[clienteKey][semanaKey] = { negociado: 0, produzido: 0, complemento: 0, sort: semanaSort };
       }
       
       porClienteSemana[clienteKey][semanaKey].negociado += valorNegociado;
@@ -13764,20 +13777,28 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
     }
     
     // Formatar resultado - normalizar semanas para todos os clientes terem as mesmas
-    const todasSemanas = new Set();
+    const todasSemanas = new Map(); // Map para guardar semanaKey -> sort
     Object.values(porClienteSemana).forEach(semanas => {
-      Object.keys(semanas).forEach(semana => todasSemanas.add(semana));
+      Object.entries(semanas).forEach(([semanaKey, dados]) => {
+        if (!todasSemanas.has(semanaKey)) {
+          todasSemanas.set(semanaKey, dados.sort);
+        }
+      });
     });
-    const semanasOrdenadas = Array.from(todasSemanas).sort();
+    
+    // Ordenar semanas por data
+    const semanasOrdenadas = Array.from(todasSemanas.entries())
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([key]) => key);
     
     // Formatar resultado garantindo que todos tenham todas as semanas
     const resultado = Object.entries(porClienteSemana).map(([cliente, semanas]) => ({
       onde_rodou: cliente,
-      semanas: semanasOrdenadas.map(semana => ({
-        semana,
-        negociado: semanas[semana]?.negociado || 0,
-        produzido: semanas[semana]?.produzido || 0,
-        complemento: semanas[semana]?.complemento || 0
+      semanas: semanasOrdenadas.map(semanaKey => ({
+        semana: semanaKey,
+        negociado: semanas[semanaKey]?.negociado || 0,
+        produzido: semanas[semanaKey]?.produzido || 0,
+        complemento: semanas[semanaKey]?.complemento || 0
       }))
     })).sort((a, b) => a.onde_rodou.localeCompare(b.onde_rodou));
     
