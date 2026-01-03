@@ -13499,6 +13499,19 @@ app.get('/api/bi/garantido', async (req, res) => {
       const codProfNum = parseInt(g.cod_prof);
       console.log(`🔍 Buscando produção: cod_prof=${g.cod_prof} (${codProfNum}), data=${g.data}, profissional=${g.profissional}`);
       
+      // DEBUG: Verificar quais datas existem para esse profissional
+      if (g.cod_prof === '10339' || g.cod_prof === '11146') {
+        const debugDatas = await pool.query(`
+          SELECT DISTINCT data_solicitado::date as data, COUNT(*) as qtd
+          FROM bi_entregas
+          WHERE cod_prof = $1
+          GROUP BY data_solicitado::date
+          ORDER BY data DESC
+          LIMIT 10
+        `, [codProfNum]);
+        console.log(`🔍 DEBUG - Datas disponíveis para ${g.profissional} (${codProfNum}):`, debugDatas.rows);
+      }
+      
       const producaoResult = await pool.query(`
         SELECT 
           COUNT(DISTINCT os) as total_os,
@@ -13511,10 +13524,10 @@ app.get('/api/bi/garantido', async (req, res) => {
           END) as tempo_medio_entrega,
           STRING_AGG(DISTINCT COALESCE(nome_fantasia, nome_cliente, centro_custo, 'N/A'), ', ') as locais_rodou
         FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado = $2
+        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
       `, [codProfNum, g.data]);
       
-      console.log(`🔍 Resultado query:`, producaoResult.rows[0]);
+      console.log(`🔍 Resultado query para ${g.profissional}:`, JSON.stringify(producaoResult.rows[0]));
       
       const prod = producaoResult.rows[0];
       const valorProduzido = parseFloat(prod?.valor_produzido) || 0;
@@ -13695,7 +13708,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       const producaoResult = await pool.query(`
         SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
         FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado = $2
+        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
       `, [parseInt(codProf), dataFormatada]);
       
       const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
@@ -13803,7 +13816,7 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       const producaoResult = await pool.query(`
         SELECT COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_produzido
         FROM bi_entregas
-        WHERE cod_prof = $1 AND data_solicitado = $2
+        WHERE cod_prof = $1 AND data_solicitado::date = $2::date
       `, [parseInt(codProf), dataFormatada]);
       
       const valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
