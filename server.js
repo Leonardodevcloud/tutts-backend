@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const dns = require('dns');
+const cron = require('node-cron');
 require('dotenv').config();
 
 // Forçar DNS para IPv4
@@ -1510,6 +1511,23 @@ async function createTables() {
       `);
       console.log('✅ Milestones padrão inseridos');
     }
+    
+    // Tabela para controlar gratuidades do Score (mensal)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_gratuidades (
+        id SERIAL PRIMARY KEY,
+        cod_prof INTEGER NOT NULL,
+        nome_prof VARCHAR(255),
+        mes_referencia VARCHAR(7) NOT NULL,
+        score_no_momento DECIMAL(10,2),
+        nivel VARCHAR(50),
+        quantidade_saques INTEGER DEFAULT 0,
+        gratuidade_id INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(cod_prof, mes_referencia)
+      )
+    `);
+    console.log('✅ Tabela score_gratuidades verificada');
     
     // ==================== FIM MÓDULO SCORE/GAMIFICAÇÃO ====================
 
@@ -14637,6 +14655,79 @@ app.listen(port, () => {
   // Processar imediatamente ao iniciar
   setTimeout(processarRecorrenciasInterno, 10000); // 10 segundos após iniciar
   console.log('⏰ Processamento de recorrências ativado (a cada 1h)');
+  
+  // ==================== CRON JOBS DO SCORE ====================
+  
+  // Cron Job: Aplicar gratuidades do Score no dia 1 de cada mês às 00:05
+  cron.schedule('5 0 1 * *', async () => {
+    console.log('🎁 [CRON] Iniciando aplicação de gratuidades do Score...');
+    try {
+      const mesReferencia = new Date().toISOString().slice(0, 7); // YYYY-MM
+      
+      // Buscar profissionais com score >= 80
+      const profissionais = await pool.query(`
+        SELECT cod_prof, nome_prof, score_total 
+        FROM score_totais 
+        WHERE score_total >= 80
+        ORDER BY score_total DESC
+      `);
+      
+      let aplicados = 0;
+      
+      for (const prof of profissionais.rows) {
+        try {
+          const score = parseFloat(prof.score_total) || 0;
+          let quantidadeSaques = 0;
+          let nivel = null;
+          
+          if (score >= 100) {
+            quantidadeSaques = 4;
+            nivel = 'Prata';
+          } else if (score >= 80) {
+            quantidadeSaques = 2;
+            nivel = 'Bronze';
+          }
+          
+          if (quantidadeSaques === 0) continue;
+          
+          // Verificar se já tem gratuidade neste mês
+          const existente = await pool.query(
+            'SELECT * FROM score_gratuidades WHERE cod_prof = $1 AND mes_referencia = $2',
+            [prof.cod_prof, mesReferencia]
+          );
+          
+          if (existente.rows.length === 0) {
+            // Criar nova gratuidade
+            const gratuidade = await pool.query(`
+              INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by)
+              VALUES ($1, $2, $3, $3, 500.00, $4, 'ativa', 'Sistema Score')
+              RETURNING id
+            `, [prof.cod_prof, prof.nome_prof, quantidadeSaques, `Score ${nivel} - ${mesReferencia}`]);
+            
+            await pool.query(`
+              INSERT INTO score_gratuidades (cod_prof, nome_prof, mes_referencia, score_no_momento, nivel, quantidade_saques, gratuidade_id)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `, [prof.cod_prof, prof.nome_prof, mesReferencia, score, nivel, quantidadeSaques, gratuidade.rows[0].id]);
+            
+            aplicados++;
+          }
+        } catch (err) {
+          console.error(`[CRON] Erro ao aplicar gratuidade para ${prof.cod_prof}:`, err.message);
+        }
+      }
+      
+      console.log(`✅ [CRON] Gratuidades do Score aplicadas: ${aplicados} profissionais`);
+    } catch (error) {
+      console.error('❌ [CRON] Erro ao aplicar gratuidades do Score:', error);
+    }
+  }, {
+    scheduled: true,
+    timezone: "America/Sao_Paulo"
+  });
+  
+  console.log('🎁 Cron Job do Score ativado (dia 1 de cada mês às 00:05)');
+  
+  // ==================== FIM CRON JOBS DO SCORE ====================
 });
 
 // ===== REGIÕES =====
@@ -17309,7 +17400,7 @@ app.post('/api/score/milestones/reset', async (req, res) => {
       message: 'Milestones resetados com sucesso!',
       milestones: [
         { pontos: 80, premio: '2 saques gratuitos de R$500/mês' },
-        { pontos: 100, premio: '4 saques gratuitos de R$500/mês' },
+        { pontos: 100, premio: '+2 saques gratuitos/mês (total: 4)' },
         { pontos: 250, premio: '1 Camisa Tutts' },
         { pontos: 300, premio: '1 Óleo de motor' },
         { pontos: 500, premio: 'Sorteio Vale Combustível R$100/mês' }
@@ -17318,6 +17409,218 @@ app.post('/api/score/milestones/reset', async (req, res) => {
   } catch (error) {
     console.error('Erro ao resetar milestones:', error);
     res.status(500).json({ error: 'Erro ao resetar milestones', details: error.message });
+  }
+});
+
+// POST /api/score/aplicar-gratuidades - Aplica gratuidades do mês baseado no score
+app.post('/api/score/aplicar-gratuidades', async (req, res) => {
+  try {
+    const mesReferencia = req.body.mes || new Date().toISOString().slice(0, 7); // YYYY-MM
+    console.log(`🎁 Aplicando gratuidades do Score para ${mesReferencia}...`);
+    
+    // Buscar todos os profissionais com score
+    const profissionais = await pool.query(`
+      SELECT cod_prof, nome_prof, score_total 
+      FROM score_totais 
+      WHERE score_total >= 80
+      ORDER BY score_total DESC
+    `);
+    
+    let aplicados = 0, atualizados = 0, erros = 0;
+    const detalhes = [];
+    
+    for (const prof of profissionais.rows) {
+      try {
+        const score = parseFloat(prof.score_total) || 0;
+        let quantidadeSaques = 0;
+        let nivel = null;
+        
+        // Determinar quantidade de saques baseado no score
+        if (score >= 100) {
+          quantidadeSaques = 4; // Bronze (2) + Prata (+2) = 4
+          nivel = 'Prata';
+        } else if (score >= 80) {
+          quantidadeSaques = 2; // Bronze = 2
+          nivel = 'Bronze';
+        }
+        
+        if (quantidadeSaques === 0) continue;
+        
+        // Verificar se já tem gratuidade neste mês
+        const existente = await pool.query(
+          'SELECT * FROM score_gratuidades WHERE cod_prof = $1 AND mes_referencia = $2',
+          [prof.cod_prof, mesReferencia]
+        );
+        
+        if (existente.rows.length > 0) {
+          // Já existe - verificar se precisa atualizar
+          const atual = existente.rows[0];
+          if (atual.quantidade_saques !== quantidadeSaques) {
+            // Atualizar gratuidade existente
+            const diferenca = quantidadeSaques - atual.quantidade_saques;
+            
+            if (diferenca > 0 && atual.gratuidade_id) {
+              // Aumentar quantidade na gratuidade
+              await pool.query(
+                'UPDATE gratuities SET quantity = quantity + $1, remaining = remaining + $1 WHERE id = $2',
+                [diferenca, atual.gratuidade_id]
+              );
+            }
+            
+            await pool.query(
+              'UPDATE score_gratuidades SET quantidade_saques = $1, nivel = $2, score_no_momento = $3 WHERE id = $4',
+              [quantidadeSaques, nivel, score, atual.id]
+            );
+            atualizados++;
+            detalhes.push({ cod_prof: prof.cod_prof, nome: prof.nome_prof, acao: 'atualizado', saques: quantidadeSaques });
+          }
+        } else {
+          // Criar nova gratuidade
+          const gratuidade = await pool.query(`
+            INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by)
+            VALUES ($1, $2, $3, $3, 500.00, $4, 'ativa', 'Sistema Score')
+            RETURNING id
+          `, [prof.cod_prof, prof.nome_prof, quantidadeSaques, `Score ${nivel} - ${mesReferencia}`]);
+          
+          // Registrar na tabela de controle
+          await pool.query(`
+            INSERT INTO score_gratuidades (cod_prof, nome_prof, mes_referencia, score_no_momento, nivel, quantidade_saques, gratuidade_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [prof.cod_prof, prof.nome_prof, mesReferencia, score, nivel, quantidadeSaques, gratuidade.rows[0].id]);
+          
+          aplicados++;
+          detalhes.push({ cod_prof: prof.cod_prof, nome: prof.nome_prof, acao: 'criado', saques: quantidadeSaques });
+        }
+      } catch (err) {
+        erros++;
+        console.error(`Erro ao aplicar gratuidade para ${prof.cod_prof}:`, err.message);
+      }
+    }
+    
+    console.log(`✅ Gratuidades aplicadas: ${aplicados} novos, ${atualizados} atualizados, ${erros} erros`);
+    
+    res.json({
+      success: true,
+      mes_referencia: mesReferencia,
+      resumo: {
+        novos: aplicados,
+        atualizados: atualizados,
+        erros: erros,
+        total_processados: profissionais.rows.length
+      },
+      detalhes: detalhes.slice(0, 20) // Limitar a 20 para não sobrecarregar
+    });
+  } catch (error) {
+    console.error('Erro ao aplicar gratuidades:', error);
+    res.status(500).json({ error: 'Erro ao aplicar gratuidades', details: error.message });
+  }
+});
+
+// GET /api/score/gratuidades - Listar gratuidades do score
+app.get('/api/score/gratuidades', async (req, res) => {
+  try {
+    const { mes, cod_prof } = req.query;
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (mes) { whereClause += ` AND mes_referencia = $${paramIndex}`; params.push(mes); paramIndex++; }
+    if (cod_prof) { whereClause += ` AND cod_prof = $${paramIndex}`; params.push(cod_prof); paramIndex++; }
+    
+    const result = await pool.query(`
+      SELECT sg.*, g.remaining as saques_restantes, g.status as gratuidade_status
+      FROM score_gratuidades sg
+      LEFT JOIN gratuities g ON sg.gratuidade_id = g.id
+      ${whereClause}
+      ORDER BY sg.created_at DESC
+      LIMIT 100
+    `, params);
+    
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao listar gratuidades do score' });
+  }
+});
+
+// POST /api/score/resetar-gratuidades-mes - Resetar e reaplicar gratuidades do mês
+app.post('/api/score/resetar-gratuidades-mes', async (req, res) => {
+  try {
+    const mesReferencia = req.body.mes || new Date().toISOString().slice(0, 7);
+    console.log(`🔄 Resetando gratuidades do Score para ${mesReferencia}...`);
+    
+    // Buscar gratuidades do mês
+    const gratuidadesDoMes = await pool.query(
+      'SELECT * FROM score_gratuidades WHERE mes_referencia = $1',
+      [mesReferencia]
+    );
+    
+    // Deletar gratuidades antigas
+    for (const sg of gratuidadesDoMes.rows) {
+      if (sg.gratuidade_id) {
+        await pool.query('DELETE FROM gratuities WHERE id = $1', [sg.gratuidade_id]);
+      }
+    }
+    await pool.query('DELETE FROM score_gratuidades WHERE mes_referencia = $1', [mesReferencia]);
+    
+    console.log(`🗑️ ${gratuidadesDoMes.rows.length} gratuidades removidas`);
+    
+    // Reaplicar gratuidades chamando o endpoint
+    const response = await new Promise((resolve) => {
+      const mockReq = { body: { mes: mesReferencia } };
+      const mockRes = {
+        json: (data) => resolve(data),
+        status: () => ({ json: (data) => resolve(data) })
+      };
+      // Simular chamada interna
+      resolve({ precisaReaplicar: true });
+    });
+    
+    // Reaplicar manualmente
+    const profissionais = await pool.query(`
+      SELECT cod_prof, nome_prof, score_total 
+      FROM score_totais 
+      WHERE score_total >= 80
+    `);
+    
+    let aplicados = 0;
+    for (const prof of profissionais.rows) {
+      const score = parseFloat(prof.score_total) || 0;
+      let quantidadeSaques = 0;
+      let nivel = null;
+      
+      if (score >= 100) {
+        quantidadeSaques = 4;
+        nivel = 'Prata';
+      } else if (score >= 80) {
+        quantidadeSaques = 2;
+        nivel = 'Bronze';
+      }
+      
+      if (quantidadeSaques > 0) {
+        const gratuidade = await pool.query(`
+          INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by)
+          VALUES ($1, $2, $3, $3, 500.00, $4, 'ativa', 'Sistema Score')
+          RETURNING id
+        `, [prof.cod_prof, prof.nome_prof, quantidadeSaques, `Score ${nivel} - ${mesReferencia}`]);
+        
+        await pool.query(`
+          INSERT INTO score_gratuidades (cod_prof, nome_prof, mes_referencia, score_no_momento, nivel, quantidade_saques, gratuidade_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [prof.cod_prof, prof.nome_prof, mesReferencia, score, nivel, quantidadeSaques, gratuidade.rows[0].id]);
+        
+        aplicados++;
+      }
+    }
+    
+    res.json({
+      success: true,
+      mes_referencia: mesReferencia,
+      removidos: gratuidadesDoMes.rows.length,
+      reaplicados: aplicados
+    });
+  } catch (error) {
+    console.error('Erro ao resetar gratuidades:', error);
+    res.status(500).json({ error: 'Erro ao resetar gratuidades', details: error.message });
   }
 });
 
