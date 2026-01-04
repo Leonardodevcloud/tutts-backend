@@ -16955,7 +16955,8 @@ app.post('/api/score/recalcular', async (req, res) => {
   try {
     const { cod_prof, data_inicio, data_fim } = req.body;
     
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL';
+    // Buscar entregas que têm tempo de entrega e prazo definidos
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND tempo_entrega_prof_minutos IS NOT NULL AND prazo_prof_minutos IS NOT NULL';
     const params = [];
     let paramIndex = 1;
     
@@ -16977,7 +16978,7 @@ app.post('/api/score/recalcular', async (req, res) => {
     
     const entregasQuery = await pool.query(`
       SELECT DISTINCT ON (os, cod_prof) os, cod_prof, nome_prof, data_solicitado, hora_solicitado,
-        tempo_entrega_prof_minutos, prazo_prof_minutos, dentro_prazo_prof
+        tempo_entrega_prof_minutos, prazo_prof_minutos
       FROM bi_entregas ${whereClause}
       ORDER BY os, cod_prof, data_solicitado DESC
     `, params);
@@ -16986,7 +16987,12 @@ app.post('/api/score/recalcular', async (req, res) => {
     
     for (const entrega of entregasQuery.rows) {
       try {
-        const pontos = calcularPontosOS(entrega.dentro_prazo_prof, entrega.hora_solicitado);
+        // CALCULAR se está dentro do prazo comparando os tempos
+        const tempoEntrega = parseFloat(entrega.tempo_entrega_prof_minutos) || 0;
+        const prazoMinutos = parseFloat(entrega.prazo_prof_minutos) || 0;
+        const dentroPrazo = tempoEntrega <= prazoMinutos;
+        
+        const pontos = calcularPontosOS(dentroPrazo, entrega.hora_solicitado);
         
         await pool.query(`
           INSERT INTO score_historico (cod_prof, nome_prof, os, data_os, hora_solicitacao,
@@ -17001,12 +17007,13 @@ app.post('/api/score/recalcular', async (req, res) => {
             dentro_prazo = EXCLUDED.dentro_prazo, janela_bonus = EXCLUDED.janela_bonus,
             detalhamento = EXCLUDED.detalhamento
         `, [entrega.cod_prof, entrega.nome_prof, entrega.os, entrega.data_solicitado,
-            entrega.hora_solicitado, entrega.tempo_entrega_prof_minutos, entrega.prazo_prof_minutos,
+            entrega.hora_solicitado, tempoEntrega, prazoMinutos,
             pontos.ponto_prazo, pontos.ponto_bonus_janela, pontos.ponto_total,
-            entrega.dentro_prazo_prof, pontos.janela_bonus, pontos.detalhamento]);
+            dentroPrazo, pontos.janela_bonus, pontos.detalhamento]);
         processadas++;
       } catch (err) {
         erros++;
+        console.error('Erro ao processar OS:', entrega.os, err.message);
       }
     }
     
