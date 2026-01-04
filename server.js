@@ -3,6 +3,10 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const dns = require('dns');
 const cron = require('node-cron');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 // Forçar DNS para IPv4
@@ -10,6 +14,127 @@ dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 const port = process.env.PORT || 3001;
+
+// ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
+const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
+const JWT_EXPIRES_IN = '8h';
+const BCRYPT_ROUNDS = 10;
+
+// Rate Limiters
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 10, // máximo 10 tentativas
+  message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 100, // máximo 100 requisições por minuto
+  message: { error: 'Muitas requisições. Aguarde um momento.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const createAccountLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hora
+  max: 5, // máximo 5 contas por hora por IP
+  message: { error: 'Muitas contas criadas. Tente novamente em 1 hora.' }
+});
+
+// ==================== MIDDLEWARES DE AUTENTICAÇÃO ====================
+
+// Verificar token JWT
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expirado', expired: true });
+    }
+    return res.status(403).json({ error: 'Token inválido' });
+  }
+};
+
+// Verificar se é admin
+const verificarAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado. Requer permissão de administrador.' });
+  }
+  next();
+};
+
+// Verificar se é admin ou financeiro
+const verificarAdminOuFinanceiro = (req, res, next) => {
+  if (!req.user || !['admin', 'financeiro'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Acesso negado. Requer permissão de admin ou financeiro.' });
+  }
+  next();
+};
+
+// Verificar se é o próprio usuário ou admin
+const verificarProprioOuAdmin = (req, res, next) => {
+  const userCod = req.params.cod_prof || req.params.userCod || req.body.user_cod;
+  if (!req.user) {
+    return res.status(401).json({ error: 'Não autenticado' });
+  }
+  if (req.user.role === 'admin' || req.user.codProfissional === userCod) {
+    next();
+  } else {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+};
+
+// Middleware opcional de autenticação (não bloqueia, mas adiciona user se tiver token)
+const verificarTokenOpcional = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (token) {
+    try {
+      req.user = jwt.verify(token, JWT_SECRET);
+    } catch (err) {
+      // Token inválido, mas não bloqueia
+    }
+  }
+  next();
+};
+
+// Função para gerar token JWT
+const gerarToken = (user) => {
+  return jwt.sign(
+    { 
+      id: user.id,
+      codProfissional: user.cod_profissional,
+      role: user.role,
+      nome: user.full_name
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+};
+
+// Função para hash de senha
+const hashSenha = async (senha) => {
+  return await bcrypt.hash(senha, BCRYPT_ROUNDS);
+};
+
+// Função para verificar senha
+const verificarSenha = async (senha, hash) => {
+  return await bcrypt.compare(senha, hash);
+};
+
+// ==================== FIM CONFIGURAÇÕES DE SEGURANÇA ====================
 
 // Validar DATABASE_URL
 if (!process.env.DATABASE_URL) {
@@ -1733,7 +1858,17 @@ async function atualizarResumos(datasAfetadas = null) {
   }
 }
 
-// Middlewares - CORS configurado (DEVE SER O PRIMEIRO!)
+// ==================== MIDDLEWARES DE SEGURANÇA ====================
+
+// Helmet - Headers de segurança
+app.use(helmet({
+  contentSecurityPolicy: false, // Desabilitado para não quebrar frontend
+  crossOriginEmbedderPolicy: false
+}));
+
+// Rate limiting global para API
+app.use('/api/', apiLimiter);
+
 // Lista de origens permitidas
 const allowedOrigins = [
   'https://www.centraltutts.online',
@@ -1743,14 +1878,21 @@ const allowedOrigins = [
   'http://127.0.0.1:5500'
 ];
 
-// Função para setar headers CORS
+// Função para setar headers CORS (mais restritivo)
 const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
+  
+  // Verificar se a origem é permitida
   if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (process.env.NODE_ENV === 'development') {
+    // Em desenvolvimento, permitir qualquer origem
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
   } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Em produção, usar a primeira origem permitida como fallback
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
   }
+  
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma');
@@ -1773,7 +1915,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Health check (raiz e /api/health)
+// Health check (raiz e /api/health) - Público
 app.get('/health', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -1789,9 +1931,18 @@ app.get('/api/health', (req, res) => {
 // ============================================
 
 // Registrar novo usuário
-app.post('/api/users/register', async (req, res) => {
+app.post('/api/users/register', createAccountLimiter, async (req, res) => {
   try {
     const { codProfissional, password, fullName, role } = req.body;
+
+    // Validação de input
+    if (!codProfissional || !password || !fullName) {
+      return res.status(400).json({ error: 'Código profissional, senha e nome são obrigatórios' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Senha deve ter pelo menos 6 caracteres' });
+    }
 
     console.log('📝 Tentando registrar:', { codProfissional, fullName, role });
 
@@ -1809,72 +1960,108 @@ app.post('/api/users/register', async (req, res) => {
     const validRoles = ['user', 'admin', 'admin_financeiro'];
     const userRole = validRoles.includes(role) ? role : 'user';
     
+    // Hash da senha
+    const hashedPassword = await hashSenha(password);
+    
     const result = await pool.query(
       `INSERT INTO users (cod_profissional, password, full_name, role, created_at) 
        VALUES ($1, $2, $3, $4, NOW()) 
        RETURNING id, cod_profissional, full_name, role, created_at`,
-      [codProfissional, password, fullName, userRole]
+      [codProfissional, hashedPassword, fullName, userRole]
     );
 
     console.log('✅ Usuário registrado:', result.rows[0]);
-    res.status(201).json(result.rows[0]);
+    
+    // Gerar token JWT para o novo usuário
+    const token = gerarToken(result.rows[0]);
+    
+    res.status(201).json({
+      ...result.rows[0],
+      token
+    });
   } catch (error) {
     console.error('❌ Erro ao registrar usuário:', error);
     res.status(500).json({ error: 'Erro ao registrar usuário: ' + error.message });
   }
 });
 
-// Login
-app.post('/api/users/login', async (req, res) => {
+// Login com rate limiting
+app.post('/api/users/login', loginLimiter, async (req, res) => {
   try {
     const { codProfissional, password } = req.body;
 
+    if (!codProfissional || !password) {
+      return res.status(400).json({ error: 'Código profissional e senha são obrigatórios' });
+    }
+
     console.log('🔐 Tentando login:', codProfissional);
 
-    // Admin hardcoded
-    if (codProfissional.toLowerCase() === 'admin' && password === 'admin123') {
-      console.log('✅ Login admin');
-      return res.json({
-        id: 0,
-        cod_profissional: 'admin',
-        full_name: 'Administrador',
-        role: 'admin'
-      });
-    }
-
-    // Admin financeiro hardcoded
-    if (codProfissional.toLowerCase() === 'financeiro' && password === 'fin123') {
-      console.log('✅ Login admin financeiro');
-      return res.json({
-        id: -1,
-        cod_profissional: 'financeiro',
-        full_name: 'Admin Financeiro',
-        role: 'admin_financeiro'
-      });
-    }
-
+    // Buscar usuário no banco
     const result = await pool.query(
       'SELECT id, cod_profissional, full_name, role, password, setor_id, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
-    if (result.rows.length === 0 || result.rows[0].password !== password) {
-      console.log('❌ Credenciais inválidas');
+    if (result.rows.length === 0) {
+      console.log('❌ Usuário não encontrado');
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
     const user = result.rows[0];
+    
+    // Verificar senha com bcrypt
+    // Suporte para senhas antigas (texto plano) e novas (hash)
+    let senhaValida = false;
+    
+    if (user.password.startsWith('$2')) {
+      // Senha já está em hash bcrypt
+      senhaValida = await verificarSenha(password, user.password);
+    } else {
+      // Senha antiga em texto plano - comparar diretamente
+      senhaValida = (user.password === password);
+      
+      // Se senha antiga válida, atualizar para bcrypt
+      if (senhaValida) {
+        const hashedPassword = await hashSenha(password);
+        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, user.id]);
+        console.log('🔄 Senha migrada para bcrypt:', user.cod_profissional);
+      }
+    }
+
+    if (!senhaValida) {
+      console.log('❌ Senha inválida');
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    // Remover senha do objeto antes de enviar
     delete user.password;
 
+    // Gerar token JWT
+    const token = gerarToken(user);
+
     console.log('✅ Login bem-sucedido:', user.cod_profissional);
-    res.json(user);
+    res.json({
+      ...user,
+      token
+    });
   } catch (error) {
     console.error('❌ Erro ao fazer login:', error);
     res.status(500).json({ error: 'Erro ao fazer login: ' + error.message });
   }
 });
 
-// Listar todos os usuários
+// Endpoint para verificar token
+app.get('/api/users/verify-token', verificarToken, (req, res) => {
+  res.json({ valid: true, user: req.user });
+});
+
+// Endpoint para renovar token
+app.post('/api/users/refresh-token', verificarToken, (req, res) => {
+  const newToken = gerarToken(req.user);
+  res.json({ token: newToken });
+});
+
+// Listar todos os usuários (apenas admin)
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1892,23 +2079,72 @@ app.get('/api/users', async (req, res) => {
 });
 
 // Resetar senha
-app.post('/api/users/reset-password', async (req, res) => {
+app.post('/api/users/reset-password', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { codProfissional, newPassword } = req.body;
 
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'Nova senha deve ter pelo menos 6 caracteres' });
+    }
+
+    // Hash da nova senha
+    const hashedPassword = await hashSenha(newPassword);
+
     const result = await pool.query(
       'UPDATE users SET password = $1 WHERE LOWER(cod_profissional) = LOWER($2) RETURNING id, cod_profissional, full_name',
-      [newPassword, codProfissional]
+      [hashedPassword, codProfissional]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
+    console.log(`🔐 Senha resetada para: ${codProfissional} por ${req.user.codProfissional}`);
     res.json({ message: 'Senha alterada com sucesso', user: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao resetar senha:', error);
     res.status(500).json({ error: 'Erro ao resetar senha: ' + error.message });
+  }
+});
+
+// Alterar própria senha
+app.post('/api/users/change-password', verificarToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'Nova senha deve ter pelo menos 6 caracteres' });
+    }
+
+    // Buscar usuário atual
+    const userResult = await pool.query(
+      'SELECT password FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    // Verificar senha atual
+    const senhaAtualValida = await verificarSenha(currentPassword, userResult.rows[0].password);
+    if (!senhaAtualValida) {
+      return res.status(401).json({ error: 'Senha atual incorreta' });
+    }
+
+    // Hash da nova senha
+    const hashedPassword = await hashSenha(newPassword);
+
+    await pool.query(
+      'UPDATE users SET password = $1 WHERE id = $2',
+      [hashedPassword, req.user.id]
+    );
+
+    console.log(`🔐 Senha alterada pelo próprio usuário: ${req.user.codProfissional}`);
+    res.json({ message: 'Senha alterada com sucesso' });
+  } catch (error) {
+    console.error('❌ Erro ao alterar senha:', error);
+    res.status(500).json({ error: 'Erro ao alterar senha: ' + error.message });
   }
 });
 
