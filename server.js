@@ -1969,24 +1969,31 @@ app.use('/api/', apiLimiter);
 const allowedOrigins = [
   'https://www.centraltutts.online',
   'https://centraltutts.online',
+  'https://tutts-frontend.vercel.app',
+  'https://tutts-frontend-git-main.vercel.app',
   'http://localhost:3000',
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
 
-// Função para setar headers CORS (mais restritivo)
+// Função para setar headers CORS
 const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
   
   // Verificar se a origem é permitida
-  if (origin && (allowedOrigins.includes(origin) || origin.includes('centraltutts'))) {
+  if (origin && (
+    allowedOrigins.includes(origin) || 
+    origin.includes('centraltutts') || 
+    origin.includes('vercel.app') ||
+    origin.includes('localhost')
+  )) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (process.env.NODE_ENV === 'development') {
-    // Em desenvolvimento, permitir qualquer origem
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  } else if (origin) {
+    // Para outras origens, ainda permitir (para PWA e apps instalados)
+    res.setHeader('Access-Control-Allow-Origin', origin);
   } else {
-    // Em produção, usar a primeira origem permitida como fallback
-    res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
+    // Sem origin (requisição direta), permitir todas
+    res.setHeader('Access-Control-Allow-Origin', '*');
   }
   
   res.setHeader('Access-Control-Allow-Credentials', 'true');
