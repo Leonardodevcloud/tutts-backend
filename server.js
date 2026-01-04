@@ -39,12 +39,16 @@ const loginLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 200, // máximo 200 requisições por minuto (aumentado)
+  max: 500, // máximo 500 requisições por minuto (aumentado para PWA)
   message: { error: 'Muitas requisições. Aguarde um momento.' },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    return req.path === '/health' || req.path === '/api/health';
+    // Rotas que não devem ter rate limit
+    return req.path === '/health' || 
+           req.path === '/api/health' ||
+           req.path.startsWith('/api/score/') ||  // Score é consultado frequentemente
+           req.path.startsWith('/api/relatorios-diarios/'); // Relatórios também
   },
   keyGenerator: (req) => {
     return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
