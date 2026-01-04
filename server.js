@@ -1423,6 +1423,96 @@ async function createTables() {
     `);
     console.log('✅ Tabela operacoes_faixas_km verificada');
     // ==================== FIM MÓDULO OPERAÇÕES ====================
+// ==================== INÍCIO MÓDULO SCORE/GAMIFICAÇÃO ====================
+    
+    // Tabela de histórico de pontos (extrato detalhado)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_historico (
+        id SERIAL PRIMARY KEY,
+        cod_prof INTEGER NOT NULL,
+        nome_prof VARCHAR(255),
+        os VARCHAR(50) NOT NULL,
+        data_os DATE NOT NULL,
+        hora_solicitacao TIME,
+        tempo_entrega_minutos INTEGER,
+        prazo_minutos INTEGER,
+        ponto_prazo DECIMAL(5,2) DEFAULT 0,
+        ponto_bonus_janela DECIMAL(5,2) DEFAULT 0,
+        ponto_total DECIMAL(5,2) DEFAULT 0,
+        dentro_prazo BOOLEAN DEFAULT FALSE,
+        janela_bonus VARCHAR(20),
+        detalhamento TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(cod_prof, os)
+      )
+    `);
+    console.log('✅ Tabela score_historico verificada');
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_score_hist_prof ON score_historico(cod_prof)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_score_hist_data ON score_historico(data_os)`).catch(() => {});
+
+    // Tabela de totais por profissional (cache para performance)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_totais (
+        id SERIAL PRIMARY KEY,
+        cod_prof INTEGER UNIQUE NOT NULL,
+        nome_prof VARCHAR(255),
+        score_total DECIMAL(10,2) DEFAULT 0,
+        total_os INTEGER DEFAULT 0,
+        os_no_prazo INTEGER DEFAULT 0,
+        os_fora_prazo INTEGER DEFAULT 0,
+        bonus_janela_total DECIMAL(10,2) DEFAULT 0,
+        ultimo_calculo TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela score_totais verificada');
+
+    // Tabela de milestones/benefícios do clube
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_milestones (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL,
+        descricao TEXT,
+        pontos_necessarios INTEGER NOT NULL,
+        icone VARCHAR(50) DEFAULT '🏆',
+        cor VARCHAR(20) DEFAULT '#7c3aed',
+        beneficio TEXT,
+        ativo BOOLEAN DEFAULT TRUE,
+        ordem INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela score_milestones verificada');
+
+    // Tabela de milestones conquistados por profissional
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_conquistas (
+        id SERIAL PRIMARY KEY,
+        cod_prof INTEGER NOT NULL,
+        milestone_id INTEGER REFERENCES score_milestones(id),
+        conquistado_em TIMESTAMP DEFAULT NOW(),
+        notificado BOOLEAN DEFAULT FALSE,
+        UNIQUE(cod_prof, milestone_id)
+      )
+    `);
+    console.log('✅ Tabela score_conquistas verificada');
+
+    // Inserir milestones padrão se não existirem
+    const milestonesCount = await pool.query('SELECT COUNT(*) FROM score_milestones');
+    if (parseInt(milestonesCount.rows[0].count) === 0) {
+      await pool.query(`
+        INSERT INTO score_milestones (nome, descricao, pontos_necessarios, icone, cor, beneficio, ordem) VALUES
+        ('Iniciante', 'Primeiros passos no programa', 10, '🌟', '#94a3b8', 'Acesso ao programa de benefícios', 1),
+        ('Bronze', 'Entregador comprometido', 50, '🥉', '#cd7f32', 'Prioridade em OS de valor alto', 2),
+        ('Prata', 'Performance consistente', 150, '🥈', '#c0c0c0', 'Bônus de R$ 20 no próximo saque', 3),
+        ('Ouro', 'Excelência reconhecida', 300, '🥇', '#ffd700', 'Bônus de R$ 50 + Camiseta exclusiva', 4),
+        ('Platina', 'Elite dos entregadores', 500, '💎', '#e5e4e2', 'Bônus de R$ 100 + Kit completo', 5),
+        ('Diamante', 'Lenda da Tutts', 1000, '👑', '#b9f2ff', 'Bônus de R$ 200 + Benefícios VIP permanentes', 6)
+      `);
+      console.log('✅ Milestones padrão inseridos');
+    }
+    
+    // ==================== FIM MÓDULO SCORE/GAMIFICAÇÃO ====================
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -16783,3 +16873,415 @@ app.get('/api/bi/cliente-767', async (req, res) => {
     res.status(500).json({ error: 'Erro ao buscar dados do cliente 767', details: error.message });
   }
 });
+// =====================================================
+// MÓDULO DE SCORE E GAMIFICAÇÃO - ENDPOINTS
+// Adicionar no final do server.js, ANTES da última linha
+// =====================================================
+
+// Função para calcular pontos de uma OS
+function calcularPontosOS(dentroPrazo, horaSolicitacao) {
+  let pontoPrazo = 0;
+  let pontoBonus = 0;
+  let janelaBonus = null;
+  let detalhes = [];
+
+  // 1. Pontuação por prazo
+  if (dentroPrazo === true) {
+    pontoPrazo = 0.75;
+    detalhes.push('No prazo (+0,75)');
+  } else if (dentroPrazo === false) {
+    pontoPrazo = -1.00;
+    detalhes.push('Fora do prazo (-1,00)');
+  }
+
+  // 2. Bônus por janela de horário (apenas se entregou no prazo)
+  if (dentroPrazo === true && horaSolicitacao) {
+    const hora = typeof horaSolicitacao === 'string' 
+      ? parseInt(horaSolicitacao.split(':')[0]) 
+      : (horaSolicitacao instanceof Date ? horaSolicitacao.getHours() : null);
+    
+    if (hora !== null) {
+      if (hora >= 10 && hora < 12) {
+        pontoBonus = 0.50;
+        janelaBonus = '10h-12h';
+        detalhes.push('Bônus janela 10-12h (+0,50)');
+      }
+      else if (hora >= 16 && hora < 18) {
+        pontoBonus = 0.75;
+        janelaBonus = '16h-18h';
+        detalhes.push('Bônus janela 16-18h (+0,75)');
+      }
+    }
+  }
+
+  return {
+    ponto_prazo: pontoPrazo,
+    ponto_bonus_janela: pontoBonus,
+    ponto_total: pontoPrazo + pontoBonus,
+    janela_bonus: janelaBonus,
+    detalhamento: detalhes.join(' | ')
+  };
+}
+
+// Função auxiliar para verificar conquistas
+async function verificarConquistas(cod_prof) {
+  try {
+    const scoreResult = await pool.query('SELECT score_total FROM score_totais WHERE cod_prof = $1', [cod_prof]);
+    if (scoreResult.rows.length === 0) return;
+    
+    const scoreAtual = parseFloat(scoreResult.rows[0].score_total) || 0;
+    
+    const milestonesDisponiveis = await pool.query(`
+      SELECT m.* FROM score_milestones m
+      WHERE m.ativo = true
+      AND m.id NOT IN (SELECT milestone_id FROM score_conquistas WHERE cod_prof = $1)
+      AND m.pontos_necessarios <= $2
+      ORDER BY m.pontos_necessarios ASC
+    `, [cod_prof, scoreAtual]);
+    
+    for (const milestone of milestonesDisponiveis.rows) {
+      await pool.query(`
+        INSERT INTO score_conquistas (cod_prof, milestone_id)
+        VALUES ($1, $2) ON CONFLICT (cod_prof, milestone_id) DO NOTHING
+      `, [cod_prof, milestone.id]);
+    }
+  } catch (error) {
+    console.error('Erro ao verificar conquistas:', error);
+  }
+}
+
+// POST /api/score/recalcular - Recalcula scores
+app.post('/api/score/recalcular', async (req, res) => {
+  try {
+    const { cod_prof, data_inicio, data_fim } = req.body;
+    
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (cod_prof) {
+      whereClause += ` AND cod_prof = $${paramIndex}`;
+      params.push(cod_prof);
+      paramIndex++;
+    }
+    if (data_inicio) {
+      whereClause += ` AND data_solicitado >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    if (data_fim) {
+      whereClause += ` AND data_solicitado <= $${paramIndex}`;
+      params.push(data_fim);
+      paramIndex++;
+    }
+    
+    const entregasQuery = await pool.query(`
+      SELECT DISTINCT ON (os, cod_prof) os, cod_prof, nome_prof, data_solicitado, hora_solicitado,
+        tempo_entrega_prof_minutos, prazo_prof_minutos, dentro_prazo_prof
+      FROM bi_entregas ${whereClause}
+      ORDER BY os, cod_prof, data_solicitado DESC
+    `, params);
+    
+    let processadas = 0, erros = 0;
+    
+    for (const entrega of entregasQuery.rows) {
+      try {
+        const pontos = calcularPontosOS(entrega.dentro_prazo_prof, entrega.hora_solicitado);
+        
+        await pool.query(`
+          INSERT INTO score_historico (cod_prof, nome_prof, os, data_os, hora_solicitacao,
+            tempo_entrega_minutos, prazo_minutos, ponto_prazo, ponto_bonus_janela, ponto_total,
+            dentro_prazo, janela_bonus, detalhamento)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ON CONFLICT (cod_prof, os) DO UPDATE SET
+            nome_prof = EXCLUDED.nome_prof, data_os = EXCLUDED.data_os,
+            hora_solicitacao = EXCLUDED.hora_solicitacao, tempo_entrega_minutos = EXCLUDED.tempo_entrega_minutos,
+            prazo_minutos = EXCLUDED.prazo_minutos, ponto_prazo = EXCLUDED.ponto_prazo,
+            ponto_bonus_janela = EXCLUDED.ponto_bonus_janela, ponto_total = EXCLUDED.ponto_total,
+            dentro_prazo = EXCLUDED.dentro_prazo, janela_bonus = EXCLUDED.janela_bonus,
+            detalhamento = EXCLUDED.detalhamento
+        `, [entrega.cod_prof, entrega.nome_prof, entrega.os, entrega.data_solicitado,
+            entrega.hora_solicitado, entrega.tempo_entrega_prof_minutos, entrega.prazo_prof_minutos,
+            pontos.ponto_prazo, pontos.ponto_bonus_janela, pontos.ponto_total,
+            entrega.dentro_prazo_prof, pontos.janela_bonus, pontos.detalhamento]);
+        processadas++;
+      } catch (err) {
+        erros++;
+      }
+    }
+    
+    // Atualizar totais
+    const profissionais = cod_prof ? [{ cod_prof }] : (await pool.query('SELECT DISTINCT cod_prof FROM score_historico')).rows;
+    
+    for (const prof of profissionais) {
+      await pool.query(`
+        INSERT INTO score_totais (cod_prof, nome_prof, score_total, total_os, os_no_prazo, os_fora_prazo, bonus_janela_total)
+        SELECT cod_prof, MAX(nome_prof), COALESCE(SUM(ponto_total), 0), COUNT(*),
+          SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END),
+          SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END),
+          COALESCE(SUM(ponto_bonus_janela), 0)
+        FROM score_historico WHERE cod_prof = $1 GROUP BY cod_prof
+        ON CONFLICT (cod_prof) DO UPDATE SET
+          nome_prof = EXCLUDED.nome_prof, score_total = EXCLUDED.score_total,
+          total_os = EXCLUDED.total_os, os_no_prazo = EXCLUDED.os_no_prazo,
+          os_fora_prazo = EXCLUDED.os_fora_prazo, bonus_janela_total = EXCLUDED.bonus_janela_total,
+          ultimo_calculo = NOW(), updated_at = NOW()
+      `, [prof.cod_prof]);
+      await verificarConquistas(prof.cod_prof);
+    }
+    
+    res.json({ success: true, message: `Score recalculado: ${processadas} OS processadas, ${erros} erros`, processadas, erros });
+  } catch (error) {
+    console.error('Erro ao recalcular score:', error);
+    res.status(500).json({ error: 'Erro ao recalcular score', details: error.message });
+  }
+});
+
+// GET /api/score/profissional/:cod_prof - Dados completos de um profissional
+app.get('/api/score/profissional/:cod_prof', async (req, res) => {
+  try {
+    const { cod_prof } = req.params;
+    const { data_inicio, data_fim, limite } = req.query;
+    
+    // Buscar totais
+    const totaisResult = await pool.query('SELECT * FROM score_totais WHERE cod_prof = $1', [cod_prof]);
+    let totais = totaisResult.rows[0] || { cod_prof: parseInt(cod_prof), nome_prof: null, score_total: 0, total_os: 0, os_no_prazo: 0, os_fora_prazo: 0, bonus_janela_total: 0 };
+    
+    if (!totais.nome_prof) {
+      const nomeResult = await pool.query('SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1', [cod_prof]);
+      if (nomeResult.rows.length > 0) totais.nome_prof = nomeResult.rows[0].nome_prof;
+    }
+    
+    // Buscar extrato
+    let extratoWhere = 'WHERE cod_prof = $1';
+    const extratoParams = [cod_prof];
+    let paramIndex = 2;
+    
+    if (data_inicio) { extratoWhere += ` AND data_os >= $${paramIndex}`; extratoParams.push(data_inicio); paramIndex++; }
+    if (data_fim) { extratoWhere += ` AND data_os <= $${paramIndex}`; extratoParams.push(data_fim); paramIndex++; }
+    
+    const extratoResult = await pool.query(`
+      SELECT os, data_os, hora_solicitacao, tempo_entrega_minutos, prazo_minutos,
+        ponto_prazo, ponto_bonus_janela, ponto_total, dentro_prazo, janela_bonus, detalhamento
+      FROM score_historico ${extratoWhere}
+      ORDER BY data_os DESC, os DESC LIMIT ${parseInt(limite) || 100}
+    `, extratoParams);
+    
+    // Buscar milestones
+    const milestonesResult = await pool.query(`
+      SELECT m.*, c.conquistado_em, CASE WHEN c.id IS NOT NULL THEN true ELSE false END as conquistado
+      FROM score_milestones m
+      LEFT JOIN score_conquistas c ON m.id = c.milestone_id AND c.cod_prof = $1
+      WHERE m.ativo = true ORDER BY m.ordem ASC
+    `, [cod_prof]);
+    
+    // Calcular próximo milestone
+    const scoreAtual = parseFloat(totais.score_total) || 0;
+    const proximoMilestone = milestonesResult.rows.find(m => !m.conquistado);
+    let progressoProximo = null;
+    
+    if (proximoMilestone) {
+      const milestoneAnterior = milestonesResult.rows.filter(m => m.conquistado).sort((a, b) => b.pontos_necessarios - a.pontos_necessarios)[0];
+      const pontoInicial = milestoneAnterior ? milestoneAnterior.pontos_necessarios : 0;
+      const pontoFinal = proximoMilestone.pontos_necessarios;
+      const progresso = ((scoreAtual - pontoInicial) / (pontoFinal - pontoInicial)) * 100;
+      
+      progressoProximo = {
+        milestone: proximoMilestone,
+        pontos_atuais: scoreAtual,
+        pontos_faltam: Math.max(0, pontoFinal - scoreAtual),
+        progresso_percentual: Math.min(100, Math.max(0, progresso))
+      };
+    }
+    
+    const taxaNoPrazo = totais.total_os > 0 ? ((totais.os_no_prazo / totais.total_os) * 100).toFixed(1) : 0;
+    
+    res.json({
+      profissional: { cod_prof: parseInt(cod_prof), nome: totais.nome_prof || `Profissional ${cod_prof}` },
+      score: {
+        total: parseFloat(totais.score_total) || 0,
+        total_os: parseInt(totais.total_os) || 0,
+        os_no_prazo: parseInt(totais.os_no_prazo) || 0,
+        os_fora_prazo: parseInt(totais.os_fora_prazo) || 0,
+        bonus_janela_total: parseFloat(totais.bonus_janela_total) || 0,
+        taxa_no_prazo: parseFloat(taxaNoPrazo)
+      },
+      extrato: extratoResult.rows,
+      milestones: milestonesResult.rows,
+      proximo_milestone: progressoProximo
+    });
+  } catch (error) {
+    console.error('Erro ao buscar score do profissional:', error);
+    res.status(500).json({ error: 'Erro ao buscar score', details: error.message });
+  }
+});
+
+// GET /api/score/ranking - Ranking geral
+app.get('/api/score/ranking', async (req, res) => {
+  try {
+    const { limite, data_inicio, data_fim, ordem } = req.query;
+    let query, params = [];
+    
+    if (data_inicio || data_fim) {
+      let whereClause = 'WHERE 1=1';
+      let paramIndex = 1;
+      if (data_inicio) { whereClause += ` AND data_os >= $${paramIndex}`; params.push(data_inicio); paramIndex++; }
+      if (data_fim) { whereClause += ` AND data_os <= $${paramIndex}`; params.push(data_fim); paramIndex++; }
+      
+      query = `SELECT cod_prof, MAX(nome_prof) as nome_prof, COALESCE(SUM(ponto_total), 0) as score_total,
+        COUNT(*) as total_os, SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as os_no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as os_fora_prazo,
+        ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo
+        FROM score_historico ${whereClause} GROUP BY cod_prof
+        ORDER BY score_total ${ordem === 'asc' ? 'ASC' : 'DESC'} LIMIT $${paramIndex}`;
+      params.push(parseInt(limite) || 50);
+    } else {
+      query = `SELECT cod_prof, nome_prof, score_total, total_os, os_no_prazo, os_fora_prazo,
+        ROUND(os_no_prazo::numeric / NULLIF(total_os, 0) * 100, 1) as taxa_prazo, ultimo_calculo
+        FROM score_totais ORDER BY score_total ${ordem === 'asc' ? 'ASC' : 'DESC'} LIMIT $1`;
+      params.push(parseInt(limite) || 50);
+    }
+    
+    const result = await pool.query(query, params);
+    const ranking = result.rows.map((prof, index) => ({
+      posicao: index + 1, cod_prof: prof.cod_prof, nome: prof.nome_prof || `Profissional ${prof.cod_prof}`,
+      score_total: parseFloat(prof.score_total) || 0, total_os: parseInt(prof.total_os) || 0,
+      os_no_prazo: parseInt(prof.os_no_prazo) || 0, os_fora_prazo: parseInt(prof.os_fora_prazo) || 0,
+      taxa_prazo: parseFloat(prof.taxa_prazo) || 0
+    }));
+    
+    res.json({ ranking, total_profissionais: ranking.length, filtros: { data_inicio, data_fim, limite, ordem } });
+  } catch (error) {
+    console.error('Erro ao buscar ranking:', error);
+    res.status(500).json({ error: 'Erro ao buscar ranking', details: error.message });
+  }
+});
+
+// GET /api/score/milestones - Listar milestones
+app.get('/api/score/milestones', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM score_milestones ORDER BY ordem ASC');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao listar milestones' });
+  }
+});
+
+// POST /api/score/milestones - Criar milestone
+app.post('/api/score/milestones', async (req, res) => {
+  try {
+    const { nome, descricao, pontos_necessarios, icone, cor, beneficio, ordem } = req.body;
+    const result = await pool.query(`
+      INSERT INTO score_milestones (nome, descricao, pontos_necessarios, icone, cor, beneficio, ordem)
+      VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *
+    `, [nome, descricao, pontos_necessarios, icone || '🏆', cor || '#7c3aed', beneficio, ordem || 0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao criar milestone' });
+  }
+});
+
+// PUT /api/score/milestones/:id - Atualizar milestone
+app.put('/api/score/milestones/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, pontos_necessarios, icone, cor, beneficio, ativo, ordem } = req.body;
+    const result = await pool.query(`
+      UPDATE score_milestones SET nome = COALESCE($1, nome), descricao = COALESCE($2, descricao),
+        pontos_necessarios = COALESCE($3, pontos_necessarios), icone = COALESCE($4, icone),
+        cor = COALESCE($5, cor), beneficio = COALESCE($6, beneficio), ativo = COALESCE($7, ativo),
+        ordem = COALESCE($8, ordem) WHERE id = $9 RETURNING *
+    `, [nome, descricao, pontos_necessarios, icone, cor, beneficio, ativo, ordem, id]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao atualizar milestone' });
+  }
+});
+
+// DELETE /api/score/milestones/:id - Deletar milestone
+app.delete('/api/score/milestones/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM score_conquistas WHERE milestone_id = $1', [id]);
+    await pool.query('DELETE FROM score_milestones WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao deletar milestone' });
+  }
+});
+
+// GET /api/score/estatisticas - Dashboard administrativo
+app.get('/api/score/estatisticas', async (req, res) => {
+  try {
+    const { data_inicio, data_fim } = req.query;
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) { whereClause += ` AND data_os >= $${paramIndex}`; params.push(data_inicio); paramIndex++; }
+    if (data_fim) { whereClause += ` AND data_os <= $${paramIndex}`; params.push(data_fim); paramIndex++; }
+    
+    const geraisResult = await pool.query(`
+      SELECT COUNT(DISTINCT cod_prof) as total_profissionais, COUNT(*) as total_os,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as os_no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as os_fora_prazo,
+        COALESCE(SUM(ponto_total), 0) as pontos_distribuidos,
+        COALESCE(SUM(ponto_bonus_janela), 0) as bonus_janelas_total,
+        ROUND(AVG(ponto_total), 2) as media_pontos_por_os
+      FROM score_historico ${whereClause}
+    `, params);
+    
+    const top10Result = await pool.query(`
+      SELECT cod_prof, MAX(nome_prof) as nome_prof, COALESCE(SUM(ponto_total), 0) as score_total, COUNT(*) as total_os
+      FROM score_historico ${whereClause} GROUP BY cod_prof ORDER BY score_total DESC LIMIT 10
+    `, params);
+    
+    const conquistasResult = await pool.query(`
+      SELECT c.cod_prof, t.nome_prof, m.nome as milestone_nome, m.icone, c.conquistado_em
+      FROM score_conquistas c JOIN score_milestones m ON c.milestone_id = m.id
+      LEFT JOIN score_totais t ON c.cod_prof = t.cod_prof
+      ORDER BY c.conquistado_em DESC LIMIT 10
+    `);
+    
+    const gerais = geraisResult.rows[0];
+    res.json({
+      resumo: {
+        total_profissionais: parseInt(gerais.total_profissionais) || 0,
+        total_os: parseInt(gerais.total_os) || 0,
+        os_no_prazo: parseInt(gerais.os_no_prazo) || 0,
+        os_fora_prazo: parseInt(gerais.os_fora_prazo) || 0,
+        taxa_prazo: gerais.total_os > 0 ? ((gerais.os_no_prazo / gerais.total_os) * 100).toFixed(1) : 0,
+        pontos_distribuidos: parseFloat(gerais.pontos_distribuidos) || 0,
+        bonus_janelas_total: parseFloat(gerais.bonus_janelas_total) || 0,
+        media_pontos_por_os: parseFloat(gerais.media_pontos_por_os) || 0
+      },
+      top_10: top10Result.rows.map((p, i) => ({
+        posicao: i + 1, cod_prof: p.cod_prof, nome: p.nome_prof || `Profissional ${p.cod_prof}`,
+        score_total: parseFloat(p.score_total), total_os: parseInt(p.total_os)
+      })),
+      conquistas_recentes: conquistasResult.rows
+    });
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas:', error);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas', details: error.message });
+  }
+});
+
+// GET /api/score/buscar - Buscar profissional
+app.get('/api/score/buscar', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json([]);
+    
+    const result = await pool.query(`
+      SELECT cod_prof, nome_prof, score_total, total_os FROM score_totais
+      WHERE cod_prof::text ILIKE $1 OR nome_prof ILIKE $1
+      ORDER BY score_total DESC LIMIT 20
+    `, [`%${q}%`]);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar profissional' });
+  }
+});
+
+console.log('✅ Módulo de Score e Gamificação carregado!');
