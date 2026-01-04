@@ -16931,6 +16931,16 @@ async function verificarConquistas(cod_prof) {
     
     const scoreAtual = parseFloat(scoreResult.rows[0].score_total) || 0;
     
+    // PRIMEIRO: Remover conquistas que o profissional não deveria ter (score insuficiente)
+    await pool.query(`
+      DELETE FROM score_conquistas 
+      WHERE cod_prof = $1 
+      AND milestone_id IN (
+        SELECT id FROM score_milestones WHERE pontos_necessarios > $2
+      )
+    `, [cod_prof, scoreAtual]);
+    
+    // DEPOIS: Adicionar conquistas que o profissional alcançou
     const milestonesDisponiveis = await pool.query(`
       SELECT m.* FROM score_milestones m
       WHERE m.ativo = true
@@ -16983,6 +16993,7 @@ app.post('/api/score/recalcular', async (req, res) => {
     if (!cod_prof) {
       await pool.query(`DELETE FROM score_historico WHERE data_os < '${DATA_MINIMA_SCORE}'`);
       await pool.query(`TRUNCATE score_totais`);
+      await pool.query(`TRUNCATE score_conquistas`); // Limpar conquistas para recalcular
     } else {
       await pool.query(`DELETE FROM score_historico WHERE cod_prof = $1 AND data_os < '${DATA_MINIMA_SCORE}'`, [cod_prof]);
     }
