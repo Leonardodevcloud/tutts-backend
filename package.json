@@ -12,7 +12,8 @@
     "cors": "^2.8.5",
     "pg": "^8.11.3",
     "dotenv": "^16.3.1",
-    "docx": "^8.5.0"
+    "docx": "^8.5.0",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
