@@ -134,6 +134,51 @@ const verificarSenha = async (senha, hash) => {
   return await bcrypt.compare(senha, hash);
 };
 
+// ==================== FUNÇÃO DE AUDITORIA ====================
+
+// Categorias de ações para auditoria
+const AUDIT_CATEGORIES = {
+  AUTH: 'auth',           // Login, logout, registro
+  USER: 'user',           // Gestão de usuários
+  FINANCIAL: 'financial', // Saques, gratuidades
+  DATA: 'data',           // BI, importações, exclusões
+  CONFIG: 'config',       // Configurações do sistema
+  SCORE: 'score',         // Sistema de pontuação
+  ADMIN: 'admin'          // Ações administrativas
+};
+
+// Função para registrar log de auditoria
+const registrarAuditoria = async (req, action, category, resource = null, resourceId = null, details = null, status = 'success') => {
+  try {
+    const user = req.user || {};
+    const ip = req.headers['x-forwarded-for'] || req.connection?.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    
+    await pool.query(`
+      INSERT INTO audit_logs (user_id, user_cod, user_name, user_role, action, category, resource, resource_id, details, ip_address, user_agent, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `, [
+      user.id || null,
+      user.codProfissional || req.body?.codProfissional || 'anonymous',
+      user.nome || req.body?.fullName || 'Anônimo',
+      user.role || 'guest',
+      action,
+      category,
+      resource,
+      resourceId?.toString(),
+      details ? JSON.stringify(details) : null,
+      ip,
+      userAgent,
+      status
+    ]);
+  } catch (error) {
+    console.error('❌ Erro ao registrar auditoria:', error.message);
+    // Não propagar erro para não afetar a operação principal
+  }
+};
+
+// ==================== FIM FUNÇÃO DE AUDITORIA ====================
+
 // ==================== FIM CONFIGURAÇÕES DE SEGURANÇA ====================
 
 // Validar DATABASE_URL
@@ -1674,6 +1719,38 @@ async function createTables() {
     
     // ==================== FIM MÓDULO SCORE/GAMIFICAÇÃO ====================
 
+    // ==================== MÓDULO AUDITORIA ====================
+    
+    // Tabela de logs de auditoria
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        user_cod VARCHAR(50),
+        user_name VARCHAR(255),
+        user_role VARCHAR(50),
+        action VARCHAR(100) NOT NULL,
+        category VARCHAR(50) NOT NULL,
+        resource VARCHAR(100),
+        resource_id VARCHAR(100),
+        details JSONB,
+        ip_address VARCHAR(50),
+        user_agent TEXT,
+        status VARCHAR(20) DEFAULT 'success',
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    // Índices para consultas rápidas
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_user_cod ON audit_logs(user_cod)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_category ON audit_logs(category)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC)`);
+    
+    console.log('✅ Tabela audit_logs verificada');
+    
+    // ==================== FIM MÓDULO AUDITORIA ====================
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -2030,6 +2107,8 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
 
     if (!senhaValida) {
       console.log('❌ Senha inválida');
+      // Registrar tentativa de login falha
+      await registrarAuditoria(req, 'LOGIN_FAILED', AUDIT_CATEGORIES.AUTH, 'users', codProfissional, { motivo: 'Senha inválida' }, 'failed');
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
@@ -2038,6 +2117,10 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
 
     // Gerar token JWT
     const token = gerarToken(user);
+
+    // Registrar login bem-sucedido
+    req.user = { id: user.id, codProfissional: user.cod_profissional, nome: user.full_name, role: user.role };
+    await registrarAuditoria(req, 'LOGIN_SUCCESS', AUDIT_CATEGORIES.AUTH, 'users', user.id, { role: user.role });
 
     console.log('✅ Login bem-sucedido:', user.cod_profissional);
     res.json({
@@ -2350,6 +2433,18 @@ app.delete('/api/users/:codProfissional', async (req, res) => {
     }
     
     deletedData.user = userResult.rows[0];
+    
+    // Registrar auditoria
+    await registrarAuditoria(req, 'USER_DELETE', AUDIT_CATEGORIES.USER, 'users', codProfissional, {
+      nome: deletedData.user.full_name,
+      role: deletedData.user.role,
+      dados_excluidos: {
+        submissions: deletedData.submissions,
+        withdrawals: deletedData.withdrawals,
+        gratuities: deletedData.gratuities,
+        indicacoes: deletedData.indicacoes
+      }
+    });
     
     console.log(`🗑️ Usuário ${codProfissional} e todos os dados associados foram excluídos:`, deletedData);
     
@@ -2982,6 +3077,15 @@ app.post('/api/withdrawals', async (req, res) => {
       [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
 
+    // Registrar auditoria
+    await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
+      valor: requestedAmount,
+      taxa: feeAmount,
+      valor_final: finalAmount,
+      gratuidade: hasGratuity,
+      restrito: isRestricted
+    });
+
     res.status(201).json({ 
       ...result.rows[0], 
       isRestricted 
@@ -3082,6 +3186,15 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
 
+    // Registrar auditoria
+    const saque = result.rows[0];
+    await registrarAuditoria(req, `WITHDRAWAL_${status.toUpperCase()}`, AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+      user_cod: saque.user_cod,
+      valor: saque.requested_amount,
+      admin: adminName,
+      motivo_rejeicao: rejectReason
+    });
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar saque:', error);
@@ -3094,6 +3207,9 @@ app.delete('/api/withdrawals/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Buscar dados antes de excluir para auditoria
+    const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
+
     const result = await pool.query(
       'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
       [id]
@@ -3102,6 +3218,13 @@ app.delete('/api/withdrawals/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
+
+    // Registrar auditoria
+    await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+      user_cod: result.rows[0].user_cod,
+      valor: result.rows[0].requested_amount,
+      status_anterior: result.rows[0].status
+    });
 
     console.log('🗑️ Saque excluído:', id);
     res.json({ success: true, deleted: result.rows[0] });
@@ -18122,3 +18245,250 @@ app.get('/api/score/buscar', async (req, res) => {
 });
 
 console.log('✅ Módulo de Score e Gamificação carregado!');
+
+// ==================== MÓDULO DE AUDITORIA ====================
+
+// GET /api/audit/logs - Listar logs de auditoria (apenas admin)
+app.get('/api/audit/logs', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const { 
+      page = 1, 
+      limit = 50, 
+      category, 
+      action, 
+      user_cod, 
+      status,
+      data_inicio, 
+      data_fim,
+      search
+    } = req.query;
+    
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (category) {
+      whereClause += ` AND category = $${paramIndex}`;
+      params.push(category);
+      paramIndex++;
+    }
+    
+    if (action) {
+      whereClause += ` AND action ILIKE $${paramIndex}`;
+      params.push(`%${action}%`);
+      paramIndex++;
+    }
+    
+    if (user_cod) {
+      whereClause += ` AND user_cod ILIKE $${paramIndex}`;
+      params.push(`%${user_cod}%`);
+      paramIndex++;
+    }
+    
+    if (status) {
+      whereClause += ` AND status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+    
+    if (data_inicio) {
+      whereClause += ` AND created_at >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    
+    if (data_fim) {
+      whereClause += ` AND created_at <= $${paramIndex}`;
+      params.push(data_fim + ' 23:59:59');
+      paramIndex++;
+    }
+    
+    if (search) {
+      whereClause += ` AND (user_cod ILIKE $${paramIndex} OR user_name ILIKE $${paramIndex} OR action ILIKE $${paramIndex} OR resource ILIKE $${paramIndex})`;
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+    
+    // Contar total
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total FROM audit_logs ${whereClause}
+    `, params);
+    
+    // Buscar logs
+    const result = await pool.query(`
+      SELECT * FROM audit_logs 
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `, [...params, parseInt(limit), offset]);
+    
+    res.json({
+      logs: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(countResult.rows[0].total),
+        totalPages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao listar logs de auditoria:', error);
+    res.status(500).json({ error: 'Erro ao listar logs' });
+  }
+});
+
+// GET /api/audit/stats - Estatísticas de auditoria
+app.get('/api/audit/stats', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const { dias = 7 } = req.query;
+    
+    // Total por categoria
+    const categoriaResult = await pool.query(`
+      SELECT category, COUNT(*) as total
+      FROM audit_logs
+      WHERE created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+      GROUP BY category
+      ORDER BY total DESC
+    `);
+    
+    // Total por ação
+    const acaoResult = await pool.query(`
+      SELECT action, COUNT(*) as total
+      FROM audit_logs
+      WHERE created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+      GROUP BY action
+      ORDER BY total DESC
+      LIMIT 10
+    `);
+    
+    // Usuários mais ativos
+    const usuariosResult = await pool.query(`
+      SELECT user_cod, user_name, COUNT(*) as total
+      FROM audit_logs
+      WHERE created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+      AND user_cod IS NOT NULL AND user_cod != 'anonymous'
+      GROUP BY user_cod, user_name
+      ORDER BY total DESC
+      LIMIT 10
+    `);
+    
+    // Logs por dia
+    const porDiaResult = await pool.query(`
+      SELECT DATE(created_at) as data, COUNT(*) as total
+      FROM audit_logs
+      WHERE created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+      GROUP BY DATE(created_at)
+      ORDER BY data DESC
+    `);
+    
+    // Falhas de login
+    const falhasResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM audit_logs
+      WHERE action = 'LOGIN_FAILED'
+      AND created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+    `);
+    
+    // Total geral no período
+    const totalResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM audit_logs
+      WHERE created_at >= NOW() - INTERVAL '${parseInt(dias)} days'
+    `);
+    
+    res.json({
+      periodo_dias: parseInt(dias),
+      total_acoes: parseInt(totalResult.rows[0].total),
+      falhas_login: parseInt(falhasResult.rows[0].total),
+      por_categoria: categoriaResult.rows,
+      top_acoes: acaoResult.rows,
+      usuarios_ativos: usuariosResult.rows,
+      por_dia: porDiaResult.rows
+    });
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas:', error);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas' });
+  }
+});
+
+// GET /api/audit/export - Exportar logs (CSV)
+app.get('/api/audit/export', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const { data_inicio, data_fim, category } = req.query;
+    
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (data_inicio) {
+      whereClause += ` AND created_at >= $${paramIndex}`;
+      params.push(data_inicio);
+      paramIndex++;
+    }
+    
+    if (data_fim) {
+      whereClause += ` AND created_at <= $${paramIndex}`;
+      params.push(data_fim + ' 23:59:59');
+      paramIndex++;
+    }
+    
+    if (category) {
+      whereClause += ` AND category = $${paramIndex}`;
+      params.push(category);
+      paramIndex++;
+    }
+    
+    const result = await pool.query(`
+      SELECT 
+        TO_CHAR(created_at, 'DD/MM/YYYY HH24:MI:SS') as data_hora,
+        user_cod as usuario,
+        user_name as nome,
+        user_role as perfil,
+        action as acao,
+        category as categoria,
+        resource as recurso,
+        resource_id as recurso_id,
+        status,
+        ip_address as ip
+      FROM audit_logs 
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT 10000
+    `, params);
+    
+    // Registrar exportação
+    await registrarAuditoria(req, 'EXPORT_AUDIT_LOGS', AUDIT_CATEGORIES.ADMIN, 'audit_logs', null, { 
+      registros: result.rows.length,
+      filtros: { data_inicio, data_fim, category }
+    });
+    
+    // Gerar CSV
+    const headers = ['Data/Hora', 'Usuário', 'Nome', 'Perfil', 'Ação', 'Categoria', 'Recurso', 'ID Recurso', 'Status', 'IP'];
+    const csvRows = [headers.join(';')];
+    
+    for (const row of result.rows) {
+      csvRows.push([
+        row.data_hora,
+        row.usuario,
+        row.nome,
+        row.perfil,
+        row.acao,
+        row.categoria,
+        row.recurso || '',
+        row.recurso_id || '',
+        row.status,
+        row.ip
+      ].join(';'));
+    }
+    
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=audit_logs_${new Date().toISOString().split('T')[0]}.csv`);
+    res.send('\uFEFF' + csvRows.join('\n')); // BOM para UTF-8
+  } catch (error) {
+    console.error('Erro ao exportar logs:', error);
+    res.status(500).json({ error: 'Erro ao exportar logs' });
+  }
+});
+
+console.log('✅ Módulo de Auditoria carregado!');
