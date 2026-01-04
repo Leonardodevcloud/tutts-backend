@@ -16955,8 +16955,11 @@ app.post('/api/score/recalcular', async (req, res) => {
   try {
     const { cod_prof, data_inicio, data_fim } = req.body;
     
+    // DATA MÍNIMA: Só contabiliza entregas a partir de 01/01/2025
+    const DATA_MINIMA_SCORE = '2025-01-01';
+    
     // Buscar entregas que têm dentro_prazo_prof calculado
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL';
+    let whereClause = `WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL AND data_solicitado >= '${DATA_MINIMA_SCORE}'`;
     const params = [];
     let paramIndex = 1;
     
@@ -16974,6 +16977,14 @@ app.post('/api/score/recalcular', async (req, res) => {
       whereClause += ` AND data_solicitado <= $${paramIndex}`;
       params.push(data_fim);
       paramIndex++;
+    }
+    
+    // Limpar histórico antigo antes de recalcular
+    if (!cod_prof) {
+      await pool.query(`DELETE FROM score_historico WHERE data_os < '${DATA_MINIMA_SCORE}'`);
+      await pool.query(`TRUNCATE score_totais`);
+    } else {
+      await pool.query(`DELETE FROM score_historico WHERE cod_prof = $1 AND data_os < '${DATA_MINIMA_SCORE}'`, [cod_prof]);
     }
     
     const entregasQuery = await pool.query(`
@@ -17037,7 +17048,7 @@ app.post('/api/score/recalcular', async (req, res) => {
       await verificarConquistas(prof.cod_prof);
     }
     
-    res.json({ success: true, message: `Score recalculado: ${processadas} OS processadas, ${erros} erros`, processadas, erros });
+    res.json({ success: true, message: `Score recalculado: ${processadas} OS processadas a partir de ${DATA_MINIMA_SCORE}, ${erros} erros`, processadas, erros, dataMinima: DATA_MINIMA_SCORE });
   } catch (error) {
     console.error('Erro ao recalcular score:', error);
     res.status(500).json({ error: 'Erro ao recalcular score', details: error.message });
