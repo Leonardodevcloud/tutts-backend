@@ -20,27 +20,44 @@ const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_pr
 const JWT_EXPIRES_IN = '8h';
 const BCRYPT_ROUNDS = 10;
 
-// Rate Limiters
+// Rate Limiters - configurados para funcionar com proxies
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 10, // máximo 10 tentativas
+  max: 20, // máximo 20 tentativas (aumentado)
   message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limit para health checks
+    return req.path === '/health' || req.path === '/api/health';
+  },
+  keyGenerator: (req) => {
+    // Usar X-Forwarded-For se disponível (para proxies/PWA)
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+  }
 });
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 100, // máximo 100 requisições por minuto
+  max: 200, // máximo 200 requisições por minuto (aumentado)
   message: { error: 'Muitas requisições. Aguarde um momento.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => {
+    return req.path === '/health' || req.path === '/api/health';
+  },
+  keyGenerator: (req) => {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+  }
 });
 
 const createAccountLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  max: 5, // máximo 5 contas por hora por IP
-  message: { error: 'Muitas contas criadas. Tente novamente em 1 hora.' }
+  max: 10, // máximo 10 contas por hora por IP (aumentado)
+  message: { error: 'Muitas contas criadas. Tente novamente em 1 hora.' },
+  keyGenerator: (req) => {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+  }
 });
 
 // ==================== MIDDLEWARES DE AUTENTICAÇÃO ====================
@@ -1937,10 +1954,12 @@ async function atualizarResumos(datasAfetadas = null) {
 
 // ==================== MIDDLEWARES DE SEGURANÇA ====================
 
-// Helmet - Headers de segurança
+// Helmet - Headers de segurança (configurado para funcionar com PWA)
 app.use(helmet({
   contentSecurityPolicy: false, // Desabilitado para não quebrar frontend
-  crossOriginEmbedderPolicy: false
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false, // Desabilitado para PWA
+  crossOriginResourcePolicy: false // Desabilitado para PWA
 }));
 
 // Rate limiting global para API
