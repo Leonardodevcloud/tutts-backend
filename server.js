@@ -4152,6 +4152,159 @@ app.get('/api/indicacao-link/estatisticas/:userCod', async (req, res) => {
 // PROMOÇÕES NOVATOS
 // ============================================
 
+// Listar regiões disponíveis da planilha (para criar promoções)
+app.get('/api/promocoes-novatos/regioes', async (req, res) => {
+  try {
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+    const response = await fetch(sheetUrl);
+    const text = await response.text();
+    const lines = text.split('\n').slice(1); // pular header
+    
+    const regioes = new Set();
+    lines.forEach(line => {
+      const cols = line.split(',');
+      const cidade = cols[3]?.trim(); // coluna Cidade (índice 3 = coluna D)
+      if (cidade && cidade.length > 0 && cidade !== '') {
+        regioes.add(cidade);
+      }
+    });
+    
+    res.json([...regioes].sort());
+  } catch (err) {
+    console.error('❌ Erro ao buscar regiões para novatos:', err);
+    res.json([]);
+  }
+});
+
+// Verificar elegibilidade do usuário para promoções novatos
+// Regras: 
+// 1. Deve haver promoção ativa para a região do usuário (região vem da planilha)
+// 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 15 dias
+app.get('/api/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    
+    // Buscar região do usuário na planilha do Google Sheets
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    const sheetText = await sheetResponse.text();
+    const sheetLines = sheetText.split('\n').slice(1); // pular header
+    
+    let userRegiao = null;
+    for (const line of sheetLines) {
+      const cols = line.split(',');
+      if (cols[0]?.trim() === userCod.toString()) {
+        userRegiao = cols[3]?.trim(); // coluna Cidade (índice 3 = coluna D)
+        break;
+      }
+    }
+    
+    // Verificar se há promoções ativas
+    const promoResult = await pool.query(
+      "SELECT * FROM promocoes_novatos WHERE status = 'ativa'"
+    );
+    
+    if (promoResult.rows.length === 0) {
+      return res.json({ 
+        elegivel: false, 
+        motivo: 'Nenhuma promoção ativa no momento',
+        promocoes: [],
+        userRegiao
+      });
+    }
+    
+    // Verificar histórico de entregas do usuário
+    // cod_prof na bi_entregas é INTEGER, userCod pode ser string
+    const userCodNumerico = parseInt(userCod.toString().replace(/\D/g, ''), 10);
+    
+    const entregasResult = await pool.query(`
+      SELECT 
+        COUNT(*) as total_entregas,
+        MAX(data_solicitado) as ultima_entrega
+      FROM bi_entregas 
+      WHERE cod_prof = $1
+    `, [userCodNumerico]);
+    
+    const totalEntregas = parseInt(entregasResult.rows[0]?.total_entregas) || 0;
+    const ultimaEntrega = entregasResult.rows[0]?.ultima_entrega;
+    
+    // Calcular dias desde a última entrega
+    let diasSemEntrega = null;
+    if (ultimaEntrega) {
+      const hoje = new Date();
+      const dataUltima = new Date(ultimaEntrega);
+      diasSemEntrega = Math.floor((hoje - dataUltima) / (1000 * 60 * 60 * 24));
+    }
+    
+    // Verificar elegibilidade:
+    // - Nunca fez entrega (totalEntregas === 0) OU
+    // - Não fez entrega nos últimos 15 dias (diasSemEntrega >= 15)
+    const elegivelPorEntregas = totalEntregas === 0 || (diasSemEntrega !== null && diasSemEntrega >= 15);
+    
+    if (!elegivelPorEntregas) {
+      return res.json({
+        elegivel: false,
+        motivo: `Você realizou entregas recentemente (última há ${diasSemEntrega} dias). Promoção disponível apenas para quem não fez entregas nos últimos 15 dias.`,
+        promocoes: [],
+        totalEntregas,
+        diasSemEntrega,
+        userRegiao
+      });
+    }
+    
+    // Filtrar promoções por região do usuário
+    let promocoesDisponiveis = promoResult.rows;
+    
+    // Se o usuário tem região na planilha, filtrar promoções compatíveis
+    if (userRegiao) {
+      promocoesDisponiveis = promoResult.rows.filter(promo => {
+        const regiaoPromo = (promo.regiao || '').toLowerCase().trim();
+        const regiaoUser = userRegiao.toLowerCase().trim();
+        
+        // Compatível se:
+        // - Região da promoção é igual à região do usuário
+        // - Região da promoção contém a região do usuário (ou vice-versa)
+        // - Região da promoção é "Todas", "Geral" ou vazia
+        return regiaoPromo === regiaoUser ||
+               regiaoPromo.includes(regiaoUser) || 
+               regiaoUser.includes(regiaoPromo) ||
+               regiaoPromo.includes('todas') || 
+               regiaoPromo.includes('geral') ||
+               regiaoPromo === '' ||
+               !promo.regiao;
+      });
+    }
+    
+    if (promocoesDisponiveis.length === 0) {
+      return res.json({
+        elegivel: false,
+        motivo: userRegiao 
+          ? `Não há promoções ativas para sua região (${userRegiao}).` 
+          : 'Você não está cadastrado na planilha de profissionais ou não tem região definida.',
+        promocoes: [],
+        totalEntregas,
+        diasSemEntrega,
+        userRegiao
+      });
+    }
+    
+    res.json({
+      elegivel: true,
+      motivo: totalEntregas === 0 
+        ? 'Você é um novo profissional! Aproveite as promoções.' 
+        : `Você não realiza entregas há ${diasSemEntrega} dias. Volte a entregar com bônus!`,
+      promocoes: promocoesDisponiveis,
+      totalEntregas,
+      diasSemEntrega,
+      userRegiao
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao verificar elegibilidade novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Listar todas as promoções de novatos
 app.get('/api/promocoes-novatos', async (req, res) => {
   try {
