@@ -16955,8 +16955,8 @@ app.post('/api/score/recalcular', async (req, res) => {
   try {
     const { cod_prof, data_inicio, data_fim } = req.body;
     
-    // Buscar entregas que têm tempo de entrega e prazo definidos
-    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND tempo_entrega_prof_minutos IS NOT NULL AND prazo_prof_minutos IS NOT NULL';
+    // Buscar entregas que têm dentro_prazo_prof calculado
+    let whereClause = 'WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL';
     const params = [];
     let paramIndex = 1;
     
@@ -16978,7 +16978,7 @@ app.post('/api/score/recalcular', async (req, res) => {
     
     const entregasQuery = await pool.query(`
       SELECT DISTINCT ON (os, cod_prof) os, cod_prof, nome_prof, data_solicitado, hora_solicitado,
-        tempo_entrega_prof_minutos, prazo_prof_minutos
+        tempo_entrega_prof_minutos, prazo_prof_minutos, dentro_prazo_prof
       FROM bi_entregas ${whereClause}
       ORDER BY os, cod_prof, data_solicitado DESC
     `, params);
@@ -16987,10 +16987,10 @@ app.post('/api/score/recalcular', async (req, res) => {
     
     for (const entrega of entregasQuery.rows) {
       try {
-        // CALCULAR se está dentro do prazo comparando os tempos
+        // Usar dentro_prazo_prof diretamente do banco (já calculado)
+        const dentroPrazo = entrega.dentro_prazo_prof;
         const tempoEntrega = parseFloat(entrega.tempo_entrega_prof_minutos) || 0;
         const prazoMinutos = parseFloat(entrega.prazo_prof_minutos) || 0;
-        const dentroPrazo = tempoEntrega <= prazoMinutos;
         
         const pontos = calcularPontosOS(dentroPrazo, entrega.hora_solicitado);
         
