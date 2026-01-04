@@ -1502,12 +1502,11 @@ async function createTables() {
     if (parseInt(milestonesCount.rows[0].count) === 0) {
       await pool.query(`
         INSERT INTO score_milestones (nome, descricao, pontos_necessarios, icone, cor, beneficio, ordem) VALUES
-        ('Iniciante', 'Primeiros passos no programa', 10, '🌟', '#94a3b8', 'Acesso ao programa de benefícios', 1),
-        ('Bronze', 'Entregador comprometido', 50, '🥉', '#cd7f32', 'Prioridade em OS de valor alto', 2),
-        ('Prata', 'Performance consistente', 150, '🥈', '#c0c0c0', 'Bônus de R$ 20 no próximo saque', 3),
-        ('Ouro', 'Excelência reconhecida', 300, '🥇', '#ffd700', 'Bônus de R$ 50 + Camiseta exclusiva', 4),
-        ('Platina', 'Elite dos entregadores', 500, '💎', '#e5e4e2', 'Bônus de R$ 100 + Kit completo', 5),
-        ('Diamante', 'Lenda da Tutts', 1000, '👑', '#b9f2ff', 'Bônus de R$ 200 + Benefícios VIP permanentes', 6)
+        ('Bronze', '2 saques gratuitos de R$500/mês', 80, '🥉', '#cd7f32', '2 saques gratuitos de R$500 por mês', 1),
+        ('Prata', '+2 saques gratuitos/mês (total: 4)', 100, '🥈', '#c0c0c0', '+2 saques gratuitos de R$500 por mês (total: 4)', 2),
+        ('Ouro', '1 Camisa Tutts', 250, '🥇', '#ffd700', '1 Camisa Tutts (Retirada única)', 3),
+        ('Platina', '1 Óleo de motor', 300, '💎', '#e5e4e2', '1 Óleo de motor (Retirada única)', 4),
+        ('Diamante', 'Sorteio Vale Combustível', 500, '👑', '#b9f2ff', 'Participação em sorteio de Vale Combustível R$100 por mês', 5)
       `);
       console.log('✅ Milestones padrão inseridos');
     }
@@ -17266,6 +17265,59 @@ app.delete('/api/score/milestones/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao deletar milestone' });
+  }
+});
+
+// POST /api/score/milestones/reset - Resetar milestones para os valores padrão
+app.post('/api/score/milestones/reset', async (req, res) => {
+  try {
+    // Limpar conquistas e milestones existentes
+    await pool.query('TRUNCATE score_conquistas');
+    await pool.query('TRUNCATE score_milestones RESTART IDENTITY CASCADE');
+    
+    // Inserir novos milestones
+    await pool.query(`
+      INSERT INTO score_milestones (nome, descricao, pontos_necessarios, icone, cor, beneficio, ordem) VALUES
+      ('Bronze', '2 saques gratuitos de R$500/mês', 80, '🥉', '#cd7f32', '2 saques gratuitos de R$500 por mês', 1),
+      ('Prata', '+2 saques gratuitos/mês (total: 4)', 100, '🥈', '#c0c0c0', '+2 saques gratuitos de R$500 por mês (total: 4)', 2),
+      ('Ouro', '1 Camisa Tutts', 250, '🥇', '#ffd700', '1 Camisa Tutts (Retirada única)', 3),
+      ('Platina', '1 Óleo de motor', 300, '💎', '#e5e4e2', '1 Óleo de motor (Retirada única)', 4),
+      ('Diamante', 'Sorteio Vale Combustível', 500, '👑', '#b9f2ff', 'Participação em sorteio de Vale Combustível R$100 por mês', 5)
+    `);
+    
+    // Recalcular conquistas de todos os profissionais
+    const profissionais = await pool.query('SELECT DISTINCT cod_prof FROM score_totais');
+    for (const prof of profissionais.rows) {
+      const scoreResult = await pool.query('SELECT score_total FROM score_totais WHERE cod_prof = $1', [prof.cod_prof]);
+      if (scoreResult.rows.length > 0) {
+        const scoreAtual = parseFloat(scoreResult.rows[0].score_total) || 0;
+        const milestonesAlcancados = await pool.query(
+          'SELECT id FROM score_milestones WHERE pontos_necessarios <= $1',
+          [scoreAtual]
+        );
+        for (const m of milestonesAlcancados.rows) {
+          await pool.query(
+            'INSERT INTO score_conquistas (cod_prof, milestone_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+            [prof.cod_prof, m.id]
+          );
+        }
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Milestones resetados com sucesso!',
+      milestones: [
+        { pontos: 80, premio: '2 saques gratuitos de R$500/mês' },
+        { pontos: 100, premio: '4 saques gratuitos de R$500/mês' },
+        { pontos: 250, premio: '1 Camisa Tutts' },
+        { pontos: 300, premio: '1 Óleo de motor' },
+        { pontos: 500, premio: 'Sorteio Vale Combustível R$100/mês' }
+      ]
+    });
+  } catch (error) {
+    console.error('Erro ao resetar milestones:', error);
+    res.status(500).json({ error: 'Erro ao resetar milestones', details: error.message });
   }
 });
 
