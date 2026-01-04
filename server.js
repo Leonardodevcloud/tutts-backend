@@ -16987,9 +16987,12 @@ app.post('/api/score/recalcular', async (req, res) => {
       await pool.query(`DELETE FROM score_historico WHERE cod_prof = $1 AND data_os < '${DATA_MINIMA_SCORE}'`, [cod_prof]);
     }
     
+    // Adicionar coluna distancia se não existir
+    await pool.query(`ALTER TABLE score_historico ADD COLUMN IF NOT EXISTS distancia_km DECIMAL(10,2)`).catch(() => {});
+    
     const entregasQuery = await pool.query(`
       SELECT DISTINCT ON (os, cod_prof) os, cod_prof, nome_prof, data_solicitado, hora_solicitado,
-        tempo_entrega_prof_minutos, prazo_prof_minutos, dentro_prazo_prof
+        tempo_entrega_prof_minutos, prazo_prof_minutos, dentro_prazo_prof, distancia
       FROM bi_entregas ${whereClause}
       ORDER BY os, cod_prof, data_solicitado DESC
     `, params);
@@ -17002,25 +17005,26 @@ app.post('/api/score/recalcular', async (req, res) => {
         const dentroPrazo = entrega.dentro_prazo_prof;
         const tempoEntrega = parseFloat(entrega.tempo_entrega_prof_minutos) || 0;
         const prazoMinutos = parseFloat(entrega.prazo_prof_minutos) || 0;
+        const distanciaKm = parseFloat(entrega.distancia) || 0;
         
         const pontos = calcularPontosOS(dentroPrazo, entrega.hora_solicitado);
         
         await pool.query(`
           INSERT INTO score_historico (cod_prof, nome_prof, os, data_os, hora_solicitacao,
             tempo_entrega_minutos, prazo_minutos, ponto_prazo, ponto_bonus_janela, ponto_total,
-            dentro_prazo, janela_bonus, detalhamento)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            dentro_prazo, janela_bonus, detalhamento, distancia_km)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
           ON CONFLICT (cod_prof, os) DO UPDATE SET
             nome_prof = EXCLUDED.nome_prof, data_os = EXCLUDED.data_os,
             hora_solicitacao = EXCLUDED.hora_solicitacao, tempo_entrega_minutos = EXCLUDED.tempo_entrega_minutos,
             prazo_minutos = EXCLUDED.prazo_minutos, ponto_prazo = EXCLUDED.ponto_prazo,
             ponto_bonus_janela = EXCLUDED.ponto_bonus_janela, ponto_total = EXCLUDED.ponto_total,
             dentro_prazo = EXCLUDED.dentro_prazo, janela_bonus = EXCLUDED.janela_bonus,
-            detalhamento = EXCLUDED.detalhamento
+            detalhamento = EXCLUDED.detalhamento, distancia_km = EXCLUDED.distancia_km
         `, [entrega.cod_prof, entrega.nome_prof, entrega.os, entrega.data_solicitado,
             entrega.hora_solicitado, tempoEntrega, prazoMinutos,
             pontos.ponto_prazo, pontos.ponto_bonus_janela, pontos.ponto_total,
-            dentroPrazo, pontos.janela_bonus, pontos.detalhamento]);
+            dentroPrazo, pontos.janela_bonus, pontos.detalhamento, distanciaKm]);
         processadas++;
       } catch (err) {
         erros++;
@@ -17080,7 +17084,7 @@ app.get('/api/score/profissional/:cod_prof', async (req, res) => {
     
     const extratoResult = await pool.query(`
       SELECT os, data_os, hora_solicitacao, tempo_entrega_minutos, prazo_minutos,
-        ponto_prazo, ponto_bonus_janela, ponto_total, dentro_prazo, janela_bonus, detalhamento
+        ponto_prazo, ponto_bonus_janela, ponto_total, dentro_prazo, janela_bonus, detalhamento, distancia_km
       FROM score_historico ${extratoWhere}
       ORDER BY data_os DESC, os DESC LIMIT ${parseInt(limite) || 100}
     `, extratoParams);
