@@ -1955,15 +1955,7 @@ async function atualizarResumos(datasAfetadas = null) {
 // ==================== MIDDLEWARES DE SEGURANÇA ====================
 
 // Helmet - Headers de segurança (configurado para funcionar com PWA)
-app.use(helmet({
-  contentSecurityPolicy: false, // Desabilitado para não quebrar frontend
-  crossOriginEmbedderPolicy: false,
-  crossOriginOpenerPolicy: false, // Desabilitado para PWA
-  crossOriginResourcePolicy: false // Desabilitado para PWA
-}));
-
-// Rate limiting global para API
-app.use('/api/', apiLimiter);
+// ==================== CORS - DEVE VIR ANTES DE TUDO ====================
 
 // Lista de origens permitidas
 const allowedOrigins = [
@@ -1976,26 +1968,24 @@ const allowedOrigins = [
   'http://127.0.0.1:5500'
 ];
 
-// Função para setar headers CORS
+// Função para verificar se origem é permitida
+const isOriginAllowed = (origin) => {
+  if (!origin) return true; // Permite requisições sem origin
+  return allowedOrigins.includes(origin) || 
+         origin.includes('centraltutts') || 
+         origin.includes('vercel.app') ||
+         origin.includes('localhost') ||
+         origin.includes('railway.app');
+};
+
+// Função para setar headers CORS (usada em todos os lugares)
 const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
-  
-  // Verificar se a origem é permitida
-  if (origin && (
-    allowedOrigins.includes(origin) || 
-    origin.includes('centraltutts') || 
-    origin.includes('vercel.app') ||
-    origin.includes('localhost')
-  )) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (origin) {
-    // Para outras origens, ainda permitir (para PWA e apps instalados)
+  if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else {
-    // Sem origin (requisição direta), permitir todas
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
-  
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma');
@@ -2003,17 +1993,29 @@ const setCorsHeaders = (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
 };
 
-// Responder imediatamente a requisições OPTIONS (preflight) - ANTES de tudo
+// OPTIONS (preflight) DEVE vir ANTES de qualquer outro middleware
 app.options('*', (req, res) => {
   setCorsHeaders(req, res);
   return res.status(200).end();
 });
 
-// CORS para todas requisições
+// CORS para TODAS as requisições - ANTES do helmet
 app.use((req, res, next) => {
   setCorsHeaders(req, res);
   next();
 });
+
+// ==================== FIM CORS ====================
+
+app.use(helmet({
+  contentSecurityPolicy: false, // Desabilitado para não quebrar frontend
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false, // Desabilitado para PWA
+  crossOriginResourcePolicy: false // Desabilitado para PWA
+}));
+
+// Rate limiting global para API
+app.use('/api/', apiLimiter);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -15045,6 +15047,32 @@ app.get('/api/recrutamento/estatisticas', async (req, res) => {
     console.error('Erro ao buscar estatísticas:', error);
     res.status(500).json({ error: 'Erro ao buscar estatísticas' });
   }
+});
+
+// ==================== ERROR HANDLER GLOBAL COM CORS ====================
+// Este handler DEVE ser o último middleware antes de app.listen
+
+// 404 - Rota não encontrada
+app.use((req, res, next) => {
+  setCorsHeaders(req, res);
+  res.status(404).json({ error: 'Rota não encontrada', path: req.path });
+});
+
+// Error handler global - captura todos os erros não tratados
+app.use((err, req, res, next) => {
+  // SEMPRE adicionar CORS nos erros para evitar bloqueio no navegador
+  setCorsHeaders(req, res);
+  
+  console.error('❌ Erro não tratado:', err.message);
+  console.error('Stack:', err.stack);
+  
+  // Não expor detalhes do erro em produção
+  const isDev = process.env.NODE_ENV !== 'production';
+  
+  res.status(err.status || 500).json({ 
+    error: isDev ? err.message : 'Erro interno do servidor',
+    ...(isDev && { stack: err.stack })
+  });
 });
 
 // Iniciar servidor
