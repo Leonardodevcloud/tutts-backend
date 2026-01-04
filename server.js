@@ -1529,6 +1529,24 @@ async function createTables() {
     `);
     console.log('✅ Tabela score_gratuidades verificada');
     
+    // Tabela para controlar prêmios físicos (Camisa, Óleo, etc.)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS score_premios_fisicos (
+        id SERIAL PRIMARY KEY,
+        cod_prof INTEGER NOT NULL,
+        nome_prof VARCHAR(255),
+        milestone_id INTEGER REFERENCES score_milestones(id),
+        tipo_premio VARCHAR(100) NOT NULL,
+        status VARCHAR(50) DEFAULT 'disponivel',
+        confirmado_por VARCHAR(255),
+        confirmado_em TIMESTAMP,
+        observacao TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(cod_prof, milestone_id)
+      )
+    `);
+    console.log('✅ Tabela score_premios_fisicos verificada');
+    
     // ==================== FIM MÓDULO SCORE/GAMIFICAÇÃO ====================
 
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
@@ -17216,11 +17234,16 @@ app.get('/api/score/profissional/:cod_prof', async (req, res) => {
       ORDER BY data_os DESC, os DESC LIMIT ${parseInt(limite) || 100}
     `, extratoParams);
     
-    // Buscar milestones
+    // Buscar milestones com status de prêmios físicos
     const milestonesResult = await pool.query(`
-      SELECT m.*, c.conquistado_em, CASE WHEN c.id IS NOT NULL THEN true ELSE false END as conquistado
+      SELECT m.*, c.conquistado_em, 
+             CASE WHEN c.id IS NOT NULL THEN true ELSE false END as conquistado,
+             pf.status as premio_status,
+             pf.confirmado_em as premio_confirmado_em,
+             CASE WHEN pf.status = 'entregue' THEN true ELSE false END as premio_recebido
       FROM score_milestones m
       LEFT JOIN score_conquistas c ON m.id = c.milestone_id AND c.cod_prof = $1
+      LEFT JOIN score_premios_fisicos pf ON m.id = pf.milestone_id AND pf.cod_prof = $1
       WHERE m.ativo = true ORDER BY m.ordem ASC
     `, [cod_prof]);
     
@@ -17621,6 +17644,170 @@ app.post('/api/score/resetar-gratuidades-mes', async (req, res) => {
   } catch (error) {
     console.error('Erro ao resetar gratuidades:', error);
     res.status(500).json({ error: 'Erro ao resetar gratuidades', details: error.message });
+  }
+});
+
+// ==================== PRÊMIOS FÍSICOS (Camisa, Óleo) ====================
+
+// GET /api/score/premios-fisicos - Listar prêmios físicos pendentes e entregues
+app.get('/api/score/premios-fisicos', async (req, res) => {
+  try {
+    const { status, cod_prof } = req.query;
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    if (status) { whereClause += ` AND pf.status = $${paramIndex}`; params.push(status); paramIndex++; }
+    if (cod_prof) { whereClause += ` AND pf.cod_prof = $${paramIndex}`; params.push(cod_prof); paramIndex++; }
+    
+    const result = await pool.query(`
+      SELECT pf.*, m.nome as milestone_nome, m.icone as milestone_icone, m.pontos_necessarios,
+             st.score_total
+      FROM score_premios_fisicos pf
+      JOIN score_milestones m ON pf.milestone_id = m.id
+      LEFT JOIN score_totais st ON pf.cod_prof = st.cod_prof
+      ${whereClause}
+      ORDER BY pf.status ASC, pf.created_at DESC
+    `, params);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Erro ao listar prêmios físicos:', error);
+    res.status(500).json({ error: 'Erro ao listar prêmios físicos' });
+  }
+});
+
+// GET /api/score/premios-pendentes - Dashboard de prêmios pendentes para admin
+app.get('/api/score/premios-pendentes', async (req, res) => {
+  try {
+    // Buscar todos que alcançaram milestones de prêmios físicos (Ouro=250, Platina=300)
+    const result = await pool.query(`
+      SELECT 
+        st.cod_prof, st.nome_prof, st.score_total,
+        m.id as milestone_id, m.nome as milestone_nome, m.icone, m.pontos_necessarios, m.beneficio,
+        pf.id as premio_id, pf.status as premio_status, pf.confirmado_em, pf.confirmado_por
+      FROM score_totais st
+      JOIN score_milestones m ON st.score_total >= m.pontos_necessarios
+      LEFT JOIN score_premios_fisicos pf ON st.cod_prof = pf.cod_prof AND m.id = pf.milestone_id
+      WHERE m.pontos_necessarios IN (250, 300)
+      ORDER BY st.score_total DESC, m.pontos_necessarios ASC
+    `);
+    
+    // Agrupar por profissional
+    const porProfissional = {};
+    for (const row of result.rows) {
+      if (!porProfissional[row.cod_prof]) {
+        porProfissional[row.cod_prof] = {
+          cod_prof: row.cod_prof,
+          nome_prof: row.nome_prof,
+          score_total: parseFloat(row.score_total),
+          premios: []
+        };
+      }
+      porProfissional[row.cod_prof].premios.push({
+        milestone_id: row.milestone_id,
+        milestone_nome: row.milestone_nome,
+        icone: row.icone,
+        pontos_necessarios: row.pontos_necessarios,
+        beneficio: row.beneficio,
+        premio_id: row.premio_id,
+        status: row.premio_status || 'disponivel',
+        confirmado_em: row.confirmado_em,
+        confirmado_por: row.confirmado_por
+      });
+    }
+    
+    res.json(Object.values(porProfissional));
+  } catch (error) {
+    console.error('Erro ao listar prêmios pendentes:', error);
+    res.status(500).json({ error: 'Erro ao listar prêmios pendentes' });
+  }
+});
+
+// POST /api/score/premios-fisicos/confirmar - Admin confirma entrega do prêmio
+app.post('/api/score/premios-fisicos/confirmar', async (req, res) => {
+  try {
+    const { cod_prof, milestone_id, confirmado_por, observacao } = req.body;
+    
+    if (!cod_prof || !milestone_id) {
+      return res.status(400).json({ error: 'cod_prof e milestone_id são obrigatórios' });
+    }
+    
+    // Verificar se o profissional realmente alcançou esse milestone
+    const scoreResult = await pool.query('SELECT * FROM score_totais WHERE cod_prof = $1', [cod_prof]);
+    if (scoreResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Profissional não encontrado' });
+    }
+    
+    const milestoneResult = await pool.query('SELECT * FROM score_milestones WHERE id = $1', [milestone_id]);
+    if (milestoneResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Milestone não encontrado' });
+    }
+    
+    const score = parseFloat(scoreResult.rows[0].score_total);
+    const pontosNecessarios = milestoneResult.rows[0].pontos_necessarios;
+    
+    if (score < pontosNecessarios) {
+      return res.status(400).json({ error: 'Profissional não atingiu pontuação necessária' });
+    }
+    
+    // Inserir ou atualizar registro de prêmio
+    const result = await pool.query(`
+      INSERT INTO score_premios_fisicos (cod_prof, nome_prof, milestone_id, tipo_premio, status, confirmado_por, confirmado_em, observacao)
+      VALUES ($1, $2, $3, $4, 'entregue', $5, NOW(), $6)
+      ON CONFLICT (cod_prof, milestone_id) DO UPDATE SET
+        status = 'entregue',
+        confirmado_por = $5,
+        confirmado_em = NOW(),
+        observacao = $6
+      RETURNING *
+    `, [cod_prof, scoreResult.rows[0].nome_prof, milestone_id, milestoneResult.rows[0].beneficio, confirmado_por || 'Admin', observacao]);
+    
+    res.json({ 
+      success: true, 
+      message: 'Prêmio confirmado com sucesso!',
+      premio: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Erro ao confirmar prêmio:', error);
+    res.status(500).json({ error: 'Erro ao confirmar prêmio', details: error.message });
+  }
+});
+
+// GET /api/score/profissional/:cod_prof/premios - Prêmios do profissional (para tela do usuário)
+app.get('/api/score/profissional/:cod_prof/premios', async (req, res) => {
+  try {
+    const { cod_prof } = req.params;
+    
+    // Buscar score do profissional
+    const scoreResult = await pool.query('SELECT * FROM score_totais WHERE cod_prof = $1', [cod_prof]);
+    const score = scoreResult.rows.length > 0 ? parseFloat(scoreResult.rows[0].score_total) : 0;
+    
+    // Buscar todos os milestones com status de prêmios físicos
+    const milestones = await pool.query(`
+      SELECT m.*, 
+             c.conquistado_em,
+             CASE WHEN c.id IS NOT NULL THEN true ELSE false END as conquistado,
+             pf.status as premio_status,
+             pf.confirmado_em as premio_confirmado_em
+      FROM score_milestones m
+      LEFT JOIN score_conquistas c ON m.id = c.milestone_id AND c.cod_prof = $1
+      LEFT JOIN score_premios_fisicos pf ON m.id = pf.milestone_id AND pf.cod_prof = $1
+      WHERE m.ativo = true
+      ORDER BY m.ordem ASC
+    `, [cod_prof]);
+    
+    res.json({
+      score_atual: score,
+      milestones: milestones.rows.map(m => ({
+        ...m,
+        premio_fisico: m.pontos_necessarios === 250 || m.pontos_necessarios === 300,
+        premio_recebido: m.premio_status === 'entregue'
+      }))
+    });
+  } catch (error) {
+    console.error('Erro ao buscar prêmios do profissional:', error);
+    res.status(500).json({ error: 'Erro ao buscar prêmios' });
   }
 });
 
