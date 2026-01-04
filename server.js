@@ -6772,6 +6772,31 @@ app.post('/api/bi/inicializar-prazos-dax', async (req, res) => {
   }
 });
 
+// Endpoint para preencher hora_solicitado a partir de data_hora (para dados antigos)
+app.post('/api/bi/preencher-hora-solicitado', async (req, res) => {
+  try {
+    console.log('🕐 Preenchendo hora_solicitado a partir de data_hora...');
+    
+    // Atualizar hora_solicitado extraindo a hora de data_hora onde está null
+    const result = await pool.query(`
+      UPDATE bi_entregas 
+      SET hora_solicitado = data_hora::time 
+      WHERE hora_solicitado IS NULL AND data_hora IS NOT NULL
+    `);
+    
+    console.log(`✅ ${result.rowCount} registros atualizados com hora_solicitado`);
+    
+    res.json({ 
+      success: true, 
+      message: `${result.rowCount} registros atualizados com hora_solicitado`,
+      atualizados: result.rowCount 
+    });
+  } catch (error) {
+    console.error('❌ Erro ao preencher hora_solicitado:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/bi/diagnostico', async (req, res) => {
   try {
     // Versão do código para verificar deploy
@@ -7225,6 +7250,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             data_hora_alocado: parseTimestamp(e.data_hora_alocado || e['Data/Hora Alocado'] || e['Data Hora Alocado'] || e['DataHoraAlocado']),
             finalizado: parseTimestamp(e.finalizado),
             data_solicitado: parseData(e.data_solicitado) || parseData(e.data_hora),
+            hora_solicitado: parseHora(e.hora_solicitado || e['H. Solicitação'] || e['H.Solicitação'] || e['H. Solicitacao'] || e['H.Solicitacao'] || e['Hora Solicitação'] || e['Hora Solicitacao'] || e['hora_solicitacao'] || e['HSolicitacao'] || e['h_solicitacao']),
             data_chegada: parseData(e.data_chegada || e['Data Chegada'] || e['Data chegada']),
             hora_chegada: parseHora(e.hora_chegada || e['Hora Chegada'] || e['Hora chegada']),
             data_saida: parseData(e.data_saida || e['Data Saida'] || e['Data Saída'] || e['Data saida']),
@@ -7262,19 +7288,19 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 os, ponto, num_pedido, cod_cliente, nome_cliente, empresa,
                 nome_fantasia, centro_custo, cidade_p1, endereco,
                 bairro, cidade, estado, cod_prof, nome_prof,
-                data_hora, data_hora_alocado, finalizado, data_solicitado,
+                data_hora, data_hora_alocado, finalizado, data_solicitado, hora_solicitado,
                 data_chegada, hora_chegada, data_saida, hora_saida,
                 categoria, valor, distancia, valor_prof,
                 execucao_comp, execucao_espera, status, motivo, ocorrencia, velocidade_media,
                 dentro_prazo, prazo_minutos, tempo_execucao_minutos, 
                 tempo_entrega_prof_minutos, dentro_prazo_prof,
                 data_upload, latitude, longitude
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41)
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
               d.bairro, d.cidade, d.estado, d.cod_prof, d.nome_prof,
-              d.data_hora, d.data_hora_alocado, d.finalizado, d.data_solicitado,
+              d.data_hora, d.data_hora_alocado, d.finalizado, d.data_solicitado, d.hora_solicitado,
               d.data_chegada, d.hora_chegada, d.data_saida, d.hora_saida,
               d.categoria, d.valor, d.distancia, d.valor_prof,
               d.execucao_comp, d.execucao_espera, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
