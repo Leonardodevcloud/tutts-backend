@@ -1968,16 +1968,6 @@ const allowedOrigins = [
   'http://127.0.0.1:5500'
 ];
 
-// Função para verificar se origem é permitida
-const isOriginAllowed = (origin) => {
-  if (!origin) return true; // Permite requisições sem origin
-  return allowedOrigins.includes(origin) || 
-         origin.includes('centraltutts') || 
-         origin.includes('vercel.app') ||
-         origin.includes('localhost') ||
-         origin.includes('railway.app');
-};
-
 // Função para setar headers CORS (usada em todos os lugares)
 const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
@@ -15049,118 +15039,6 @@ app.get('/api/recrutamento/estatisticas', async (req, res) => {
   }
 });
 
-// ==================== ERROR HANDLER GLOBAL COM CORS ====================
-// Este handler DEVE ser o último middleware antes de app.listen
-
-// 404 - Rota não encontrada
-app.use((req, res, next) => {
-  setCorsHeaders(req, res);
-  res.status(404).json({ error: 'Rota não encontrada', path: req.path });
-});
-
-// Error handler global - captura todos os erros não tratados
-app.use((err, req, res, next) => {
-  // SEMPRE adicionar CORS nos erros para evitar bloqueio no navegador
-  setCorsHeaders(req, res);
-  
-  console.error('❌ Erro não tratado:', err.message);
-  console.error('Stack:', err.stack);
-  
-  // Não expor detalhes do erro em produção
-  const isDev = process.env.NODE_ENV !== 'production';
-  
-  res.status(err.status || 500).json({ 
-    error: isDev ? err.message : 'Erro interno do servidor',
-    ...(isDev && { stack: err.stack })
-  });
-});
-
-// Iniciar servidor
-app.listen(port, () => {
-  console.log(`🚀 Servidor rodando na porta ${port}`);
-  console.log(`📡 API: http://localhost:${port}/api/health`);
-  
-  // Processar recorrências a cada hora (para garantir que tarefas não fiquem presas)
-  setInterval(processarRecorrenciasInterno, 60 * 60 * 1000); // 1 hora
-  
-  // Processar imediatamente ao iniciar
-  setTimeout(processarRecorrenciasInterno, 10000); // 10 segundos após iniciar
-  console.log('⏰ Processamento de recorrências ativado (a cada 1h)');
-  
-  // ==================== CRON JOBS DO SCORE ====================
-  
-  // Cron Job: Aplicar gratuidades do Score no dia 1 de cada mês às 00:05
-  cron.schedule('5 0 1 * *', async () => {
-    console.log('🎁 [CRON] Iniciando aplicação de gratuidades do Score...');
-    try {
-      const mesReferencia = new Date().toISOString().slice(0, 7); // YYYY-MM
-      
-      // Buscar profissionais com score >= 80
-      const profissionais = await pool.query(`
-        SELECT cod_prof, nome_prof, score_total 
-        FROM score_totais 
-        WHERE score_total >= 80
-        ORDER BY score_total DESC
-      `);
-      
-      let aplicados = 0;
-      
-      for (const prof of profissionais.rows) {
-        try {
-          const score = parseFloat(prof.score_total) || 0;
-          let quantidadeSaques = 0;
-          let nivel = null;
-          
-          if (score >= 100) {
-            quantidadeSaques = 4;
-            nivel = 'Prata';
-          } else if (score >= 80) {
-            quantidadeSaques = 2;
-            nivel = 'Bronze';
-          }
-          
-          if (quantidadeSaques === 0) continue;
-          
-          // Verificar se já tem gratuidade neste mês
-          const existente = await pool.query(
-            'SELECT * FROM score_gratuidades WHERE cod_prof = $1 AND mes_referencia = $2',
-            [prof.cod_prof, mesReferencia]
-          );
-          
-          if (existente.rows.length === 0) {
-            // Criar nova gratuidade
-            const gratuidade = await pool.query(`
-              INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by)
-              VALUES ($1, $2, $3, $3, 500.00, $4, 'ativa', 'Sistema Score')
-              RETURNING id
-            `, [prof.cod_prof, prof.nome_prof, quantidadeSaques, `Score ${nivel} - ${mesReferencia}`]);
-            
-            await pool.query(`
-              INSERT INTO score_gratuidades (cod_prof, nome_prof, mes_referencia, score_no_momento, nivel, quantidade_saques, gratuidade_id)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
-            `, [prof.cod_prof, prof.nome_prof, mesReferencia, score, nivel, quantidadeSaques, gratuidade.rows[0].id]);
-            
-            aplicados++;
-          }
-        } catch (err) {
-          console.error(`[CRON] Erro ao aplicar gratuidade para ${prof.cod_prof}:`, err.message);
-        }
-      }
-      
-      console.log(`✅ [CRON] Gratuidades do Score aplicadas: ${aplicados} profissionais`);
-    } catch (error) {
-      console.error('❌ [CRON] Erro ao aplicar gratuidades do Score:', error);
-    }
-  }, {
-    scheduled: true,
-    timezone: "America/Sao_Paulo"
-  });
-  
-  console.log('🎁 Cron Job do Score ativado (dia 1 de cada mês às 00:05)');
-  
-  // ==================== FIM CRON JOBS DO SCORE ====================
-});
-
 // ===== REGIÕES =====
 // Criar tabela se não existir
 pool.query(`
@@ -18546,3 +18424,115 @@ app.get('/api/audit/export', verificarToken, verificarAdmin, async (req, res) =>
 });
 
 console.log('✅ Módulo de Auditoria carregado!');
+
+// ==================== ERROR HANDLER GLOBAL COM CORS ====================
+// Este handler DEVE ser o último middleware antes de app.listen
+
+// 404 - Rota não encontrada
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.status(404).json({ error: 'Rota não encontrada', path: req.path });
+});
+
+// Error handler global - captura todos os erros não tratados
+app.use((err, req, res, next) => {
+  // SEMPRE adicionar CORS nos erros
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  console.error('❌ Erro não tratado:', err.message);
+  
+  res.status(err.status || 500).json({ 
+    error: 'Erro interno do servidor'
+  });
+});
+
+// ==================== INICIAR SERVIDOR ====================
+app.listen(port, () => {
+  console.log(`🚀 Servidor rodando na porta ${port}`);
+  console.log(`📡 API: http://localhost:${port}/api/health`);
+  
+  // Processar recorrências a cada hora
+  setInterval(processarRecorrenciasInterno, 60 * 60 * 1000);
+  setTimeout(processarRecorrenciasInterno, 10000);
+  console.log('⏰ Processamento de recorrências ativado (a cada 1h)');
+  
+  // ==================== CRON JOBS DO SCORE ====================
+  
+  // Cron Job: Aplicar gratuidades do Score no dia 1 de cada mês às 00:05
+  cron.schedule('5 0 1 * *', async () => {
+    console.log('🎁 [CRON] Iniciando aplicação de gratuidades do Score...');
+    try {
+      const mesReferencia = new Date().toISOString().slice(0, 7);
+      
+      const profissionais = await pool.query(`
+        SELECT cod_prof, nome_prof, score_total 
+        FROM score_totais 
+        WHERE score_total >= 80
+        ORDER BY score_total DESC
+      `);
+      
+      let aplicados = 0;
+      
+      for (const prof of profissionais.rows) {
+        try {
+          const score = parseFloat(prof.score_total) || 0;
+          let quantidadeSaques = 0;
+          let nivel = null;
+          
+          if (score >= 100) {
+            quantidadeSaques = 4;
+            nivel = 'Prata';
+          } else if (score >= 80) {
+            quantidadeSaques = 2;
+            nivel = 'Bronze';
+          }
+          
+          if (quantidadeSaques === 0) continue;
+          
+          const existente = await pool.query(
+            'SELECT * FROM score_gratuidades WHERE cod_prof = $1 AND mes_referencia = $2',
+            [prof.cod_prof, mesReferencia]
+          );
+          
+          if (existente.rows.length === 0) {
+            const gratuidade = await pool.query(`
+              INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by)
+              VALUES ($1, $2, $3, $3, 500.00, $4, 'ativa', 'Sistema Score')
+              RETURNING id
+            `, [prof.cod_prof, prof.nome_prof, quantidadeSaques, `Score ${nivel} - ${mesReferencia}`]);
+            
+            await pool.query(`
+              INSERT INTO score_gratuidades (cod_prof, nome_prof, mes_referencia, score_no_momento, nivel, quantidade_saques, gratuidade_id)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `, [prof.cod_prof, prof.nome_prof, mesReferencia, score, nivel, quantidadeSaques, gratuidade.rows[0].id]);
+            
+            aplicados++;
+          }
+        } catch (err) {
+          console.error(`[CRON] Erro ao aplicar gratuidade para ${prof.cod_prof}:`, err.message);
+        }
+      }
+      
+      console.log(`✅ [CRON] Gratuidades do Score aplicadas: ${aplicados} profissionais`);
+    } catch (error) {
+      console.error('❌ [CRON] Erro ao aplicar gratuidades do Score:', error);
+    }
+  }, {
+    scheduled: true,
+    timezone: "America/Sao_Paulo"
+  });
+  
+  console.log('🎁 Cron Job do Score ativado (dia 1 de cada mês às 00:05)');
+});
