@@ -17547,8 +17547,8 @@ app.post('/api/score/recalcular', async (req, res) => {
   try {
     const { cod_prof, data_inicio, data_fim } = req.body;
     
-    // DATA MÍNIMA: Só contabiliza entregas a partir de 01/01/2026
-    const DATA_MINIMA_SCORE = '2026-01-01';
+    // DATA MÍNIMA: Só contabiliza entregas a partir de 01/12/2025
+    const DATA_MINIMA_SCORE = '2025-12-01';
     
     // Buscar entregas que têm dentro_prazo_prof calculado
     let whereClause = `WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL AND data_solicitado >= '${DATA_MINIMA_SCORE}'`;
