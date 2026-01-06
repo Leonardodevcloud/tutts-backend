@@ -17754,12 +17754,12 @@ app.get('/api/score/ranking', async (req, res) => {
         ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo
         FROM score_historico ${whereClause} GROUP BY cod_prof
         ORDER BY score_total ${ordem === 'asc' ? 'ASC' : 'DESC'} LIMIT $${paramIndex}`;
-      params.push(parseInt(limite) || 50);
+      params.push(parseInt(limite) || 10000);
     } else {
       query = `SELECT cod_prof, nome_prof, score_total, total_os, os_no_prazo, os_fora_prazo,
         ROUND(os_no_prazo::numeric / NULLIF(total_os, 0) * 100, 1) as taxa_prazo, ultimo_calculo
         FROM score_totais ORDER BY score_total ${ordem === 'asc' ? 'ASC' : 'DESC'} LIMIT $1`;
-      params.push(parseInt(limite) || 50);
+      params.push(parseInt(limite) || 10000);
     }
     
     const result = await pool.query(query, params);
