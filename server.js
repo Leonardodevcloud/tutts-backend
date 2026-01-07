@@ -1549,6 +1549,48 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela social_messages verificada/criada');
+    
+    // ==================== MENSAGENS DA LIDERANÇA ====================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS lideranca_mensagens (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(255) NOT NULL,
+        conteudo TEXT NOT NULL,
+        tipo_conteudo VARCHAR(50) DEFAULT 'texto',
+        midia_url TEXT,
+        midia_tipo VARCHAR(50),
+        criado_por_cod VARCHAR(50) NOT NULL,
+        criado_por_nome VARCHAR(255),
+        criado_por_foto TEXT,
+        recorrente BOOLEAN DEFAULT false,
+        tipo_recorrencia VARCHAR(50),
+        intervalo_recorrencia INT DEFAULT 1,
+        proxima_exibicao TIMESTAMP,
+        ativo BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela lideranca_mensagens verificada/criada');
+    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS lideranca_visualizacoes (
+        id SERIAL PRIMARY KEY,
+        mensagem_id INT REFERENCES lideranca_mensagens(id) ON DELETE CASCADE,
+        user_cod VARCHAR(50) NOT NULL,
+        user_nome VARCHAR(255),
+        user_foto TEXT,
+        visualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(mensagem_id, user_cod)
+      )
+    `);
+    console.log('✅ Tabela lideranca_visualizacoes verificada/criada');
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_msg_ativo ON lideranca_mensagens(ativo)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_msg ON lideranca_visualizacoes(mensagem_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_user ON lideranca_visualizacoes(user_cod)`).catch(() => {});
+    // ==================== FIM MENSAGENS DA LIDERANÇA ====================
+    
     // ==================== FIM MÓDULO SOCIAL ====================
 
     // ==================== MÓDULO AVISOS ====================
@@ -13845,6 +13887,226 @@ app.get('/api/social/messages/unread/:userCod', async (req, res) => {
     res.json({ count: 0 });
   }
 });
+
+// ==================== ROTAS MENSAGENS DA LIDERANÇA ====================
+
+// Criar nova mensagem da liderança (apenas admin_master)
+app.post('/api/lideranca/mensagens', async (req, res) => {
+  try {
+    const { 
+      titulo, conteudo, tipo_conteudo, midia_url, midia_tipo,
+      criado_por_cod, criado_por_nome, criado_por_foto,
+      recorrente, tipo_recorrencia, intervalo_recorrencia
+    } = req.body;
+    
+    // Calcular próxima exibição se for recorrente
+    let proxima_exibicao = null;
+    if (recorrente && tipo_recorrencia) {
+      const agora = new Date();
+      switch (tipo_recorrencia) {
+        case 'diaria':
+          proxima_exibicao = new Date(agora.getTime() + (intervalo_recorrencia || 1) * 24 * 60 * 60 * 1000);
+          break;
+        case 'semanal':
+          proxima_exibicao = new Date(agora.getTime() + (intervalo_recorrencia || 1) * 7 * 24 * 60 * 60 * 1000);
+          break;
+        case 'mensal':
+          proxima_exibicao = new Date(agora);
+          proxima_exibicao.setMonth(proxima_exibicao.getMonth() + (intervalo_recorrencia || 1));
+          break;
+      }
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO lideranca_mensagens (
+        titulo, conteudo, tipo_conteudo, midia_url, midia_tipo,
+        criado_por_cod, criado_por_nome, criado_por_foto,
+        recorrente, tipo_recorrencia, intervalo_recorrencia, proxima_exibicao
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING *
+    `, [
+      titulo, conteudo, tipo_conteudo || 'texto', midia_url, midia_tipo,
+      criado_por_cod, criado_por_nome, criado_por_foto,
+      recorrente || false, tipo_recorrencia, intervalo_recorrencia || 1, proxima_exibicao
+    ]);
+    
+    console.log('📢 Nova mensagem da liderança criada:', result.rows[0].id);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar mensagem da liderança:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar todas as mensagens da liderança (para admin_master gerenciar)
+app.get('/api/lideranca/mensagens', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, 
+        (SELECT COUNT(*) FROM lideranca_visualizacoes WHERE mensagem_id = m.id) as total_visualizacoes
+      FROM lideranca_mensagens m
+      ORDER BY m.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar mensagens:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Buscar mensagens não visualizadas pelo usuário (para notificação)
+app.get('/api/lideranca/mensagens/pendentes/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(`
+      SELECT m.* FROM lideranca_mensagens m
+      WHERE m.ativo = true
+        AND m.id NOT IN (
+          SELECT mensagem_id FROM lideranca_visualizacoes WHERE user_cod = $1
+        )
+      ORDER BY m.created_at DESC
+    `, [userCod]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar mensagens pendentes:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Marcar mensagem como visualizada
+app.post('/api/lideranca/mensagens/:id/visualizar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, user_nome, user_foto } = req.body;
+    
+    await pool.query(`
+      INSERT INTO lideranca_visualizacoes (mensagem_id, user_cod, user_nome, user_foto)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (mensagem_id, user_cod) DO UPDATE SET visualizado_em = CURRENT_TIMESTAMP
+    `, [id, user_cod, user_nome, user_foto]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao marcar como visualizado:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar quem visualizou uma mensagem específica
+app.get('/api/lideranca/mensagens/:id/visualizacoes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM lideranca_visualizacoes
+      WHERE mensagem_id = $1
+      ORDER BY visualizado_em DESC
+    `, [id]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar visualizações:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar mensagens já visualizadas pelo usuário (histórico)
+app.get('/api/lideranca/mensagens/historico/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const result = await pool.query(`
+      SELECT m.*, v.visualizado_em
+      FROM lideranca_mensagens m
+      INNER JOIN lideranca_visualizacoes v ON m.id = v.mensagem_id
+      WHERE v.user_cod = $1
+      ORDER BY v.visualizado_em DESC
+    `, [userCod]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar histórico:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Atualizar mensagem da liderança
+app.put('/api/lideranca/mensagens/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE lideranca_mensagens SET
+        titulo = COALESCE($1, titulo),
+        conteudo = COALESCE($2, conteudo),
+        tipo_conteudo = COALESCE($3, tipo_conteudo),
+        midia_url = COALESCE($4, midia_url),
+        midia_tipo = COALESCE($5, midia_tipo),
+        recorrente = COALESCE($6, recorrente),
+        tipo_recorrencia = COALESCE($7, tipo_recorrencia),
+        intervalo_recorrencia = COALESCE($8, intervalo_recorrencia),
+        ativo = COALESCE($9, ativo),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $10
+      RETURNING *
+    `, [titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo, id]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar mensagem:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Deletar mensagem da liderança
+app.delete('/api/lideranca/mensagens/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM lideranca_mensagens WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar mensagem:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Processar recorrências (endpoint para ser chamado por cron ou manualmente)
+app.post('/api/lideranca/processar-recorrencias', async (req, res) => {
+  try {
+    const agora = new Date();
+    
+    // Buscar mensagens recorrentes que precisam ser reexibidas
+    const mensagens = await pool.query(`
+      SELECT * FROM lideranca_mensagens
+      WHERE recorrente = true AND ativo = true AND proxima_exibicao <= $1
+    `, [agora]);
+    
+    for (const msg of mensagens.rows) {
+      // Limpar visualizações antigas para reexibir
+      await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
+      
+      // Calcular próxima exibição
+      let proxima = new Date(agora);
+      switch (msg.tipo_recorrencia) {
+        case 'diaria':
+          proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1));
+          break;
+        case 'semanal':
+          proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1) * 7);
+          break;
+        case 'mensal':
+          proxima.setMonth(proxima.getMonth() + (msg.intervalo_recorrencia || 1));
+          break;
+      }
+      
+      await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
+    }
+    
+    res.json({ processadas: mensagens.rows.length });
+  } catch (err) {
+    console.error('❌ Erro ao processar recorrências:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== FIM ROTAS MENSAGENS DA LIDERANÇA ====================
 
 // ==================== FIM ROTAS MÓDULO SOCIAL ====================
 
