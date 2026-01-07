@@ -1589,6 +1589,22 @@ async function createTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_msg_ativo ON lideranca_mensagens(ativo)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_msg ON lideranca_visualizacoes(mensagem_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_user ON lideranca_visualizacoes(user_cod)`).catch(() => {});
+    
+    // Tabela de reações às mensagens
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS lideranca_reacoes (
+        id SERIAL PRIMARY KEY,
+        mensagem_id INT REFERENCES lideranca_mensagens(id) ON DELETE CASCADE,
+        user_cod VARCHAR(50) NOT NULL,
+        user_nome VARCHAR(255),
+        user_foto TEXT,
+        emoji VARCHAR(10) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(mensagem_id, user_cod, emoji)
+      )
+    `);
+    console.log('✅ Tabela lideranca_reacoes verificada/criada');
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_reacoes_msg ON lideranca_reacoes(mensagem_id)`).catch(() => {});
     // ==================== FIM MENSAGENS DA LIDERANÇA ====================
     
     // ==================== FIM MÓDULO SOCIAL ====================
@@ -14102,6 +14118,59 @@ app.post('/api/lideranca/processar-recorrencias', async (req, res) => {
     res.json({ processadas: mensagens.rows.length });
   } catch (err) {
     console.error('❌ Erro ao processar recorrências:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Enviar reação a uma mensagem
+app.post('/api/lideranca/mensagens/:id/reagir', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, user_nome, user_foto, emoji } = req.body;
+    
+    await pool.query(`
+      INSERT INTO lideranca_reacoes (mensagem_id, user_cod, user_nome, user_foto, emoji)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (mensagem_id, user_cod, emoji) DO NOTHING
+    `, [id, user_cod, user_nome, user_foto, emoji]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao enviar reação:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar reações de uma mensagem
+app.get('/api/lideranca/mensagens/:id/reacoes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM lideranca_reacoes
+      WHERE mensagem_id = $1
+      ORDER BY created_at DESC
+    `, [id]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar reações:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Remover reação (toggle)
+app.delete('/api/lideranca/mensagens/:id/reagir', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_cod, emoji } = req.body;
+    
+    await pool.query(`
+      DELETE FROM lideranca_reacoes 
+      WHERE mensagem_id = $1 AND user_cod = $2 AND emoji = $3
+    `, [id, user_cod, emoji]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao remover reação:', err);
     res.status(500).json({ error: err.message });
   }
 });
