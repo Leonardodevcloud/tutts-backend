@@ -3265,7 +3265,12 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
         const valorDebito = parseFloat(dadosSaque.requested_amount);
         const idProf = dadosSaque.user_cod;
         
-        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+        // Definir descrição baseado no tipo de aprovação
+        const descricaoDebito = status === 'aprovado_gratuidade' 
+          ? 'Saque Emergencial - Gratuito'
+          : 'Saque emergencial - Prestação de Serviços';
+        
+        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}, Tipo: ${status}`);
         
         const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
         const responseDebito = await fetch(urlDebito, {
@@ -3277,7 +3282,7 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
           body: JSON.stringify({
             idProf: parseInt(idProf),
             valor: valorDebito,
-            descricao: `Saque emergencial #${id}`
+            descricao: descricaoDebito
           })
         });
         
