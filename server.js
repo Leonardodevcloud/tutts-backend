@@ -18980,9 +18980,18 @@ app.get('/api/plific/saldo/:idProf', verificarToken, async (req, res) => {
             return res.status(404).json({ error: 'Profissional não encontrado', details: data.dados.msg || 'ID não existe na base Plific' });
         }
 
+        // Converter saldo de formato brasileiro (1.000,00) para número
+        const profissionalData = data.dados?.profissional || null;
+        if (profissionalData && profissionalData.saldo) {
+            // Remove pontos de milhar e troca vírgula por ponto
+            const saldoStr = String(profissionalData.saldo);
+            profissionalData.saldoOriginal = saldoStr;
+            profissionalData.saldo = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+        }
+        
         const resultado = {
             success: true,
-            profissional: data.dados?.profissional || null,
+            profissional: profissionalData,
             ambiente: PLIFIC_AMBIENTE,
             consultadoEm: new Date().toISOString()
         };
