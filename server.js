@@ -3252,6 +3252,60 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
     // Se status for aprovado ou aprovado_gratuidade, salvar a data de aprovação
     const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
     
+    // Buscar dados do saque antes de atualizar (para pegar user_cod e valor)
+    const saqueAtual = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
+    if (saqueAtual.rows.length === 0) {
+      return res.status(404).json({ error: 'Saque não encontrado' });
+    }
+    const dadosSaque = saqueAtual.rows[0];
+    
+    // Se for aprovação, fazer débito automático na API Plific
+    if (isAprovado) {
+      try {
+        const valorDebito = parseFloat(dadosSaque.requested_amount);
+        const idProf = dadosSaque.user_cod;
+        
+        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+        
+        const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
+        const responseDebito = await fetch(urlDebito, {
+          method: 'POST',
+          headers: { 
+            'Authorization': `Bearer ${PLIFIC_TOKEN}`, 
+            'Content-Type': 'application/json' 
+          },
+          body: JSON.stringify({
+            idProf: parseInt(idProf),
+            valor: valorDebito,
+            descricao: `Saque emergencial #${id}`
+          })
+        });
+        
+        const dataDebito = await responseDebito.json();
+        
+        if (dataDebito.status !== '200' && dataDebito.status !== 200) {
+          console.error('❌ Erro ao debitar Plific:', dataDebito);
+          return res.status(400).json({ 
+            error: 'Erro ao debitar no Plific', 
+            details: dataDebito.msgUsuario || dataDebito.dados?.msg || 'Falha no débito'
+          });
+        }
+        
+        console.log(`✅ Débito Plific realizado com sucesso - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+        
+        // Limpar cache do profissional para atualizar saldo
+        const cacheKey = `saldo_${idProf}`;
+        plificSaldoCache.delete(cacheKey);
+        
+      } catch (erroDebito) {
+        console.error('❌ Exceção ao debitar Plific:', erroDebito);
+        return res.status(500).json({ 
+          error: 'Erro ao processar débito', 
+          details: erroDebito.message 
+        });
+      }
+    }
+    
     const result = await pool.query(
       `UPDATE withdrawal_requests 
        SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, 
@@ -3262,17 +3316,14 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
       [status, adminId, adminName, rejectReason || null, isAprovado, id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Saque não encontrado' });
-    }
-
     // Registrar auditoria
     const saque = result.rows[0];
     await registrarAuditoria(req, `WITHDRAWAL_${status.toUpperCase()}`, AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
       user_cod: saque.user_cod,
       valor: saque.requested_amount,
       admin: adminName,
-      motivo_rejeicao: rejectReason
+      motivo_rejeicao: rejectReason,
+      debito_plific: isAprovado ? 'realizado' : null
     });
 
     res.json(result.rows[0]);
