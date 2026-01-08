@@ -19208,6 +19208,118 @@ app.get('/api/plific/profissionais', verificarToken, async (req, res) => {
     }
 });
 
+// Listar todos os profissionais com saldo (do banco local + API Plific)
+app.get('/api/plific/saldos-todos', verificarToken, async (req, res) => {
+    try {
+        const { pagina = 1, porPagina = 20 } = req.query;
+        const paginaNum = parseInt(pagina);
+        const porPaginaNum = Math.min(parseInt(porPagina), 50); // máximo 50 por página
+        
+        // Buscar todos os profissionais únicos que já fizeram saque
+        const queryProfs = `
+            SELECT DISTINCT s.user_cod as codigo, s.user_name as nome 
+            FROM withdrawal_requests s 
+            WHERE s.user_cod IS NOT NULL AND s.user_name IS NOT NULL
+            ORDER BY s.user_name ASC
+        `;
+        const resultProfs = await pool.query(queryProfs);
+        const profissionais = resultProfs.rows;
+        
+        if (profissionais.length === 0) {
+            return res.json({ 
+                success: true, 
+                profissionais: [], 
+                total: 0, 
+                pagina: paginaNum, 
+                porPagina: porPaginaNum, 
+                totalPaginas: 0 
+            });
+        }
+        
+        // Buscar saldos de todos os profissionais na API Plific
+        const resultados = [];
+        for (const prof of profissionais) {
+            try {
+                // Verificar cache primeiro
+                const cacheKey = `saldo_${prof.codigo}`;
+                if (plificSaldoCache.has(cacheKey)) {
+                    const cached = plificSaldoCache.get(cacheKey);
+                    if (Date.now() - cached.timestamp < PLIFIC_CONFIG.CACHE_TTL) {
+                        const saldoNum = cached.data.profissional?.saldo || 0;
+                        resultados.push({
+                            codigo: prof.codigo,
+                            nome: prof.nome,
+                            saldo: saldoNum,
+                            cpf: cached.data.profissional?.cpf || null
+                        });
+                        continue;
+                    }
+                }
+                
+                // Buscar da API
+                const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${prof.codigo}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                
+                if (data.status === '200' || data.status === 200) {
+                    const profData = data.dados?.profissional || null;
+                    let saldoNum = 0;
+                    if (profData && profData.saldo) {
+                        const saldoStr = String(profData.saldo);
+                        saldoNum = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+                    }
+                    
+                    resultados.push({
+                        codigo: prof.codigo,
+                        nome: profData?.nome || prof.nome,
+                        saldo: saldoNum,
+                        cpf: profData?.cpf || null
+                    });
+                    
+                    // Cachear resultado
+                    plificSaldoCache.set(cacheKey, { 
+                        data: { profissional: { ...profData, saldo: saldoNum } }, 
+                        timestamp: Date.now() 
+                    });
+                }
+                
+                // Rate limit - pequena pausa entre requisições
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+            } catch (err) {
+                console.error(`Erro ao buscar saldo do prof ${prof.codigo}:`, err.message);
+            }
+        }
+        
+        // Ordenar por saldo (maior para menor)
+        resultados.sort((a, b) => b.saldo - a.saldo);
+        
+        // Paginação
+        const total = resultados.length;
+        const totalPaginas = Math.ceil(total / porPaginaNum);
+        const inicio = (paginaNum - 1) * porPaginaNum;
+        const fim = inicio + porPaginaNum;
+        const profissionaisPaginados = resultados.slice(inicio, fim);
+        
+        res.json({ 
+            success: true, 
+            profissionais: profissionaisPaginados, 
+            total, 
+            pagina: paginaNum, 
+            porPagina: porPaginaNum, 
+            totalPaginas,
+            somaTotal: resultados.reduce((acc, p) => acc + p.saldo, 0)
+        });
+        
+    } catch (error) {
+        console.error('❌ Erro ao buscar saldos:', error.message);
+        res.status(500).json({ error: 'Erro ao buscar saldos', details: error.message });
+    }
+});
+
 // Status da Integração
 app.get('/api/plific/status', verificarToken, async (req, res) => {
     try {
