@@ -18911,6 +18911,274 @@ app.get('/api/audit/export', verificarToken, verificarAdmin, async (req, res) =>
   }
 });
 
+// ==================== INTEGRAÇÃO PLIFIC ====================
+// Consulta de saldo e lançamento de débito na plataforma Plific
+
+const PLIFIC_CONFIG = {
+    BASE_URL_TESTE: 'https://mototaxionline.com/sem/v1/rotas.php/integracao-plific-saldo-prof',
+    TOKEN_TESTE: '1e5e485d3e105c2c0eef661a203a0bd539548954',
+    BASE_URL_PRODUCAO: 'https://tutts.com.br/sem/v1/rotas.php/integracao-plific-saldo-prof',
+    RATE_LIMIT: 10,
+    RATE_LIMIT_WINDOW: 1000,
+    CACHE_TTL: 5 * 60 * 1000
+};
+
+const PLIFIC_AMBIENTE = process.env.PLIFIC_AMBIENTE || 'teste';
+const PLIFIC_BASE_URL = PLIFIC_AMBIENTE === 'producao' ? PLIFIC_CONFIG.BASE_URL_PRODUCAO : PLIFIC_CONFIG.BASE_URL_TESTE;
+const PLIFIC_TOKEN = process.env.PLIFIC_TOKEN || PLIFIC_CONFIG.TOKEN_TESTE;
+
+console.log(`🔗 Plific configurado para ambiente: ${PLIFIC_AMBIENTE.toUpperCase()}`);
+
+const plificSaldoCache = new Map();
+
+const limparCachePlific = () => {
+    const agora = Date.now();
+    for (const [key, value] of plificSaldoCache.entries()) {
+        if (agora - value.timestamp > PLIFIC_CONFIG.CACHE_TTL) {
+            plificSaldoCache.delete(key);
+        }
+    }
+};
+
+setInterval(limparCachePlific, PLIFIC_CONFIG.CACHE_TTL);
+
+// Buscar Saldo Individual
+app.get('/api/plific/saldo/:idProf', verificarToken, async (req, res) => {
+    try {
+        const { idProf } = req.params;
+        const forceRefresh = req.query.refresh === 'true';
+        
+        if (!idProf || isNaN(parseInt(idProf))) {
+            return res.status(400).json({ error: 'ID do profissional inválido', details: 'O idProf deve ser um número válido' });
+        }
+
+        const cacheKey = `saldo_${idProf}`;
+        if (!forceRefresh && plificSaldoCache.has(cacheKey)) {
+            const cached = plificSaldoCache.get(cacheKey);
+            if (Date.now() - cached.timestamp < PLIFIC_CONFIG.CACHE_TTL) {
+                console.log(`📦 Plific: Saldo do profissional ${idProf} retornado do cache`);
+                return res.json({ ...cached.data, fromCache: true, cacheAge: Math.round((Date.now() - cached.timestamp) / 1000) });
+            }
+        }
+
+        const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
+        console.log(`🔍 Plific: Consultando saldo do profissional ${idProf}...`);
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
+        });
+
+        const data = await response.json();
+
+        if (data.status === '401') {
+            console.error('❌ Plific: Token inválido');
+            return res.status(401).json({ error: 'Token Plific inválido', details: data.msgUsuario || 'Verifique a configuração do token' });
+        }
+
+        if (data.dados && data.dados.status === false) {
+            return res.status(404).json({ error: 'Profissional não encontrado', details: data.dados.msg || 'ID não existe na base Plific' });
+        }
+
+        const resultado = {
+            success: true,
+            profissional: data.dados?.profissional || null,
+            ambiente: PLIFIC_AMBIENTE,
+            consultadoEm: new Date().toISOString()
+        };
+
+        plificSaldoCache.set(cacheKey, { data: resultado, timestamp: Date.now() });
+        console.log(`✅ Plific: Saldo do profissional ${idProf} = R$ ${resultado.profissional?.saldo || 0}`);
+        
+        await registrarAuditoria(req, 'CONSULTA_SALDO_PLIFIC', AUDIT_CATEGORIES.FINANCIAL, 'plific_saldo', idProf, { saldo: resultado.profissional?.saldo, ambiente: PLIFIC_AMBIENTE });
+
+        res.json(resultado);
+    } catch (error) {
+        console.error('❌ Erro ao consultar saldo Plific:', error.message);
+        res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
+    }
+});
+
+// Buscar Saldos em Lote
+app.post('/api/plific/saldos-lote', verificarToken, async (req, res) => {
+    try {
+        const { ids } = req.body;
+        
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'Lista de IDs inválida', details: 'Envie um array de IDs no corpo da requisição' });
+        }
+
+        if (ids.length > 100) {
+            return res.status(400).json({ error: 'Limite excedido', details: 'Máximo de 100 profissionais por requisição' });
+        }
+
+        console.log(`🔍 Plific: Consultando saldo de ${ids.length} profissionais em lote...`);
+
+        const resultados = [];
+        const BATCH_SIZE = PLIFIC_CONFIG.RATE_LIMIT;
+        
+        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+            const batch = ids.slice(i, i + BATCH_SIZE);
+            
+            const batchPromises = batch.map(async (idProf) => {
+                const cacheKey = `saldo_${idProf}`;
+                if (plificSaldoCache.has(cacheKey)) {
+                    const cached = plificSaldoCache.get(cacheKey);
+                    if (Date.now() - cached.timestamp < PLIFIC_CONFIG.CACHE_TTL) {
+                        return { idProf, ...cached.data.profissional, fromCache: true };
+                    }
+                }
+
+                try {
+                    const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
+                    const response = await fetch(url, {
+                        method: 'GET',
+                        headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
+                    });
+
+                    const data = await response.json();
+
+                    if (data.status === '200' && data.dados?.status === true) {
+                        plificSaldoCache.set(cacheKey, { data: { profissional: data.dados.profissional }, timestamp: Date.now() });
+                        return { idProf, ...data.dados.profissional, fromCache: false };
+                    } else {
+                        return { idProf, erro: data.dados?.msg || 'Não encontrado', saldo: null };
+                    }
+                } catch (err) {
+                    return { idProf, erro: err.message, saldo: null };
+                }
+            });
+
+            const batchResults = await Promise.all(batchPromises);
+            resultados.push(...batchResults);
+
+            if (i + BATCH_SIZE < ids.length) {
+                await new Promise(resolve => setTimeout(resolve, PLIFIC_CONFIG.RATE_LIMIT_WINDOW));
+            }
+        }
+
+        const sucessos = resultados.filter(r => r.saldo !== null && !r.erro);
+        const falhas = resultados.filter(r => r.saldo === null || r.erro);
+
+        console.log(`✅ Plific: Lote concluído - ${sucessos.length} sucesso(s), ${falhas.length} falha(s)`);
+        await registrarAuditoria(req, 'CONSULTA_SALDOS_LOTE_PLIFIC', AUDIT_CATEGORIES.FINANCIAL, 'plific_saldo_lote', null, { total: ids.length, sucessos: sucessos.length, falhas: falhas.length, ambiente: PLIFIC_AMBIENTE });
+
+        res.json({ success: true, total: ids.length, sucessos: sucessos.length, falhas: falhas.length, resultados, ambiente: PLIFIC_AMBIENTE, consultadoEm: new Date().toISOString() });
+    } catch (error) {
+        console.error('❌ Erro ao consultar saldos em lote Plific:', error.message);
+        res.status(500).json({ error: 'Erro ao consultar saldos em lote', details: error.message });
+    }
+});
+
+// Lançar Débito
+app.post('/api/plific/lancar-debito', verificarToken, async (req, res) => {
+    try {
+        const { idProf, valor, descricao } = req.body;
+        
+        if (!idProf || isNaN(parseInt(idProf))) {
+            return res.status(400).json({ error: 'ID do profissional inválido', details: 'O idProf deve ser um número válido' });
+        }
+        if (!valor || isNaN(parseFloat(valor)) || parseFloat(valor) <= 0) {
+            return res.status(400).json({ error: 'Valor inválido', details: 'O valor deve ser um número positivo' });
+        }
+        if (!descricao || descricao.trim().length === 0) {
+            return res.status(400).json({ error: 'Descrição obrigatória', details: 'Informe uma descrição para o débito' });
+        }
+
+        const url = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
+        console.log(`💳 Plific: Lançando débito de R$ ${valor} para profissional ${idProf}...`);
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idProf: parseInt(idProf), valor: parseFloat(valor), descricao: descricao.trim() })
+        });
+
+        const data = await response.json();
+
+        if (data.status === '401') {
+            console.error('❌ Plific: Token inválido ao lançar débito');
+            return res.status(401).json({ error: 'Token Plific inválido', details: data.msgUsuario || 'Verifique a configuração do token' });
+        }
+
+        if (data.dados?.status === 'erro') {
+            console.error('❌ Plific: Erro ao lançar débito:', data.dados.mensagem);
+            return res.status(400).json({ error: 'Erro ao lançar débito', details: data.dados.mensagem || 'Erro na validação dos parâmetros', erros: data.dados.erros });
+        }
+
+        const cacheKey = `saldo_${idProf}`;
+        plificSaldoCache.delete(cacheKey);
+
+        console.log(`✅ Plific: Débito de R$ ${valor} lançado com sucesso para profissional ${idProf}`);
+        await registrarAuditoria(req, 'LANCAR_DEBITO_PLIFIC', AUDIT_CATEGORIES.FINANCIAL, 'plific_debito', idProf, { valor: parseFloat(valor), descricao: descricao.trim(), ambiente: PLIFIC_AMBIENTE });
+
+        res.json({ success: true, mensagem: data.dados?.mensagem || 'Débito lançado com sucesso', ambiente: PLIFIC_AMBIENTE, lancadoEm: new Date().toISOString() });
+    } catch (error) {
+        console.error('❌ Erro ao lançar débito Plific:', error.message);
+        res.status(500).json({ error: 'Erro ao lançar débito', details: error.message });
+    }
+});
+
+// Buscar Profissionais para Consulta
+app.get('/api/plific/profissionais', verificarToken, async (req, res) => {
+    try {
+        const { regiao, limite } = req.query;
+        
+        let query = `SELECT DISTINCT s.user_cod as id, s.user_name as nome, s.regiao FROM withdrawal_requests s WHERE s.user_cod IS NOT NULL`;
+        const params = [];
+        let paramIndex = 1;
+
+        if (regiao) {
+            query += ` AND s.regiao = $${paramIndex++}`;
+            params.push(regiao);
+        }
+
+        query += ` ORDER BY s.user_name ASC`;
+        
+        if (limite) {
+            query += ` LIMIT $${paramIndex}`;
+            params.push(parseInt(limite));
+        }
+
+        const result = await pool.query(query, params);
+        res.json({ success: true, total: result.rows.length, profissionais: result.rows });
+    } catch (error) {
+        console.error('❌ Erro ao buscar profissionais:', error.message);
+        res.status(500).json({ error: 'Erro ao buscar profissionais', details: error.message });
+    }
+});
+
+// Status da Integração
+app.get('/api/plific/status', verificarToken, async (req, res) => {
+    try {
+        const testId = PLIFIC_AMBIENTE === 'teste' ? '8888' : '1';
+        const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${testId}`;
+        
+        const startTime = Date.now();
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
+        });
+        const latency = Date.now() - startTime;
+
+        const data = await response.json();
+        const tokenValido = data.status !== '401';
+        const apiOnline = response.ok;
+
+        res.json({
+            success: true,
+            status: { apiOnline, tokenValido, latencia: `${latency}ms`, ambiente: PLIFIC_AMBIENTE, baseUrl: PLIFIC_BASE_URL, cacheSize: plificSaldoCache.size, cacheTTL: `${PLIFIC_CONFIG.CACHE_TTL / 1000}s` }
+        });
+    } catch (error) {
+        res.json({ success: false, status: { apiOnline: false, tokenValido: false, erro: error.message, ambiente: PLIFIC_AMBIENTE } });
+    }
+});
+
+console.log('✅ Módulo Plific carregado!');
+
+// ==================== FIM INTEGRAÇÃO PLIFIC ====================
+
+
 console.log('✅ Módulo de Auditoria carregado!');
 
 // ==================== ERROR HANDLER GLOBAL COM CORS ====================
