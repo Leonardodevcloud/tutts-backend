@@ -19217,10 +19217,11 @@ app.get('/api/plific/saldos-todos', verificarToken, async (req, res) => {
         
         // Buscar todos os profissionais únicos que já fizeram saque
         const queryProfs = `
-            SELECT DISTINCT s.user_cod as codigo, s.user_name as nome 
+            SELECT s.user_cod as codigo, MAX(s.user_name) as nome 
             FROM withdrawal_requests s 
             WHERE s.user_cod IS NOT NULL AND s.user_name IS NOT NULL
-            ORDER BY s.user_name ASC
+            GROUP BY s.user_cod
+            ORDER BY MAX(s.user_name) ASC
         `;
         const resultProfs = await pool.query(queryProfs);
         const profissionais = resultProfs.rows;
