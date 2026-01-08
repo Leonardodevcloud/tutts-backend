@@ -18976,7 +18976,7 @@ const PLIFIC_CONFIG = {
     BASE_URL_PRODUCAO: 'https://tutts.com.br/sem/v1/rotas.php/integracao-plific-saldo-prof',
     RATE_LIMIT: 10,
     RATE_LIMIT_WINDOW: 1000,
-    CACHE_TTL: 5 * 60 * 1000
+    CACHE_TTL: 1 * 60 * 1000
 };
 
 const PLIFIC_AMBIENTE = process.env.PLIFIC_AMBIENTE || 'teste';
