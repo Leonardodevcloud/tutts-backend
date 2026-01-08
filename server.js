@@ -89,7 +89,7 @@ const verificarToken = (req, res, next) => {
 
 // Verificar se é admin
 const verificarAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== 'admin') {
+  if (!req.user || !['admin', 'admin_master'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Acesso negado. Requer permissão de administrador.' });
   }
   next();
@@ -109,7 +109,7 @@ const verificarProprioOuAdmin = (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ error: 'Não autenticado' });
   }
-  if (req.user.role === 'admin' || req.user.codProfissional === userCod) {
+  if (['admin', 'admin_master'].includes(req.user.role) || req.user.codProfissional === userCod) {
     next();
   } else {
     return res.status(403).json({ error: 'Acesso negado' });
