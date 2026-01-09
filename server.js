@@ -3247,7 +3247,7 @@ app.get('/api/withdrawals', async (req, res) => {
 app.patch('/api/withdrawals/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, adminId, adminName, rejectReason } = req.body;
+    const { status, adminId, adminName, rejectReason, dataDebito } = req.body;
 
     // Se status for aprovado ou aprovado_gratuidade, salvar a data de aprovação
     const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
@@ -3270,7 +3270,8 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
           ? 'Saque Emergencial - Gratuito'
           : 'Saque emergencial - Prestação de Serviços';
         
-        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}, Tipo: ${status}`);
+        const dataDebitoFormatada = dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0];
+        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
         
         const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
         const responseDebito = await fetch(urlDebito, {
@@ -3282,17 +3283,18 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
           body: JSON.stringify({
             idProf: parseInt(idProf),
             valor: valorDebito,
-            descricao: descricaoDebito
+            descricao: descricaoDebito,
+            data: dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0]
           })
         });
         
-        const dataDebito = await responseDebito.json();
+        const respostaDebito = await responseDebito.json();
         
-        if (dataDebito.status !== '200' && dataDebito.status !== 200) {
-          console.error('❌ Erro ao debitar Plific:', dataDebito);
+        if (respostaDebito.status !== '200' && respostaDebito.status !== 200) {
+          console.error('❌ Erro ao debitar Plific:', respostaDebito);
           return res.status(400).json({ 
             error: 'Erro ao debitar no Plific', 
-            details: dataDebito.msgUsuario || dataDebito.dados?.msg || 'Falha no débito'
+            details: respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito'
           });
         }
         
