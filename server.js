@@ -3256,6 +3256,7 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, adminId, adminName, rejectReason, dataDebito } = req.body;
+    console.log('📅 dataDebito recebido do frontend:', dataDebito);
 
     // Se status for aprovado ou aprovado_gratuidade, salvar a data de aprovação
     const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
@@ -19265,7 +19266,10 @@ app.get('/api/plific/saldos-todos', verificarToken, async (req, res) => {
                 if (plificSaldoCache.has(cacheKey)) {
                     const cached = plificSaldoCache.get(cacheKey);
                     if (Date.now() - cached.timestamp < PLIFIC_CONFIG.CACHE_TTL) {
-                        const saldoNum = cached.data.profissional?.saldo || 0;
+                        const saldoCached = cached.data.profissional?.saldo;
+                        const saldoNum = typeof saldoCached === 'string' 
+                            ? parseFloat(saldoCached.replace(/\./g, '').replace(',', '.')) || 0
+                            : parseFloat(saldoCached || 0);
                         resultados.push({
                             codigo: prof.codigo,
                             nome: prof.nome,
