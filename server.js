@@ -19378,6 +19378,54 @@ console.log('✅ Módulo Plific carregado!');
 console.log('✅ Módulo de Auditoria carregado!');
 
 // ==================== API DE GEOCODIFICAÇÃO ====================
+
+// Endpoint Google Geocoding (PRINCIPAL)
+app.get('/api/geocode/google', async (req, res) => {
+  try {
+    const { endereco } = req.query;
+    const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+    
+    if (!endereco) {
+      return res.status(400).json({ error: 'Informe o endereço' });
+    }
+    
+    if (!GOOGLE_API_KEY) {
+      console.log('⚠️ GOOGLE_GEOCODING_API_KEY não configurada');
+      return res.status(500).json({ error: 'API Key não configurada no servidor' });
+    }
+    
+    console.log('🔍 Google Geocoding:', endereco);
+    
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR`;
+    
+    const resp = await fetch(url);
+    const data = await resp.json();
+    
+    if (data.status === 'OK' && data.results && data.results.length > 0) {
+      console.log('✅ Google sucesso:', data.results.length, 'resultados');
+      return res.json({
+        results: data.results.map(r => ({
+          endereco: r.formatted_address,
+          latitude: r.geometry.location.lat,
+          longitude: r.geometry.location.lng,
+          tipos: r.types,
+          componentes: r.address_components,
+          fonte: 'google'
+        })),
+        fonte: 'google'
+      });
+    } else if (data.status === 'ZERO_RESULTS') {
+      return res.status(404).json({ error: 'Endereço não encontrado' });
+    } else {
+      console.log('⚠️ Google erro:', data.status, data.error_message);
+      return res.status(500).json({ error: 'Erro na API Google', status: data.status });
+    }
+  } catch (err) {
+    console.error('❌ Erro Google Geocoding:', err);
+    res.status(500).json({ error: 'Erro ao geocodificar' });
+  }
+});
+
 // Endpoint para buscar CEP com coordenadas
 app.get('/api/geocode/cep/:cep', async (req, res) => {
   try {
