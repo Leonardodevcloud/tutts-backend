@@ -19643,7 +19643,7 @@ app.get('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, r
 
 // ==================== PROXY PARA OPENROUTESERVICE (evitar CORS) ====================
 
-const ORS_API_KEY = '5b3ce3597851110001cf62489923ef7b12aa4be8a1f63a02f94ed073';
+const ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjM5MTI2ZjMwMTMxOTQ3OTU5Mjc2YWM5OGNjNGZiZWEwIiwiaCI6Im11cm11cjY0In0=';
 
 // Proxy para otimização de rotas
 app.post('/api/roteirizador/otimizar', verificarTokenRoteirizador, async (req, res) => {
