@@ -19664,9 +19664,9 @@ app.post('/api/admin/roteirizador/usuarios', verificarToken, async (req, res) =>
       INSERT INTO usuarios_roteirizador (nome, email, senha_hash, telefone, empresa, observacoes, criado_por)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, nome, email, empresa, criado_em
-    `, [nome, email.toLowerCase().trim(), senha_hash, telefone, empresa, observacoes, req.usuario.id]);
+    `, [nome, email.toLowerCase().trim(), senha_hash, telefone, empresa, observacoes, req.user.id || null]);
     
-    console.log('✅ Usuário roteirizador criado:', result.rows[0].email, 'por:', req.usuario.email);
+    console.log('✅ Usuário roteirizador criado:', result.rows[0].email, 'por:', req.user.email);
     
     res.json(result.rows[0]);
   } catch (err) {
