@@ -20368,3 +20368,658 @@ app.listen(port, () => {
   
   console.log('🎁 Cron Job do Score ativado (dia 1 de cada mês às 00:05)');
 });
+
+// =====================================================
+// SISTEMA DE SOLICITAÇÃO DE CORRIDAS - INTEGRAÇÃO TUTTS
+// =====================================================
+
+// Middleware de autenticação para clientes de solicitação
+const verificarTokenSolicitacao = async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'tutts_secret_key_2024');
+    
+    if (decoded.tipo !== 'solicitacao') {
+      return res.status(401).json({ error: 'Token inválido para solicitação' });
+    }
+    
+    const cliente = await pool.query(
+      'SELECT * FROM clientes_solicitacao WHERE id = $1',
+      [decoded.id]
+    );
+    
+    if (cliente.rows.length === 0 || !cliente.rows[0].ativo) {
+      return res.status(401).json({ error: 'Cliente inativo ou não encontrado' });
+    }
+    
+    req.clienteSolicitacao = cliente.rows[0];
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Token inválido ou expirado' });
+  }
+};
+
+// Login do cliente de solicitação
+app.post('/api/solicitacao/login', async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+    
+    if (!email || !senha) {
+      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
+    }
+    
+    const cliente = await pool.query(
+      'SELECT * FROM clientes_solicitacao WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    
+    if (cliente.rows.length === 0) {
+      return res.status(401).json({ error: 'Email ou senha inválidos' });
+    }
+    
+    const clienteData = cliente.rows[0];
+    
+    if (!clienteData.ativo) {
+      return res.status(401).json({ error: 'Conta desativada. Entre em contato com o administrador.' });
+    }
+    
+    const senhaValida = await bcrypt.compare(senha, clienteData.senha_hash);
+    if (!senhaValida) {
+      return res.status(401).json({ error: 'Email ou senha inválidos' });
+    }
+    
+    // Atualizar último acesso
+    await pool.query(
+      'UPDATE clientes_solicitacao SET ultimo_acesso = CURRENT_TIMESTAMP WHERE id = $1',
+      [clienteData.id]
+    );
+    
+    const token = jwt.sign(
+      { id: clienteData.id, email: clienteData.email, tipo: 'solicitacao' },
+      process.env.JWT_SECRET || 'tutts_secret_key_2024',
+      { expiresIn: '7d' }
+    );
+    
+    res.json({
+      token,
+      cliente: {
+        id: clienteData.id,
+        nome: clienteData.nome,
+        email: clienteData.email,
+        empresa: clienteData.empresa,
+        forma_pagamento_padrao: clienteData.forma_pagamento_padrao,
+        endereco_partida_padrao: clienteData.endereco_partida_padrao,
+        centro_custo_padrao: clienteData.centro_custo_padrao
+      }
+    });
+  } catch (err) {
+    console.error('❌ Erro no login solicitação:', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Verificar token
+app.get('/api/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
+  res.json({
+    valido: true,
+    cliente: {
+      id: req.clienteSolicitacao.id,
+      nome: req.clienteSolicitacao.nome,
+      email: req.clienteSolicitacao.email,
+      empresa: req.clienteSolicitacao.empresa,
+      forma_pagamento_padrao: req.clienteSolicitacao.forma_pagamento_padrao,
+      endereco_partida_padrao: req.clienteSolicitacao.endereco_partida_padrao,
+      centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao
+    }
+  });
+});
+
+// Atualizar configurações do cliente (partida padrão, etc)
+app.patch('/api/solicitacao/configuracoes', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao } = req.body;
+    
+    await pool.query(`
+      UPDATE clientes_solicitacao 
+      SET forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
+          endereco_partida_padrao = COALESCE($2, endereco_partida_padrao),
+          centro_custo_padrao = COALESCE($3, centro_custo_padrao)
+      WHERE id = $4
+    `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar configurações:', err);
+    res.status(500).json({ error: 'Erro ao atualizar configurações' });
+  }
+});
+
+// Solicitar corrida (enviar para API Tutts)
+app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const {
+      numero_pedido,
+      centro_custo,
+      usuario_solicitante,
+      data_retirada,
+      forma_pagamento,
+      ponto_receber,
+      retorno,
+      obs_retorno,
+      ordenar,
+      codigo_profissional,
+      valor_rota_profissional,
+      valor_rota_servico,
+      pontos // Array de pontos
+    } = req.body;
+    
+    if (!pontos || pontos.length < 1) {
+      return res.status(400).json({ error: 'Informe pelo menos 1 ponto de entrega' });
+    }
+    
+    if (pontos.length > 80) {
+      return res.status(400).json({ error: 'Máximo de 80 pontos permitido' });
+    }
+    
+    // Montar payload para API Tutts
+    const payloadTutts = {
+      token: req.clienteSolicitacao.tutts_token,
+      codCliente: req.clienteSolicitacao.tutts_cod_cliente,
+      Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
+      centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || '',
+      numeroPedido: numero_pedido || '',
+      DataRetirada: data_retirada || '',
+      codigoProf: codigo_profissional || '',
+      pontos: pontos.map(p => ({
+        rua: p.rua || '',
+        numero: p.numero || '',
+        complemento: p.complemento || '',
+        bairro: p.bairro || '',
+        cidade: p.cidade || '',
+        uf: p.uf || '',
+        cep: p.cep || '',
+        la: p.latitude ? String(p.latitude) : '',
+        lo: p.longitude ? String(p.longitude) : '',
+        obs: p.observacao || '',
+        telefone: p.telefone || '',
+        procurarPor: p.procurar_por || '',
+        numeroNota: p.numero_nota || '',
+        codigoFinalizarEnd: p.codigo_finalizar || ''
+      })),
+      retorno: retorno ? 'S' : 'N',
+      obsRetorno: obs_retorno || '',
+      formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F',
+      pontoReceber: ponto_receber ? String(ponto_receber) : '',
+      valorRotaProfissional: valor_rota_profissional ? String(valor_rota_profissional) : '',
+      valorRotaServico: valor_rota_servico ? String(valor_rota_servico) : '',
+      ordenar: ordenar ? 'true' : 'false'
+    };
+    
+    console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
+    
+    // Enviar para API Tutts
+    const response = await fetch('https://tutts.com.br/integracao', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payloadTutts)
+    });
+    
+    const resultado = await response.json();
+    console.log('📥 Resposta da API Tutts:', resultado);
+    
+    // Salvar no banco independente do resultado
+    const solicitacao = await pool.query(`
+      INSERT INTO solicitacoes_corrida (
+        cliente_id, numero_pedido, centro_custo, usuario_solicitante,
+        data_retirada, forma_pagamento, ponto_receber, retorno, obs_retorno,
+        ordenar, codigo_profissional, valor_rota_profissional, valor_rota_servico,
+        tutts_os_numero, tutts_distancia, tutts_duracao, tutts_valor, tutts_url_rastreamento,
+        status, erro_mensagem
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      RETURNING id
+    `, [
+      req.clienteSolicitacao.id,
+      numero_pedido,
+      centro_custo,
+      usuario_solicitante || req.clienteSolicitacao.nome,
+      data_retirada || null,
+      forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F',
+      ponto_receber,
+      retorno || false,
+      obs_retorno,
+      ordenar || false,
+      codigo_profissional,
+      valor_rota_profissional,
+      valor_rota_servico,
+      resultado.Sucesso || null,
+      resultado.detalhes?.distancia || null,
+      resultado.detalhes?.duracao || null,
+      resultado.detalhes?.valor ? parseFloat(resultado.detalhes.valor) : null,
+      resultado.detalhes?.urlRastreamento || null,
+      resultado.Sucesso ? 'enviado' : 'erro',
+      resultado.Erro || null
+    ]);
+    
+    const solicitacaoId = solicitacao.rows[0].id;
+    
+    // Salvar pontos
+    for (let i = 0; i < pontos.length; i++) {
+      const p = pontos[i];
+      await pool.query(`
+        INSERT INTO solicitacoes_pontos (
+          solicitacao_id, ordem, rua, numero, complemento, bairro, cidade, uf, cep,
+          latitude, longitude, observacao, telefone, procurar_por, numero_nota, codigo_finalizar,
+          status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      `, [
+        solicitacaoId, i + 1, p.rua, p.numero, p.complemento, p.bairro, p.cidade, p.uf, p.cep,
+        p.latitude, p.longitude, p.observacao, p.telefone, p.procurar_por, p.numero_nota, p.codigo_finalizar,
+        'pendente'
+      ]);
+    }
+    
+    if (resultado.Erro) {
+      return res.status(400).json({ 
+        error: resultado.Erro,
+        solicitacao_id: solicitacaoId 
+      });
+    }
+    
+    res.json({
+      sucesso: true,
+      solicitacao_id: solicitacaoId,
+      os_numero: resultado.Sucesso,
+      detalhes: resultado.detalhes
+    });
+    
+  } catch (err) {
+    console.error('❌ Erro ao solicitar corrida:', err);
+    res.status(500).json({ error: 'Erro ao solicitar corrida' });
+  }
+});
+
+// Listar histórico de solicitações
+app.get('/api/solicitacao/historico', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { limite = 20, pagina = 1, status } = req.query;
+    const offset = (pagina - 1) * limite;
+    
+    let query = `
+      SELECT s.*, 
+        (SELECT COUNT(*) FROM solicitacoes_pontos WHERE solicitacao_id = s.id) as total_pontos
+      FROM solicitacoes_corrida s
+      WHERE s.cliente_id = $1
+    `;
+    const params = [req.clienteSolicitacao.id];
+    
+    if (status) {
+      query += ` AND s.status = $${params.length + 1}`;
+      params.push(status);
+    }
+    
+    query += ` ORDER BY s.criado_em DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limite, offset);
+    
+    const result = await pool.query(query, params);
+    
+    // Contar total
+    const total = await pool.query(
+      'SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = $1' + (status ? ' AND status = $2' : ''),
+      status ? [req.clienteSolicitacao.id, status] : [req.clienteSolicitacao.id]
+    );
+    
+    res.json({
+      solicitacoes: result.rows,
+      total: parseInt(total.rows[0].count),
+      pagina: parseInt(pagina),
+      limite: parseInt(limite)
+    });
+  } catch (err) {
+    console.error('❌ Erro ao listar histórico:', err);
+    res.status(500).json({ error: 'Erro ao listar histórico' });
+  }
+});
+
+// Buscar detalhes de uma solicitação
+app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const solicitacao = await pool.query(
+      'SELECT * FROM solicitacoes_corrida WHERE id = $1 AND cliente_id = $2',
+      [id, req.clienteSolicitacao.id]
+    );
+    
+    if (solicitacao.rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitação não encontrada' });
+    }
+    
+    const pontos = await pool.query(
+      'SELECT * FROM solicitacoes_pontos WHERE solicitacao_id = $1 ORDER BY ordem',
+      [id]
+    );
+    
+    res.json({
+      ...solicitacao.rows[0],
+      pontos: pontos.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro ao buscar solicitação:', err);
+    res.status(500).json({ error: 'Erro ao buscar solicitação' });
+  }
+});
+
+// Salvar endereço favorito
+app.post('/api/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { apelido, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao } = req.body;
+    
+    if (!rua || !cidade) {
+      return res.status(400).json({ error: 'Rua e cidade são obrigatórios' });
+    }
+    
+    // Verificar se já existe
+    const existe = await pool.query(
+      'SELECT id FROM solicitacao_favoritos WHERE cliente_id = $1 AND rua = $2 AND numero = $3 AND cidade = $4',
+      [req.clienteSolicitacao.id, rua, numero, cidade]
+    );
+    
+    if (existe.rows.length > 0) {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP,
+            latitude = COALESCE($2, latitude), longitude = COALESCE($3, longitude)
+        WHERE id = $1
+      `, [existe.rows[0].id, latitude, longitude]);
+      
+      return res.json({ sucesso: true, id: existe.rows[0].id, atualizado: true });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO solicitacao_favoritos (
+        cliente_id, apelido, rua, numero, complemento, bairro, cidade, uf, cep,
+        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING id
+    `, [
+      req.clienteSolicitacao.id, apelido, rua, numero, complemento, bairro, cidade, uf, cep,
+      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
+    ]);
+    
+    res.json({ sucesso: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('❌ Erro ao salvar favorito:', err);
+    res.status(500).json({ error: 'Erro ao salvar favorito' });
+  }
+});
+
+// Listar favoritos
+app.get('/api/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM solicitacao_favoritos 
+      WHERE cliente_id = $1 
+      ORDER BY vezes_usado DESC, ultimo_uso DESC
+      LIMIT 50
+    `, [req.clienteSolicitacao.id]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar favoritos:', err);
+    res.status(500).json({ error: 'Erro ao listar favoritos' });
+  }
+});
+
+// Deletar favorito
+app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
+      [req.params.id, req.clienteSolicitacao.id]
+    );
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar favorito:', err);
+    res.status(500).json({ error: 'Erro ao deletar favorito' });
+  }
+});
+
+// WEBHOOK - Receber notificações da API Tutts
+app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log('📨 Webhook Tutts recebido:', JSON.stringify(payload, null, 2));
+    
+    // Salvar log do webhook
+    await pool.query(
+      'INSERT INTO solicitacao_webhooks_log (tutts_os_numero, payload) VALUES ($1, $2)',
+      [payload.ID, JSON.stringify(payload)]
+    );
+    
+    if (!payload.ID) {
+      return res.status(400).json({ error: 'ID da OS não informado' });
+    }
+    
+    // Buscar solicitação pelo número da OS
+    const solicitacao = await pool.query(
+      'SELECT id FROM solicitacoes_corrida WHERE tutts_os_numero = $1',
+      [payload.ID]
+    );
+    
+    if (solicitacao.rows.length === 0) {
+      console.log('⚠️ OS não encontrada no sistema:', payload.ID);
+      return res.json({ recebido: true, processado: false, motivo: 'OS não encontrada' });
+    }
+    
+    const solicitacaoId = solicitacao.rows[0].id;
+    const statusInfo = payload.Status;
+    const statusCodigo = statusInfo?.ID;
+    
+    // Mapear status
+    let novoStatus = 'enviado';
+    if (statusCodigo === 0) novoStatus = 'aceito';
+    else if (statusCodigo === 0.5 || statusCodigo === 0.75) novoStatus = 'em_andamento';
+    else if (statusCodigo === 1) novoStatus = 'em_andamento';
+    else if (statusCodigo === 2) novoStatus = 'finalizado';
+    
+    // Atualizar solicitação
+    await pool.query(`
+      UPDATE solicitacoes_corrida SET
+        status = $1,
+        status_codigo = $2,
+        status_atualizado_em = CURRENT_TIMESTAMP,
+        tutts_url_rastreamento = COALESCE($3, tutts_url_rastreamento),
+        profissional_nome = COALESCE($4, profissional_nome),
+        profissional_email = COALESCE($5, profissional_email),
+        profissional_foto = COALESCE($6, profissional_foto),
+        profissional_placa = COALESCE($7, profissional_placa),
+        profissional_veiculo = COALESCE($8, profissional_veiculo),
+        profissional_cor_veiculo = COALESCE($9, profissional_cor_veiculo),
+        atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = $10
+    `, [
+      novoStatus,
+      statusCodigo,
+      payload.UrlRastreamento,
+      statusInfo?.Nome,
+      statusInfo?.Email,
+      statusInfo?.Foto,
+      statusInfo?.placa,
+      statusInfo?.modeloVeiculo,
+      statusInfo?.corVeiculo,
+      solicitacaoId
+    ]);
+    
+    // Atualizar ponto específico se informado
+    if (payload.statusEndereco) {
+      const endInfo = payload.statusEndereco;
+      const pontoOrdem = endInfo.endereco?.ponto;
+      
+      if (pontoOrdem) {
+        let statusPonto = 'pendente';
+        if (endInfo.codigo === 'CHE') statusPonto = 'chegou';
+        else if (endInfo.codigo === 'COL') statusPonto = 'coletado';
+        else if (endInfo.codigo === 'FIN') statusPonto = 'finalizado';
+        
+        await pool.query(`
+          UPDATE solicitacoes_pontos SET
+            status = $1,
+            status_atualizado_em = CURRENT_TIMESTAMP,
+            data_chegada = CASE WHEN $1 = 'chegou' THEN CURRENT_TIMESTAMP ELSE data_chegada END,
+            data_coletado = CASE WHEN $1 = 'coletado' THEN CURRENT_TIMESTAMP ELSE data_coletado END,
+            data_finalizado = CASE WHEN $1 = 'finalizado' THEN CURRENT_TIMESTAMP ELSE data_finalizado END,
+            motivo_finalizacao = COALESCE($2, motivo_finalizacao),
+            motivo_descricao = COALESCE($3, motivo_descricao),
+            tempo_espera = COALESCE($4, tempo_espera),
+            fotos = COALESCE($5, fotos),
+            assinatura = COALESCE($6, assinatura)
+          WHERE solicitacao_id = $7 AND ordem = $8
+        `, [
+          statusPonto,
+          endInfo.endereco?.motivo?.tipo,
+          endInfo.endereco?.motivo?.descricao,
+          endInfo.endereco?.tempoEspera,
+          endInfo.endereco?.protocolo ? JSON.stringify(endInfo.endereco.protocolo) : null,
+          endInfo.endereco?.assinatura ? JSON.stringify(endInfo.endereco.assinatura) : null,
+          solicitacaoId,
+          pontoOrdem
+        ]);
+      }
+    }
+    
+    // Marcar webhook como processado
+    await pool.query(
+      'UPDATE solicitacao_webhooks_log SET processado = true WHERE tutts_os_numero = $1 ORDER BY id DESC LIMIT 1',
+      [payload.ID]
+    );
+    
+    res.json({ recebido: true, processado: true });
+    
+  } catch (err) {
+    console.error('❌ Erro ao processar webhook:', err);
+    res.status(500).json({ error: 'Erro ao processar webhook' });
+  }
+});
+
+// ==================== ADMIN - Gerenciar clientes de solicitação ====================
+
+// Criar cliente de solicitação (só admin da central)
+app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
+  try {
+    const { nome, email, senha, telefone, empresa, tutts_token, tutts_cod_cliente, observacoes } = req.body;
+    
+    if (!nome || !email || !senha || !tutts_token || !tutts_cod_cliente) {
+      return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
+    }
+    
+    // Verificar se email já existe
+    const existe = await pool.query(
+      'SELECT id FROM clientes_solicitacao WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    
+    if (existe.rows.length > 0) {
+      return res.status(400).json({ error: 'Email já cadastrado' });
+    }
+    
+    const senhaHash = await bcrypt.hash(senha, 10);
+    
+    const result = await pool.query(`
+      INSERT INTO clientes_solicitacao (nome, email, senha_hash, telefone, empresa, tutts_token, tutts_cod_cliente, criado_por, observacoes)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id, nome, email, empresa
+    `, [nome, email.toLowerCase(), senhaHash, telefone, empresa, tutts_token, tutts_cod_cliente, req.user.id, observacoes]);
+    
+    res.json({ sucesso: true, cliente: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao criar cliente solicitação:', err);
+    res.status(500).json({ error: 'Erro ao criar cliente' });
+  }
+});
+
+// Listar clientes de solicitação
+app.get('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT c.id, c.nome, c.email, c.telefone, c.empresa, c.ativo, c.criado_em, c.ultimo_acesso,
+        c.tutts_cod_cliente, c.observacoes,
+        (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
+      FROM clientes_solicitacao c
+      ORDER BY c.criado_em DESC
+    `);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar clientes:', err);
+    res.status(500).json({ error: 'Erro ao listar clientes' });
+  }
+});
+
+// Ativar/Desativar cliente
+app.patch('/api/admin/solicitacao/clientes/:id/ativo', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { ativo } = req.body;
+    
+    await pool.query(
+      'UPDATE clientes_solicitacao SET ativo = $1 WHERE id = $2',
+      [ativo, id]
+    );
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar cliente:', err);
+    res.status(500).json({ error: 'Erro ao atualizar cliente' });
+  }
+});
+
+// Resetar senha do cliente
+app.patch('/api/admin/solicitacao/clientes/:id/senha', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nova_senha } = req.body;
+    
+    if (!nova_senha || nova_senha.length < 4) {
+      return res.status(400).json({ error: 'Senha deve ter pelo menos 4 caracteres' });
+    }
+    
+    const senhaHash = await bcrypt.hash(nova_senha, 10);
+    
+    await pool.query(
+      'UPDATE clientes_solicitacao SET senha_hash = $1 WHERE id = $2',
+      [senhaHash, id]
+    );
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao resetar senha:', err);
+    res.status(500).json({ error: 'Erro ao resetar senha' });
+  }
+});
+
+// Atualizar credenciais Tutts do cliente
+app.patch('/api/admin/solicitacao/clientes/:id/credenciais', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tutts_token, tutts_cod_cliente } = req.body;
+    
+    await pool.query(`
+      UPDATE clientes_solicitacao 
+      SET tutts_token = COALESCE($1, tutts_token),
+          tutts_cod_cliente = COALESCE($2, tutts_cod_cliente)
+      WHERE id = $3
+    `, [tutts_token, tutts_cod_cliente, id]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar credenciais:', err);
+    res.status(500).json({ error: 'Erro ao atualizar credenciais' });
+  }
+});
