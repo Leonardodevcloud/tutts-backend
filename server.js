@@ -19589,6 +19589,10 @@ app.post('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, 
   try {
     const { endereco, apelido, latitude, longitude } = req.body;
     
+    if (!endereco) {
+      return res.status(400).json({ error: 'Endereço é obrigatório' });
+    }
+    
     // Verificar se já existe
     const existe = await pool.query(
       'SELECT id FROM enderecos_favoritos WHERE usuario_id = $1 AND endereco = $2',
@@ -19599,7 +19603,7 @@ app.post('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, 
       // Atualizar uso
       await pool.query(`
         UPDATE enderecos_favoritos 
-        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP, latitude = COALESCE($3, latitude), longitude = COALESCE($4, longitude)
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP, latitude = COALESCE($2, latitude), longitude = COALESCE($3, longitude)
         WHERE id = $1
       `, [existe.rows[0].id, latitude, longitude]);
       
@@ -19610,7 +19614,7 @@ app.post('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, 
       INSERT INTO enderecos_favoritos (usuario_id, endereco, apelido, latitude, longitude)
       VALUES ($1, $2, $3, $4, $5)
       RETURNING id
-    `, [req.usuarioRoteirizador.id, endereco, apelido, latitude, longitude]);
+    `, [req.usuarioRoteirizador.id, endereco, apelido || null, latitude, longitude]);
     
     res.json({ sucesso: true, id: result.rows[0].id });
   } catch (err) {
