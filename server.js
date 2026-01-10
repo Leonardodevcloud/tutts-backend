@@ -19377,6 +19377,375 @@ console.log('✅ Módulo Plific carregado!');
 
 console.log('✅ Módulo de Auditoria carregado!');
 
+// ==================== ROTEIRIZADOR PÚBLICO - API ====================
+
+// Middleware para verificar token do roteirizador
+const verificarTokenRoteirizador = async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'tutts_secret_key_2024');
+    
+    if (decoded.tipo !== 'roteirizador') {
+      return res.status(401).json({ error: 'Token inválido para roteirizador' });
+    }
+    
+    // Verificar se usuário ainda está ativo
+    const usuario = await pool.query(
+      'SELECT id, nome, email, ativo FROM usuarios_roteirizador WHERE id = $1',
+      [decoded.id]
+    );
+    
+    if (usuario.rows.length === 0 || !usuario.rows[0].ativo) {
+      return res.status(401).json({ error: 'Usuário inativo ou não encontrado' });
+    }
+    
+    req.usuarioRoteirizador = usuario.rows[0];
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Token inválido ou expirado' });
+  }
+};
+
+// Login do roteirizador
+app.post('/api/roteirizador/login', async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+    
+    if (!email || !senha) {
+      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
+    }
+    
+    const result = await pool.query(
+      'SELECT id, nome, email, senha_hash, ativo, empresa FROM usuarios_roteirizador WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Email ou senha incorretos' });
+    }
+    
+    const usuario = result.rows[0];
+    
+    if (!usuario.ativo) {
+      return res.status(401).json({ error: 'Usuário inativo. Entre em contato com o suporte.' });
+    }
+    
+    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash);
+    
+    if (!senhaValida) {
+      return res.status(401).json({ error: 'Email ou senha incorretos' });
+    }
+    
+    // Atualizar último acesso
+    await pool.query(
+      'UPDATE usuarios_roteirizador SET ultimo_acesso = CURRENT_TIMESTAMP WHERE id = $1',
+      [usuario.id]
+    );
+    
+    // Gerar token
+    const token = jwt.sign(
+      { id: usuario.id, email: usuario.email, tipo: 'roteirizador' },
+      process.env.JWT_SECRET || 'tutts_secret_key_2024',
+      { expiresIn: '7d' }
+    );
+    
+    console.log('✅ Login roteirizador:', usuario.email);
+    
+    res.json({
+      token,
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+        empresa: usuario.empresa
+      }
+    });
+  } catch (err) {
+    console.error('❌ Erro login roteirizador:', err);
+    res.status(500).json({ error: 'Erro ao fazer login' });
+  }
+});
+
+// Verificar token (para manter sessão)
+app.get('/api/roteirizador/verificar', verificarTokenRoteirizador, (req, res) => {
+  res.json({ 
+    valido: true, 
+    usuario: req.usuarioRoteirizador 
+  });
+});
+
+// Salvar rota no histórico
+app.post('/api/roteirizador/rotas', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const { nome_rota, ponto_partida, pontos_entrega, rotas_geradas, config, total_km, total_min, num_rotas, num_paradas } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO rotas_historico 
+      (usuario_id, nome_rota, ponto_partida, pontos_entrega, rotas_geradas, config, total_km, total_min, num_rotas, num_paradas)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id, criado_em
+    `, [
+      req.usuarioRoteirizador.id,
+      nome_rota || null,
+      JSON.stringify(ponto_partida),
+      JSON.stringify(pontos_entrega),
+      JSON.stringify(rotas_geradas),
+      JSON.stringify(config),
+      total_km || null,
+      total_min || null,
+      num_rotas || null,
+      num_paradas || null
+    ]);
+    
+    console.log('💾 Rota salva:', result.rows[0].id, 'usuário:', req.usuarioRoteirizador.id);
+    
+    res.json({ 
+      sucesso: true, 
+      id: result.rows[0].id,
+      criado_em: result.rows[0].criado_em
+    });
+  } catch (err) {
+    console.error('❌ Erro ao salvar rota:', err);
+    res.status(500).json({ error: 'Erro ao salvar rota' });
+  }
+});
+
+// Listar histórico de rotas
+app.get('/api/roteirizador/rotas', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const { limite = 20, pagina = 1 } = req.query;
+    const offset = (parseInt(pagina) - 1) * parseInt(limite);
+    
+    const result = await pool.query(`
+      SELECT id, nome_rota, ponto_partida, num_rotas, num_paradas, total_km, total_min, criado_em
+      FROM rotas_historico 
+      WHERE usuario_id = $1 
+      ORDER BY criado_em DESC 
+      LIMIT $2 OFFSET $3
+    `, [req.usuarioRoteirizador.id, parseInt(limite), offset]);
+    
+    const total = await pool.query(
+      'SELECT COUNT(*) FROM rotas_historico WHERE usuario_id = $1',
+      [req.usuarioRoteirizador.id]
+    );
+    
+    res.json({
+      rotas: result.rows,
+      total: parseInt(total.rows[0].count),
+      pagina: parseInt(pagina),
+      limite: parseInt(limite)
+    });
+  } catch (err) {
+    console.error('❌ Erro ao listar rotas:', err);
+    res.status(500).json({ error: 'Erro ao listar rotas' });
+  }
+});
+
+// Buscar rota específica (para recarregar)
+app.get('/api/roteirizador/rotas/:id', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM rotas_historico 
+      WHERE id = $1 AND usuario_id = $2
+    `, [req.params.id, req.usuarioRoteirizador.id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Rota não encontrada' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao buscar rota:', err);
+    res.status(500).json({ error: 'Erro ao buscar rota' });
+  }
+});
+
+// Deletar rota do histórico
+app.delete('/api/roteirizador/rotas/:id', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM rotas_historico WHERE id = $1 AND usuario_id = $2 RETURNING id',
+      [req.params.id, req.usuarioRoteirizador.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Rota não encontrada' });
+    }
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar rota:', err);
+    res.status(500).json({ error: 'Erro ao deletar rota' });
+  }
+});
+
+// Salvar endereço favorito
+app.post('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const { endereco, apelido, latitude, longitude } = req.body;
+    
+    // Verificar se já existe
+    const existe = await pool.query(
+      'SELECT id FROM enderecos_favoritos WHERE usuario_id = $1 AND endereco = $2',
+      [req.usuarioRoteirizador.id, endereco]
+    );
+    
+    if (existe.rows.length > 0) {
+      // Atualizar uso
+      await pool.query(`
+        UPDATE enderecos_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP, latitude = COALESCE($3, latitude), longitude = COALESCE($4, longitude)
+        WHERE id = $1
+      `, [existe.rows[0].id, latitude, longitude]);
+      
+      return res.json({ sucesso: true, id: existe.rows[0].id, atualizado: true });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO enderecos_favoritos (usuario_id, endereco, apelido, latitude, longitude)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+    `, [req.usuarioRoteirizador.id, endereco, apelido, latitude, longitude]);
+    
+    res.json({ sucesso: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('❌ Erro ao salvar favorito:', err);
+    res.status(500).json({ error: 'Erro ao salvar favorito' });
+  }
+});
+
+// Listar endereços favoritos
+app.get('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, endereco, apelido, latitude, longitude, vezes_usado
+      FROM enderecos_favoritos 
+      WHERE usuario_id = $1 
+      ORDER BY vezes_usado DESC, ultimo_uso DESC
+      LIMIT 50
+    `, [req.usuarioRoteirizador.id]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar favoritos:', err);
+    res.status(500).json({ error: 'Erro ao listar favoritos' });
+  }
+});
+
+// ==================== CENTRAL - Gerenciar usuários do roteirizador ====================
+
+// Criar usuário do roteirizador (só admin da central)
+app.post('/api/admin/roteirizador/usuarios', verificarToken, async (req, res) => {
+  try {
+    const { nome, email, senha, telefone, empresa, observacoes } = req.body;
+    
+    if (!nome || !email || !senha) {
+      return res.status(400).json({ error: 'Nome, email e senha são obrigatórios' });
+    }
+    
+    // Verificar se email já existe
+    const existe = await pool.query(
+      'SELECT id FROM usuarios_roteirizador WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+    
+    if (existe.rows.length > 0) {
+      return res.status(400).json({ error: 'Email já cadastrado' });
+    }
+    
+    const senha_hash = await bcrypt.hash(senha, 10);
+    
+    const result = await pool.query(`
+      INSERT INTO usuarios_roteirizador (nome, email, senha_hash, telefone, empresa, observacoes, criado_por)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING id, nome, email, empresa, criado_em
+    `, [nome, email.toLowerCase().trim(), senha_hash, telefone, empresa, observacoes, req.usuario.id]);
+    
+    console.log('✅ Usuário roteirizador criado:', result.rows[0].email, 'por:', req.usuario.email);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar usuário roteirizador:', err);
+    res.status(500).json({ error: 'Erro ao criar usuário' });
+  }
+});
+
+// Listar usuários do roteirizador (só admin)
+app.get('/api/admin/roteirizador/usuarios', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, nome, email, telefone, empresa, ativo, criado_em, ultimo_acesso,
+             (SELECT COUNT(*) FROM rotas_historico WHERE usuario_id = usuarios_roteirizador.id) as total_rotas
+      FROM usuarios_roteirizador 
+      ORDER BY criado_em DESC
+    `);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar usuários:', err);
+    res.status(500).json({ error: 'Erro ao listar usuários' });
+  }
+});
+
+// Ativar/Desativar usuário do roteirizador
+app.patch('/api/admin/roteirizador/usuarios/:id/ativo', verificarToken, async (req, res) => {
+  try {
+    const { ativo } = req.body;
+    
+    const result = await pool.query(
+      'UPDATE usuarios_roteirizador SET ativo = $1 WHERE id = $2 RETURNING id, nome, email, ativo',
+      [ativo, req.params.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    console.log('✅ Usuário roteirizador', ativo ? 'ativado' : 'desativado', ':', result.rows[0].email);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar usuário:', err);
+    res.status(500).json({ error: 'Erro ao atualizar usuário' });
+  }
+});
+
+// Resetar senha do usuário do roteirizador
+app.patch('/api/admin/roteirizador/usuarios/:id/senha', verificarToken, async (req, res) => {
+  try {
+    const { nova_senha } = req.body;
+    
+    if (!nova_senha || nova_senha.length < 6) {
+      return res.status(400).json({ error: 'Senha deve ter no mínimo 6 caracteres' });
+    }
+    
+    const senha_hash = await bcrypt.hash(nova_senha, 10);
+    
+    const result = await pool.query(
+      'UPDATE usuarios_roteirizador SET senha_hash = $1 WHERE id = $2 RETURNING id, nome, email',
+      [senha_hash, req.params.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    console.log('✅ Senha resetada para:', result.rows[0].email);
+    
+    res.json({ sucesso: true, usuario: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Erro ao resetar senha:', err);
+    res.status(500).json({ error: 'Erro ao resetar senha' });
+  }
+});
+
+console.log('🗺️ API do Roteirizador Público carregada!');
+
 // ==================== API DE GEOCODIFICAÇÃO ====================
 
 // Função para normalizar endereço (para comparação no cache)
