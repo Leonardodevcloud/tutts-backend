@@ -19637,6 +19637,62 @@ app.get('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, r
   }
 });
 
+// ==================== PROXY PARA OPENROUTESERVICE (evitar CORS) ====================
+
+const ORS_API_KEY = '5b3ce3597851110001cf62489923ef7b12aa4be8a1f63a02f94ed073';
+
+// Proxy para otimização de rotas
+app.post('/api/roteirizador/otimizar', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const response = await fetch('https://api.openrouteservice.org/optimization', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': ORS_API_KEY
+      },
+      body: JSON.stringify(req.body)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Erro ORS otimização:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Erro na otimização' });
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('❌ Erro proxy otimização:', err);
+    res.status(500).json({ error: 'Erro ao otimizar rota' });
+  }
+});
+
+// Proxy para direções/geometria
+app.post('/api/roteirizador/direcoes', verificarTokenRoteirizador, async (req, res) => {
+  try {
+    const response = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': ORS_API_KEY
+      },
+      body: JSON.stringify(req.body)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Erro ORS direções:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Erro nas direções' });
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('❌ Erro proxy direções:', err);
+    res.status(500).json({ error: 'Erro ao obter direções' });
+  }
+});
+
 // ==================== CENTRAL - Gerenciar usuários do roteirizador ====================
 
 // Criar usuário do roteirizador (só admin da central)
