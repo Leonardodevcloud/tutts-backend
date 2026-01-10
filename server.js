@@ -19379,7 +19379,120 @@ console.log('✅ Módulo de Auditoria carregado!');
 
 // ==================== API DE GEOCODIFICAÇÃO ====================
 
-// Endpoint Google Geocoding (PRINCIPAL)
+// Função para normalizar endereço (para comparação no cache)
+function normalizarEndereco(endereco) {
+  let texto = (endereco || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove acentos
+    
+    // ========================================
+    // ABREVIAÇÕES DE LOGRADOUROS
+    // ========================================
+    .replace(/\b(avenida|aven|avda)\b/g, 'av')
+    .replace(/\b(rua)\b/g, 'r')
+    .replace(/\b(travessa|trav)\b/g, 'tv')
+    .replace(/\b(alameda)\b/g, 'al')
+    .replace(/\b(praca|pca)\b/g, 'pc')
+    .replace(/\b(rodovia|rod)\b/g, 'rod')
+    .replace(/\b(estrada|estr)\b/g, 'est')
+    .replace(/\b(largo)\b/g, 'lg')
+    .replace(/\b(beco)\b/g, 'bc')
+    .replace(/\b(viela)\b/g, 'vl')
+    .replace(/\b(ladeira)\b/g, 'ld')
+    .replace(/\b(passagem|pass)\b/g, 'pas')
+    .replace(/\b(quadra|qd)\b/g, 'q')
+    .replace(/\b(lote|lt)\b/g, 'lt')
+    .replace(/\b(bloco|bl)\b/g, 'bl')
+    .replace(/\b(conjunto|conj|cj)\b/g, 'cj')
+    .replace(/\b(edificio|edif|ed)\b/g, 'ed')
+    .replace(/\b(apartamento|apto|apt|ap)\b/g, 'ap')
+    .replace(/\b(casa)\b/g, 'cs')
+    .replace(/\b(sala|sl)\b/g, 'sl')
+    .replace(/\b(loja|lj)\b/g, 'lj')
+    .replace(/\b(sobreloja|slj)\b/g, 'slj')
+    .replace(/\b(andar)\b/g, 'and')
+    .replace(/\b(galeria|gal)\b/g, 'gal')
+    .replace(/\b(chacara|chac)\b/g, 'ch')
+    .replace(/\b(fazenda|faz)\b/g, 'faz')
+    .replace(/\b(sitio)\b/g, 'sit')
+    .replace(/\b(vila|vl)\b/g, 'vl')
+    .replace(/\b(jardim|jd|jard)\b/g, 'jd')
+    .replace(/\b(parque|pq|pque)\b/g, 'pq')
+    .replace(/\b(residencial|resid|res)\b/g, 'res')
+    .replace(/\b(setor|set)\b/g, 'st')
+    .replace(/\b(centro)\b/g, 'ctr')
+    
+    // ========================================
+    // TÍTULOS E PATENTES
+    // ========================================
+    .replace(/\b(doutor|dr)\b/g, 'dr')
+    .replace(/\b(doutora|dra)\b/g, 'dra')
+    .replace(/\b(professor|prof)\b/g, 'prof')
+    .replace(/\b(professora|profa)\b/g, 'profa')
+    .replace(/\b(engenheiro|eng)\b/g, 'eng')
+    .replace(/\b(engenheira|enga)\b/g, 'enga')
+    .replace(/\b(general|gen)\b/g, 'gen')
+    .replace(/\b(coronel|cel)\b/g, 'cel')
+    .replace(/\b(tenente|ten)\b/g, 'ten')
+    .replace(/\b(capitao|cap)\b/g, 'cap')
+    .replace(/\b(sargento|sgt)\b/g, 'sgt')
+    .replace(/\b(soldado|sd)\b/g, 'sd')
+    .replace(/\b(almirante|alm)\b/g, 'alm')
+    .replace(/\b(brigadeiro|brig)\b/g, 'brig')
+    .replace(/\b(marechal|mal)\b/g, 'mal')
+    .replace(/\b(presidente|pres)\b/g, 'pres')
+    .replace(/\b(governador|gov)\b/g, 'gov')
+    .replace(/\b(prefeito|pref)\b/g, 'pref')
+    .replace(/\b(deputado|dep)\b/g, 'dep')
+    .replace(/\b(senador|sen)\b/g, 'sen')
+    .replace(/\b(vereador|ver)\b/g, 'ver')
+    .replace(/\b(padre|pe)\b/g, 'pe')
+    .replace(/\b(frei)\b/g, 'fr')
+    .replace(/\b(irma|irm)\b/g, 'irm')
+    .replace(/\b(santo|sto)\b/g, 'sto')
+    .replace(/\b(santa|sta)\b/g, 'sta')
+    .replace(/\b(sao)\b/g, 'sao')
+    .replace(/\b(nossa senhora|ns)\b/g, 'ns')
+    .replace(/\b(dom)\b/g, 'dom')
+    .replace(/\b(dona|dna)\b/g, 'dna')
+    .replace(/\b(senhor|sr)\b/g, 'sr')
+    .replace(/\b(senhora|sra)\b/g, 'sra')
+    
+    // ========================================
+    // DIREÇÕES E POSIÇÕES
+    // ========================================
+    .replace(/\b(norte|n)\b/g, 'n')
+    .replace(/\b(sul|s)\b/g, 's')
+    .replace(/\b(leste|l)\b/g, 'l')
+    .replace(/\b(oeste|o)\b/g, 'o')
+    
+    // ========================================
+    // ESTADOS (para remover redundância)
+    // ========================================
+    .replace(/\bgoias\b/g, 'go')
+    .replace(/\b(goiania)\b/g, 'gyn')
+    .replace(/\b(brasilia)\b/g, 'bsb')
+    .replace(/\b(sao paulo)\b/g, 'sp')
+    .replace(/\b(rio de janeiro)\b/g, 'rj')
+    .replace(/\b(belo horizonte)\b/g, 'bh')
+    .replace(/\b(brasil|brazil|br)\b/g, '')
+    
+    // ========================================
+    // LIMPEZA FINAL
+    // ========================================
+    .replace(/[^a-z0-9\s]/g, ' ') // Remove caracteres especiais
+    .replace(/\s+/g, ' ') // Normaliza múltiplos espaços
+    .trim();
+    
+  // Remover palavras muito comuns que não agregam na busca
+  const stopWords = ['de', 'da', 'do', 'das', 'dos', 'e', 'em', 'na', 'no', 'nas', 'nos', 'a', 'o', 'as', 'os', 'um', 'uma', 'para', 'com'];
+  texto = texto.split(' ').filter(p => !stopWords.includes(p) && p.length > 0).join(' ');
+  
+  return texto;
+}
+
+// Endpoint Google Geocoding (COM CACHE)
 app.get('/api/geocode/google', async (req, res) => {
   try {
     const { endereco } = req.query;
@@ -19394,7 +19507,51 @@ app.get('/api/geocode/google', async (req, res) => {
       return res.status(500).json({ error: 'API Key não configurada no servidor' });
     }
     
-    console.log('🔍 Google Geocoding:', endereco);
+    const enderecoNormalizado = normalizarEndereco(endereco);
+    
+    // ========================================
+    // ETAPA 1: Verificar cache no banco
+    // ========================================
+    try {
+      const cacheResult = await pool.query(
+        `SELECT id, endereco_formatado, latitude, longitude, fonte 
+         FROM enderecos_geocodificados 
+         WHERE endereco_busca_normalizado = $1 
+         LIMIT 1`,
+        [enderecoNormalizado]
+      );
+      
+      if (cacheResult.rows.length > 0) {
+        const cached = cacheResult.rows[0];
+        console.log('✅ Cache HIT:', endereco, '→', cached.latitude, cached.longitude);
+        
+        // Atualizar contador de acessos (async, não bloqueia)
+        pool.query(
+          `UPDATE enderecos_geocodificados 
+           SET acessos = acessos + 1, ultimo_acesso = CURRENT_TIMESTAMP 
+           WHERE id = $1`,
+          [cached.id]
+        ).catch(e => console.log('⚠️ Erro ao atualizar acessos:', e.message));
+        
+        return res.json({
+          results: [{
+            endereco: cached.endereco_formatado,
+            latitude: parseFloat(cached.latitude),
+            longitude: parseFloat(cached.longitude),
+            fonte: cached.fonte + '-cache'
+          }],
+          fonte: 'cache'
+        });
+      }
+    } catch (dbErr) {
+      console.log('⚠️ Erro ao consultar cache:', dbErr.message);
+      // Continua para buscar no Google
+    }
+    
+    // ========================================
+    // ETAPA 2: Buscar no Google (cache MISS)
+    // ========================================
+    console.log('🔍 Cache MISS, buscando no Google:', endereco);
     
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR`;
     
@@ -19403,6 +19560,28 @@ app.get('/api/geocode/google', async (req, res) => {
     
     if (data.status === 'OK' && data.results && data.results.length > 0) {
       console.log('✅ Google sucesso:', data.results.length, 'resultados');
+      
+      // Salvar o primeiro resultado no cache (async, não bloqueia)
+      const primeiro = data.results[0];
+      pool.query(
+        `INSERT INTO enderecos_geocodificados 
+         (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [
+          endereco,
+          enderecoNormalizado,
+          primeiro.formatted_address,
+          primeiro.geometry.location.lat,
+          primeiro.geometry.location.lng,
+          'google'
+        ]
+      ).then(() => {
+        console.log('💾 Salvo no cache:', endereco);
+      }).catch(e => {
+        console.log('⚠️ Erro ao salvar cache:', e.message);
+      });
+      
       return res.json({
         results: data.results.map(r => ({
           endereco: r.formatted_address,
@@ -19423,6 +19602,50 @@ app.get('/api/geocode/google', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro Google Geocoding:', err);
     res.status(500).json({ error: 'Erro ao geocodificar' });
+  }
+});
+
+// Endpoint para estatísticas do cache de geocodificação
+app.get('/api/geocode/stats', async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_enderecos,
+        SUM(acessos) as total_acessos,
+        SUM(acessos) - COUNT(*) as requisicoes_economizadas,
+        ROUND(((SUM(acessos) - COUNT(*))::numeric / NULLIF(SUM(acessos), 0)) * 100, 2) as percentual_cache,
+        MAX(criado_em) as ultimo_cadastro,
+        (SELECT COUNT(*) FROM enderecos_geocodificados WHERE criado_em > CURRENT_DATE - INTERVAL '30 days') as novos_ultimo_mes
+      FROM enderecos_geocodificados
+    `);
+    
+    const topEnderecos = await pool.query(`
+      SELECT endereco_formatado, acessos, criado_em
+      FROM enderecos_geocodificados
+      ORDER BY acessos DESC
+      LIMIT 10
+    `);
+    
+    const row = stats.rows[0];
+    const economiaDolares = ((parseInt(row.requisicoes_economizadas) || 0) / 1000) * 5;
+    
+    res.json({
+      cache: {
+        total_enderecos: parseInt(row.total_enderecos) || 0,
+        total_acessos: parseInt(row.total_acessos) || 0,
+        requisicoes_economizadas: parseInt(row.requisicoes_economizadas) || 0,
+        percentual_cache: parseFloat(row.percentual_cache) || 0,
+        novos_ultimo_mes: parseInt(row.novos_ultimo_mes) || 0
+      },
+      economia: {
+        dolares: economiaDolares.toFixed(2),
+        reais: (economiaDolares * 6).toFixed(2)
+      },
+      top_enderecos: topEnderecos.rows
+    });
+  } catch (err) {
+    console.error('❌ Erro stats cache:', err);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas' });
   }
 });
 
