@@ -13,30 +13,83 @@ require('dotenv').config();
 // Função para fazer requisições HTTP/HTTPS (substitui fetch)
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const requestOptions = {
-      hostname: urlObj.hostname,
-      port: urlObj.port || 443,
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || 'GET',
-      headers: options.headers || {}
-    };
-    
-    const req = https.request(requestOptions, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: () => JSON.parse(data), text: () => data });
-        } catch (e) {
-          resolve({ ok: false, status: res.statusCode, json: () => ({}), text: () => data });
+    try {
+      const urlObj = new URL(url);
+      const isHttps = urlObj.protocol === 'https:';
+      const httpModule = isHttps ? https : require('http');
+      
+      const requestOptions = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (isHttps ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: options.method || 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          ...(options.headers || {})
         }
+      };
+      
+      // Adicionar Content-Length se tiver body
+      if (options.body) {
+        requestOptions.headers['Content-Length'] = Buffer.byteLength(options.body);
+      }
+      
+      const req = httpModule.request(requestOptions, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const jsonData = data ? JSON.parse(data) : {};
+            resolve({ 
+              ok: res.statusCode >= 200 && res.statusCode < 300, 
+              status: res.statusCode, 
+              json: () => jsonData, 
+              text: () => data 
+            });
+          } catch (e) {
+            console.log('⚠️ httpRequest parse error:', e.message, 'data:', data.substring(0, 200));
+            resolve({ 
+              ok: false, 
+              status: res.statusCode, 
+              json: () => ({ error: 'Parse error', raw: data.substring(0, 500) }), 
+              text: () => data 
+            });
+          }
+        });
       });
-    });
-    
-    req.on('error', reject);
-    if (options.body) req.write(options.body);
-    req.end();
+      
+      req.on('error', (err) => {
+        console.log('❌ httpRequest error:', err.message);
+        resolve({ 
+          ok: false, 
+          status: 0, 
+          json: () => ({ error: err.message }), 
+          text: () => err.message 
+        });
+      });
+      
+      req.setTimeout(30000, () => {
+        req.destroy();
+        resolve({ 
+          ok: false, 
+          status: 0, 
+          json: () => ({ error: 'Timeout' }), 
+          text: () => 'Timeout' 
+        });
+      });
+      
+      if (options.body) req.write(options.body);
+      req.end();
+    } catch (err) {
+      console.log('❌ httpRequest exception:', err.message);
+      resolve({ 
+        ok: false, 
+        status: 0, 
+        json: () => ({ error: err.message }), 
+        text: () => err.message 
+      });
+    }
   });
 }
 
@@ -20563,8 +20616,8 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     });
     
   } catch (err) {
-    console.error('❌ Erro ao solicitar corrida:', err);
-    res.status(500).json({ error: 'Erro ao solicitar corrida' });
+    console.error('❌ Erro ao solicitar corrida:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao solicitar corrida', detalhe: err.message });
   }
 });
 
@@ -20944,6 +20997,28 @@ app.patch('/api/admin/solicitacao/clientes/:id/credenciais', verificarToken, asy
   } catch (err) {
     console.error('❌ Erro ao atualizar credenciais:', err);
     res.status(500).json({ error: 'Erro ao atualizar credenciais' });
+  }
+});
+
+// Excluir cliente de solicitação
+app.delete('/api/admin/solicitacao/clientes/:id', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verificar se cliente existe
+    const cliente = await pool.query('SELECT id, nome FROM clientes_solicitacao WHERE id = $1', [id]);
+    if (cliente.rows.length === 0) {
+      return res.status(404).json({ error: 'Cliente não encontrado' });
+    }
+    
+    // Excluir (as tabelas relacionadas têm ON DELETE CASCADE)
+    await pool.query('DELETE FROM clientes_solicitacao WHERE id = $1', [id]);
+    
+    console.log(`🗑️ Cliente de solicitação excluído: ${cliente.rows[0].nome} (ID: ${id})`);
+    res.json({ sucesso: true, mensagem: 'Cliente excluído com sucesso' });
+  } catch (err) {
+    console.error('❌ Erro ao excluir cliente:', err);
+    res.status(500).json({ error: 'Erro ao excluir cliente' });
   }
 });
 
