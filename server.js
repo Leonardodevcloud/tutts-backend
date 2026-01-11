@@ -15,6 +15,10 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// VERSÃO DO SERVIDOR - Para debug de deploy
+const SERVER_VERSION = '2026-01-11-SOLICITACAO';
+app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
+
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
 const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
 const JWT_EXPIRES_IN = '8h';
