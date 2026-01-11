@@ -7,10 +7,38 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const https = require('https');
 require('dotenv').config();
 
-// Importar fetch para Node.js (compatibilidade)
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+// Função para fazer requisições HTTP/HTTPS (substitui fetch)
+function httpRequest(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const requestOptions = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || 443,
+      path: urlObj.pathname + urlObj.search,
+      method: options.method || 'GET',
+      headers: options.headers || {}
+    };
+    
+    const req = https.request(requestOptions, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: () => JSON.parse(data), text: () => data });
+        } catch (e) {
+          resolve({ ok: false, status: res.statusCode, json: () => ({}), text: () => data });
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
 
 // Forçar DNS para IPv4
 dns.setDefaultResultOrder('ipv4first');
@@ -20458,7 +20486,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
     
     // Enviar para API Tutts
-    const response = await fetch('https://tutts.com.br/integracao', {
+    const response = await httpRequest('https://tutts.com.br/integracao', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
