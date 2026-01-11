@@ -20491,6 +20491,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       codigo_profissional,
       valor_rota_profissional,
       valor_rota_servico,
+      sem_profissional,  // NOVO - Modo teste (não dispara para motoboys)
       pontos // Array de pontos
     } = req.body;
     
@@ -20500,6 +20501,11 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     
     if (pontos.length > 80) {
       return res.status(400).json({ error: 'Máximo de 80 pontos permitido' });
+    }
+    
+    // NOVO - Validação: ordenar só permite até 20 pontos
+    if (ordenar && pontos.length > 20) {
+      return res.status(400).json({ error: 'Ordenação automática permite máximo de 20 pontos' });
     }
     
     // Montar payload para API Tutts
@@ -20533,10 +20539,12 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       pontoReceber: ponto_receber ? String(ponto_receber) : '',
       valorRotaProfissional: valor_rota_profissional ? String(valor_rota_profissional) : '',
       valorRotaServico: valor_rota_servico ? String(valor_rota_servico) : '',
-      ordenar: ordenar ? 'true' : 'false'
+      ordenar: ordenar ? 'true' : 'false',
+      semProfissional: sem_profissional ? 'S' : ''  // NOVO - Modo teste
     };
     
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
+    console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
     
     // Enviar para API Tutts
     const response = await httpRequest('https://tutts.com.br/integracao', {
@@ -20612,7 +20620,8 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       sucesso: true,
       solicitacao_id: solicitacaoId,
       os_numero: resultado.Sucesso,
-      detalhes: resultado.detalhes
+      detalhes: resultado.detalhes,
+      modo_teste: sem_profissional || false  // NOVO - Informa se foi modo teste
     });
     
   } catch (err) {
