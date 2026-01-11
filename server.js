@@ -20776,6 +20776,74 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
   }
 });
 
+// RASTREIO PÚBLICO - Acompanhar corrida sem login (para compartilhar)
+app.get('/api/rastreio/:codigo', async (req, res) => {
+  try {
+    const { codigo } = req.params;
+    
+    // Buscar por OS número ou por código de rastreio
+    const solicitacao = await pool.query(`
+      SELECT 
+        s.id, s.tutts_os_numero, s.status, s.status_codigo, s.status_atualizado_em,
+        s.tutts_distancia, s.tutts_duracao, s.tutts_valor, s.tutts_url_rastreamento,
+        s.profissional_nome, s.profissional_foto, s.profissional_placa, 
+        s.profissional_veiculo, s.profissional_cor_veiculo,
+        s.criado_em, s.atualizado_em,
+        c.empresa as cliente_empresa
+      FROM solicitacoes_corrida s
+      LEFT JOIN clientes_solicitacao c ON s.cliente_id = c.id
+      WHERE s.tutts_os_numero = $1 OR s.codigo_rastreio = $1
+    `, [codigo]);
+    
+    if (solicitacao.rows.length === 0) {
+      return res.status(404).json({ error: 'Corrida não encontrada' });
+    }
+    
+    const dados = solicitacao.rows[0];
+    
+    // Buscar pontos (sem dados sensíveis)
+    const pontos = await pool.query(`
+      SELECT 
+        ordem, bairro, cidade, uf, status, 
+        data_chegada, data_coletado, data_finalizado
+      FROM solicitacoes_pontos 
+      WHERE solicitacao_id = $1 
+      ORDER BY ordem
+    `, [dados.id]);
+    
+    // Retornar dados públicos (sem expor endereços completos, telefones, etc)
+    res.json({
+      os_numero: dados.tutts_os_numero,
+      status: dados.status,
+      status_atualizado_em: dados.status_atualizado_em,
+      distancia: dados.tutts_distancia,
+      duracao: dados.tutts_duracao,
+      url_rastreamento_tutts: dados.tutts_url_rastreamento,
+      profissional: dados.profissional_nome ? {
+        nome: dados.profissional_nome,
+        foto: dados.profissional_foto,
+        placa: dados.profissional_placa,
+        veiculo: dados.profissional_veiculo,
+        cor: dados.profissional_cor_veiculo
+      } : null,
+      empresa: dados.cliente_empresa,
+      criado_em: dados.criado_em,
+      pontos: pontos.rows.map(p => ({
+        ordem: p.ordem,
+        local: `${p.bairro || ''}, ${p.cidade || ''}`.replace(/^, |, $/g, ''),
+        status: p.status,
+        chegou_em: p.data_chegada,
+        coletado_em: p.data_coletado,
+        finalizado_em: p.data_finalizado
+      }))
+    });
+    
+  } catch (err) {
+    console.error('❌ Erro ao buscar rastreio:', err);
+    res.status(500).json({ error: 'Erro ao buscar rastreio' });
+  }
+});
+
 // WEBHOOK - Receber notificações da API Tutts
 app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
   try {
