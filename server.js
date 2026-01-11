@@ -20776,6 +20776,59 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
   }
 });
 
+// BUSCAR PROFISSIONAIS - Lista motoboys disponíveis para o cliente
+app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    // Verificar se cliente tem token de profissionais configurado
+    if (!req.clienteSolicitacao.tutts_token_profissionais) {
+      return res.json({ 
+        profissionais: [], 
+        aviso: 'Token de profissionais não configurado. Entre em contato com o administrador.'
+      });
+    }
+    
+    // Buscar profissionais na API Tutts
+    const payloadTutts = {
+      token: req.clienteSolicitacao.tutts_token_profissionais,
+      codCliente: req.clienteSolicitacao.tutts_cod_cliente
+    };
+    
+    console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
+    
+    const response = await fetch('https://tutts.com.br/md/painelLumen/lumen/v2/integracaoAPI/servico/profissionais/buscar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payloadTutts)
+    });
+    
+    const resultado = await response.json();
+    console.log('📥 Resposta profissionais Tutts:', resultado);
+    
+    if (resultado.Erro) {
+      console.log('⚠️ Erro ao buscar profissionais:', resultado.Erro);
+      return res.json({ 
+        profissionais: [], 
+        erro: resultado.Erro 
+      });
+    }
+    
+    if (resultado.Sucesso && Array.isArray(resultado.Sucesso)) {
+      return res.json({ 
+        profissionais: resultado.Sucesso.map(p => ({
+          codigo: p.codigo,
+          nome: p.nome
+        }))
+      });
+    }
+    
+    res.json({ profissionais: [] });
+    
+  } catch (err) {
+    console.error('❌ Erro ao buscar profissionais:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar profissionais', detalhe: err.message });
+  }
+});
+
 // RASTREIO PÚBLICO - Acompanhar corrida sem login (para compartilhar)
 app.get('/api/rastreio/:codigo', async (req, res) => {
   try {
