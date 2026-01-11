@@ -9,6 +9,9 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+// Importar fetch para Node.js (compatibilidade)
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
 // Forçar DNS para IPv4
 dns.setDefaultResultOrder('ipv4first');
 
