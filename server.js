@@ -20515,7 +20515,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       token: req.clienteSolicitacao.tutts_token_api,
       codCliente: req.clienteSolicitacao.tutts_codigo_cliente,
       Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
-      centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || '',
+      centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || req.clienteSolicitacao.nome || 'Central',
       numeroPedido: numero_pedido || '',
       DataRetirada: data_retirada || '',
       codigoProf: codigo_profissional || '',
