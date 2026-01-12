@@ -20728,7 +20728,7 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
   }
 });
 
-// Cancelar corrida manualmente (quando cancelou na Tutts)
+// Cancelar corrida - chama API Tutts para cancelar de verdade
 app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
@@ -20743,12 +20743,69 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
       return res.status(404).json({ error: 'Solicitação não encontrada' });
     }
     
+    const osNumero = solicitacao.rows[0].tutts_os_numero;
+    
     // Não permitir cancelar se já finalizada ou cancelada
     if (['finalizado', 'cancelado'].includes(solicitacao.rows[0].status)) {
       return res.status(400).json({ error: 'Esta corrida já está ' + solicitacao.rows[0].status });
     }
     
-    // Atualizar status para cancelado
+    // Obter token de cancelamento do cliente
+    // O token de cancelamento tem sufixo "-cancelar" em vez de "-gravar"
+    let tokenCancelar = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenCancelar && tokenCancelar.includes('-gravar')) {
+      tokenCancelar = tokenCancelar.replace('-gravar', '-cancelar');
+    } else if (tokenCancelar && !tokenCancelar.includes('-cancelar')) {
+      tokenCancelar = tokenCancelar + '-cancelar';
+    }
+    
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+    
+    // Se tem OS na Tutts, tentar cancelar lá também
+    let cancelouNaTutts = false;
+    let erroTutts = null;
+    
+    if (osNumero && tokenCancelar && codCliente) {
+      try {
+        const payloadTutts = {
+          token: tokenCancelar,
+          codCliente: codCliente,
+          OS: osNumero.toString()
+        };
+        
+        console.log('❌ [CANCELAR TUTTS] Enviando cancelamento:', JSON.stringify(payloadTutts, null, 2));
+        
+        const respTutts = await fetch('https://tutts.com.br/integracao', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payloadTutts)
+        });
+        
+        const dataTutts = await respTutts.json();
+        console.log('📥 [CANCELAR TUTTS] Resposta:', dataTutts);
+        
+        if (dataTutts.Sucesso || dataTutts.sucesso) {
+          cancelouNaTutts = true;
+          console.log(`✅ [CANCELAR TUTTS] OS ${osNumero} cancelada com sucesso na Tutts`);
+        } else if (dataTutts.Erro || dataTutts.erro) {
+          erroTutts = dataTutts.Erro || dataTutts.erro;
+          console.log(`⚠️ [CANCELAR TUTTS] Erro ao cancelar OS ${osNumero}: ${erroTutts}`);
+          
+          // Se erro é "Alocado", significa que já está em execução
+          if (erroTutts === 'Alocado') {
+            return res.status(400).json({ 
+              error: 'Não é possível cancelar: serviço em execução ou já finalizado na Tutts',
+              erro_tutts: erroTutts
+            });
+          }
+        }
+      } catch (errTutts) {
+        console.error('❌ [CANCELAR TUTTS] Erro na requisição:', errTutts.message);
+        erroTutts = errTutts.message;
+      }
+    }
+    
+    // Atualizar status para cancelado no nosso banco
     await pool.query(`
       UPDATE solicitacoes_corrida 
       SET status = 'cancelado', 
@@ -20757,9 +20814,14 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
       WHERE id = $1
     `, [id]);
     
-    console.log(`❌ [CANCELAR] OS ${solicitacao.rows[0].tutts_os_numero || id} cancelada manualmente pelo cliente ${req.clienteSolicitacao.nome}`);
+    console.log(`❌ [CANCELAR] OS ${osNumero || id} cancelada pelo cliente ${req.clienteSolicitacao.nome}`);
     
-    res.json({ sucesso: true, mensagem: 'Corrida marcada como cancelada' });
+    res.json({ 
+      sucesso: true, 
+      mensagem: cancelouNaTutts ? 'Corrida cancelada na Tutts e no sistema' : 'Corrida marcada como cancelada',
+      cancelou_tutts: cancelouNaTutts,
+      erro_tutts: erroTutts
+    });
   } catch (err) {
     console.error('❌ Erro ao cancelar corrida:', err);
     res.status(500).json({ error: 'Erro ao cancelar corrida' });
