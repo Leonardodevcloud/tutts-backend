@@ -21045,6 +21045,8 @@ app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => 
     const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token;
     const tutts_codigo_cliente = req.body.tutts_codigo_cliente || req.body.tutts_cod_cliente;
     
+    console.log('📝 Criando cliente solicitação:', { nome, email, telefone, empresa, tutts_token_api: tutts_token_api ? '***' : null, tutts_codigo_cliente });
+    
     if (!nome || !email || !senha || !tutts_token_api || !tutts_codigo_cliente) {
       return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
     }
@@ -21060,17 +21062,19 @@ app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => 
     }
     
     const senhaHash = await bcrypt.hash(senha, 10);
+    const criado_por = req.user?.id || null;
     
     const result = await pool.query(`
       INSERT INTO clientes_solicitacao (nome, email, senha_hash, telefone, empresa, tutts_token_api, tutts_codigo_cliente, criado_por, observacoes)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id, nome, email, empresa
-    `, [nome, email.toLowerCase(), senhaHash, telefone, empresa, tutts_token_api, tutts_codigo_cliente, req.user.id, observacoes]);
+    `, [nome, email.toLowerCase(), senhaHash, telefone || null, empresa || null, tutts_token_api, tutts_codigo_cliente, criado_por, observacoes || null]);
     
+    console.log('✅ Cliente solicitação criado:', result.rows[0]);
     res.json({ sucesso: true, cliente: result.rows[0] });
   } catch (err) {
-    console.error('❌ Erro ao criar cliente solicitação:', err);
-    res.status(500).json({ error: 'Erro ao criar cliente' });
+    console.error('❌ Erro ao criar cliente solicitação:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao criar cliente: ' + err.message });
   }
 });
 
