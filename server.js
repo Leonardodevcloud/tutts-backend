@@ -20510,57 +20510,59 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       return res.status(400).json({ error: 'Ordenação automática permite máximo de 20 pontos' });
     }
     
-    // Montar payload para API Tutts
+    // Montar payload para API Tutts - MÍNIMO conforme documentação
+    const pontosFormatados = pontos.map(p => {
+      // Se rua estiver vazia, usar endereco_completo como fallback
+      let rua = p.rua || '';
+      if (!rua && p.endereco_completo) {
+        rua = p.endereco_completo;
+      }
+      if (!rua && p.latitude && p.longitude) {
+        rua = `Coordenadas: ${p.latitude}, ${p.longitude}`;
+      }
+      
+      const ponto = {
+        rua: rua,
+        numero: p.numero || '',
+        bairro: p.bairro || '',
+        cidade: p.cidade || '',
+        uf: p.uf || '',
+        obs: p.observacao || ''
+      };
+      
+      // Adicionar coordenadas se existirem
+      if (p.latitude) ponto.la = String(p.latitude);
+      if (p.longitude) ponto.lo = String(p.longitude);
+      if (p.cep) ponto.cep = p.cep;
+      if (p.complemento) ponto.complemento = p.complemento;
+      if (p.telefone) ponto.telefone = p.telefone;
+      if (p.procurar_por) ponto.procurarPor = p.procurar_por;
+      if (p.numero_nota) ponto.numeroNota = p.numero_nota;
+      if (p.codigo_finalizar) ponto.codigoFinalizarEnd = p.codigo_finalizar;
+      
+      return ponto;
+    });
+    
     const payloadTutts = {
       token: req.clienteSolicitacao.tutts_token_api,
       codCliente: req.clienteSolicitacao.tutts_codigo_cliente,
       Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
       centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || req.clienteSolicitacao.nome || 'Central',
-      numeroPedido: numero_pedido || '',
-      DataRetirada: data_retirada || '',
-      codigoProf: codigo_profissional || '',
-      pontos: pontos.map(p => {
-        // Se rua estiver vazia, usar endereco_completo como fallback
-        let rua = p.rua || '';
-        let cidade = p.cidade || '';
-        let bairro = p.bairro || '';
-        
-        // Fallback: usar endereco_completo se campos estiverem vazios
-        if (!rua && p.endereco_completo) {
-          rua = p.endereco_completo;
-        }
-        
-        // Se ainda estiver vazio e tiver coordenadas, criar endereço genérico
-        if (!rua && p.latitude && p.longitude) {
-          rua = `Coordenadas: ${p.latitude}, ${p.longitude}`;
-        }
-        
-        return {
-          rua: rua,
-          numero: p.numero || '',
-          complemento: p.complemento || '',
-          bairro: bairro,
-          cidade: cidade,
-          uf: p.uf || '',
-          cep: p.cep || '',
-          la: p.latitude ? String(p.latitude) : '',
-          lo: p.longitude ? String(p.longitude) : '',
-          obs: p.observacao || '',
-          telefone: p.telefone || '',
-          procurarPor: p.procurar_por || '',
-          numeroNota: p.numero_nota || '',
-          codigoFinalizarEnd: p.codigo_finalizar || ''
-        };
-      }),
+      pontos: pontosFormatados,
       retorno: retorno ? 'S' : 'N',
-      obsRetorno: obs_retorno || '',
-      formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F',
-      pontoReceber: ponto_receber ? String(ponto_receber) : '',
-      valorRotaProfissional: valor_rota_profissional ? String(valor_rota_profissional) : '',
-      valorRotaServico: valor_rota_servico ? String(valor_rota_servico) : '',
-      ordenar: ordenar ? 'true' : 'false',
-      semProfissional: sem_profissional ? 'S' : ''  // NOVO - Modo teste
+      formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F'
     };
+    
+    // Adicionar campos opcionais apenas se tiverem valor
+    if (numero_pedido) payloadTutts.numeroPedido = numero_pedido;
+    if (data_retirada) payloadTutts.DataRetirada = data_retirada;
+    if (codigo_profissional) payloadTutts.codigoProf = codigo_profissional;
+    if (obs_retorno) payloadTutts.obsRetorno = obs_retorno;
+    if (ponto_receber) payloadTutts.pontoReceber = String(ponto_receber);
+    if (valor_rota_profissional) payloadTutts.valorRotaProfissional = String(valor_rota_profissional);
+    if (valor_rota_servico) payloadTutts.valorRotaServico = String(valor_rota_servico);
+    if (ordenar) payloadTutts.ordenar = 'true';
+    if (sem_profissional) payloadTutts.semProfissional = 'S';
     
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
     console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
