@@ -20530,6 +20530,11 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
           rua = p.endereco_completo;
         }
         
+        // Se ainda estiver vazio e tiver coordenadas, criar endereço genérico
+        if (!rua && p.latitude && p.longitude) {
+          rua = `Coordenadas: ${p.latitude}, ${p.longitude}`;
+        }
+        
         return {
           rua: rua,
           numero: p.numero || '',
