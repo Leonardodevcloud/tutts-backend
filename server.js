@@ -20510,8 +20510,8 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     
     // Montar payload para API Tutts
     const payloadTutts = {
-      token: req.clienteSolicitacao.tutts_token,
-      codCliente: req.clienteSolicitacao.tutts_cod_cliente,
+      token: req.clienteSolicitacao.tutts_token_api,
+      codCliente: req.clienteSolicitacao.tutts_codigo_cliente,
       Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
       centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || '',
       numeroPedido: numero_pedido || '',
@@ -20790,7 +20790,7 @@ app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req,
     // Buscar profissionais na API Tutts
     const payloadTutts = {
       token: req.clienteSolicitacao.tutts_token_profissionais,
-      codCliente: req.clienteSolicitacao.tutts_cod_cliente
+      codCliente: req.clienteSolicitacao.tutts_codigo_cliente
     };
     
     console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
@@ -21019,9 +21019,9 @@ app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
 // Criar cliente de solicitação (só admin da central)
 app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
-    const { nome, email, senha, telefone, empresa, tutts_token, tutts_cod_cliente, observacoes } = req.body;
+    const { nome, email, senha, telefone, empresa, tutts_token_api, tutts_codigo_cliente, observacoes } = req.body;
     
-    if (!nome || !email || !senha || !tutts_token || !tutts_cod_cliente) {
+    if (!nome || !email || !senha || !tutts_token_api || !tutts_codigo_cliente) {
       return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
     }
     
@@ -21038,10 +21038,10 @@ app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => 
     const senhaHash = await bcrypt.hash(senha, 10);
     
     const result = await pool.query(`
-      INSERT INTO clientes_solicitacao (nome, email, senha_hash, telefone, empresa, tutts_token, tutts_cod_cliente, criado_por, observacoes)
+      INSERT INTO clientes_solicitacao (nome, email, senha_hash, telefone, empresa, tutts_token_api, tutts_codigo_cliente, criado_por, observacoes)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id, nome, email, empresa
-    `, [nome, email.toLowerCase(), senhaHash, telefone, empresa, tutts_token, tutts_cod_cliente, req.user.id, observacoes]);
+    `, [nome, email.toLowerCase(), senhaHash, telefone, empresa, tutts_token_api, tutts_codigo_cliente, req.user.id, observacoes]);
     
     res.json({ sucesso: true, cliente: result.rows[0] });
   } catch (err) {
@@ -21055,7 +21055,7 @@ app.get('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT c.id, c.nome, c.email, c.telefone, c.empresa, c.ativo, c.criado_em, c.ultimo_acesso,
-        c.tutts_cod_cliente, c.observacoes,
+        c.tutts_codigo_cliente, c.observacoes,
         (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
       FROM clientes_solicitacao c
       ORDER BY c.criado_em DESC
@@ -21114,14 +21114,14 @@ app.patch('/api/admin/solicitacao/clientes/:id/senha', verificarToken, async (re
 app.patch('/api/admin/solicitacao/clientes/:id/credenciais', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { tutts_token, tutts_cod_cliente } = req.body;
+    const { tutts_token_api, tutts_codigo_cliente } = req.body;
     
     await pool.query(`
       UPDATE clientes_solicitacao 
-      SET tutts_token = COALESCE($1, tutts_token),
-          tutts_cod_cliente = COALESCE($2, tutts_cod_cliente)
+      SET tutts_token_api = COALESCE($1, tutts_token_api),
+          tutts_codigo_cliente = COALESCE($2, tutts_codigo_cliente)
       WHERE id = $3
-    `, [tutts_token, tutts_cod_cliente, id]);
+    `, [tutts_token_api, tutts_codigo_cliente, id]);
     
     res.json({ sucesso: true });
   } catch (err) {
