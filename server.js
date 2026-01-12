@@ -21156,6 +21156,24 @@ app.patch('/api/admin/solicitacao/clientes/:id/credenciais', verificarToken, asy
   }
 });
 
+// Alterar status (ativo/inativo) do cliente de solicitação
+app.patch('/api/admin/solicitacao/clientes/:id/status', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { ativo } = req.body;
+    
+    await pool.query(
+      'UPDATE clientes_solicitacao SET ativo = $1 WHERE id = $2',
+      [ativo, id]
+    );
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao alterar status:', err);
+    res.status(500).json({ error: 'Erro ao alterar status' });
+  }
+});
+
 // Excluir cliente de solicitação
 app.delete('/api/admin/solicitacao/clientes/:id', verificarToken, async (req, res) => {
   try {
