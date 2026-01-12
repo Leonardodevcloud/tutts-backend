@@ -20493,6 +20493,10 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       obs_retorno,
       ordenar,
       codigo_profissional,
+      profissional_nome,      // NOVO - Nome do profissional selecionado
+      profissional_foto,      // NOVO - Foto do profissional selecionado
+      profissional_telefone,  // NOVO - Telefone do profissional selecionado
+      profissional_placa,     // NOVO - Placa do profissional selecionado
       valor_rota_profissional,
       valor_rota_servico,
       sem_profissional,  // NOVO - Modo teste (não dispara para motoboys)
@@ -20592,8 +20596,9 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
         data_retirada, forma_pagamento, ponto_receber, retorno, obs_retorno,
         ordenar, codigo_profissional, valor_rota_profissional, valor_rota_servico,
         tutts_os_numero, tutts_distancia, tutts_duracao, tutts_valor, tutts_url_rastreamento,
-        status, erro_mensagem
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        status, erro_mensagem,
+        profissional_nome, profissional_foto, profissional_telefone, profissional_placa
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING id
     `, [
       req.clienteSolicitacao.id,
@@ -20615,7 +20620,11 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       resultado.detalhes?.valor ? parseFloat(resultado.detalhes.valor) : null,
       resultado.detalhes?.urlRastreamento || null,
       resultado.Sucesso ? 'enviado' : 'erro',
-      resultado.Erro || null
+      resultado.Erro || null,
+      profissional_nome || null,
+      profissional_foto || null,
+      profissional_telefone || null,
+      profissional_placa || null
     ]);
     
     const solicitacaoId = solicitacao.rows[0].id;
@@ -21320,7 +21329,11 @@ app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req,
       return res.json({ 
         profissionais: resultado.Sucesso.map(p => ({
           codigo: p.codigo,
-          nome: p.nome
+          nome: p.nome,
+          foto: p.foto || p.Foto || null,
+          telefone: p.telefone || null,
+          placa: p.placa || null,
+          veiculo: p.veiculo || p.modeloVeiculo || null
         }))
       });
     }
