@@ -20499,6 +20499,8 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       return res.status(400).json({ error: 'Informe pelo menos 1 ponto de entrega' });
     }
     
+    console.log('📍 Pontos recebidos do frontend:', JSON.stringify(pontos, null, 2));
+    
     if (pontos.length > 80) {
       return res.status(400).json({ error: 'Máximo de 80 pontos permitido' });
     }
@@ -20517,22 +20519,34 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
       numeroPedido: numero_pedido || '',
       DataRetirada: data_retirada || '',
       codigoProf: codigo_profissional || '',
-      pontos: pontos.map(p => ({
-        rua: p.rua || '',
-        numero: p.numero || '',
-        complemento: p.complemento || '',
-        bairro: p.bairro || '',
-        cidade: p.cidade || '',
-        uf: p.uf || '',
-        cep: p.cep || '',
-        la: p.latitude ? String(p.latitude) : '',
-        lo: p.longitude ? String(p.longitude) : '',
-        obs: p.observacao || '',
-        telefone: p.telefone || '',
-        procurarPor: p.procurar_por || '',
-        numeroNota: p.numero_nota || '',
-        codigoFinalizarEnd: p.codigo_finalizar || ''
-      })),
+      pontos: pontos.map(p => {
+        // Se rua estiver vazia, usar endereco_completo como fallback
+        let rua = p.rua || '';
+        let cidade = p.cidade || '';
+        let bairro = p.bairro || '';
+        
+        // Fallback: usar endereco_completo se campos estiverem vazios
+        if (!rua && p.endereco_completo) {
+          rua = p.endereco_completo;
+        }
+        
+        return {
+          rua: rua,
+          numero: p.numero || '',
+          complemento: p.complemento || '',
+          bairro: bairro,
+          cidade: cidade,
+          uf: p.uf || '',
+          cep: p.cep || '',
+          la: p.latitude ? String(p.latitude) : '',
+          lo: p.longitude ? String(p.longitude) : '',
+          obs: p.observacao || '',
+          telefone: p.telefone || '',
+          procurarPor: p.procurar_por || '',
+          numeroNota: p.numero_nota || '',
+          codigoFinalizarEnd: p.codigo_finalizar || ''
+        };
+      }),
       retorno: retorno ? 'S' : 'N',
       obsRetorno: obs_retorno || '',
       formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F',
