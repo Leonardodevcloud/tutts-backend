@@ -20828,6 +20828,152 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
   }
 });
 
+// Sincronizar status das corridas ativas com a Tutts
+app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    // Buscar corridas ativas do cliente que tem OS na Tutts
+    const corridasAtivas = await pool.query(`
+      SELECT id, tutts_os_numero, status 
+      FROM solicitacoes_corrida 
+      WHERE cliente_id = $1 
+        AND status IN ('enviado', 'aceito', 'em_andamento')
+        AND tutts_os_numero IS NOT NULL
+      ORDER BY criado_em DESC
+      LIMIT 50
+    `, [req.clienteSolicitacao.id]);
+    
+    if (corridasAtivas.rows.length === 0) {
+      return res.json({ 
+        sucesso: true, 
+        mensagem: 'Nenhuma corrida ativa para sincronizar',
+        atualizadas: 0 
+      });
+    }
+    
+    // Montar token de status
+    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenStatus && tokenStatus.includes('-gravar')) {
+      tokenStatus = tokenStatus.replace('-gravar', '-status');
+    } else if (tokenStatus && !tokenStatus.includes('-status')) {
+      tokenStatus = tokenStatus + '-status';
+    }
+    
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+    
+    if (!tokenStatus || !codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
+    }
+    
+    // Pegar lista de OS para consultar
+    const listaOS = corridasAtivas.rows.map(c => c.tutts_os_numero);
+    
+    console.log(`🔄 [SINCRONIZAR] Consultando ${listaOS.length} OS na Tutts:`, listaOS);
+    
+    // Chamar API da Tutts
+    const payloadTutts = {
+      token: tokenStatus,
+      codCliente: codCliente,
+      servicos: listaOS
+    };
+    
+    const respTutts = await fetch('https://tutts.com.br/integracao', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payloadTutts)
+    });
+    
+    const dataTutts = await respTutts.json();
+    console.log('📥 [SINCRONIZAR] Resposta da Tutts recebida');
+    
+    if (dataTutts.Erro) {
+      console.error('❌ [SINCRONIZAR] Erro da Tutts:', dataTutts.Erro);
+      return res.status(400).json({ error: dataTutts.Erro });
+    }
+    
+    if (!dataTutts.Sucesso) {
+      return res.status(400).json({ error: 'Resposta inválida da Tutts' });
+    }
+    
+    // Mapear status da Tutts para nosso sistema
+    const mapearStatus = (statusTutts) => {
+      switch (statusTutts) {
+        case 'SP': return 'enviado';      // Sem profissional
+        case 'A': return 'em_andamento';  // Em execução
+        case 'F': return 'finalizado';    // Finalizado
+        case 'C': return 'cancelado';     // Cancelado
+        case 'V': return 'enviado';       // Aguardando análise
+        case 'U': return 'enviado';       // Aguardando autorização
+        default: return null;
+      }
+    };
+    
+    let atualizadas = 0;
+    let finalizadas = 0;
+    let canceladas = 0;
+    
+    // Processar cada OS retornada
+    for (const os of listaOS) {
+      const dadosOS = dataTutts.Sucesso[os];
+      if (!dadosOS) continue;
+      
+      const novoStatus = mapearStatus(dadosOS.status);
+      if (!novoStatus) continue;
+      
+      // Buscar corrida no nosso banco
+      const corrida = corridasAtivas.rows.find(c => c.tutts_os_numero === os || c.tutts_os_numero === os.toString());
+      if (!corrida) continue;
+      
+      // Só atualizar se status mudou
+      if (corrida.status !== novoStatus) {
+        // Extrair dados do profissional
+        const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+        
+        await pool.query(`
+          UPDATE solicitacoes_corrida SET
+            status = $1,
+            profissional_nome = COALESCE($2, profissional_nome),
+            profissional_cpf = COALESCE($3, profissional_cpf),
+            profissional_placa = COALESCE($4, profissional_placa),
+            tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
+            dados_pontos = COALESCE($6, dados_pontos),
+            ultima_atualizacao = NOW(),
+            atualizado_em = NOW()
+          WHERE id = $7
+        `, [
+          novoStatus,
+          dadosProf.nome || null,
+          dadosProf.cpf || null,
+          dadosProf.placa || null,
+          dadosOS.urlRastreamento || null,
+          dadosOS.pontos ? JSON.stringify(dadosOS.pontos) : null,
+          corrida.id
+        ]);
+        
+        atualizadas++;
+        if (novoStatus === 'finalizado') finalizadas++;
+        if (novoStatus === 'cancelado') canceladas++;
+        
+        console.log(`✅ [SINCRONIZAR] OS ${os}: ${corrida.status} → ${novoStatus}`);
+      }
+    }
+    
+    console.log(`🔄 [SINCRONIZAR] Concluído: ${atualizadas} atualizadas, ${finalizadas} finalizadas, ${canceladas} canceladas`);
+    
+    res.json({ 
+      sucesso: true, 
+      mensagem: `Sincronização concluída`,
+      total_consultadas: listaOS.length,
+      atualizadas,
+      finalizadas,
+      canceladas
+    });
+    
+  } catch (err) {
+    console.error('❌ Erro ao sincronizar:', err);
+    res.status(500).json({ error: 'Erro ao sincronizar com a Tutts' });
+  }
+});
+
 // ==================== SINCRONIZAÇÃO DE STATUS COM TUTTS ====================
 
 // Consultar status de uma ou mais OS na Tutts
