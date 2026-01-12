@@ -20460,6 +20460,9 @@ app.patch('/api/solicitacao/configuracoes', verificarTokenSolicitacao, async (re
   try {
     const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao } = req.body;
     
+    console.log('💾 Salvando configurações para cliente:', req.clienteSolicitacao.id);
+    console.log('📍 Endereço partida:', endereco_partida_padrao);
+    
     await pool.query(`
       UPDATE clientes_solicitacao 
       SET forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
@@ -20468,7 +20471,8 @@ app.patch('/api/solicitacao/configuracoes', verificarTokenSolicitacao, async (re
       WHERE id = $4
     `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id]);
     
-    res.json({ sucesso: true });
+    console.log('✅ Configurações salvas com sucesso');
+    res.json({ sucesso: true, endereco_partida_padrao });
   } catch (err) {
     console.error('❌ Erro ao atualizar configurações:', err);
     res.status(500).json({ error: 'Erro ao atualizar configurações' });
