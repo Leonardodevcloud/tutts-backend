@@ -21040,7 +21040,10 @@ app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
 // Criar cliente de solicitação (só admin da central)
 app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
-    const { nome, email, senha, telefone, empresa, tutts_token_api, tutts_codigo_cliente, observacoes } = req.body;
+    // Aceita ambos os nomes (novo e antigo) para compatibilidade
+    const { nome, email, senha, telefone, empresa, observacoes } = req.body;
+    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token;
+    const tutts_codigo_cliente = req.body.tutts_codigo_cliente || req.body.tutts_cod_cliente;
     
     if (!nome || !email || !senha || !tutts_token_api || !tutts_codigo_cliente) {
       return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
@@ -21076,7 +21079,7 @@ app.get('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT c.id, c.nome, c.email, c.telefone, c.empresa, c.ativo, c.criado_em, c.ultimo_acesso,
-        c.tutts_codigo_cliente, c.observacoes,
+        c.tutts_codigo_cliente, c.tutts_codigo_cliente as tutts_cod_cliente, c.observacoes,
         (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
       FROM clientes_solicitacao c
       ORDER BY c.criado_em DESC
@@ -21135,7 +21138,9 @@ app.patch('/api/admin/solicitacao/clientes/:id/senha', verificarToken, async (re
 app.patch('/api/admin/solicitacao/clientes/:id/credenciais', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { tutts_token_api, tutts_codigo_cliente } = req.body;
+    // Aceita ambos os nomes (novo e antigo) para compatibilidade
+    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token;
+    const tutts_codigo_cliente = req.body.tutts_codigo_cliente || req.body.tutts_cod_cliente;
     
     await pool.query(`
       UPDATE clientes_solicitacao 
