@@ -20547,7 +20547,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
     
     // Enviar para API Tutts
-    const response = await httpRequest('https://tutts.com.br/integracao', {
+    const response = await httpRequest('https://tutts.com.br/md/painelLumen/lumen/v2/integracaoAPI/servico/solicitar', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
