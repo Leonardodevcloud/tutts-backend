@@ -20545,9 +20545,11 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
     console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
+    console.log('🔑 Token usado:', payloadTutts.token);
+    console.log('🏢 Código cliente usado:', payloadTutts.codCliente);
     
     // Enviar para API Tutts
-    const response = await httpRequest('https://tutts.com.br/md/painelLumen/lumen/v2/integracaoAPI/servico/solicitar', {
+    const response = await httpRequest('https://tutts.com.br/integracao', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
