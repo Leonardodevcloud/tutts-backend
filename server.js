@@ -21230,7 +21230,7 @@ app.post('/api/webhook/tutts', async (req, res) => {
     
     // Buscar a solicitação pelo número da OS
     const solicitacao = await pool.query(
-      'SELECT id, status FROM solicitacoes_corrida WHERE tutts_os_numero = $1',
+      'SELECT id, status, dados_pontos FROM solicitacoes_corrida WHERE tutts_os_numero = $1',
       [osNumero]
     );
     
@@ -21240,14 +21240,16 @@ app.post('/api/webhook/tutts', async (req, res) => {
     }
     
     const solicitacaoId = solicitacao.rows[0].id;
+    let dadosPontos = solicitacao.rows[0].dados_pontos || [];
+    if (typeof dadosPontos === 'string') dadosPontos = JSON.parse(dadosPontos);
     
     // Mapear status da Tutts para nosso sistema
-    // Status Tutts: 0 = recebeu, 0.5 = chegou, 0.75 = coletou, 1 = finalizou ponto, 2 = OS finalizada
     let novoStatus = solicitacao.rows[0].status;
     let statusDescricao = '';
+    let statusId = status?.ID !== undefined ? parseFloat(status.ID) : null;
     
-    if (status?.ID !== undefined) {
-      switch (parseFloat(status.ID)) {
+    if (statusId !== null) {
+      switch (statusId) {
         case 0:
           novoStatus = 'aceito';
           statusDescricao = 'Profissional recebeu a OS';
@@ -21279,9 +21281,59 @@ app.post('/api/webhook/tutts', async (req, res) => {
     const profissionalPlaca = status?.placa || null;
     const profissionalTelefone = status?.telefone || null;
     const profissionalCodigo = status?.codProf || null;
-    const dataHora = status?.dataHora || null;
+    const corVeiculo = status?.corVeiculo || null;
+    const modeloVeiculo = status?.modeloVeiculo || null;
+    const dataHoraStatus = status?.dataHora || null;
     
-    // Atualizar a solicitação
+    // Se tiver info do endereço, atualizar o ponto específico
+    if (statusEndereco?.endereco) {
+      const pontoNumero = parseInt(statusEndereco.endereco.ponto);
+      const pontoIdx = pontoNumero - 1; // Converter para 0-indexed
+      
+      // Determinar status do ponto
+      let pontoStatus = 'pendente';
+      const codigoStatus = statusEndereco.codigo?.toUpperCase();
+      if (codigoStatus === 'FIN' || statusEndereco.codigoCompleto?.toUpperCase() === 'FINALIZADO') {
+        pontoStatus = 'finalizado';
+      } else if (codigoStatus === 'CHE' || statusEndereco.codigoCompleto?.toUpperCase() === 'CHEGOU') {
+        pontoStatus = 'chegou';
+      } else if (codigoStatus === 'COL' || statusEndereco.codigoCompleto?.toUpperCase() === 'COLETADO') {
+        pontoStatus = 'coletado';
+      }
+      
+      // Garantir que o array tem o ponto
+      while (dadosPontos.length <= pontoIdx) {
+        dadosPontos.push({});
+      }
+      
+      // Atualizar dados do ponto
+      dadosPontos[pontoIdx] = {
+        ...dadosPontos[pontoIdx],
+        status: pontoStatus,
+        status_codigo: statusEndereco.codigo,
+        status_completo: statusEndereco.codigoCompleto,
+        status_descricao: statusEndereco.descricao,
+        data_evento: statusEndereco.criadoEm,
+        data_coletado: statusEndereco.endereco.dataColetado,
+        tempo_espera: statusEndereco.endereco.tempoEspera,
+        distancia_ultimo_ponto: statusEndereco.distanciaPercorridaUltimoPonto,
+        tempo_ultimo_ponto: statusEndereco.tempoPercorridaUltimoPonto,
+        lat_chegada: statusEndereco.endereco.latChegada,
+        lon_chegada: statusEndereco.endereco.lonChegada,
+        endereco_completo: statusEndereco.endereco.enderecoCompleto,
+        // Dados de entrega
+        assinatura: statusEndereco.endereco.assinatura || null,
+        protocolo_fotos: statusEndereco.endereco.protocolo || null,
+        motivo_tipo: statusEndereco.endereco.motivo?.tipo || null,
+        motivo_descricao: statusEndereco.endereco.motivo?.descricao || null,
+        numero_nota: statusEndereco.endereco.numeroNota || null,
+        observacao: statusEndereco.endereco.obs || null
+      };
+      
+      console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} atualizado: ${pontoStatus} - ${statusEndereco.descricao || ''}`);
+    }
+    
+    // Atualizar a solicitação com todos os dados
     await pool.query(`
       UPDATE solicitacoes_corrida SET
         status = $1,
@@ -21293,9 +21345,13 @@ app.post('/api/webhook/tutts', async (req, res) => {
         profissional_telefone = COALESCE($7, profissional_telefone),
         profissional_codigo = COALESCE($8, profissional_codigo),
         tutts_url_rastreamento = COALESCE($9, tutts_url_rastreamento),
+        dados_pontos = $10,
+        rota_profissional = COALESCE($11, rota_profissional),
+        cor_veiculo = COALESCE($12, cor_veiculo),
+        modelo_veiculo = COALESCE($13, modelo_veiculo),
         ultima_atualizacao = NOW(),
         atualizado_em = NOW()
-      WHERE id = $10
+      WHERE id = $14
     `, [
       novoStatus,
       profissionalNome,
@@ -21306,6 +21362,10 @@ app.post('/api/webhook/tutts', async (req, res) => {
       profissionalTelefone,
       profissionalCodigo,
       urlRastreamento,
+      JSON.stringify(dadosPontos),
+      rotaProfissional ? JSON.stringify(rotaProfissional) : null,
+      corVeiculo,
+      modeloVeiculo,
       solicitacaoId
     ]);
     
@@ -21313,48 +21373,18 @@ app.post('/api/webhook/tutts', async (req, res) => {
     await pool.query(`
       INSERT INTO webhook_tutts_logs (
         os_numero, solicitacao_id, status_id, status_descricao,
-        profissional_nome, payload_completo, criado_em
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        profissional_nome, ponto_numero, ponto_status, payload_completo, criado_em
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
     `, [
       osNumero,
       solicitacaoId,
-      status?.ID,
+      statusId,
       statusDescricao,
       profissionalNome,
+      statusEndereco?.endereco?.ponto || null,
+      statusEndereco?.codigo || null,
       JSON.stringify(payload)
     ]);
-    
-    // Se tiver info do endereço finalizado, atualizar o ponto específico
-    if (statusEndereco?.endereco) {
-      const pontoNumero = statusEndereco.endereco.ponto;
-      const pontoStatus = statusEndereco.codigo?.toLowerCase() === 'fin' ? 'finalizado' : 
-                          statusEndereco.codigo?.toLowerCase() === 'che' ? 'chegou' : 'pendente';
-      
-      // Buscar e atualizar o ponto específico
-      const pontos = await pool.query(
-        'SELECT id, dados_pontos FROM solicitacoes_corrida WHERE id = $1',
-        [solicitacaoId]
-      );
-      
-      if (pontos.rows[0]?.dados_pontos) {
-        let dadosPontos = pontos.rows[0].dados_pontos;
-        if (typeof dadosPontos === 'string') dadosPontos = JSON.parse(dadosPontos);
-        
-        // Atualizar status do ponto (pontoNumero é 1-indexed)
-        if (dadosPontos[pontoNumero - 1]) {
-          dadosPontos[pontoNumero - 1].status = pontoStatus;
-          dadosPontos[pontoNumero - 1].data_finalizado = statusEndereco.endereco.dataColetado;
-          dadosPontos[pontoNumero - 1].tempo_espera = statusEndereco.endereco.tempoEspera;
-          
-          await pool.query(
-            'UPDATE solicitacoes_corrida SET dados_pontos = $1 WHERE id = $2',
-            [JSON.stringify(dadosPontos), solicitacaoId]
-          );
-        }
-      }
-      
-      console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} atualizado: ${pontoStatus}`);
-    }
     
     console.log(`✅ [WEBHOOK] OS ${osNumero} atualizada: ${statusDescricao} (${novoStatus})`);
     
