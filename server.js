@@ -100,7 +100,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-11-SOLICITACAO';
+const SERVER_VERSION = '2026-01-12-WEBHOOK-MERGE';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
@@ -20700,10 +20700,13 @@ app.get('/api/solicitacao/historico', verificarTokenSolicitacao, async (req, res
 });
 
 // Buscar detalhes de uma solicitação
+
+// Buscar detalhes de uma solicitação (COM MERGE DE DADOS DO WEBHOOK)
 app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
     
+    // Buscar solicitação incluindo dados_pontos do webhook
     const solicitacao = await pool.query(
       'SELECT * FROM solicitacoes_corrida WHERE id = $1 AND cliente_id = $2',
       [id, req.clienteSolicitacao.id]
@@ -20713,20 +20716,96 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
       return res.status(404).json({ error: 'Solicitação não encontrada' });
     }
     
-    const pontos = await pool.query(
+    const corridaData = solicitacao.rows[0];
+    
+    // Buscar pontos da tabela solicitacoes_pontos
+    const pontosResult = await pool.query(
       'SELECT * FROM solicitacoes_pontos WHERE solicitacao_id = $1 ORDER BY ordem',
       [id]
     );
     
+    let pontos = pontosResult.rows;
+    
+    // Fazer merge com dados_pontos do webhook (se existir)
+    // O webhook /api/webhook/tutts salva dados detalhados em dados_pontos
+    let dadosPontosWebhook = corridaData.dados_pontos;
+    if (dadosPontosWebhook) {
+      // Parse se for string
+      if (typeof dadosPontosWebhook === 'string') {
+        try {
+          dadosPontosWebhook = JSON.parse(dadosPontosWebhook);
+        } catch (e) {
+          dadosPontosWebhook = [];
+        }
+      }
+      
+      // Fazer merge: dados do webhook complementam dados da tabela
+      if (Array.isArray(dadosPontosWebhook) && dadosPontosWebhook.length > 0) {
+        pontos = pontos.map((ponto, idx) => {
+          const dadosWebhook = dadosPontosWebhook[idx] || {};
+          
+          // Priorizar dados do webhook se existirem (são mais atualizados)
+          return {
+            ...ponto,
+            // Status do ponto (webhook pode ter atualização mais recente)
+            status: dadosWebhook.status || ponto.status || 'pendente',
+            status_codigo: dadosWebhook.status_codigo || ponto.status_codigo,
+            status_completo: dadosWebhook.status_completo || ponto.status_completo,
+            status_descricao: dadosWebhook.status_descricao || ponto.status_descricao,
+            
+            // Datas do webhook
+            data_evento: dadosWebhook.data_evento || ponto.data_evento,
+            data_chegada: dadosWebhook.data_evento && dadosWebhook.status === 'chegou' 
+              ? dadosWebhook.data_evento 
+              : ponto.data_chegada,
+            data_coletado: dadosWebhook.data_coletado || ponto.data_coletado,
+            data_finalizado: dadosWebhook.data_evento && dadosWebhook.status === 'finalizado'
+              ? dadosWebhook.data_evento
+              : ponto.data_finalizado,
+            
+            // Métricas do webhook
+            tempo_espera: dadosWebhook.tempo_espera || ponto.tempo_espera,
+            distancia_ultimo_ponto: dadosWebhook.distancia_ultimo_ponto,
+            tempo_ultimo_ponto: dadosWebhook.tempo_ultimo_ponto,
+            
+            // Coordenadas de chegada
+            lat_chegada: dadosWebhook.lat_chegada,
+            lon_chegada: dadosWebhook.lon_chegada,
+            
+            // Endereço completo (webhook pode ter versão atualizada)
+            endereco_completo: dadosWebhook.endereco_completo || ponto.endereco_completo || 
+              [ponto.rua, ponto.numero, ponto.bairro, ponto.cidade].filter(Boolean).join(', '),
+            
+            // Motivo de finalização
+            motivo_finalizacao: dadosWebhook.motivo_tipo || ponto.motivo_finalizacao,
+            motivo_descricao: dadosWebhook.motivo_descricao || ponto.motivo_descricao,
+            
+            // Assinatura e fotos
+            assinatura: dadosWebhook.assinatura || (ponto.assinatura ? 
+              (typeof ponto.assinatura === 'string' ? JSON.parse(ponto.assinatura) : ponto.assinatura) : null),
+            fotos: dadosWebhook.protocolo_fotos || (ponto.fotos ?
+              (typeof ponto.fotos === 'string' ? JSON.parse(ponto.fotos) : ponto.fotos) : null),
+            
+            // Outros dados
+            numero_nota: dadosWebhook.numero_nota || ponto.numero_nota,
+            observacao: dadosWebhook.observacao || ponto.observacao
+          };
+        });
+      }
+    }
+    
+    // Retornar dados completos
     res.json({
-      ...solicitacao.rows[0],
-      pontos: pontos.rows
+      ...corridaData,
+      pontos: pontos
     });
+    
   } catch (err) {
     console.error('❌ Erro ao buscar solicitação:', err);
     res.status(500).json({ error: 'Erro ao buscar solicitação' });
   }
 });
+
 
 // Cancelar corrida - chama API Tutts para cancelar de verdade
 app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, async (req, res) => {
