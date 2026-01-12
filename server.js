@@ -21217,7 +21217,7 @@ app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req,
     
     console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
     
-    const response = await fetch('https://tutts.com.br/md/painelLumen/lumen/v2/integracaoAPI/servico/profissionais/buscar', {
+    const response = await fetch('https://tutts.com.br/integracao', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payloadTutts)
