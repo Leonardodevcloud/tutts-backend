@@ -21883,6 +21883,11 @@ app.post('/api/webhook/tutts', async (req, res) => {
         observacao: statusEndereco.endereco.obs || null
       };
       
+      // Log detalhado das fotos de protocolo
+      if (statusEndereco.endereco.protocolo) {
+        console.log(`📸 [WEBHOOK] Fotos de protocolo do ponto ${pontoNumero}:`, JSON.stringify(statusEndereco.endereco.protocolo));
+      }
+      
       console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} atualizado: ${pontoStatus} - ${statusEndereco.descricao || ''}`);
     }
     
