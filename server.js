@@ -100,7 +100,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-12-WEBHOOK-MERGE';
+const SERVER_VERSION = '2026-01-12-ENDERECO-NOTA';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
@@ -20623,16 +20623,18 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     // Salvar pontos
     for (let i = 0; i < pontos.length; i++) {
       const p = pontos[i];
+      // Montar endereco_completo se não vier do frontend
+      const enderecoCompleto = p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(x => x && x.trim()).join(', ');
       await pool.query(`
         INSERT INTO solicitacoes_pontos (
           solicitacao_id, ordem, rua, numero, complemento, bairro, cidade, uf, cep,
           latitude, longitude, observacao, telefone, procurar_por, numero_nota, codigo_finalizar,
-          status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          status, endereco_completo
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       `, [
         solicitacaoId, i + 1, p.rua, p.numero, p.complemento, p.bairro, p.cidade, p.uf, p.cep,
         p.latitude, p.longitude, p.observacao, p.telefone, p.procurar_por, p.numero_nota, p.codigo_finalizar,
-        'pendente'
+        'pendente', enderecoCompleto
       ]);
     }
     
@@ -20665,7 +20667,8 @@ app.get('/api/solicitacao/historico', verificarTokenSolicitacao, async (req, res
     
     let query = `
       SELECT s.*, 
-        (SELECT COUNT(*) FROM solicitacoes_pontos WHERE solicitacao_id = s.id) as total_pontos
+        (SELECT COUNT(*) FROM solicitacoes_pontos WHERE solicitacao_id = s.id) as total_pontos,
+        (SELECT numero_nota FROM solicitacoes_pontos WHERE solicitacao_id = s.id AND numero_nota IS NOT NULL AND numero_nota != '' ORDER BY ordem LIMIT 1) as primeiro_numero_nota
       FROM solicitacoes_corrida s
       WHERE s.cliente_id = $1
     `;
