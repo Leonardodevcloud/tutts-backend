@@ -20728,6 +20728,44 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
   }
 });
 
+// Cancelar corrida manualmente (quando cancelou na Tutts)
+app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verificar se a corrida pertence ao cliente
+    const solicitacao = await pool.query(
+      'SELECT id, status, tutts_os_numero FROM solicitacoes_corrida WHERE id = $1 AND cliente_id = $2',
+      [id, req.clienteSolicitacao.id]
+    );
+    
+    if (solicitacao.rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitação não encontrada' });
+    }
+    
+    // Não permitir cancelar se já finalizada ou cancelada
+    if (['finalizado', 'cancelado'].includes(solicitacao.rows[0].status)) {
+      return res.status(400).json({ error: 'Esta corrida já está ' + solicitacao.rows[0].status });
+    }
+    
+    // Atualizar status para cancelado
+    await pool.query(`
+      UPDATE solicitacoes_corrida 
+      SET status = 'cancelado', 
+          atualizado_em = NOW(),
+          ultima_atualizacao = NOW()
+      WHERE id = $1
+    `, [id]);
+    
+    console.log(`❌ [CANCELAR] OS ${solicitacao.rows[0].tutts_os_numero || id} cancelada manualmente pelo cliente ${req.clienteSolicitacao.nome}`);
+    
+    res.json({ sucesso: true, mensagem: 'Corrida marcada como cancelada' });
+  } catch (err) {
+    console.error('❌ Erro ao cancelar corrida:', err);
+    res.status(500).json({ error: 'Erro ao cancelar corrida' });
+  }
+});
+
 // Salvar endereço favorito
 app.post('/api/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
   try {
