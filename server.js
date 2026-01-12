@@ -21206,6 +21206,183 @@ app.delete('/api/admin/solicitacao/clientes/:id', verificarToken, async (req, re
   }
 });
 
+// ==================== WEBHOOK TUTTS - NOTIFICAÇÕES EM TEMPO REAL ====================
+// Endpoint para receber atualizações de status das corridas da Tutts
+// URL para configurar na Tutts: https://tutts-backend-production.up.railway.app/api/webhook/tutts
+
+app.post('/api/webhook/tutts', async (req, res) => {
+  try {
+    const payload = req.body;
+    
+    console.log('📥 [WEBHOOK TUTTS] Notificação recebida:', JSON.stringify(payload, null, 2));
+    
+    // Extrair dados do payload conforme documentação
+    const osNumero = payload.ID;
+    const status = payload.Status;
+    const urlRastreamento = payload.UrlRastreamento;
+    const rotaProfissional = payload.rotaprofissional;
+    const statusEndereco = payload.statusEndereco;
+    
+    if (!osNumero) {
+      console.log('⚠️ [WEBHOOK] Payload sem ID da OS');
+      return res.status(200).json({ recebido: true, mensagem: 'Payload sem ID' });
+    }
+    
+    // Buscar a solicitação pelo número da OS
+    const solicitacao = await pool.query(
+      'SELECT id, status FROM solicitacoes_corrida WHERE tutts_os_numero = $1',
+      [osNumero]
+    );
+    
+    if (solicitacao.rows.length === 0) {
+      console.log(`⚠️ [WEBHOOK] OS ${osNumero} não encontrada no sistema`);
+      return res.status(200).json({ recebido: true, mensagem: 'OS não encontrada' });
+    }
+    
+    const solicitacaoId = solicitacao.rows[0].id;
+    
+    // Mapear status da Tutts para nosso sistema
+    // Status Tutts: 0 = recebeu, 0.5 = chegou, 0.75 = coletou, 1 = finalizou ponto, 2 = OS finalizada
+    let novoStatus = solicitacao.rows[0].status;
+    let statusDescricao = '';
+    
+    if (status?.ID !== undefined) {
+      switch (parseFloat(status.ID)) {
+        case 0:
+          novoStatus = 'aceito';
+          statusDescricao = 'Profissional recebeu a OS';
+          break;
+        case 0.5:
+          novoStatus = 'em_andamento';
+          statusDescricao = 'Profissional chegou no ponto';
+          break;
+        case 0.75:
+          novoStatus = 'em_andamento';
+          statusDescricao = 'Coleta confirmada';
+          break;
+        case 1:
+          novoStatus = 'em_andamento';
+          statusDescricao = 'Ponto finalizado';
+          break;
+        case 2:
+          novoStatus = 'finalizado';
+          statusDescricao = 'OS finalizada';
+          break;
+      }
+    }
+    
+    // Dados do profissional
+    const profissionalNome = status?.Nome || null;
+    const profissionalEmail = status?.Email || null;
+    const profissionalFoto = status?.Foto || null;
+    const profissionalCpf = status?.cpf || null;
+    const profissionalPlaca = status?.placa || null;
+    const profissionalTelefone = status?.telefone || null;
+    const profissionalCodigo = status?.codProf || null;
+    const dataHora = status?.dataHora || null;
+    
+    // Atualizar a solicitação
+    await pool.query(`
+      UPDATE solicitacoes_corrida SET
+        status = $1,
+        profissional_nome = COALESCE($2, profissional_nome),
+        profissional_email = COALESCE($3, profissional_email),
+        profissional_foto = COALESCE($4, profissional_foto),
+        profissional_cpf = COALESCE($5, profissional_cpf),
+        profissional_placa = COALESCE($6, profissional_placa),
+        profissional_telefone = COALESCE($7, profissional_telefone),
+        profissional_codigo = COALESCE($8, profissional_codigo),
+        tutts_url_rastreamento = COALESCE($9, tutts_url_rastreamento),
+        ultima_atualizacao = NOW(),
+        atualizado_em = NOW()
+      WHERE id = $10
+    `, [
+      novoStatus,
+      profissionalNome,
+      profissionalEmail,
+      profissionalFoto,
+      profissionalCpf,
+      profissionalPlaca,
+      profissionalTelefone,
+      profissionalCodigo,
+      urlRastreamento,
+      solicitacaoId
+    ]);
+    
+    // Registrar log da notificação
+    await pool.query(`
+      INSERT INTO webhook_tutts_logs (
+        os_numero, solicitacao_id, status_id, status_descricao,
+        profissional_nome, payload_completo, criado_em
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `, [
+      osNumero,
+      solicitacaoId,
+      status?.ID,
+      statusDescricao,
+      profissionalNome,
+      JSON.stringify(payload)
+    ]);
+    
+    // Se tiver info do endereço finalizado, atualizar o ponto específico
+    if (statusEndereco?.endereco) {
+      const pontoNumero = statusEndereco.endereco.ponto;
+      const pontoStatus = statusEndereco.codigo?.toLowerCase() === 'fin' ? 'finalizado' : 
+                          statusEndereco.codigo?.toLowerCase() === 'che' ? 'chegou' : 'pendente';
+      
+      // Buscar e atualizar o ponto específico
+      const pontos = await pool.query(
+        'SELECT id, dados_pontos FROM solicitacoes_corrida WHERE id = $1',
+        [solicitacaoId]
+      );
+      
+      if (pontos.rows[0]?.dados_pontos) {
+        let dadosPontos = pontos.rows[0].dados_pontos;
+        if (typeof dadosPontos === 'string') dadosPontos = JSON.parse(dadosPontos);
+        
+        // Atualizar status do ponto (pontoNumero é 1-indexed)
+        if (dadosPontos[pontoNumero - 1]) {
+          dadosPontos[pontoNumero - 1].status = pontoStatus;
+          dadosPontos[pontoNumero - 1].data_finalizado = statusEndereco.endereco.dataColetado;
+          dadosPontos[pontoNumero - 1].tempo_espera = statusEndereco.endereco.tempoEspera;
+          
+          await pool.query(
+            'UPDATE solicitacoes_corrida SET dados_pontos = $1 WHERE id = $2',
+            [JSON.stringify(dadosPontos), solicitacaoId]
+          );
+        }
+      }
+      
+      console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} atualizado: ${pontoStatus}`);
+    }
+    
+    console.log(`✅ [WEBHOOK] OS ${osNumero} atualizada: ${statusDescricao} (${novoStatus})`);
+    
+    // Responder rapidamente (Tutts espera resposta em até 5 segundos)
+    res.status(200).json({ 
+      recebido: true, 
+      os: osNumero, 
+      status: novoStatus,
+      mensagem: statusDescricao 
+    });
+    
+  } catch (err) {
+    console.error('❌ [WEBHOOK] Erro ao processar notificação:', err);
+    // Mesmo com erro, responder 200 para a Tutts não reenviar
+    res.status(200).json({ recebido: true, erro: err.message });
+  }
+});
+
+// Endpoint para verificar se webhook está funcionando
+app.get('/api/webhook/tutts/status', (req, res) => {
+  res.json({ 
+    ativo: true, 
+    url: 'https://tutts-backend-production.up.railway.app/api/webhook/tutts',
+    metodo: 'POST',
+    mensagem: 'Configure esta URL no painel da Tutts para receber notificações'
+  });
+});
+
 // ==================== ERROR HANDLER GLOBAL COM CORS ====================
 // Este handler DEVE ser o último middleware antes de app.listen
 
