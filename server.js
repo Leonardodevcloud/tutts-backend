@@ -100,7 +100,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-12-ENDERECO-NOTA';
+const SERVER_VERSION = '2026-01-12-FOTO-PROFISSIONAL';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
@@ -20652,6 +20652,69 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
         error: resultado.Erro,
         solicitacao_id: solicitacaoId 
       });
+    }
+    
+    // NOVO: Se enviou para profissional específico, consultar status para pegar foto
+    if (codigo_profissional && resultado.Sucesso) {
+      try {
+        // Montar token de status
+        let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+        if (tokenStatus && tokenStatus.includes('-gravar')) {
+          tokenStatus = tokenStatus.replace('-gravar', '-status');
+        } else if (tokenStatus && !tokenStatus.includes('-status')) {
+          tokenStatus = tokenStatus + '-status';
+        }
+        
+        const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+        
+        if (tokenStatus && codCliente) {
+          // Aguardar 1 segundo para dar tempo da Tutts processar
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Consultar status da OS recém criada
+          const statusData = await consultarStatusTutts(tokenStatus, codCliente, [resultado.Sucesso]);
+          
+          if (statusData && !statusData.erro) {
+            const dadosOS = statusData[resultado.Sucesso] || statusData[resultado.Sucesso.toString()];
+            
+            if (dadosOS) {
+              const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+              
+              console.log('📸 [FOTO] Dados do profissional recebidos:', JSON.stringify(dadosProf, null, 2));
+              
+              // Atualizar com dados do profissional (incluindo foto)
+              if (dadosProf.nome || dadosProf.foto || dadosProf.Foto) {
+                await pool.query(`
+                  UPDATE solicitacoes_corrida SET
+                    profissional_nome = COALESCE($1, profissional_nome),
+                    profissional_foto = COALESCE($2, profissional_foto),
+                    profissional_cpf = COALESCE($3, profissional_cpf),
+                    profissional_placa = COALESCE($4, profissional_placa),
+                    profissional_telefone = COALESCE($5, profissional_telefone),
+                    profissional_email = COALESCE($6, profissional_email),
+                    tutts_url_rastreamento = COALESCE($7, tutts_url_rastreamento),
+                    atualizado_em = NOW()
+                  WHERE id = $8
+                `, [
+                  dadosProf.nome || dadosProf.Nome || null,
+                  dadosProf.foto || dadosProf.Foto || null,
+                  dadosProf.cpf || dadosProf.CPF || null,
+                  dadosProf.placa || dadosProf.Placa || null,
+                  dadosProf.telefone || dadosProf.Telefone || null,
+                  dadosProf.email || dadosProf.Email || null,
+                  dadosOS.urlRastreamento || dadosOS.UrlRastreamento || null,
+                  solicitacaoId
+                ]);
+                
+                console.log('✅ [FOTO] Dados do profissional atualizados para OS', resultado.Sucesso);
+              }
+            }
+          }
+        }
+      } catch (errStatus) {
+        // Não falhar a criação se a consulta de status der erro
+        console.log('⚠️ [FOTO] Erro ao consultar status (não crítico):', errStatus.message);
+      }
     }
     
     res.json({
