@@ -21489,6 +21489,165 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
   }
 });
 
+// ==================== ENDEREÇOS SALVOS (NOVO SISTEMA) ====================
+
+// Criar tabela de endereços salvos se não existir
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS solicitacao_enderecos_salvos (
+        id SERIAL PRIMARY KEY,
+        cliente_id INTEGER NOT NULL,
+        apelido VARCHAR(100) NOT NULL,
+        rua VARCHAR(255),
+        numero VARCHAR(20),
+        complemento VARCHAR(100),
+        bairro VARCHAR(100),
+        cidade VARCHAR(100) NOT NULL,
+        uf VARCHAR(2),
+        cep VARCHAR(10),
+        latitude DECIMAL(10, 7),
+        longitude DECIMAL(10, 7),
+        endereco_completo TEXT,
+        vezes_usado INTEGER DEFAULT 1,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ultimo_uso TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_enderecos_salvos_cliente ON solicitacao_enderecos_salvos(cliente_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_enderecos_salvos_apelido ON solicitacao_enderecos_salvos(cliente_id, apelido)`);
+    console.log('✅ Tabela solicitacao_enderecos_salvos verificada');
+  } catch (err) {
+    console.log('⚠️ Erro ao criar tabela enderecos_salvos:', err.message);
+  }
+})();
+
+// Salvar endereço
+app.post('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { apelido, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, endereco_completo } = req.body;
+    
+    if (!apelido || !cidade) {
+      return res.status(400).json({ error: 'Apelido e cidade são obrigatórios' });
+    }
+    
+    // Verificar se apelido já existe para este cliente
+    const existe = await pool.query(
+      'SELECT id FROM solicitacao_enderecos_salvos WHERE cliente_id = $1 AND LOWER(apelido) = LOWER($2)',
+      [req.clienteSolicitacao.id, apelido]
+    );
+    
+    if (existe.rows.length > 0) {
+      return res.status(400).json({ error: 'Já existe um endereço com este apelido. Escolha outro nome.' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO solicitacao_enderecos_salvos (
+        cliente_id, apelido, rua, numero, complemento, bairro, cidade, uf, cep,
+        latitude, longitude, endereco_completo
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING id
+    `, [
+      req.clienteSolicitacao.id, apelido.trim(), rua, numero, complemento, bairro, cidade, uf, cep,
+      latitude, longitude, endereco_completo
+    ]);
+    
+    console.log(`💾 [ENDEREÇO SALVO] Cliente ${req.clienteSolicitacao.id}: "${apelido}" - ${cidade}`);
+    res.json({ sucesso: true, id: result.rows[0].id, mensagem: 'Endereço salvo com sucesso!' });
+  } catch (err) {
+    console.error('❌ Erro ao salvar endereço:', err);
+    res.status(500).json({ error: 'Erro ao salvar endereço' });
+  }
+});
+
+// Buscar endereços salvos (por apelido ou endereço)
+app.get('/api/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { q } = req.query;
+    
+    if (!q || q.length < 2) {
+      // Retorna os mais usados se não tiver busca
+      const result = await pool.query(`
+        SELECT * FROM solicitacao_enderecos_salvos 
+        WHERE cliente_id = $1 
+        ORDER BY vezes_usado DESC, ultimo_uso DESC
+        LIMIT 10
+      `, [req.clienteSolicitacao.id]);
+      return res.json(result.rows);
+    }
+    
+    // Busca por apelido ou endereço
+    const termoBusca = `%${q.toLowerCase()}%`;
+    const result = await pool.query(`
+      SELECT * FROM solicitacao_enderecos_salvos 
+      WHERE cliente_id = $1 
+        AND (
+          LOWER(apelido) LIKE $2 
+          OR LOWER(rua) LIKE $2 
+          OR LOWER(bairro) LIKE $2 
+          OR LOWER(cidade) LIKE $2
+          OR LOWER(endereco_completo) LIKE $2
+        )
+      ORDER BY 
+        CASE WHEN LOWER(apelido) LIKE $2 THEN 0 ELSE 1 END,
+        vezes_usado DESC, 
+        ultimo_uso DESC
+      LIMIT 20
+    `, [req.clienteSolicitacao.id, termoBusca]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar endereços salvos:', err);
+    res.status(500).json({ error: 'Erro ao buscar endereços' });
+  }
+});
+
+// Listar todos endereços salvos
+app.get('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM solicitacao_enderecos_salvos 
+      WHERE cliente_id = $1 
+      ORDER BY vezes_usado DESC, ultimo_uso DESC
+    `, [req.clienteSolicitacao.id]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar endereços salvos:', err);
+    res.status(500).json({ error: 'Erro ao listar endereços' });
+  }
+});
+
+// Incrementar uso de endereço salvo
+app.patch('/api/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    await pool.query(`
+      UPDATE solicitacao_enderecos_salvos 
+      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+      WHERE id = $1 AND cliente_id = $2
+    `, [req.params.id, req.clienteSolicitacao.id]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar uso:', err);
+    res.status(500).json({ error: 'Erro ao atualizar' });
+  }
+});
+
+// Deletar endereço salvo
+app.delete('/api/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM solicitacao_enderecos_salvos WHERE id = $1 AND cliente_id = $2',
+      [req.params.id, req.clienteSolicitacao.id]
+    );
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar endereço salvo:', err);
+    res.status(500).json({ error: 'Erro ao deletar' });
+  }
+});
+
 // BUSCAR PROFISSIONAIS - Lista motoboys disponíveis para o cliente
 app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req, res) => {
   try {
