@@ -100,7 +100,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-12-FOTO-PROFISSIONAL';
+const SERVER_VERSION = '2026-01-13-RETORNO-INFERIDO';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
@@ -20879,19 +20879,38 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
           // Adicionar pontos extras (retornos)
           for (let i = pontos.length; i < dadosPontosWebhook.length; i++) {
             const dadosWebhook = dadosPontosWebhook[i];
+            
+            // Inferir se é retorno baseado na obs
+            const obsLower = (dadosWebhook.observacao || dadosWebhook.obs || '').toLowerCase();
+            const isRetornoInferido = obsLower.includes('retorno');
+            
+            // Tentar extrair de qual ponto veio o retorno
+            let pontoRetornoDeExtra = dadosWebhook.ponto_retorno_de;
+            if (!pontoRetornoDeExtra && isRetornoInferido) {
+              const matchRetorno = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
+              if (matchRetorno) {
+                const refRetorno = matchRetorno[1].toLowerCase();
+                if (refRetorno === 'primeiro') pontoRetornoDeExtra = 1;
+                else if (refRetorno === 'segundo') pontoRetornoDeExtra = 2;
+                else if (refRetorno === 'terceiro') pontoRetornoDeExtra = 3;
+                else pontoRetornoDeExtra = parseInt(refRetorno);
+              }
+            }
+            
             pontos.push({
               id: null,
               ordem: i + 1,
               status: dadosWebhook.status || 'pendente',
               endereco_completo: dadosWebhook.endereco_completo || 'Ponto de Retorno',
-              is_retorno: true,
-              ponto_retorno_de: dadosWebhook.ponto_retorno_de,
-              tipo_ponto: dadosWebhook.tipo_ponto || 'retorno',
-              data_chegada: dadosWebhook.data_evento && dadosWebhook.status === 'chegou' ? dadosWebhook.data_evento : null,
-              data_finalizado: dadosWebhook.data_evento && dadosWebhook.status === 'finalizado' ? dadosWebhook.data_evento : null,
-              motivo_finalizacao: dadosWebhook.motivo_tipo,
-              motivo_descricao: dadosWebhook.motivo_descricao,
-              fotos: dadosWebhook.protocolo_fotos
+              observacao: dadosWebhook.observacao || dadosWebhook.obs,
+              is_retorno: isRetornoInferido || dadosWebhook.is_retorno || true,
+              ponto_retorno_de: pontoRetornoDeExtra,
+              tipo_ponto: 'retorno',
+              data_chegada: dadosWebhook.data_chegada || (dadosWebhook.data_evento && dadosWebhook.status === 'chegou' ? dadosWebhook.data_evento : null),
+              data_finalizado: dadosWebhook.data_finalizado || (dadosWebhook.data_evento && dadosWebhook.status === 'finalizado' ? dadosWebhook.data_evento : null),
+              motivo_finalizacao: dadosWebhook.motivo_tipo || dadosWebhook.ocorrencia,
+              motivo_descricao: dadosWebhook.motivo_descricao || dadosWebhook.motivo,
+              fotos: dadosWebhook.protocolo_fotos || dadosWebhook.protocolo
             });
           }
         }
@@ -21160,6 +21179,81 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
 // ==================== SINCRONIZAÇÃO DE STATUS COM TUTTS ====================
 
 // Consultar status de uma ou mais OS na Tutts
+// ==================== FUNÇÕES AUXILIARES PARA PROCESSAR PONTOS DA TUTTS ====================
+
+// Processar array de pontos retornado pela API da Tutts
+// Detecta retornos baseado no campo obs e ocorrência de erro
+function processarPontosTuttsAPI(pontosTutts) {
+  if (!Array.isArray(pontosTutts)) return [];
+  
+  return pontosTutts.map((ponto, idx) => {
+    // Inferir se é retorno baseado na obs
+    const obsLower = (ponto.obs || '').toLowerCase();
+    const isRetorno = obsLower.includes('retorno');
+    
+    // Tentar extrair de qual ponto veio o retorno
+    let pontoRetornoDe = null;
+    if (isRetorno) {
+      const matchRetorno = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
+      if (matchRetorno) {
+        const ref = matchRetorno[1].toLowerCase();
+        if (ref === 'primeiro') pontoRetornoDe = 1;
+        else if (ref === 'segundo') pontoRetornoDe = 2;
+        else if (ref === 'terceiro') pontoRetornoDe = 3;
+        else pontoRetornoDe = parseInt(ref);
+      }
+    }
+    
+    // Detectar insucesso
+    const ocorrencia = ponto.statusPonto?.ocorrencia || '';
+    const isInsucesso = ocorrencia.toLowerCase() === 'erro';
+    
+    // Determinar status do ponto
+    let statusPonto = 'pendente';
+    const codigoStatus = ponto.codigo?.toUpperCase();
+    if (codigoStatus === 'FIN' || ponto.codigoCompleto?.toUpperCase() === 'FINALIZADO') {
+      statusPonto = 'finalizado';
+    } else if (ponto.statusPonto?.chegada && !ponto.statusPonto?.saida) {
+      statusPonto = 'chegou';
+    } else if (ponto.statusPonto?.saida) {
+      statusPonto = 'finalizado';
+    }
+    
+    return {
+      ponto: parseInt(ponto.ponto),
+      id_ponto_tutts: ponto.IDponto,
+      status: statusPonto,
+      status_codigo: ponto.codigo,
+      status_completo: ponto.codigoCompleto,
+      status_descricao: ponto.descricao,
+      // Observação e nota
+      observacao: ponto.obs || null,
+      numero_nota: ponto.numeroNota || null,
+      // Datas
+      data_chegada: ponto.statusPonto?.chegada || null,
+      data_saida: ponto.statusPonto?.saida || null,
+      data_finalizado: ponto.statusPonto?.saida || null,
+      // Ocorrência/Motivo
+      ocorrencia: ponto.statusPonto?.ocorrencia || null,
+      motivo: ponto.statusPonto?.motivo || null,
+      motivo_finalizacao: ponto.statusPonto?.ocorrencia || null,
+      motivo_descricao: ponto.statusPonto?.motivo || null,
+      is_insucesso: isInsucesso,
+      // Fotos e assinatura
+      protocolo_fotos: ponto.statusPonto?.protocolo || [],
+      assinatura: ponto.statusPonto?.assinatura || [],
+      fotos: ponto.statusPonto?.protocolo || [],
+      // Coordenadas
+      latitude: ponto.coordernadasPonto?.la,
+      longitude: ponto.coordernadasPonto?.lo,
+      // Dados de retorno (inferidos da obs)
+      is_retorno: isRetorno,
+      ponto_retorno_de: pontoRetornoDe,
+      tipo_ponto: isRetorno ? 'retorno' : (idx === 0 ? 'coleta' : 'entrega')
+    };
+  });
+}
+
 async function consultarStatusTutts(tokenStatus, codCliente, osNumeros) {
   try {
     const payload = {
@@ -21255,35 +21349,49 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       if (dadosOS) {
         const novoStatus = mapearStatusTutts(dadosOS.status);
         
-        // Só atualizar se status mudou
+        // Extrair dados do profissional
+        const dadosProf = dadosOS.dadosProfissional || dadosOS.dadosProf || {};
+        
+        // Processar pontos com detecção de retorno
+        const pontosProcessados = dadosOS.pontos ? processarPontosTuttsAPI(dadosOS.pontos) : null;
+        
+        // Atualizar sempre os pontos (mesmo se status não mudou)
+        await pool.query(`
+          UPDATE solicitacoes_corrida SET
+            status = $1,
+            profissional_nome = COALESCE($2, profissional_nome),
+            profissional_cpf = COALESCE($3, profissional_cpf),
+            profissional_placa = COALESCE($4, profissional_placa),
+            tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
+            dados_pontos = COALESCE($6, dados_pontos),
+            ultima_atualizacao = NOW(),
+            atualizado_em = NOW()
+          WHERE id = $7
+        `, [
+          novoStatus,
+          dadosProf.nome || null,
+          dadosProf.cpf || null,
+          dadosProf.placa || null,
+          dadosOS.urlRastreamento || null,
+          pontosProcessados ? JSON.stringify(pontosProcessados) : null,
+          corrida.id
+        ]);
+        
+        // Só contar como atualizada se status mudou
         if (novoStatus !== corrida.status) {
-          // Extrair dados do profissional
-          const dadosProf = dadosOS.dadosProfissional || dadosOS.dadosProf || {};
-          
-          await pool.query(`
-            UPDATE solicitacoes_corrida SET
-              status = $1,
-              profissional_nome = COALESCE($2, profissional_nome),
-              profissional_cpf = COALESCE($3, profissional_cpf),
-              profissional_placa = COALESCE($4, profissional_placa),
-              tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
-              ultima_atualizacao = NOW(),
-              atualizado_em = NOW()
-            WHERE id = $6
-          `, [
-            novoStatus,
-            dadosProf.nome || null,
-            dadosProf.cpf || null,
-            dadosProf.placa || null,
-            dadosOS.urlRastreamento || null,
-            corrida.id
-          ]);
-          
           atualizadas++;
           if (novoStatus === 'cancelado') canceladas++;
           if (novoStatus === 'finalizado') finalizadas++;
           
           console.log(`🔄 [SYNC] OS ${osNum}: ${corrida.status} → ${novoStatus}`);
+        }
+        
+        // Log de pontos de retorno detectados
+        if (pontosProcessados) {
+          const pontosRetorno = pontosProcessados.filter(p => p.is_retorno);
+          if (pontosRetorno.length > 0) {
+            console.log(`🔄 [SYNC] OS ${osNum}: ${pontosRetorno.length} ponto(s) de retorno detectado(s)`);
+          }
         }
       }
     }
@@ -21910,10 +22018,37 @@ app.post('/api/webhook/tutts', async (req, res) => {
         motivo_descricao: statusEndereco.endereco.motivo?.descricao || null,
         numero_nota: statusEndereco.endereco.numeroNota || null,
         observacao: statusEndereco.endereco.obs || null,
-        // Campos de retorno (quando há insucesso)
-        is_retorno: statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true || false,
-        ponto_retorno_de: statusEndereco.endereco.pontoRetornoDe || statusEndereco.endereco.retornoDe || null,
-        tipo_ponto: statusEndereco.endereco.tipoPonto || statusEndereco.endereco.tipo || null
+        // Campos de retorno - inferir da obs se não vier explícito
+        is_retorno: (() => {
+          // Primeiro verificar campos explícitos
+          if (statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true) return true;
+          // Depois inferir da obs
+          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
+          return obsLower.includes('retorno');
+        })(),
+        ponto_retorno_de: (() => {
+          // Primeiro verificar campos explícitos
+          if (statusEndereco.endereco.pontoRetornoDe) return statusEndereco.endereco.pontoRetornoDe;
+          if (statusEndereco.endereco.retornoDe) return statusEndereco.endereco.retornoDe;
+          // Depois inferir da obs
+          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
+          const match = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
+          if (match) {
+            const ref = match[1].toLowerCase();
+            if (ref === 'primeiro') return 1;
+            if (ref === 'segundo') return 2;
+            if (ref === 'terceiro') return 3;
+            return parseInt(ref);
+          }
+          return null;
+        })(),
+        tipo_ponto: (() => {
+          if (statusEndereco.endereco.tipoPonto) return statusEndereco.endereco.tipoPonto;
+          if (statusEndereco.endereco.tipo) return statusEndereco.endereco.tipo;
+          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
+          if (obsLower.includes('retorno')) return 'retorno';
+          return null;
+        })()
       };
       
       // Log detalhado quando há insucesso ou retorno
@@ -21929,10 +22064,23 @@ app.post('/api/webhook/tutts', async (req, res) => {
         }, null, 2));
       }
       
-      // Verificar se é um ponto de retorno (adicionado automaticamente pela Tutts)
-      if (statusEndereco.endereco.retorno || statusEndereco.endereco.isRetorno || statusEndereco.endereco.tipoPonto === 'retorno') {
+      // Verificar se é um ponto de retorno (adicionado automaticamente pela Tutts ou inferido da obs)
+      const obsLowerRetorno = (statusEndereco.endereco.obs || '').toLowerCase();
+      const isRetornoInferido = obsLowerRetorno.includes('retorno');
+      
+      if (statusEndereco.endereco.retorno || statusEndereco.endereco.isRetorno || 
+          statusEndereco.endereco.tipoPonto === 'retorno' || isRetornoInferido) {
         console.log(`🔄 [WEBHOOK] Ponto ${pontoNumero} é um PONTO DE RETORNO`);
+        console.log(`   📝 Obs: "${statusEndereco.endereco.obs || '(vazio)'}"`);
+        console.log(`   🔙 Retorno de: ponto ${dadosPontos[pontoIdx].ponto_retorno_de || '?'}`);
         dadosPontos[pontoIdx].is_retorno = true;
+        dadosPontos[pontoIdx].tipo_ponto = 'retorno';
+      }
+      
+      // Log de insucesso (quando ocorrência indica erro)
+      const ocorrenciaPonto = statusEndereco.endereco.ocorrencia || '';
+      if (ocorrenciaPonto.toLowerCase() === 'erro') {
+        console.log(`⚠️ [WEBHOOK] Ponto ${pontoNumero} teve INSUCESSO: ${statusEndereco.endereco.motivo || ocorrenciaPonto}`);
       }
       
       // Log detalhado das fotos de protocolo
