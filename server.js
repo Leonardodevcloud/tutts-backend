@@ -100,8 +100,18 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-13-RETORNO-INFERIDO';
+const SERVER_VERSION = '2026-01-13-TOKENS-GLOBAIS';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
+
+// ==================== TOKENS GLOBAIS TUTTS ====================
+// Esses tokens são compartilhados por todos os clientes
+// Cada cliente só precisa do seu próprio tutts_codigo_cliente
+const TUTTS_TOKENS = {
+  GRAVAR: 'a6620113fac165e634a298599512ab5e-gravar',
+  STATUS: 'a6620113fac165e634a298599512ab5e-status',
+  PROFISSIONAIS: 'a6620113fac165e634a298599512ab5e-profissionais',
+  CANCELAR: 'a6620113fac165e634a298599512ab5e-cancelar'
+};
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
 const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
@@ -20552,7 +20562,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     });
     
     const payloadTutts = {
-      token: req.clienteSolicitacao.tutts_token_api,
+      token: TUTTS_TOKENS.GRAVAR,
       codCliente: req.clienteSolicitacao.tutts_codigo_cliente,
       Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
       centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || req.clienteSolicitacao.nome || 'Central',
@@ -20657,17 +20667,12 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     // NOVO: Se enviou para profissional específico, consultar status para pegar foto
     if (codigo_profissional && resultado.Sucesso) {
       try {
-        // Montar token de status
-        let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
-        if (tokenStatus && tokenStatus.includes('-gravar')) {
-          tokenStatus = tokenStatus.replace('-gravar', '-status');
-        } else if (tokenStatus && !tokenStatus.includes('-status')) {
-          tokenStatus = tokenStatus + '-status';
-        }
+        // Usar token global de status
+        const tokenStatus = TUTTS_TOKENS.STATUS;
         
         const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
         
-        if (tokenStatus && codCliente) {
+        if (codCliente) {
           // Aguardar 1 segundo para dar tempo da Tutts processar
           await new Promise(resolve => setTimeout(resolve, 1000));
           
@@ -20952,14 +20957,8 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
       return res.status(400).json({ error: 'Esta corrida já está ' + solicitacao.rows[0].status });
     }
     
-    // Obter token de cancelamento do cliente
-    // O token de cancelamento tem sufixo "-cancelar" em vez de "-gravar"
-    let tokenCancelar = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
-    if (tokenCancelar && tokenCancelar.includes('-gravar')) {
-      tokenCancelar = tokenCancelar.replace('-gravar', '-cancelar');
-    } else if (tokenCancelar && !tokenCancelar.includes('-cancelar')) {
-      tokenCancelar = tokenCancelar + '-cancelar';
-    }
+    // Usar token global de cancelamento
+    const tokenCancelar = TUTTS_TOKENS.CANCELAR;
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
@@ -20967,7 +20966,7 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
     let cancelouNaTutts = false;
     let erroTutts = null;
     
-    if (osNumero && tokenCancelar && codCliente) {
+    if (osNumero && codCliente) {
       try {
         const payloadTutts = {
           token: tokenCancelar,
@@ -21052,18 +21051,13 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       });
     }
     
-    // Montar token de status
-    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
-    if (tokenStatus && tokenStatus.includes('-gravar')) {
-      tokenStatus = tokenStatus.replace('-gravar', '-status');
-    } else if (tokenStatus && !tokenStatus.includes('-status')) {
-      tokenStatus = tokenStatus + '-status';
-    }
+    // Usar token global de status
+    const tokenStatus = TUTTS_TOKENS.STATUS;
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
-    if (!tokenStatus || !codCliente) {
-      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
+    if (!codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem código Tutts configurado' });
     }
     
     // Pegar lista de OS para consultar
@@ -21315,18 +21309,13 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       return res.json({ sucesso: true, mensagem: 'Nenhuma corrida ativa para sincronizar', atualizadas: 0 });
     }
     
-    // Obter token de status do cliente
-    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
-    if (tokenStatus && tokenStatus.includes('-gravar')) {
-      tokenStatus = tokenStatus.replace('-gravar', '-status');
-    } else if (tokenStatus && !tokenStatus.includes('-status')) {
-      tokenStatus = tokenStatus + '-status';
-    }
+    // Usar token global de status
+    const tokenStatus = TUTTS_TOKENS.STATUS;
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
-    if (!tokenStatus || !codCliente) {
-      return res.status(400).json({ error: 'Cliente não tem credenciais Tutts configuradas' });
+    if (!codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem código Tutts configurado' });
     }
     
     // Consultar status na Tutts
@@ -21652,18 +21641,20 @@ app.delete('/api/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, a
 // BUSCAR PROFISSIONAIS - Lista motoboys disponíveis para o cliente
 app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req, res) => {
   try {
-    // Verificar se cliente tem token de profissionais configurado
-    if (!req.clienteSolicitacao.tutts_token_profissionais) {
+    // Usar token global de profissionais
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente;
+    
+    if (!codCliente) {
       return res.json({ 
         profissionais: [], 
-        aviso: 'Token de profissionais não configurado. Entre em contato com o administrador.'
+        aviso: 'Código do cliente não configurado.'
       });
     }
     
     // Buscar profissionais na API Tutts
     const payloadTutts = {
-      token: req.clienteSolicitacao.tutts_token_profissionais,
-      codCliente: req.clienteSolicitacao.tutts_codigo_cliente
+      token: TUTTS_TOKENS.PROFISSIONAIS,
+      codCliente: codCliente
     };
     
     console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
@@ -21896,15 +21887,16 @@ app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
 // Criar cliente de solicitação (só admin da central)
 app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
-    // Aceita ambos os nomes (novo e antigo) para compatibilidade
     const { nome, email, senha, telefone, empresa, observacoes } = req.body;
-    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token;
+    // Token é opcional agora (usamos tokens globais)
+    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token || null;
     const tutts_codigo_cliente = req.body.tutts_codigo_cliente || req.body.tutts_cod_cliente;
     
-    console.log('📝 Criando cliente solicitação:', { nome, email, telefone, empresa, tutts_token_api: tutts_token_api ? '***' : null, tutts_codigo_cliente });
+    console.log('📝 Criando cliente solicitação:', { nome, email, telefone, empresa, tutts_codigo_cliente });
     
-    if (!nome || !email || !senha || !tutts_token_api || !tutts_codigo_cliente) {
-      return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
+    // Só código cliente é obrigatório agora (tokens são globais)
+    if (!nome || !email || !senha || !tutts_codigo_cliente) {
+      return res.status(400).json({ error: 'Nome, email, senha e código cliente Tutts são obrigatórios' });
     }
     
     // Verificar se email já existe
