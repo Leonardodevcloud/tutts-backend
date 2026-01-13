@@ -100,18 +100,8 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-13-TOKENS-GLOBAIS';
+const SERVER_VERSION = '2026-01-12-FOTO-PROFISSIONAL';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
-
-// ==================== TOKENS GLOBAIS TUTTS ====================
-// Esses tokens são compartilhados por todos os clientes
-// Cada cliente só precisa do seu próprio tutts_codigo_cliente
-const TUTTS_TOKENS = {
-  GRAVAR: 'a6620113fac165e634a298599512ab5e-gravar',
-  STATUS: 'a6620113fac165e634a298599512ab5e-status',
-  PROFISSIONAIS: 'a6620113fac165e634a298599512ab5e-profissionais',
-  CANCELAR: 'a6620113fac165e634a298599512ab5e-cancelar'
-};
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
 const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
@@ -436,6 +426,14 @@ async function createTables() {
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS saldo_status VARCHAR(20)`);
       console.log('✅ Coluna saldo_status verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
+    // Garantir que a coluna lancamento_at existe (migração) - data/hora da aprovação
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS lancamento_at TIMESTAMP`);
+      console.log('✅ Coluna lancamento_at verificada');
     } catch (e) {
       // Coluna já existe ou outro erro
     }
@@ -3427,6 +3425,7 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
       `UPDATE withdrawal_requests 
        SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, 
            approved_at = CASE WHEN $5 THEN NOW() ELSE approved_at END,
+           lancamento_at = CASE WHEN $5 THEN NOW() ELSE lancamento_at END,
            debito_plific_at = CASE WHEN $5 THEN $7::timestamp ELSE debito_plific_at END,
            updated_at = NOW() 
        WHERE id = $6 
@@ -20562,7 +20561,7 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     });
     
     const payloadTutts = {
-      token: TUTTS_TOKENS.GRAVAR,
+      token: req.clienteSolicitacao.tutts_token_api,
       codCliente: req.clienteSolicitacao.tutts_codigo_cliente,
       Usuario: usuario_solicitante || req.clienteSolicitacao.nome,
       centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || req.clienteSolicitacao.nome || 'Central',
@@ -20667,12 +20666,17 @@ app.post('/api/solicitacao/corrida', verificarTokenSolicitacao, async (req, res)
     // NOVO: Se enviou para profissional específico, consultar status para pegar foto
     if (codigo_profissional && resultado.Sucesso) {
       try {
-        // Usar token global de status
-        const tokenStatus = TUTTS_TOKENS.STATUS;
+        // Montar token de status
+        let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+        if (tokenStatus && tokenStatus.includes('-gravar')) {
+          tokenStatus = tokenStatus.replace('-gravar', '-status');
+        } else if (tokenStatus && !tokenStatus.includes('-status')) {
+          tokenStatus = tokenStatus + '-status';
+        }
         
         const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
         
-        if (codCliente) {
+        if (tokenStatus && codCliente) {
           // Aguardar 1 segundo para dar tempo da Tutts processar
           await new Promise(resolve => setTimeout(resolve, 1000));
           
@@ -20884,38 +20888,19 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
           // Adicionar pontos extras (retornos)
           for (let i = pontos.length; i < dadosPontosWebhook.length; i++) {
             const dadosWebhook = dadosPontosWebhook[i];
-            
-            // Inferir se é retorno baseado na obs
-            const obsLower = (dadosWebhook.observacao || dadosWebhook.obs || '').toLowerCase();
-            const isRetornoInferido = obsLower.includes('retorno');
-            
-            // Tentar extrair de qual ponto veio o retorno
-            let pontoRetornoDeExtra = dadosWebhook.ponto_retorno_de;
-            if (!pontoRetornoDeExtra && isRetornoInferido) {
-              const matchRetorno = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
-              if (matchRetorno) {
-                const refRetorno = matchRetorno[1].toLowerCase();
-                if (refRetorno === 'primeiro') pontoRetornoDeExtra = 1;
-                else if (refRetorno === 'segundo') pontoRetornoDeExtra = 2;
-                else if (refRetorno === 'terceiro') pontoRetornoDeExtra = 3;
-                else pontoRetornoDeExtra = parseInt(refRetorno);
-              }
-            }
-            
             pontos.push({
               id: null,
               ordem: i + 1,
               status: dadosWebhook.status || 'pendente',
               endereco_completo: dadosWebhook.endereco_completo || 'Ponto de Retorno',
-              observacao: dadosWebhook.observacao || dadosWebhook.obs,
-              is_retorno: isRetornoInferido || dadosWebhook.is_retorno || true,
-              ponto_retorno_de: pontoRetornoDeExtra,
-              tipo_ponto: 'retorno',
-              data_chegada: dadosWebhook.data_chegada || (dadosWebhook.data_evento && dadosWebhook.status === 'chegou' ? dadosWebhook.data_evento : null),
-              data_finalizado: dadosWebhook.data_finalizado || (dadosWebhook.data_evento && dadosWebhook.status === 'finalizado' ? dadosWebhook.data_evento : null),
-              motivo_finalizacao: dadosWebhook.motivo_tipo || dadosWebhook.ocorrencia,
-              motivo_descricao: dadosWebhook.motivo_descricao || dadosWebhook.motivo,
-              fotos: dadosWebhook.protocolo_fotos || dadosWebhook.protocolo
+              is_retorno: true,
+              ponto_retorno_de: dadosWebhook.ponto_retorno_de,
+              tipo_ponto: dadosWebhook.tipo_ponto || 'retorno',
+              data_chegada: dadosWebhook.data_evento && dadosWebhook.status === 'chegou' ? dadosWebhook.data_evento : null,
+              data_finalizado: dadosWebhook.data_evento && dadosWebhook.status === 'finalizado' ? dadosWebhook.data_evento : null,
+              motivo_finalizacao: dadosWebhook.motivo_tipo,
+              motivo_descricao: dadosWebhook.motivo_descricao,
+              fotos: dadosWebhook.protocolo_fotos
             });
           }
         }
@@ -20957,8 +20942,14 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
       return res.status(400).json({ error: 'Esta corrida já está ' + solicitacao.rows[0].status });
     }
     
-    // Usar token global de cancelamento
-    const tokenCancelar = TUTTS_TOKENS.CANCELAR;
+    // Obter token de cancelamento do cliente
+    // O token de cancelamento tem sufixo "-cancelar" em vez de "-gravar"
+    let tokenCancelar = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenCancelar && tokenCancelar.includes('-gravar')) {
+      tokenCancelar = tokenCancelar.replace('-gravar', '-cancelar');
+    } else if (tokenCancelar && !tokenCancelar.includes('-cancelar')) {
+      tokenCancelar = tokenCancelar + '-cancelar';
+    }
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
@@ -20966,7 +20957,7 @@ app.patch('/api/solicitacao/corrida/:id/cancelar', verificarTokenSolicitacao, as
     let cancelouNaTutts = false;
     let erroTutts = null;
     
-    if (osNumero && codCliente) {
+    if (osNumero && tokenCancelar && codCliente) {
       try {
         const payloadTutts = {
           token: tokenCancelar,
@@ -21051,13 +21042,18 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       });
     }
     
-    // Usar token global de status
-    const tokenStatus = TUTTS_TOKENS.STATUS;
+    // Montar token de status
+    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenStatus && tokenStatus.includes('-gravar')) {
+      tokenStatus = tokenStatus.replace('-gravar', '-status');
+    } else if (tokenStatus && !tokenStatus.includes('-status')) {
+      tokenStatus = tokenStatus + '-status';
+    }
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
-    if (!codCliente) {
-      return res.status(400).json({ error: 'Cliente não tem código Tutts configurado' });
+    if (!tokenStatus || !codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
     }
     
     // Pegar lista de OS para consultar
@@ -21173,81 +21169,6 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
 // ==================== SINCRONIZAÇÃO DE STATUS COM TUTTS ====================
 
 // Consultar status de uma ou mais OS na Tutts
-// ==================== FUNÇÕES AUXILIARES PARA PROCESSAR PONTOS DA TUTTS ====================
-
-// Processar array de pontos retornado pela API da Tutts
-// Detecta retornos baseado no campo obs e ocorrência de erro
-function processarPontosTuttsAPI(pontosTutts) {
-  if (!Array.isArray(pontosTutts)) return [];
-  
-  return pontosTutts.map((ponto, idx) => {
-    // Inferir se é retorno baseado na obs
-    const obsLower = (ponto.obs || '').toLowerCase();
-    const isRetorno = obsLower.includes('retorno');
-    
-    // Tentar extrair de qual ponto veio o retorno
-    let pontoRetornoDe = null;
-    if (isRetorno) {
-      const matchRetorno = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
-      if (matchRetorno) {
-        const ref = matchRetorno[1].toLowerCase();
-        if (ref === 'primeiro') pontoRetornoDe = 1;
-        else if (ref === 'segundo') pontoRetornoDe = 2;
-        else if (ref === 'terceiro') pontoRetornoDe = 3;
-        else pontoRetornoDe = parseInt(ref);
-      }
-    }
-    
-    // Detectar insucesso
-    const ocorrencia = ponto.statusPonto?.ocorrencia || '';
-    const isInsucesso = ocorrencia.toLowerCase() === 'erro';
-    
-    // Determinar status do ponto
-    let statusPonto = 'pendente';
-    const codigoStatus = ponto.codigo?.toUpperCase();
-    if (codigoStatus === 'FIN' || ponto.codigoCompleto?.toUpperCase() === 'FINALIZADO') {
-      statusPonto = 'finalizado';
-    } else if (ponto.statusPonto?.chegada && !ponto.statusPonto?.saida) {
-      statusPonto = 'chegou';
-    } else if (ponto.statusPonto?.saida) {
-      statusPonto = 'finalizado';
-    }
-    
-    return {
-      ponto: parseInt(ponto.ponto),
-      id_ponto_tutts: ponto.IDponto,
-      status: statusPonto,
-      status_codigo: ponto.codigo,
-      status_completo: ponto.codigoCompleto,
-      status_descricao: ponto.descricao,
-      // Observação e nota
-      observacao: ponto.obs || null,
-      numero_nota: ponto.numeroNota || null,
-      // Datas
-      data_chegada: ponto.statusPonto?.chegada || null,
-      data_saida: ponto.statusPonto?.saida || null,
-      data_finalizado: ponto.statusPonto?.saida || null,
-      // Ocorrência/Motivo
-      ocorrencia: ponto.statusPonto?.ocorrencia || null,
-      motivo: ponto.statusPonto?.motivo || null,
-      motivo_finalizacao: ponto.statusPonto?.ocorrencia || null,
-      motivo_descricao: ponto.statusPonto?.motivo || null,
-      is_insucesso: isInsucesso,
-      // Fotos e assinatura
-      protocolo_fotos: ponto.statusPonto?.protocolo || [],
-      assinatura: ponto.statusPonto?.assinatura || [],
-      fotos: ponto.statusPonto?.protocolo || [],
-      // Coordenadas
-      latitude: ponto.coordernadasPonto?.la,
-      longitude: ponto.coordernadasPonto?.lo,
-      // Dados de retorno (inferidos da obs)
-      is_retorno: isRetorno,
-      ponto_retorno_de: pontoRetornoDe,
-      tipo_ponto: isRetorno ? 'retorno' : (idx === 0 ? 'coleta' : 'entrega')
-    };
-  });
-}
-
 async function consultarStatusTutts(tokenStatus, codCliente, osNumeros) {
   try {
     const payload = {
@@ -21309,13 +21230,18 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       return res.json({ sucesso: true, mensagem: 'Nenhuma corrida ativa para sincronizar', atualizadas: 0 });
     }
     
-    // Usar token global de status
-    const tokenStatus = TUTTS_TOKENS.STATUS;
+    // Obter token de status do cliente
+    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenStatus && tokenStatus.includes('-gravar')) {
+      tokenStatus = tokenStatus.replace('-gravar', '-status');
+    } else if (tokenStatus && !tokenStatus.includes('-status')) {
+      tokenStatus = tokenStatus + '-status';
+    }
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
-    if (!codCliente) {
-      return res.status(400).json({ error: 'Cliente não tem código Tutts configurado' });
+    if (!tokenStatus || !codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem credenciais Tutts configuradas' });
     }
     
     // Consultar status na Tutts
@@ -21338,49 +21264,35 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
       if (dadosOS) {
         const novoStatus = mapearStatusTutts(dadosOS.status);
         
-        // Extrair dados do profissional
-        const dadosProf = dadosOS.dadosProfissional || dadosOS.dadosProf || {};
-        
-        // Processar pontos com detecção de retorno
-        const pontosProcessados = dadosOS.pontos ? processarPontosTuttsAPI(dadosOS.pontos) : null;
-        
-        // Atualizar sempre os pontos (mesmo se status não mudou)
-        await pool.query(`
-          UPDATE solicitacoes_corrida SET
-            status = $1,
-            profissional_nome = COALESCE($2, profissional_nome),
-            profissional_cpf = COALESCE($3, profissional_cpf),
-            profissional_placa = COALESCE($4, profissional_placa),
-            tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
-            dados_pontos = COALESCE($6, dados_pontos),
-            ultima_atualizacao = NOW(),
-            atualizado_em = NOW()
-          WHERE id = $7
-        `, [
-          novoStatus,
-          dadosProf.nome || null,
-          dadosProf.cpf || null,
-          dadosProf.placa || null,
-          dadosOS.urlRastreamento || null,
-          pontosProcessados ? JSON.stringify(pontosProcessados) : null,
-          corrida.id
-        ]);
-        
-        // Só contar como atualizada se status mudou
+        // Só atualizar se status mudou
         if (novoStatus !== corrida.status) {
+          // Extrair dados do profissional
+          const dadosProf = dadosOS.dadosProfissional || dadosOS.dadosProf || {};
+          
+          await pool.query(`
+            UPDATE solicitacoes_corrida SET
+              status = $1,
+              profissional_nome = COALESCE($2, profissional_nome),
+              profissional_cpf = COALESCE($3, profissional_cpf),
+              profissional_placa = COALESCE($4, profissional_placa),
+              tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
+              ultima_atualizacao = NOW(),
+              atualizado_em = NOW()
+            WHERE id = $6
+          `, [
+            novoStatus,
+            dadosProf.nome || null,
+            dadosProf.cpf || null,
+            dadosProf.placa || null,
+            dadosOS.urlRastreamento || null,
+            corrida.id
+          ]);
+          
           atualizadas++;
           if (novoStatus === 'cancelado') canceladas++;
           if (novoStatus === 'finalizado') finalizadas++;
           
           console.log(`🔄 [SYNC] OS ${osNum}: ${corrida.status} → ${novoStatus}`);
-        }
-        
-        // Log de pontos de retorno detectados
-        if (pontosProcessados) {
-          const pontosRetorno = pontosProcessados.filter(p => p.is_retorno);
-          if (pontosRetorno.length > 0) {
-            console.log(`🔄 [SYNC] OS ${osNum}: ${pontosRetorno.length} ponto(s) de retorno detectado(s)`);
-          }
         }
       }
     }
@@ -21478,183 +21390,21 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
   }
 });
 
-// ==================== ENDEREÇOS SALVOS (NOVO SISTEMA) ====================
-
-// Criar tabela de endereços salvos se não existir
-(async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS solicitacao_enderecos_salvos (
-        id SERIAL PRIMARY KEY,
-        cliente_id INTEGER NOT NULL,
-        apelido VARCHAR(100) NOT NULL,
-        rua VARCHAR(255),
-        numero VARCHAR(20),
-        complemento VARCHAR(100),
-        bairro VARCHAR(100),
-        cidade VARCHAR(100),
-        uf VARCHAR(2),
-        cep VARCHAR(10),
-        latitude DECIMAL(10, 7),
-        longitude DECIMAL(10, 7),
-        endereco_completo TEXT,
-        vezes_usado INTEGER DEFAULT 1,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        ultimo_uso TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_enderecos_salvos_cliente ON solicitacao_enderecos_salvos(cliente_id)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_enderecos_salvos_apelido ON solicitacao_enderecos_salvos(cliente_id, apelido)`);
-    console.log('✅ Tabela solicitacao_enderecos_salvos verificada');
-  } catch (err) {
-    console.log('⚠️ Erro ao criar tabela enderecos_salvos:', err.message);
-  }
-})();
-
-// Salvar endereço
-app.post('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    const { apelido, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, endereco_completo } = req.body;
-    
-    if (!apelido) {
-      return res.status(400).json({ error: 'Apelido é obrigatório' });
-    }
-    
-    // Verificar se apelido já existe para este cliente
-    const existe = await pool.query(
-      'SELECT id FROM solicitacao_enderecos_salvos WHERE cliente_id = $1 AND LOWER(apelido) = LOWER($2)',
-      [req.clienteSolicitacao.id, apelido]
-    );
-    
-    if (existe.rows.length > 0) {
-      return res.status(400).json({ error: 'Já existe um endereço com este apelido. Escolha outro nome.' });
-    }
-    
-    const result = await pool.query(`
-      INSERT INTO solicitacao_enderecos_salvos (
-        cliente_id, apelido, rua, numero, complemento, bairro, cidade, uf, cep,
-        latitude, longitude, endereco_completo
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      RETURNING id
-    `, [
-      req.clienteSolicitacao.id, apelido.trim(), rua || null, numero || null, complemento || null, 
-      bairro || null, cidade || null, uf || null, cep || null,
-      latitude || null, longitude || null, endereco_completo || null
-    ]);
-    
-    console.log(`💾 [ENDEREÇO SALVO] Cliente ${req.clienteSolicitacao.id}: "${apelido}" - ${cidade || endereco_completo || 'sem cidade'}`);
-    res.json({ sucesso: true, id: result.rows[0].id, mensagem: 'Endereço salvo com sucesso!' });
-  } catch (err) {
-    console.error('❌ Erro ao salvar endereço:', err);
-    res.status(500).json({ error: 'Erro ao salvar endereço' });
-  }
-});
-
-// Buscar endereços salvos (por apelido ou endereço)
-app.get('/api/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    const { q } = req.query;
-    
-    if (!q || q.length < 2) {
-      // Retorna os mais usados se não tiver busca
-      const result = await pool.query(`
-        SELECT * FROM solicitacao_enderecos_salvos 
-        WHERE cliente_id = $1 
-        ORDER BY vezes_usado DESC, ultimo_uso DESC
-        LIMIT 10
-      `, [req.clienteSolicitacao.id]);
-      return res.json(result.rows);
-    }
-    
-    // Busca por apelido ou endereço
-    const termoBusca = `%${q.toLowerCase()}%`;
-    const result = await pool.query(`
-      SELECT * FROM solicitacao_enderecos_salvos 
-      WHERE cliente_id = $1 
-        AND (
-          LOWER(apelido) LIKE $2 
-          OR LOWER(rua) LIKE $2 
-          OR LOWER(bairro) LIKE $2 
-          OR LOWER(cidade) LIKE $2
-          OR LOWER(endereco_completo) LIKE $2
-        )
-      ORDER BY 
-        CASE WHEN LOWER(apelido) LIKE $2 THEN 0 ELSE 1 END,
-        vezes_usado DESC, 
-        ultimo_uso DESC
-      LIMIT 20
-    `, [req.clienteSolicitacao.id, termoBusca]);
-    
-    res.json(result.rows);
-  } catch (err) {
-    console.error('❌ Erro ao buscar endereços salvos:', err);
-    res.status(500).json({ error: 'Erro ao buscar endereços' });
-  }
-});
-
-// Listar todos endereços salvos
-app.get('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT * FROM solicitacao_enderecos_salvos 
-      WHERE cliente_id = $1 
-      ORDER BY vezes_usado DESC, ultimo_uso DESC
-    `, [req.clienteSolicitacao.id]);
-    
-    res.json(result.rows);
-  } catch (err) {
-    console.error('❌ Erro ao listar endereços salvos:', err);
-    res.status(500).json({ error: 'Erro ao listar endereços' });
-  }
-});
-
-// Incrementar uso de endereço salvo
-app.patch('/api/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    await pool.query(`
-      UPDATE solicitacao_enderecos_salvos 
-      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
-      WHERE id = $1 AND cliente_id = $2
-    `, [req.params.id, req.clienteSolicitacao.id]);
-    
-    res.json({ sucesso: true });
-  } catch (err) {
-    console.error('❌ Erro ao atualizar uso:', err);
-    res.status(500).json({ error: 'Erro ao atualizar' });
-  }
-});
-
-// Deletar endereço salvo
-app.delete('/api/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    await pool.query(
-      'DELETE FROM solicitacao_enderecos_salvos WHERE id = $1 AND cliente_id = $2',
-      [req.params.id, req.clienteSolicitacao.id]
-    );
-    res.json({ sucesso: true });
-  } catch (err) {
-    console.error('❌ Erro ao deletar endereço salvo:', err);
-    res.status(500).json({ error: 'Erro ao deletar' });
-  }
-});
-
 // BUSCAR PROFISSIONAIS - Lista motoboys disponíveis para o cliente
 app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req, res) => {
   try {
-    // Usar token global de profissionais
-    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente;
-    
-    if (!codCliente) {
+    // Verificar se cliente tem token de profissionais configurado
+    if (!req.clienteSolicitacao.tutts_token_profissionais) {
       return res.json({ 
         profissionais: [], 
-        aviso: 'Código do cliente não configurado.'
+        aviso: 'Token de profissionais não configurado. Entre em contato com o administrador.'
       });
     }
     
     // Buscar profissionais na API Tutts
     const payloadTutts = {
-      token: TUTTS_TOKENS.PROFISSIONAIS,
-      codCliente: codCliente
+      token: req.clienteSolicitacao.tutts_token_profissionais,
+      codCliente: req.clienteSolicitacao.tutts_codigo_cliente
     };
     
     console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
@@ -21887,16 +21637,15 @@ app.post('/api/solicitacao/webhook/tutts', async (req, res) => {
 // Criar cliente de solicitação (só admin da central)
 app.post('/api/admin/solicitacao/clientes', verificarToken, async (req, res) => {
   try {
+    // Aceita ambos os nomes (novo e antigo) para compatibilidade
     const { nome, email, senha, telefone, empresa, observacoes } = req.body;
-    // Token é opcional agora (usamos tokens globais)
-    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token || null;
+    const tutts_token_api = req.body.tutts_token_api || req.body.tutts_token;
     const tutts_codigo_cliente = req.body.tutts_codigo_cliente || req.body.tutts_cod_cliente;
     
-    console.log('📝 Criando cliente solicitação:', { nome, email, telefone, empresa, tutts_codigo_cliente });
+    console.log('📝 Criando cliente solicitação:', { nome, email, telefone, empresa, tutts_token_api: tutts_token_api ? '***' : null, tutts_codigo_cliente });
     
-    // Só código cliente é obrigatório agora (tokens são globais)
-    if (!nome || !email || !senha || !tutts_codigo_cliente) {
-      return res.status(400).json({ error: 'Nome, email, senha e código cliente Tutts são obrigatórios' });
+    if (!nome || !email || !senha || !tutts_token_api || !tutts_codigo_cliente) {
+      return res.status(400).json({ error: 'Nome, email, senha, token Tutts e código cliente são obrigatórios' });
     }
     
     // Verificar se email já existe
@@ -22170,37 +21919,10 @@ app.post('/api/webhook/tutts', async (req, res) => {
         motivo_descricao: statusEndereco.endereco.motivo?.descricao || null,
         numero_nota: statusEndereco.endereco.numeroNota || null,
         observacao: statusEndereco.endereco.obs || null,
-        // Campos de retorno - inferir da obs se não vier explícito
-        is_retorno: (() => {
-          // Primeiro verificar campos explícitos
-          if (statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true) return true;
-          // Depois inferir da obs
-          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
-          return obsLower.includes('retorno');
-        })(),
-        ponto_retorno_de: (() => {
-          // Primeiro verificar campos explícitos
-          if (statusEndereco.endereco.pontoRetornoDe) return statusEndereco.endereco.pontoRetornoDe;
-          if (statusEndereco.endereco.retornoDe) return statusEndereco.endereco.retornoDe;
-          // Depois inferir da obs
-          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
-          const match = obsLower.match(/(?:ponto |ao )(\d+|primeiro|segundo|terceiro)/i);
-          if (match) {
-            const ref = match[1].toLowerCase();
-            if (ref === 'primeiro') return 1;
-            if (ref === 'segundo') return 2;
-            if (ref === 'terceiro') return 3;
-            return parseInt(ref);
-          }
-          return null;
-        })(),
-        tipo_ponto: (() => {
-          if (statusEndereco.endereco.tipoPonto) return statusEndereco.endereco.tipoPonto;
-          if (statusEndereco.endereco.tipo) return statusEndereco.endereco.tipo;
-          const obsLower = (statusEndereco.endereco.obs || '').toLowerCase();
-          if (obsLower.includes('retorno')) return 'retorno';
-          return null;
-        })()
+        // Campos de retorno (quando há insucesso)
+        is_retorno: statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true || false,
+        ponto_retorno_de: statusEndereco.endereco.pontoRetornoDe || statusEndereco.endereco.retornoDe || null,
+        tipo_ponto: statusEndereco.endereco.tipoPonto || statusEndereco.endereco.tipo || null
       };
       
       // Log detalhado quando há insucesso ou retorno
@@ -22216,23 +21938,10 @@ app.post('/api/webhook/tutts', async (req, res) => {
         }, null, 2));
       }
       
-      // Verificar se é um ponto de retorno (adicionado automaticamente pela Tutts ou inferido da obs)
-      const obsLowerRetorno = (statusEndereco.endereco.obs || '').toLowerCase();
-      const isRetornoInferido = obsLowerRetorno.includes('retorno');
-      
-      if (statusEndereco.endereco.retorno || statusEndereco.endereco.isRetorno || 
-          statusEndereco.endereco.tipoPonto === 'retorno' || isRetornoInferido) {
+      // Verificar se é um ponto de retorno (adicionado automaticamente pela Tutts)
+      if (statusEndereco.endereco.retorno || statusEndereco.endereco.isRetorno || statusEndereco.endereco.tipoPonto === 'retorno') {
         console.log(`🔄 [WEBHOOK] Ponto ${pontoNumero} é um PONTO DE RETORNO`);
-        console.log(`   📝 Obs: "${statusEndereco.endereco.obs || '(vazio)'}"`);
-        console.log(`   🔙 Retorno de: ponto ${dadosPontos[pontoIdx].ponto_retorno_de || '?'}`);
         dadosPontos[pontoIdx].is_retorno = true;
-        dadosPontos[pontoIdx].tipo_ponto = 'retorno';
-      }
-      
-      // Log de insucesso (quando ocorrência indica erro)
-      const ocorrenciaPonto = statusEndereco.endereco.ocorrencia || '';
-      if (ocorrenciaPonto.toLowerCase() === 'erro') {
-        console.log(`⚠️ [WEBHOOK] Ponto ${pontoNumero} teve INSUCESSO: ${statusEndereco.endereco.motivo || ocorrenciaPonto}`);
       }
       
       // Log detalhado das fotos de protocolo
