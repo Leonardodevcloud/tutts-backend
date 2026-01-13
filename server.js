@@ -21503,7 +21503,7 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
         numero VARCHAR(20),
         complemento VARCHAR(100),
         bairro VARCHAR(100),
-        cidade VARCHAR(100) NOT NULL,
+        cidade VARCHAR(100),
         uf VARCHAR(2),
         cep VARCHAR(10),
         latitude DECIMAL(10, 7),
@@ -21527,8 +21527,8 @@ app.post('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (
   try {
     const { apelido, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, endereco_completo } = req.body;
     
-    if (!apelido || !cidade) {
-      return res.status(400).json({ error: 'Apelido e cidade são obrigatórios' });
+    if (!apelido) {
+      return res.status(400).json({ error: 'Apelido é obrigatório' });
     }
     
     // Verificar se apelido já existe para este cliente
@@ -21548,11 +21548,12 @@ app.post('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING id
     `, [
-      req.clienteSolicitacao.id, apelido.trim(), rua, numero, complemento, bairro, cidade, uf, cep,
-      latitude, longitude, endereco_completo
+      req.clienteSolicitacao.id, apelido.trim(), rua || null, numero || null, complemento || null, 
+      bairro || null, cidade || null, uf || null, cep || null,
+      latitude || null, longitude || null, endereco_completo || null
     ]);
     
-    console.log(`💾 [ENDEREÇO SALVO] Cliente ${req.clienteSolicitacao.id}: "${apelido}" - ${cidade}`);
+    console.log(`💾 [ENDEREÇO SALVO] Cliente ${req.clienteSolicitacao.id}: "${apelido}" - ${cidade || endereco_completo || 'sem cidade'}`);
     res.json({ sucesso: true, id: result.rows[0].id, mensagem: 'Endereço salvo com sucesso!' });
   } catch (err) {
     console.error('❌ Erro ao salvar endereço:', err);
