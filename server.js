@@ -21508,8 +21508,26 @@ app.get('/api/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, a
   }
 });
 
-// Registrar uso de endereço
+// Registrar uso de endereço (POST)
 app.post('/api/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    await pool.query(`
+      UPDATE solicitacao_favoritos 
+      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+      WHERE id = $1 AND cliente_id = $2
+    `, [id, req.clienteSolicitacao.id]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar uso:', err);
+    res.status(500).json({ error: 'Erro ao registrar uso' });
+  }
+});
+
+// Registrar uso de endereço (PATCH)
+app.patch('/api/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
     
