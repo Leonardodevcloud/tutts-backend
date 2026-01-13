@@ -460,6 +460,14 @@ async function createTables() {
       console.log('⚠️ Erro na migração lancamento_at:', e.message);
     }
 
+    // Garantir que a coluna endereco_completo existe na tabela solicitacao_favoritos
+    try {
+      await pool.query(`ALTER TABLE solicitacao_favoritos ADD COLUMN IF NOT EXISTS endereco_completo TEXT`);
+      console.log('✅ Coluna endereco_completo verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Tabela de gratuidades
     await pool.query(`
       CREATE TABLE IF NOT EXISTS gratuities (
@@ -21409,6 +21417,126 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
   } catch (err) {
     console.error('❌ Erro ao deletar favorito:', err);
     res.status(500).json({ error: 'Erro ao deletar favorito' });
+  }
+});
+
+// ==================== ENDEREÇOS SALVOS (novo padrão) ====================
+
+// Salvar endereço
+app.post('/api/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao } = req.body;
+    
+    console.log('📍 Salvando endereço:', { apelido, endereco_completo, rua, cidade });
+    
+    if (!endereco_completo && !rua) {
+      return res.status(400).json({ error: 'Endereço é obrigatório' });
+    }
+    
+    // Verificar se já existe pelo endereço completo ou rua+numero+cidade
+    const existe = await pool.query(
+      `SELECT id FROM solicitacao_favoritos 
+       WHERE cliente_id = $1 AND (
+         (endereco_completo = $2 AND $2 IS NOT NULL) OR 
+         (rua = $3 AND numero = $4 AND cidade = $5)
+       )`,
+      [req.clienteSolicitacao.id, endereco_completo, rua, numero, cidade]
+    );
+    
+    if (existe.rows.length > 0) {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET apelido = COALESCE($2, apelido),
+            vezes_usado = vezes_usado + 1, 
+            ultimo_uso = CURRENT_TIMESTAMP,
+            latitude = COALESCE($3, latitude), 
+            longitude = COALESCE($4, longitude)
+        WHERE id = $1
+      `, [existe.rows[0].id, apelido, latitude, longitude]);
+      
+      return res.json({ sucesso: true, id: existe.rows[0].id, atualizado: true });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO solicitacao_favoritos (
+        cliente_id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
+        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      RETURNING id
+    `, [
+      req.clienteSolicitacao.id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
+      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
+    ]);
+    
+    console.log('✅ Endereço salvo com ID:', result.rows[0].id);
+    res.json({ sucesso: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('❌ Erro ao salvar endereço:', err);
+    res.status(500).json({ error: 'Erro ao salvar endereço' });
+  }
+});
+
+// Buscar endereços salvos
+app.get('/api/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { q } = req.query;
+    
+    let query = `
+      SELECT * FROM solicitacao_favoritos 
+      WHERE cliente_id = $1
+    `;
+    let params = [req.clienteSolicitacao.id];
+    
+    if (q && q.trim()) {
+      query += ` AND (
+        apelido ILIKE $2 OR 
+        endereco_completo ILIKE $2 OR 
+        rua ILIKE $2 OR 
+        bairro ILIKE $2 OR 
+        cidade ILIKE $2
+      )`;
+      params.push(`%${q.trim()}%`);
+    }
+    
+    query += ` ORDER BY vezes_usado DESC, ultimo_uso DESC LIMIT 50`;
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar endereços:', err);
+    res.status(500).json({ error: 'Erro ao buscar endereços' });
+  }
+});
+
+// Registrar uso de endereço
+app.post('/api/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    await pool.query(`
+      UPDATE solicitacao_favoritos 
+      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+      WHERE id = $1 AND cliente_id = $2
+    `, [id, req.clienteSolicitacao.id]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao registrar uso:', err);
+    res.status(500).json({ error: 'Erro ao registrar uso' });
+  }
+});
+
+// Deletar endereço salvo
+app.delete('/api/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
+      [req.params.id, req.clienteSolicitacao.id]
+    );
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar endereço:', err);
+    res.status(500).json({ error: 'Erro ao deletar endereço' });
   }
 });
 
