@@ -434,8 +434,20 @@ async function createTables() {
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS lancamento_at TIMESTAMP`);
       console.log('✅ Coluna lancamento_at verificada');
+      
+      // Preencher retroativamente lancamento_at para registros aprovados que não têm essa data
+      const resultado = await pool.query(`
+        UPDATE withdrawal_requests 
+        SET lancamento_at = COALESCE(approved_at, updated_at, created_at)
+        WHERE status IN ('aprovado', 'aprovado_gratuidade') 
+        AND lancamento_at IS NULL
+      `);
+      if (resultado.rowCount > 0) {
+        console.log(`✅ lancamento_at preenchido retroativamente para ${resultado.rowCount} registros`);
+      }
     } catch (e) {
       // Coluna já existe ou outro erro
+      console.log('⚠️ Erro na migração lancamento_at:', e.message);
     }
 
     // Tabela de gratuidades
