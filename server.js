@@ -100,8 +100,18 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-12-FOTO-PROFISSIONAL';
+const SERVER_VERSION = '2026-01-13-TOKENS-GLOBAIS-FIX';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
+
+// ==================== TOKENS GLOBAIS TUTTS ====================
+// Esses tokens são compartilhados por todos os clientes
+// Cada cliente só precisa do seu próprio tutts_codigo_cliente
+const TUTTS_TOKENS = {
+  GRAVAR: 'a6620113fac165e634a298599512ab5e-gravar',
+  STATUS: 'a6620113fac165e634a298599512ab5e-status',
+  PROFISSIONAIS: 'a6620113fac165e634a298599512ab5e-profissionais',
+  CANCELAR: 'a6620113fac165e634a298599512ab5e-cancelar'
+};
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
 const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
@@ -21405,18 +21415,20 @@ app.delete('/api/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (r
 // BUSCAR PROFISSIONAIS - Lista motoboys disponíveis para o cliente
 app.get('/api/solicitacao/profissionais', verificarTokenSolicitacao, async (req, res) => {
   try {
-    // Verificar se cliente tem token de profissionais configurado
-    if (!req.clienteSolicitacao.tutts_token_profissionais) {
+    // Usar token global de profissionais
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+    
+    if (!codCliente) {
       return res.json({ 
         profissionais: [], 
-        aviso: 'Token de profissionais não configurado. Entre em contato com o administrador.'
+        aviso: 'Código do cliente não configurado.'
       });
     }
     
     // Buscar profissionais na API Tutts
     const payloadTutts = {
-      token: req.clienteSolicitacao.tutts_token_profissionais,
-      codCliente: req.clienteSolicitacao.tutts_codigo_cliente
+      token: TUTTS_TOKENS.PROFISSIONAIS,
+      codCliente: codCliente
     };
     
     console.log('📤 Buscando profissionais na Tutts:', JSON.stringify(payloadTutts, null, 2));
