@@ -20861,11 +20861,40 @@ app.get('/api/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, r
             fotos: dadosWebhook.protocolo_fotos || (ponto.fotos ?
               (typeof ponto.fotos === 'string' ? JSON.parse(ponto.fotos) : ponto.fotos) : null),
             
+            // Dados de retorno
+            is_retorno: dadosWebhook.is_retorno || ponto.is_retorno || false,
+            ponto_retorno_de: dadosWebhook.ponto_retorno_de || ponto.ponto_retorno_de || null,
+            tipo_ponto: dadosWebhook.tipo_ponto || ponto.tipo_ponto || null,
+            
             // Outros dados
             numero_nota: dadosWebhook.numero_nota || ponto.numero_nota,
             observacao: dadosWebhook.observacao || ponto.observacao
           };
         });
+        
+        // Verificar se existem pontos extras no webhook (pontos de retorno adicionados pela Tutts)
+        if (dadosPontosWebhook.length > pontos.length) {
+          console.log(`🔄 [GET] Detectados ${dadosPontosWebhook.length - pontos.length} ponto(s) extra(s) (possíveis retornos)`);
+          
+          // Adicionar pontos extras (retornos)
+          for (let i = pontos.length; i < dadosPontosWebhook.length; i++) {
+            const dadosWebhook = dadosPontosWebhook[i];
+            pontos.push({
+              id: null,
+              ordem: i + 1,
+              status: dadosWebhook.status || 'pendente',
+              endereco_completo: dadosWebhook.endereco_completo || 'Ponto de Retorno',
+              is_retorno: true,
+              ponto_retorno_de: dadosWebhook.ponto_retorno_de,
+              tipo_ponto: dadosWebhook.tipo_ponto || 'retorno',
+              data_chegada: dadosWebhook.data_evento && dadosWebhook.status === 'chegou' ? dadosWebhook.data_evento : null,
+              data_finalizado: dadosWebhook.data_evento && dadosWebhook.status === 'finalizado' ? dadosWebhook.data_evento : null,
+              motivo_finalizacao: dadosWebhook.motivo_tipo,
+              motivo_descricao: dadosWebhook.motivo_descricao,
+              fotos: dadosWebhook.protocolo_fotos
+            });
+          }
+        }
       }
     }
     
@@ -21880,8 +21909,31 @@ app.post('/api/webhook/tutts', async (req, res) => {
         motivo_tipo: statusEndereco.endereco.motivo?.tipo || null,
         motivo_descricao: statusEndereco.endereco.motivo?.descricao || null,
         numero_nota: statusEndereco.endereco.numeroNota || null,
-        observacao: statusEndereco.endereco.obs || null
+        observacao: statusEndereco.endereco.obs || null,
+        // Campos de retorno (quando há insucesso)
+        is_retorno: statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true || false,
+        ponto_retorno_de: statusEndereco.endereco.pontoRetornoDe || statusEndereco.endereco.retornoDe || null,
+        tipo_ponto: statusEndereco.endereco.tipoPonto || statusEndereco.endereco.tipo || null
       };
+      
+      // Log detalhado quando há insucesso ou retorno
+      const motivoTipo = statusEndereco.endereco.motivo?.tipo?.toLowerCase();
+      if (motivoTipo && motivoTipo !== 'sucesso') {
+        console.log(`⚠️ [WEBHOOK] INSUCESSO no ponto ${pontoNumero}: ${statusEndereco.endereco.motivo?.tipo} - ${statusEndereco.endereco.motivo?.descricao}`);
+        console.log(`📦 [WEBHOOK] Dados de retorno:`, JSON.stringify({
+          retorno: statusEndereco.endereco.retorno,
+          isRetorno: statusEndereco.endereco.isRetorno,
+          pontoRetornoDe: statusEndereco.endereco.pontoRetornoDe,
+          tipoPonto: statusEndereco.endereco.tipoPonto,
+          endereco: statusEndereco.endereco
+        }, null, 2));
+      }
+      
+      // Verificar se é um ponto de retorno (adicionado automaticamente pela Tutts)
+      if (statusEndereco.endereco.retorno || statusEndereco.endereco.isRetorno || statusEndereco.endereco.tipoPonto === 'retorno') {
+        console.log(`🔄 [WEBHOOK] Ponto ${pontoNumero} é um PONTO DE RETORNO`);
+        dadosPontos[pontoIdx].is_retorno = true;
+      }
       
       // Log detalhado das fotos de protocolo
       if (statusEndereco.endereco.protocolo) {
