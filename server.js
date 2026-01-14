@@ -22455,10 +22455,11 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
             VALUES ($1, $2, $3, $4, 'enviado_rota', $5, $6, $7)
         `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, req.user.codProfissional, req.user.nome]);
         
-        await registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, tempo_espera: tempoEspera });
-        
         res.json({ success: true, tempo_espera: tempoEspera });
+        
+        registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
+        
     } catch (error) {
         console.error('❌ Erro ao enviar para rota:', error);
         res.status(500).json({ error: 'Erro ao enviar para rota' });
@@ -22499,10 +22500,11 @@ app.post('/api/filas/remover', verificarToken, verificarAdmin, async (req, res) 
             VALUES ($1, $2, $3, $4, 'removido', $5, $6, $7, $8)
         `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoNaFila, observacao, req.user.codProfissional, req.user.nome]);
         
-        await registrarAuditoria(req, 'REMOVER_DA_FILA', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, observacao });
-        
         res.json({ success: true });
+        
+        registrarAuditoria(req, 'REMOVER_DA_FILA', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, observacao }).catch(() => {});
+        
     } catch (error) {
         console.error('❌ Erro ao remover da fila:', error);
         res.status(500).json({ error: 'Erro ao remover da fila' });
@@ -22660,15 +22662,17 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
             VALUES ($1, $2, $3, $4, 'entrada')
         `, [central.central_id, central.central_nome, cod_profissional, nome_profissional]);
         
-        await registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, 
-            { central_id: central.central_id, posicao, distancia: Math.round(distancia) });
-        
         res.json({ 
             success: true, 
             posicao: posicao,
             central: central.central_nome,
             distancia: Math.round(distancia)
         });
+        
+        // Auditoria em background (não bloqueia a resposta)
+        registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, 
+            { central_id: central.central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
+        
     } catch (error) {
         console.error('❌ Erro ao entrar na fila:', error);
         res.status(500).json({ error: 'Erro ao entrar na fila' });
