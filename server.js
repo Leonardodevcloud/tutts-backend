@@ -226,7 +226,7 @@ const verificarAdmin = (req, res, next) => {
 
 // Verificar se é admin ou financeiro
 const verificarAdminOuFinanceiro = (req, res, next) => {
-  if (!req.user || !['admin', 'financeiro'].includes(req.user.role)) {
+  if (!req.user || !['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Acesso negado. Requer permissão de admin ou financeiro.' });
   }
   next();
