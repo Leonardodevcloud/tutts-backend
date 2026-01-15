@@ -164,6 +164,35 @@ const createAccountLimiter = rateLimit({
   }
 });
 
+// Rate limiter específico para operações financeiras (mais restritivo)
+const financialLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 30, // máximo 30 operações por minuto
+  message: { error: 'Muitas operações financeiras. Aguarde um momento.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Usar ID do usuário se autenticado, senão IP
+    if (req.user && req.user.id) {
+      return `user_${req.user.id}`;
+    }
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+  }
+});
+
+// Rate limiter para criação de saques (muito restritivo)
+const withdrawalCreateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hora
+  max: 5, // máximo 5 saques por hora por usuário
+  message: { error: 'Limite de solicitações de saque atingido. Tente novamente em 1 hora.' },
+  keyGenerator: (req) => {
+    if (req.user && req.user.codProfissional) {
+      return `withdrawal_${req.user.codProfissional}`;
+    }
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+  }
+});
+
 // ==================== MIDDLEWARES DE AUTENTICAÇÃO ====================
 
 // Verificar token JWT
@@ -3263,7 +3292,7 @@ app.delete('/api/avisos/:id', async (req, res) => {
 // ============================================
 
 // ==================== NOVO: Endpoint otimizado - Apenas Pendentes ====================
-app.get('/api/withdrawals/pendentes', async (req, res) => {
+app.get('/api/withdrawals/pendentes', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT w.*, 
@@ -3290,7 +3319,7 @@ app.get('/api/withdrawals/pendentes', async (req, res) => {
 });
 
 // ==================== NOVO: Contadores (ultra leve) ====================
-app.get('/api/withdrawals/contadores', async (req, res) => {
+app.get('/api/withdrawals/contadores', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
@@ -3308,7 +3337,7 @@ app.get('/api/withdrawals/contadores', async (req, res) => {
 });
 
 // ==================== NOVO: Histórico paginado ====================
-app.get('/api/withdrawals/historico', async (req, res) => {
+app.get('/api/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { page = 1, limit = 50, status, user_cod, data_inicio, data_fim } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -3365,9 +3394,17 @@ app.get('/api/withdrawals/historico', async (req, res) => {
 });
 
 // Criar solicitação de saque
-app.post('/api/withdrawals', async (req, res) => {
+app.post('/api/withdrawals', verificarToken, withdrawalCreateLimiter, async (req, res) => {
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount } = req.body;
+
+    // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
+    if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
+      if (req.user.codProfissional !== userCod) {
+        console.log(`⚠️ [SEGURANÇA] Tentativa de criar saque para outro usuário: ${req.user.codProfissional} tentou criar para ${userCod}`);
+        return res.status(403).json({ error: 'Você só pode criar saques para sua própria conta' });
+      }
+    }
 
     // Verificar se está restrito
     const restricted = await pool.query(
@@ -3440,9 +3477,16 @@ app.post('/api/withdrawals', async (req, res) => {
 });
 
 // Listar saques do usuário
-app.get('/api/withdrawals/user/:userCod', async (req, res) => {
+app.get('/api/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // Usuário só pode ver seus próprios saques (exceto admin)
+    if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+    }
     
     const result = await pool.query(
       'SELECT * FROM withdrawal_requests WHERE user_cod = $1 ORDER BY created_at DESC',
@@ -3470,7 +3514,7 @@ app.get('/api/withdrawals/user/:userCod', async (req, res) => {
 });
 
 // Listar todos os saques (admin financeiro)
-app.get('/api/withdrawals', async (req, res) => {
+app.get('/api/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status } = req.query;
     
@@ -3507,7 +3551,7 @@ app.get('/api/withdrawals', async (req, res) => {
 });
 
 // Atualizar status do saque
-app.patch('/api/withdrawals/:id', async (req, res) => {
+app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, adminId, adminName, rejectReason, dataDebito } = req.body;
@@ -3615,7 +3659,7 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
 });
 
 // Excluir saque
-app.delete('/api/withdrawals/:id', async (req, res) => {
+app.delete('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3647,7 +3691,7 @@ app.delete('/api/withdrawals/:id', async (req, res) => {
 });
 
 // Atualizar conciliação/débito
-app.patch('/api/withdrawals/:id/conciliacao', async (req, res) => {
+app.patch('/api/withdrawals/:id/conciliacao', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
     const { conciliacaoOmie, debito } = req.body;
@@ -3670,7 +3714,7 @@ app.patch('/api/withdrawals/:id/conciliacao', async (req, res) => {
 });
 
 // Atualizar débito com data/hora
-app.patch('/api/withdrawals/:id/debito', async (req, res) => {
+app.patch('/api/withdrawals/:id/debito', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
     const { debito, debitoAt } = req.body;
@@ -3696,7 +3740,7 @@ app.patch('/api/withdrawals/:id/debito', async (req, res) => {
 });
 
 // Atualizar status do saldo
-app.patch('/api/withdrawals/:id/saldo', async (req, res) => {
+app.patch('/api/withdrawals/:id/saldo', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
     const { saldoStatus } = req.body;
@@ -3749,7 +3793,7 @@ app.get('/api/withdrawals/dashboard/conciliacao', async (req, res) => {
 // ============================================
 
 // Listar todas as gratuidades
-app.get('/api/gratuities', async (req, res) => {
+app.get('/api/gratuities', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status } = req.query;
     
@@ -3787,7 +3831,7 @@ app.get('/api/gratuities/user/:userCod', async (req, res) => {
 });
 
 // Criar gratuidade
-app.post('/api/gratuities', async (req, res) => {
+app.post('/api/gratuities', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { userCod, userName, quantity, value, reason, createdBy } = req.body;
 
@@ -3806,7 +3850,7 @@ app.post('/api/gratuities', async (req, res) => {
 });
 
 // Deletar gratuidade
-app.delete('/api/gratuities/:id', async (req, res) => {
+app.delete('/api/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3831,7 +3875,7 @@ app.delete('/api/gratuities/:id', async (req, res) => {
 // ============================================
 
 // Listar todos os restritos
-app.get('/api/restricted', async (req, res) => {
+app.get('/api/restricted', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status } = req.query;
     
@@ -3872,7 +3916,7 @@ app.get('/api/restricted/check/:userCod', async (req, res) => {
 });
 
 // Adicionar restrição
-app.post('/api/restricted', async (req, res) => {
+app.post('/api/restricted', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { userCod, userName, reason, createdBy } = req.body;
 
@@ -3920,7 +3964,7 @@ app.post('/api/restricted', async (req, res) => {
 });
 
 // Remover restrição
-app.patch('/api/restricted/:id/remove', async (req, res) => {
+app.patch('/api/restricted/:id/remove', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
     const { removedReason } = req.body;
@@ -23127,29 +23171,60 @@ wss.on('connection', (ws, req) => {
   console.log('🔌 [WS] Nova conexão');
   let clientType = null;
   let userCod = null;
+  let authenticated = false;
+  
+  // Timeout para autenticação (30 segundos)
+  const authTimeout = setTimeout(() => {
+    if (!authenticated) {
+      console.log('⚠️ [WS] Conexão fechada por falta de autenticação');
+      ws.close(4001, 'Autenticação necessária');
+    }
+  }, 30000);
   
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
       
       if (data.type === 'AUTH') {
-        const { role, cod_profissional } = data;
-        if (['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
-          clientType = 'admin';
-          wsClients.admins.add(ws);
-          ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'admin' }));
-          console.log(`✅ [WS] Admin conectado. Total: ${wsClients.admins.size}`);
-        } else if (cod_profissional) {
-          clientType = 'user';
-          userCod = cod_profissional;
-          if (!wsClients.users.has(userCod)) wsClients.users.set(userCod, new Set());
-          wsClients.users.get(userCod).add(ws);
-          ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'user', userCod }));
-          console.log(`✅ [WS] Usuário ${userCod} conectado`);
+        const { token, role, cod_profissional } = data;
+        
+        // Validar token JWT
+        if (!token) {
+          ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
+          return;
+        }
+        
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          authenticated = true;
+          clearTimeout(authTimeout);
+          
+          // Verificar se role do token bate com o informado
+          if (decoded.role !== role) {
+            console.log(`⚠️ [WS] Role mismatch: token=${decoded.role}, informado=${role}`);
+          }
+          
+          if (['admin', 'admin_master', 'admin_financeiro'].includes(decoded.role)) {
+            clientType = 'admin';
+            wsClients.admins.add(ws);
+            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'admin', user: decoded.fullName }));
+            console.log(`✅ [WS] Admin ${decoded.fullName} autenticado. Total: ${wsClients.admins.size}`);
+          } else if (decoded.codProfissional) {
+            clientType = 'user';
+            userCod = decoded.codProfissional;
+            if (!wsClients.users.has(userCod)) wsClients.users.set(userCod, new Set());
+            wsClients.users.get(userCod).add(ws);
+            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'user', userCod }));
+            console.log(`✅ [WS] Usuário ${userCod} autenticado`);
+          }
+        } catch (jwtError) {
+          console.log(`❌ [WS] Token inválido: ${jwtError.message}`);
+          ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido ou expirado' }));
+          ws.close(4003, 'Token inválido');
         }
       }
       
-      if (data.type === 'PING') {
+      if (data.type === 'PING' && authenticated) {
         ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
       }
     } catch (e) {
@@ -23158,6 +23233,7 @@ wss.on('connection', (ws, req) => {
   });
   
   ws.on('close', () => {
+    clearTimeout(authTimeout);
     if (clientType === 'admin') {
       wsClients.admins.delete(ws);
       console.log(`🔌 [WS] Admin desconectado. Restam: ${wsClients.admins.size}`);
@@ -23170,7 +23246,7 @@ wss.on('connection', (ws, req) => {
     }
   });
   
-  ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts' }));
+  ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts - Envie AUTH com token' }));
 });
 
 // Exportar funções globalmente para uso nos endpoints
