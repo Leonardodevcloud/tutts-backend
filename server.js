@@ -8,6 +8,8 @@ const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const https = require('https');
+const http = require('http');
+const WebSocket = require('ws');
 require('dotenv').config();
 
 // Função para fazer requisições HTTP/HTTPS (substitui fetch)
@@ -100,7 +102,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-13-TOKENS-GLOBAIS-FIX';
+const SERVER_VERSION = '2026-01-14-WEBSOCKET-OTIMIZADO';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
@@ -459,6 +461,26 @@ async function createTables() {
       // Coluna já existe ou outro erro
       console.log('⚠️ Erro na migração lancamento_at:', e.message);
     }
+
+    // ==================== ÍNDICES PARA PERFORMANCE ====================
+    console.log('🔧 Criando índices de performance para withdrawal_requests...');
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_status ON withdrawal_requests(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_user_cod ON withdrawal_requests(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_created_at ON withdrawal_requests(created_at DESC)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_conciliacao ON withdrawal_requests(conciliacao_omie, debito)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_status_created ON withdrawal_requests(status, created_at DESC)`).catch(() => {});
+    
+    // Índices para gratuities
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_gratuities_user_cod ON gratuities(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_gratuities_status ON gratuities(status)`).catch(() => {});
+    
+    // Índices para restricted_professionals
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_restricted_user_cod ON restricted_professionals(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_restricted_status ON restricted_professionals(status)`).catch(() => {});
+    
+    console.log('✅ Índices de performance criados/verificados');
+    // ==================== FIM ÍNDICES ====================
 
     // Garantir que a coluna endereco_completo existe na tabela solicitacao_favoritos
     try {
@@ -3240,6 +3262,108 @@ app.delete('/api/avisos/:id', async (req, res) => {
 // SOLICITAÇÕES DE SAQUE
 // ============================================
 
+// ==================== NOVO: Endpoint otimizado - Apenas Pendentes ====================
+app.get('/api/withdrawals/pendentes', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT w.*, 
+        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+        r.reason as restriction_reason,
+        EXTRACT(EPOCH FROM (NOW() - w.created_at))/3600 as horas_aguardando
+      FROM withdrawal_requests w
+      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+      WHERE w.status IN ('pending', 'aguardando_aprovacao')
+      ORDER BY w.created_at ASC
+    `);
+    
+    const withdrawals = result.rows.map(w => ({
+      ...w,
+      isDelayed: parseFloat(w.horas_aguardando) > 1
+    }));
+    
+    console.log(`📋 [withdrawals/pendentes] Retornando ${withdrawals.length} saques pendentes`);
+    res.json(withdrawals);
+  } catch (error) {
+    console.error('❌ Erro ao listar saques pendentes:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOVO: Contadores (ultra leve) ====================
+app.get('/api/withdrawals/contadores', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status IN ('pending', 'aguardando_aprovacao')) as pendentes,
+        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')) as aprovados,
+        COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
+        COUNT(*) as total
+      FROM withdrawal_requests
+    `);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao obter contadores:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOVO: Histórico paginado ====================
+app.get('/api/withdrawals/historico', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, status, user_cod, data_inicio, data_fim } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const params = [];
+    let whereConditions = [];
+    
+    if (status) {
+      params.push(status);
+      whereConditions.push(`w.status = $${params.length}`);
+    } else {
+      whereConditions.push(`w.status NOT IN ('pending', 'aguardando_aprovacao')`);
+    }
+    
+    if (user_cod) {
+      params.push(user_cod);
+      whereConditions.push(`w.user_cod = $${params.length}`);
+    }
+    
+    if (data_inicio) {
+      params.push(data_inicio);
+      whereConditions.push(`w.created_at >= $${params.length}::date`);
+    }
+    
+    if (data_fim) {
+      params.push(data_fim);
+      whereConditions.push(`w.created_at <= $${params.length}::date + interval '1 day'`);
+    }
+    
+    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+    
+    const result = await pool.query(`
+      SELECT w.*, 
+        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+        r.reason as restriction_reason
+      FROM withdrawal_requests w
+      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+      ${whereClause}
+      ORDER BY w.created_at DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `, [...params, parseInt(limit), offset]);
+    
+    const countResult = await pool.query(`SELECT COUNT(*) as total FROM withdrawal_requests w ${whereClause}`, params);
+    const total = parseInt(countResult.rows[0].total);
+    const totalPages = Math.ceil(total / parseInt(limit));
+    
+    res.json({
+      data: result.rows,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, totalPages, hasNext: parseInt(page) < totalPages, hasPrev: parseInt(page) > 1 }
+    });
+  } catch (error) {
+    console.error('❌ Erro ao listar histórico:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Criar solicitação de saque
 app.post('/api/withdrawals', async (req, res) => {
   try {
@@ -3299,6 +3423,11 @@ app.post('/api/withdrawals', async (req, res) => {
       gratuidade: hasGratuity,
       restrito: isRestricted
     });
+
+    // ==================== NOTIFICAR VIA WEBSOCKET ====================
+    if (global.notifyNewWithdrawal) {
+      global.notifyNewWithdrawal(result.rows[0]);
+    }
 
     res.status(201).json({ 
       ...result.rows[0], 
@@ -3472,6 +3601,11 @@ app.patch('/api/withdrawals/:id', async (req, res) => {
       motivo_rejeicao: rejectReason,
       debito_plific: isAprovado ? 'realizado' : null
     });
+
+    // ==================== NOTIFICAR VIA WEBSOCKET ====================
+    if (global.notifyWithdrawalUpdate) {
+      global.notifyWithdrawalUpdate(result.rows[0], status);
+    }
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -22927,10 +23061,130 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ==================== WEBSOCKET SETUP ====================
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/ws/financeiro' });
+
+// Armazenar conexões ativas
+const wsClients = {
+  admins: new Set(),
+  users: new Map()
+};
+
+// Broadcast para admins
+function broadcastToAdmins(event, data) {
+  const message = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+  wsClients.admins.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+    }
+  });
+  console.log(`📡 [WS] Broadcast para ${wsClients.admins.size} admins: ${event}`);
+}
+
+// Enviar para usuário específico
+function sendToUser(userCod, event, data) {
+  const userConnections = wsClients.users.get(userCod);
+  if (!userConnections) return;
+  const message = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+  userConnections.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(message);
+  });
+}
+
+// Notificar novo saque
+function notifyNewWithdrawal(withdrawal) {
+  broadcastToAdmins('NEW_WITHDRAWAL', {
+    id: withdrawal.id,
+    user_cod: withdrawal.user_cod,
+    user_name: withdrawal.user_name,
+    requested_amount: withdrawal.requested_amount,
+    final_amount: withdrawal.final_amount,
+    has_gratuity: withdrawal.has_gratuity,
+    status: withdrawal.status,
+    created_at: withdrawal.created_at
+  });
+}
+
+// Notificar atualização de saque
+function notifyWithdrawalUpdate(withdrawal, action) {
+  broadcastToAdmins('WITHDRAWAL_UPDATE', {
+    id: withdrawal.id,
+    user_cod: withdrawal.user_cod,
+    status: withdrawal.status,
+    action: action
+  });
+  sendToUser(withdrawal.user_cod, 'MY_WITHDRAWAL_UPDATE', {
+    id: withdrawal.id,
+    status: withdrawal.status,
+    action: action,
+    reject_reason: withdrawal.reject_reason
+  });
+}
+
+// Handler de conexão WebSocket
+wss.on('connection', (ws, req) => {
+  console.log('🔌 [WS] Nova conexão');
+  let clientType = null;
+  let userCod = null;
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      
+      if (data.type === 'AUTH') {
+        const { role, cod_profissional } = data;
+        if (['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
+          clientType = 'admin';
+          wsClients.admins.add(ws);
+          ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'admin' }));
+          console.log(`✅ [WS] Admin conectado. Total: ${wsClients.admins.size}`);
+        } else if (cod_profissional) {
+          clientType = 'user';
+          userCod = cod_profissional;
+          if (!wsClients.users.has(userCod)) wsClients.users.set(userCod, new Set());
+          wsClients.users.get(userCod).add(ws);
+          ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'user', userCod }));
+          console.log(`✅ [WS] Usuário ${userCod} conectado`);
+        }
+      }
+      
+      if (data.type === 'PING') {
+        ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
+      }
+    } catch (e) {
+      console.error('❌ [WS] Erro:', e.message);
+    }
+  });
+  
+  ws.on('close', () => {
+    if (clientType === 'admin') {
+      wsClients.admins.delete(ws);
+      console.log(`🔌 [WS] Admin desconectado. Restam: ${wsClients.admins.size}`);
+    } else if (clientType === 'user' && userCod) {
+      const conns = wsClients.users.get(userCod);
+      if (conns) {
+        conns.delete(ws);
+        if (conns.size === 0) wsClients.users.delete(userCod);
+      }
+    }
+  });
+  
+  ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts' }));
+});
+
+// Exportar funções globalmente para uso nos endpoints
+global.notifyNewWithdrawal = notifyNewWithdrawal;
+global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
+global.broadcastToAdmins = broadcastToAdmins;
+
+// ==================== FIM WEBSOCKET SETUP ====================
+
 // ==================== INICIAR SERVIDOR ====================
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   console.log(`📡 API: http://localhost:${port}/api/health`);
+  console.log(`🔌 WebSocket: ws://localhost:${port}/ws/financeiro`);
   
   // Processar recorrências a cada hora
   setInterval(processarRecorrenciasInterno, 60 * 60 * 1000);
