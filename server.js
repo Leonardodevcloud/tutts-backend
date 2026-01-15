@@ -23142,6 +23142,8 @@ function notifyNewWithdrawal(withdrawal) {
     id: withdrawal.id,
     user_cod: withdrawal.user_cod,
     user_name: withdrawal.user_name,
+    cpf: withdrawal.cpf,
+    pix_key: withdrawal.pix_key,
     requested_amount: withdrawal.requested_amount,
     final_amount: withdrawal.final_amount,
     has_gratuity: withdrawal.has_gratuity,
