@@ -106,17 +106,23 @@ const SERVER_VERSION = '2026-01-14-WEBSOCKET-OTIMIZADO';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
-// Esses tokens são compartilhados por todos os clientes
-// Cada cliente só precisa do seu próprio tutts_codigo_cliente
+// CRÍTICO: Tokens devem ser definidos via variáveis de ambiente
 const TUTTS_TOKENS = {
-  GRAVAR: 'a6620113fac165e634a298599512ab5e-gravar',
-  STATUS: 'a6620113fac165e634a298599512ab5e-status',
-  PROFISSIONAIS: 'a6620113fac165e634a298599512ab5e-profissionais',
-  CANCELAR: 'a6620113fac165e634a298599512ab5e-cancelar'
+  GRAVAR: process.env.TUTTS_TOKEN_GRAVAR || (() => { console.warn('⚠️ TUTTS_TOKEN_GRAVAR não configurado'); return ''; })(),
+  STATUS: process.env.TUTTS_TOKEN_STATUS || (() => { console.warn('⚠️ TUTTS_TOKEN_STATUS não configurado'); return ''; })(),
+  PROFISSIONAIS: process.env.TUTTS_TOKEN_PROFISSIONAIS || (() => { console.warn('⚠️ TUTTS_TOKEN_PROFISSIONAIS não configurado'); return ''; })(),
+  CANCELAR: process.env.TUTTS_TOKEN_CANCELAR || (() => { console.warn('⚠️ TUTTS_TOKEN_CANCELAR não configurado'); return ''; })()
 };
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
-const JWT_SECRET = process.env.JWT_SECRET || 'tutts_jwt_secret_2026_change_in_production';
+// CRÍTICO: JWT_SECRET deve ser definido via variável de ambiente
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('❌ ERRO CRÍTICO: JWT_SECRET não está configurado!');
+  console.error('Configure a variável de ambiente JWT_SECRET no servidor.');
+  console.error('Use um valor forte e aleatório de pelo menos 32 caracteres.');
+  process.exit(1);
+}
 const JWT_EXPIRES_IN = '8h';
 const BCRYPT_ROUNDS = 10;
 
@@ -2409,8 +2415,8 @@ app.post('/api/users/refresh-token', verificarToken, (req, res) => {
   res.json({ token: newToken });
 });
 
-// Listar todos os usuários (apenas admin)
-app.get('/api/users', async (req, res) => {
+// Listar todos os usuários (APENAS ADMIN - protegido)
+app.get('/api/users', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT u.id, u.cod_profissional, u.full_name, u.role, u.setor_id, u.created_at,
@@ -2496,9 +2502,20 @@ app.post('/api/users/change-password', verificarToken, async (req, res) => {
   }
 });
 
-// Atualizar role do usuário (Admin Master)
-app.patch('/api/users/:codProfissional/role', async (req, res) => {
+// Atualizar role do usuário (Admin Master APENAS)
+// SEGURANÇA: Apenas admin_master pode alterar roles
+app.patch('/api/users/:codProfissional/role', verificarToken, async (req, res) => {
   try {
+    // CRÍTICO: Apenas admin_master pode alterar roles
+    if (req.user.role !== 'admin_master') {
+      console.log(`⚠️ [SEGURANÇA] Tentativa não autorizada de alterar role por: ${req.user.codProfissional} (${req.user.role})`);
+      await registrarAuditoria(req, 'ROLE_CHANGE_DENIED', AUDIT_CATEGORIES.ADMIN, 'users', req.params.codProfissional, {
+        tentativa_role: req.body.role,
+        motivo: 'Usuário não é admin_master'
+      }, 'failed');
+      return res.status(403).json({ error: 'Acesso negado. Apenas Admin Master pode alterar roles.' });
+    }
+    
     const { codProfissional } = req.params;
     const { role } = req.body;
     
@@ -2506,6 +2523,11 @@ app.patch('/api/users/:codProfissional/role', async (req, res) => {
     const rolesPermitidos = ['user', 'admin', 'admin_financeiro', 'admin_master'];
     if (!rolesPermitidos.includes(role)) {
       return res.status(400).json({ error: 'Role inválido' });
+    }
+    
+    // Não permitir rebaixar a si mesmo de admin_master
+    if (req.user.codProfissional === codProfissional && role !== 'admin_master') {
+      return res.status(400).json({ error: 'Você não pode rebaixar seu próprio role de Admin Master' });
     }
     
     const result = await pool.query(
@@ -2517,7 +2539,14 @@ app.patch('/api/users/:codProfissional/role', async (req, res) => {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
     
-    console.log(`👑 Role atualizado: ${codProfissional} -> ${role}`);
+    // Registrar auditoria
+    await registrarAuditoria(req, 'ROLE_CHANGE', AUDIT_CATEGORIES.ADMIN, 'users', result.rows[0].id, {
+      cod_profissional: codProfissional,
+      novo_role: role,
+      alterado_por: req.user.codProfissional
+    });
+    
+    console.log(`👑 Role atualizado: ${codProfissional} -> ${role} (por ${req.user.codProfissional})`);
     res.json({ message: 'Role atualizado com sucesso', user: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao atualizar role:', error);
@@ -2529,9 +2558,15 @@ app.patch('/api/users/:codProfissional/role', async (req, res) => {
 // ENDPOINTS DE PERMISSÕES DE ADMIN
 // ============================================
 
-// Listar todos os admins com permissões
-app.get('/api/admin-permissions', async (req, res) => {
+// Listar todos os admins com permissões (APENAS ADMIN_MASTER)
+app.get('/api/admin-permissions', verificarToken, async (req, res) => {
   try {
+    // CRÍTICO: Apenas admin_master pode ver/gerenciar permissões
+    if (req.user.role !== 'admin_master') {
+      console.log(`⚠️ [SEGURANÇA] Acesso negado a admin-permissions por: ${req.user.codProfissional}`);
+      return res.status(403).json({ error: 'Acesso negado. Apenas Admin Master pode gerenciar permissões.' });
+    }
+    
     const result = await pool.query(`
       SELECT u.id, u.cod_profissional, u.full_name, u.role, 
              COALESCE(u.allowed_modules::text, '[]') as allowed_modules,
@@ -2561,9 +2596,18 @@ app.get('/api/admin-permissions', async (req, res) => {
   }
 });
 
-// Atualizar permissões de um admin
-app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
+// Atualizar permissões de um admin (APENAS ADMIN_MASTER)
+app.patch('/api/admin-permissions/:codProfissional', verificarToken, async (req, res) => {
   try {
+    // CRÍTICO: Apenas admin_master pode alterar permissões
+    if (req.user.role !== 'admin_master') {
+      console.log(`⚠️ [SEGURANÇA] Tentativa não autorizada de alterar permissões por: ${req.user.codProfissional}`);
+      await registrarAuditoria(req, 'PERMISSIONS_CHANGE_DENIED', AUDIT_CATEGORIES.ADMIN, 'users', req.params.codProfissional, {
+        motivo: 'Usuário não é admin_master'
+      }, 'failed');
+      return res.status(403).json({ error: 'Acesso negado. Apenas Admin Master pode alterar permissões.' });
+    }
+    
     const { codProfissional } = req.params;
     const { allowed_modules, allowed_tabs } = req.body;
     
@@ -2582,7 +2626,14 @@ app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
       return res.json({ message: 'Usuário não encontrado', success: false });
     }
     
-    console.log(`🔐 Permissões atualizadas: ${codProfissional}`);
+    // Registrar auditoria
+    await registrarAuditoria(req, 'PERMISSIONS_CHANGE', AUDIT_CATEGORIES.ADMIN, 'users', result.rows[0].id, {
+      cod_profissional: codProfissional,
+      modulos: modules,
+      alterado_por: req.user.codProfissional
+    });
+    
+    console.log(`🔐 Permissões atualizadas: ${codProfissional} (por ${req.user.codProfissional})`);
     res.json({ message: 'Permissões atualizadas com sucesso', user: result.rows[0], success: true });
   } catch (error) {
     console.error('❌ Erro ao atualizar permissões:', error);
@@ -2590,10 +2641,15 @@ app.patch('/api/admin-permissions/:codProfissional', async (req, res) => {
   }
 });
 
-// Obter permissões de um admin específico
-app.get('/api/admin-permissions/:codProfissional', async (req, res) => {
+// Obter permissões de um admin específico (ADMIN_MASTER ou próprio usuário)
+app.get('/api/admin-permissions/:codProfissional', verificarToken, async (req, res) => {
   try {
     const { codProfissional } = req.params;
+    
+    // Permitir acesso apenas para admin_master ou o próprio usuário consultando suas permissões
+    if (req.user.role !== 'admin_master' && req.user.codProfissional.toLowerCase() !== codProfissional.toLowerCase()) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
     
     const result = await pool.query(`
       SELECT id, cod_profissional, full_name, role, 
@@ -2624,10 +2680,24 @@ app.get('/api/admin-permissions/:codProfissional', async (req, res) => {
   }
 });
 
-// Deletar usuário
-app.delete('/api/users/:codProfissional', async (req, res) => {
+// Deletar usuário (APENAS ADMIN_MASTER)
+app.delete('/api/users/:codProfissional', verificarToken, async (req, res) => {
   try {
+    // CRÍTICO: Apenas admin_master pode deletar usuários
+    if (req.user.role !== 'admin_master') {
+      console.log(`⚠️ [SEGURANÇA] Tentativa não autorizada de deletar usuário por: ${req.user.codProfissional}`);
+      await registrarAuditoria(req, 'USER_DELETE_DENIED', AUDIT_CATEGORIES.USER, 'users', req.params.codProfissional, {
+        motivo: 'Usuário não é admin_master'
+      }, 'failed');
+      return res.status(403).json({ error: 'Acesso negado. Apenas Admin Master pode deletar usuários.' });
+    }
+    
     const { codProfissional } = req.params;
+    
+    // Não permitir deletar a si mesmo
+    if (req.user.codProfissional.toLowerCase() === codProfissional.toLowerCase()) {
+      return res.status(400).json({ error: 'Você não pode deletar sua própria conta' });
+    }
     
     const deletedData = {
       user: null,
@@ -2863,10 +2933,17 @@ app.delete('/api/submissions/:id', async (req, res) => {
 // DADOS FINANCEIROS DO USUÁRIO
 // ============================================
 
-// Verificar se usuário aceitou termos
-app.get('/api/financial/check-terms/:userCod', async (req, res) => {
+// Verificar se usuário aceitou termos (protegido - apenas próprio usuário ou admin)
+app.get('/api/financial/check-terms/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // SEGURANÇA: Apenas o próprio usuário ou admin pode verificar
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+    }
     
     const result = await pool.query(
       'SELECT terms_accepted FROM user_financial_data WHERE user_cod = $1',
@@ -2883,10 +2960,16 @@ app.get('/api/financial/check-terms/:userCod', async (req, res) => {
   }
 });
 
-// Aceitar termos
-app.post('/api/financial/accept-terms', async (req, res) => {
+// Aceitar termos (protegido - apenas próprio usuário)
+app.post('/api/financial/accept-terms', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.body;
+    
+    // SEGURANÇA: Apenas o próprio usuário pode aceitar seus termos
+    if (req.user.codProfissional !== userCod) {
+      console.log(`⚠️ [SEGURANÇA] Tentativa de aceitar termos para outro usuário: ${req.user.codProfissional} -> ${userCod}`);
+      return res.status(403).json({ error: 'Você só pode aceitar termos para sua própria conta' });
+    }
     
     // Verificar se já existe registro
     const existing = await pool.query(
@@ -2920,10 +3003,19 @@ app.post('/api/financial/accept-terms', async (req, res) => {
   }
 });
 
-// Obter dados financeiros do usuário
-app.get('/api/financial/data/:userCod', async (req, res) => {
+// Obter dados financeiros do usuário (PROTEGIDO - dados sensíveis)
+app.get('/api/financial/data/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // CRÍTICO: Dados financeiros são sensíveis (CPF, PIX)
+    // Apenas o próprio usuário ou admin podem acessar
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
+      if (req.user.codProfissional !== userCod) {
+        console.log(`⚠️ [SEGURANÇA] Acesso negado a dados financeiros: ${req.user.codProfissional} tentou acessar ${userCod}`);
+        return res.status(403).json({ error: 'Acesso negado aos dados financeiros' });
+      }
+    }
     
     const result = await pool.query(
       'SELECT * FROM user_financial_data WHERE user_cod = $1',
@@ -2941,10 +3033,24 @@ app.get('/api/financial/data/:userCod', async (req, res) => {
   }
 });
 
-// Salvar/Atualizar dados financeiros
-app.post('/api/financial/data', async (req, res) => {
+// Salvar/Atualizar dados financeiros (PROTEGIDO)
+app.post('/api/financial/data', verificarToken, async (req, res) => {
   try {
     const { userCod, fullName, cpf, pixKey, pixTipo } = req.body;
+    
+    // SEGURANÇA: Apenas o próprio usuário pode alterar seus dados financeiros
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
+      if (req.user.codProfissional !== userCod) {
+        console.log(`⚠️ [SEGURANÇA] Tentativa de alterar dados financeiros de outro usuário: ${req.user.codProfissional} -> ${userCod}`);
+        return res.status(403).json({ error: 'Você só pode alterar seus próprios dados financeiros' });
+      }
+    }
+    
+    // Validação básica de CPF (formato)
+    const cpfLimpo = cpf.replace(/\D/g, '');
+    if (cpfLimpo.length !== 11) {
+      return res.status(400).json({ error: 'CPF inválido' });
+    }
     
     // Verificar se já existe
     const existing = await pool.query(
@@ -3001,10 +3107,17 @@ app.post('/api/financial/data', async (req, res) => {
   }
 });
 
-// Obter logs de alterações
-app.get('/api/financial/logs/:userCod', async (req, res) => {
+// Obter logs de alterações financeiras (PROTEGIDO)
+app.get('/api/financial/logs/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // SEGURANÇA: Apenas o próprio usuário ou admin podem ver logs
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado aos logs financeiros' });
+      }
+    }
     
     const result = await pool.query(
       'SELECT * FROM financial_logs WHERE user_cod = $1 ORDER BY created_at DESC',
@@ -3765,8 +3878,8 @@ app.patch('/api/withdrawals/:id/saldo', verificarToken, verificarAdminOuFinancei
   }
 });
 
-// Dashboard de conciliação
-app.get('/api/withdrawals/dashboard/conciliacao', async (req, res) => {
+// Dashboard de conciliação (PROTEGIDO - apenas admin financeiro)
+app.get('/api/withdrawals/dashboard/conciliacao', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
@@ -3813,10 +3926,17 @@ app.get('/api/gratuities', verificarToken, verificarAdminOuFinanceiro, async (re
   }
 });
 
-// Listar gratuidades do usuário
-app.get('/api/gratuities/user/:userCod', async (req, res) => {
+// Listar gratuidades do usuário (PROTEGIDO)
+app.get('/api/gratuities/user/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // SEGURANÇA: Apenas o próprio usuário ou admin podem ver gratuidades
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role)) {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+    }
     
     const result = await pool.query(
       'SELECT * FROM gratuities WHERE user_cod = $1 ORDER BY created_at DESC',
@@ -4030,8 +4150,8 @@ app.get('/api/notifications/:userCod', async (req, res) => {
 // RECUPERAÇÃO DE SENHA
 // ============================================
 
-// Solicitar recuperação de senha
-app.post('/api/password-recovery', async (req, res) => {
+// Solicitar recuperação de senha (público - com rate limit)
+app.post('/api/password-recovery', loginLimiter, async (req, res) => {
   try {
     const { cod, name } = req.body;
 
@@ -4080,11 +4200,11 @@ app.post('/api/password-recovery', async (req, res) => {
   }
 });
 
-// Listar solicitações de recuperação (admin)
-app.get('/api/password-recovery', async (req, res) => {
+// Listar solicitações de recuperação (APENAS ADMIN)
+app.get('/api/password-recovery', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM password_recovery ORDER BY created_at DESC'
+      'SELECT id, user_cod, user_name, status, created_at, resolved_at, resolved_by FROM password_recovery ORDER BY created_at DESC'
     );
     res.json(result.rows);
   } catch (error) {
@@ -4093,13 +4213,18 @@ app.get('/api/password-recovery', async (req, res) => {
   }
 });
 
-// Resetar senha (admin)
-app.patch('/api/password-recovery/:id/reset', async (req, res) => {
+// Resetar senha (APENAS ADMIN - com hash de senha)
+app.patch('/api/password-recovery/:id/reset', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { newPassword, adminName } = req.body;
+    const { newPassword } = req.body;
 
-    console.log('🔐 Resetando senha, ID:', id);
+    console.log('🔐 Resetando senha, ID:', id, 'por:', req.user.codProfissional);
+
+    // Validar senha
+    if (!newPassword || newPassword.length < 4) {
+      return res.status(400).json({ error: 'Senha deve ter pelo menos 4 caracteres' });
+    }
 
     // Buscar solicitação
     const requestResult = await pool.query(
@@ -4113,22 +4238,31 @@ app.patch('/api/password-recovery/:id/reset', async (req, res) => {
 
     const request = requestResult.rows[0];
 
-    // Atualizar senha do usuário
+    // CRÍTICO: Fazer hash da senha antes de salvar!
+    const hashedPassword = await hashSenha(newPassword);
+
+    // Atualizar senha do usuário COM HASH
     await pool.query(
       'UPDATE users SET password = $1, updated_at = NOW() WHERE LOWER(cod_profissional) = LOWER($2)',
-      [newPassword, request.user_cod]
+      [hashedPassword, request.user_cod]
     );
 
-    // Marcar solicitação como resolvida
+    // Marcar solicitação como resolvida (NÃO salvar a senha em texto plano!)
     const result = await pool.query(
       `UPDATE password_recovery 
-       SET status = 'resolvido', new_password = $1, resolved_at = NOW(), resolved_by = $2 
-       WHERE id = $3 
-       RETURNING *`,
-      [newPassword, adminName, id]
+       SET status = 'resolvido', resolved_at = NOW(), resolved_by = $1 
+       WHERE id = $2 
+       RETURNING id, user_cod, user_name, status, resolved_at, resolved_by`,
+      [req.user.nome || req.user.codProfissional, id]
     );
 
-    console.log('✅ Senha resetada com sucesso');
+    // Registrar auditoria
+    await registrarAuditoria(req, 'PASSWORD_RESET', AUDIT_CATEGORIES.AUTH, 'users', request.user_cod, {
+      solicitacao_id: id,
+      admin: req.user.codProfissional
+    });
+
+    console.log('✅ Senha resetada com sucesso por:', req.user.codProfissional);
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao resetar senha:', error);
@@ -4136,19 +4270,25 @@ app.patch('/api/password-recovery/:id/reset', async (req, res) => {
   }
 });
 
-// Cancelar solicitação (admin)
-app.delete('/api/password-recovery/:id', async (req, res) => {
+// Cancelar solicitação (APENAS ADMIN)
+app.delete('/api/password-recovery/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
     const result = await pool.query(
-      'DELETE FROM password_recovery WHERE id = $1 RETURNING *',
+      'DELETE FROM password_recovery WHERE id = $1 RETURNING id, user_cod, user_name',
       [id]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Solicitação não encontrada' });
     }
+
+    // Registrar auditoria
+    await registrarAuditoria(req, 'PASSWORD_RECOVERY_DELETE', AUDIT_CATEGORIES.AUTH, 'password_recovery', id, {
+      user_cod: result.rows[0].user_cod,
+      admin: req.user.codProfissional
+    });
 
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
@@ -19289,10 +19429,10 @@ app.get('/api/audit/export', verificarToken, verificarAdmin, async (req, res) =>
 
 // ==================== INTEGRAÇÃO PLIFIC ====================
 // Consulta de saldo e lançamento de débito na plataforma Plific
+// SEGURANÇA: Token DEVE ser configurado via variável de ambiente
 
 const PLIFIC_CONFIG = {
     BASE_URL_TESTE: 'https://mototaxionline.com/sem/v1/rotas.php/integracao-plific-saldo-prof',
-    TOKEN_TESTE: '1e5e485d3e105c2c0eef661a203a0bd539548954',
     BASE_URL_PRODUCAO: 'https://tutts.com.br/sem/v1/rotas.php/integracao-plific-saldo-prof',
     RATE_LIMIT: 10,
     RATE_LIMIT_WINDOW: 1000,
@@ -19301,7 +19441,11 @@ const PLIFIC_CONFIG = {
 
 const PLIFIC_AMBIENTE = process.env.PLIFIC_AMBIENTE || 'teste';
 const PLIFIC_BASE_URL = PLIFIC_AMBIENTE === 'producao' ? PLIFIC_CONFIG.BASE_URL_PRODUCAO : PLIFIC_CONFIG.BASE_URL_TESTE;
-const PLIFIC_TOKEN = process.env.PLIFIC_TOKEN || PLIFIC_CONFIG.TOKEN_TESTE;
+const PLIFIC_TOKEN = process.env.PLIFIC_TOKEN;
+
+if (!PLIFIC_TOKEN) {
+  console.warn('⚠️ AVISO: PLIFIC_TOKEN não configurado! Integração com Plific não funcionará.');
+}
 
 console.log(`🔗 Plific configurado para ambiente: ${PLIFIC_AMBIENTE.toUpperCase()}`);
 
