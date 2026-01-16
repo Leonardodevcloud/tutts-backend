@@ -3115,11 +3115,11 @@ app.post('/api/financial/data', verificarToken, async (req, res) => {
     // Validação completa de CPF
     const cpfLimpo = cpf.replace(/\D/g, '');
     if (cpfLimpo.length !== 11) {
-      return res.status(400).json({ error: 'CPF deve ter 11 dígitos' });
+      return res.status(400).json({ error: 'CPF deve ter 11 dígitos. Verifique se digitou corretamente.' });
     }
     // Verificar se não é CPF com todos dígitos iguais
     if (/^(\d)\1{10}$/.test(cpfLimpo)) {
-      return res.status(400).json({ error: 'CPF inválido' });
+      return res.status(400).json({ error: 'CPF inválido. Não é permitido CPF com todos os dígitos iguais.' });
     }
     // Validar dígitos verificadores do CPF
     const validarCPF = (cpf) => {
@@ -3136,7 +3136,7 @@ app.post('/api/financial/data', verificarToken, async (req, res) => {
       return true;
     };
     if (!validarCPF(cpfLimpo)) {
-      return res.status(400).json({ error: 'CPF inválido (dígito verificador incorreto)' });
+      return res.status(400).json({ error: 'CPF inválido. Por favor, verifique se digitou os números corretamente.' });
     }
     
     // Validar chave PIX baseado no tipo
