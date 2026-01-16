@@ -20463,61 +20463,8 @@ app.get('/api/roteirizador/favoritos', verificarTokenRoteirizador, async (req, r
   }
 });
 
-// ==================== PROXY PARA OPENROUTESERVICE (evitar CORS) ====================
-
-const ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjM5MTI2ZjMwMTMxOTQ3OTU5Mjc2YWM5OGNjNGZiZWEwIiwiaCI6Im11cm11cjY0In0=';
-
-// Proxy para otimização de rotas
-app.post('/api/roteirizador/otimizar', verificarTokenRoteirizador, async (req, res) => {
-  try {
-    const response = await fetch('https://api.openrouteservice.org/optimization', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': ORS_API_KEY
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Erro ORS otimização:', response.status, errorText);
-      return res.status(response.status).json({ error: 'Erro na otimização' });
-    }
-    
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    console.error('❌ Erro proxy otimização:', err);
-    res.status(500).json({ error: 'Erro ao otimizar rota' });
-  }
-});
-
-// Proxy para direções/geometria
-app.post('/api/roteirizador/direcoes', verificarTokenRoteirizador, async (req, res) => {
-  try {
-    const response = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': ORS_API_KEY
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Erro ORS direções:', response.status, errorText);
-      return res.status(response.status).json({ error: 'Erro nas direções' });
-    }
-    
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    console.error('❌ Erro proxy direções:', err);
-    res.status(500).json({ error: 'Erro ao obter direções' });
-  }
-});
+// ==================== PROXY PARA OPENROUTESERVICE (ANTIGO - REMOVIDO) ====================
+// SEGURANÇA: O proxy antigo foi removido. Usar /api/routing/* que já está protegido
 
 // ==================== CENTRAL - Gerenciar usuários do roteirizador ====================
 
