@@ -110,7 +110,7 @@ app.set('trust proxy', 1); // Confiar no primeiro proxy
 app.disable('x-powered-by');
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-15-SECURITY-UPDATE';
+const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-CRITICAL';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
@@ -121,6 +121,12 @@ const TUTTS_TOKENS = {
   PROFISSIONAIS: process.env.TUTTS_TOKEN_PROFISSIONAIS || (() => { console.warn('⚠️ TUTTS_TOKEN_PROFISSIONAIS não configurado'); return ''; })(),
   CANCELAR: process.env.TUTTS_TOKEN_CANCELAR || (() => { console.warn('⚠️ TUTTS_TOKEN_CANCELAR não configurado'); return ''; })()
 };
+
+// ==================== API KEY OPENROUTESERVICE (PROTEGIDA) ====================
+const ORS_API_KEY = process.env.ORS_API_KEY;
+if (!ORS_API_KEY) {
+  console.warn('⚠️ ORS_API_KEY não configurada - Roteirizador não funcionará');
+}
 
 // ==================== CONFIGURAÇÕES DE SEGURANÇA ====================
 // CRÍTICO: JWT_SECRET deve ser definido via variável de ambiente
@@ -2305,10 +2311,33 @@ app.use((req, res, next) => {
 // ==================== FIM CORS ====================
 
 app.use(helmet({
-  contentSecurityPolicy: false, // Desabilitado para não quebrar frontend
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdn.tailwindcss.com", "https://unpkg.com", "https://cdn.sheetjs.com", "https://cdnjs.cloudflare.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdn.tailwindcss.com", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+      imgSrc: ["'self'", "data:", "blob:", "https:", "https://*.tile.openstreetmap.org", "https://api.qrserver.com"],
+      connectSrc: ["'self'", "https://tutts-backend-production.up.railway.app", "wss://tutts-backend-production.up.railway.app", "https://nominatim.openstreetmap.org", "https://viacep.com.br", "https://api.qrserver.com"],
+      frameAncestors: ["'self'"],
+      formAction: ["'self'"],
+      workerSrc: ["'self'", "blob:"],
+      childSrc: ["'self'", "blob:"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"]
+    },
+    reportOnly: false
+  },
   crossOriginEmbedderPolicy: false,
-  crossOriginOpenerPolicy: false, // Desabilitado para PWA
-  crossOriginResourcePolicy: false // Desabilitado para PWA
+  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy: false,
+  dnsPrefetchControl: { allow: true },
+  frameguard: { action: 'sameorigin' },
+  hidePoweredBy: true,
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  ieNoOpen: true,
+  noSniff: true,
+  xssFilter: true
 }));
 
 // Rate limiting global para API
@@ -2327,6 +2356,147 @@ app.get('/api/health', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({ status: 'ok', message: 'API funcionando' });
 });
+
+// ==================== PROXY OPENROUTESERVICE (ROTEIRIZADOR) ====================
+// SEGURANÇA: API Key protegida no backend
+
+// Proxy para geocodificação
+app.get('/api/routing/geocode', verificarToken, async (req, res) => {
+  try {
+    if (!ORS_API_KEY) {
+      return res.status(503).json({ error: 'Serviço de geocodificação não configurado' });
+    }
+    
+    const { text } = req.query;
+    
+    if (!text || text.length < 3) {
+      return res.status(400).json({ error: 'Texto de busca inválido' });
+    }
+    
+    const sanitizedText = text.replace(/[<>\"'&]/g, '').substring(0, 200);
+    const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_API_KEY}&text=${encodeURIComponent(sanitizedText)}&boundary.country=BR&size=1`;
+    
+    const response = await httpRequest(url);
+    const data = response.json();
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Erro no serviço de geocodificação' });
+    }
+    
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Erro no proxy geocode:', error.message);
+    res.status(500).json({ error: 'Erro interno no serviço de geocodificação' });
+  }
+});
+
+// Proxy para otimização de rota
+app.post('/api/routing/optimize', verificarToken, async (req, res) => {
+  try {
+    if (!ORS_API_KEY) {
+      return res.status(503).json({ error: 'Serviço de roteirização não configurado' });
+    }
+    
+    const { jobs, vehicles } = req.body;
+    
+    if (!jobs || !Array.isArray(jobs) || jobs.length === 0) {
+      return res.status(400).json({ error: 'Jobs inválidos' });
+    }
+    if (!vehicles || !Array.isArray(vehicles) || vehicles.length === 0) {
+      return res.status(400).json({ error: 'Vehicles inválidos' });
+    }
+    if (jobs.length > 50) {
+      return res.status(400).json({ error: 'Máximo de 50 pontos permitido' });
+    }
+    
+    for (const job of jobs) {
+      if (!job.location || !Array.isArray(job.location) || job.location.length !== 2) {
+        return res.status(400).json({ error: 'Coordenadas de job inválidas' });
+      }
+      const [lng, lat] = job.location;
+      if (typeof lng !== 'number' || typeof lat !== 'number' || 
+          lng < -180 || lng > 180 || lat < -90 || lat > 90) {
+        return res.status(400).json({ error: 'Coordenadas fora do intervalo válido' });
+      }
+    }
+    
+    const response = await httpRequest('https://api.openrouteservice.org/optimization', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': ORS_API_KEY
+      },
+      body: JSON.stringify({ jobs, vehicles })
+    });
+    
+    const data = response.json();
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Erro no serviço de otimização' });
+    }
+    
+    await registrarAuditoria(req, 'ROUTE_OPTIMIZE', AUDIT_CATEGORIES.DATA, 'routing', null, {
+      pontos: jobs.length,
+      usuario: req.user.codProfissional
+    });
+    
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Erro no proxy optimize:', error.message);
+    res.status(500).json({ error: 'Erro interno no serviço de otimização' });
+  }
+});
+
+// Proxy para direções (geometria da rota)
+app.post('/api/routing/directions', verificarToken, async (req, res) => {
+  try {
+    if (!ORS_API_KEY) {
+      return res.status(503).json({ error: 'Serviço de direções não configurado' });
+    }
+    
+    const { coordinates } = req.body;
+    
+    if (!coordinates || !Array.isArray(coordinates) || coordinates.length < 2) {
+      return res.status(400).json({ error: 'Coordenadas inválidas (mínimo 2 pontos)' });
+    }
+    if (coordinates.length > 50) {
+      return res.status(400).json({ error: 'Máximo de 50 pontos permitido' });
+    }
+    
+    for (const coord of coordinates) {
+      if (!Array.isArray(coord) || coord.length !== 2) {
+        return res.status(400).json({ error: 'Formato de coordenada inválido' });
+      }
+      const [lng, lat] = coord;
+      if (typeof lng !== 'number' || typeof lat !== 'number' ||
+          lng < -180 || lng > 180 || lat < -90 || lat > 90) {
+        return res.status(400).json({ error: 'Coordenadas fora do intervalo válido' });
+      }
+    }
+    
+    const response = await httpRequest('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': ORS_API_KEY
+      },
+      body: JSON.stringify({ coordinates })
+    });
+    
+    const data = response.json();
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Erro no serviço de direções' });
+    }
+    
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Erro no proxy directions:', error.message);
+    res.status(500).json({ error: 'Erro interno no serviço de direções' });
+  }
+});
+
+// ==================== FIM PROXY OPENROUTESERVICE ====================
 
 // ============================================
 // USUÁRIOS (existente)
@@ -2849,12 +3019,29 @@ app.delete('/api/users/:codProfissional', verificarToken, async (req, res) => {
 });
 
 // ============================================
-// SUBMISSÕES (existente)
+// SUBMISSÕES (COM AUTENTICAÇÃO - CORRIGIDO)
 // ============================================
 
-app.post('/api/submissions', async (req, res) => {
+// POST - Criar submissão (REQUER AUTENTICAÇÃO)
+app.post('/api/submissions', verificarToken, async (req, res) => {
   try {
-    const { ordemServico, motivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas } = req.body;
+    const { ordemServico, motivo, imagemComprovante, imagens, coordenadas } = req.body;
+    
+    // SEGURANÇA: Usar dados do token JWT, não do body
+    const userId = req.user.id;
+    const userCod = req.user.codProfissional;
+    const userName = req.user.nome;
+    
+    // Validação de entrada
+    if (!ordemServico || ordemServico.length < 1 || ordemServico.length > 50) {
+      return res.status(400).json({ error: 'Ordem de serviço inválida' });
+    }
+    if (!motivo || motivo.length < 1 || motivo.length > 1000) {
+      return res.status(400).json({ error: 'Motivo inválido' });
+    }
+    
+    const sanitizedOrdemServico = ordemServico.toString().trim().substring(0, 50);
+    const sanitizedMotivo = motivo.toString().trim().substring(0, 1000);
 
     const result = await pool.query(
       `INSERT INTO submissions 
@@ -2862,35 +3049,44 @@ app.post('/api/submissions', async (req, res) => {
         imagem_comprovante, imagens, coordenadas, created_at) 
        VALUES ($1, $2, 'pendente', $3, $4, $5, $6, $7, $8, NOW()) 
        RETURNING *`,
-      [ordemServico, motivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas]
+      [sanitizedOrdemServico, sanitizedMotivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas]
     );
+
+    await registrarAuditoria(req, 'SUBMISSION_CREATE', AUDIT_CATEGORIES.DATA, 'submissions', result.rows[0].id, {
+      ordem_servico: sanitizedOrdemServico
+    });
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao criar submissão:', error);
-    res.status(500).json({ error: 'Erro ao criar submissão: ' + error.message });
+    res.status(500).json({ error: 'Erro interno ao criar submissão' });
   }
 });
 
-app.get('/api/submissions', async (req, res) => {
+// GET - Listar submissões (REQUER AUTENTICAÇÃO)
+app.get('/api/submissions', verificarToken, async (req, res) => {
   try {
-    const { userId, userCod } = req.query;
-
-    let query = `
-      SELECT 
-        id, ordem_servico, motivo, status, 
-        user_id, user_cod, user_name,
-        CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
-        LENGTH(imagem_comprovante) as tamanho_imagem,
-        coordenadas, observacao,
-        validated_by, validated_by_name,
-        created_at, updated_at
-      FROM submissions 
-      ORDER BY created_at DESC
-    `;
-    let params = [];
-
-    if (userId && userId !== '0') {
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    
+    let query;
+    let params;
+    
+    if (isAdmin) {
+      query = `
+        SELECT 
+          id, ordem_servico, motivo, status, 
+          user_id, user_cod, user_name,
+          CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
+          LENGTH(imagem_comprovante) as tamanho_imagem,
+          coordenadas, observacao,
+          validated_by, validated_by_name,
+          created_at, updated_at
+        FROM submissions 
+        ORDER BY created_at DESC
+        LIMIT 1000
+      `;
+      params = [];
+    } else {
       query = `
         SELECT 
           id, ordem_servico, motivo, status, 
@@ -2903,26 +3099,42 @@ app.get('/api/submissions', async (req, res) => {
         FROM submissions 
         WHERE user_cod = $1 
         ORDER BY created_at DESC
+        LIMIT 500
       `;
-      params = [userCod];
+      params = [req.user.codProfissional];
     }
 
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar submissões:', error);
-    res.status(500).json({ error: 'Erro ao listar submissões: ' + error.message });
+    res.status(500).json({ error: 'Erro interno ao listar submissões' });
   }
 });
 
-app.get('/api/submissions/:id/imagem', async (req, res) => {
+// GET - Buscar imagem de submissão (REQUER AUTENTICAÇÃO)
+app.get('/api/submissions/:id/imagem', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
+    const submissionId = parseInt(id);
+    if (isNaN(submissionId) || submissionId < 1) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
     
-    const result = await pool.query(
-      'SELECT imagem_comprovante FROM submissions WHERE id = $1',
-      [id]
-    );
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    
+    let query;
+    let params;
+    
+    if (isAdmin) {
+      query = 'SELECT imagem_comprovante FROM submissions WHERE id = $1';
+      params = [submissionId];
+    } else {
+      query = 'SELECT imagem_comprovante FROM submissions WHERE id = $1 AND user_cod = $2';
+      params = [submissionId, req.user.codProfissional];
+    }
+    
+    const result = await pool.query(query, params);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Submissão não encontrada' });
@@ -2931,14 +3143,28 @@ app.get('/api/submissions/:id/imagem', async (req, res) => {
     res.json({ imagem: result.rows[0].imagem_comprovante });
   } catch (error) {
     console.error('❌ Erro ao buscar imagem:', error);
-    res.status(500).json({ error: 'Erro ao buscar imagem: ' + error.message });
+    res.status(500).json({ error: 'Erro interno ao buscar imagem' });
   }
 });
 
-app.patch('/api/submissions/:id', async (req, res) => {
+// PATCH - Atualizar submissão (APENAS ADMINS)
+app.patch('/api/submissions/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, observacao, validatedBy, validatedByName } = req.body;
+    const { status, observacao } = req.body;
+    
+    const submissionId = parseInt(id);
+    if (isNaN(submissionId) || submissionId < 1) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+    
+    const validStatuses = ['pendente', 'aprovado', 'rejeitado', 'em_analise'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Status inválido' });
+    }
+    
+    const validatedBy = req.user.id;
+    const validatedByName = req.user.nome;
 
     const result = await pool.query(
       `UPDATE submissions 
@@ -2949,37 +3175,60 @@ app.patch('/api/submissions/:id', async (req, res) => {
            updated_at = NOW() 
        WHERE id = $5 
        RETURNING *`,
-      [status, observacao || '', validatedBy || null, validatedByName || null, id]
+      [status, (observacao || '').substring(0, 1000), validatedBy, validatedByName, submissionId]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Submissão não encontrada' });
     }
+
+    await registrarAuditoria(req, 'SUBMISSION_UPDATE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, {
+      novo_status: status
+    });
 
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar submissão:', error);
-    res.status(500).json({ error: 'Erro ao atualizar submissão: ' + error.message });
+    res.status(500).json({ error: 'Erro interno ao atualizar submissão' });
   }
 });
 
-app.delete('/api/submissions/:id', async (req, res) => {
+// DELETE - Excluir submissão (APENAS ADMIN MASTER)
+app.delete('/api/submissions/:id', verificarToken, async (req, res) => {
   try {
+    if (req.user.role !== 'admin_master') {
+      await registrarAuditoria(req, 'SUBMISSION_DELETE_DENIED', AUDIT_CATEGORIES.DATA, 'submissions', req.params.id, {
+        motivo: 'Permissão negada'
+      }, 'denied');
+      return res.status(403).json({ error: 'Apenas admin master pode excluir submissões' });
+    }
+    
     const { id } = req.params;
+    const submissionId = parseInt(id);
+    if (isNaN(submissionId) || submissionId < 1) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+
+    const existing = await pool.query('SELECT ordem_servico, user_cod FROM submissions WHERE id = $1', [submissionId]);
+    
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Submissão não encontrada' });
+    }
 
     const result = await pool.query(
       'DELETE FROM submissions WHERE id = $1 RETURNING *',
-      [id]
+      [submissionId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Submissão não encontrada' });
-    }
+    await registrarAuditoria(req, 'SUBMISSION_DELETE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, {
+      ordem_servico: existing.rows[0].ordem_servico,
+      user_cod_original: existing.rows[0].user_cod
+    });
 
     res.json({ message: 'Submissão excluída com sucesso', deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao deletar submissão:', error);
-    res.status(500).json({ error: 'Erro ao deletar submissão: ' + error.message });
+    res.status(500).json({ error: 'Erro interno ao deletar submissão' });
   }
 });
 
