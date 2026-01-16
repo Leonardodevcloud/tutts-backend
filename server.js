@@ -110,16 +110,37 @@ app.set('trust proxy', 1); // Confiar no primeiro proxy
 app.disable('x-powered-by');
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-CRITICAL';
+const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-V2';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
 // CRÍTICO: Tokens devem ser definidos via variáveis de ambiente
 const TUTTS_TOKENS = {
-  GRAVAR: process.env.TUTTS_TOKEN_GRAVAR || (() => { console.warn('⚠️ TUTTS_TOKEN_GRAVAR não configurado'); return ''; })(),
-  STATUS: process.env.TUTTS_TOKEN_STATUS || (() => { console.warn('⚠️ TUTTS_TOKEN_STATUS não configurado'); return ''; })(),
-  PROFISSIONAIS: process.env.TUTTS_TOKEN_PROFISSIONAIS || (() => { console.warn('⚠️ TUTTS_TOKEN_PROFISSIONAIS não configurado'); return ''; })(),
-  CANCELAR: process.env.TUTTS_TOKEN_CANCELAR || (() => { console.warn('⚠️ TUTTS_TOKEN_CANCELAR não configurado'); return ''; })()
+  GRAVAR: process.env.TUTTS_TOKEN_GRAVAR,
+  STATUS: process.env.TUTTS_TOKEN_STATUS,
+  PROFISSIONAIS: process.env.TUTTS_TOKEN_PROFISSIONAIS,
+  CANCELAR: process.env.TUTTS_TOKEN_CANCELAR
+};
+
+// Validar tokens obrigatórios (warn, não bloqueia inicialização)
+const tokensNaoConfigurados = Object.entries(TUTTS_TOKENS)
+  .filter(([key, value]) => !value)
+  .map(([key]) => key);
+
+if (tokensNaoConfigurados.length > 0) {
+  console.warn('⚠️ ATENÇÃO: Os seguintes tokens Tutts NÃO estão configurados:');
+  tokensNaoConfigurados.forEach(token => console.warn(`   - TUTTS_TOKEN_${token}`));
+  console.warn('   Funcionalidades que dependem desses tokens não funcionarão!');
+}
+
+// Função para verificar se um token Tutts está disponível
+const verificarTokenTutts = (tokenName) => {
+  const token = TUTTS_TOKENS[tokenName];
+  if (!token) {
+    console.error(`❌ Token TUTTS_TOKEN_${tokenName} não configurado!`);
+    return null;
+  }
+  return token;
 };
 
 // ==================== API KEY OPENROUTESERVICE (PROTEGIDA) ====================
@@ -298,6 +319,112 @@ const verificarTokenOpcional = (req, res, next) => {
   next();
 };
 
+// ==================== FUNÇÕES DE VALIDAÇÃO DE ENTRADA ====================
+
+// Sanitizar string - remove caracteres perigosos
+const sanitizeString = (str, maxLength = 255) => {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .trim()
+    .substring(0, maxLength)
+    .replace(/[<>]/g, '') // Remove < > para prevenir HTML injection
+    .replace(/[\x00-\x1F\x7F]/g, ''); // Remove caracteres de controle
+};
+
+// Sanitizar para SQL (prevenir injection em casos especiais)
+const sanitizeForSQL = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/['";\\]/g, '');
+};
+
+// Validar email
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email) && email.length <= 255;
+};
+
+// Validar CPF (formato)
+const isValidCPF = (cpf) => {
+  if (!cpf || typeof cpf !== 'string') return false;
+  const cleaned = cpf.replace(/\D/g, '');
+  return cleaned.length === 11;
+};
+
+// Validar valor monetário
+const isValidMoney = (value) => {
+  if (value === null || value === undefined) return false;
+  const num = parseFloat(value);
+  return !isNaN(num) && num >= 0 && num <= 999999.99;
+};
+
+// Validar ID numérico
+const isValidId = (id) => {
+  const num = parseInt(id);
+  return !isNaN(num) && num > 0 && num < 2147483647;
+};
+
+// Validar código profissional
+const isValidCodProfissional = (cod) => {
+  if (!cod) return false;
+  const str = String(cod).trim();
+  return str.length >= 1 && str.length <= 20 && /^[a-zA-Z0-9_-]+$/.test(str);
+};
+
+// Middleware genérico de validação
+const validarEntrada = (validacoes) => {
+  return (req, res, next) => {
+    const erros = [];
+    
+    for (const [campo, regras] of Object.entries(validacoes)) {
+      const valor = req.body[campo] ?? req.params[campo] ?? req.query[campo];
+      
+      if (regras.required && (valor === undefined || valor === null || valor === '')) {
+        erros.push(`${campo} é obrigatório`);
+        continue;
+      }
+      
+      if (valor !== undefined && valor !== null && valor !== '') {
+        if (regras.type === 'string' && typeof valor !== 'string') {
+          erros.push(`${campo} deve ser texto`);
+        }
+        if (regras.type === 'number' && isNaN(Number(valor))) {
+          erros.push(`${campo} deve ser número`);
+        }
+        if (regras.minLength && String(valor).length < regras.minLength) {
+          erros.push(`${campo} deve ter pelo menos ${regras.minLength} caracteres`);
+        }
+        if (regras.maxLength && String(valor).length > regras.maxLength) {
+          erros.push(`${campo} deve ter no máximo ${regras.maxLength} caracteres`);
+        }
+        if (regras.pattern && !regras.pattern.test(String(valor))) {
+          erros.push(`${campo} tem formato inválido`);
+        }
+        if (regras.isEmail && !isValidEmail(valor)) {
+          erros.push(`${campo} deve ser um email válido`);
+        }
+        if (regras.isCPF && !isValidCPF(valor)) {
+          erros.push(`${campo} deve ser um CPF válido`);
+        }
+        if (regras.isMoney && !isValidMoney(valor)) {
+          erros.push(`${campo} deve ser um valor monetário válido`);
+        }
+        if (regras.isId && !isValidId(valor)) {
+          erros.push(`${campo} deve ser um ID válido`);
+        }
+      }
+    }
+    
+    if (erros.length > 0) {
+      return res.status(400).json({ error: 'Dados inválidos', detalhes: erros });
+    }
+    
+    next();
+  };
+};
+
+// ==================== FIM FUNÇÕES DE VALIDAÇÃO ====================
+
 // Função para gerar token JWT
 const gerarToken = (user) => {
   return jwt.sign(
@@ -380,19 +507,33 @@ console.log('🔄 Conectando ao banco de dados...');
 // SEGURANÇA: Não logar URL do banco (contém credenciais)
 
 // Configuração do banco de dados
-// SEGURANÇA: Em produção, usar SSL com verificação de certificado
-const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
-const sslConfig = isProduction 
-  ? { rejectUnauthorized: false } // Neon/Railway usam certificados que podem não ser verificáveis
-  : false; // Desenvolvimento local sem SSL
+// NOTA SOBRE SSL: Neon/Railway/Supabase usam SSL por padrão
+// rejectUnauthorized: false é necessário porque esses serviços usam certificados 
+// que podem não estar na cadeia de confiança do Node.js
+// Em um ambiente ideal, usaríamos o certificado CA do provedor
+const sslConfig = {
+  rejectUnauthorized: false,
+  // Se você tiver o certificado CA do Neon, descomente abaixo:
+  // ca: process.env.DATABASE_CA_CERT
+};
+
+// Log de segurança sobre SSL
+if (process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('localhost')) {
+  console.log('🔐 Conexão SSL ativada para o banco de dados');
+  if (sslConfig.rejectUnauthorized === false) {
+    console.log('⚠️  SSL: rejectUnauthorized=false (padrão para Neon/Railway)');
+  }
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('localhost') ? false : sslConfig,
-  // Configurações de pool para melhor performance
+  // Configurações de pool para melhor performance e segurança
   max: 20, // máximo de conexões
   idleTimeoutMillis: 30000, // fechar conexões ociosas após 30s
   connectionTimeoutMillis: 10000, // timeout de conexão 10s
+  // Segurança: não expor erros detalhados do banco
+  application_name: 'tutts-backend'
 });
 
 // Testar conexão e criar tabelas
@@ -2252,17 +2393,25 @@ async function atualizarResumos(datasAfetadas = null) {
 // Helmet - Headers de segurança (configurado para funcionar com PWA)
 // ==================== CORS - DEVE VIR ANTES DE TUDO ====================
 
-// Lista de origens permitidas (PRODUÇÃO)
+// Detectar ambiente
+const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+
+// Lista de origens permitidas (CONDICIONAL POR AMBIENTE)
 const allowedOrigins = [
   'https://www.centraltutts.online',
   'https://centraltutts.online',
   'https://tutts-frontend.vercel.app',
   'https://tutts-frontend-git-main.vercel.app',
-  // Desenvolvimento local (remover em produção se preferir)
-  'http://localhost:3000',
-  'http://localhost:5500',
-  'http://127.0.0.1:5500'
+  // Desenvolvimento local - SÓ em ambiente não-produção
+  ...(isProduction ? [] : [
+    'http://localhost:3000',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+    'http://localhost:3001'
+  ])
 ];
+
+console.log(`🔒 CORS configurado para ${isProduction ? 'PRODUÇÃO' : 'DESENVOLVIMENTO'} - ${allowedOrigins.length} origens permitidas`);
 
 // Função para verificar se origem é permitida
 const isOriginAllowed = (origin) => {
