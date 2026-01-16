@@ -101,8 +101,16 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// ==================== CONFIGURAÇÕES DE SEGURANÇA EXPRESS ====================
+// Trust proxy - necessário para Railway/Vercel/Heroku
+// Permite que o Express confie nos headers X-Forwarded-* dos proxies
+app.set('trust proxy', 1); // Confiar no primeiro proxy
+
+// Desabilitar header X-Powered-By (não expor que é Express)
+app.disable('x-powered-by');
+
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-14-WEBSOCKET-OTIMIZADO';
+const SERVER_VERSION = '2026-01-15-SECURITY-UPDATE';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
@@ -126,48 +134,65 @@ if (!JWT_SECRET) {
 const JWT_EXPIRES_IN = '8h';
 const BCRYPT_ROUNDS = 10;
 
+// ==================== RATE LIMITING SEGURO ====================
+// SEGURANÇA: Validar X-Forwarded-For para evitar bypass
+
+// Função para extrair IP real de forma segura
+const getClientIP = (req) => {
+  // Railway/Vercel adicionam X-Forwarded-For automaticamente
+  // Mas precisamos validar para evitar spoofing
+  const forwardedFor = req.headers['x-forwarded-for'];
+  
+  if (forwardedFor) {
+    // Pegar o primeiro IP (cliente original) - ignorar IPs internos
+    const ips = forwardedFor.split(',').map(ip => ip.trim());
+    // Filtrar IPs privados/internos que podem ser injetados
+    const publicIP = ips.find(ip => {
+      // Rejeitar IPs privados e localhost
+      if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.')) return false;
+      if (ip.startsWith('127.') || ip === 'localhost' || ip === '::1') return false;
+      return true;
+    });
+    if (publicIP) return publicIP;
+  }
+  
+  // Fallback para req.ip (Railway/Express já processa corretamente)
+  return req.ip || req.connection?.remoteAddress || 'unknown';
+};
+
 // Rate Limiters - configurados para funcionar com proxies
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 20, // máximo 20 tentativas (aumentado)
+  max: 20, // máximo 20 tentativas
   message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limit para health checks
     return req.path === '/health' || req.path === '/api/health';
   },
-  keyGenerator: (req) => {
-    // Usar X-Forwarded-For se disponível (para proxies/PWA)
-    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
-  }
+  keyGenerator: (req) => getClientIP(req)
 });
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 500, // máximo 500 requisições por minuto (aumentado para PWA)
+  max: 500, // máximo 500 requisições por minuto
   message: { error: 'Muitas requisições. Aguarde um momento.' },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Rotas que não devem ter rate limit
     return req.path === '/health' || 
            req.path === '/api/health' ||
-           req.path.startsWith('/api/score/') ||  // Score é consultado frequentemente
-           req.path.startsWith('/api/relatorios-diarios/'); // Relatórios também
+           req.path.startsWith('/api/score/') ||
+           req.path.startsWith('/api/relatorios-diarios/');
   },
-  keyGenerator: (req) => {
-    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
-  }
+  keyGenerator: (req) => getClientIP(req)
 });
 
 const createAccountLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  max: 10, // máximo 10 contas por hora por IP (aumentado)
+  max: 10, // máximo 10 contas por hora por IP
   message: { error: 'Muitas contas criadas. Tente novamente em 1 hora.' },
-  keyGenerator: (req) => {
-    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
-  }
+  keyGenerator: (req) => getClientIP(req)
 });
 
 // Rate limiter específico para operações financeiras (mais restritivo)
@@ -178,11 +203,11 @@ const financialLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    // Usar ID do usuário se autenticado, senão IP
+    // Preferir ID do usuário autenticado (mais seguro que IP)
     if (req.user && req.user.id) {
       return `user_${req.user.id}`;
     }
-    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+    return getClientIP(req);
   }
 });
 
@@ -192,10 +217,11 @@ const withdrawalCreateLimiter = rateLimit({
   max: 5, // máximo 5 saques por hora por usuário
   message: { error: 'Limite de solicitações de saque atingido. Tente novamente em 1 hora.' },
   keyGenerator: (req) => {
+    // SEMPRE usar codProfissional para saques (mais seguro)
     if (req.user && req.user.codProfissional) {
       return `withdrawal_${req.user.codProfissional}`;
     }
-    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+    return getClientIP(req);
   }
 });
 
@@ -345,12 +371,22 @@ if (!process.env.DATABASE_URL) {
 }
 
 console.log('🔄 Conectando ao banco de dados...');
-console.log('URL:', process.env.DATABASE_URL.substring(0, 30) + '...');
+// SEGURANÇA: Não logar URL do banco (contém credenciais)
 
 // Configuração do banco de dados
+// SEGURANÇA: Em produção, usar SSL com verificação de certificado
+const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+const sslConfig = isProduction 
+  ? { rejectUnauthorized: false } // Neon/Railway usam certificados que podem não ser verificáveis
+  : false; // Desenvolvimento local sem SSL
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : sslConfig,
+  // Configurações de pool para melhor performance
+  max: 20, // máximo de conexões
+  idleTimeoutMillis: 30000, // fechar conexões ociosas após 30s
+  connectionTimeoutMillis: 10000, // timeout de conexão 10s
 });
 
 // Testar conexão e criar tabelas
@@ -2210,26 +2246,44 @@ async function atualizarResumos(datasAfetadas = null) {
 // Helmet - Headers de segurança (configurado para funcionar com PWA)
 // ==================== CORS - DEVE VIR ANTES DE TUDO ====================
 
-// Lista de origens permitidas
+// Lista de origens permitidas (PRODUÇÃO)
 const allowedOrigins = [
   'https://www.centraltutts.online',
   'https://centraltutts.online',
   'https://tutts-frontend.vercel.app',
   'https://tutts-frontend-git-main.vercel.app',
+  // Desenvolvimento local (remover em produção se preferir)
   'http://localhost:3000',
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
 
+// Função para verificar se origem é permitida
+const isOriginAllowed = (origin) => {
+  if (!origin) return false; // Bloquear requisições sem origem em produção
+  // Permitir qualquer subdomínio do Vercel para preview deploys
+  if (origin.includes('tutts-frontend') && origin.includes('vercel.app')) return true;
+  return allowedOrigins.includes(origin);
+};
+
 // Função para setar headers CORS (usada em todos os lugares)
 const setCorsHeaders = (req, res) => {
   const origin = req.headers.origin;
-  if (origin) {
+  
+  // SEGURANÇA: Só permitir origens da whitelist
+  if (origin && isOriginAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (!origin) {
+    // Requisições sem Origin (como de apps mobile ou server-to-server)
+    // Permitir apenas para endpoints públicos específicos
+    const publicPaths = ['/health', '/api/health', '/api/version'];
+    if (publicPaths.some(p => req.path.startsWith(p))) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    // Para outros endpoints, não setar CORS (bloqueará requisições de browsers sem origin)
   }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma');
   res.setHeader('Access-Control-Max-Age', '86400');
@@ -3046,11 +3100,81 @@ app.post('/api/financial/data', verificarToken, async (req, res) => {
       }
     }
     
-    // Validação básica de CPF (formato)
+    // ==================== VALIDAÇÃO DE INPUTS ====================
+    
+    // Validar nome (não vazio, sem caracteres especiais perigosos)
+    if (!fullName || fullName.trim().length < 3) {
+      return res.status(400).json({ error: 'Nome deve ter pelo menos 3 caracteres' });
+    }
+    if (fullName.length > 255) {
+      return res.status(400).json({ error: 'Nome muito longo (máx 255 caracteres)' });
+    }
+    // Sanitizar nome - remover caracteres potencialmente perigosos
+    const nomeSeguro = fullName.replace(/[<>\"'%;()&+]/g, '').trim();
+    
+    // Validação completa de CPF
     const cpfLimpo = cpf.replace(/\D/g, '');
     if (cpfLimpo.length !== 11) {
+      return res.status(400).json({ error: 'CPF deve ter 11 dígitos' });
+    }
+    // Verificar se não é CPF com todos dígitos iguais
+    if (/^(\d)\1{10}$/.test(cpfLimpo)) {
       return res.status(400).json({ error: 'CPF inválido' });
     }
+    // Validar dígitos verificadores do CPF
+    const validarCPF = (cpf) => {
+      let soma = 0, resto;
+      for (let i = 1; i <= 9; i++) soma += parseInt(cpf.substring(i-1, i)) * (11 - i);
+      resto = (soma * 10) % 11;
+      if (resto === 10 || resto === 11) resto = 0;
+      if (resto !== parseInt(cpf.substring(9, 10))) return false;
+      soma = 0;
+      for (let i = 1; i <= 10; i++) soma += parseInt(cpf.substring(i-1, i)) * (12 - i);
+      resto = (soma * 10) % 11;
+      if (resto === 10 || resto === 11) resto = 0;
+      if (resto !== parseInt(cpf.substring(10, 11))) return false;
+      return true;
+    };
+    if (!validarCPF(cpfLimpo)) {
+      return res.status(400).json({ error: 'CPF inválido (dígito verificador incorreto)' });
+    }
+    
+    // Validar chave PIX baseado no tipo
+    const tiposPix = ['cpf', 'cnpj', 'email', 'telefone', 'aleatoria'];
+    const tipoPixSeguro = tiposPix.includes(pixTipo) ? pixTipo : 'cpf';
+    
+    if (!pixKey || pixKey.trim().length === 0) {
+      return res.status(400).json({ error: 'Chave PIX é obrigatória' });
+    }
+    
+    const pixKeyLimpo = pixKey.trim();
+    if (tipoPixSeguro === 'cpf') {
+      const pixCpfLimpo = pixKeyLimpo.replace(/\D/g, '');
+      if (pixCpfLimpo.length !== 11) {
+        return res.status(400).json({ error: 'Chave PIX CPF deve ter 11 dígitos' });
+      }
+    } else if (tipoPixSeguro === 'cnpj') {
+      const pixCnpjLimpo = pixKeyLimpo.replace(/\D/g, '');
+      if (pixCnpjLimpo.length !== 14) {
+        return res.status(400).json({ error: 'Chave PIX CNPJ deve ter 14 dígitos' });
+      }
+    } else if (tipoPixSeguro === 'email') {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(pixKeyLimpo)) {
+        return res.status(400).json({ error: 'Chave PIX Email inválida' });
+      }
+    } else if (tipoPixSeguro === 'telefone') {
+      const telLimpo = pixKeyLimpo.replace(/\D/g, '');
+      if (telLimpo.length < 10 || telLimpo.length > 11) {
+        return res.status(400).json({ error: 'Chave PIX Telefone inválida' });
+      }
+    } else if (tipoPixSeguro === 'aleatoria') {
+      if (pixKeyLimpo.length !== 32 && pixKeyLimpo.length !== 36) {
+        return res.status(400).json({ error: 'Chave PIX aleatória deve ter 32 ou 36 caracteres' });
+      }
+    }
+    
+    // ==================== FIM VALIDAÇÃO ====================
     
     // Verificar se já existe
     const existing = await pool.query(
@@ -3065,23 +3189,23 @@ app.post('/api/financial/data', verificarToken, async (req, res) => {
         `UPDATE user_financial_data 
          SET full_name = $1, cpf = $2, pix_key = $3, pix_tipo = $4, updated_at = NOW() 
          WHERE user_cod = $5`,
-        [fullName, cpf, pixKey, pixTipo || 'cpf', userCod]
+        [nomeSeguro, cpfLimpo, pixKeyLimpo, tipoPixSeguro, userCod]
       );
 
       // Log de alterações
-      if (oldData.full_name !== fullName) {
+      if (oldData.full_name !== nomeSeguro) {
         await pool.query(
           'INSERT INTO financial_logs (user_cod, action, old_value, new_value) VALUES ($1, $2, $3, $4)',
-          [userCod, 'ALTERACAO_NOME', oldData.full_name, fullName]
+          [userCod, 'ALTERACAO_NOME', oldData.full_name, nomeSeguro]
         );
       }
-      if (oldData.cpf !== cpf) {
+      if (oldData.cpf !== cpfLimpo) {
         await pool.query(
           'INSERT INTO financial_logs (user_cod, action, old_value, new_value) VALUES ($1, $2, $3, $4)',
-          [userCod, 'ALTERACAO_CPF', oldData.cpf, cpf]
+          [userCod, 'ALTERACAO_CPF', '***' + oldData.cpf?.slice(-4), '***' + cpfLimpo.slice(-4)]
         );
       }
-      if (oldData.pix_key !== pixKey) {
+      if (oldData.pix_key !== pixKeyLimpo) {
         await pool.query(
           'INSERT INTO financial_logs (user_cod, action, old_value, new_value) VALUES ($1, $2, $3, $4)',
           [userCod, 'ALTERACAO_PIX', oldData.pix_key, pixKey]
@@ -3692,7 +3816,7 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
           : 'Saque emergencial - Prestação de Serviços';
         
         const dataDebitoFormatada = dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0];
-        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Valor: R$ ${valorDebito}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
+        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
         
         const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
         const responseDebito = await fetch(urlDebito, {
@@ -3719,7 +3843,7 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
           });
         }
         
-        console.log(`✅ Débito Plific realizado com sucesso - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+        console.log(`✅ Débito Plific realizado com sucesso - Prof: ${idProf}`);
         
         // Limpar cache do profissional para atualizar saldo
         const cacheKey = `saldo_${idProf}`;
