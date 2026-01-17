@@ -10,6 +10,7 @@ const rateLimit = require('express-rate-limit');
 const https = require('https');
 const http = require('http');
 const WebSocket = require('ws');
+const crypto = require('crypto'); // Para 2FA TOTP
 require('dotenv').config();
 
 // Função para fazer requisições HTTP/HTTPS (substitui fetch)
@@ -101,6 +102,168 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// ==================== SISTEMA DE LOGGING ESTRUTURADO ====================
+
+// Níveis de log
+const LOG_LEVELS = {
+  ERROR: 'error',
+  WARN: 'warn',
+  INFO: 'info',
+  DEBUG: 'debug',
+  SECURITY: 'security'
+};
+
+// Configuração de logging
+const LOG_CONFIG = {
+  level: process.env.LOG_LEVEL || 'info',
+  includeTimestamp: true,
+  includeLevel: true,
+  jsonFormat: process.env.NODE_ENV === 'production', // JSON em produção para melhor parsing
+  colorize: process.env.NODE_ENV !== 'production'
+};
+
+// Cores para terminal (apenas em desenvolvimento)
+const COLORS = {
+  reset: '\x1b[0m',
+  red: '\x1b[31m',
+  yellow: '\x1b[33m',
+  green: '\x1b[32m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m'
+};
+
+// Mapear níveis para cores
+const LEVEL_COLORS = {
+  error: COLORS.red,
+  warn: COLORS.yellow,
+  info: COLORS.green,
+  debug: COLORS.blue,
+  security: COLORS.magenta
+};
+
+// Classe de Logger estruturado
+class Logger {
+  constructor(context = 'APP') {
+    this.context = context;
+  }
+  
+  _shouldLog(level) {
+    const levels = ['error', 'warn', 'security', 'info', 'debug'];
+    const configLevel = levels.indexOf(LOG_CONFIG.level);
+    const msgLevel = levels.indexOf(level);
+    return msgLevel <= configLevel;
+  }
+  
+  _format(level, message, meta = {}) {
+    const timestamp = new Date().toISOString();
+    
+    if (LOG_CONFIG.jsonFormat) {
+      // Formato JSON estruturado (para produção/ELK/Datadog)
+      return JSON.stringify({
+        timestamp,
+        level,
+        context: this.context,
+        message,
+        ...meta,
+        // Não incluir dados sensíveis
+        ...(meta.password && { password: '[REDACTED]' }),
+        ...(meta.token && { token: '[REDACTED]' }),
+        ...(meta.secret && { secret: '[REDACTED]' })
+      });
+    }
+    
+    // Formato legível (para desenvolvimento)
+    const color = LOG_CONFIG.colorize ? (LEVEL_COLORS[level] || '') : '';
+    const reset = LOG_CONFIG.colorize ? COLORS.reset : '';
+    const levelStr = level.toUpperCase().padEnd(8);
+    const contextStr = `[${this.context}]`.padEnd(15);
+    const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
+    
+    return `${timestamp} ${color}${levelStr}${reset} ${contextStr} ${message}${metaStr}`;
+  }
+  
+  _log(level, message, meta = {}) {
+    if (!this._shouldLog(level)) return;
+    
+    const formatted = this._format(level, message, meta);
+    
+    switch (level) {
+      case 'error':
+        console.error(formatted);
+        break;
+      case 'warn':
+        console.warn(formatted);
+        break;
+      default:
+        console.log(formatted);
+    }
+  }
+  
+  error(message, meta = {}) { this._log('error', message, meta); }
+  warn(message, meta = {}) { this._log('warn', message, meta); }
+  info(message, meta = {}) { this._log('info', message, meta); }
+  debug(message, meta = {}) { this._log('debug', message, meta); }
+  security(message, meta = {}) { this._log('security', message, meta); }
+  
+  // Logger para requests HTTP
+  request(req, res, duration) {
+    const meta = {
+      method: req.method,
+      url: req.originalUrl || req.url,
+      status: res.statusCode,
+      duration: `${duration}ms`,
+      ip: req.headers['x-forwarded-for'] || req.ip,
+      userAgent: req.headers['user-agent']?.substring(0, 100)
+    };
+    
+    if (req.user) {
+      meta.userId = req.user.id;
+      meta.userCod = req.user.codProfissional;
+    }
+    
+    const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+    this._log(level, `${req.method} ${req.originalUrl || req.url} ${res.statusCode}`, meta);
+  }
+  
+  // Logger para eventos de segurança
+  securityEvent(event, details = {}) {
+    this._log('security', `🔐 ${event}`, {
+      event,
+      ...details,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// Criar instâncias de logger para diferentes contextos
+const logger = new Logger('SERVER');
+const authLogger = new Logger('AUTH');
+const dbLogger = new Logger('DATABASE');
+const apiLogger = new Logger('API');
+const securityLogger = new Logger('SECURITY');
+
+// Middleware de logging de requests
+const requestLogger = (req, res, next) => {
+  const start = Date.now();
+  
+  // Log ao finalizar a resposta
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    
+    // Não logar health checks em produção
+    if (LOG_CONFIG.jsonFormat && (req.path === '/health' || req.path === '/api/health')) {
+      return;
+    }
+    
+    apiLogger.request(req, res, duration);
+  });
+  
+  next();
+};
+
+// ==================== FIM SISTEMA DE LOGGING ====================
+
 // ==================== CONFIGURAÇÕES DE SEGURANÇA EXPRESS ====================
 // Trust proxy - necessário para Railway/Vercel/Heroku
 // Permite que o Express confie nos headers X-Forwarded-* dos proxies
@@ -110,7 +273,7 @@ app.set('trust proxy', 1); // Confiar no primeiro proxy
 app.disable('x-powered-by');
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-V4';
+const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-V5';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
@@ -620,7 +783,11 @@ const registrarTentativaLogin = async (codProfissional, ip, sucesso) => {
         ]
       );
       
-      console.log(`🔒 Conta bloqueada: ${codProfissional} até ${blockedUntil.toISOString()}`);
+      securityLogger.securityEvent('ACCOUNT_BLOCKED', {
+        codProfissional,
+        blockedUntil: blockedUntil.toISOString(),
+        attempts: numTentativas
+      });
       
       return {
         bloqueado: true,
@@ -827,6 +994,216 @@ setInterval(limparRefreshTokensExpirados, 60 * 60 * 1000);
 
 // ==================== FIM FUNÇÕES DE REFRESH TOKEN ====================
 
+// ==================== FUNÇÕES DE 2FA (TOTP) ====================
+
+// Configurações 2FA
+const TOTP_CONFIG = {
+  ISSUER: 'Tutts',
+  ALGORITHM: 'SHA1',
+  DIGITS: 6,
+  PERIOD: 30, // segundos
+  WINDOW: 1   // Aceita código anterior/próximo (tolerância)
+};
+
+// Chave para criptografar secrets no banco
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || JWT_SECRET.substring(0, 32).padEnd(32, '0');
+
+// Criptografar secret para armazenar no banco
+const encryptSecret = (secret) => {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+  let encrypted = cipher.update(secret, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return iv.toString('hex') + ':' + encrypted;
+};
+
+// Descriptografar secret do banco
+const decryptSecret = (encryptedData) => {
+  const [ivHex, encrypted] = encryptedData.split(':');
+  const iv = Buffer.from(ivHex, 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+};
+
+// Gerar secret aleatório para 2FA (Base32)
+const generateTOTPSecret = () => {
+  const buffer = crypto.randomBytes(20);
+  const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let secret = '';
+  for (let i = 0; i < buffer.length; i++) {
+    secret += base32Chars[buffer[i] % 32];
+  }
+  return secret;
+};
+
+// Converter Base32 para bytes
+const base32ToBytes = (base32) => {
+  const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const char of base32.toUpperCase()) {
+    const val = base32Chars.indexOf(char);
+    if (val === -1) continue;
+    bits += val.toString(2).padStart(5, '0');
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    bytes.push(parseInt(bits.substring(i, i + 8), 2));
+  }
+  return Buffer.from(bytes);
+};
+
+// Gerar código TOTP
+const generateTOTP = (secret, time = null) => {
+  const counter = Math.floor((time || Date.now()) / 1000 / TOTP_CONFIG.PERIOD);
+  const counterBuffer = Buffer.alloc(8);
+  counterBuffer.writeBigInt64BE(BigInt(counter));
+  
+  const key = base32ToBytes(secret);
+  const hmac = crypto.createHmac('sha1', key).update(counterBuffer).digest();
+  
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const code = (
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff)
+  ) % Math.pow(10, TOTP_CONFIG.DIGITS);
+  
+  return code.toString().padStart(TOTP_CONFIG.DIGITS, '0');
+};
+
+// Verificar código TOTP (com janela de tolerância)
+const verifyTOTP = (secret, code) => {
+  const now = Date.now();
+  
+  for (let i = -TOTP_CONFIG.WINDOW; i <= TOTP_CONFIG.WINDOW; i++) {
+    const time = now + (i * TOTP_CONFIG.PERIOD * 1000);
+    const expectedCode = generateTOTP(secret, time);
+    if (expectedCode === code) {
+      return true;
+    }
+  }
+  return false;
+};
+
+// Gerar URI para QR Code (compatível com Google Authenticator)
+const generateTOTPUri = (secret, userEmail, userName) => {
+  const label = encodeURIComponent(`${TOTP_CONFIG.ISSUER}:${userName || userEmail}`);
+  const params = new URLSearchParams({
+    secret: secret,
+    issuer: TOTP_CONFIG.ISSUER,
+    algorithm: TOTP_CONFIG.ALGORITHM,
+    digits: TOTP_CONFIG.DIGITS.toString(),
+    period: TOTP_CONFIG.PERIOD.toString()
+  });
+  return `otpauth://totp/${label}?${params.toString()}`;
+};
+
+// Gerar códigos de backup (8 códigos de 8 caracteres)
+const generateBackupCodes = () => {
+  const codes = [];
+  for (let i = 0; i < 8; i++) {
+    const code = crypto.randomBytes(4).toString('hex').toUpperCase();
+    codes.push(code);
+  }
+  return codes;
+};
+
+// Verificar código de backup
+const verifyBackupCode = async (userId, code) => {
+  try {
+    const result = await pool.query(
+      'SELECT backup_codes FROM user_2fa WHERE user_id = $1 AND enabled = true',
+      [userId]
+    );
+    
+    if (result.rows.length === 0) return { valid: false };
+    
+    const backupCodes = result.rows[0].backup_codes || [];
+    const codeHash = crypto.createHash('sha256').update(code.toUpperCase()).digest('hex');
+    
+    const index = backupCodes.findIndex(bc => bc === codeHash);
+    if (index === -1) return { valid: false };
+    
+    // Remover código usado
+    backupCodes.splice(index, 1);
+    await pool.query(
+      'UPDATE user_2fa SET backup_codes = $1, updated_at = NOW() WHERE user_id = $2',
+      [backupCodes, userId]
+    );
+    
+    return { valid: true, codesRemaining: backupCodes.length };
+  } catch (error) {
+    console.error('❌ Erro ao verificar backup code:', error.message);
+    return { valid: false };
+  }
+};
+
+// Verificar se código já foi usado (prevenir replay attacks)
+const isCodeUsed = async (userId, code) => {
+  try {
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+    
+    // Limpar códigos antigos (mais de 2 minutos)
+    await pool.query(
+      'DELETE FROM used_2fa_codes WHERE used_at < NOW() - INTERVAL \'2 minutes\''
+    );
+    
+    // Verificar se código foi usado
+    const result = await pool.query(
+      'SELECT id FROM used_2fa_codes WHERE user_id = $1 AND code_hash = $2',
+      [userId, codeHash]
+    );
+    
+    if (result.rows.length > 0) return true;
+    
+    // Marcar como usado
+    await pool.query(
+      'INSERT INTO used_2fa_codes (user_id, code_hash) VALUES ($1, $2)',
+      [userId, codeHash]
+    );
+    
+    return false;
+  } catch (error) {
+    console.error('❌ Erro ao verificar código usado:', error.message);
+    return false; // Fail-open para não bloquear usuário
+  }
+};
+
+// Verificar se usuário tem 2FA habilitado
+const has2FAEnabled = async (userId) => {
+  try {
+    const result = await pool.query(
+      'SELECT enabled FROM user_2fa WHERE user_id = $1',
+      [userId]
+    );
+    return result.rows.length > 0 && result.rows[0].enabled === true;
+  } catch (error) {
+    console.error('❌ Erro ao verificar 2FA:', error.message);
+    return false;
+  }
+};
+
+// Obter secret do usuário (descriptografado)
+const getUserTOTPSecret = async (userId) => {
+  try {
+    const result = await pool.query(
+      'SELECT secret_encrypted FROM user_2fa WHERE user_id = $1 AND enabled = true',
+      [userId]
+    );
+    
+    if (result.rows.length === 0) return null;
+    return decryptSecret(result.rows[0].secret_encrypted);
+  } catch (error) {
+    console.error('❌ Erro ao obter secret 2FA:', error.message);
+    return null;
+  }
+};
+
+// ==================== FIM FUNÇÕES DE 2FA ====================
+
 // ==================== FUNÇÃO DE AUDITORIA ====================
 
 // Categorias de ações para auditoria
@@ -952,9 +1329,9 @@ const pool = new Pool({
 // Testar conexão e criar tabelas
 pool.query('SELECT NOW()', async (err, res) => {
   if (err) {
-    console.error('❌ Erro ao conectar no banco:', err.message);
+    dbLogger.error('Falha na conexão com banco de dados', { error: err.message });
   } else {
-    console.log('✅ Banco de dados conectado!', res.rows[0].now);
+    dbLogger.info('Banco de dados conectado', { serverTime: res.rows[0].now });
     // Criar tabelas necessárias
     await createTables();
   }
@@ -2679,6 +3056,41 @@ async function createTables() {
     
     // ==================== FIM MÓDULO REFRESH TOKENS ====================
 
+    // ==================== MÓDULO 2FA (TWO-FACTOR AUTHENTICATION) ====================
+    
+    // Tabela para configuração de 2FA dos usuários
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_2fa (
+        id SERIAL PRIMARY KEY,
+        user_id INT UNIQUE NOT NULL,
+        secret_encrypted VARCHAR(255) NOT NULL,
+        enabled BOOLEAN DEFAULT FALSE,
+        backup_codes TEXT[], -- Códigos de backup criptografados
+        verified_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_2fa_user ON user_2fa(user_id)`);
+    
+    // Tabela para códigos 2FA usados (prevenir replay attacks)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS used_2fa_codes (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL,
+        code_hash VARCHAR(255) NOT NULL,
+        used_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_used_2fa_user ON used_2fa_codes(user_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_used_2fa_used_at ON used_2fa_codes(used_at)`);
+    
+    console.log('✅ Tabelas de 2FA verificadas');
+    
+    // ==================== FIM MÓDULO 2FA ====================
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -2967,6 +3379,9 @@ app.use(helmet({
 // Rate limiting global para API
 app.use('/api/', apiLimiter);
 
+// Middleware de logging de requests (após rate limiter)
+app.use(requestLogger);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -3197,7 +3612,11 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
     // SEGURANÇA: Verificar se conta está bloqueada
     const bloqueio = await verificarContaBloqueada(codProfissional);
     if (bloqueio.bloqueada) {
-      console.log(`🔒 Login bloqueado para ${codProfissional}: ${bloqueio.minutosRestantes} min restantes`);
+      securityLogger.securityEvent('LOGIN_BLOCKED', {
+        codProfissional,
+        minutosRestantes: bloqueio.minutosRestantes,
+        ip: clientIP
+      });
       await registrarAuditoria(req, 'LOGIN_BLOCKED', AUDIT_CATEGORIES.AUTH, 'users', codProfissional, {
         motivo: bloqueio.motivo,
         minutosRestantes: bloqueio.minutosRestantes
@@ -3276,7 +3695,28 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
       });
     }
 
-    // Login bem-sucedido - registrar e limpar tentativas
+    // Login bem-sucedido - verificar se tem 2FA
+    const tem2FA = await has2FAEnabled(user.id);
+    
+    if (tem2FA) {
+      // Se tem 2FA, não completar login ainda - retornar status pendente
+      authLogger.info('2FA requerido', { codProfissional: user.cod_profissional });
+      
+      // Gerar token temporário para completar 2FA (curta duração)
+      const tempToken = jwt.sign(
+        { id: user.id, codProfissional: user.cod_profissional, pending2FA: true },
+        JWT_SECRET,
+        { expiresIn: '5m' }
+      );
+      
+      return res.json({
+        requires2FA: true,
+        tempToken,
+        message: 'Verificação de dois fatores necessária'
+      });
+    }
+    
+    // Sem 2FA - login normal
     await registrarTentativaLogin(codProfissional, clientIP, true);
 
     // Remover senha do objeto antes de enviar
@@ -3289,7 +3729,7 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
     req.user = { id: user.id, codProfissional: user.cod_profissional, nome: user.full_name, role: user.role };
     await registrarAuditoria(req, 'LOGIN_SUCCESS', AUDIT_CATEGORIES.AUTH, 'users', user.id, { role: user.role });
 
-    console.log('✅ Login bem-sucedido:', user.cod_profissional);
+    authLogger.info('Login bem-sucedido', { codProfissional: user.cod_profissional, role: user.role });
     
     // Gerar refresh token e salvar
     const refreshToken = gerarRefreshToken(user);
@@ -3458,6 +3898,316 @@ app.delete('/api/users/sessions/:id', verificarToken, async (req, res) => {
     return handleError(res, error, 'Erro ao revogar sessão');
   }
 });
+
+// ==================== ENDPOINTS DE 2FA ====================
+
+// Verificar se 2FA está habilitado para o usuário atual
+app.get('/api/users/2fa/status', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT enabled, verified_at, array_length(backup_codes, 1) as backup_codes_remaining 
+       FROM user_2fa WHERE user_id = $1`,
+      [req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.json({ enabled: false, configured: false });
+    }
+    
+    const { enabled, verified_at, backup_codes_remaining } = result.rows[0];
+    res.json({
+      enabled,
+      configured: true,
+      verifiedAt: verified_at,
+      backupCodesRemaining: backup_codes_remaining || 0
+    });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao verificar status 2FA');
+  }
+});
+
+// Iniciar configuração de 2FA (gerar secret e QR code)
+app.post('/api/users/2fa/setup', verificarToken, async (req, res) => {
+  try {
+    // Verificar se já tem 2FA configurado e habilitado
+    const existing = await pool.query(
+      'SELECT enabled FROM user_2fa WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    if (existing.rows.length > 0 && existing.rows[0].enabled) {
+      return res.status(400).json({ error: '2FA já está habilitado. Desabilite primeiro para reconfigurar.' });
+    }
+    
+    // Gerar novo secret
+    const secret = generateTOTPSecret();
+    const secretEncrypted = encryptSecret(secret);
+    
+    // Gerar URI para QR code
+    const uri = generateTOTPUri(secret, req.user.codProfissional, req.user.nome);
+    
+    // Salvar ou atualizar (não habilitado ainda)
+    await pool.query(`
+      INSERT INTO user_2fa (user_id, secret_encrypted, enabled)
+      VALUES ($1, $2, false)
+      ON CONFLICT (user_id) 
+      DO UPDATE SET secret_encrypted = $2, enabled = false, updated_at = NOW()
+    `, [req.user.id, secretEncrypted]);
+    
+    await registrarAuditoria(req, '2FA_SETUP_STARTED', AUDIT_CATEGORIES.AUTH, 'user_2fa', req.user.id);
+    
+    res.json({
+      secret, // Mostrar para usuário digitar manualmente se preferir
+      qrCodeUri: uri, // Para gerar QR code no frontend
+      message: 'Escaneie o QR code com Google Authenticator ou outro app TOTP'
+    });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao configurar 2FA');
+  }
+});
+
+// Verificar e ativar 2FA (após escanear QR code)
+app.post('/api/users/2fa/verify', verificarToken, async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Código de 6 dígitos é obrigatório' });
+    }
+    
+    // Buscar secret não verificado
+    const result = await pool.query(
+      'SELECT secret_encrypted FROM user_2fa WHERE user_id = $1 AND enabled = false',
+      [req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Inicie a configuração do 2FA primeiro' });
+    }
+    
+    // Descriptografar e verificar
+    const secret = decryptSecret(result.rows[0].secret_encrypted);
+    const isValid = verifyTOTP(secret, code);
+    
+    if (!isValid) {
+      return res.status(400).json({ error: 'Código inválido. Tente novamente.' });
+    }
+    
+    // Gerar códigos de backup
+    const backupCodes = generateBackupCodes();
+    const backupCodesHashed = backupCodes.map(c => 
+      crypto.createHash('sha256').update(c).digest('hex')
+    );
+    
+    // Ativar 2FA
+    await pool.query(`
+      UPDATE user_2fa 
+      SET enabled = true, verified_at = NOW(), backup_codes = $1, updated_at = NOW()
+      WHERE user_id = $2
+    `, [backupCodesHashed, req.user.id]);
+    
+    await registrarAuditoria(req, '2FA_ENABLED', AUDIT_CATEGORIES.AUTH, 'user_2fa', req.user.id);
+    
+    securityLogger.securityEvent('2FA_ENABLED', { codProfissional: req.user.codProfissional });
+    
+    res.json({
+      success: true,
+      message: '2FA ativado com sucesso!',
+      backupCodes, // Mostrar apenas UMA vez ao usuário
+      warning: 'SALVE esses códigos de backup em local seguro. Eles não serão mostrados novamente!'
+    });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao verificar 2FA');
+  }
+});
+
+// Completar login com 2FA
+app.post('/api/users/2fa/authenticate', async (req, res) => {
+  try {
+    const { tempToken, code, isBackupCode } = req.body;
+    
+    if (!tempToken || !code) {
+      return res.status(400).json({ error: 'Token temporário e código são obrigatórios' });
+    }
+    
+    // Verificar token temporário
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'Sessão expirada. Faça login novamente.' });
+    }
+    
+    if (!decoded.pending2FA) {
+      return res.status(400).json({ error: 'Token inválido para 2FA' });
+    }
+    
+    const userId = decoded.id;
+    
+    // Verificar se código já foi usado (replay attack)
+    if (!isBackupCode && await isCodeUsed(userId, code)) {
+      return res.status(400).json({ error: 'Código já utilizado. Aguarde o próximo código.' });
+    }
+    
+    let isValid = false;
+    let backupCodesRemaining = null;
+    
+    if (isBackupCode) {
+      // Verificar código de backup
+      const backupResult = await verifyBackupCode(userId, code);
+      isValid = backupResult.valid;
+      backupCodesRemaining = backupResult.codesRemaining;
+    } else {
+      // Verificar código TOTP
+      const secret = await getUserTOTPSecret(userId);
+      if (secret) {
+        isValid = verifyTOTP(secret, code);
+      }
+    }
+    
+    if (!isValid) {
+      await registrarAuditoria({ user: decoded }, '2FA_FAILED', AUDIT_CATEGORIES.AUTH, 'users', userId, {
+        isBackupCode
+      }, 'failed');
+      return res.status(401).json({ error: 'Código inválido' });
+    }
+    
+    // 2FA válido - completar login
+    const userResult = await pool.query(
+      `SELECT id, cod_profissional, full_name, role, setor_id, 
+              COALESCE(allowed_modules, '[]') as allowed_modules, 
+              COALESCE(allowed_tabs, '{}') as allowed_tabs 
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    const user = userResult.rows[0];
+    
+    // Gerar tokens
+    const token = gerarToken(user);
+    const refreshToken = gerarRefreshToken(user);
+    await salvarRefreshToken(user.id, refreshToken, req);
+    
+    await registrarAuditoria({ user }, 'LOGIN_2FA_SUCCESS', AUDIT_CATEGORIES.AUTH, 'users', user.id, {
+      isBackupCode
+    });
+    
+    authLogger.info('Login 2FA bem-sucedido', { codProfissional: user.cod_profissional, isBackupCode });
+    
+    const response = {
+      ...user,
+      token,
+      refreshToken,
+      expiresIn: 3600
+    };
+    
+    // Avisar se restam poucos códigos de backup
+    if (backupCodesRemaining !== null && backupCodesRemaining <= 2) {
+      response.warning = `Atenção: Você tem apenas ${backupCodesRemaining} código(s) de backup restante(s). Considere gerar novos.`;
+    }
+    
+    res.json(response);
+  } catch (error) {
+    return handleError(res, error, 'Erro na autenticação 2FA');
+  }
+});
+
+// Desabilitar 2FA (requer senha atual)
+app.post('/api/users/2fa/disable', verificarToken, async (req, res) => {
+  try {
+    const { password, code } = req.body;
+    
+    if (!password) {
+      return res.status(400).json({ error: 'Senha atual é obrigatória' });
+    }
+    
+    // Verificar senha
+    const userResult = await pool.query(
+      'SELECT password FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    const senhaValida = await verificarSenha(password, userResult.rows[0].password);
+    if (!senhaValida) {
+      return res.status(401).json({ error: 'Senha incorreta' });
+    }
+    
+    // Verificar código 2FA atual (se fornecido)
+    if (code) {
+      const secret = await getUserTOTPSecret(req.user.id);
+      if (secret && !verifyTOTP(secret, code)) {
+        return res.status(401).json({ error: 'Código 2FA incorreto' });
+      }
+    }
+    
+    // Desabilitar 2FA
+    await pool.query(
+      'DELETE FROM user_2fa WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    await registrarAuditoria(req, '2FA_DISABLED', AUDIT_CATEGORIES.AUTH, 'user_2fa', req.user.id);
+    
+    securityLogger.securityEvent('2FA_DISABLED', { codProfissional: req.user.codProfissional });
+    
+    res.json({ success: true, message: '2FA desabilitado com sucesso' });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao desabilitar 2FA');
+  }
+});
+
+// Regenerar códigos de backup
+app.post('/api/users/2fa/backup-codes/regenerate', verificarToken, async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Código 2FA atual é obrigatório' });
+    }
+    
+    // Verificar se 2FA está habilitado
+    const secret = await getUserTOTPSecret(req.user.id);
+    if (!secret) {
+      return res.status(400).json({ error: '2FA não está habilitado' });
+    }
+    
+    // Verificar código atual
+    if (!verifyTOTP(secret, code)) {
+      return res.status(401).json({ error: 'Código 2FA incorreto' });
+    }
+    
+    // Gerar novos códigos de backup
+    const backupCodes = generateBackupCodes();
+    const backupCodesHashed = backupCodes.map(c => 
+      crypto.createHash('sha256').update(c).digest('hex')
+    );
+    
+    await pool.query(
+      'UPDATE user_2fa SET backup_codes = $1, updated_at = NOW() WHERE user_id = $2',
+      [backupCodesHashed, req.user.id]
+    );
+    
+    await registrarAuditoria(req, '2FA_BACKUP_CODES_REGENERATED', AUDIT_CATEGORIES.AUTH, 'user_2fa', req.user.id);
+    
+    res.json({
+      success: true,
+      backupCodes,
+      warning: 'SALVE esses códigos de backup em local seguro. Os códigos anteriores foram invalidados!'
+    });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao regenerar códigos de backup');
+  }
+});
+
+// ==================== FIM ENDPOINTS DE 2FA ====================
 
 // Listar todos os usuários (APENAS ADMIN - protegido)
 app.get('/api/users', verificarToken, verificarAdmin, async (req, res) => {
@@ -24548,14 +25298,21 @@ global.broadcastToAdmins = broadcastToAdmins;
 
 // ==================== INICIAR SERVIDOR ====================
 server.listen(port, () => {
-  console.log(`🚀 Servidor rodando na porta ${port}`);
-  console.log(`📡 API: http://localhost:${port}/api/health`);
-  console.log(`🔌 WebSocket: ws://localhost:${port}/ws/financeiro`);
+  logger.info('Servidor iniciado', {
+    port,
+    version: SERVER_VERSION,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    railwayEnv: process.env.RAILWAY_ENVIRONMENT || 'local'
+  });
+  logger.info('Endpoints disponíveis', {
+    api: `http://localhost:${port}/api/health`,
+    websocket: `ws://localhost:${port}/ws/financeiro`
+  });
   
   // Processar recorrências a cada hora
   setInterval(processarRecorrenciasInterno, 60 * 60 * 1000);
   setTimeout(processarRecorrenciasInterno, 10000);
-  console.log('⏰ Processamento de recorrências ativado (a cada 1h)');
+  logger.info('Processamento de recorrências ativado', { intervalo: '1h' });
   
   // ==================== CRON JOBS DO SCORE ====================
   
