@@ -110,7 +110,7 @@ app.set('trust proxy', 1); // Confiar no primeiro proxy
 app.disable('x-powered-by');
 
 // VERSÃO DO SERVIDOR - Para debug de deploy
-const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-V2';
+const SERVER_VERSION = '2026-01-16-SECURITY-PATCH-V4';
 app.get('/api/version', (req, res) => res.json({ version: SERVER_VERSION, timestamp: new Date().toISOString() }));
 
 // ==================== TOKENS GLOBAIS TUTTS ====================
@@ -158,8 +158,14 @@ if (!JWT_SECRET) {
   console.error('Use um valor forte e aleatório de pelo menos 32 caracteres.');
   process.exit(1);
 }
-const JWT_EXPIRES_IN = '8h';
+
+// Configurações de tokens
+const JWT_EXPIRES_IN = '1h';           // Access token: 1 hora (reduzido para segurança)
+const REFRESH_TOKEN_EXPIRES_IN = '7d'; // Refresh token: 7 dias
 const BCRYPT_ROUNDS = 10;
+
+// Secret separado para refresh tokens (usa JWT_SECRET + sufixo)
+const REFRESH_SECRET = JWT_SECRET + '_REFRESH';
 
 // ==================== RATE LIMITING SEGURO ====================
 // SEGURANÇA: Validar X-Forwarded-For para evitar bypass
@@ -247,6 +253,46 @@ const withdrawalCreateLimiter = rateLimit({
     // SEMPRE usar codProfissional para saques (mais seguro)
     if (req.user && req.user.codProfissional) {
       return `withdrawal_${req.user.codProfissional}`;
+    }
+    return getClientIP(req);
+  }
+});
+
+// Rate limiter para buscas/listagens pesadas (evitar DoS)
+const searchLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 60, // máximo 60 buscas por minuto
+  message: { error: 'Muitas buscas. Aguarde um momento.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => getClientIP(req)
+});
+
+// Rate limiter para uploads/operações pesadas
+const heavyOperationLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutos
+  max: 10, // máximo 10 operações pesadas por 5 minutos
+  message: { error: 'Muitas operações. Aguarde alguns minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    if (req.user && req.user.id) {
+      return `heavy_${req.user.id}`;
+    }
+    return getClientIP(req);
+  }
+});
+
+// Rate limiter para exports/downloads
+const exportLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutos
+  max: 20, // máximo 20 exports por 10 minutos
+  message: { error: 'Muitos downloads. Aguarde alguns minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    if (req.user && req.user.id) {
+      return `export_${req.user.id}`;
     }
     return getClientIP(req);
   }
@@ -425,6 +471,194 @@ const validarEntrada = (validacoes) => {
 
 // ==================== FIM FUNÇÕES DE VALIDAÇÃO ====================
 
+// ==================== VALIDAÇÃO DE SENHA FORTE ====================
+
+// Requisitos de senha:
+// - Mínimo 8 caracteres
+// - Pelo menos 1 letra maiúscula
+// - Pelo menos 1 letra minúscula  
+// - Pelo menos 1 número
+// NOTA: Para senhas de usuários comuns (motoboys), os requisitos são mais simples
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MIN_LENGTH_SIMPLE = 6; // Para reset de senha por admin
+
+// Validar senha forte (para admins e novos cadastros)
+const validarSenhaForte = (senha) => {
+  if (!senha || typeof senha !== 'string') {
+    return { valido: false, erro: 'Senha é obrigatória' };
+  }
+  
+  if (senha.length < PASSWORD_MIN_LENGTH) {
+    return { valido: false, erro: `Senha deve ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` };
+  }
+  
+  if (!/[a-z]/.test(senha)) {
+    return { valido: false, erro: 'Senha deve conter pelo menos uma letra minúscula' };
+  }
+  
+  if (!/[A-Z]/.test(senha)) {
+    return { valido: false, erro: 'Senha deve conter pelo menos uma letra maiúscula' };
+  }
+  
+  if (!/[0-9]/.test(senha)) {
+    return { valido: false, erro: 'Senha deve conter pelo menos um número' };
+  }
+  
+  // Verificar senhas muito comuns
+  const senhasComuns = ['12345678', 'password', 'senha123', 'Senha123', 'Tutts123', 'Admin123'];
+  if (senhasComuns.some(s => senha.toLowerCase() === s.toLowerCase())) {
+    return { valido: false, erro: 'Senha muito comum. Escolha uma senha mais segura' };
+  }
+  
+  return { valido: true };
+};
+
+// Validar senha simples (mínimo 6 caracteres, para casos específicos)
+const validarSenhaSimples = (senha) => {
+  if (!senha || typeof senha !== 'string') {
+    return { valido: false, erro: 'Senha é obrigatória' };
+  }
+  
+  if (senha.length < PASSWORD_MIN_LENGTH_SIMPLE) {
+    return { valido: false, erro: `Senha deve ter pelo menos ${PASSWORD_MIN_LENGTH_SIMPLE} caracteres` };
+  }
+  
+  return { valido: true };
+};
+
+// ==================== FIM VALIDAÇÃO DE SENHA ====================
+
+// ==================== CONTROLE DE BLOQUEIO DE CONTA ====================
+
+// Configurações de bloqueio
+const LOGIN_CONFIG = {
+  MAX_ATTEMPTS: 5,           // Máximo de tentativas antes de bloquear
+  BLOCK_DURATION_MINUTES: 15, // Duração do bloqueio em minutos
+  ATTEMPT_WINDOW_MINUTES: 30  // Janela de tempo para contar tentativas
+};
+
+// Verificar se conta está bloqueada
+const verificarContaBloqueada = async (codProfissional) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM blocked_accounts 
+       WHERE LOWER(cod_profissional) = LOWER($1) 
+       AND blocked_until > NOW()`,
+      [codProfissional]
+    );
+    
+    if (result.rows.length > 0) {
+      const blocked = result.rows[0];
+      const minutosRestantes = Math.ceil((new Date(blocked.blocked_until) - new Date()) / 60000);
+      return {
+        bloqueada: true,
+        motivo: blocked.reason,
+        tentativas: blocked.attempts_count,
+        minutosRestantes,
+        desbloqueioPrevisto: blocked.blocked_until
+      };
+    }
+    
+    return { bloqueada: false };
+  } catch (error) {
+    console.error('❌ Erro ao verificar bloqueio:', error.message);
+    return { bloqueada: false }; // Em caso de erro, permitir (fail-open)
+  }
+};
+
+// Registrar tentativa de login
+const registrarTentativaLogin = async (codProfissional, ip, sucesso) => {
+  try {
+    // Registrar tentativa
+    await pool.query(
+      `INSERT INTO login_attempts (cod_profissional, ip_address, success) 
+       VALUES ($1, $2, $3)`,
+      [codProfissional.toLowerCase(), ip, sucesso]
+    );
+    
+    // Se foi sucesso, remover bloqueio (se existir) e limpar tentativas
+    if (sucesso) {
+      await pool.query(
+        `DELETE FROM blocked_accounts WHERE LOWER(cod_profissional) = LOWER($1)`,
+        [codProfissional]
+      );
+      // Limpar tentativas antigas (manter só últimas 24h para auditoria)
+      await pool.query(
+        `DELETE FROM login_attempts 
+         WHERE LOWER(cod_profissional) = LOWER($1) 
+         AND created_at < NOW() - INTERVAL '24 hours'`,
+        [codProfissional]
+      );
+      return { bloqueado: false };
+    }
+    
+    // Contar tentativas falhas recentes
+    const tentativas = await pool.query(
+      `SELECT COUNT(*) as count FROM login_attempts 
+       WHERE LOWER(cod_profissional) = LOWER($1) 
+       AND success = false 
+       AND created_at > NOW() - INTERVAL '${LOGIN_CONFIG.ATTEMPT_WINDOW_MINUTES} minutes'`,
+      [codProfissional]
+    );
+    
+    const numTentativas = parseInt(tentativas.rows[0].count);
+    
+    // Se excedeu limite, bloquear conta
+    if (numTentativas >= LOGIN_CONFIG.MAX_ATTEMPTS) {
+      const blockedUntil = new Date(Date.now() + LOGIN_CONFIG.BLOCK_DURATION_MINUTES * 60000);
+      
+      await pool.query(
+        `INSERT INTO blocked_accounts (cod_profissional, blocked_until, attempts_count, reason)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (cod_profissional) 
+         DO UPDATE SET blocked_until = $2, attempts_count = $3, reason = $4`,
+        [
+          codProfissional.toLowerCase(), 
+          blockedUntil, 
+          numTentativas,
+          `Conta bloqueada após ${numTentativas} tentativas de login falhas`
+        ]
+      );
+      
+      console.log(`🔒 Conta bloqueada: ${codProfissional} até ${blockedUntil.toISOString()}`);
+      
+      return {
+        bloqueado: true,
+        tentativas: numTentativas,
+        minutosRestantes: LOGIN_CONFIG.BLOCK_DURATION_MINUTES
+      };
+    }
+    
+    return {
+      bloqueado: false,
+      tentativas: numTentativas,
+      tentativasRestantes: LOGIN_CONFIG.MAX_ATTEMPTS - numTentativas
+    };
+  } catch (error) {
+    console.error('❌ Erro ao registrar tentativa:', error.message);
+    return { bloqueado: false };
+  }
+};
+
+// Limpar bloqueios expirados (executar periodicamente)
+const limparBloqueiosExpirados = async () => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM blocked_accounts WHERE blocked_until < NOW() RETURNING cod_profissional`
+    );
+    if (result.rows.length > 0) {
+      console.log(`🔓 ${result.rows.length} bloqueio(s) expirado(s) removido(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Erro ao limpar bloqueios:', error.message);
+  }
+};
+
+// Executar limpeza a cada 5 minutos
+setInterval(limparBloqueiosExpirados, 5 * 60 * 1000);
+
+// ==================== FIM CONTROLE DE BLOQUEIO ====================
+
 // Função para gerar token JWT
 const gerarToken = (user) => {
   return jwt.sign(
@@ -448,6 +682,150 @@ const hashSenha = async (senha) => {
 const verificarSenha = async (senha, hash) => {
   return await bcrypt.compare(senha, hash);
 };
+
+// ==================== FUNÇÕES DE REFRESH TOKEN ====================
+
+// Gerar refresh token
+const gerarRefreshToken = (user) => {
+  return jwt.sign(
+    { 
+      id: user.id,
+      codProfissional: user.cod_profissional,
+      type: 'refresh'
+    },
+    REFRESH_SECRET,
+    { expiresIn: REFRESH_TOKEN_EXPIRES_IN }
+  );
+};
+
+// Salvar refresh token no banco
+const salvarRefreshToken = async (userId, refreshToken, req) => {
+  try {
+    // Hash do token para armazenar (não guardar token em texto plano)
+    const tokenHash = await bcrypt.hash(refreshToken, 10);
+    const ip = getClientIP(req);
+    const deviceInfo = req.headers['user-agent']?.substring(0, 255) || 'Unknown';
+    
+    // Calcular expiração (7 dias)
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    
+    // Revogar tokens antigos do mesmo dispositivo (limitar a 5 sessões)
+    const existingTokens = await pool.query(
+      `SELECT id FROM refresh_tokens 
+       WHERE user_id = $1 AND revoked = false 
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+    
+    // Manter no máximo 5 sessões ativas
+    if (existingTokens.rows.length >= 5) {
+      const tokensToRevoke = existingTokens.rows.slice(4).map(t => t.id);
+      if (tokensToRevoke.length > 0) {
+        await pool.query(
+          `UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() 
+           WHERE id = ANY($1)`,
+          [tokensToRevoke]
+        );
+      }
+    }
+    
+    // Salvar novo token
+    await pool.query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, tokenHash, deviceInfo, ip, expiresAt]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Erro ao salvar refresh token:', error.message);
+    return false;
+  }
+};
+
+// Validar refresh token
+const validarRefreshToken = async (refreshToken, userId) => {
+  try {
+    // Verificar assinatura do token
+    const decoded = jwt.verify(refreshToken, REFRESH_SECRET);
+    
+    if (decoded.type !== 'refresh' || decoded.id !== userId) {
+      return { valido: false, erro: 'Token inválido' };
+    }
+    
+    // Buscar tokens não revogados do usuário
+    const result = await pool.query(
+      `SELECT id, token_hash FROM refresh_tokens 
+       WHERE user_id = $1 AND revoked = false AND expires_at > NOW()`,
+      [userId]
+    );
+    
+    // Verificar se algum hash bate
+    for (const row of result.rows) {
+      const match = await bcrypt.compare(refreshToken, row.token_hash);
+      if (match) {
+        return { valido: true, tokenId: row.id };
+      }
+    }
+    
+    return { valido: false, erro: 'Token não encontrado ou revogado' };
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return { valido: false, erro: 'Token expirado' };
+    }
+    return { valido: false, erro: 'Token inválido' };
+  }
+};
+
+// Revogar refresh token específico
+const revogarRefreshToken = async (tokenId) => {
+  try {
+    await pool.query(
+      `UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() WHERE id = $1`,
+      [tokenId]
+    );
+    return true;
+  } catch (error) {
+    console.error('❌ Erro ao revogar token:', error.message);
+    return false;
+  }
+};
+
+// Revogar todos os refresh tokens de um usuário (logout de todas as sessões)
+const revogarTodosTokens = async (userId) => {
+  try {
+    const result = await pool.query(
+      `UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() 
+       WHERE user_id = $1 AND revoked = false
+       RETURNING id`,
+      [userId]
+    );
+    console.log(`🔒 ${result.rows.length} sessão(ões) revogada(s) para user_id: ${userId}`);
+    return result.rows.length;
+  } catch (error) {
+    console.error('❌ Erro ao revogar tokens:', error.message);
+    return 0;
+  }
+};
+
+// Limpar refresh tokens expirados (executar periodicamente)
+const limparRefreshTokensExpirados = async () => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM refresh_tokens WHERE expires_at < NOW() OR (revoked = true AND revoked_at < NOW() - INTERVAL '7 days')`
+    );
+    if (result.rowCount > 0) {
+      console.log(`🧹 ${result.rowCount} refresh token(s) expirado(s) removido(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Erro ao limpar refresh tokens:', error.message);
+  }
+};
+
+// Executar limpeza a cada hora
+setInterval(limparRefreshTokensExpirados, 60 * 60 * 1000);
+
+// ==================== FIM FUNÇÕES DE REFRESH TOKEN ====================
 
 // ==================== FUNÇÃO DE AUDITORIA ====================
 
@@ -493,6 +871,41 @@ const registrarAuditoria = async (req, action, category, resource = null, resour
 };
 
 // ==================== FIM FUNÇÃO DE AUDITORIA ====================
+
+// ==================== TRATAMENTO SEGURO DE ERROS ====================
+
+// Função para log de erro (interno) e resposta genérica (externa)
+// NUNCA expõe error.message para o cliente em produção
+const handleError = (res, error, contexto, statusCode = 500) => {
+  // Log interno completo (para debug)
+  console.error(`❌ ${contexto}:`, error.message || error);
+  
+  // Em produção, mensagem genérica. Em dev, pode mostrar mais detalhes.
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+  
+  const mensagemCliente = isProduction 
+    ? 'Erro interno do servidor' 
+    : `${contexto}: ${error.message || 'Erro desconhecido'}`;
+  
+  return res.status(statusCode).json({ 
+    error: mensagemCliente,
+    // Código de referência para suporte (pode ser usado para buscar nos logs)
+    ref: Date.now().toString(36)
+  });
+};
+
+// Mensagens de erro padrão por tipo de operação
+const ERRO_MSGS = {
+  CRIAR: 'Não foi possível criar o registro',
+  ATUALIZAR: 'Não foi possível atualizar o registro',
+  DELETAR: 'Não foi possível excluir o registro',
+  BUSCAR: 'Não foi possível buscar os dados',
+  AUTENTICAR: 'Erro na autenticação',
+  VALIDAR: 'Dados inválidos',
+  PERMISSAO: 'Permissão negada'
+};
+
+// ==================== FIM TRATAMENTO DE ERROS ====================
 
 // ==================== FIM CONFIGURAÇÕES DE SEGURANÇA ====================
 
@@ -2204,6 +2617,68 @@ async function createTables() {
     
     // ==================== FIM MÓDULO AUDITORIA ====================
 
+    // ==================== MÓDULO BLOQUEIO DE CONTA ====================
+    
+    // Tabela para controle de tentativas de login
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS login_attempts (
+        id SERIAL PRIMARY KEY,
+        cod_profissional VARCHAR(50) NOT NULL,
+        ip_address VARCHAR(50),
+        success BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    // Índices para consultas rápidas
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_login_attempts_cod ON login_attempts(cod_profissional)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_login_attempts_created ON login_attempts(created_at DESC)`);
+    
+    // Tabela para contas bloqueadas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS blocked_accounts (
+        id SERIAL PRIMARY KEY,
+        cod_profissional VARCHAR(50) UNIQUE NOT NULL,
+        blocked_until TIMESTAMP NOT NULL,
+        reason VARCHAR(255) DEFAULT 'Muitas tentativas de login falhas',
+        attempts_count INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_blocked_accounts_cod ON blocked_accounts(cod_profissional)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_blocked_accounts_until ON blocked_accounts(blocked_until)`);
+    
+    console.log('✅ Tabelas de controle de login verificadas');
+    
+    // ==================== FIM MÓDULO BLOQUEIO DE CONTA ====================
+
+    // ==================== MÓDULO REFRESH TOKENS ====================
+    
+    // Tabela para refresh tokens
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL,
+        token_hash VARCHAR(255) NOT NULL,
+        device_info VARCHAR(255),
+        ip_address VARCHAR(50),
+        expires_at TIMESTAMP NOT NULL,
+        revoked BOOLEAN DEFAULT FALSE,
+        revoked_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    // Índices para consultas rápidas
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)`);
+    
+    console.log('✅ Tabela refresh_tokens verificada');
+    
+    // ==================== FIM MÓDULO REFRESH TOKENS ====================
+
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);
@@ -2661,8 +3136,10 @@ app.post('/api/users/register', createAccountLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Código profissional, senha e nome são obrigatórios' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Senha deve ter pelo menos 6 caracteres' });
+    // Validar senha forte
+    const validacaoSenha = validarSenhaForte(password);
+    if (!validacaoSenha.valido) {
+      return res.status(400).json({ error: validacaoSenha.erro });
     }
 
     console.log('📝 Tentando registrar:', { codProfissional, fullName, role });
@@ -2701,12 +3178,11 @@ app.post('/api/users/register', createAccountLimiter, async (req, res) => {
       token
     });
   } catch (error) {
-    console.error('❌ Erro ao registrar usuário:', error);
-    res.status(500).json({ error: 'Erro ao registrar usuário: ' + error.message });
+    return handleError(res, error, 'Erro ao registrar usuário');
   }
 });
 
-// Login com rate limiting
+// Login com rate limiting e bloqueio de conta
 app.post('/api/users/login', loginLimiter, async (req, res) => {
   try {
     const { codProfissional, password } = req.body;
@@ -2715,7 +3191,23 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Código profissional e senha são obrigatórios' });
     }
 
+    const clientIP = getClientIP(req);
     console.log('🔐 Tentando login:', codProfissional);
+
+    // SEGURANÇA: Verificar se conta está bloqueada
+    const bloqueio = await verificarContaBloqueada(codProfissional);
+    if (bloqueio.bloqueada) {
+      console.log(`🔒 Login bloqueado para ${codProfissional}: ${bloqueio.minutosRestantes} min restantes`);
+      await registrarAuditoria(req, 'LOGIN_BLOCKED', AUDIT_CATEGORIES.AUTH, 'users', codProfissional, {
+        motivo: bloqueio.motivo,
+        minutosRestantes: bloqueio.minutosRestantes
+      }, 'blocked');
+      return res.status(429).json({ 
+        error: `Conta temporariamente bloqueada. Tente novamente em ${bloqueio.minutosRestantes} minuto(s).`,
+        bloqueada: true,
+        minutosRestantes: bloqueio.minutosRestantes
+      });
+    }
 
     // Buscar usuário no banco
     const result = await pool.query(
@@ -2725,7 +3217,19 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
 
     if (result.rows.length === 0) {
       console.log('❌ Usuário não encontrado');
-      return res.status(401).json({ error: 'Credenciais inválidas' });
+      // Registrar tentativa falha mesmo para usuário inexistente (previne enumeração)
+      const tentativa = await registrarTentativaLogin(codProfissional, clientIP, false);
+      if (tentativa.bloqueado) {
+        return res.status(429).json({
+          error: `Conta bloqueada por ${tentativa.minutosRestantes} minuto(s) devido a muitas tentativas falhas.`,
+          bloqueada: true,
+          minutosRestantes: tentativa.minutosRestantes
+        });
+      }
+      return res.status(401).json({ 
+        error: 'Credenciais inválidas',
+        tentativasRestantes: tentativa.tentativasRestantes
+      });
     }
 
     const user = result.rows[0];
@@ -2751,10 +3255,29 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
 
     if (!senhaValida) {
       console.log('❌ Senha inválida');
-      // Registrar tentativa de login falha
-      await registrarAuditoria(req, 'LOGIN_FAILED', AUDIT_CATEGORIES.AUTH, 'users', codProfissional, { motivo: 'Senha inválida' }, 'failed');
-      return res.status(401).json({ error: 'Credenciais inválidas' });
+      // Registrar tentativa de login falha e verificar bloqueio
+      const tentativa = await registrarTentativaLogin(codProfissional, clientIP, false);
+      await registrarAuditoria(req, 'LOGIN_FAILED', AUDIT_CATEGORIES.AUTH, 'users', codProfissional, { 
+        motivo: 'Senha inválida',
+        tentativas: tentativa.tentativas 
+      }, 'failed');
+      
+      if (tentativa.bloqueado) {
+        return res.status(429).json({
+          error: `Conta bloqueada por ${tentativa.minutosRestantes} minuto(s) devido a muitas tentativas falhas.`,
+          bloqueada: true,
+          minutosRestantes: tentativa.minutosRestantes
+        });
+      }
+      
+      return res.status(401).json({ 
+        error: 'Credenciais inválidas',
+        tentativasRestantes: tentativa.tentativasRestantes
+      });
     }
+
+    // Login bem-sucedido - registrar e limpar tentativas
+    await registrarTentativaLogin(codProfissional, clientIP, true);
 
     // Remover senha do objeto antes de enviar
     delete user.password;
@@ -2767,13 +3290,19 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
     await registrarAuditoria(req, 'LOGIN_SUCCESS', AUDIT_CATEGORIES.AUTH, 'users', user.id, { role: user.role });
 
     console.log('✅ Login bem-sucedido:', user.cod_profissional);
+    
+    // Gerar refresh token e salvar
+    const refreshToken = gerarRefreshToken(user);
+    await salvarRefreshToken(user.id, refreshToken, req);
+    
     res.json({
       ...user,
-      token
+      token,
+      refreshToken,
+      expiresIn: 3600 // 1 hora em segundos
     });
   } catch (error) {
-    console.error('❌ Erro ao fazer login:', error);
-    res.status(500).json({ error: 'Erro ao fazer login: ' + error.message });
+    return handleError(res, error, 'Erro ao fazer login');
   }
 });
 
@@ -2782,10 +3311,152 @@ app.get('/api/users/verify-token', verificarToken, (req, res) => {
   res.json({ valid: true, user: req.user });
 });
 
-// Endpoint para renovar token
-app.post('/api/users/refresh-token', verificarToken, (req, res) => {
-  const newToken = gerarToken(req.user);
-  res.json({ token: newToken });
+// Endpoint para renovar token usando refresh token
+app.post('/api/users/refresh-token', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'Refresh token é obrigatório' });
+    }
+    
+    // Decodificar refresh token para pegar userId
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, REFRESH_SECRET);
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        return res.status(401).json({ error: 'Refresh token expirado', expired: true });
+      }
+      return res.status(401).json({ error: 'Refresh token inválido' });
+    }
+    
+    // Validar refresh token no banco
+    const validacao = await validarRefreshToken(refreshToken, decoded.id);
+    if (!validacao.valido) {
+      return res.status(401).json({ error: validacao.erro });
+    }
+    
+    // Buscar dados atualizados do usuário
+    const result = await pool.query(
+      `SELECT id, cod_profissional, full_name, role, setor_id, 
+              COALESCE(allowed_modules, '[]') as allowed_modules, 
+              COALESCE(allowed_tabs, '{}') as allowed_tabs 
+       FROM users WHERE id = $1`,
+      [decoded.id]
+    );
+    
+    if (result.rows.length === 0) {
+      // Revogar token se usuário não existe mais
+      await revogarRefreshToken(validacao.tokenId);
+      return res.status(401).json({ error: 'Usuário não encontrado' });
+    }
+    
+    const user = result.rows[0];
+    
+    // Gerar novo access token
+    const newToken = gerarToken(user);
+    
+    // Opcionalmente, rotacionar refresh token (mais seguro)
+    // const newRefreshToken = gerarRefreshToken(user);
+    // await revogarRefreshToken(validacao.tokenId);
+    // await salvarRefreshToken(user.id, newRefreshToken, req);
+    
+    console.log('🔄 Token renovado para:', user.cod_profissional);
+    
+    res.json({ 
+      token: newToken,
+      // refreshToken: newRefreshToken, // Descomente se rotacionar
+      expiresIn: 3600,
+      user: {
+        id: user.id,
+        cod_profissional: user.cod_profissional,
+        full_name: user.full_name,
+        role: user.role,
+        setor_id: user.setor_id,
+        allowed_modules: user.allowed_modules,
+        allowed_tabs: user.allowed_tabs
+      }
+    });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao renovar token');
+  }
+});
+
+// Endpoint para logout (revogar refresh token)
+app.post('/api/users/logout', verificarToken, async (req, res) => {
+  try {
+    const { refreshToken, allDevices } = req.body;
+    
+    if (allDevices) {
+      // Revogar todas as sessões
+      const count = await revogarTodosTokens(req.user.id);
+      await registrarAuditoria(req, 'LOGOUT_ALL', AUDIT_CATEGORIES.AUTH, 'users', req.user.id, {
+        sessoes_revogadas: count
+      });
+      return res.json({ message: `Logout realizado em ${count} dispositivo(s)` });
+    }
+    
+    if (refreshToken) {
+      // Revogar apenas esta sessão
+      const validacao = await validarRefreshToken(refreshToken, req.user.id);
+      if (validacao.valido) {
+        await revogarRefreshToken(validacao.tokenId);
+      }
+    }
+    
+    await registrarAuditoria(req, 'LOGOUT', AUDIT_CATEGORIES.AUTH, 'users', req.user.id);
+    res.json({ message: 'Logout realizado com sucesso' });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao fazer logout');
+  }
+});
+
+// Endpoint para listar sessões ativas
+app.get('/api/users/sessions', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, device_info, ip_address, created_at, expires_at
+       FROM refresh_tokens 
+       WHERE user_id = $1 AND revoked = false AND expires_at > NOW()
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    
+    res.json(result.rows.map(r => ({
+      id: r.id,
+      device: r.device_info,
+      ip: r.ip_address,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at
+    })));
+  } catch (error) {
+    return handleError(res, error, 'Erro ao listar sessões');
+  }
+});
+
+// Endpoint para revogar sessão específica
+app.delete('/api/users/sessions/:id', verificarToken, async (req, res) => {
+  try {
+    const sessionId = parseInt(req.params.id);
+    
+    // Verificar se a sessão pertence ao usuário
+    const result = await pool.query(
+      `SELECT id FROM refresh_tokens WHERE id = $1 AND user_id = $2 AND revoked = false`,
+      [sessionId, req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+    
+    await revogarRefreshToken(sessionId);
+    await registrarAuditoria(req, 'SESSION_REVOKED', AUDIT_CATEGORIES.AUTH, 'refresh_tokens', sessionId);
+    
+    res.json({ message: 'Sessão revogada com sucesso' });
+  } catch (error) {
+    return handleError(res, error, 'Erro ao revogar sessão');
+  }
 });
 
 // Listar todos os usuários (APENAS ADMIN - protegido)
@@ -20698,8 +21369,10 @@ app.patch('/api/admin/roteirizador/usuarios/:id/senha', verificarToken, async (r
   try {
     const { nova_senha } = req.body;
     
-    if (!nova_senha || nova_senha.length < 6) {
-      return res.status(400).json({ error: 'Senha deve ter no mínimo 6 caracteres' });
+    // Admin pode resetar com senha simples (usuário deve trocar depois)
+    const validacaoSenha = validarSenhaSimples(nova_senha);
+    if (!validacaoSenha.valido) {
+      return res.status(400).json({ error: validacaoSenha.erro });
     }
     
     const senha_hash = await bcrypt.hash(nova_senha, 10);
@@ -22678,8 +23351,10 @@ app.patch('/api/admin/solicitacao/clientes/:id/senha', verificarToken, async (re
     const { id } = req.params;
     const { nova_senha } = req.body;
     
-    if (!nova_senha || nova_senha.length < 4) {
-      return res.status(400).json({ error: 'Senha deve ter pelo menos 4 caracteres' });
+    // Cliente pode ter senha simples (mínimo 6 caracteres)
+    const validacaoSenha = validarSenhaSimples(nova_senha);
+    if (!validacaoSenha.valido) {
+      return res.status(400).json({ error: validacaoSenha.erro });
     }
     
     const senhaHash = await bcrypt.hash(nova_senha, 10);
