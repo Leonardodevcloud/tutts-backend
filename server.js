@@ -6696,7 +6696,7 @@ app.get('/api/promocoes-novatos/regioes', async (req, res) => {
 // Verificar elegibilidade do usuário para promoções novatos
 // Regras: 
 // 1. Deve haver promoção ativa para a região do usuário (região vem da planilha)
-// 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 15 dias
+// 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 10 dias
 app.get('/api/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
   try {
     const { userCod } = req.params;
@@ -6755,13 +6755,13 @@ app.get('/api/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
     
     // Verificar elegibilidade:
     // - Nunca fez entrega (totalEntregas === 0) OU
-    // - Não fez entrega nos últimos 15 dias (diasSemEntrega >= 15)
-    const elegivelPorEntregas = totalEntregas === 0 || (diasSemEntrega !== null && diasSemEntrega >= 15);
+    // - Não fez entrega nos últimos 10 dias (diasSemEntrega >= 10)
+    const elegivelPorEntregas = totalEntregas === 0 || (diasSemEntrega !== null && diasSemEntrega >= 10);
     
     if (!elegivelPorEntregas) {
       return res.json({
         elegivel: false,
-        motivo: `Você realizou entregas recentemente (última há ${diasSemEntrega} dias). Promoção disponível apenas para quem não fez entregas nos últimos 15 dias.`,
+        motivo: `Você realizou entregas recentemente (última há ${diasSemEntrega} dias). Promoção disponível apenas para quem não fez entregas nos últimos 10 dias.`,
         promocoes: [],
         totalEntregas,
         diasSemEntrega,
