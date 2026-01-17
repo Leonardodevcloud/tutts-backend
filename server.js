@@ -1658,6 +1658,39 @@ async function createTables() {
     `);
     console.log('✅ Tabela promocoes_novatos verificada');
 
+    // Migração: adicionar coluna quantidade_entregas se não existir
+    try {
+      await pool.query(`ALTER TABLE promocoes_novatos ADD COLUMN IF NOT EXISTS quantidade_entregas INTEGER DEFAULT 50`);
+      console.log('✅ Coluna quantidade_entregas verificada');
+    } catch (e) {
+      // Coluna já existe
+    }
+
+    // Migração: adicionar coluna apelido se não existir (substitui o cliente fixo)
+    try {
+      await pool.query(`ALTER TABLE promocoes_novatos ADD COLUMN IF NOT EXISTS apelido VARCHAR(255)`);
+      // Copiar valor de cliente para apelido onde apelido é null
+      await pool.query(`UPDATE promocoes_novatos SET apelido = cliente WHERE apelido IS NULL`);
+      console.log('✅ Coluna apelido verificada');
+    } catch (e) {
+      // Coluna já existe
+    }
+
+    // Tabela de clientes vinculados às promoções novatos (permite múltiplos clientes por promoção)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS promocoes_novatos_clientes (
+        id SERIAL PRIMARY KEY,
+        promocao_id INTEGER REFERENCES promocoes_novatos(id) ON DELETE CASCADE,
+        cod_cliente INTEGER NOT NULL,
+        nome_cliente VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(promocao_id, cod_cliente)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_promo_novatos_clientes_promocao ON promocoes_novatos_clientes(promocao_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_promo_novatos_clientes_cod ON promocoes_novatos_clientes(cod_cliente)`).catch(() => {});
+    console.log('✅ Tabela promocoes_novatos_clientes verificada');
+
     // Tabela de inscrições dos novatos nas promoções
     await pool.query(`
       CREATE TABLE IF NOT EXISTS inscricoes_novatos (
@@ -6828,7 +6861,20 @@ app.get('/api/promocoes-novatos', async (req, res) => {
     const result = await pool.query(
       'SELECT * FROM promocoes_novatos ORDER BY created_at DESC'
     );
-    res.json(result.rows);
+    
+    // Buscar clientes vinculados para cada promoção
+    const promocoesComClientes = await Promise.all(result.rows.map(async (promo) => {
+      const clientesResult = await pool.query(
+        'SELECT * FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+        [promo.id]
+      );
+      return {
+        ...promo,
+        clientes_vinculados: clientesResult.rows
+      };
+    }));
+    
+    res.json(promocoesComClientes);
   } catch (error) {
     console.error('❌ Erro ao listar promoções novatos:', error);
     res.status(500).json({ error: error.message });
@@ -6841,7 +6887,20 @@ app.get('/api/promocoes-novatos/ativas', async (req, res) => {
     const result = await pool.query(
       "SELECT * FROM promocoes_novatos WHERE status = 'ativa' ORDER BY created_at DESC"
     );
-    res.json(result.rows);
+    
+    // Buscar clientes vinculados para cada promoção
+    const promocoesComClientes = await Promise.all(result.rows.map(async (promo) => {
+      const clientesResult = await pool.query(
+        'SELECT * FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+        [promo.id]
+      );
+      return {
+        ...promo,
+        clientes_vinculados: clientesResult.rows
+      };
+    }));
+    
+    res.json(promocoesComClientes);
   } catch (error) {
     console.error('❌ Erro ao listar promoções ativas:', error);
     res.status(500).json({ error: error.message });
@@ -6851,17 +6910,41 @@ app.get('/api/promocoes-novatos/ativas', async (req, res) => {
 // Criar nova promoção novatos
 app.post('/api/promocoes-novatos', async (req, res) => {
   try {
-    const { regiao, cliente, valor_bonus, detalhes, created_by } = req.body;
+    const { regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas, created_by } = req.body;
+    
+    // Validar que tem pelo menos um cliente selecionado
+    if (!clientes || !Array.isArray(clientes) || clientes.length === 0) {
+      return res.status(400).json({ error: 'Selecione pelo menos um cliente' });
+    }
 
+    // Criar a promoção (usando apelido como "cliente" para manter compatibilidade)
     const result = await pool.query(
-      `INSERT INTO promocoes_novatos (regiao, cliente, valor_bonus, detalhes, status, created_by, created_at) 
-       VALUES ($1, $2, $3, $4, 'ativa', $5, NOW()) 
+      `INSERT INTO promocoes_novatos (regiao, cliente, apelido, valor_bonus, detalhes, quantidade_entregas, status, created_by, created_at) 
+       VALUES ($1, $2, $2, $3, $4, $5, 'ativa', $6, NOW()) 
        RETURNING *`,
-      [regiao, cliente, valor_bonus, detalhes || null, created_by || 'Admin']
+      [regiao, apelido, valor_bonus, detalhes || null, quantidade_entregas || 50, created_by || 'Admin']
+    );
+    
+    const promocaoId = result.rows[0].id;
+    
+    // Inserir os clientes vinculados
+    for (const cliente of clientes) {
+      await pool.query(
+        `INSERT INTO promocoes_novatos_clientes (promocao_id, cod_cliente, nome_cliente) 
+         VALUES ($1, $2, $3)
+         ON CONFLICT (promocao_id, cod_cliente) DO NOTHING`,
+        [promocaoId, cliente.cod_cliente, cliente.nome_display || cliente.nome_cliente]
+      );
+    }
+    
+    // Buscar clientes inseridos
+    const clientesResult = await pool.query(
+      'SELECT * FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+      [promocaoId]
     );
 
-    console.log('✅ Promoção novatos criada:', result.rows[0]);
-    res.json(result.rows[0]);
+    console.log('✅ Promoção novatos criada:', result.rows[0], 'Clientes:', clientesResult.rows.length);
+    res.json({ ...result.rows[0], clientes_vinculados: clientesResult.rows });
   } catch (error) {
     console.error('❌ Erro ao criar promoção novatos:', error);
     res.status(500).json({ error: error.message });
@@ -6872,7 +6955,7 @@ app.post('/api/promocoes-novatos', async (req, res) => {
 app.patch('/api/promocoes-novatos/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, regiao, cliente, valor_bonus, detalhes } = req.body;
+    const { status, regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas } = req.body;
 
     let result;
     if (status && !regiao) {
@@ -6884,13 +6967,43 @@ app.patch('/api/promocoes-novatos/:id', async (req, res) => {
     } else {
       // Atualizar todos os campos
       result = await pool.query(
-        'UPDATE promocoes_novatos SET regiao = COALESCE($1, regiao), cliente = COALESCE($2, cliente), valor_bonus = COALESCE($3, valor_bonus), detalhes = $4, updated_at = NOW() WHERE id = $5 RETURNING *',
-        [regiao, cliente, valor_bonus, detalhes, id]
+        `UPDATE promocoes_novatos SET 
+         regiao = COALESCE($1, regiao), 
+         cliente = COALESCE($2, cliente),
+         apelido = COALESCE($2, apelido), 
+         valor_bonus = COALESCE($3, valor_bonus), 
+         detalhes = $4, 
+         quantidade_entregas = COALESCE($5, quantidade_entregas), 
+         updated_at = NOW() 
+         WHERE id = $6 RETURNING *`,
+        [regiao, apelido, valor_bonus, detalhes, quantidade_entregas, id]
       );
+      
+      // Se tiver clientes, atualizar a tabela de clientes vinculados
+      if (clientes && Array.isArray(clientes) && clientes.length > 0) {
+        // Remover clientes antigos
+        await pool.query('DELETE FROM promocoes_novatos_clientes WHERE promocao_id = $1', [id]);
+        
+        // Inserir novos clientes
+        for (const cliente of clientes) {
+          await pool.query(
+            `INSERT INTO promocoes_novatos_clientes (promocao_id, cod_cliente, nome_cliente) 
+             VALUES ($1, $2, $3)
+             ON CONFLICT (promocao_id, cod_cliente) DO NOTHING`,
+            [id, cliente.cod_cliente, cliente.nome_display || cliente.nome_cliente]
+          );
+        }
+      }
     }
 
+    // Buscar clientes vinculados
+    const clientesResult = await pool.query(
+      'SELECT * FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+      [id]
+    );
+
     console.log('✅ Promoção novatos atualizada:', result.rows[0]);
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], clientes_vinculados: clientesResult.rows });
   } catch (error) {
     console.error('❌ Erro ao atualizar promoção novatos:', error);
     res.status(500).json({ error: error.message });
@@ -6975,7 +7088,7 @@ app.post('/api/inscricoes-novatos', async (req, res) => {
     // Criar inscrição com expiração em 10 dias
     const result = await pool.query(
       `INSERT INTO inscricoes_novatos (promocao_id, user_cod, user_name, valor_bonus, regiao, cliente, status, created_at, expires_at) 
-       VALUES ($1, $2, $3, $4, $5, $6, 'pendente', NOW(), NOW() + INTERVAL '10 days') 
+       VALUES ($1, $2, $3, $4, $5, $6, 'pendente', NOW(), NOW() + INTERVAL '15 days') 
        RETURNING *`,
       [promocao_id, user_cod, user_name, valor_bonus, regiao, cliente]
     );
@@ -7090,6 +7203,171 @@ app.patch('/api/inscricoes-novatos/:id/debito', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Erro ao atualizar débito novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Buscar entregas do profissional no período da inscrição (integração com BI)
+app.get('/api/inscricoes-novatos/:id/entregas', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Buscar dados da inscrição
+    const inscricaoResult = await pool.query(
+      'SELECT * FROM inscricoes_novatos WHERE id = $1',
+      [id]
+    );
+    
+    if (inscricaoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Inscrição não encontrada' });
+    }
+    
+    const inscricao = inscricaoResult.rows[0];
+    const userCod = parseInt(inscricao.user_cod.toString().replace(/\D/g, ''), 10);
+    const dataInscricao = new Date(inscricao.created_at);
+    const dataExpiracao = new Date(inscricao.expires_at);
+    
+    // Buscar a meta de entregas da promoção
+    const promoResult = await pool.query(
+      'SELECT quantidade_entregas FROM promocoes_novatos WHERE id = $1',
+      [inscricao.promocao_id]
+    );
+    const metaEntregas = promoResult.rows[0]?.quantidade_entregas || 50;
+    
+    // Buscar clientes vinculados à promoção
+    const clientesResult = await pool.query(
+      'SELECT cod_cliente FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+      [inscricao.promocao_id]
+    );
+    const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
+    
+    // Buscar entregas do profissional no período, filtrando pelos clientes da promoção
+    let query = `
+      SELECT 
+        os,
+        cod_cliente,
+        data_solicitado,
+        hora_solicitado,
+        COALESCE(nome_fantasia, nome_cliente) as nome_cliente,
+        cidade,
+        bairro,
+        valor_prof,
+        status
+      FROM bi_entregas 
+      WHERE cod_prof = $1 
+        AND data_solicitado >= $2::date
+        AND data_solicitado <= $3::date
+        AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+    `;
+    
+    const params = [userCod, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0]];
+    
+    // Se há clientes vinculados, filtrar por eles
+    if (clientesVinculados.length > 0) {
+      query += ` AND cod_cliente = ANY($4::int[])`;
+      params.push(clientesVinculados);
+    }
+    
+    query += ` ORDER BY data_solicitado DESC, hora_solicitado DESC`;
+    
+    const entregasResult = await pool.query(query, params);
+    
+    const entregas = entregasResult.rows;
+    const totalEntregas = entregas.length;
+    const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
+    const metaAtingida = totalEntregas >= metaEntregas;
+    
+    console.log(`📊 Entregas da inscrição ${id}: ${totalEntregas}/${metaEntregas} (${percentual}%) - Clientes: ${clientesVinculados.join(',')}`);
+    
+    res.json({
+      inscricao_id: parseInt(id),
+      user_cod: inscricao.user_cod,
+      data_inscricao: dataInscricao,
+      data_expiracao: dataExpiracao,
+      meta_entregas: metaEntregas,
+      total_entregas: totalEntregas,
+      percentual,
+      meta_atingida: metaAtingida,
+      clientes_vinculados: clientesVinculados,
+      entregas
+    });
+  } catch (error) {
+    console.error('❌ Erro ao buscar entregas da inscrição:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Buscar progresso de todas as inscrições de um usuário
+app.get('/api/inscricoes-novatos/progresso/:userCod', async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    const userCodNumerico = parseInt(userCod.toString().replace(/\D/g, ''), 10);
+    
+    // Buscar todas as inscrições pendentes do usuário
+    const inscricoesResult = await pool.query(`
+      SELECT i.*, p.quantidade_entregas as meta_entregas
+      FROM inscricoes_novatos i
+      LEFT JOIN promocoes_novatos p ON i.promocao_id = p.id
+      WHERE LOWER(i.user_cod) = LOWER($1)
+      ORDER BY i.created_at DESC
+    `, [userCod]);
+    
+    const progressos = await Promise.all(inscricoesResult.rows.map(async (inscricao) => {
+      const dataInscricao = new Date(inscricao.created_at);
+      const dataExpiracao = new Date(inscricao.expires_at);
+      const metaEntregas = inscricao.meta_entregas || 50;
+      
+      // Buscar clientes vinculados à promoção
+      const clientesResult = await pool.query(
+        'SELECT cod_cliente FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+        [inscricao.promocao_id]
+      );
+      const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
+      
+      // Buscar entregas no período, filtrando pelos clientes da promoção
+      let query = `
+        SELECT COUNT(*) as total
+        FROM bi_entregas 
+        WHERE cod_prof = $1 
+          AND data_solicitado >= $2::date
+          AND data_solicitado <= $3::date
+          AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+      `;
+      
+      const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0]];
+      
+      // Se há clientes vinculados, filtrar por eles
+      if (clientesVinculados.length > 0) {
+        query += ` AND cod_cliente = ANY($4::int[])`;
+        params.push(clientesVinculados);
+      }
+      
+      const entregasResult = await pool.query(query, params);
+      
+      const totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
+      const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
+      
+      return {
+        inscricao_id: inscricao.id,
+        promocao_id: inscricao.promocao_id,
+        status: inscricao.status,
+        regiao: inscricao.regiao,
+        cliente: inscricao.cliente,
+        valor_bonus: inscricao.valor_bonus,
+        data_inscricao: dataInscricao,
+        data_expiracao: dataExpiracao,
+        meta_entregas: metaEntregas,
+        total_entregas: totalEntregas,
+        percentual,
+        meta_atingida: totalEntregas >= metaEntregas,
+        clientes_vinculados: clientesVinculados
+      };
+    }));
+    
+    console.log(`📊 Progresso de ${userCod}: ${progressos.length} inscrições`);
+    res.json(progressos);
+  } catch (error) {
+    console.error('❌ Erro ao buscar progresso:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -14876,6 +15154,60 @@ app.get('/api/bi/clientes', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao listar clientes:', err);
     res.status(500).json({ error: 'Erro ao listar clientes' });
+  }
+});
+
+// Listar clientes por região com máscaras (para promoções novatos)
+app.get('/api/bi/clientes-por-regiao', async (req, res) => {
+  try {
+    const { regiao } = req.query;
+    
+    // Buscar máscaras
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
+    // Query base - busca clientes distintos
+    let query = `
+      SELECT DISTINCT 
+        e.cod_cliente,
+        COALESCE(e.nome_fantasia, e.nome_cliente, 'Cliente ' || e.cod_cliente::text) as nome_cliente,
+        e.cidade_p1
+      FROM bi_entregas e
+      WHERE e.cod_cliente IS NOT NULL
+    `;
+    
+    const params = [];
+    
+    // Se região especificada, filtrar por cidade_p1
+    if (regiao && regiao !== 'Todas') {
+      // Normalizar para comparação (sem UNACCENT para compatibilidade)
+      query += ` AND (
+        LOWER(e.cidade_p1) LIKE LOWER($1) OR
+        LOWER(e.cidade_p1) LIKE LOWER($2)
+      )`;
+      params.push(`%${regiao}%`, `${regiao}%`);
+    }
+    
+    query += ` ORDER BY nome_cliente`;
+    
+    const result = await pool.query(query, params);
+    
+    // Adicionar máscaras aos resultados
+    const clientesComMascara = result.rows.map(c => ({
+      cod_cliente: c.cod_cliente,
+      nome_original: c.nome_cliente,
+      mascara: mascaras[String(c.cod_cliente)] || null,
+      nome_display: mascaras[String(c.cod_cliente)] || c.nome_cliente,
+      cidade: c.cidade_p1
+    }));
+    
+    res.json(clientesComMascara);
+  } catch (err) {
+    console.error('❌ Erro ao listar clientes por região:', err);
+    res.status(500).json({ error: 'Erro ao listar clientes por região' });
   }
 });
 
