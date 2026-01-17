@@ -7045,10 +7045,62 @@ app.delete('/api/promocoes-novatos/:id', async (req, res) => {
 // Listar todas as inscrições (admin)
 app.get('/api/inscricoes-novatos', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM inscricoes_novatos ORDER BY created_at DESC'
-    );
-    res.json(result.rows);
+    // Buscar inscrições com dados da promoção
+    const result = await pool.query(`
+      SELECT i.*, p.quantidade_entregas as meta_entregas
+      FROM inscricoes_novatos i
+      LEFT JOIN promocoes_novatos p ON i.promocao_id = p.id
+      ORDER BY i.created_at DESC
+    `);
+    
+    // Calcular progresso de cada inscrição
+    const inscricoesComProgresso = await Promise.all(result.rows.map(async (inscricao) => {
+      const userCodNumerico = parseInt(inscricao.user_cod.toString().replace(/\D/g, ''), 10);
+      const dataInscricao = new Date(inscricao.created_at);
+      const dataExpiracao = inscricao.expires_at ? new Date(inscricao.expires_at) : null;
+      const metaEntregas = inscricao.meta_entregas || 50;
+      
+      // Buscar clientes vinculados à promoção
+      const clientesResult = await pool.query(
+        'SELECT cod_cliente FROM promocoes_novatos_clientes WHERE promocao_id = $1',
+        [inscricao.promocao_id]
+      );
+      const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
+      
+      // Buscar entregas no período, filtrando pelos clientes da promoção
+      let query = `
+        SELECT COUNT(*) as total
+        FROM bi_entregas 
+        WHERE cod_prof = $1 
+          AND data_solicitado >= $2::date
+          AND data_solicitado <= $3::date
+          AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+      `;
+      
+      const dataFim = dataExpiracao ? dataExpiracao.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+      const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataFim];
+      
+      // Se há clientes vinculados, filtrar por eles
+      if (clientesVinculados.length > 0) {
+        query += ` AND cod_cliente = ANY($4::int[])`;
+        params.push(clientesVinculados);
+      }
+      
+      const entregasResult = await pool.query(query, params);
+      const totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
+      const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
+      const metaAtingida = totalEntregas >= metaEntregas;
+      
+      return {
+        ...inscricao,
+        meta_entregas: metaEntregas,
+        total_entregas: totalEntregas,
+        percentual,
+        meta_atingida: metaAtingida
+      };
+    }));
+    
+    res.json(inscricoesComProgresso);
   } catch (error) {
     console.error('❌ Erro ao listar inscrições novatos:', error);
     res.status(500).json({ error: error.message });
