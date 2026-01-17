@@ -21780,7 +21780,7 @@ const verificarTokenRoteirizador = async (req, res, next) => {
   }
   
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'tutts_secret_key_2024');
+    const decoded = jwt.verify(token, JWT_SECRET);
     
     if (decoded.tipo !== 'roteirizador') {
       return res.status(401).json({ error: 'Token inválido para roteirizador' });
@@ -21842,7 +21842,7 @@ app.post('/api/roteirizador/login', async (req, res) => {
     // Gerar token
     const token = jwt.sign(
       { id: usuario.id, email: usuario.email, tipo: 'roteirizador' },
-      process.env.JWT_SECRET || 'tutts_secret_key_2024',
+      JWT_SECRET,
       { expiresIn: '7d' }
     );
     
@@ -22611,7 +22611,7 @@ const verificarTokenSolicitacao = async (req, res, next) => {
   }
   
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'tutts_secret_key_2024');
+    const decoded = jwt.verify(token, JWT_SECRET);
     
     if (decoded.tipo !== 'solicitacao') {
       return res.status(401).json({ error: 'Token inválido para solicitação' });
@@ -22670,7 +22670,7 @@ app.post('/api/solicitacao/login', async (req, res) => {
     
     const token = jwt.sign(
       { id: clienteData.id, email: clienteData.email, tipo: 'solicitacao' },
-      process.env.JWT_SECRET || 'tutts_secret_key_2024',
+      JWT_SECRET,
       { expiresIn: '7d' }
     );
     
