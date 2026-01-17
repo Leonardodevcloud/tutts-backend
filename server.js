@@ -15167,14 +15167,16 @@ app.get('/api/bi/clientes-por-regiao', async (req, res) => {
       mascaras[String(m.cod_cliente)] = m.mascara;
     });
     
-    // Buscar todos os clientes distintos do BI
+    // Buscar clientes agrupados por cod_cliente (evita duplicatas por centro de custo)
     const result = await pool.query(`
-      SELECT DISTINCT 
+      SELECT 
         cod_cliente,
-        COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente::text) as nome_cliente
+        MAX(COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente::text)) as nome_cliente,
+        COUNT(*) as total_entregas
       FROM bi_entregas
       WHERE cod_cliente IS NOT NULL
-      ORDER BY nome_cliente
+      GROUP BY cod_cliente
+      ORDER BY MAX(COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente::text))
     `);
     
     // Adicionar máscaras aos resultados
@@ -15182,7 +15184,8 @@ app.get('/api/bi/clientes-por-regiao', async (req, res) => {
       cod_cliente: c.cod_cliente,
       nome_original: c.nome_cliente,
       mascara: mascaras[String(c.cod_cliente)] || null,
-      nome_display: mascaras[String(c.cod_cliente)] || c.nome_cliente
+      nome_display: mascaras[String(c.cod_cliente)] || c.nome_cliente,
+      total_entregas: parseInt(c.total_entregas)
     }));
     
     console.log(`📋 Clientes carregados: ${clientesComMascara.length}`);
