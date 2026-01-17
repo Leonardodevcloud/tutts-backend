@@ -7067,27 +7067,28 @@ app.get('/api/inscricoes-novatos', async (req, res) => {
       );
       const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
       
-      // Buscar entregas no período, filtrando pelos clientes da promoção
-      let query = `
-        SELECT COUNT(*) as total
-        FROM bi_entregas 
-        WHERE cod_prof = $1 
-          AND data_solicitado >= $2::date
-          AND data_solicitado <= $3::date
-          AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
-      `;
+      let totalEntregas = 0;
       
-      const dataFim = dataExpiracao ? dataExpiracao.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-      const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataFim];
-      
-      // Se há clientes vinculados, filtrar por eles
+      // Só conta entregas se tiver clientes vinculados à promoção
       if (clientesVinculados.length > 0) {
-        query += ` AND cod_cliente = ANY($4::int[])`;
-        params.push(clientesVinculados);
+        // Buscar entregas no período, filtrando pelos clientes da promoção
+        const query = `
+          SELECT COUNT(*) as total
+          FROM bi_entregas 
+          WHERE cod_prof = $1 
+            AND data_solicitado >= $2::date
+            AND data_solicitado <= $3::date
+            AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+            AND cod_cliente = ANY($4::int[])
+        `;
+        
+        const dataFim = dataExpiracao ? dataExpiracao.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+        const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataFim, clientesVinculados];
+        
+        const entregasResult = await pool.query(query, params);
+        totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
       }
       
-      const entregasResult = await pool.query(query, params);
-      const totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
       const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
       const metaAtingida = totalEntregas >= metaEntregas;
       
@@ -7293,38 +7294,37 @@ app.get('/api/inscricoes-novatos/:id/entregas', async (req, res) => {
     );
     const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
     
-    // Buscar entregas do profissional no período, filtrando pelos clientes da promoção
-    let query = `
-      SELECT 
-        os,
-        cod_cliente,
-        data_solicitado,
-        hora_solicitado,
-        COALESCE(nome_fantasia, nome_cliente) as nome_cliente,
-        cidade,
-        bairro,
-        valor_prof,
-        status
-      FROM bi_entregas 
-      WHERE cod_prof = $1 
-        AND data_solicitado >= $2::date
-        AND data_solicitado <= $3::date
-        AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
-    `;
+    let entregas = [];
     
-    const params = [userCod, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0]];
-    
-    // Se há clientes vinculados, filtrar por eles
+    // Só busca entregas se tiver clientes vinculados à promoção
     if (clientesVinculados.length > 0) {
-      query += ` AND cod_cliente = ANY($4::int[])`;
-      params.push(clientesVinculados);
+      // Buscar entregas do profissional no período, filtrando pelos clientes da promoção
+      const query = `
+        SELECT 
+          os,
+          cod_cliente,
+          data_solicitado,
+          hora_solicitado,
+          COALESCE(nome_fantasia, nome_cliente) as nome_cliente,
+          cidade,
+          bairro,
+          valor_prof,
+          status
+        FROM bi_entregas 
+        WHERE cod_prof = $1 
+          AND data_solicitado >= $2::date
+          AND data_solicitado <= $3::date
+          AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+          AND cod_cliente = ANY($4::int[])
+        ORDER BY data_solicitado DESC, hora_solicitado DESC
+      `;
+      
+      const params = [userCod, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0], clientesVinculados];
+      
+      const entregasResult = await pool.query(query, params);
+      entregas = entregasResult.rows;
     }
     
-    query += ` ORDER BY data_solicitado DESC, hora_solicitado DESC`;
-    
-    const entregasResult = await pool.query(query, params);
-    
-    const entregas = entregasResult.rows;
     const totalEntregas = entregas.length;
     const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
     const metaAtingida = totalEntregas >= metaEntregas;
@@ -7376,27 +7376,26 @@ app.get('/api/inscricoes-novatos/progresso/:userCod', async (req, res) => {
       );
       const clientesVinculados = clientesResult.rows.map(c => c.cod_cliente);
       
-      // Buscar entregas no período, filtrando pelos clientes da promoção
-      let query = `
-        SELECT COUNT(*) as total
-        FROM bi_entregas 
-        WHERE cod_prof = $1 
-          AND data_solicitado >= $2::date
-          AND data_solicitado <= $3::date
-          AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
-      `;
+      let totalEntregas = 0;
       
-      const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0]];
-      
-      // Se há clientes vinculados, filtrar por eles
+      // Só conta entregas se tiver clientes vinculados à promoção
       if (clientesVinculados.length > 0) {
-        query += ` AND cod_cliente = ANY($4::int[])`;
-        params.push(clientesVinculados);
+        const query = `
+          SELECT COUNT(*) as total
+          FROM bi_entregas 
+          WHERE cod_prof = $1 
+            AND data_solicitado >= $2::date
+            AND data_solicitado <= $3::date
+            AND (status IS NULL OR status NOT IN ('cancelado', 'cancelada'))
+            AND cod_cliente = ANY($4::int[])
+        `;
+        
+        const params = [userCodNumerico, dataInscricao.toISOString().split('T')[0], dataExpiracao.toISOString().split('T')[0], clientesVinculados];
+        
+        const entregasResult = await pool.query(query, params);
+        totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
       }
       
-      const entregasResult = await pool.query(query, params);
-      
-      const totalEntregas = parseInt(entregasResult.rows[0]?.total) || 0;
       const percentual = Math.min(100, Math.round((totalEntregas / metaEntregas) * 100));
       
       return {
