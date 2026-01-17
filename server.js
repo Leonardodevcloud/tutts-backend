@@ -7220,6 +7220,28 @@ app.patch('/api/inscricoes-novatos/:id/credito', async (req, res) => {
   }
 });
 
+// Deletar inscrição novatos
+app.delete('/api/inscricoes-novatos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'DELETE FROM inscricoes_novatos WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Inscrição não encontrada' });
+    }
+
+    console.log('🗑️ Inscrição novatos deletada:', result.rows[0]);
+    res.json({ success: true, deleted: result.rows[0] });
+  } catch (error) {
+    console.error('❌ Erro ao deletar inscrição novatos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Verificar e expirar inscrições novatos antigas (chamado periodicamente)
 app.post('/api/inscricoes-novatos/verificar-expiradas', async (req, res) => {
   try {
