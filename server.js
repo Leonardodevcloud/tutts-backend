@@ -15160,8 +15160,6 @@ app.get('/api/bi/clientes', async (req, res) => {
 // Listar clientes por região com máscaras (para promoções novatos)
 app.get('/api/bi/clientes-por-regiao', async (req, res) => {
   try {
-    const { regiao } = req.query;
-    
     // Buscar máscaras
     const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
     const mascaras = {};
@@ -15169,45 +15167,29 @@ app.get('/api/bi/clientes-por-regiao', async (req, res) => {
       mascaras[String(m.cod_cliente)] = m.mascara;
     });
     
-    // Query base - busca clientes distintos
-    let query = `
+    // Buscar todos os clientes distintos do BI
+    const result = await pool.query(`
       SELECT DISTINCT 
-        e.cod_cliente,
-        COALESCE(e.nome_fantasia, e.nome_cliente, 'Cliente ' || e.cod_cliente::text) as nome_cliente,
-        e.cidade_p1
-      FROM bi_entregas e
-      WHERE e.cod_cliente IS NOT NULL
-    `;
-    
-    const params = [];
-    
-    // Se região especificada, filtrar por cidade_p1
-    if (regiao && regiao !== 'Todas') {
-      // Normalizar para comparação (sem UNACCENT para compatibilidade)
-      query += ` AND (
-        LOWER(e.cidade_p1) LIKE LOWER($1) OR
-        LOWER(e.cidade_p1) LIKE LOWER($2)
-      )`;
-      params.push(`%${regiao}%`, `${regiao}%`);
-    }
-    
-    query += ` ORDER BY nome_cliente`;
-    
-    const result = await pool.query(query, params);
+        cod_cliente,
+        COALESCE(nome_fantasia, nome_cliente, 'Cliente ' || cod_cliente::text) as nome_cliente
+      FROM bi_entregas
+      WHERE cod_cliente IS NOT NULL
+      ORDER BY nome_cliente
+    `);
     
     // Adicionar máscaras aos resultados
     const clientesComMascara = result.rows.map(c => ({
       cod_cliente: c.cod_cliente,
       nome_original: c.nome_cliente,
       mascara: mascaras[String(c.cod_cliente)] || null,
-      nome_display: mascaras[String(c.cod_cliente)] || c.nome_cliente,
-      cidade: c.cidade_p1
+      nome_display: mascaras[String(c.cod_cliente)] || c.nome_cliente
     }));
     
+    console.log(`📋 Clientes carregados: ${clientesComMascara.length}`);
     res.json(clientesComMascara);
   } catch (err) {
-    console.error('❌ Erro ao listar clientes por região:', err);
-    res.status(500).json({ error: 'Erro ao listar clientes por região' });
+    console.error('❌ Erro ao listar clientes:', err);
+    res.status(500).json({ error: 'Erro ao listar clientes' });
   }
 });
 
