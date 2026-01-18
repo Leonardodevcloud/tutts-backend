@@ -2881,7 +2881,11 @@ async function createTables() {
         todas_operacoes BOOLEAN DEFAULT FALSE,
         data_inicio DATE NOT NULL,
         data_fim DATE NOT NULL,
+        hora_inicio TIME,
+        hora_fim TIME,
         valor VARCHAR(100),
+        valor_incentivo DECIMAL(10,2),
+        clientes_vinculados INTEGER[],
         condicoes TEXT,
         status VARCHAR(20) DEFAULT 'ativo',
         cor VARCHAR(20) DEFAULT '#0d9488',
@@ -2890,6 +2894,11 @@ async function createTables() {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Migrations para adicionar novos campos
+    await pool.query(`ALTER TABLE incentivos_operacionais ADD COLUMN IF NOT EXISTS hora_inicio TIME`).catch(() => {});
+    await pool.query(`ALTER TABLE incentivos_operacionais ADD COLUMN IF NOT EXISTS hora_fim TIME`).catch(() => {});
+    await pool.query(`ALTER TABLE incentivos_operacionais ADD COLUMN IF NOT EXISTS valor_incentivo DECIMAL(10,2)`).catch(() => {});
+    await pool.query(`ALTER TABLE incentivos_operacionais ADD COLUMN IF NOT EXISTS clientes_vinculados INTEGER[]`).catch(() => {});
     console.log('✅ Tabela incentivos_operacionais verificada');
 
     // ==================== FIM MÓDULO OPERAÇÕES ====================
@@ -17259,14 +17268,195 @@ app.get('/api/incentivos-op/mes/:ano/:mes', async (req, res) => {
   }
 });
 
-// Listar todos os incentivos
+// Calcular custo do incentivo baseado nas OS do BI (DEVE VIR ANTES DE :id)
+app.get('/api/incentivos-op/calcular/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Buscar o incentivo
+    const incResult = await pool.query('SELECT * FROM incentivos_operacionais WHERE id = $1', [id]);
+    if (incResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Incentivo não encontrado' });
+    }
+    
+    const incentivo = incResult.rows[0];
+    
+    // Se não for do tipo incentivo, não calcula
+    if (incentivo.tipo !== 'incentivo') {
+      return res.json({ 
+        quantidade_os: 0, 
+        valor_total: 0, 
+        mensagem: 'Cálculo disponível apenas para tipo Incentivo' 
+      });
+    }
+    
+    // Verificar se tem valor configurado
+    if (!incentivo.valor_incentivo) {
+      return res.json({ 
+        quantidade_os: 0, 
+        valor_total: 0, 
+        mensagem: 'Valor do incentivo não configurado' 
+      });
+    }
+    
+    // Buscar máscaras para obter nomes dos clientes
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
+    // Construir query para buscar OS
+    let queryParams = [incentivo.data_inicio, incentivo.data_fim];
+    let clienteFilter = '';
+    
+    if (incentivo.clientes_vinculados && incentivo.clientes_vinculados.length > 0) {
+      clienteFilter = ` AND cod_cliente = ANY($3)`;
+      queryParams.push(incentivo.clientes_vinculados);
+    }
+    
+    let horaFilter = '';
+    if (incentivo.hora_inicio && incentivo.hora_fim) {
+      horaFilter = ` AND hora_solicitado >= $${queryParams.length + 1} AND hora_solicitado <= $${queryParams.length + 2}`;
+      queryParams.push(incentivo.hora_inicio, incentivo.hora_fim);
+    }
+    
+    // Buscar quantidade de OS
+    const osResult = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT os) as quantidade_os,
+        COALESCE(SUM(CASE WHEN ponto = 1 THEN 1 ELSE 0 END), COUNT(DISTINCT os)) as quantidade_entregas
+      FROM bi_entregas
+      WHERE data_solicitado >= $1 
+        AND data_solicitado <= $2
+        ${clienteFilter}
+        ${horaFilter}
+    `, queryParams);
+    
+    const quantidadeOS = parseInt(osResult.rows[0]?.quantidade_os || 0);
+    const valorIncentivo = parseFloat(incentivo.valor_incentivo) || 0;
+    const valorTotal = quantidadeOS * valorIncentivo;
+    
+    // Buscar detalhes por cliente se houver clientes vinculados
+    let detalhesPorCliente = [];
+    if (incentivo.clientes_vinculados && incentivo.clientes_vinculados.length > 0) {
+      const detalhesResult = await pool.query(`
+        SELECT 
+          cod_cliente,
+          MAX(nome_cliente) as nome_cliente,
+          COUNT(DISTINCT os) as quantidade_os
+        FROM bi_entregas
+        WHERE data_solicitado >= $1 
+          AND data_solicitado <= $2
+          AND cod_cliente = ANY($3)
+          ${horaFilter}
+        GROUP BY cod_cliente
+        ORDER BY COUNT(DISTINCT os) DESC
+      `, horaFilter ? [incentivo.data_inicio, incentivo.data_fim, incentivo.clientes_vinculados, incentivo.hora_inicio, incentivo.hora_fim] : [incentivo.data_inicio, incentivo.data_fim, incentivo.clientes_vinculados]);
+      
+      detalhesPorCliente = detalhesResult.rows.map(row => ({
+        cod_cliente: row.cod_cliente,
+        nome_display: mascaras[String(row.cod_cliente)] || row.nome_cliente || `Cliente ${row.cod_cliente}`,
+        quantidade_os: parseInt(row.quantidade_os),
+        valor: parseInt(row.quantidade_os) * valorIncentivo
+      }));
+    }
+    
+    res.json({
+      quantidade_os: quantidadeOS,
+      valor_unitario: valorIncentivo,
+      valor_total: valorTotal,
+      detalhes_por_cliente: detalhesPorCliente,
+      periodo: {
+        data_inicio: incentivo.data_inicio,
+        data_fim: incentivo.data_fim,
+        hora_inicio: incentivo.hora_inicio,
+        hora_fim: incentivo.hora_fim
+      },
+      mensagem: quantidadeOS > 0 ? null : 'Nenhuma OS encontrada no período/horário configurado'
+    });
+  } catch (err) {
+    console.error('❌ Erro ao calcular incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar todos os incentivos com cálculo automático para tipo incentivo
 app.get('/api/incentivos-op', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT * FROM incentivos_operacionais 
       ORDER BY data_inicio DESC, created_at DESC
     `);
-    res.json(result.rows);
+    
+    // Buscar máscaras
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
+    // Para cada incentivo do tipo 'incentivo', calcular o valor
+    const incentivosComCalculo = await Promise.all(result.rows.map(async (inc) => {
+      if (inc.tipo === 'incentivo' && inc.valor_incentivo) {
+        try {
+          let queryParams = [inc.data_inicio, inc.data_fim];
+          let clienteFilter = '';
+          
+          if (inc.clientes_vinculados && inc.clientes_vinculados.length > 0) {
+            clienteFilter = ` AND cod_cliente = ANY($3)`;
+            queryParams.push(inc.clientes_vinculados);
+          }
+          
+          let horaFilter = '';
+          if (inc.hora_inicio && inc.hora_fim) {
+            horaFilter = ` AND hora_solicitado >= $${queryParams.length + 1} AND hora_solicitado <= $${queryParams.length + 2}`;
+            queryParams.push(inc.hora_inicio, inc.hora_fim);
+          }
+          
+          const osResult = await pool.query(`
+            SELECT COUNT(DISTINCT os) as quantidade_os
+            FROM bi_entregas
+            WHERE data_solicitado >= $1 
+              AND data_solicitado <= $2
+              ${clienteFilter}
+              ${horaFilter}
+          `, queryParams);
+          
+          const quantidadeOS = parseInt(osResult.rows[0]?.quantidade_os || 0);
+          const valorTotal = quantidadeOS * parseFloat(inc.valor_incentivo);
+          
+          // Mapear nomes dos clientes
+          const clientesNomes = (inc.clientes_vinculados || []).map(cod => ({
+            cod_cliente: cod,
+            nome_display: mascaras[String(cod)] || `Cliente ${cod}`
+          }));
+          
+          return {
+            ...inc,
+            calculo: {
+              quantidade_os: quantidadeOS,
+              valor_total: valorTotal,
+              tem_dados: quantidadeOS > 0
+            },
+            clientes_nomes: clientesNomes
+          };
+        } catch (err) {
+          console.error('Erro ao calcular incentivo:', inc.id, err);
+          return { ...inc, calculo: null };
+        }
+      }
+      
+      // Para outros tipos, mapear nomes dos clientes se houver
+      const clientesNomes = (inc.clientes_vinculados || []).map(cod => ({
+        cod_cliente: cod,
+        nome_display: mascaras[String(cod)] || `Cliente ${cod}`
+      }));
+      
+      return { ...inc, calculo: null, clientes_nomes: clientesNomes };
+    }));
+    
+    res.json(incentivosComCalculo);
   } catch (err) {
     console.error('❌ Erro ao listar incentivos:', err);
     res.json([]);
@@ -17290,13 +17480,16 @@ app.post('/api/incentivos-op', async (req, res) => {
   try {
     const { 
       titulo, descricao, tipo, operacoes, todas_operacoes,
-      data_inicio, data_fim, valor, condicoes, cor, created_by 
+      data_inicio, data_fim, hora_inicio, hora_fim,
+      valor, valor_incentivo, clientes_vinculados,
+      condicoes, cor, created_by 
     } = req.body;
     
     const result = await pool.query(`
       INSERT INTO incentivos_operacionais 
-        (titulo, descricao, tipo, operacoes, todas_operacoes, data_inicio, data_fim, valor, condicoes, cor, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        (titulo, descricao, tipo, operacoes, todas_operacoes, data_inicio, data_fim, 
+         hora_inicio, hora_fim, valor, valor_incentivo, clientes_vinculados, condicoes, cor, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING *
     `, [
       titulo, 
@@ -17305,8 +17498,12 @@ app.post('/api/incentivos-op', async (req, res) => {
       operacoes || [], 
       todas_operacoes || false,
       data_inicio, 
-      data_fim, 
+      data_fim,
+      hora_inicio || null,
+      hora_fim || null,
       valor || '', 
+      valor_incentivo || null,
+      clientes_vinculados || [],
       condicoes || '', 
       cor || '#0d9488',
       created_by
@@ -17325,19 +17522,24 @@ app.put('/api/incentivos-op/:id', async (req, res) => {
     const { id } = req.params;
     const { 
       titulo, descricao, tipo, operacoes, todas_operacoes,
-      data_inicio, data_fim, valor, condicoes, status, cor 
+      data_inicio, data_fim, hora_inicio, hora_fim,
+      valor, valor_incentivo, clientes_vinculados,
+      condicoes, status, cor 
     } = req.body;
     
     const result = await pool.query(`
       UPDATE incentivos_operacionais 
       SET titulo = $1, descricao = $2, tipo = $3, operacoes = $4, todas_operacoes = $5,
-          data_inicio = $6, data_fim = $7, valor = $8, condicoes = $9, status = $10, 
-          cor = $11, updated_at = NOW()
-      WHERE id = $12
+          data_inicio = $6, data_fim = $7, hora_inicio = $8, hora_fim = $9,
+          valor = $10, valor_incentivo = $11, clientes_vinculados = $12,
+          condicoes = $13, status = $14, cor = $15, updated_at = NOW()
+      WHERE id = $16
       RETURNING *
     `, [
       titulo, descricao, tipo, operacoes, todas_operacoes,
-      data_inicio, data_fim, valor, condicoes, status, cor, id
+      data_inicio, data_fim, hora_inicio, hora_fim,
+      valor, valor_incentivo, clientes_vinculados,
+      condicoes, status, cor, id
     ]);
     
     res.json(result.rows[0]);
@@ -17355,6 +17557,107 @@ app.delete('/api/incentivos-op/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('❌ Erro ao deletar incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Relatório de custos de incentivos
+app.get('/api/incentivos-op/relatorio/custos', async (req, res) => {
+  try {
+    const { mes, ano } = req.query;
+    
+    let filtroData = '';
+    let queryParams = [];
+    
+    if (mes && ano) {
+      filtroData = ` WHERE EXTRACT(MONTH FROM data_inicio) = $1 AND EXTRACT(YEAR FROM data_inicio) = $2`;
+      queryParams = [mes, ano];
+    }
+    
+    // Buscar todos os incentivos do tipo 'incentivo'
+    const result = await pool.query(`
+      SELECT * FROM incentivos_operacionais 
+      WHERE tipo = 'incentivo'
+      ${mes && ano ? `AND (
+        (EXTRACT(MONTH FROM data_inicio) = $1 AND EXTRACT(YEAR FROM data_inicio) = $2)
+        OR (EXTRACT(MONTH FROM data_fim) = $1 AND EXTRACT(YEAR FROM data_fim) = $2)
+      )` : ''}
+      ORDER BY data_inicio DESC
+    `, queryParams);
+    
+    // Buscar máscaras
+    const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    const mascaras = {};
+    mascarasResult.rows.forEach(m => {
+      mascaras[String(m.cod_cliente)] = m.mascara;
+    });
+    
+    // Calcular valores para cada incentivo
+    let custoTotal = 0;
+    let totalOS = 0;
+    
+    const relatorio = await Promise.all(result.rows.map(async (inc) => {
+      if (!inc.valor_incentivo) {
+        return { ...inc, quantidade_os: 0, valor_total: 0 };
+      }
+      
+      let qParams = [inc.data_inicio, inc.data_fim];
+      let clienteFilter = '';
+      
+      if (inc.clientes_vinculados && inc.clientes_vinculados.length > 0) {
+        clienteFilter = ` AND cod_cliente = ANY($3)`;
+        qParams.push(inc.clientes_vinculados);
+      }
+      
+      let horaFilter = '';
+      if (inc.hora_inicio && inc.hora_fim) {
+        horaFilter = ` AND hora_solicitado >= $${qParams.length + 1} AND hora_solicitado <= $${qParams.length + 2}`;
+        qParams.push(inc.hora_inicio, inc.hora_fim);
+      }
+      
+      const osResult = await pool.query(`
+        SELECT COUNT(DISTINCT os) as quantidade_os
+        FROM bi_entregas
+        WHERE data_solicitado >= $1 AND data_solicitado <= $2
+        ${clienteFilter} ${horaFilter}
+      `, qParams);
+      
+      const qtdOS = parseInt(osResult.rows[0]?.quantidade_os || 0);
+      const valorTotal = qtdOS * parseFloat(inc.valor_incentivo);
+      
+      custoTotal += valorTotal;
+      totalOS += qtdOS;
+      
+      // Mapear nomes dos clientes
+      const clientesNomes = (inc.clientes_vinculados || []).map(cod => 
+        mascaras[String(cod)] || `Cliente ${cod}`
+      );
+      
+      return {
+        id: inc.id,
+        titulo: inc.titulo,
+        data_inicio: inc.data_inicio,
+        data_fim: inc.data_fim,
+        hora_inicio: inc.hora_inicio,
+        hora_fim: inc.hora_fim,
+        valor_incentivo: inc.valor_incentivo,
+        clientes: clientesNomes,
+        quantidade_os: qtdOS,
+        valor_total: valorTotal,
+        status: inc.status
+      };
+    }));
+    
+    res.json({
+      incentivos: relatorio,
+      resumo: {
+        total_incentivos: relatorio.length,
+        total_os: totalOS,
+        custo_total: custoTotal
+      }
+    });
+  } catch (err) {
+    console.error('❌ Erro ao gerar relatório:', err);
     res.status(500).json({ error: err.message });
   }
 });
