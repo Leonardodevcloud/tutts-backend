@@ -17216,6 +17216,49 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 
 // ==================== INCENTIVOS OPERACIONAIS ====================
 
+// Buscar estatísticas de incentivos (DEVE VIR ANTES DE :id)
+app.get('/api/incentivos-op/stats', async (req, res) => {
+  try {
+    const hoje = new Date().toISOString().split('T')[0];
+    const em7dias = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'ativo' AND data_inicio <= $1 AND data_fim >= $1) as ativos,
+        COUNT(*) FILTER (WHERE status = 'ativo' AND data_fim >= $1 AND data_fim <= $2) as vencendo_em_breve,
+        COUNT(*) FILTER (WHERE status = 'pausado') as pausados,
+        COUNT(*) FILTER (WHERE data_fim < $1) as encerrados,
+        COUNT(*) as total
+      FROM incentivos_operacionais
+    `, [hoje, em7dias]);
+    
+    res.json(stats.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao buscar stats incentivos:', err);
+    res.json({ ativos: 0, vencendo_em_breve: 0, pausados: 0, encerrados: 0, total: 0 });
+  }
+});
+
+// Buscar incentivos por mês (para calendário) (DEVE VIR ANTES DE :id)
+app.get('/api/incentivos-op/mes/:ano/:mes', async (req, res) => {
+  try {
+    const { ano, mes } = req.params;
+    const inicioMes = `${ano}-${mes.padStart(2, '0')}-01`;
+    const fimMes = new Date(ano, mes, 0).toISOString().split('T')[0];
+    
+    const result = await pool.query(`
+      SELECT * FROM incentivos_operacionais 
+      WHERE (data_inicio <= $2 AND data_fim >= $1)
+      ORDER BY data_inicio ASC
+    `, [inicioMes, fimMes]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar incentivos do mês:', err);
+    res.json([]);
+  }
+});
+
 // Listar todos os incentivos
 app.get('/api/incentivos-op', async (req, res) => {
   try {
@@ -17313,49 +17356,6 @@ app.delete('/api/incentivos-op/:id', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao deletar incentivo:', err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Buscar incentivos por mês (para calendário)
-app.get('/api/incentivos-op/mes/:ano/:mes', async (req, res) => {
-  try {
-    const { ano, mes } = req.params;
-    const inicioMes = `${ano}-${mes.padStart(2, '0')}-01`;
-    const fimMes = new Date(ano, mes, 0).toISOString().split('T')[0];
-    
-    const result = await pool.query(`
-      SELECT * FROM incentivos_operacionais 
-      WHERE (data_inicio <= $2 AND data_fim >= $1)
-      ORDER BY data_inicio ASC
-    `, [inicioMes, fimMes]);
-    
-    res.json(result.rows);
-  } catch (err) {
-    console.error('❌ Erro ao buscar incentivos do mês:', err);
-    res.json([]);
-  }
-});
-
-// Buscar estatísticas de incentivos
-app.get('/api/incentivos-op/stats', async (req, res) => {
-  try {
-    const hoje = new Date().toISOString().split('T')[0];
-    const em7dias = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    
-    const stats = await pool.query(`
-      SELECT 
-        COUNT(*) FILTER (WHERE status = 'ativo' AND data_inicio <= $1 AND data_fim >= $1) as ativos,
-        COUNT(*) FILTER (WHERE status = 'ativo' AND data_fim >= $1 AND data_fim <= $2) as vencendo_em_breve,
-        COUNT(*) FILTER (WHERE status = 'pausado') as pausados,
-        COUNT(*) FILTER (WHERE data_fim < $1) as encerrados,
-        COUNT(*) as total
-      FROM incentivos_operacionais
-    `, [hoje, em7dias]);
-    
-    res.json(stats.rows[0]);
-  } catch (err) {
-    console.error('❌ Erro ao buscar stats incentivos:', err);
-    res.json({ ativos: 0, vencendo_em_breve: 0, pausados: 0, encerrados: 0, total: 0 });
   }
 });
 
