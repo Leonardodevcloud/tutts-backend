@@ -2869,6 +2869,29 @@ async function createTables() {
       )
     `);
     console.log('✅ Tabela operacoes_faixas_km verificada');
+
+    // Tabela de incentivos/promoções operacionais (controle interno admin)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS incentivos_operacionais (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        tipo VARCHAR(50) DEFAULT 'promocao',
+        operacoes TEXT[],
+        todas_operacoes BOOLEAN DEFAULT FALSE,
+        data_inicio DATE NOT NULL,
+        data_fim DATE NOT NULL,
+        valor VARCHAR(100),
+        condicoes TEXT,
+        status VARCHAR(20) DEFAULT 'ativo',
+        cor VARCHAR(20) DEFAULT '#0d9488',
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela incentivos_operacionais verificada');
+
     // ==================== FIM MÓDULO OPERAÇÕES ====================
 // ==================== INÍCIO MÓDULO SCORE/GAMIFICAÇÃO ====================
     
@@ -17190,6 +17213,153 @@ app.post('/api/avisos-op/:id/visualizar', async (req, res) => {
 });
 
 // ==================== FIM ROTAS MÓDULO AVISOS ====================
+
+// ==================== INCENTIVOS OPERACIONAIS ====================
+
+// Listar todos os incentivos
+app.get('/api/incentivos-op', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM incentivos_operacionais 
+      ORDER BY data_inicio DESC, created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar incentivos:', err);
+    res.json([]);
+  }
+});
+
+// Buscar incentivo por ID
+app.get('/api/incentivos-op/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM incentivos_operacionais WHERE id = $1', [id]);
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    console.error('❌ Erro ao buscar incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Criar novo incentivo
+app.post('/api/incentivos-op', async (req, res) => {
+  try {
+    const { 
+      titulo, descricao, tipo, operacoes, todas_operacoes,
+      data_inicio, data_fim, valor, condicoes, cor, created_by 
+    } = req.body;
+    
+    const result = await pool.query(`
+      INSERT INTO incentivos_operacionais 
+        (titulo, descricao, tipo, operacoes, todas_operacoes, data_inicio, data_fim, valor, condicoes, cor, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `, [
+      titulo, 
+      descricao || '', 
+      tipo || 'promocao', 
+      operacoes || [], 
+      todas_operacoes || false,
+      data_inicio, 
+      data_fim, 
+      valor || '', 
+      condicoes || '', 
+      cor || '#0d9488',
+      created_by
+    ]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Atualizar incentivo
+app.put('/api/incentivos-op/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      titulo, descricao, tipo, operacoes, todas_operacoes,
+      data_inicio, data_fim, valor, condicoes, status, cor 
+    } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE incentivos_operacionais 
+      SET titulo = $1, descricao = $2, tipo = $3, operacoes = $4, todas_operacoes = $5,
+          data_inicio = $6, data_fim = $7, valor = $8, condicoes = $9, status = $10, 
+          cor = $11, updated_at = NOW()
+      WHERE id = $12
+      RETURNING *
+    `, [
+      titulo, descricao, tipo, operacoes, todas_operacoes,
+      data_inicio, data_fim, valor, condicoes, status, cor, id
+    ]);
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao atualizar incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Deletar incentivo
+app.delete('/api/incentivos-op/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM incentivos_operacionais WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Erro ao deletar incentivo:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Buscar incentivos por mês (para calendário)
+app.get('/api/incentivos-op/mes/:ano/:mes', async (req, res) => {
+  try {
+    const { ano, mes } = req.params;
+    const inicioMes = `${ano}-${mes.padStart(2, '0')}-01`;
+    const fimMes = new Date(ano, mes, 0).toISOString().split('T')[0];
+    
+    const result = await pool.query(`
+      SELECT * FROM incentivos_operacionais 
+      WHERE (data_inicio <= $2 AND data_fim >= $1)
+      ORDER BY data_inicio ASC
+    `, [inicioMes, fimMes]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao buscar incentivos do mês:', err);
+    res.json([]);
+  }
+});
+
+// Buscar estatísticas de incentivos
+app.get('/api/incentivos-op/stats', async (req, res) => {
+  try {
+    const hoje = new Date().toISOString().split('T')[0];
+    const em7dias = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'ativo' AND data_inicio <= $1 AND data_fim >= $1) as ativos,
+        COUNT(*) FILTER (WHERE status = 'ativo' AND data_fim >= $1 AND data_fim <= $2) as vencendo_em_breve,
+        COUNT(*) FILTER (WHERE status = 'pausado') as pausados,
+        COUNT(*) FILTER (WHERE data_fim < $1) as encerrados,
+        COUNT(*) as total
+      FROM incentivos_operacionais
+    `, [hoje, em7dias]);
+    
+    res.json(stats.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao buscar stats incentivos:', err);
+    res.json({ ativos: 0, vencendo_em_breve: 0, pausados: 0, encerrados: 0, total: 0 });
+  }
+});
+
+// ==================== FIM INCENTIVOS OPERACIONAIS ====================
 
 // Função para processar recorrências
 async function processarRecorrenciasInterno() {
