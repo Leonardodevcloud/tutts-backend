@@ -24427,10 +24427,14 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
 
 app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { limite = 50, apenasIncompletas = true } = req.body;
+    const { limite = 50, apenasIncompletas = false } = req.body;
+    
+    console.log(`🔄 [SYNC HISTÓRICO] Iniciando para cliente ${req.clienteSolicitacao.id}`);
     
     // Obter token de status do cliente
     let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    console.log(`🔑 [SYNC HISTÓRICO] Token original: ${tokenStatus ? tokenStatus.substring(0, 20) + '...' : 'VAZIO'}`);
+    
     if (tokenStatus && tokenStatus.includes('-gravar')) {
       tokenStatus = tokenStatus.replace('-gravar', '-status');
     } else if (tokenStatus && !tokenStatus.includes('-status')) {
@@ -24439,9 +24443,32 @@ app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, as
     
     const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
     
+    console.log(`🔑 [SYNC HISTÓRICO] Token status: ${tokenStatus ? tokenStatus.substring(0, 20) + '...' : 'VAZIO'}`);
+    console.log(`🔑 [SYNC HISTÓRICO] Cod cliente: ${codCliente || 'VAZIO'}`);
+    
     if (!tokenStatus || !codCliente) {
       return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
     }
+    
+    // Buscar corridas concluídas - PRIMEIRO SEM FILTRO PARA DEBUG
+    let queryDebug = `
+      SELECT id, tutts_os_numero, status, 
+             CASE WHEN dados_pontos IS NULL THEN 'NULL' 
+                  WHEN dados_pontos::text = '[]' THEN 'VAZIO_ARRAY'
+                  WHEN dados_pontos::text = '{}' THEN 'VAZIO_OBJ'
+                  ELSE 'TEM_DADOS' END as status_dados
+      FROM solicitacoes_corrida 
+      WHERE cliente_id = $1 
+        AND status IN ('finalizado', 'cancelado')
+      ORDER BY criado_em DESC
+      LIMIT 10
+    `;
+    
+    const debugResult = await pool.query(queryDebug, [req.clienteSolicitacao.id]);
+    console.log(`📊 [SYNC HISTÓRICO] Debug - Primeiras 10 corridas concluídas:`);
+    debugResult.rows.forEach(r => {
+      console.log(`   OS: ${r.tutts_os_numero || 'NULL'} | Status: ${r.status} | Dados: ${r.status_dados}`);
+    });
     
     // Buscar corridas concluídas que precisam de dados
     let query = `
@@ -24450,26 +24477,41 @@ app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, as
       WHERE cliente_id = $1 
         AND status IN ('finalizado', 'cancelado')
         AND tutts_os_numero IS NOT NULL
+        AND tutts_os_numero != ''
     `;
     
     if (apenasIncompletas) {
-      query += ` AND (dados_pontos IS NULL OR dados_pontos = '[]' OR dados_pontos = '{}')`;
+      query += ` AND (dados_pontos IS NULL OR dados_pontos::text = '[]' OR dados_pontos::text = '{}')`;
     }
     
     query += ` ORDER BY criado_em DESC LIMIT $2`;
     
     const corridasConcluidas = await pool.query(query, [req.clienteSolicitacao.id, limite]);
     
+    console.log(`📊 [SYNC HISTÓRICO] Encontradas ${corridasConcluidas.rows.length} corridas para sincronizar`);
+    
     if (corridasConcluidas.rows.length === 0) {
+      // Verificar se o problema é o tutts_os_numero
+      const countSemOS = await pool.query(`
+        SELECT COUNT(*) FROM solicitacoes_corrida 
+        WHERE cliente_id = $1 
+          AND status IN ('finalizado', 'cancelado')
+          AND (tutts_os_numero IS NULL OR tutts_os_numero = '')
+      `, [req.clienteSolicitacao.id]);
+      
+      console.log(`⚠️ [SYNC HISTÓRICO] ${countSemOS.rows[0].count} corridas sem tutts_os_numero`);
+      
       return res.json({ 
         sucesso: true, 
         mensagem: 'Nenhuma corrida para sincronizar',
         atualizadas: 0,
-        total_verificadas: 0
+        total_verificadas: 0,
+        debug: {
+          corridas_sem_os: parseInt(countSemOS.rows[0].count),
+          primeiras_corridas: debugResult.rows
+        }
       });
     }
-    
-    console.log(`🔄 [SYNC HISTÓRICO] Sincronizando ${corridasConcluidas.rows.length} corridas concluídas`);
     
     // Processar em lotes de 50 (limite da API)
     const lotes = [];
@@ -24484,7 +24526,7 @@ app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, as
     for (const lote of lotes) {
       const listaOS = lote.map(c => parseInt(c.tutts_os_numero));
       
-      console.log(`📤 [SYNC HISTÓRICO] Consultando lote de ${listaOS.length} OS`);
+      console.log(`📤 [SYNC HISTÓRICO] Consultando lote de ${listaOS.length} OS: ${listaOS.slice(0,5).join(', ')}...`);
       
       // Chamar API da Tutts
       const payloadTutts = {
@@ -24501,6 +24543,8 @@ app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, as
         });
         
         const dataTutts = respTutts.json();
+        
+        console.log(`📥 [SYNC HISTÓRICO] Resposta Tutts:`, JSON.stringify(dataTutts).substring(0, 500));
         
         if (dataTutts.Erro) {
           console.error('❌ [SYNC HISTÓRICO] Erro da Tutts:', dataTutts.Erro);
