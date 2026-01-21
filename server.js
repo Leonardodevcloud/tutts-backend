@@ -24422,6 +24422,228 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
   }
 });
 
+// ==================== SINCRONIZAÇÃO RETROATIVA DE HISTÓRICO ====================
+// Endpoint para recuperar dados de corridas já finalizadas da API Tutts
+
+app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { limite = 50, apenasIncompletas = true } = req.body;
+    
+    // Obter token de status do cliente
+    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenStatus && tokenStatus.includes('-gravar')) {
+      tokenStatus = tokenStatus.replace('-gravar', '-status');
+    } else if (tokenStatus && !tokenStatus.includes('-status')) {
+      tokenStatus = tokenStatus + '-status';
+    }
+    
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+    
+    if (!tokenStatus || !codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
+    }
+    
+    // Buscar corridas concluídas que precisam de dados
+    let query = `
+      SELECT id, tutts_os_numero, status, dados_pontos, profissional_nome
+      FROM solicitacoes_corrida 
+      WHERE cliente_id = $1 
+        AND status IN ('finalizado', 'cancelado')
+        AND tutts_os_numero IS NOT NULL
+    `;
+    
+    if (apenasIncompletas) {
+      query += ` AND (dados_pontos IS NULL OR dados_pontos = '[]' OR dados_pontos = '{}')`;
+    }
+    
+    query += ` ORDER BY criado_em DESC LIMIT $2`;
+    
+    const corridasConcluidas = await pool.query(query, [req.clienteSolicitacao.id, limite]);
+    
+    if (corridasConcluidas.rows.length === 0) {
+      return res.json({ 
+        sucesso: true, 
+        mensagem: 'Nenhuma corrida para sincronizar',
+        atualizadas: 0,
+        total_verificadas: 0
+      });
+    }
+    
+    console.log(`🔄 [SYNC HISTÓRICO] Sincronizando ${corridasConcluidas.rows.length} corridas concluídas`);
+    
+    // Processar em lotes de 50 (limite da API)
+    const lotes = [];
+    for (let i = 0; i < corridasConcluidas.rows.length; i += 50) {
+      lotes.push(corridasConcluidas.rows.slice(i, i + 50));
+    }
+    
+    let totalAtualizadas = 0;
+    let totalErros = 0;
+    const detalhes = [];
+    
+    for (const lote of lotes) {
+      const listaOS = lote.map(c => parseInt(c.tutts_os_numero));
+      
+      console.log(`📤 [SYNC HISTÓRICO] Consultando lote de ${listaOS.length} OS`);
+      
+      // Chamar API da Tutts
+      const payloadTutts = {
+        token: tokenStatus,
+        codCliente: codCliente,
+        servicos: listaOS
+      };
+      
+      try {
+        const respTutts = await httpRequest('https://tutts.com.br/integracao', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payloadTutts)
+        });
+        
+        const dataTutts = respTutts.json();
+        
+        if (dataTutts.Erro) {
+          console.error('❌ [SYNC HISTÓRICO] Erro da Tutts:', dataTutts.Erro);
+          totalErros += lote.length;
+          continue;
+        }
+        
+        if (!dataTutts.Sucesso) {
+          console.error('❌ [SYNC HISTÓRICO] Resposta inválida da Tutts');
+          totalErros += lote.length;
+          continue;
+        }
+        
+        // Processar cada OS retornada
+        for (const corrida of lote) {
+          const osNumero = corrida.tutts_os_numero.toString();
+          const dadosOS = dataTutts.Sucesso[osNumero];
+          
+          if (!dadosOS) {
+            console.log(`⚠️ [SYNC HISTÓRICO] OS ${osNumero} não encontrada na resposta`);
+            continue;
+          }
+          
+          // Extrair dados do profissional
+          const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+          
+          // Processar pontos
+          const pontosProcessados = [];
+          if (dadosOS.pontos && Array.isArray(dadosOS.pontos)) {
+            for (const ponto of dadosOS.pontos) {
+              const statusPonto = ponto.statusPonto || {};
+              
+              pontosProcessados.push({
+                ponto: ponto.ponto,
+                id_ponto: ponto.IDponto,
+                numero_nota: ponto.numeroNota || null,
+                observacao: ponto.obs || null,
+                // Horários
+                data_chegada: statusPonto.chegada || null,
+                data_finalizado: statusPonto.saida || null,
+                // Status
+                status: statusPonto.ocorrencia?.toLowerCase() === 'sucesso' ? 'finalizado' : 
+                        statusPonto.chegada ? 'finalizado' : 'pendente',
+                motivo_tipo: statusPonto.ocorrencia || null,
+                motivo_descricao: statusPonto.motivo || null,
+                // Fotos de protocolo
+                protocolo_fotos: statusPonto.protocolo || [],
+                // Assinatura
+                assinatura: statusPonto.assinatura || [],
+                // Coordenadas
+                latitude: ponto.coordernadasPonto?.la || null,
+                longitude: ponto.coordernadasPonto?.lo || null
+              });
+            }
+          }
+          
+          // Atualizar no banco
+          await pool.query(`
+            UPDATE solicitacoes_corrida SET
+              profissional_nome = COALESCE($1, profissional_nome),
+              profissional_cpf = COALESCE($2, profissional_cpf),
+              profissional_placa = COALESCE($3, profissional_placa),
+              tutts_url_rastreamento = COALESCE($4, tutts_url_rastreamento),
+              dados_pontos = $5,
+              ultima_atualizacao = NOW(),
+              atualizado_em = NOW()
+            WHERE id = $6
+          `, [
+            dadosProf.nome || null,
+            dadosProf.cpf || null,
+            dadosProf.placa || null,
+            dadosOS.urlRastreamento || null,
+            JSON.stringify(pontosProcessados),
+            corrida.id
+          ]);
+          
+          // Atualizar também a tabela de pontos
+          for (const ponto of pontosProcessados) {
+            const pontoIdx = parseInt(ponto.ponto) || 0;
+            
+            await pool.query(`
+              UPDATE solicitacoes_pontos SET
+                data_chegada = COALESCE($1, data_chegada),
+                data_finalizado = COALESCE($2, data_finalizado),
+                motivo_finalizacao = COALESCE($3, motivo_finalizacao),
+                motivo_descricao = COALESCE($4, motivo_descricao),
+                fotos = COALESCE($5, fotos),
+                assinatura = COALESCE($6, assinatura),
+                status = COALESCE($7, status)
+              WHERE solicitacao_id = $8 AND ordem = $9
+            `, [
+              ponto.data_chegada,
+              ponto.data_finalizado,
+              ponto.motivo_tipo,
+              ponto.motivo_descricao,
+              ponto.protocolo_fotos?.length > 0 ? JSON.stringify(ponto.protocolo_fotos) : null,
+              ponto.assinatura?.length > 0 ? JSON.stringify(ponto.assinatura) : null,
+              ponto.status,
+              corrida.id,
+              pontoIdx
+            ]);
+          }
+          
+          totalAtualizadas++;
+          detalhes.push({
+            os: osNumero,
+            status: dadosOS.status,
+            pontos: pontosProcessados.length,
+            profissional: dadosProf.nome || 'N/A'
+          });
+          
+          console.log(`✅ [SYNC HISTÓRICO] OS ${osNumero} atualizada - ${pontosProcessados.length} pontos`);
+        }
+        
+        // Aguardar entre lotes (rate limit da API)
+        if (lotes.indexOf(lote) < lotes.length - 1) {
+          console.log('⏳ [SYNC HISTÓRICO] Aguardando 2 segundos antes do próximo lote...');
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+      } catch (err) {
+        console.error('❌ [SYNC HISTÓRICO] Erro ao processar lote:', err.message);
+        totalErros += lote.length;
+      }
+    }
+    
+    console.log(`🎉 [SYNC HISTÓRICO] Concluído: ${totalAtualizadas} atualizadas, ${totalErros} erros`);
+    
+    res.json({
+      sucesso: true,
+      mensagem: `Sincronização concluída`,
+      total_verificadas: corridasConcluidas.rows.length,
+      atualizadas: totalAtualizadas,
+      erros: totalErros,
+      detalhes: detalhes.slice(0, 20)
+    });
+    
+  } catch (err) {
+    console.error('❌ [SYNC HISTÓRICO] Erro geral:', err);
+    res.status(500).json({ error: 'Erro ao sincronizar histórico: ' + err.message });
+  }
+});
+
 // Salvar endereço favorito
 app.post('/api/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
   try {
