@@ -24422,272 +24422,6 @@ app.post('/api/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, 
   }
 });
 
-// ==================== SINCRONIZAÇÃO RETROATIVA DE HISTÓRICO ====================
-// Endpoint para recuperar dados de corridas já finalizadas da API Tutts
-
-app.post('/api/solicitacao/sincronizar-historico', verificarTokenSolicitacao, async (req, res) => {
-  try {
-    const { limite = 50, apenasIncompletas = false } = req.body;
-    
-    console.log(`🔄 [SYNC HISTÓRICO] Iniciando para cliente ${req.clienteSolicitacao.id}`);
-    
-    // Obter token de status do cliente
-    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
-    console.log(`🔑 [SYNC HISTÓRICO] Token original: ${tokenStatus ? tokenStatus.substring(0, 20) + '...' : 'VAZIO'}`);
-    
-    if (tokenStatus && tokenStatus.includes('-gravar')) {
-      tokenStatus = tokenStatus.replace('-gravar', '-status');
-    } else if (tokenStatus && !tokenStatus.includes('-status')) {
-      tokenStatus = tokenStatus + '-status';
-    }
-    
-    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
-    
-    console.log(`🔑 [SYNC HISTÓRICO] Token status: ${tokenStatus ? tokenStatus.substring(0, 20) + '...' : 'VAZIO'}`);
-    console.log(`🔑 [SYNC HISTÓRICO] Cod cliente: ${codCliente || 'VAZIO'}`);
-    
-    if (!tokenStatus || !codCliente) {
-      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
-    }
-    
-    // Buscar corridas concluídas - PRIMEIRO SEM FILTRO PARA DEBUG
-    let queryDebug = `
-      SELECT id, tutts_os_numero, status, 
-             CASE WHEN dados_pontos IS NULL THEN 'NULL' 
-                  WHEN dados_pontos::text = '[]' THEN 'VAZIO_ARRAY'
-                  WHEN dados_pontos::text = '{}' THEN 'VAZIO_OBJ'
-                  ELSE 'TEM_DADOS' END as status_dados
-      FROM solicitacoes_corrida 
-      WHERE cliente_id = $1 
-        AND status IN ('finalizado', 'cancelado')
-      ORDER BY criado_em DESC
-      LIMIT 10
-    `;
-    
-    const debugResult = await pool.query(queryDebug, [req.clienteSolicitacao.id]);
-    console.log(`📊 [SYNC HISTÓRICO] Debug - Primeiras 10 corridas concluídas:`);
-    debugResult.rows.forEach(r => {
-      console.log(`   OS: ${r.tutts_os_numero || 'NULL'} | Status: ${r.status} | Dados: ${r.status_dados}`);
-    });
-    
-    // Buscar corridas concluídas que precisam de dados
-    let query = `
-      SELECT id, tutts_os_numero, status, dados_pontos, profissional_nome
-      FROM solicitacoes_corrida 
-      WHERE cliente_id = $1 
-        AND status IN ('finalizado', 'cancelado')
-        AND tutts_os_numero IS NOT NULL
-        AND tutts_os_numero != ''
-    `;
-    
-    if (apenasIncompletas) {
-      query += ` AND (dados_pontos IS NULL OR dados_pontos::text = '[]' OR dados_pontos::text = '{}')`;
-    }
-    
-    query += ` ORDER BY criado_em DESC LIMIT $2`;
-    
-    const corridasConcluidas = await pool.query(query, [req.clienteSolicitacao.id, limite]);
-    
-    console.log(`📊 [SYNC HISTÓRICO] Encontradas ${corridasConcluidas.rows.length} corridas para sincronizar`);
-    
-    if (corridasConcluidas.rows.length === 0) {
-      // Verificar se o problema é o tutts_os_numero
-      const countSemOS = await pool.query(`
-        SELECT COUNT(*) FROM solicitacoes_corrida 
-        WHERE cliente_id = $1 
-          AND status IN ('finalizado', 'cancelado')
-          AND (tutts_os_numero IS NULL OR tutts_os_numero = '')
-      `, [req.clienteSolicitacao.id]);
-      
-      console.log(`⚠️ [SYNC HISTÓRICO] ${countSemOS.rows[0].count} corridas sem tutts_os_numero`);
-      
-      return res.json({ 
-        sucesso: true, 
-        mensagem: 'Nenhuma corrida para sincronizar',
-        atualizadas: 0,
-        total_verificadas: 0,
-        debug: {
-          corridas_sem_os: parseInt(countSemOS.rows[0].count),
-          primeiras_corridas: debugResult.rows
-        }
-      });
-    }
-    
-    // Processar em lotes de 50 (limite da API)
-    const lotes = [];
-    for (let i = 0; i < corridasConcluidas.rows.length; i += 50) {
-      lotes.push(corridasConcluidas.rows.slice(i, i + 50));
-    }
-    
-    let totalAtualizadas = 0;
-    let totalErros = 0;
-    const detalhes = [];
-    
-    for (const lote of lotes) {
-      const listaOS = lote.map(c => parseInt(c.tutts_os_numero));
-      
-      console.log(`📤 [SYNC HISTÓRICO] Consultando lote de ${listaOS.length} OS: ${listaOS.slice(0,5).join(', ')}...`);
-      
-      // Chamar API da Tutts
-      const payloadTutts = {
-        token: tokenStatus,
-        codCliente: codCliente,
-        servicos: listaOS
-      };
-      
-      try {
-        const respTutts = await httpRequest('https://tutts.com.br/integracao', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payloadTutts)
-        });
-        
-        const dataTutts = respTutts.json();
-        
-        console.log(`📥 [SYNC HISTÓRICO] Resposta Tutts:`, JSON.stringify(dataTutts).substring(0, 500));
-        
-        if (dataTutts.Erro) {
-          console.error('❌ [SYNC HISTÓRICO] Erro da Tutts:', dataTutts.Erro);
-          totalErros += lote.length;
-          continue;
-        }
-        
-        if (!dataTutts.Sucesso) {
-          console.error('❌ [SYNC HISTÓRICO] Resposta inválida da Tutts');
-          totalErros += lote.length;
-          continue;
-        }
-        
-        // Processar cada OS retornada
-        for (const corrida of lote) {
-          const osNumero = corrida.tutts_os_numero.toString();
-          const dadosOS = dataTutts.Sucesso[osNumero];
-          
-          if (!dadosOS) {
-            console.log(`⚠️ [SYNC HISTÓRICO] OS ${osNumero} não encontrada na resposta`);
-            continue;
-          }
-          
-          // Extrair dados do profissional
-          const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
-          
-          // Processar pontos
-          const pontosProcessados = [];
-          if (dadosOS.pontos && Array.isArray(dadosOS.pontos)) {
-            for (const ponto of dadosOS.pontos) {
-              const statusPonto = ponto.statusPonto || {};
-              
-              pontosProcessados.push({
-                ponto: ponto.ponto,
-                id_ponto: ponto.IDponto,
-                numero_nota: ponto.numeroNota || null,
-                observacao: ponto.obs || null,
-                // Horários
-                data_chegada: statusPonto.chegada || null,
-                data_finalizado: statusPonto.saida || null,
-                // Status
-                status: statusPonto.ocorrencia?.toLowerCase() === 'sucesso' ? 'finalizado' : 
-                        statusPonto.chegada ? 'finalizado' : 'pendente',
-                motivo_tipo: statusPonto.ocorrencia || null,
-                motivo_descricao: statusPonto.motivo || null,
-                // Fotos de protocolo
-                protocolo_fotos: statusPonto.protocolo || [],
-                // Assinatura
-                assinatura: statusPonto.assinatura || [],
-                // Coordenadas
-                latitude: ponto.coordernadasPonto?.la || null,
-                longitude: ponto.coordernadasPonto?.lo || null
-              });
-            }
-          }
-          
-          // Atualizar no banco
-          await pool.query(`
-            UPDATE solicitacoes_corrida SET
-              profissional_nome = COALESCE($1, profissional_nome),
-              profissional_cpf = COALESCE($2, profissional_cpf),
-              profissional_placa = COALESCE($3, profissional_placa),
-              tutts_url_rastreamento = COALESCE($4, tutts_url_rastreamento),
-              dados_pontos = $5,
-              ultima_atualizacao = NOW(),
-              atualizado_em = NOW()
-            WHERE id = $6
-          `, [
-            dadosProf.nome || null,
-            dadosProf.cpf || null,
-            dadosProf.placa || null,
-            dadosOS.urlRastreamento || null,
-            JSON.stringify(pontosProcessados),
-            corrida.id
-          ]);
-          
-          // Atualizar também a tabela de pontos
-          for (const ponto of pontosProcessados) {
-            const pontoIdx = parseInt(ponto.ponto) || 0;
-            
-            await pool.query(`
-              UPDATE solicitacoes_pontos SET
-                data_chegada = COALESCE($1, data_chegada),
-                data_finalizado = COALESCE($2, data_finalizado),
-                motivo_finalizacao = COALESCE($3, motivo_finalizacao),
-                motivo_descricao = COALESCE($4, motivo_descricao),
-                fotos = COALESCE($5, fotos),
-                assinatura = COALESCE($6, assinatura),
-                status = COALESCE($7, status)
-              WHERE solicitacao_id = $8 AND ordem = $9
-            `, [
-              ponto.data_chegada,
-              ponto.data_finalizado,
-              ponto.motivo_tipo,
-              ponto.motivo_descricao,
-              ponto.protocolo_fotos?.length > 0 ? JSON.stringify(ponto.protocolo_fotos) : null,
-              ponto.assinatura?.length > 0 ? JSON.stringify(ponto.assinatura) : null,
-              ponto.status,
-              corrida.id,
-              pontoIdx
-            ]);
-          }
-          
-          totalAtualizadas++;
-          detalhes.push({
-            os: osNumero,
-            status: dadosOS.status,
-            pontos: pontosProcessados.length,
-            profissional: dadosProf.nome || 'N/A'
-          });
-          
-          console.log(`✅ [SYNC HISTÓRICO] OS ${osNumero} atualizada - ${pontosProcessados.length} pontos`);
-        }
-        
-        // Aguardar entre lotes (rate limit da API)
-        if (lotes.indexOf(lote) < lotes.length - 1) {
-          console.log('⏳ [SYNC HISTÓRICO] Aguardando 2 segundos antes do próximo lote...');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        
-      } catch (err) {
-        console.error('❌ [SYNC HISTÓRICO] Erro ao processar lote:', err.message);
-        totalErros += lote.length;
-      }
-    }
-    
-    console.log(`🎉 [SYNC HISTÓRICO] Concluído: ${totalAtualizadas} atualizadas, ${totalErros} erros`);
-    
-    res.json({
-      sucesso: true,
-      mensagem: `Sincronização concluída`,
-      total_verificadas: corridasConcluidas.rows.length,
-      atualizadas: totalAtualizadas,
-      erros: totalErros,
-      detalhes: detalhes.slice(0, 20)
-    });
-    
-  } catch (err) {
-    console.error('❌ [SYNC HISTÓRICO] Erro geral:', err);
-    res.status(500).json({ error: 'Erro ao sincronizar histórico: ' + err.message });
-  }
-});
-
 // Salvar endereço favorito
 app.post('/api/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
   try {
@@ -25538,7 +25272,11 @@ app.post('/api/webhook/tutts', async (req, res) => {
 });
 
 // ============================================================
+
+// ============================================================
 // MÓDULO DE FILAS - Sistema de Gerenciamento de Filas Logísticas
+// VERSÃO 2.0 - Com notificações WebSocket, Corrida Única, 
+// Prioridade de Retorno e Mover para Último
 // ============================================================
 
 // ========== GESTÃO DE CENTRAIS (ADMIN) ==========
@@ -25730,7 +25468,8 @@ app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
         const { id } = req.params;
         
         const aguardando = await pool.query(`
-            SELECT *, 
+            SELECT cod_profissional, nome_profissional, posicao,
+                   corrida_unica, posicao_original,
                    EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'aguardando'
@@ -25738,7 +25477,7 @@ app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
         `, [id]);
         
         const emRota = await pool.query(`
-            SELECT *,
+            SELECT cod_profissional, nome_profissional, corrida_unica,
                    EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60 as minutos_em_rota
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'em_rota'
@@ -25749,9 +25488,19 @@ app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
         
         res.json({ 
             success: true, 
-            aguardando: aguardando.rows,
-            em_rota: emRota.rows,
-            alertas: alertas,
+            aguardando: aguardando.rows.map(p => ({
+                ...p,
+                minutos_esperando: Math.round(p.minutos_esperando || 0),
+                retornou_corrida_unica: p.corrida_unica === true
+            })),
+            em_rota: emRota.rows.map(p => ({
+                ...p,
+                minutos_em_rota: Math.round(p.minutos_em_rota || 0)
+            })),
+            alertas: alertas.map(p => ({
+                ...p,
+                minutos_em_rota: Math.round(p.minutos_em_rota || 0)
+            })),
             total_aguardando: aguardando.rows.length,
             total_em_rota: emRota.rows.length
         });
@@ -25761,7 +25510,7 @@ app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
     }
 });
 
-// Enviar profissional para roteiro
+// Enviar profissional para roteiro (com notificação WebSocket)
 app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional, central_id } = req.body;
@@ -25783,6 +25532,7 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
             SET status = 'em_rota', 
                 saida_rota_at = NOW(),
                 posicao = NULL,
+                corrida_unica = FALSE,
                 updated_at = NOW()
             WHERE cod_profissional = $1 AND central_id = $2
         `, [cod_profissional, central_id]);
@@ -25800,6 +25550,16 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
             VALUES ($1, $2, $3, $4, 'enviado_rota', $5, $6, $7)
         `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, req.user.codProfissional, req.user.nome]);
         
+        // Notificação WebSocket
+        if (global.sendFilaNotification) {
+            global.sendFilaNotification(cod_profissional, 'ROTEIRO_DESPACHADO', {
+                tipo: 'roteiro_normal',
+                mensagem: '🚀 Seu roteiro já foi definido, não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas!',
+                central: central.rows[0]?.nome,
+                tempo_espera: tempoEspera
+            });
+        }
+        
         res.json({ success: true, tempo_espera: tempoEspera });
         
         registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
@@ -25808,6 +25568,167 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
     } catch (error) {
         console.error('❌ Erro ao enviar para rota:', error);
         res.status(500).json({ error: 'Erro ao enviar para rota' });
+    }
+});
+
+// Enviar para Rota Única (com bônus e prioridade)
+app.post('/api/filas/enviar-rota-unica', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+        const { cod_profissional, central_id } = req.body;
+        
+        const posicao = await pool.query(
+            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+            [cod_profissional, central_id, 'aguardando']
+        );
+        
+        if (posicao.rows.length === 0) {
+            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+        }
+        
+        const prof = posicao.rows[0];
+        const tempoEspera = Math.round((Date.now() - new Date(prof.entrada_fila_at).getTime()) / 60000);
+        const posicaoOriginal = prof.posicao;
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET status = 'em_rota', 
+                saida_rota_at = NOW(),
+                posicao = NULL,
+                corrida_unica = TRUE,
+                posicao_original = $3,
+                bonus_aplicado = TRUE,
+                updated_at = NOW()
+            WHERE cod_profissional = $1 AND central_id = $2
+        `, [cod_profissional, central_id, posicaoOriginal]);
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = posicao - 1 
+            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
+        `, [central_id, posicaoOriginal]);
+        
+        const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+        
+        await pool.query(`
+            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome)
+            VALUES ($1, $2, $3, $4, 'enviado_rota_unica', $5, $6, $7, $8)
+        `, [
+            central_id, 
+            central.rows[0]?.nome, 
+            cod_profissional, 
+            prof.nome_profissional, 
+            tempoEspera,
+            `Corrida única - Posição original: ${posicaoOriginal} - Bônus aplicado`,
+            req.user.codProfissional, 
+            req.user.nome
+        ]);
+        
+        if (global.sendFilaNotification) {
+            global.sendFilaNotification(cod_profissional, 'ROTEIRO_DESPACHADO', {
+                tipo: 'corrida_unica',
+                mensagem: '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!',
+                central: central.rows[0]?.nome,
+                tempo_espera: tempoEspera,
+                bonus: true,
+                posicao_retorno: posicaoOriginal
+            });
+        }
+        
+        res.json({ 
+            success: true, 
+            tempo_espera: tempoEspera,
+            corrida_unica: true,
+            posicao_retorno: posicaoOriginal
+        });
+        
+        registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
+        
+    } catch (error) {
+        console.error('❌ Erro ao enviar para rota única:', error);
+        res.status(500).json({ error: 'Erro ao enviar para rota única' });
+    }
+});
+
+// Mover para Último (recusou roteiro)
+app.post('/api/filas/mover-ultimo', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+        const { cod_profissional, central_id } = req.body;
+        
+        const posicao = await pool.query(
+            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+            [cod_profissional, central_id, 'aguardando']
+        );
+        
+        if (posicao.rows.length === 0) {
+            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+        }
+        
+        const prof = posicao.rows[0];
+        const posicaoAnterior = prof.posicao;
+        
+        const ultimaPosicao = await pool.query(
+            'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+            [central_id, 'aguardando']
+        );
+        const novaPosicao = ultimaPosicao.rows[0].max_pos;
+        
+        if (posicaoAnterior === novaPosicao) {
+            return res.json({ success: true, message: 'Profissional já está na última posição', posicao: novaPosicao });
+        }
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = posicao - 1,
+                updated_at = NOW()
+            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
+        `, [central_id, posicaoAnterior]);
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = $3,
+                corrida_unica = FALSE,
+                posicao_original = NULL,
+                updated_at = NOW()
+            WHERE cod_profissional = $1 AND central_id = $2
+        `, [cod_profissional, central_id, novaPosicao]);
+        
+        const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+        
+        await pool.query(`
+            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+            VALUES ($1, $2, $3, $4, 'movido_ultimo', $5, $6, $7)
+        `, [
+            central_id, 
+            central.rows[0]?.nome, 
+            cod_profissional, 
+            prof.nome_profissional,
+            `Movido da posição ${posicaoAnterior} para ${novaPosicao} (recusou roteiro)`,
+            req.user.codProfissional, 
+            req.user.nome
+        ]);
+        
+        if (global.sendFilaNotification) {
+            global.sendFilaNotification(cod_profissional, 'POSICAO_ALTERADA', {
+                tipo: 'movido_ultimo',
+                mensagem: `📍 Você foi movido para a última posição da fila (${novaPosicao}º) por recusar o roteiro.`,
+                posicao_anterior: posicaoAnterior,
+                posicao_nova: novaPosicao
+            });
+        }
+        
+        res.json({ 
+            success: true, 
+            posicao_anterior: posicaoAnterior,
+            posicao_nova: novaPosicao
+        });
+        
+        registrarAuditoria(req, 'MOVER_PARA_ULTIMO', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao }).catch(() => {});
+        
+    } catch (error) {
+        console.error('❌ Erro ao mover para último:', error);
+        res.status(500).json({ error: 'Erro ao mover para último' });
     }
 });
 
@@ -25904,7 +25825,7 @@ function calcularDistanciaHaversine(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-// Entrar na fila (com validação de geolocalização)
+// Entrar na fila (com lógica de prioridade de retorno)
 app.post('/api/filas/entrar', verificarToken, async (req, res) => {
     try {
         const cod_profissional = req.user.codProfissional;
@@ -25927,6 +25848,7 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
         }
         
         const central = vinculo.rows[0];
+        const central_id = central.central_id;
         
         const distancia = calcularDistanciaHaversine(
             parseFloat(latitude), 
@@ -25955,34 +25877,76 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
             if (posicaoAtual.status === 'em_rota') {
                 const tempoRota = Math.round((Date.now() - new Date(posicaoAtual.saida_rota_at).getTime()) / 60000);
                 
-                const ultimaPosicao = await pool.query(
-                    'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-                    [central.central_id, 'aguardando']
-                );
+                let novaPosicao;
+                let acaoHistorico = 'retorno';
+                let observacaoHistorico = '';
                 
-                const novaPosicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
+                // Lógica de prioridade de retorno
+                if (posicaoAtual.corrida_unica && posicaoAtual.posicao_original) {
+                    const posicaoOriginal = posicaoAtual.posicao_original;
+                    
+                    const totalAtual = await pool.query(
+                        'SELECT COUNT(*) as total, MIN(posicao) as primeira FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+                        [central_id, 'aguardando']
+                    );
+                    
+                    const total = parseInt(totalAtual.rows[0].total) || 0;
+                    const primeiraPosicao = parseInt(totalAtual.rows[0].primeira) || 1;
+                    
+                    if (total === 0) {
+                        novaPosicao = 1;
+                    } else if (posicaoOriginal <= primeiraPosicao) {
+                        novaPosicao = primeiraPosicao;
+                        await pool.query(`
+                            UPDATE filas_posicoes 
+                            SET posicao = posicao + 1 
+                            WHERE central_id = $1 AND status = 'aguardando'
+                        `, [central_id]);
+                    } else {
+                        novaPosicao = posicaoOriginal;
+                        await pool.query(`
+                            UPDATE filas_posicoes 
+                            SET posicao = posicao + 1 
+                            WHERE central_id = $1 AND status = 'aguardando' AND posicao >= $2
+                        `, [central_id, posicaoOriginal]);
+                    }
+                    
+                    acaoHistorico = 'retorno_prioridade';
+                    observacaoHistorico = `Retorno prioritário (corrida única) - Posição original: ${posicaoOriginal}`;
+                    
+                } else {
+                    const maxPosicao = await pool.query(
+                        'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+                        [central_id, 'aguardando']
+                    );
+                    novaPosicao = maxPosicao.rows[0].max_pos + 1;
+                }
                 
                 await pool.query(`
                     UPDATE filas_posicoes 
                     SET status = 'aguardando',
-                        posicao = $1,
+                        posicao = $3,
                         entrada_fila_at = NOW(),
+                        saida_rota_at = NULL,
                         retorno_at = NOW(),
-                        latitude_checkin = $2,
-                        longitude_checkin = $3,
+                        latitude_checkin = $4,
+                        longitude_checkin = $5,
+                        corrida_unica = FALSE,
+                        posicao_original = NULL,
                         updated_at = NOW()
-                    WHERE cod_profissional = $4
-                `, [novaPosicao, latitude, longitude, cod_profissional]);
+                    WHERE cod_profissional = $1 AND central_id = $2
+                `, [cod_profissional, central_id, novaPosicao, latitude, longitude]);
                 
                 await pool.query(`
-                    INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos)
-                    VALUES ($1, $2, $3, $4, 'retorno', $5)
-                `, [central.central_id, central.central_nome, cod_profissional, nome_profissional, tempoRota]);
+                    INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [central_id, central.central_nome, cod_profissional, nome_profissional, acaoHistorico, tempoRota, observacaoHistorico]);
                 
                 return res.json({ 
                     success: true, 
-                    mensagem: 'Você retornou para a fila',
                     posicao: novaPosicao,
+                    mensagem: posicaoAtual.corrida_unica ? 'Você retornou com prioridade!' : 'Você retornou para a fila',
+                    prioridade: posicaoAtual.corrida_unica,
                     tempo_rota: tempoRota
                 });
             } else {
@@ -25992,7 +25956,7 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
         
         const ultimaPosicao = await pool.query(
             'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-            [central.central_id, 'aguardando']
+            [central_id, 'aguardando']
         );
         
         const posicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
@@ -26000,12 +25964,12 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
         await pool.query(`
             INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin)
             VALUES ($1, $2, $3, 'aguardando', $4, $5, $6)
-        `, [central.central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
+        `, [central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
         
         await pool.query(`
             INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao)
             VALUES ($1, $2, $3, $4, 'entrada')
-        `, [central.central_id, central.central_nome, cod_profissional, nome_profissional]);
+        `, [central_id, central.central_nome, cod_profissional, nome_profissional]);
         
         res.json({ 
             success: true, 
@@ -26014,9 +25978,8 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
             distancia: Math.round(distancia)
         });
         
-        // Auditoria em background (não bloqueia a resposta)
         registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, 
-            { central_id: central.central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
+            { central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
         
     } catch (error) {
         console.error('❌ Erro ao entrar na fila:', error);
@@ -26090,12 +26053,14 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
                 na_fila: true,
                 status: 'em_rota',
                 minutos_em_rota: minutosEmRota,
-                saida_rota_at: eu.saida_rota_at
+                saida_rota_at: eu.saida_rota_at,
+                corrida_unica: eu.corrida_unica,
+                posicao_original: eu.posicao_original
             });
         }
         
         const naFrente = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao
+            SELECT cod_profissional, nome_profissional, posicao, corrida_unica
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'aguardando' AND posicao < $2
             ORDER BY posicao DESC
@@ -26103,7 +26068,7 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
         `, [central_id, eu.posicao]);
         
         const atras = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao
+            SELECT cod_profissional, nome_profissional, posicao, corrida_unica
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
             ORDER BY posicao ASC
@@ -26125,8 +26090,14 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
             total_na_fila: parseInt(total.rows[0].count),
             minutos_esperando: minutosEsperando,
             entrada_fila_at: eu.entrada_fila_at,
-            na_frente: naFrente.rows.reverse(),
-            atras: atras.rows
+            na_frente: naFrente.rows.reverse().map(p => ({
+                ...p,
+                retornou_corrida_unica: p.corrida_unica === true
+            })),
+            atras: atras.rows.map(p => ({
+                ...p,
+                retornou_corrida_unica: p.corrida_unica === true
+            }))
         });
     } catch (error) {
         console.error('❌ Erro ao buscar posição:', error);
@@ -26148,7 +26119,7 @@ app.get('/api/filas/estatisticas/:central_id', verificarToken, async (req, res) 
             SELECT COUNT(*) as total
             FROM filas_historico 
             WHERE central_id = $1 
-              AND acao = 'enviado_rota'
+              AND acao IN ('enviado_rota', 'enviado_rota_unica')
               AND DATE(created_at) = $2
         `, [central_id, dataFiltro]);
         
@@ -26156,7 +26127,7 @@ app.get('/api/filas/estatisticas/:central_id', verificarToken, async (req, res) 
             SELECT AVG(tempo_espera_minutos) as media
             FROM filas_historico 
             WHERE central_id = $1 
-              AND acao = 'enviado_rota'
+              AND acao IN ('enviado_rota', 'enviado_rota_unica')
               AND DATE(created_at) = $2
               AND tempo_espera_minutos IS NOT NULL
         `, [central_id, dataFiltro]);
@@ -26165,7 +26136,7 @@ app.get('/api/filas/estatisticas/:central_id', verificarToken, async (req, res) 
             SELECT cod_profissional, nome_profissional, COUNT(*) as total_saidas
             FROM filas_historico 
             WHERE central_id = $1 
-              AND acao = 'enviado_rota'
+              AND acao IN ('enviado_rota', 'enviado_rota_unica')
               AND DATE(created_at) = $2
             GROUP BY cod_profissional, nome_profissional
             ORDER BY total_saidas DESC
@@ -26176,7 +26147,7 @@ app.get('/api/filas/estatisticas/:central_id', verificarToken, async (req, res) 
             SELECT EXTRACT(HOUR FROM created_at) as hora, COUNT(*) as total
             FROM filas_historico 
             WHERE central_id = $1 
-              AND acao = 'enviado_rota'
+              AND acao IN ('enviado_rota', 'enviado_rota_unica')
               AND DATE(created_at) = $2
             GROUP BY EXTRACT(HOUR FROM created_at)
             ORDER BY hora
@@ -26227,6 +26198,7 @@ app.get('/api/filas/historico/:central_id', verificarToken, async (req, res) => 
 });
 
 // ==================== FIM MÓDULO DE FILAS ====================
+
 
 
 // Endpoint para verificar se webhook está funcionando
@@ -26422,6 +26394,119 @@ wss.on('connection', (ws, req) => {
 global.notifyNewWithdrawal = notifyNewWithdrawal;
 global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
 global.broadcastToAdmins = broadcastToAdmins;
+
+
+// ==================== WEBSOCKET PARA FILAS ====================
+const wssFilas = new WebSocket.Server({ server, path: '/ws/filas' });
+
+const wsFilasClients = new Map();
+
+function sendFilaNotification(cod_profissional, event, data) {
+    const connections = wsFilasClients.get(String(cod_profissional));
+    if (!connections || connections.size === 0) {
+        console.log(`⚠️ [WS-Filas] Motoboy ${cod_profissional} não conectado`);
+        return false;
+    }
+    
+    const message = JSON.stringify({ 
+        event, 
+        data,
+        timestamp: new Date().toISOString(),
+        playSound: true
+    });
+    
+    let enviados = 0;
+    connections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(message);
+            enviados++;
+        }
+    });
+    
+    console.log(`📡 [WS-Filas] Notificação enviada para motoboy ${cod_profissional}: ${event} (${enviados} conexões)`);
+    return enviados > 0;
+}
+
+wssFilas.on('connection', (ws, req) => {
+    console.log('🔌 [WS-Filas] Nova conexão');
+    let userCod = null;
+    let authenticated = false;
+    
+    const authTimeout = setTimeout(() => {
+        if (!authenticated) {
+            console.log('⚠️ [WS-Filas] Conexão fechada por falta de autenticação');
+            ws.close(4001, 'Autenticação necessária');
+        }
+    }, 30000);
+    
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            
+            if (data.type === 'AUTH') {
+                const { token } = data;
+                
+                if (!token) {
+                    ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
+                    return;
+                }
+                
+                try {
+                    const decoded = jwt.verify(token, JWT_SECRET);
+                    authenticated = true;
+                    clearTimeout(authTimeout);
+                    
+                    if (decoded.codProfissional) {
+                        userCod = String(decoded.codProfissional);
+                        if (!wsFilasClients.has(userCod)) {
+                            wsFilasClients.set(userCod, new Set());
+                        }
+                        wsFilasClients.get(userCod).add(ws);
+                        
+                        ws.send(JSON.stringify({ 
+                            event: 'AUTH_SUCCESS', 
+                            userCod,
+                            message: 'Conectado às notificações de fila'
+                        }));
+                        console.log(`✅ [WS-Filas] Motoboy ${userCod} (${decoded.fullName}) conectado. Total: ${wsFilasClients.size}`);
+                    } else {
+                        ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Usuário sem código profissional' }));
+                        ws.close(4002, 'Sem código profissional');
+                    }
+                } catch (jwtError) {
+                    console.log(`❌ [WS-Filas] Token inválido: ${jwtError.message}`);
+                    ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido' }));
+                    ws.close(4003, 'Token inválido');
+                }
+            }
+            
+            if (data.type === 'PING' && authenticated) {
+                ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
+            }
+        } catch (e) {
+            console.error('❌ [WS-Filas] Erro:', e.message);
+        }
+    });
+    
+    ws.on('close', () => {
+        clearTimeout(authTimeout);
+        if (userCod) {
+            const conns = wsFilasClients.get(userCod);
+            if (conns) {
+                conns.delete(ws);
+                if (conns.size === 0) wsFilasClients.delete(userCod);
+            }
+            console.log(`🔌 [WS-Filas] Motoboy ${userCod} desconectado. Total: ${wsFilasClients.size}`);
+        }
+    });
+    
+    ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts Filas - Envie AUTH com token' }));
+});
+
+global.sendFilaNotification = sendFilaNotification;
+console.log('✅ WebSocket de Filas inicializado em /ws/filas');
+
+// ==================== FIM WEBSOCKET FILAS ====================
 
 // ==================== FIM WEBSOCKET SETUP ====================
 
