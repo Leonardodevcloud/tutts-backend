@@ -25536,6 +25536,13 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
         
         res.json({ success: true, tempo_espera: tempoEspera });
         
+        // Salvar notificação para o motoboy
+        pool.query(`
+            INSERT INTO filas_notificacoes (cod_profissional, tipo, mensagem, dados)
+            VALUES ($1, 'roteiro_despachado', $2, $3)
+            ON CONFLICT (cod_profissional) DO UPDATE SET tipo = $1, mensagem = $2, dados = $3, lida = false, created_at = NOW()
+        `, [cod_profissional, '🚀 Seu roteiro já foi definido, não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome })]).catch(() => {});
+        
         registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
             { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
         
@@ -25589,6 +25596,13 @@ app.post('/api/filas/enviar-rota-unica', verificarToken, verificarAdmin, async (
             `Corrida única - Posição original: ${posicaoOriginal}`, req.user.codProfissional, req.user.nome]);
         
         res.json({ success: true, tempo_espera: tempoEspera, corrida_unica: true, posicao_retorno: posicaoOriginal });
+        
+        // Salvar notificação para o motoboy (corrida única com bônus)
+        pool.query(`
+            INSERT INTO filas_notificacoes (cod_profissional, tipo, mensagem, dados)
+            VALUES ($1, 'corrida_unica', $2, $3)
+            ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'corrida_unica', mensagem = $2, dados = $3, lida = false, created_at = NOW()
+        `, [cod_profissional, '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, posicao_retorno: posicaoOriginal, bonus: true })]).catch(() => {});
         
         registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
             { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
@@ -26114,6 +26128,42 @@ app.get('/api/filas/historico/:central_id', verificarToken, async (req, res) => 
     } catch (error) {
         console.error('❌ Erro ao buscar histórico:', error);
         res.status(500).json({ error: 'Erro ao buscar histórico' });
+    }
+});
+
+// ========== NOTIFICAÇÕES DO MOTOBOY ==========
+
+// Buscar notificação pendente do motoboy
+app.get('/api/filas/minha-notificacao', verificarToken, async (req, res) => {
+    try {
+        const cod_profissional = req.user.codProfissional;
+        const result = await pool.query(
+            'SELECT * FROM filas_notificacoes WHERE cod_profissional = $1 AND lida = false ORDER BY created_at DESC LIMIT 1',
+            [cod_profissional]
+        );
+        if (result.rows.length > 0) {
+            res.json({ success: true, tem_notificacao: true, notificacao: result.rows[0] });
+        } else {
+            res.json({ success: true, tem_notificacao: false });
+        }
+    } catch (error) {
+        console.error('❌ Erro ao buscar notificação:', error);
+        res.status(500).json({ error: 'Erro ao buscar notificação' });
+    }
+});
+
+// Marcar notificação como lida
+app.post('/api/filas/notificacao-lida', verificarToken, async (req, res) => {
+    try {
+        const cod_profissional = req.user.codProfissional;
+        await pool.query(
+            'UPDATE filas_notificacoes SET lida = true WHERE cod_profissional = $1',
+            [cod_profissional]
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Erro ao marcar notificação:', error);
+        res.status(500).json({ error: 'Erro ao marcar notificação' });
     }
 });
 
