@@ -26248,6 +26248,21 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws/financeiro' });
 
+// Heartbeat para manter conexões vivas (Railway fecha conexões idle)
+const wssHeartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wss.on('close', () => {
+    clearInterval(wssHeartbeat);
+});
+
 // Armazenar conexões ativas
 const wsClients = {
   admins: new Set(),
@@ -26310,6 +26325,9 @@ function notifyWithdrawalUpdate(withdrawal, action) {
 // Handler de conexão WebSocket
 wss.on('connection', (ws, req) => {
   console.log('🔌 [WS] Nova conexão');
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  
   let clientType = null;
   let userCod = null;
   let authenticated = false;
@@ -26401,6 +26419,21 @@ const wssFilas = new WebSocket.Server({ server, path: '/ws/filas' });
 
 const wsFilasClients = new Map();
 
+// Heartbeat para manter conexões vivas (Railway fecha conexões idle)
+const heartbeatInterval = setInterval(() => {
+    wssFilas.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wssFilas.on('close', () => {
+    clearInterval(heartbeatInterval);
+});
+
 function sendFilaNotification(cod_profissional, event, data) {
     const connections = wsFilasClients.get(String(cod_profissional));
     if (!connections || connections.size === 0) {
@@ -26429,6 +26462,9 @@ function sendFilaNotification(cod_profissional, event, data) {
 
 wssFilas.on('connection', (ws, req) => {
     console.log('🔌 [WS-Filas] Nova conexão');
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    
     let userCod = null;
     let authenticated = false;
     
