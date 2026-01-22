@@ -25545,6 +25545,120 @@ app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, r
     }
 });
 
+// Enviar para Rota Única (com bônus e prioridade de retorno)
+app.post('/api/filas/enviar-rota-unica', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+        const { cod_profissional, central_id } = req.body;
+        
+        const posicao = await pool.query(
+            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+            [cod_profissional, central_id, 'aguardando']
+        );
+        
+        if (posicao.rows.length === 0) {
+            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+        }
+        
+        const prof = posicao.rows[0];
+        const tempoEspera = Math.round((Date.now() - new Date(prof.entrada_fila_at).getTime()) / 60000);
+        const posicaoOriginal = prof.posicao;
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET status = 'em_rota', 
+                saida_rota_at = NOW(),
+                posicao = NULL,
+                corrida_unica = TRUE,
+                posicao_original = $3,
+                updated_at = NOW()
+            WHERE cod_profissional = $1 AND central_id = $2
+        `, [cod_profissional, central_id, posicaoOriginal]);
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = posicao - 1 
+            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
+        `, [central_id, posicaoOriginal]);
+        
+        const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+        
+        await pool.query(`
+            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome)
+            VALUES ($1, $2, $3, $4, 'enviado_rota_unica', $5, $6, $7, $8)
+        `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, 
+            `Corrida única - Posição original: ${posicaoOriginal}`, req.user.codProfissional, req.user.nome]);
+        
+        res.json({ success: true, tempo_espera: tempoEspera, corrida_unica: true, posicao_retorno: posicaoOriginal });
+        
+        registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
+        
+    } catch (error) {
+        console.error('❌ Erro ao enviar para rota única:', error);
+        res.status(500).json({ error: 'Erro ao enviar para rota única' });
+    }
+});
+
+// Mover para Último (recusou roteiro)
+app.post('/api/filas/mover-ultimo', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+        const { cod_profissional, central_id } = req.body;
+        
+        const posicao = await pool.query(
+            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+            [cod_profissional, central_id, 'aguardando']
+        );
+        
+        if (posicao.rows.length === 0) {
+            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+        }
+        
+        const prof = posicao.rows[0];
+        const posicaoAnterior = prof.posicao;
+        
+        const ultimaPosicao = await pool.query(
+            'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+            [central_id, 'aguardando']
+        );
+        const novaPosicao = ultimaPosicao.rows[0].max_pos;
+        
+        if (posicaoAnterior === novaPosicao) {
+            return res.json({ success: true, message: 'Profissional já está na última posição', posicao: novaPosicao });
+        }
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = posicao - 1
+            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
+        `, [central_id, posicaoAnterior]);
+        
+        await pool.query(`
+            UPDATE filas_posicoes 
+            SET posicao = $3,
+                corrida_unica = FALSE,
+                posicao_original = NULL
+            WHERE cod_profissional = $1 AND central_id = $2
+        `, [cod_profissional, central_id, novaPosicao]);
+        
+        const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+        
+        await pool.query(`
+            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+            VALUES ($1, $2, $3, $4, 'movido_ultimo', $5, $6, $7)
+        `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional,
+            `Movido da posição ${posicaoAnterior} para ${novaPosicao}`, req.user.codProfissional, req.user.nome]);
+        
+        res.json({ success: true, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao });
+        
+        registrarAuditoria(req, 'MOVER_PARA_ULTIMO', 'admin', 'filas_posicoes', null, 
+            { cod_profissional, central_id, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao }).catch(() => {});
+        
+    } catch (error) {
+        console.error('❌ Erro ao mover para último:', error);
+        res.status(500).json({ error: 'Erro ao mover para último' });
+    }
+});
+
 // Remover profissional da fila (admin)
 app.post('/api/filas/remover', verificarToken, verificarAdmin, async (req, res) => {
     try {
@@ -25689,12 +25803,52 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
             if (posicaoAtual.status === 'em_rota') {
                 const tempoRota = Math.round((Date.now() - new Date(posicaoAtual.saida_rota_at).getTime()) / 60000);
                 
-                const ultimaPosicao = await pool.query(
-                    'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-                    [central.central_id, 'aguardando']
-                );
+                let novaPosicao;
+                let acaoHistorico = 'retorno';
+                let observacaoHistorico = null;
                 
-                const novaPosicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
+                // Verificar se tem prioridade de retorno (corrida única)
+                if (posicaoAtual.corrida_unica && posicaoAtual.posicao_original) {
+                    const posicaoOriginal = posicaoAtual.posicao_original;
+                    
+                    const totalAtual = await pool.query(
+                        'SELECT COUNT(*) as total, MIN(posicao) as primeira FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+                        [central.central_id, 'aguardando']
+                    );
+                    
+                    const total = parseInt(totalAtual.rows[0].total) || 0;
+                    const primeiraPosicao = parseInt(totalAtual.rows[0].primeira) || 1;
+                    
+                    if (total === 0) {
+                        novaPosicao = 1;
+                    } else if (posicaoOriginal <= primeiraPosicao) {
+                        // Sua vez já passou, assume a ponta
+                        novaPosicao = primeiraPosicao;
+                        await pool.query(`
+                            UPDATE filas_posicoes 
+                            SET posicao = posicao + 1 
+                            WHERE central_id = $1 AND status = 'aguardando'
+                        `, [central.central_id]);
+                    } else {
+                        // Volta para posição original
+                        novaPosicao = posicaoOriginal;
+                        await pool.query(`
+                            UPDATE filas_posicoes 
+                            SET posicao = posicao + 1 
+                            WHERE central_id = $1 AND status = 'aguardando' AND posicao >= $2
+                        `, [central.central_id, posicaoOriginal]);
+                    }
+                    
+                    acaoHistorico = 'retorno_prioridade';
+                    observacaoHistorico = `Retorno prioritário - Posição original: ${posicaoOriginal}`;
+                } else {
+                    // Retorno normal - vai para o final
+                    const ultimaPosicao = await pool.query(
+                        'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+                        [central.central_id, 'aguardando']
+                    );
+                    novaPosicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
+                }
                 
                 await pool.query(`
                     UPDATE filas_posicoes 
@@ -25704,20 +25858,23 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
                         retorno_at = NOW(),
                         latitude_checkin = $2,
                         longitude_checkin = $3,
+                        corrida_unica = FALSE,
+                        posicao_original = NULL,
                         updated_at = NOW()
                     WHERE cod_profissional = $4
                 `, [novaPosicao, latitude, longitude, cod_profissional]);
                 
                 await pool.query(`
-                    INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos)
-                    VALUES ($1, $2, $3, $4, 'retorno', $5)
-                `, [central.central_id, central.central_nome, cod_profissional, nome_profissional, tempoRota]);
+                    INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [central.central_id, central.central_nome, cod_profissional, nome_profissional, acaoHistorico, tempoRota, observacaoHistorico]);
                 
                 return res.json({ 
                     success: true, 
-                    mensagem: 'Você retornou para a fila',
+                    mensagem: posicaoAtual.corrida_unica ? 'Você retornou com prioridade!' : 'Você retornou para a fila',
                     posicao: novaPosicao,
-                    tempo_rota: tempoRota
+                    tempo_rota: tempoRota,
+                    prioridade: posicaoAtual.corrida_unica || false
                 });
             } else {
                 return res.status(400).json({ error: 'Você já está na fila de espera' });
@@ -26156,6 +26313,95 @@ wss.on('connection', (ws, req) => {
 global.notifyNewWithdrawal = notifyNewWithdrawal;
 global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
 global.broadcastToAdmins = broadcastToAdmins;
+
+// ==================== WEBSOCKET PARA FILAS ====================
+const wssFilas = new WebSocket.Server({ server, path: '/ws/filas' });
+const wsFilasClients = new Map();
+
+function sendFilaNotification(cod_profissional, event, data) {
+    const connections = wsFilasClients.get(String(cod_profissional));
+    if (!connections || connections.size === 0) {
+        console.log(`⚠️ [WS-Filas] Motoboy ${cod_profissional} não conectado`);
+        return false;
+    }
+    const message = JSON.stringify({ event, data, timestamp: new Date().toISOString(), playSound: true });
+    let enviados = 0;
+    connections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) { ws.send(message); enviados++; }
+    });
+    console.log(`📡 [WS-Filas] Notificação enviada para motoboy ${cod_profissional}: ${event} (${enviados} conexões)`);
+    return enviados > 0;
+}
+
+wssFilas.on('connection', (ws, req) => {
+    console.log('🔌 [WS-Filas] Nova conexão');
+    let userCod = null;
+    let authenticated = false;
+    
+    const authTimeout = setTimeout(() => {
+        if (!authenticated) {
+            console.log('⚠️ [WS-Filas] Timeout de autenticação');
+            ws.close(4001, 'Autenticação necessária');
+        }
+    }, 30000);
+    
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            
+            if (data.type === 'AUTH') {
+                const { token } = data;
+                if (!token) {
+                    ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
+                    return;
+                }
+                try {
+                    const decoded = jwt.verify(token, JWT_SECRET);
+                    authenticated = true;
+                    clearTimeout(authTimeout);
+                    
+                    if (decoded.codProfissional) {
+                        userCod = String(decoded.codProfissional);
+                        if (!wsFilasClients.has(userCod)) wsFilasClients.set(userCod, new Set());
+                        wsFilasClients.get(userCod).add(ws);
+                        ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', userCod, message: 'Conectado às notificações de fila' }));
+                        console.log(`✅ [WS-Filas] Motoboy ${userCod} conectado. Total: ${wsFilasClients.size}`);
+                    } else {
+                        ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Usuário sem código profissional' }));
+                        ws.close(4002, 'Sem código profissional');
+                    }
+                } catch (jwtError) {
+                    console.log(`❌ [WS-Filas] Token inválido: ${jwtError.message}`);
+                    ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido' }));
+                    ws.close(4003, 'Token inválido');
+                }
+            }
+            
+            if (data.type === 'PING' && authenticated) {
+                ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
+            }
+        } catch (e) {
+            console.error('❌ [WS-Filas] Erro ao processar mensagem:', e.message);
+        }
+    });
+    
+    ws.on('close', () => {
+        clearTimeout(authTimeout);
+        if (userCod) {
+            const conns = wsFilasClients.get(userCod);
+            if (conns) {
+                conns.delete(ws);
+                if (conns.size === 0) wsFilasClients.delete(userCod);
+            }
+            console.log(`🔌 [WS-Filas] Motoboy ${userCod} desconectado. Total: ${wsFilasClients.size}`);
+        }
+    });
+    
+    ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts Filas - Envie AUTH com token' }));
+});
+
+global.sendFilaNotification = sendFilaNotification;
+console.log('✅ WebSocket de Filas inicializado em /ws/filas');
 
 // ==================== FIM WEBSOCKET SETUP ====================
 
