@@ -26004,7 +26004,7 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
         }
         
         const naFrente = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao
+            SELECT cod_profissional, nome_profissional, posicao, motivo_posicao
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'aguardando' AND posicao < $2
             ORDER BY posicao DESC
@@ -26012,7 +26012,7 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
         `, [central_id, eu.posicao]);
         
         const atras = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao
+            SELECT cod_profissional, nome_profissional, posicao, motivo_posicao
             FROM filas_posicoes 
             WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
             ORDER BY posicao ASC
