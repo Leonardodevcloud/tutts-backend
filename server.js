@@ -25650,7 +25650,8 @@ app.post('/api/filas/mover-ultimo', verificarToken, verificarAdmin, async (req, 
             UPDATE filas_posicoes 
             SET posicao = $3,
                 corrida_unica = FALSE,
-                posicao_original = NULL
+                posicao_original = NULL,
+                motivo_posicao = 'movido_ultimo'
             WHERE cod_profissional = $1 AND central_id = $2
         `, [cod_profissional, central_id, novaPosicao]);
         
@@ -25874,9 +25875,10 @@ app.post('/api/filas/entrar', verificarToken, async (req, res) => {
                         longitude_checkin = $3,
                         corrida_unica = FALSE,
                         posicao_original = NULL,
+                        motivo_posicao = $5,
                         updated_at = NOW()
                     WHERE cod_profissional = $4
-                `, [novaPosicao, latitude, longitude, cod_profissional]);
+                `, [novaPosicao, latitude, longitude, cod_profissional, posicaoAtual.corrida_unica ? 'retorno_prioritario' : null]);
                 
                 await pool.query(`
                     INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao)
