@@ -25274,14 +25274,11 @@ app.post('/api/webhook/tutts', async (req, res) => {
 // ============================================================
 
 // ============================================================
-// MÓDULO DE FILAS - Sistema de Gerenciamento de Filas Logísticas
-// VERSÃO 2.0 - Com notificações WebSocket, Corrida Única, 
-// Prioridade de Retorno e Mover para Último
+// MÓDULO DE FILAS - VERSÃO 2.0
 // ============================================================
 
 // ========== GESTÃO DE CENTRAIS (ADMIN) ==========
 
-// Listar todas as centrais
 app.get('/api/filas/centrais', verificarToken, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -25302,23 +25299,17 @@ app.get('/api/filas/centrais', verificarToken, async (req, res) => {
     }
 });
 
-// Criar nova central
 app.post('/api/filas/centrais', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { nome, endereco, latitude, longitude, raio_metros } = req.body;
-        
         if (!nome || !endereco || !latitude || !longitude) {
             return res.status(400).json({ error: 'Dados obrigatórios: nome, endereco, latitude, longitude' });
         }
-        
         const result = await pool.query(`
             INSERT INTO filas_centrais (nome, endereco, latitude, longitude, raio_metros)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
+            VALUES ($1, $2, $3, $4, $5) RETURNING *
         `, [nome, endereco, latitude, longitude, raio_metros || 900]);
-        
         await registrarAuditoria(req, 'CRIAR_CENTRAL_FILA', 'admin', 'filas_centrais', result.rows[0].id, { nome, endereco });
-        
         res.json({ success: true, central: result.rows[0] });
     } catch (error) {
         console.error('❌ Erro ao criar central:', error);
@@ -25326,31 +25317,18 @@ app.post('/api/filas/centrais', verificarToken, verificarAdmin, async (req, res)
     }
 });
 
-// Atualizar central
 app.put('/api/filas/centrais/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const { nome, endereco, latitude, longitude, raio_metros, ativa } = req.body;
-        
         const result = await pool.query(`
-            UPDATE filas_centrais 
-            SET nome = COALESCE($1, nome),
-                endereco = COALESCE($2, endereco),
-                latitude = COALESCE($3, latitude),
-                longitude = COALESCE($4, longitude),
-                raio_metros = COALESCE($5, raio_metros),
-                ativa = COALESCE($6, ativa),
-                updated_at = NOW()
-            WHERE id = $7
-            RETURNING *
+            UPDATE filas_centrais SET nome = COALESCE($1, nome), endereco = COALESCE($2, endereco),
+                latitude = COALESCE($3, latitude), longitude = COALESCE($4, longitude),
+                raio_metros = COALESCE($5, raio_metros), ativa = COALESCE($6, ativa), updated_at = NOW()
+            WHERE id = $7 RETURNING *
         `, [nome, endereco, latitude, longitude, raio_metros, ativa, id]);
-        
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Central não encontrada' });
-        }
-        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Central não encontrada' });
         await registrarAuditoria(req, 'ATUALIZAR_CENTRAL_FILA', 'admin', 'filas_centrais', id, req.body);
-        
         res.json({ success: true, central: result.rows[0] });
     } catch (error) {
         console.error('❌ Erro ao atualizar central:', error);
@@ -25358,19 +25336,15 @@ app.put('/api/filas/centrais/:id', verificarToken, verificarAdmin, async (req, r
     }
 });
 
-// Deletar central
 app.delete('/api/filas/centrais/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { id } = req.params;
-        
         const posicoes = await pool.query('SELECT COUNT(*) FROM filas_posicoes WHERE central_id = $1', [id]);
         if (parseInt(posicoes.rows[0].count) > 0) {
             return res.status(400).json({ error: 'Não é possível excluir central com profissionais na fila' });
         }
-        
         await pool.query('DELETE FROM filas_centrais WHERE id = $1', [id]);
         await registrarAuditoria(req, 'EXCLUIR_CENTRAL_FILA', 'admin', 'filas_centrais', id);
-        
         res.json({ success: true });
     } catch (error) {
         console.error('❌ Erro ao deletar central:', error);
@@ -25378,22 +25352,16 @@ app.delete('/api/filas/centrais/:id', verificarToken, verificarAdmin, async (req
     }
 });
 
-// ========== GESTÃO DE VÍNCULOS (ADMIN) ==========
+// ========== GESTÃO DE VÍNCULOS ==========
 
-// Listar profissionais vinculados a uma central
 app.get('/api/filas/centrais/:id/vinculos', verificarToken, async (req, res) => {
     try {
         const { id } = req.params;
         const result = await pool.query(`
-            SELECT v.*, 
-                   p.status as status_fila,
-                   p.posicao,
-                   p.entrada_fila_at,
-                   p.saida_rota_at
+            SELECT v.*, p.status as status_fila, p.posicao, p.entrada_fila_at, p.saida_rota_at
             FROM filas_vinculos v
             LEFT JOIN filas_posicoes p ON p.cod_profissional = v.cod_profissional AND p.central_id = v.central_id
-            WHERE v.central_id = $1 AND v.ativo = true
-            ORDER BY v.nome_profissional
+            WHERE v.central_id = $1 AND v.ativo = true ORDER BY v.nome_profissional
         `, [id]);
         res.json({ success: true, vinculos: result.rows });
     } catch (error) {
@@ -25402,40 +25370,19 @@ app.get('/api/filas/centrais/:id/vinculos', verificarToken, async (req, res) => 
     }
 });
 
-// Vincular profissional a uma central
 app.post('/api/filas/vinculos', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { central_id, cod_profissional, nome_profissional } = req.body;
-        
-        if (!central_id || !cod_profissional) {
-            return res.status(400).json({ error: 'central_id e cod_profissional são obrigatórios' });
-        }
-        
-        const existente = await pool.query(
-            'SELECT * FROM filas_vinculos WHERE cod_profissional = $1 AND ativo = true',
-            [cod_profissional]
-        );
-        
+        if (!central_id || !cod_profissional) return res.status(400).json({ error: 'central_id e cod_profissional são obrigatórios' });
+        const existente = await pool.query('SELECT * FROM filas_vinculos WHERE cod_profissional = $1 AND ativo = true', [cod_profissional]);
         if (existente.rows.length > 0) {
-            return res.status(400).json({ 
-                error: 'Profissional já está vinculado a outra central',
-                central_atual: existente.rows[0].central_id
-            });
+            return res.status(400).json({ error: 'Profissional já está vinculado a outra central', central_atual: existente.rows[0].central_id });
         }
-        
         const result = await pool.query(`
-            INSERT INTO filas_vinculos (central_id, cod_profissional, nome_profissional)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (cod_profissional) DO UPDATE SET
-                central_id = $1,
-                nome_profissional = $3,
-                ativo = true
-            RETURNING *
+            INSERT INTO filas_vinculos (central_id, cod_profissional, nome_profissional) VALUES ($1, $2, $3)
+            ON CONFLICT (cod_profissional) DO UPDATE SET central_id = $1, nome_profissional = $3, ativo = true RETURNING *
         `, [central_id, cod_profissional, nome_profissional]);
-        
-        await registrarAuditoria(req, 'VINCULAR_PROFISSIONAL_CENTRAL', 'admin', 'filas_vinculos', result.rows[0].id, 
-            { central_id, cod_profissional, nome_profissional });
-        
+        await registrarAuditoria(req, 'VINCULAR_PROFISSIONAL_CENTRAL', 'admin', 'filas_vinculos', result.rows[0].id, { central_id, cod_profissional, nome_profissional });
         res.json({ success: true, vinculo: result.rows[0] });
     } catch (error) {
         console.error('❌ Erro ao vincular profissional:', error);
@@ -25443,16 +25390,12 @@ app.post('/api/filas/vinculos', verificarToken, verificarAdmin, async (req, res)
     }
 });
 
-// Desvincular profissional
 app.delete('/api/filas/vinculos/:cod_profissional', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional } = req.params;
-        
         await pool.query('DELETE FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
         await pool.query('UPDATE filas_vinculos SET ativo = false WHERE cod_profissional = $1', [cod_profissional]);
-        
         await registrarAuditoria(req, 'DESVINCULAR_PROFISSIONAL_CENTRAL', 'admin', 'filas_vinculos', null, { cod_profissional });
-        
         res.json({ success: true });
     } catch (error) {
         console.error('❌ Erro ao desvincular profissional:', error);
@@ -25460,47 +25403,27 @@ app.delete('/api/filas/vinculos/:cod_profissional', verificarToken, verificarAdm
     }
 });
 
-// ========== OPERAÇÕES DA FILA (ADMIN) ==========
+// ========== OPERAÇÕES DA FILA ==========
 
-// Obter fila em tempo real de uma central
 app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
     try {
         const { id } = req.params;
-        
         const aguardando = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao,
-                   corrida_unica, posicao_original,
+            SELECT cod_profissional, nome_profissional, posicao, corrida_unica, posicao_original,
                    EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando
-            FROM filas_posicoes 
-            WHERE central_id = $1 AND status = 'aguardando'
-            ORDER BY posicao ASC
+            FROM filas_posicoes WHERE central_id = $1 AND status = 'aguardando' ORDER BY posicao ASC
         `, [id]);
-        
         const emRota = await pool.query(`
             SELECT cod_profissional, nome_profissional, corrida_unica,
                    EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60 as minutos_em_rota
-            FROM filas_posicoes 
-            WHERE central_id = $1 AND status = 'em_rota'
-            ORDER BY saida_rota_at ASC
+            FROM filas_posicoes WHERE central_id = $1 AND status = 'em_rota' ORDER BY saida_rota_at ASC
         `, [id]);
-        
         const alertas = emRota.rows.filter(p => p.minutos_em_rota > 90);
-        
         res.json({ 
             success: true, 
-            aguardando: aguardando.rows.map(p => ({
-                ...p,
-                minutos_esperando: Math.round(p.minutos_esperando || 0),
-                retornou_corrida_unica: p.corrida_unica === true
-            })),
-            em_rota: emRota.rows.map(p => ({
-                ...p,
-                minutos_em_rota: Math.round(p.minutos_em_rota || 0)
-            })),
-            alertas: alertas.map(p => ({
-                ...p,
-                minutos_em_rota: Math.round(p.minutos_em_rota || 0)
-            })),
+            aguardando: aguardando.rows.map(p => ({ ...p, minutos_esperando: Math.round(p.minutos_esperando || 0), retornou_corrida_unica: p.corrida_unica === true })),
+            em_rota: emRota.rows.map(p => ({ ...p, minutos_em_rota: Math.round(p.minutos_em_rota || 0) })),
+            alertas: alertas.map(p => ({ ...p, minutos_em_rota: Math.round(p.minutos_em_rota || 0) })),
             total_aguardando: aguardando.rows.length,
             total_em_rota: emRota.rows.length
         });
@@ -25510,518 +25433,198 @@ app.get('/api/filas/centrais/:id/fila', verificarToken, async (req, res) => {
     }
 });
 
-// Enviar profissional para roteiro (com notificação WebSocket)
+// Enviar para rota (com notificação)
 app.post('/api/filas/enviar-rota', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional, central_id } = req.body;
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
-            [cod_profissional, central_id, 'aguardando']
-        );
-        
-        if (posicao.rows.length === 0) {
-            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
-        }
-        
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3', [cod_profissional, central_id, 'aguardando']);
+        if (posicao.rows.length === 0) return res.status(404).json({ error: 'Profissional não encontrado na fila' });
         const prof = posicao.rows[0];
         const tempoEspera = Math.round((Date.now() - new Date(prof.entrada_fila_at).getTime()) / 60000);
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET status = 'em_rota', 
-                saida_rota_at = NOW(),
-                posicao = NULL,
-                corrida_unica = FALSE,
-                updated_at = NOW()
-            WHERE cod_profissional = $1 AND central_id = $2
-        `, [cod_profissional, central_id]);
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET posicao = posicao - 1 
-            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-        `, [central_id, prof.posicao]);
-        
+        await pool.query(`UPDATE filas_posicoes SET status = 'em_rota', saida_rota_at = NOW(), posicao = NULL, corrida_unica = FALSE, updated_at = NOW() WHERE cod_profissional = $1 AND central_id = $2`, [cod_profissional, central_id]);
+        await pool.query(`UPDATE filas_posicoes SET posicao = posicao - 1 WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2`, [central_id, prof.posicao]);
         const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, admin_cod, admin_nome)
-            VALUES ($1, $2, $3, $4, 'enviado_rota', $5, $6, $7)
-        `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, req.user.codProfissional, req.user.nome]);
-        
-        // Notificação WebSocket
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, admin_cod, admin_nome) VALUES ($1, $2, $3, $4, 'enviado_rota', $5, $6, $7)`, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, req.user.codProfissional, req.user.nome]);
         if (global.sendFilaNotification) {
             global.sendFilaNotification(cod_profissional, 'ROTEIRO_DESPACHADO', {
                 tipo: 'roteiro_normal',
                 mensagem: '🚀 Seu roteiro já foi definido, não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas!',
-                central: central.rows[0]?.nome,
-                tempo_espera: tempoEspera
+                central: central.rows[0]?.nome, tempo_espera: tempoEspera
             });
         }
-        
         res.json({ success: true, tempo_espera: tempoEspera });
-        
-        registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
-        
+        registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
     } catch (error) {
         console.error('❌ Erro ao enviar para rota:', error);
         res.status(500).json({ error: 'Erro ao enviar para rota' });
     }
 });
 
-// Enviar para Rota Única (com bônus e prioridade)
+// Enviar para rota única
 app.post('/api/filas/enviar-rota-unica', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional, central_id } = req.body;
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
-            [cod_profissional, central_id, 'aguardando']
-        );
-        
-        if (posicao.rows.length === 0) {
-            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
-        }
-        
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3', [cod_profissional, central_id, 'aguardando']);
+        if (posicao.rows.length === 0) return res.status(404).json({ error: 'Profissional não encontrado na fila' });
         const prof = posicao.rows[0];
         const tempoEspera = Math.round((Date.now() - new Date(prof.entrada_fila_at).getTime()) / 60000);
         const posicaoOriginal = prof.posicao;
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET status = 'em_rota', 
-                saida_rota_at = NOW(),
-                posicao = NULL,
-                corrida_unica = TRUE,
-                posicao_original = $3,
-                bonus_aplicado = TRUE,
-                updated_at = NOW()
-            WHERE cod_profissional = $1 AND central_id = $2
-        `, [cod_profissional, central_id, posicaoOriginal]);
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET posicao = posicao - 1 
-            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-        `, [central_id, posicaoOriginal]);
-        
+        await pool.query(`UPDATE filas_posicoes SET status = 'em_rota', saida_rota_at = NOW(), posicao = NULL, corrida_unica = TRUE, posicao_original = $3, bonus_aplicado = TRUE, updated_at = NOW() WHERE cod_profissional = $1 AND central_id = $2`, [cod_profissional, central_id, posicaoOriginal]);
+        await pool.query(`UPDATE filas_posicoes SET posicao = posicao - 1 WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2`, [central_id, posicaoOriginal]);
         const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome)
-            VALUES ($1, $2, $3, $4, 'enviado_rota_unica', $5, $6, $7, $8)
-        `, [
-            central_id, 
-            central.rows[0]?.nome, 
-            cod_profissional, 
-            prof.nome_profissional, 
-            tempoEspera,
-            `Corrida única - Posição original: ${posicaoOriginal} - Bônus aplicado`,
-            req.user.codProfissional, 
-            req.user.nome
-        ]);
-        
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome) VALUES ($1, $2, $3, $4, 'enviado_rota_unica', $5, $6, $7, $8)`, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, `Corrida única - Posição original: ${posicaoOriginal}`, req.user.codProfissional, req.user.nome]);
         if (global.sendFilaNotification) {
             global.sendFilaNotification(cod_profissional, 'ROTEIRO_DESPACHADO', {
                 tipo: 'corrida_unica',
                 mensagem: '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!',
-                central: central.rows[0]?.nome,
-                tempo_espera: tempoEspera,
-                bonus: true,
-                posicao_retorno: posicaoOriginal
+                central: central.rows[0]?.nome, tempo_espera: tempoEspera, bonus: true, posicao_retorno: posicaoOriginal
             });
         }
-        
-        res.json({ 
-            success: true, 
-            tempo_espera: tempoEspera,
-            corrida_unica: true,
-            posicao_retorno: posicaoOriginal
-        });
-        
-        registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
-        
+        res.json({ success: true, tempo_espera: tempoEspera, corrida_unica: true, posicao_retorno: posicaoOriginal });
     } catch (error) {
         console.error('❌ Erro ao enviar para rota única:', error);
         res.status(500).json({ error: 'Erro ao enviar para rota única' });
     }
 });
 
-// Mover para Último (recusou roteiro)
+// Mover para último
 app.post('/api/filas/mover-ultimo', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional, central_id } = req.body;
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
-            [cod_profissional, central_id, 'aguardando']
-        );
-        
-        if (posicao.rows.length === 0) {
-            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
-        }
-        
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3', [cod_profissional, central_id, 'aguardando']);
+        if (posicao.rows.length === 0) return res.status(404).json({ error: 'Profissional não encontrado na fila' });
         const prof = posicao.rows[0];
         const posicaoAnterior = prof.posicao;
-        
-        const ultimaPosicao = await pool.query(
-            'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-            [central_id, 'aguardando']
-        );
+        const ultimaPosicao = await pool.query('SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central_id, 'aguardando']);
         const novaPosicao = ultimaPosicao.rows[0].max_pos;
-        
-        if (posicaoAnterior === novaPosicao) {
-            return res.json({ success: true, message: 'Profissional já está na última posição', posicao: novaPosicao });
-        }
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET posicao = posicao - 1,
-                updated_at = NOW()
-            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-        `, [central_id, posicaoAnterior]);
-        
-        await pool.query(`
-            UPDATE filas_posicoes 
-            SET posicao = $3,
-                corrida_unica = FALSE,
-                posicao_original = NULL,
-                updated_at = NOW()
-            WHERE cod_profissional = $1 AND central_id = $2
-        `, [cod_profissional, central_id, novaPosicao]);
-        
+        if (posicaoAnterior === novaPosicao) return res.json({ success: true, message: 'Profissional já está na última posição', posicao: novaPosicao });
+        await pool.query(`UPDATE filas_posicoes SET posicao = posicao - 1, updated_at = NOW() WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2`, [central_id, posicaoAnterior]);
+        await pool.query(`UPDATE filas_posicoes SET posicao = $3, corrida_unica = FALSE, posicao_original = NULL, updated_at = NOW() WHERE cod_profissional = $1 AND central_id = $2`, [cod_profissional, central_id, novaPosicao]);
         const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
-            VALUES ($1, $2, $3, $4, 'movido_ultimo', $5, $6, $7)
-        `, [
-            central_id, 
-            central.rows[0]?.nome, 
-            cod_profissional, 
-            prof.nome_profissional,
-            `Movido da posição ${posicaoAnterior} para ${novaPosicao} (recusou roteiro)`,
-            req.user.codProfissional, 
-            req.user.nome
-        ]);
-        
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome) VALUES ($1, $2, $3, $4, 'movido_ultimo', $5, $6, $7)`, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, `Movido da posição ${posicaoAnterior} para ${novaPosicao}`, req.user.codProfissional, req.user.nome]);
         if (global.sendFilaNotification) {
-            global.sendFilaNotification(cod_profissional, 'POSICAO_ALTERADA', {
-                tipo: 'movido_ultimo',
-                mensagem: `📍 Você foi movido para a última posição da fila (${novaPosicao}º) por recusar o roteiro.`,
-                posicao_anterior: posicaoAnterior,
-                posicao_nova: novaPosicao
-            });
+            global.sendFilaNotification(cod_profissional, 'POSICAO_ALTERADA', { tipo: 'movido_ultimo', mensagem: `📍 Você foi movido para a última posição da fila (${novaPosicao}º) por recusar o roteiro.`, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao });
         }
-        
-        res.json({ 
-            success: true, 
-            posicao_anterior: posicaoAnterior,
-            posicao_nova: novaPosicao
-        });
-        
-        registrarAuditoria(req, 'MOVER_PARA_ULTIMO', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao }).catch(() => {});
-        
+        res.json({ success: true, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao });
     } catch (error) {
         console.error('❌ Erro ao mover para último:', error);
         res.status(500).json({ error: 'Erro ao mover para último' });
     }
 });
 
-// Remover profissional da fila (admin)
+// Remover da fila
 app.post('/api/filas/remover', verificarToken, verificarAdmin, async (req, res) => {
     try {
         const { cod_profissional, central_id, observacao } = req.body;
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2',
-            [cod_profissional, central_id]
-        );
-        
-        if (posicao.rows.length === 0) {
-            return res.status(404).json({ error: 'Profissional não encontrado na fila' });
-        }
-        
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2', [cod_profissional, central_id]);
+        if (posicao.rows.length === 0) return res.status(404).json({ error: 'Profissional não encontrado na fila' });
         const prof = posicao.rows[0];
         const tempoNaFila = Math.round((Date.now() - new Date(prof.entrada_fila_at || prof.saida_rota_at).getTime()) / 60000);
-        
         await pool.query('DELETE FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2', [cod_profissional, central_id]);
-        
         if (prof.status === 'aguardando' && prof.posicao) {
-            await pool.query(`
-                UPDATE filas_posicoes 
-                SET posicao = posicao - 1 
-                WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-            `, [central_id, prof.posicao]);
+            await pool.query(`UPDATE filas_posicoes SET posicao = posicao - 1 WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2`, [central_id, prof.posicao]);
         }
-        
         const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome)
-            VALUES ($1, $2, $3, $4, 'removido', $5, $6, $7, $8)
-        `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoNaFila, observacao, req.user.codProfissional, req.user.nome]);
-        
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, observacao, admin_cod, admin_nome) VALUES ($1, $2, $3, $4, 'removido', $5, $6, $7, $8)`, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoNaFila, observacao, req.user.codProfissional, req.user.nome]);
         res.json({ success: true });
-        
-        registrarAuditoria(req, 'REMOVER_DA_FILA', 'admin', 'filas_posicoes', null, 
-            { cod_profissional, central_id, observacao }).catch(() => {});
-        
     } catch (error) {
         console.error('❌ Erro ao remover da fila:', error);
         res.status(500).json({ error: 'Erro ao remover da fila' });
     }
 });
 
-// ========== OPERAÇÕES DO PROFISSIONAL (USER) ==========
+// ========== OPERAÇÕES DO PROFISSIONAL ==========
 
-// Verificar central do profissional
 app.get('/api/filas/minha-central', verificarToken, async (req, res) => {
     try {
         const cod_profissional = req.user.codProfissional;
-        
-        const vinculo = await pool.query(`
-            SELECT v.*, c.nome as central_nome, c.endereco, c.latitude, c.longitude, c.raio_metros, c.ativa
-            FROM filas_vinculos v
-            JOIN filas_centrais c ON c.id = v.central_id
-            WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
-        `, [cod_profissional]);
-        
-        if (vinculo.rows.length === 0) {
-            return res.json({ success: true, vinculado: false });
-        }
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1',
-            [cod_profissional]
-        );
-        
-        res.json({ 
-            success: true, 
-            vinculado: true,
-            central: vinculo.rows[0],
-            na_fila: posicao.rows.length > 0,
-            posicao_atual: posicao.rows[0] || null
-        });
+        const vinculo = await pool.query(`SELECT v.*, c.nome as central_nome, c.endereco, c.latitude, c.longitude, c.raio_metros, c.ativa FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true`, [cod_profissional]);
+        if (vinculo.rows.length === 0) return res.json({ success: true, vinculado: false });
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
+        res.json({ success: true, vinculado: true, central: vinculo.rows[0], na_fila: posicao.rows.length > 0, posicao_atual: posicao.rows[0] || null });
     } catch (error) {
         console.error('❌ Erro ao verificar central:', error);
         res.status(500).json({ error: 'Erro ao verificar central' });
     }
 });
 
-// Função auxiliar: Calcular distância (Haversine)
 function calcularDistanciaHaversine(lat1, lon1, lat2, lon2) {
     const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// Entrar na fila (com lógica de prioridade de retorno)
 app.post('/api/filas/entrar', verificarToken, async (req, res) => {
     try {
         const cod_profissional = req.user.codProfissional;
         const nome_profissional = req.user.nome;
         const { latitude, longitude } = req.body;
-        
-        if (!latitude || !longitude) {
-            return res.status(400).json({ error: 'Localização GPS é obrigatória' });
-        }
-        
-        const vinculo = await pool.query(`
-            SELECT v.*, c.nome as central_nome, c.latitude as central_lat, c.longitude as central_lng, c.raio_metros
-            FROM filas_vinculos v
-            JOIN filas_centrais c ON c.id = v.central_id
-            WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
-        `, [cod_profissional]);
-        
-        if (vinculo.rows.length === 0) {
-            return res.status(403).json({ error: 'Você não está vinculado a nenhuma central' });
-        }
-        
+        if (!latitude || !longitude) return res.status(400).json({ error: 'Localização GPS é obrigatória' });
+        const vinculo = await pool.query(`SELECT v.*, c.nome as central_nome, c.latitude as central_lat, c.longitude as central_lng, c.raio_metros FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true`, [cod_profissional]);
+        if (vinculo.rows.length === 0) return res.status(403).json({ error: 'Você não está vinculado a nenhuma central' });
         const central = vinculo.rows[0];
         const central_id = central.central_id;
-        
-        const distancia = calcularDistanciaHaversine(
-            parseFloat(latitude), 
-            parseFloat(longitude),
-            parseFloat(central.central_lat),
-            parseFloat(central.central_lng)
-        );
-        
+        const distancia = calcularDistanciaHaversine(parseFloat(latitude), parseFloat(longitude), parseFloat(central.central_lat), parseFloat(central.central_lng));
         if (distancia > central.raio_metros) {
-            return res.status(403).json({ 
-                error: 'Você está muito longe da central',
-                distancia_atual: Math.round(distancia),
-                raio_permitido: central.raio_metros,
-                mensagem: `Você está a ${Math.round(distancia)}m da central. Aproxime-se para entrar na fila (máx ${central.raio_metros}m).`
-            });
+            return res.status(403).json({ error: 'Você está muito longe da central', distancia_atual: Math.round(distancia), raio_permitido: central.raio_metros, mensagem: `Você está a ${Math.round(distancia)}m da central. Aproxime-se para entrar na fila (máx ${central.raio_metros}m).` });
         }
-        
-        const jaEstaNaFila = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1',
-            [cod_profissional]
-        );
-        
+        const jaEstaNaFila = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
         if (jaEstaNaFila.rows.length > 0) {
             const posicaoAtual = jaEstaNaFila.rows[0];
-            
             if (posicaoAtual.status === 'em_rota') {
                 const tempoRota = Math.round((Date.now() - new Date(posicaoAtual.saida_rota_at).getTime()) / 60000);
-                
-                let novaPosicao;
-                let acaoHistorico = 'retorno';
-                let observacaoHistorico = '';
-                
-                // Lógica de prioridade de retorno
+                let novaPosicao, acaoHistorico = 'retorno', observacaoHistorico = '';
                 if (posicaoAtual.corrida_unica && posicaoAtual.posicao_original) {
                     const posicaoOriginal = posicaoAtual.posicao_original;
-                    
-                    const totalAtual = await pool.query(
-                        'SELECT COUNT(*) as total, MIN(posicao) as primeira FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-                        [central_id, 'aguardando']
-                    );
-                    
+                    const totalAtual = await pool.query('SELECT COUNT(*) as total, MIN(posicao) as primeira FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central_id, 'aguardando']);
                     const total = parseInt(totalAtual.rows[0].total) || 0;
                     const primeiraPosicao = parseInt(totalAtual.rows[0].primeira) || 1;
-                    
-                    if (total === 0) {
-                        novaPosicao = 1;
-                    } else if (posicaoOriginal <= primeiraPosicao) {
+                    if (total === 0) { novaPosicao = 1; }
+                    else if (posicaoOriginal <= primeiraPosicao) {
                         novaPosicao = primeiraPosicao;
-                        await pool.query(`
-                            UPDATE filas_posicoes 
-                            SET posicao = posicao + 1 
-                            WHERE central_id = $1 AND status = 'aguardando'
-                        `, [central_id]);
+                        await pool.query(`UPDATE filas_posicoes SET posicao = posicao + 1 WHERE central_id = $1 AND status = 'aguardando'`, [central_id]);
                     } else {
                         novaPosicao = posicaoOriginal;
-                        await pool.query(`
-                            UPDATE filas_posicoes 
-                            SET posicao = posicao + 1 
-                            WHERE central_id = $1 AND status = 'aguardando' AND posicao >= $2
-                        `, [central_id, posicaoOriginal]);
+                        await pool.query(`UPDATE filas_posicoes SET posicao = posicao + 1 WHERE central_id = $1 AND status = 'aguardando' AND posicao >= $2`, [central_id, posicaoOriginal]);
                     }
-                    
                     acaoHistorico = 'retorno_prioridade';
-                    observacaoHistorico = `Retorno prioritário (corrida única) - Posição original: ${posicaoOriginal}`;
-                    
+                    observacaoHistorico = `Retorno prioritário - Posição original: ${posicaoOriginal}`;
                 } else {
-                    const maxPosicao = await pool.query(
-                        'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-                        [central_id, 'aguardando']
-                    );
+                    const maxPosicao = await pool.query('SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central_id, 'aguardando']);
                     novaPosicao = maxPosicao.rows[0].max_pos + 1;
                 }
-                
-                await pool.query(`
-                    UPDATE filas_posicoes 
-                    SET status = 'aguardando',
-                        posicao = $3,
-                        entrada_fila_at = NOW(),
-                        saida_rota_at = NULL,
-                        retorno_at = NOW(),
-                        latitude_checkin = $4,
-                        longitude_checkin = $5,
-                        corrida_unica = FALSE,
-                        posicao_original = NULL,
-                        updated_at = NOW()
-                    WHERE cod_profissional = $1 AND central_id = $2
-                `, [cod_profissional, central_id, novaPosicao, latitude, longitude]);
-                
-                await pool.query(`
-                    INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                `, [central_id, central.central_nome, cod_profissional, nome_profissional, acaoHistorico, tempoRota, observacaoHistorico]);
-                
-                return res.json({ 
-                    success: true, 
-                    posicao: novaPosicao,
-                    mensagem: posicaoAtual.corrida_unica ? 'Você retornou com prioridade!' : 'Você retornou para a fila',
-                    prioridade: posicaoAtual.corrida_unica,
-                    tempo_rota: tempoRota
-                });
-            } else {
-                return res.status(400).json({ error: 'Você já está na fila de espera' });
-            }
+                await pool.query(`UPDATE filas_posicoes SET status = 'aguardando', posicao = $3, entrada_fila_at = NOW(), saida_rota_at = NULL, retorno_at = NOW(), latitude_checkin = $4, longitude_checkin = $5, corrida_unica = FALSE, posicao_original = NULL, updated_at = NOW() WHERE cod_profissional = $1 AND central_id = $2`, [cod_profissional, central_id, novaPosicao, latitude, longitude]);
+                await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [central_id, central.central_nome, cod_profissional, nome_profissional, acaoHistorico, tempoRota, observacaoHistorico]);
+                return res.json({ success: true, posicao: novaPosicao, mensagem: posicaoAtual.corrida_unica ? 'Você retornou com prioridade!' : 'Você retornou para a fila', prioridade: posicaoAtual.corrida_unica, tempo_rota: tempoRota });
+            } else { return res.status(400).json({ error: 'Você já está na fila de espera' }); }
         }
-        
-        const ultimaPosicao = await pool.query(
-            'SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-            [central_id, 'aguardando']
-        );
-        
+        const ultimaPosicao = await pool.query('SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central_id, 'aguardando']);
         const posicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
-        
-        await pool.query(`
-            INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin)
-            VALUES ($1, $2, $3, 'aguardando', $4, $5, $6)
-        `, [central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao)
-            VALUES ($1, $2, $3, $4, 'entrada')
-        `, [central_id, central.central_nome, cod_profissional, nome_profissional]);
-        
-        res.json({ 
-            success: true, 
-            posicao: posicao,
-            central: central.central_nome,
-            distancia: Math.round(distancia)
-        });
-        
-        registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, 
-            { central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
-        
+        await pool.query(`INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin) VALUES ($1, $2, $3, 'aguardando', $4, $5, $6)`, [central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao) VALUES ($1, $2, $3, $4, 'entrada')`, [central_id, central.central_nome, cod_profissional, nome_profissional]);
+        res.json({ success: true, posicao, central: central.central_nome, distancia: Math.round(distancia) });
     } catch (error) {
         console.error('❌ Erro ao entrar na fila:', error);
         res.status(500).json({ error: 'Erro ao entrar na fila' });
     }
 });
 
-// Sair da fila voluntariamente
 app.post('/api/filas/sair', verificarToken, async (req, res) => {
     try {
         const cod_profissional = req.user.codProfissional;
-        
-        const posicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1',
-            [cod_profissional]
-        );
-        
-        if (posicao.rows.length === 0) {
-            return res.status(404).json({ error: 'Você não está na fila' });
-        }
-        
+        const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
+        if (posicao.rows.length === 0) return res.status(404).json({ error: 'Você não está na fila' });
         const prof = posicao.rows[0];
         const central_id = prof.central_id;
         const tempoNaFila = Math.round((Date.now() - new Date(prof.entrada_fila_at || prof.saida_rota_at).getTime()) / 60000);
-        
         await pool.query('DELETE FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
-        
         if (prof.status === 'aguardando' && prof.posicao) {
-            await pool.query(`
-                UPDATE filas_posicoes 
-                SET posicao = posicao - 1 
-                WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-            `, [central_id, prof.posicao]);
+            await pool.query(`UPDATE filas_posicoes SET posicao = posicao - 1 WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2`, [central_id, prof.posicao]);
         }
-        
         const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
-        
-        await pool.query(`
-            INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos)
-            VALUES ($1, $2, $3, $4, 'saida_voluntaria', $5)
-        `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoNaFila]);
-        
+        await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos) VALUES ($1, $2, $3, $4, 'saida_voluntaria', $5)`, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoNaFila]);
         res.json({ success: true });
     } catch (error) {
         console.error('❌ Erro ao sair da fila:', error);
@@ -26029,167 +25632,56 @@ app.post('/api/filas/sair', verificarToken, async (req, res) => {
     }
 });
 
-// Ver minha posição e quem está na fila
 app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
     try {
         const cod_profissional = req.user.codProfissional;
-        
-        const minhaPosicao = await pool.query(
-            'SELECT * FROM filas_posicoes WHERE cod_profissional = $1',
-            [cod_profissional]
-        );
-        
-        if (minhaPosicao.rows.length === 0) {
-            return res.json({ success: true, na_fila: false });
-        }
-        
+        const minhaPosicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
+        if (minhaPosicao.rows.length === 0) return res.json({ success: true, na_fila: false });
         const eu = minhaPosicao.rows[0];
         const central_id = eu.central_id;
-        
         if (eu.status === 'em_rota') {
             const minutosEmRota = Math.round((Date.now() - new Date(eu.saida_rota_at).getTime()) / 60000);
-            return res.json({
-                success: true,
-                na_fila: true,
-                status: 'em_rota',
-                minutos_em_rota: minutosEmRota,
-                saida_rota_at: eu.saida_rota_at,
-                corrida_unica: eu.corrida_unica,
-                posicao_original: eu.posicao_original
-            });
+            return res.json({ success: true, na_fila: true, status: 'em_rota', minutos_em_rota: minutosEmRota, saida_rota_at: eu.saida_rota_at, corrida_unica: eu.corrida_unica, posicao_original: eu.posicao_original });
         }
-        
-        const naFrente = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao, corrida_unica
-            FROM filas_posicoes 
-            WHERE central_id = $1 AND status = 'aguardando' AND posicao < $2
-            ORDER BY posicao DESC
-            LIMIT 3
-        `, [central_id, eu.posicao]);
-        
-        const atras = await pool.query(`
-            SELECT cod_profissional, nome_profissional, posicao, corrida_unica
-            FROM filas_posicoes 
-            WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2
-            ORDER BY posicao ASC
-            LIMIT 3
-        `, [central_id, eu.posicao]);
-        
-        const total = await pool.query(
-            'SELECT COUNT(*) FROM filas_posicoes WHERE central_id = $1 AND status = $2',
-            [central_id, 'aguardando']
-        );
-        
+        const naFrente = await pool.query(`SELECT cod_profissional, nome_profissional, posicao, corrida_unica FROM filas_posicoes WHERE central_id = $1 AND status = 'aguardando' AND posicao < $2 ORDER BY posicao DESC LIMIT 3`, [central_id, eu.posicao]);
+        const atras = await pool.query(`SELECT cod_profissional, nome_profissional, posicao, corrida_unica FROM filas_posicoes WHERE central_id = $1 AND status = 'aguardando' AND posicao > $2 ORDER BY posicao ASC LIMIT 3`, [central_id, eu.posicao]);
+        const total = await pool.query('SELECT COUNT(*) FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central_id, 'aguardando']);
         const minutosEsperando = Math.round((Date.now() - new Date(eu.entrada_fila_at).getTime()) / 60000);
-        
-        res.json({
-            success: true,
-            na_fila: true,
-            status: 'aguardando',
-            minha_posicao: eu.posicao,
-            total_na_fila: parseInt(total.rows[0].count),
-            minutos_esperando: minutosEsperando,
-            entrada_fila_at: eu.entrada_fila_at,
-            na_frente: naFrente.rows.reverse().map(p => ({
-                ...p,
-                retornou_corrida_unica: p.corrida_unica === true
-            })),
-            atras: atras.rows.map(p => ({
-                ...p,
-                retornou_corrida_unica: p.corrida_unica === true
-            }))
-        });
+        res.json({ success: true, na_fila: true, status: 'aguardando', minha_posicao: eu.posicao, total_na_fila: parseInt(total.rows[0].count), minutos_esperando: minutosEsperando, entrada_fila_at: eu.entrada_fila_at, na_frente: naFrente.rows.reverse().map(p => ({ ...p, retornou_corrida_unica: p.corrida_unica === true })), atras: atras.rows.map(p => ({ ...p, retornou_corrida_unica: p.corrida_unica === true })) });
     } catch (error) {
         console.error('❌ Erro ao buscar posição:', error);
         res.status(500).json({ error: 'Erro ao buscar posição' });
     }
 });
 
-// ========== RELATÓRIOS E MÉTRICAS ==========
+// ========== RELATÓRIOS ==========
 
-// Estatísticas do dia
 app.get('/api/filas/estatisticas/:central_id', verificarToken, async (req, res) => {
     try {
         const { central_id } = req.params;
         const { data } = req.query;
-        
         const dataFiltro = data || new Date().toISOString().split('T')[0];
-        
-        const saidas = await pool.query(`
-            SELECT COUNT(*) as total
-            FROM filas_historico 
-            WHERE central_id = $1 
-              AND acao IN ('enviado_rota', 'enviado_rota_unica')
-              AND DATE(created_at) = $2
-        `, [central_id, dataFiltro]);
-        
-        const tempoMedio = await pool.query(`
-            SELECT AVG(tempo_espera_minutos) as media
-            FROM filas_historico 
-            WHERE central_id = $1 
-              AND acao IN ('enviado_rota', 'enviado_rota_unica')
-              AND DATE(created_at) = $2
-              AND tempo_espera_minutos IS NOT NULL
-        `, [central_id, dataFiltro]);
-        
-        const ranking = await pool.query(`
-            SELECT cod_profissional, nome_profissional, COUNT(*) as total_saidas
-            FROM filas_historico 
-            WHERE central_id = $1 
-              AND acao IN ('enviado_rota', 'enviado_rota_unica')
-              AND DATE(created_at) = $2
-            GROUP BY cod_profissional, nome_profissional
-            ORDER BY total_saidas DESC
-            LIMIT 10
-        `, [central_id, dataFiltro]);
-        
-        const porHora = await pool.query(`
-            SELECT EXTRACT(HOUR FROM created_at) as hora, COUNT(*) as total
-            FROM filas_historico 
-            WHERE central_id = $1 
-              AND acao IN ('enviado_rota', 'enviado_rota_unica')
-              AND DATE(created_at) = $2
-            GROUP BY EXTRACT(HOUR FROM created_at)
-            ORDER BY hora
-        `, [central_id, dataFiltro]);
-        
-        res.json({
-            success: true,
-            data: dataFiltro,
-            total_saidas: parseInt(saidas.rows[0].total),
-            tempo_medio_espera: Math.round(parseFloat(tempoMedio.rows[0].media) || 0),
-            ranking: ranking.rows,
-            por_hora: porHora.rows
-        });
+        const saidas = await pool.query(`SELECT COUNT(*) as total FROM filas_historico WHERE central_id = $1 AND acao IN ('enviado_rota', 'enviado_rota_unica') AND DATE(created_at) = $2`, [central_id, dataFiltro]);
+        const tempoMedio = await pool.query(`SELECT AVG(tempo_espera_minutos) as media FROM filas_historico WHERE central_id = $1 AND acao IN ('enviado_rota', 'enviado_rota_unica') AND DATE(created_at) = $2 AND tempo_espera_minutos IS NOT NULL`, [central_id, dataFiltro]);
+        const ranking = await pool.query(`SELECT cod_profissional, nome_profissional, COUNT(*) as total_saidas FROM filas_historico WHERE central_id = $1 AND acao IN ('enviado_rota', 'enviado_rota_unica') AND DATE(created_at) = $2 GROUP BY cod_profissional, nome_profissional ORDER BY total_saidas DESC LIMIT 10`, [central_id, dataFiltro]);
+        const porHora = await pool.query(`SELECT EXTRACT(HOUR FROM created_at) as hora, COUNT(*) as total FROM filas_historico WHERE central_id = $1 AND acao IN ('enviado_rota', 'enviado_rota_unica') AND DATE(created_at) = $2 GROUP BY EXTRACT(HOUR FROM created_at) ORDER BY hora`, [central_id, dataFiltro]);
+        res.json({ success: true, data: dataFiltro, total_saidas: parseInt(saidas.rows[0].total), tempo_medio_espera: Math.round(parseFloat(tempoMedio.rows[0].media) || 0), ranking: ranking.rows, por_hora: porHora.rows });
     } catch (error) {
         console.error('❌ Erro ao buscar estatísticas:', error);
         res.status(500).json({ error: 'Erro ao buscar estatísticas' });
     }
 });
 
-// Histórico detalhado
 app.get('/api/filas/historico/:central_id', verificarToken, async (req, res) => {
     try {
         const { central_id } = req.params;
         const { data_inicio, data_fim, limit = 100 } = req.query;
-        
         let query = `SELECT * FROM filas_historico WHERE central_id = $1`;
         const params = [central_id];
-        
-        if (data_inicio) {
-            params.push(data_inicio);
-            query += ` AND DATE(created_at) >= $${params.length}`;
-        }
-        
-        if (data_fim) {
-            params.push(data_fim);
-            query += ` AND DATE(created_at) <= $${params.length}`;
-        }
-        
+        if (data_inicio) { params.push(data_inicio); query += ` AND DATE(created_at) >= $${params.length}`; }
+        if (data_fim) { params.push(data_fim); query += ` AND DATE(created_at) <= $${params.length}`; }
         query += ` ORDER BY created_at DESC LIMIT ${parseInt(limit)}`;
-        
         const result = await pool.query(query, params);
-        
         res.json({ success: true, historico: result.rows });
     } catch (error) {
         console.error('❌ Erro ao buscar histórico:', error);
@@ -26247,21 +25739,6 @@ app.use((err, req, res, next) => {
 // ==================== WEBSOCKET SETUP ====================
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws/financeiro' });
-
-// Heartbeat para manter conexões vivas (Railway fecha conexões idle)
-const wssHeartbeat = setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 30000);
-
-wss.on('close', () => {
-    clearInterval(wssHeartbeat);
-});
 
 // Armazenar conexões ativas
 const wsClients = {
@@ -26325,9 +25802,6 @@ function notifyWithdrawalUpdate(withdrawal, action) {
 // Handler de conexão WebSocket
 wss.on('connection', (ws, req) => {
   console.log('🔌 [WS] Nova conexão');
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
-  
   let clientType = null;
   let userCod = null;
   let authenticated = false;
@@ -26413,26 +25887,9 @@ global.notifyNewWithdrawal = notifyNewWithdrawal;
 global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
 global.broadcastToAdmins = broadcastToAdmins;
 
-
 // ==================== WEBSOCKET PARA FILAS ====================
 const wssFilas = new WebSocket.Server({ server, path: '/ws/filas' });
-
 const wsFilasClients = new Map();
-
-// Heartbeat para manter conexões vivas (Railway fecha conexões idle)
-const heartbeatInterval = setInterval(() => {
-    wssFilas.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 30000);
-
-wssFilas.on('close', () => {
-    clearInterval(heartbeatInterval);
-});
 
 function sendFilaNotification(cod_profissional, event, data) {
     const connections = wsFilasClients.get(String(cod_profissional));
@@ -26440,98 +25897,59 @@ function sendFilaNotification(cod_profissional, event, data) {
         console.log(`⚠️ [WS-Filas] Motoboy ${cod_profissional} não conectado`);
         return false;
     }
-    
-    const message = JSON.stringify({ 
-        event, 
-        data,
-        timestamp: new Date().toISOString(),
-        playSound: true
-    });
-    
+    const message = JSON.stringify({ event, data, timestamp: new Date().toISOString(), playSound: true });
     let enviados = 0;
     connections.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
-            enviados++;
-        }
+        if (ws.readyState === WebSocket.OPEN) { ws.send(message); enviados++; }
     });
-    
     console.log(`📡 [WS-Filas] Notificação enviada para motoboy ${cod_profissional}: ${event} (${enviados} conexões)`);
     return enviados > 0;
 }
 
 wssFilas.on('connection', (ws, req) => {
     console.log('🔌 [WS-Filas] Nova conexão');
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
-    
     let userCod = null;
     let authenticated = false;
-    
     const authTimeout = setTimeout(() => {
-        if (!authenticated) {
-            console.log('⚠️ [WS-Filas] Conexão fechada por falta de autenticação');
-            ws.close(4001, 'Autenticação necessária');
-        }
+        if (!authenticated) { ws.close(4001, 'Autenticação necessária'); }
     }, 30000);
     
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            
             if (data.type === 'AUTH') {
                 const { token } = data;
-                
-                if (!token) {
-                    ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
-                    return;
-                }
-                
+                if (!token) { ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' })); return; }
                 try {
                     const decoded = jwt.verify(token, JWT_SECRET);
                     authenticated = true;
                     clearTimeout(authTimeout);
-                    
                     if (decoded.codProfissional) {
                         userCod = String(decoded.codProfissional);
-                        if (!wsFilasClients.has(userCod)) {
-                            wsFilasClients.set(userCod, new Set());
-                        }
+                        if (!wsFilasClients.has(userCod)) wsFilasClients.set(userCod, new Set());
                         wsFilasClients.get(userCod).add(ws);
-                        
-                        ws.send(JSON.stringify({ 
-                            event: 'AUTH_SUCCESS', 
-                            userCod,
-                            message: 'Conectado às notificações de fila'
-                        }));
-                        console.log(`✅ [WS-Filas] Motoboy ${userCod} (${decoded.fullName}) conectado. Total: ${wsFilasClients.size}`);
+                        ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', userCod, message: 'Conectado às notificações de fila' }));
+                        console.log(`✅ [WS-Filas] Motoboy ${userCod} conectado. Total: ${wsFilasClients.size}`);
                     } else {
                         ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Usuário sem código profissional' }));
                         ws.close(4002, 'Sem código profissional');
                     }
                 } catch (jwtError) {
-                    console.log(`❌ [WS-Filas] Token inválido: ${jwtError.message}`);
                     ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido' }));
                     ws.close(4003, 'Token inválido');
                 }
             }
-            
             if (data.type === 'PING' && authenticated) {
                 ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
             }
-        } catch (e) {
-            console.error('❌ [WS-Filas] Erro:', e.message);
-        }
+        } catch (e) { console.error('❌ [WS-Filas] Erro:', e.message); }
     });
     
     ws.on('close', () => {
         clearTimeout(authTimeout);
         if (userCod) {
             const conns = wsFilasClients.get(userCod);
-            if (conns) {
-                conns.delete(ws);
-                if (conns.size === 0) wsFilasClients.delete(userCod);
-            }
+            if (conns) { conns.delete(ws); if (conns.size === 0) wsFilasClients.delete(userCod); }
             console.log(`🔌 [WS-Filas] Motoboy ${userCod} desconectado. Total: ${wsFilasClients.size}`);
         }
     });
@@ -26541,8 +25959,6 @@ wssFilas.on('connection', (ws, req) => {
 
 global.sendFilaNotification = sendFilaNotification;
 console.log('✅ WebSocket de Filas inicializado em /ws/filas');
-
-// ==================== FIM WEBSOCKET FILAS ====================
 
 // ==================== FIM WEBSOCKET SETUP ====================
 
