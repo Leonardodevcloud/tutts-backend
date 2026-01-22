@@ -25995,7 +25995,9 @@ app.get('/api/filas/minha-posicao', verificarToken, async (req, res) => {
                 na_fila: true,
                 status: 'em_rota',
                 minutos_em_rota: minutosEmRota,
-                saida_rota_at: eu.saida_rota_at
+                saida_rota_at: eu.saida_rota_at,
+                corrida_unica: eu.corrida_unica || false,
+                posicao_original: eu.posicao_original || null
             });
         }
         
