@@ -4718,7 +4718,7 @@ app.get('/api/submissions', verificarToken, async (req, res) => {
           created_at, updated_at
         FROM submissions 
         ORDER BY created_at DESC
-        LIMIT 1000
+        LIMIT 10000
       `;
       params = [];
     } else {
@@ -4734,7 +4734,7 @@ app.get('/api/submissions', verificarToken, async (req, res) => {
         FROM submissions 
         WHERE user_cod = $1 
         ORDER BY created_at DESC
-        LIMIT 500
+        LIMIT 2000
       `;
       params = [req.user.codProfissional];
     }
