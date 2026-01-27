@@ -5671,24 +5671,110 @@ app.get('/api/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (r
   }
 });
 
-// Atualizar status do saque
+// Atualizar status do saque - COM PROTEÇÃO CONTRA DÉBITO DUPLICADO
 app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  const client = await pool.connect(); // Usar transação para atomicidade
+  
   try {
     const { id } = req.params;
-    const { status, adminId, adminName, rejectReason, dataDebito } = req.body;
-    console.log('📅 dataDebito recebido do frontend:', dataDebito);
-
-    // Se status for aprovado ou aprovado_gratuidade, salvar a data de aprovação
-    const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
+    const { status, adminId, adminName, rejectReason, dataDebito, idempotencyKey } = req.body;
     
-    // Buscar dados do saque antes de atualizar (para pegar user_cod e valor)
-    const saqueAtual = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
+    console.log('📅 dataDebito recebido do frontend:', dataDebito);
+    console.log('🔑 idempotencyKey:', idempotencyKey);
+
+    // =============== PROTEÇÃO 1: VERIFICAR IDEMPOTÊNCIA ===============
+    // Se uma chave de idempotência foi enviada, verificar se já foi processada
+    if (idempotencyKey) {
+      const idempotenciaExistente = await client.query(
+        `SELECT * FROM withdrawal_idempotency WHERE idempotency_key = $1`,
+        [idempotencyKey]
+      );
+      
+      if (idempotenciaExistente.rows.length > 0) {
+        console.log(`⚠️ Requisição duplicada detectada! Key: ${idempotencyKey}`);
+        client.release();
+        // Retornar a resposta anterior (idempotência)
+        return res.status(200).json({
+          ...idempotenciaExistente.rows[0].response_data,
+          _idempotent: true,
+          _message: 'Requisição já processada anteriormente'
+        });
+      }
+    }
+
+    // Iniciar transação
+    await client.query('BEGIN');
+
+    // =============== PROTEÇÃO 2: LOCK PARA EVITAR RACE CONDITION ===============
+    // Buscar dados do saque COM LOCK (FOR UPDATE)
+    const saqueAtual = await client.query(
+      `SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    
     if (saqueAtual.rows.length === 0) {
+      await client.query('ROLLBACK');
+      client.release();
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
-    const dadosSaque = saqueAtual.rows[0];
     
+    const dadosSaque = saqueAtual.rows[0];
+    const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
+
+    // =============== PROTEÇÃO 3: VERIFICAR STATUS ANTERIOR ===============
+    // Só permitir aprovar se estiver aguardando
+    if (isAprovado) {
+      // Verificar se já está aprovado
+      if (dadosSaque.status === 'aprovado' || dadosSaque.status === 'aprovado_gratuidade') {
+        console.log(`⚠️ Tentativa de aprovar saque já aprovado! ID: ${id}, Status atual: ${dadosSaque.status}`);
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(400).json({ 
+          error: 'Este saque já foi aprovado anteriormente',
+          status_atual: dadosSaque.status,
+          aprovado_em: dadosSaque.approved_at
+        });
+      }
+      
+      // Verificar se já tem débito registrado
+      if (dadosSaque.debito_plific_at) {
+        console.log(`⚠️ Saque já teve débito realizado! ID: ${id}, Débito em: ${dadosSaque.debito_plific_at}`);
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(400).json({ 
+          error: 'Débito já foi realizado para este saque',
+          debito_em: dadosSaque.debito_plific_at
+        });
+      }
+      
+      // Verificar se está em processamento (flag de lock)
+      if (dadosSaque.processing_lock) {
+        const lockAge = Date.now() - new Date(dadosSaque.processing_lock).getTime();
+        // Se o lock tem menos de 60 segundos, rejeitar
+        if (lockAge < 60000) {
+          console.log(`⚠️ Saque em processamento! ID: ${id}, Lock há: ${lockAge}ms`);
+          await client.query('ROLLBACK');
+          client.release();
+          return res.status(409).json({ 
+            error: 'Este saque está sendo processado. Aguarde alguns segundos.',
+            processing_since: dadosSaque.processing_lock
+          });
+        }
+        // Se o lock é muito antigo, considerar como falha anterior e continuar
+        console.log(`🔓 Lock antigo removido (${lockAge}ms). Continuando processamento.`);
+      }
+    }
+
+    // =============== PROTEÇÃO 4: MARCAR COMO EM PROCESSAMENTO ===============
+    if (isAprovado) {
+      await client.query(
+        `UPDATE withdrawal_requests SET processing_lock = NOW() WHERE id = $1`,
+        [id]
+      );
+    }
+
     // Se for aprovação, fazer débito automático na API Plific
+    let debitoRealizado = false;
     if (isAprovado) {
       try {
         const valorDebito = parseFloat(dadosSaque.requested_amount);
@@ -5713,7 +5799,7 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
             idProf: parseInt(idProf),
             valor: valorDebito,
             descricao: descricaoDebito,
-            data: dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0]
+            data: dataDebitoFormatada
           })
         });
         
@@ -5721,12 +5807,16 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
         
         if (respostaDebito.status !== '200' && respostaDebito.status !== 200) {
           console.error('❌ Erro ao debitar Plific:', respostaDebito);
+          // Remover lock e fazer rollback
+          await client.query('ROLLBACK');
+          client.release();
           return res.status(400).json({ 
             error: 'Erro ao debitar no Plific', 
             details: respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito'
           });
         }
         
+        debitoRealizado = true;
         console.log(`✅ Débito Plific realizado com sucesso - Prof: ${idProf}`);
         
         // Limpar cache do profissional para atualizar saldo
@@ -5735,6 +5825,8 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
         
       } catch (erroDebito) {
         console.error('❌ Exceção ao debitar Plific:', erroDebito);
+        await client.query('ROLLBACK');
+        client.release();
         return res.status(500).json({ 
           error: 'Erro ao processar débito', 
           details: erroDebito.message 
@@ -5742,20 +5834,43 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
       }
     }
     
+    // =============== ATUALIZAR REGISTRO NO BANCO ===============
     // Definir a data do débito na Plific (a que foi enviada ou NOW())
     const debitoPlificAt = isAprovado ? (dataDebito || new Date().toISOString()) : null;
     
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE withdrawal_requests 
-       SET status = $1, admin_id = $2, admin_name = $3, reject_reason = $4, 
+       SET status = $1, 
+           admin_id = $2, 
+           admin_name = $3, 
+           reject_reason = $4, 
            approved_at = CASE WHEN $5 THEN NOW() ELSE approved_at END,
            lancamento_at = CASE WHEN $5 THEN NOW() ELSE lancamento_at END,
            debito_plific_at = CASE WHEN $5 THEN $7::timestamp ELSE debito_plific_at END,
+           processing_lock = NULL,
            updated_at = NOW() 
        WHERE id = $6 
        RETURNING *`,
       [status, adminId, adminName, rejectReason || null, isAprovado, id, debitoPlificAt]
     );
+
+    // =============== PROTEÇÃO 5: SALVAR IDEMPOTÊNCIA ===============
+    if (idempotencyKey && result.rows.length > 0) {
+      try {
+        await client.query(
+          `INSERT INTO withdrawal_idempotency (idempotency_key, withdrawal_id, response_data, created_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [idempotencyKey, id, JSON.stringify(result.rows[0])]
+        );
+      } catch (idempErr) {
+        // Não falhar se a tabela não existir ainda
+        console.log('⚠️ Aviso: Não foi possível salvar idempotência:', idempErr.message);
+      }
+    }
+
+    // Commit da transação
+    await client.query('COMMIT');
 
     // Registrar auditoria
     const saque = result.rows[0];
@@ -5764,7 +5879,8 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
       valor: saque.requested_amount,
       admin: adminName,
       motivo_rejeicao: rejectReason,
-      debito_plific: isAprovado ? 'realizado' : null
+      debito_plific: debitoRealizado ? 'realizado' : null,
+      idempotency_key: idempotencyKey
     });
 
     // ==================== NOTIFICAR VIA WEBSOCKET ====================
@@ -5773,9 +5889,17 @@ app.patch('/api/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
     }
 
     res.json(result.rows[0]);
+    
   } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      console.error('❌ Erro no rollback:', rollbackErr);
+    }
     console.error('❌ Erro ao atualizar saque:', error);
     res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 
