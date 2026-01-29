@@ -10543,19 +10543,38 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     console.log(`✅ Entregas novas para inserir: ${entregasNovas.length}`);
     console.log(`⏭️ Linhas ignoradas (OS já existe): ${entregas.length - entregasNovas.length}`);
     
+    // ============================================
+    // PASSO 3.5: CRIAR REGISTRO NO HISTÓRICO ANTES (para ter o upload_id)
+    // ============================================
+    const linhasIgnoradasTotal = entregas.length - entregasNovas.length;
+    
+    const historicoResult = await pool.query(`
+      INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      RETURNING id
+    `, [
+      usuario_id, 
+      usuario_nome, 
+      nome_arquivo, 
+      entregas.length, 
+      0, // Será atualizado depois
+      linhasIgnoradasTotal,
+      osDoExcel.length - osIgnoradas.length,
+      osIgnoradas.length
+    ]);
+    
+    const uploadId = historicoResult.rows[0].id;
+    console.log(`📝 Upload registrado com ID: ${uploadId}`);
+    
     if (entregasNovas.length === 0) {
-      // Registrar tentativa no histórico mesmo sem inserir nada
-      await pool.query(`
-        INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, data_upload)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-      `, [usuario_id, usuario_nome, nome_arquivo, entregas.length, 0, entregas.length]);
-      
+      // Histórico já foi criado acima, apenas retorna
       return res.json({ 
         success: true, 
         inseridos: 0, 
         ignorados: entregas.length,
         os_ignoradas: osIgnoradas.length,
-        message: 'Todas as OS já existem no banco de dados'
+        message: 'Todas as OS já existem no banco de dados',
+        upload_id: uploadId
       });
     }
     
@@ -10865,7 +10884,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
             dentro_prazo_prof: dentroPrazoProf,
             data_upload: data_referencia || new Date().toISOString().split('T')[0],
             latitude: parseNum(e.latitude || e.Latitude || e.lat || e.Lat || e.LAT || e.LATITUDE),
-            longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long)
+            longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long),
+            upload_id: uploadId
           });
         } catch (err) {
           erros++;
@@ -10887,8 +10907,8 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
                 execucao_comp, execucao_espera, status, motivo, ocorrencia, velocidade_media,
                 dentro_prazo, prazo_minutos, tempo_execucao_minutos, 
                 tempo_entrega_prof_minutos, dentro_prazo_prof,
-                data_upload, latitude, longitude
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
+                data_upload, latitude, longitude, upload_id
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
@@ -10899,7 +10919,7 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
               d.execucao_comp, d.execucao_espera, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos,
               d.tempo_entrega_prof_minutos, d.dentro_prazo_prof,
-              d.data_upload, d.latitude, d.longitude
+              d.data_upload, d.latitude, d.longitude, d.upload_id
             ]);
             inseridos++;
           } catch (singleErr) {
@@ -10910,25 +10930,15 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     }
     
     // ============================================
-    // PASSO 6: Registrar no histórico de uploads
+    // PASSO 6: Atualizar histórico com total inserido
     // ============================================
-    const linhasIgnoradas = entregas.length - entregasNovas.length;
-    
     await pool.query(`
-      INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-    `, [
-      usuario_id, 
-      usuario_nome, 
-      nome_arquivo, 
-      entregas.length, 
-      inseridos, 
-      linhasIgnoradas,
-      osDoExcel.length - osIgnoradas.length,
-      osIgnoradas.length
-    ]);
+      UPDATE bi_upload_historico 
+      SET linhas_inseridas = $1
+      WHERE id = $2
+    `, [inseridos, uploadId]);
     
-    console.log(`✅ Upload concluído: ${inseridos} inseridos, ${linhasIgnoradas} ignorados (OS duplicada), ${erros} erros`);
+    console.log(`✅ Upload concluído: ${inseridos} inseridos, ${linhasIgnoradasTotal} ignorados (OS duplicada), ${erros} erros`);
     console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);
     
     // ============================================
@@ -10948,12 +10958,13 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
     res.json({
       success: true,
       inseridos,
-      ignorados: linhasIgnoradas,
+      ignorados: linhasIgnoradasTotal,
       erros,
       os_novas: osDoExcel.length - osIgnoradas.length,
       os_ignoradas: osIgnoradas.length,
       dentro_prazo: dentroPrazoCount,
-      fora_prazo: foraPrazoCount
+      fora_prazo: foraPrazoCount,
+      upload_id: uploadId
     });
   } catch (err) {
     console.error('❌ Erro no upload:', err);
@@ -15536,12 +15547,20 @@ app.get('/api/bi/uploads', async (req, res) => {
 });
 
 // Excluir upload por data
+// Excluir upload por data (FALLBACK para dados antigos sem upload_id)
 app.delete('/api/bi/uploads/:data', async (req, res) => {
   try {
     const { data } = req.params;
-    const result = await pool.query(`DELETE FROM bi_entregas WHERE data_upload = $1`, [data]);
-    // Também remove do histórico
+    
+    // Para dados antigos (sem upload_id), ainda permite deletar por data
+    // MAS só deleta registros SEM upload_id (dados antigos)
+    console.log(`⚠️ Exclusão por data (legado): ${data}`);
+    
+    const result = await pool.query(`DELETE FROM bi_entregas WHERE data_upload = $1 AND upload_id IS NULL`, [data]);
+    
+    // Também remove do histórico onde a data coincide
     await pool.query(`DELETE FROM bi_upload_historico WHERE DATE(data_upload) = $1`, [data]).catch(() => {});
+    
     res.json({ success: true, deletados: result.rowCount });
   } catch (err) {
     console.error('❌ Erro ao excluir upload:', err);
@@ -15553,16 +15572,15 @@ app.delete('/api/bi/uploads/:data', async (req, res) => {
 app.delete('/api/bi/uploads/historico/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    // Buscar info do histórico
-    const hist = await pool.query(`SELECT data_upload FROM bi_upload_historico WHERE id = $1`, [id]);
-    if (hist.rows.length > 0) {
-      const dataUpload = hist.rows[0].data_upload;
-      // Deletar entregas dessa data
-      await pool.query(`DELETE FROM bi_entregas WHERE data_upload = DATE($1)`, [dataUpload]);
-    }
+    
+    // ✅ CORRIGIDO: Deletar APENAS entregas vinculadas a este upload_id específico
+    const deleteResult = await pool.query(`DELETE FROM bi_entregas WHERE upload_id = $1`, [id]);
+    console.log(`🗑️ Deletadas ${deleteResult.rowCount} entregas do upload ID ${id}`);
+    
     // Deletar do histórico
     await pool.query(`DELETE FROM bi_upload_historico WHERE id = $1`, [id]);
-    res.json({ success: true });
+    
+    res.json({ success: true, deletados: deleteResult.rowCount });
   } catch (err) {
     console.error('❌ Erro ao excluir histórico:', err);
     res.status(500).json({ error: 'Erro ao excluir histórico' });
