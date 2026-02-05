@@ -1302,7 +1302,7 @@ console.log('🔄 Conectando ao banco de dados...');
 // que podem não estar na cadeia de confiança do Node.js
 // Em um ambiente ideal, usaríamos o certificado CA do provedor
 const sslConfig = {
-  rejectUnauthorized: false,
+  rejectUnauthorized: true,
   // Se você tiver o certificado CA do Neon, descomente abaixo:
   // ca: process.env.DATABASE_CA_CERT
 };
