@@ -13,6 +13,30 @@ const WebSocket = require('ws');
 const crypto = require('crypto'); // Para 2FA TOTP
 require('dotenv').config();
 
+// ==================== SISTEMA DE CACHE ====================
+const NodeCache = require('node-cache');
+
+// Cache para queries do BI (TTL = 5 minutos = 300 segundos)
+const biCache = new NodeCache({ 
+  stdTTL: 300,
+  checkperiod: 60,
+  useClones: false
+});
+
+// Função helper para gerar chave de cache
+function getCacheKey(prefix, params) {
+  return prefix + ':' + JSON.stringify(params);
+}
+
+// Limpar cache do BI quando há upload/recálculo de dados
+function limparCacheBI() {
+  const keys = biCache.keys();
+  const biKeys = keys.filter(k => k.startsWith('bi:'));
+  biKeys.forEach(k => biCache.del(k));
+  console.log(`🧹 Cache BI limpo: ${biKeys.length} entradas removidas`);
+}
+// ==================== FIM SISTEMA DE CACHE ====================
+
 // ==================== MÓDULOS EXTRAÍDOS ====================
 const { initScoreRoutes, initScoreTables, initScoreCron } = require('./src/modules/score');
 const { initAuditRoutes, initAuditTables } = require('./src/modules/audit');
@@ -1328,8 +1352,8 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('localhost') ? false : sslConfig,
   // Configurações de pool para melhor performance e segurança
-  max: 20, // máximo de conexões
-  idleTimeoutMillis: 30000, // fechar conexões ociosas após 30s
+  max: 8, // reduzido: pooler do Neon gerencia conexões reais
+  idleTimeoutMillis: 15000, // fechar ociosas mais rápido (15s)
   connectionTimeoutMillis: 10000, // timeout de conexão 10s
   // Segurança: não expor erros detalhados do banco
   application_name: 'tutts-backend'
@@ -9898,6 +9922,9 @@ app.post('/api/bi/entregas/upload', async (req, res) => {
       console.error('❌ Erro ao atualizar resumos:', err);
     });
     
+    // Limpar cache do BI (dados novos foram inseridos)
+    limparCacheBI();
+    
     res.json({
       success: true,
       inseridos,
@@ -10030,6 +10057,7 @@ app.post('/api/bi/entregas/recalcular', async (req, res) => {
     
     console.log(`✅ Recalculado: ${atualizados} entregas`);
     console.log(`   ✅ Dentro: ${dentroPrazoCount} | ❌ Fora: ${foraPrazoCount} | ⚠️ Sem dados: ${semPrazoCount}`);
+    limparCacheBI();
     res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount, semDados: semPrazoCount });
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
@@ -10042,6 +10070,7 @@ app.post('/api/bi/atualizar-resumos', async (req, res) => {
   try {
     console.log('📊 Forçando atualização de resumos...');
     const resultado = await atualizarResumos();
+    limparCacheBI();
     res.json(resultado);
   } catch (err) {
     console.error('❌ Erro ao atualizar resumos:', err);
@@ -11436,6 +11465,14 @@ app.get('/api/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 app.get('/api/bi/dashboard-completo', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:dashboard-completo', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Dashboard-completo servido do cache');
+      return res.json(cached);
+    }
+
     let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_prazo_prof, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
     // Suporte a múltiplos clientes e centros de custo
     let cod_cliente = req.query.cod_cliente;
@@ -13022,12 +13059,15 @@ app.get('/api/bi/dashboard-completo', async (req, res) => {
       ${where}
     `, params);
     
-    res.json({ 
+    const resultado = { 
       metricas, 
       porCliente, 
       porProfissional, 
       dadosGraficos: dadosGraficos.rows 
-    });
+    };
+    biCache.set(cacheKey, resultado);
+    console.log('📊 Dashboard-completo salvo no cache');
+    res.json(resultado);
   } catch (err) {
     console.error('❌ Erro dashboard-completo:', err.message);
     res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
@@ -14504,6 +14544,7 @@ app.delete('/api/bi/uploads/:data', async (req, res) => {
     // Também remove do histórico onde a data coincide
     await pool.query(`DELETE FROM bi_upload_historico WHERE DATE(data_upload) = $1`, [data]).catch(() => {});
     
+    limparCacheBI();
     res.json({ success: true, deletados: result.rowCount });
   } catch (err) {
     console.error('❌ Erro ao excluir upload:', err);
@@ -14523,6 +14564,7 @@ app.delete('/api/bi/uploads/historico/:id', async (req, res) => {
     // Deletar do histórico
     await pool.query(`DELETE FROM bi_upload_historico WHERE id = $1`, [id]);
     
+    limparCacheBI();
     res.json({ success: true, deletados: deleteResult.rowCount });
   } catch (err) {
     console.error('❌ Erro ao excluir histórico:', err);
@@ -14548,6 +14590,7 @@ app.delete('/api/bi/entregas', async (req, res) => {
     }
     
     const result = await pool.query(query, params);
+    limparCacheBI();
     res.json({ success: true, deletados: result.rowCount });
   } catch (err) {
     console.error('❌ Erro ao limpar entregas:', err);
@@ -15793,6 +15836,14 @@ pool.query(`
 // GET /api/bi/garantido - Análise de mínimo garantido
 app.get('/api/bi/garantido', async (req, res) => {
   try {
+    // === CACHE (15 min - evita fetch do Google Sheets a cada request) ===
+    const cacheKey = getCacheKey('bi:garantido', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Garantido servido do cache (evitou fetch do Google Sheets)');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, cod_prof, filtro_status } = req.query;
     
     console.log('📊 Garantido - Filtros recebidos:', { data_inicio, data_fim, cod_cliente, cod_prof, filtro_status });
@@ -16108,7 +16159,9 @@ app.get('/api/bi/garantido', async (req, res) => {
     }
     totais.tempo_medio_geral = tempoMedioGeral;
     
-    res.json({ dados: resultados, totais });
+    const resultadoGarantido = { dados: resultados, totais };
+    biCache.set(cacheKey, resultadoGarantido, 900); // 15 min - Google Sheets não muda a cada segundo
+    res.json(resultadoGarantido);
   } catch (error) {
     console.error('Erro ao buscar dados garantido:', error);
     res.status(500).json({ error: 'Erro ao buscar dados de garantido', details: error.message });
@@ -16118,6 +16171,14 @@ app.get('/api/bi/garantido', async (req, res) => {
 // GET /api/bi/garantido/semanal - Análise semanal por cliente do garantido
 app.get('/api/bi/garantido/semanal', async (req, res) => {
   try {
+    // === CACHE (15 min) ===
+    const cacheKey = getCacheKey('bi:garantido-semanal', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Garantido/semanal servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim } = req.query;
     
     // Buscar dados da planilha
@@ -16308,6 +16369,7 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
       }))
     })).sort((a, b) => a.onde_rodou.localeCompare(b.onde_rodou));
     
+    biCache.set(cacheKey, resultado, 900);
     res.json(resultado);
   } catch (error) {
     console.error('Erro ao buscar análise semanal garantido:', error);
@@ -16318,6 +16380,14 @@ app.get('/api/bi/garantido/semanal', async (req, res) => {
 // GET /api/bi/garantido/por-cliente - Resumo por cliente do garantido
 app.get('/api/bi/garantido/por-cliente', async (req, res) => {
   try {
+    // === CACHE (15 min) ===
+    const cacheKey = getCacheKey('bi:garantido-por-cliente', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Garantido/por-cliente servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim } = req.query;
     
     // Buscar dados da planilha
@@ -16477,7 +16547,9 @@ app.get('/api/bi/garantido/por-cliente', async (req, res) => {
       total_complemento: resultado.reduce((sum, r) => sum + r.complemento, 0)
     };
     
-    res.json({ dados: resultado, totais });
+    const resultadoGarantidoCliente = { dados: resultado, totais };
+    biCache.set(cacheKey, resultadoGarantidoCliente, 900);
+    res.json(resultadoGarantidoCliente);
   } catch (error) {
     console.error('Erro ao buscar garantido por cliente:', error);
     res.status(500).json({ error: 'Erro ao buscar dados por cliente' });
@@ -17091,6 +17163,14 @@ migrateCoordenadas();
 // GET - Mapa de Calor usando COORDENADAS REAIS do banco
 app.get('/api/bi/mapa-calor', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:mapa-calor', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('🗺️ Mapa-calor servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria } = req.query;
     
     let whereClause = 'WHERE ponto >= 2'; // REGRA: apenas entregas (ponto >= 2), não conta coleta (ponto 1)
@@ -17232,7 +17312,7 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
     
     console.log(`🗺️ Mapa de calor: ${pontos.length} pontos com coordenadas reais`);
     
-    res.json({
+    const resultadoMapa = {
       totalEntregas: parseInt(resumoQuery.rows[0]?.total_entregas) || 0,
       totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
       totalPontos: pontos.length,
@@ -17264,7 +17344,9 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
         diaSemana: parseInt(h.dia_semana),
         total: parseInt(h.total)
       }))
-    });
+    };
+    biCache.set(cacheKey, resultadoMapa);
+    res.json(resultadoMapa);
     
   } catch (error) {
     console.error('Erro mapa de calor:', error);
@@ -17275,6 +17357,14 @@ app.get('/api/bi/mapa-calor', async (req, res) => {
 // GET - Acompanhamento Periódico (evolução temporal)
 app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:acompanhamento-periodico', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Acompanhamento-periodico servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria, status_retorno } = req.query;
     
     // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
@@ -17466,7 +17556,7 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
       ${whereClause}
     `, params);
     
-    res.json({
+    const resultadoPeriodico = {
       porData: porData,
       resumo: {
         totalOS: parseInt(resumoQuery.rows[0]?.total_os) || 0,
@@ -17478,7 +17568,9 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
         totalProfissionais: parseInt(resumoQuery.rows[0]?.total_profissionais) || 0,
         totalDias: parseInt(resumoQuery.rows[0]?.total_dias) || 0
       }
-    });
+    };
+    biCache.set(cacheKey, resultadoPeriodico);
+    res.json(resultadoPeriodico);
     
   } catch (error) {
     console.error('Erro acompanhamento periódico:', error);
@@ -17490,6 +17582,14 @@ app.get('/api/bi/acompanhamento-periodico', async (req, res) => {
 // Agrupa dados por semana e calcula variações entre semanas
 app.get('/api/bi/comparativo-semanal', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:comparativo-semanal', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Comparativo-semanal servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
     
     // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
@@ -17693,7 +17793,7 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
     const melhorSemana = semanas.reduce((best, s) => (!best || s.total_entregas > best.total_entregas) ? s : best, null);
     const piorSemana = semanas.reduce((worst, s) => (!worst || s.total_entregas < worst.total_entregas) ? s : worst, null);
     
-    res.json({
+    const resultadoSemanal = {
       semanas: semanas,
       resumo: {
         total_semanas: totalSemanas,
@@ -17701,7 +17801,9 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
         melhor_semana: melhorSemana ? { periodo: melhorSemana.periodo, entregas: melhorSemana.total_entregas } : null,
         pior_semana: piorSemana ? { periodo: piorSemana.periodo, entregas: piorSemana.total_entregas } : null
       }
-    });
+    };
+    biCache.set(cacheKey, resultadoSemanal);
+    res.json(resultadoSemanal);
     
   } catch (error) {
     console.error('Erro comparativo semanal:', error);
@@ -17712,6 +17814,14 @@ app.get('/api/bi/comparativo-semanal', async (req, res) => {
 // GET - Comparativo semanal POR CLIENTE (detalhado)
 app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:comparativo-semanal-clientes', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Comparativo-semanal-clientes servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
     
     // Removido filtro ponto >= 2 para permitir cálculo de alocação (ponto=1) e coleta (ponto=1)
@@ -17924,10 +18034,12 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
     // Ordenar por total de entregas (maiores primeiro)
     clientes.sort((a, b) => b.resumo.total_entregas - a.resumo.total_entregas);
     
-    res.json({
+    const resultadoSemanalClientes = {
       clientes: clientes,
       total_clientes: clientes.length
-    });
+    };
+    biCache.set(cacheKey, resultadoSemanalClientes);
+    res.json(resultadoSemanalClientes);
     
   } catch (error) {
     console.error('Erro comparativo semanal por cliente:', error);
@@ -17941,6 +18053,14 @@ app.get('/api/bi/comparativo-semanal-clientes', async (req, res) => {
 // IMPORTANTE: Tempo de entrega usa Data Chegada + Hora Chegada (não Finalizado)
 app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
   try {
+    // === CACHE ===
+    const cacheKey = getCacheKey('bi:acompanhamento-clientes', req.query);
+    const cached = biCache.get(cacheKey);
+    if (cached) {
+      console.log('📊 Acompanhamento-clientes servido do cache');
+      return res.json(cached);
+    }
+
     const { data_inicio, data_fim, cod_cliente, centro_custo, categoria, status_retorno } = req.query;
     
     // Não filtramos por Ponto aqui para incluir coletas (Ponto 1) e entregas (Ponto >= 2)
@@ -18322,7 +18442,9 @@ app.get('/api/bi/acompanhamento-clientes', async (req, res) => {
       mediaEntProfissional: ((parseInt(totaisQuery.rows[0]?.total_entregas) || 0) / Math.max(parseInt(totaisQuery.rows[0]?.total_profissionais) || 1, 1)).toFixed(1)
     };
     
-    res.json({ clientes, totais });
+    const resultadoAcompClientes = { clientes, totais };
+    biCache.set(cacheKey, resultadoAcompClientes);
+    res.json(resultadoAcompClientes);
     
   } catch (error) {
     console.error('Erro acompanhamento clientes:', error);
