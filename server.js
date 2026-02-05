@@ -1302,7 +1302,7 @@ console.log('🔄 Conectando ao banco de dados...');
 // que podem não estar na cadeia de confiança do Node.js
 // Em um ambiente ideal, usaríamos o certificado CA do provedor
 const sslConfig = {
-  rejectUnauthorized: false,
+  rejectUnauthorized: true,
   // Se você tiver o certificado CA do Neon, descomente abaixo:
   // ca: process.env.DATABASE_CA_CERT
 };
@@ -3718,24 +3718,8 @@ app.post('/api/users/login', loginLimiter, async (req, res) => {
 
     const user = result.rows[0];
     
-    // Verificar senha com bcrypt
-    // Suporte para senhas antigas (texto plano) e novas (hash)
-    let senhaValida = false;
-    
-    if (user.password.startsWith('$2')) {
-      // Senha já está em hash bcrypt
-      senhaValida = await verificarSenha(password, user.password);
-    } else {
-      // Senha antiga em texto plano - comparar diretamente
-      senhaValida = (user.password === password);
-      
-      // Se senha antiga válida, atualizar para bcrypt
-      if (senhaValida) {
-        const hashedPassword = await hashSenha(password);
-        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, user.id]);
-        console.log('🔄 Senha migrada para bcrypt:', user.cod_profissional);
-      }
-    }
+       // Verificar senha com bcrypt
+    let senhaValida = await verificarSenha(password, user.password);
 
     if (!senhaValida) {
       console.log('❌ Senha inválida');
