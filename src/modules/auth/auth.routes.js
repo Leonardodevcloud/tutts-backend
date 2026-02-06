@@ -34,6 +34,29 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   const authLogger = { info: (...args) => console.log('🔐 [AUTH]', ...args) };
   const securityLogger = { securityEvent: (event, data) => console.log('🛡️ [SECURITY]', event, JSON.stringify(data)) };
 
+  const validarSenhaForte = (senha) => {
+    if (!senha || typeof senha !== 'string') {
+      return { valido: false, erro: 'Senha é obrigatória' };
+    }
+    if (senha.length < 8) {
+      return { valido: false, erro: 'Senha deve ter pelo menos 8 caracteres' };
+    }
+    if (!/[a-z]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos uma letra minúscula' };
+    }
+    if (!/[A-Z]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos uma letra maiúscula' };
+    }
+    if (!/[0-9]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos um número' };
+    }
+    const senhasComuns = ['12345678', 'password', 'senha123', 'Senha123', 'Tutts123', 'Admin123'];
+    if (senhasComuns.some(s => senha.toLowerCase() === s.toLowerCase())) {
+      return { valido: false, erro: 'Senha muito comum. Escolha uma senha mais segura' };
+    }
+    return { valido: true };
+  };
+
   // ==================== CONTROLE DE BLOQUEIO ====================
 
 const verificarContaBloqueada = async (codProfissional) => {
