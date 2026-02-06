@@ -5,7 +5,7 @@
  */
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const {
   LOGIN_CONFIG, REFRESH_SECRET,
