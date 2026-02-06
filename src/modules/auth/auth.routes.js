@@ -5,7 +5,8 @@
  */
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const {
   LOGIN_CONFIG, REFRESH_SECRET,
@@ -17,6 +18,21 @@ const {
 function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter) {
   const router = express.Router();
   const JWT_SECRET = process.env.JWT_SECRET;
+
+  const handleError = (res, error, contexto, statusCode = 500) => {
+    console.error(`❌ ${contexto}:`, error.message || error);
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+    const mensagemCliente = isProduction 
+      ? 'Erro interno do servidor' 
+      : `${contexto}: ${error.message || 'Erro desconhecido'}`;
+    return res.status(statusCode).json({ 
+      error: mensagemCliente,
+      ref: Date.now().toString(36)
+    });
+  };
+
+  const authLogger = { info: (...args) => console.log('🔐 [AUTH]', ...args) };
+  const securityLogger = { securityEvent: (event, data) => console.log('🛡️ [SECURITY]', event, JSON.stringify(data)) };
 
   // ==================== CONTROLE DE BLOQUEIO ====================
 
