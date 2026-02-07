@@ -13,6 +13,44 @@ function createAuthCoreRoutes(pool, verificarToken, verificarAdmin, registrarAud
   const router = express.Router();
   const { verificarContaBloqueada, registrarTentativaLogin, salvarRefreshToken, validarRefreshToken, revogarRefreshToken, revogarTodosTokens, verifyBackupCode, isCodeUsed, has2FAEnabled, getUserTOTPSecret } = helpers;
 
+  const handleError = (res, error, contexto, statusCode = 500) => {
+    console.error(`❌ ${contexto}:`, error.message || error);
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+    const mensagemCliente = isProduction 
+      ? 'Erro interno do servidor' 
+      : `${contexto}: ${error.message || 'Erro desconhecido'}`;
+    return res.status(statusCode).json({ 
+      error: mensagemCliente,
+      ref: Date.now().toString(36)
+    });
+  };
+
+  const authLogger = { info: (...args) => console.log('🔐 [AUTH]', ...args) };
+  const securityLogger = { securityEvent: (event, data) => console.log('🛡️ [SECURITY]', event, JSON.stringify(data)) };
+
+  const validarSenhaForte = (senha) => {
+    if (!senha || typeof senha !== 'string') {
+      return { valido: false, erro: 'Senha é obrigatória' };
+    }
+    if (senha.length < 8) {
+      return { valido: false, erro: 'Senha deve ter pelo menos 8 caracteres' };
+    }
+    if (!/[a-z]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos uma letra minúscula' };
+    }
+    if (!/[A-Z]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos uma letra maiúscula' };
+    }
+    if (!/[0-9]/.test(senha)) {
+      return { valido: false, erro: 'Senha deve conter pelo menos um número' };
+    }
+    const senhasComuns = ['12345678', 'password', 'senha123', 'Senha123', 'Tutts123', 'Admin123'];
+    if (senhasComuns.some(s => senha.toLowerCase() === s.toLowerCase())) {
+      return { valido: false, erro: 'Senha muito comum. Escolha uma senha mais segura' };
+    }
+    return { valido: true };
+  };
+
 router.post('/users/register', createAccountLimiter, async (req, res) => {
   try {
     const { codProfissional, password, fullName, role } = req.body;
