@@ -26,7 +26,9 @@ const env = {
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: '1h',
   REFRESH_TOKEN_EXPIRES_IN: '7d',
-  REFRESH_SECRET: process.env.JWT_SECRET + '_REFRESH',
+  // 🔒 SECURITY: Separate secret for refresh tokens
+  // If REFRESH_SECRET env var exists, use it; otherwise derive from JWT_SECRET (backward compatible)
+  REFRESH_SECRET: process.env.REFRESH_SECRET || (process.env.JWT_SECRET + '_REFRESH_v2_' + (process.env.JWT_SECRET || '').slice(-8)),
   BCRYPT_ROUNDS: 10,
 
   // Tutts API tokens
@@ -45,7 +47,7 @@ const env = {
   PLIFIC_TOKEN: process.env.PLIFIC_TOKEN,
 
   // Version
-  SERVER_VERSION: '2026-01-16-SECURITY-PATCH-V5',
+  SERVER_VERSION: '2026-02-07-SECURITY-PATCH-V6',
 };
 
 // Warnings (não bloqueiam)
@@ -59,6 +61,10 @@ if (tuttsNaoConfigurados.length > 0) {
 
 if (!env.ORS_API_KEY) {
   console.warn('⚠️ ORS_API_KEY não configurada - Roteirizador não funcionará');
+}
+
+if (!process.env.REFRESH_SECRET) {
+  console.warn('⚠️ REFRESH_SECRET não configurado - usando derivação do JWT_SECRET. Configure REFRESH_SECRET como variável separada para maior segurança.');
 }
 
 module.exports = env;

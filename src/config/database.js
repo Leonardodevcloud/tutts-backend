@@ -6,10 +6,12 @@
 const { Pool } = require('pg');
 const env = require('./env');
 
-const sslConfig = {
-  rejectUnauthorized: false,
-};
+// 🔒 SECURITY: SSL config
+// Neon PostgreSQL uses valid Let's Encrypt certificates
+// Set DB_SSL_REJECT_UNAUTHORIZED=false only if connection fails
+const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
 
+const sslConfig = { rejectUnauthorized };
 const isLocalhost = env.DATABASE_URL?.includes('localhost');
 
 const pool = new Pool({
@@ -22,7 +24,7 @@ const pool = new Pool({
 });
 
 if (!isLocalhost) {
-  console.log('🔐 Conexão SSL ativada para o banco de dados');
+  console.log(`🔐 Conexão SSL ativada (rejectUnauthorized: ${rejectUnauthorized})`);
 }
 
 // Test connection
@@ -33,6 +35,9 @@ async function testConnection() {
     return true;
   } catch (err) {
     console.error('❌ Falha na conexão com banco de dados:', err.message);
+    if (rejectUnauthorized && err.message.includes('certificate')) {
+      console.error('💡 Se o erro é de certificado, configure DB_SSL_REJECT_UNAUTHORIZED=false como variável de ambiente');
+    }
     return false;
   }
 }

@@ -96,22 +96,22 @@ app.use('/api/score', initScoreRoutes(pool, verificarToken, verificarAdmin, regi
 app.use('/api/audit', initAuditRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
 // CRM
-app.use('/api/crm', initCrmRoutes(pool));
+app.use('/api/crm', verificarToken, initCrmRoutes(pool));
 
 // Social (2 routers)
 const { socialRouter, liderancaRouter } = initSocialRoutes(pool);
-app.use('/api/social', socialRouter);
-app.use('/api/lideranca', liderancaRouter);
+app.use('/api/social', verificarToken, socialRouter);
+app.use('/api/lideranca', verificarToken, liderancaRouter);
 
 // Operacional (3 routers)
 const { avisosRouter, incentivosRouter, operacoesRouter } = initOperacionalRoutes(pool);
-app.use('/api/avisos-op', avisosRouter);
-app.use('/api/incentivos-op', incentivosRouter);
-app.use('/api/operacoes', operacoesRouter);
-app.get('/api/operacoes-regioes', (req, res, next) => { req.url = '/regioes'; operacoesRouter(req, res, next); });
+app.use('/api/avisos-op', verificarToken, avisosRouter);
+app.use('/api/incentivos-op', verificarToken, incentivosRouter);
+app.use('/api/operacoes', verificarToken, operacoesRouter);
+app.get('/api/operacoes-regioes', verificarToken, (req, res, next) => { req.url = '/regioes'; operacoesRouter(req, res, next); });
 
 // Loja
-app.use('/api/loja', initLojaRoutes(pool));
+app.use('/api/loja', verificarToken, initLojaRoutes(pool));
 
 // Roteirizador (4 routers)
 const { routingRouter, roteirizadorRouter, adminRoteirizadorRouter, geocodeRouter } = initRoteirizadorRoutes(pool, verificarToken, httpRequest, registrarAuditoria, AUDIT_CATEGORIES);
@@ -126,12 +126,12 @@ app.use('/api/filas', initFilasRoutes(pool, verificarToken, verificarAdmin, regi
 // Config, Auth, Disponibilidade, Financial, Solicitacao, BI, Todo, Misc
 app.use('/api', initConfigRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES));
 app.use('/api', initAuthRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter));
-app.use('/api', initDisponibilidadeRoutes(pool));
+app.use('/api', initDisponibilidadeRoutes(pool, verificarToken));
 app.use('/api', initFinancialRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP));
 app.use('/api', initSolicitacaoRoutes(pool, verificarToken));
-app.use('/api', initBiRoutes(pool));
-app.use('/api', initTodoRoutes(pool));
-app.use('/api', initMiscRoutes(pool));
+app.use('/api', initBiRoutes(pool, verificarToken));
+app.use('/api', initTodoRoutes(pool, verificarToken));
+app.use('/api', initMiscRoutes(pool, verificarToken));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);

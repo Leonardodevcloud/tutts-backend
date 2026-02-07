@@ -17,8 +17,9 @@ const { createGarantidoRoutes } = require('./routes/garantido.routes');
 const { createRegioesRoutes } = require('./routes/regioes.routes');
 const { createAnalyticsRoutes } = require('./routes/analytics.routes');
 
-function createBiRouter(pool) {
+function createBiRouter(pool, verificarToken) {
   const router = express.Router();
+  if (verificarToken) router.use(verificarToken);
 
   // Função compartilhada entre sub-routers
   const atualizarResumos = createAtualizarResumos(pool);
