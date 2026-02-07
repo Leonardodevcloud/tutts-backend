@@ -5,7 +5,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { hashSenha, verificarSenha } = require('../auth.service');
 
-function createUserManagementRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
+function createUserManagementRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, loginLimiter) {
   const router = express.Router();
 
 router.get('/users', verificarToken, verificarAdmin, async (req, res) => {

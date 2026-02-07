@@ -8,7 +8,7 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   const helpers = createAuthHelpers(pool);
 
   router.use(createAuthCoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter, helpers));
-  router.use(createUserManagementRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES));
+  router.use(createUserManagementRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, loginLimiter));
 
   return router;
 }
