@@ -245,5 +245,4 @@ function createOperacoesRouter(pool) {
   return router;
 }
 
--e 
 module.exports = { createOperacoesRouter };
