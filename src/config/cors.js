@@ -10,6 +10,7 @@ const allowedOrigins = [
   'https://centraltutts.online',
   'https://tutts-frontend.vercel.app',
   'https://tutts-frontend-git-main.vercel.app',
+  'https://tutts-frontend-v2.vercel.app',
   ...(env.IS_PRODUCTION ? [] : [
     'http://localhost:3000',
     'http://localhost:5500',
