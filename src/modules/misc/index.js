@@ -1,6 +1,6 @@
 /**
- * MÓDULO MISC
- * Setores + Relatórios Diários - 10 endpoints
+ * MÓDULO MISC - Setores + Relatórios Diários
+ * 10 endpoints
  */
 const { initMiscTables } = require('./misc.migration');
 const { createMiscRouter } = require('./misc.routes');

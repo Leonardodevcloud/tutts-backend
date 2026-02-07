@@ -567,7 +567,7 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
     
     if (geminiData.error) {
       console.error('❌ Erro Gemini:', geminiData.error);
-      return res.status(500).json({ error: 'Erro na API Gemini: ' + geminiData.error.message });
+      return res.status(500).json({ error: 'Erro na API Gemini' });
     }
     
     const relatorio = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível gerar o relatório.';
@@ -656,7 +656,7 @@ ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seç
     
   } catch (err) {
     console.error('❌ Erro ao gerar relatório IA:', err);
-    res.status(500).json({ error: 'Erro ao gerar relatório: ' + err.message });
+    res.status(500).json({ error: 'Erro ao gerar relatório' });
   }
 });
 
@@ -673,7 +673,7 @@ router.get('/bi/relatorio-ia/historico', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao buscar histórico:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -692,7 +692,7 @@ router.get('/bi/relatorio-ia/historico/:id', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao buscar relatório:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -704,7 +704,7 @@ router.delete('/bi/relatorio-ia/historico/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('❌ Erro ao deletar relatório:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -1077,7 +1077,7 @@ router.post('/bi/relatorio-ia/word', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao gerar Word:', err.message);
     console.error('Stack:', err.stack);
-    res.status(500).json({ error: 'Erro ao gerar documento: ' + err.message });
+    res.status(500).json({ error: 'Erro ao gerar documento' });
   }
 });
 

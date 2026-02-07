@@ -1841,7 +1841,7 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Erro dashboard-completo:', err.message);
-    res.status(500).json({ error: 'Erro ao carregar dashboard', details: err.message });
+    res.status(500).json({ error: 'Erro ao carregar dashboard'})   ;
   }
 });
 
@@ -2141,7 +2141,7 @@ router.get('/bi/os-profissional/:cod_prof', async (req, res) => {
     
   } catch (error) {
     console.error('Erro OS profissional:', error);
-    res.status(500).json({ error: 'Erro ao buscar OS do profissional', details: error.message });
+    res.status(500).json({ error: 'Erro ao buscar OS do profissional'})   ;
   }
 });
 

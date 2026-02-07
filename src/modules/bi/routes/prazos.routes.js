@@ -400,7 +400,7 @@ router.post('/bi/inicializar-prazos-dax', async (req, res) => {
     });
   } catch (error) {
     console.error('Erro ao inicializar prazos DAX:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -425,7 +425,7 @@ router.post('/bi/preencher-hora-solicitado', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Erro ao preencher hora_solicitado:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -533,7 +533,7 @@ router.get('/bi/diagnostico', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Erro no diagnóstico:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 

@@ -327,7 +327,7 @@ router.get('/bi/garantido', async (req, res) => {
     res.json({ dados: resultados, totais });
   } catch (error) {
     console.error('Erro ao buscar dados garantido:', error);
-    res.status(500).json({ error: 'Erro ao buscar dados de garantido', details: error.message });
+    res.status(500).json({ error: 'Erro ao buscar dados de garantido'})   ;
   }
 });
 
@@ -749,7 +749,7 @@ router.put('/bi/garantido/status', async (req, res) => {
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Erro ao atualizar status garantido:', error);
-    res.status(500).json({ error: 'Erro ao atualizar status', details: error.message });
+    res.status(500).json({ error: 'Erro ao atualizar status'})   ;
   }
 });
 

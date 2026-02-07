@@ -15,6 +15,7 @@ const { pool, testConnection } = require('./src/config/database');
 const { logger } = require('./src/config/logger');
 const { setupCors } = require('./src/config/cors');
 const helmetConfig = require('./src/config/helmet');
+const { additionalSecurityHeaders } = require('./src/config/helmet');
 const { setupWebSocket, registerGlobals } = require('./src/config/websocket');
 
 // ─── Middleware ────────────────────────────────────────────
@@ -22,6 +23,8 @@ const { verificarToken, verificarAdmin, verificarAdminOuFinanceiro } = require('
 const { getClientIP, apiLimiter, loginLimiter, createAccountLimiter } = require('./src/middleware/rateLimiter');
 const { notFoundHandler, globalErrorHandler } = require('./src/middleware/errorHandler');
 const requestLogger = require('./src/middleware/requestLogger');
+const { sanitizeInput } = require("./src/middleware/inputSanitizer");
+const { verificarWebhookSignature, webhookBasicValidation } = require("./src/middleware/webhookAuth");
 
 // ─── Shared ───────────────────────────────────────────────
 const { AUDIT_CATEGORIES } = require('./src/shared/constants');
@@ -72,6 +75,10 @@ app.use(requestLogger);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Input sanitization (after body parsing)
+app.use(sanitizeInput);
+app.use(additionalSecurityHeaders);
+
 // ─── Health checks ────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -86,6 +93,10 @@ app.get('/api/health', (req, res) => {
 app.get('/api/version', (req, res) => {
   res.json({ version: env.SERVER_VERSION, timestamp: new Date().toISOString() });
 });
+
+// 🔒 Webhook security (before routes)
+app.use("/api/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
+app.use("/api/solicitacao/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
 
 // ─── Mount modules ────────────────────────────────────────
 

@@ -476,7 +476,7 @@ router.post('/bi/entregas/upload', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Erro no upload:', err);
-    res.status(500).json({ error: 'Erro ao fazer upload: ' + err.message });
+    res.status(500).json({ error: 'Erro ao fazer upload' });
   }
 });
 
@@ -610,7 +610,7 @@ router.post('/bi/atualizar-resumos', async (req, res) => {
     res.json(resultado);
   } catch (err) {
     console.error('❌ Erro ao atualizar resumos:', err);
-    res.status(500).json({ error: 'Erro ao atualizar resumos: ' + err.message });
+    res.status(500).json({ error: 'Erro ao atualizar resumos' });
   }
 });
 

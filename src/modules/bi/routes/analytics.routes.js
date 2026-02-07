@@ -186,7 +186,7 @@ router.get('/bi/mapa-calor', async (req, res) => {
     
   } catch (error) {
     console.error('Erro mapa de calor:', error);
-    res.status(500).json({ error: 'Erro ao gerar mapa de calor', details: error.message });
+    res.status(500).json({ error: 'Erro ao gerar mapa de calor'})   ;
   }
 });
 
@@ -400,7 +400,7 @@ router.get('/bi/acompanhamento-periodico', async (req, res) => {
     
   } catch (error) {
     console.error('Erro acompanhamento periódico:', error);
-    res.status(500).json({ error: 'Erro ao gerar acompanhamento', details: error.message });
+    res.status(500).json({ error: 'Erro ao gerar acompanhamento'})   ;
   }
 });
 
@@ -623,7 +623,7 @@ router.get('/bi/comparativo-semanal', async (req, res) => {
     
   } catch (error) {
     console.error('Erro comparativo semanal:', error);
-    res.status(500).json({ error: 'Erro ao gerar comparativo semanal', details: error.message });
+    res.status(500).json({ error: 'Erro ao gerar comparativo semanal'})   ;
   }
 });
 
@@ -849,7 +849,7 @@ router.get('/bi/comparativo-semanal-clientes', async (req, res) => {
     
   } catch (error) {
     console.error('Erro comparativo semanal por cliente:', error);
-    res.status(500).json({ error: 'Erro ao gerar comparativo semanal por cliente', details: error.message });
+    res.status(500).json({ error: 'Erro ao gerar comparativo semanal por cliente'})   ;
   }
 });
 
@@ -1244,7 +1244,7 @@ router.get('/bi/acompanhamento-clientes', async (req, res) => {
     
   } catch (error) {
     console.error('Erro acompanhamento clientes:', error);
-    res.status(500).json({ error: 'Erro ao buscar dados de clientes', details: error.message });
+    res.status(500).json({ error: 'Erro ao buscar dados de clientes'})   ;
   }
 });
 
@@ -1804,7 +1804,7 @@ router.get('/bi/cliente-767', async (req, res) => {
     
   } catch (error) {
     console.error('Erro cliente 767:', error);
-    res.status(500).json({ error: 'Erro ao buscar dados do cliente 767', details: error.message });
+    res.status(500).json({ error: 'Erro ao buscar dados do cliente 767'})   ;
   }
 });
 

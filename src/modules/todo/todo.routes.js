@@ -931,7 +931,7 @@ router.put('/todo/tarefas/:id/kanban', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao mover tarefa no kanban:', err);
-    res.status(500).json({ error: 'Erro ao mover tarefa', details: err.message });
+    res.status(500).json({ error: 'Erro ao mover tarefa' });
   }
 });
 
