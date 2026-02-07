@@ -1207,7 +1207,7 @@ router.get('/solicitacao/profissionais', verificarTokenSolicitacao, async (req, 
     
     // Buscar profissionais na API Tutts
     const payloadTutts = {
-      token: TUTTS_TOKENS.PROFISSIONAIS,
+      token: process.env.TUTTS_TOKEN_PROFISSIONAIS,
       codCliente: codCliente
     };
     
