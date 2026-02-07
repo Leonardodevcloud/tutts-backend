@@ -26,6 +26,7 @@ const { notFoundHandler, globalErrorHandler } = require('./src/middleware/errorH
 const requestLogger = require('./src/middleware/requestLogger');
 const { sanitizeInput } = require("./src/middleware/inputSanitizer");
 const { verificarWebhookSignature, webhookBasicValidation } = require("./src/middleware/webhookAuth");
+const { verificarCsrf } = require("./src/middleware/csrf");
 
 // ─── Shared ───────────────────────────────────────────────
 const { AUDIT_CATEGORIES } = require('./src/shared/constants');
@@ -80,6 +81,9 @@ app.use(cookieParser());
 // Input sanitization (after body parsing)
 app.use(sanitizeInput);
 app.use(additionalSecurityHeaders);
+
+// 🔒 CSRF protection (after cookie parsing, before routes)
+app.use(verificarCsrf);
 
 // ─── Health checks ────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -202,3 +206,29 @@ initDatabase().then(() => {
     }
   });
 });
+
+// ─── Graceful Shutdown ────────────────────────────────────
+function gracefulShutdown(signal) {
+  console.log(`\n🛑 ${signal} recebido. Encerrando graciosamente...`);
+  
+  server.close(async () => {
+    console.log('📡 Novas conexões recusadas');
+    try {
+      await pool.end();
+      console.log('🗄️ Pool de conexões encerrado');
+    } catch (err) {
+      console.error('Erro ao encerrar pool:', err.message);
+    }
+    console.log('✅ Shutdown completo');
+    process.exit(0);
+  });
+
+  // Forçar encerramento se demorar mais de 15s
+  setTimeout(() => {
+    console.error('⚠️ Forçando encerramento após timeout');
+    process.exit(1);
+  }, 15000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

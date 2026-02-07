@@ -29,9 +29,9 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
     try {
       const { cod_prof, data_inicio, data_fim } = req.body;
 
-      let whereClause = `WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL AND data_solicitado >= '${DATA_MINIMA_SCORE}'`;
-      const params = [];
-      let paramIndex = 1;
+      let whereClause = `WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo_prof IS NOT NULL AND data_solicitado >= $1`;
+      const params = [DATA_MINIMA_SCORE];
+      let paramIndex = 2;
 
       if (cod_prof) {
         whereClause += ` AND cod_prof = $${paramIndex}`;
@@ -51,11 +51,11 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
 
       // Limpar histórico antigo
       if (!cod_prof) {
-        await pool.query(`DELETE FROM score_historico WHERE data_os < '${DATA_MINIMA_SCORE}'`);
+        await pool.query(`DELETE FROM score_historico WHERE data_os < $1`, [DATA_MINIMA_SCORE]);
         await pool.query('TRUNCATE score_totais');
         await pool.query('TRUNCATE score_conquistas');
       } else {
-        await pool.query(`DELETE FROM score_historico WHERE cod_prof = $1 AND data_os < '${DATA_MINIMA_SCORE}'`, [cod_prof]);
+        await pool.query(`DELETE FROM score_historico WHERE cod_prof = $1 AND data_os < $2`, [cod_prof, DATA_MINIMA_SCORE]);
       }
 
       await pool.query('ALTER TABLE score_historico ADD COLUMN IF NOT EXISTS distancia_km DECIMAL(10,2)').catch(() => {});
@@ -135,7 +135,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao recalcular score:', error);
-      res.status(500).json({ error: 'Erro ao recalcular score'})   ;
+      res.status(500).json({ error: 'Erro ao recalcular score', details: error.message });
     }
   });
 
@@ -225,7 +225,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao buscar score do profissional:', error);
-      res.status(500).json({ error: 'Erro ao buscar score'})   ;
+      res.status(500).json({ error: 'Erro ao buscar score', details: error.message });
     }
   });
 
@@ -306,7 +306,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       res.json({ ranking, total_profissionais: ranking.length, filtros: { data_inicio, data_fim, limite, ordem } });
     } catch (error) {
       console.error('Erro ao buscar ranking:', error);
-      res.status(500).json({ error: 'Erro ao buscar ranking'})   ;
+      res.status(500).json({ error: 'Erro ao buscar ranking', details: error.message });
     }
   });
 
@@ -399,7 +399,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao resetar milestones:', error);
-      res.status(500).json({ error: 'Erro ao resetar milestones'})   ;
+      res.status(500).json({ error: 'Erro ao resetar milestones', details: error.message });
     }
   });
 
@@ -446,7 +446,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao aplicar gratuidades:', error);
-      res.status(500).json({ error: 'Erro ao aplicar gratuidades'})   ;
+      res.status(500).json({ error: 'Erro ao aplicar gratuidades', details: error.message });
     }
   });
 
@@ -519,7 +519,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao resetar gratuidades:', error);
-      res.status(500).json({ error: 'Erro ao resetar gratuidades'})   ;
+      res.status(500).json({ error: 'Erro ao resetar gratuidades', details: error.message });
     }
   });
 
@@ -628,7 +628,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       res.json({ success: true, message: 'Prêmio confirmado com sucesso!', premio: result.rows[0] });
     } catch (error) {
       console.error('Erro ao confirmar prêmio:', error);
-      res.status(500).json({ error: 'Erro ao confirmar prêmio'})   ;
+      res.status(500).json({ error: 'Erro ao confirmar prêmio', details: error.message });
     }
   });
 
@@ -688,7 +688,7 @@ function initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditori
       });
     } catch (error) {
       console.error('Erro ao buscar estatísticas:', error);
-      res.status(500).json({ error: 'Erro ao buscar estatísticas'})   ;
+      res.status(500).json({ error: 'Erro ao buscar estatísticas', details: error.message });
     }
   });
 

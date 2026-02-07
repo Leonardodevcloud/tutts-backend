@@ -15,6 +15,7 @@ const {
   generateTOTPSecret, verifyTOTP, generateTOTPUri, generateBackupCodes
 } = require('./auth.service');
 const { setAuthCookies, clearAuthCookies, REFRESH_COOKIE_NAME } = require('../../config/cookies');
+const { gerarCsrfToken, setCsrfCookie, clearCsrfCookie } = require('../../middleware/csrf');
 
 function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter) {
   const router = express.Router();
@@ -464,9 +465,14 @@ router.post('/users/register', createAccountLimiter, async (req, res) => {
     // 🔒 Set HttpOnly cookie
     setAuthCookies(res, token, null);
     
+    // 🔒 Set CSRF cookie
+    const csrfToken = gerarCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    
     res.status(201).json({
       ...result.rows[0],
-      token
+      token,
+      csrfToken
     });
   } catch (error) {
     return handleError(res, error, 'Erro ao registrar usuário');
@@ -614,10 +620,15 @@ router.post('/users/login', loginLimiter, async (req, res) => {
     // 🔒 Set HttpOnly cookies (seguro)
     setAuthCookies(res, token, refreshToken);
     
+    // 🔒 Set CSRF cookie (legível pelo JS para Double Submit)
+    const csrfToken = gerarCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    
     res.json({
       ...user,
       token,           // Body: compatibilidade durante migração frontend
       refreshToken,    // Body: compatibilidade durante migração frontend
+      csrfToken,       // Frontend salva e envia como header
       expiresIn: 3600
     });
   } catch (error) {
@@ -677,18 +688,24 @@ router.post('/users/refresh-token', async (req, res) => {
     // Gerar novo access token
     const newToken = gerarToken(user);
     
-    // Opcionalmente, rotacionar refresh token (mais seguro)
-    // const newRefreshToken = gerarRefreshToken(user);
-    // await revogarRefreshToken(validacao.tokenId);
-    // await salvarRefreshToken(user.id, newRefreshToken, req);
+    // 🔒 Rotação de refresh token (invalida o anterior a cada uso)
+    const newRefreshToken = gerarRefreshToken(user);
+    await revogarRefreshToken(validacao.tokenId);
+    await salvarRefreshToken(user.id, newRefreshToken, req);
     
-    console.log('🔄 Token renovado para:', user.cod_profissional);
+    console.log('🔄 Token renovado (com rotação) para:', user.cod_profissional);
     
-    // 🔒 Set new access token cookie
-    setAuthCookies(res, newToken, null);
+    // 🔒 Set cookies (access + novo refresh)
+    setAuthCookies(res, newToken, newRefreshToken);
+    
+    // 🔒 Renovar CSRF token
+    const csrfToken = gerarCsrfToken();
+    setCsrfCookie(res, csrfToken);
     
     res.json({ 
       token: newToken,
+      refreshToken: newRefreshToken,
+      csrfToken,
       expiresIn: 3600,
       user: {
         id: user.id,
@@ -719,6 +736,7 @@ router.post('/users/logout', verificarToken, async (req, res) => {
         sessoes_revogadas: count
       });
       clearAuthCookies(res);
+      clearCsrfCookie(res);
       return res.json({ message: `Logout realizado em ${count} dispositivo(s)` });
     }
     
@@ -732,6 +750,7 @@ router.post('/users/logout', verificarToken, async (req, res) => {
     
     // 🔒 Limpar cookies
     clearAuthCookies(res);
+    clearCsrfCookie(res);
     
     await registrarAuditoria(req, 'LOGOUT', AUDIT_CATEGORIES.AUTH, 'users', req.user.id);
     res.json({ message: 'Logout realizado com sucesso' });
@@ -1000,6 +1019,11 @@ router.post('/users/2fa/authenticate', async (req, res) => {
     
     // 🔒 Set HttpOnly cookies
     setAuthCookies(res, token, refreshToken);
+    
+    // 🔒 Set CSRF cookie
+    const csrfToken = gerarCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    response.csrfToken = csrfToken;
     
     res.json(response);
   } catch (error) {
