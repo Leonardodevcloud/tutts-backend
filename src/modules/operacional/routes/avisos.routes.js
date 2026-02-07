@@ -1,3 +1,4 @@
+const express = require('express');
 function createAvisosRouter(pool) {
   const router = express.Router();
 
