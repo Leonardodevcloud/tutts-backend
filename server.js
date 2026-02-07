@@ -28,7 +28,7 @@ const { initDisponibilidadeRoutes, initDisponibilidadeTables } = require('./src/
 const { initFinancialRoutes, initFinancialTables } = require('./src/modules/financial');
 const { initSolicitacaoRoutes, initSolicitacaoTables } = require('./src/modules/solicitacao');
 const { initBiRoutes, initBiTables } = require('./src/modules/bi');
-const { initTodoRoutes, initTodoTables } = require('./src/modules/todo');
+const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 
 // Função para fazer requisições HTTP/HTTPS (substitui fetch)
@@ -1300,10 +1300,8 @@ server.listen(port, () => {
     websocket: `ws://localhost:${port}/ws/financeiro`
   });
   
-  // Processar recorrências a cada hora
-  setInterval(processarRecorrenciasInterno, 60 * 60 * 1000);
-  setTimeout(processarRecorrenciasInterno, 10000);
-  logger.info('Processamento de recorrências ativado', { intervalo: '1h' });
+  // Processar recorrências Todo
+  initTodoCron(pool);
   
   // ==================== CRON JOBS DO SCORE (EXTRAÍDO) ====================
   initScoreCron(cron, pool);
