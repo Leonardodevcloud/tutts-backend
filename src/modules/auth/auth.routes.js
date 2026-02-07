@@ -3,7 +3,7 @@ const { createAuthHelpers } = require('./auth.shared');
 const { createAuthCoreRoutes } = require('./routes/core.routes');
 const { createUserManagementRoutes } = require('./routes/userManagement.routes');
 
-function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter) {
+function createUserManagementRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, loginLimiter) {
   const router = express.Router();
   const helpers = createAuthHelpers(pool);
 
