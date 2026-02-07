@@ -1,15 +1,36 @@
 /**
  * src/middleware/auth.js
  * Middlewares de autenticação e autorização
+ * 
+ * Prioridade de leitura do token:
+ *   1. Cookie HttpOnly 'tutts_access' (mais seguro)
+ *   2. Header Authorization: Bearer <token> (compatibilidade)
  */
 
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
+const { ACCESS_COOKIE_NAME } = require('../config/cookies');
+
+/**
+ * Extrai o token JWT da request
+ * Prioridade: cookie > header
+ */
+function extractToken(req) {
+  // 1. Cookie HttpOnly (mais seguro)
+  if (req.cookies && req.cookies[ACCESS_COOKIE_NAME]) {
+    return req.cookies[ACCESS_COOKIE_NAME];
+  }
+  // 2. Header Authorization (fallback / compatibilidade)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.split(' ')[1];
+  }
+  return null;
+}
 
 // Verificar token JWT (obrigatório)
 const verificarToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = extractToken(req);
 
   if (!token) {
     return res.status(401).json({ error: 'Token não fornecido' });
@@ -28,8 +49,7 @@ const verificarToken = (req, res, next) => {
 
 // Verificar token JWT (opcional - não bloqueia, mas adiciona user se tiver)
 const verificarTokenOpcional = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = extractToken(req);
 
   if (token) {
     try {
@@ -59,15 +79,14 @@ const verificarAdminOuFinanceiro = (req, res, next) => {
 
 // Verificar se é o próprio usuário ou admin
 const verificarProprioOuAdmin = (req, res, next) => {
-  const userCod = req.params.cod_prof || req.params.userCod || req.body.user_cod;
-  if (!req.user) {
-    return res.status(401).json({ error: 'Não autenticado' });
+  const targetCod = req.params.codProfissional || req.body.codProfissional;
+  if (
+    req.user &&
+    (req.user.codProfissional === targetCod || ['admin', 'admin_master'].includes(req.user.role))
+  ) {
+    return next();
   }
-  if (['admin', 'admin_master'].includes(req.user.role) || req.user.codProfissional === userCod) {
-    next();
-  } else {
-    return res.status(403).json({ error: 'Acesso negado' });
-  }
+  return res.status(403).json({ error: 'Acesso negado.' });
 };
 
 module.exports = {
@@ -76,4 +95,5 @@ module.exports = {
   verificarAdmin,
   verificarAdminOuFinanceiro,
   verificarProprioOuAdmin,
+  extractToken,
 };

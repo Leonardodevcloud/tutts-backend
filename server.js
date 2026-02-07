@@ -8,6 +8,7 @@ const express = require('express');
 const http = require('http');
 const dns = require('dns');
 const cron = require('node-cron');
+const cookieParser = require('cookie-parser');
 
 // ─── Config ───────────────────────────────────────────────
 const env = require('./src/config/env');
@@ -74,6 +75,7 @@ app.use(requestLogger);
 // Body parsing
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cookieParser());
 
 // Input sanitization (after body parsing)
 app.use(sanitizeInput);
@@ -191,6 +193,12 @@ initDatabase().then(() => {
 
     // Cron jobs
     initTodoCron(pool);
-    initScoreCron(cron, pool);
+    // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
+    if (process.env.WORKER_ENABLED === 'true') {
+      console.log('⏰ Crons desativados no server (rodando no worker separado)');
+    } else {
+      initScoreCron(cron, pool);
+      console.log('⏰ Crons rodando no server (defina WORKER_ENABLED=true para separar)');
+    }
   });
 });

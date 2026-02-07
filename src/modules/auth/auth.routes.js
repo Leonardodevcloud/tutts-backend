@@ -14,6 +14,7 @@ const {
   encryptSecret, decryptSecret,
   generateTOTPSecret, verifyTOTP, generateTOTPUri, generateBackupCodes
 } = require('./auth.service');
+const { setAuthCookies, clearAuthCookies, REFRESH_COOKIE_NAME } = require('../../config/cookies');
 
 function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES, getClientIP, loginLimiter, createAccountLimiter) {
   const router = express.Router();
@@ -404,8 +405,11 @@ const getUserTOTPSecret = async (userId) => {
 // ==================== FIM FUNÇÕES DE 2FA ====================
 
   // ==================== TIMERS ====================
-  setInterval(limparBloqueiosExpirados, 5 * 60 * 1000);
-  setInterval(limparRefreshTokensExpirados, 60 * 60 * 1000);
+  if (process.env.WORKER_ENABLED !== 'true') {
+    setInterval(limparBloqueiosExpirados, 5 * 60 * 1000);
+    setInterval(limparRefreshTokensExpirados, 60 * 60 * 1000);
+    console.log('⏰ Auth cleanup timers ativos no server');
+  }
 
   // ==================== ENDPOINTS ====================
 
@@ -456,6 +460,9 @@ router.post('/users/register', createAccountLimiter, async (req, res) => {
     
     // Gerar token JWT para o novo usuário
     const token = gerarToken(result.rows[0]);
+    
+    // 🔒 Set HttpOnly cookie
+    setAuthCookies(res, token, null);
     
     res.status(201).json({
       ...result.rows[0],
@@ -604,11 +611,14 @@ router.post('/users/login', loginLimiter, async (req, res) => {
     const refreshToken = gerarRefreshToken(user);
     await salvarRefreshToken(user.id, refreshToken, req);
     
+    // 🔒 Set HttpOnly cookies (seguro)
+    setAuthCookies(res, token, refreshToken);
+    
     res.json({
       ...user,
-      token,
-      refreshToken,
-      expiresIn: 3600 // 1 hora em segundos
+      token,           // Body: compatibilidade durante migração frontend
+      refreshToken,    // Body: compatibilidade durante migração frontend
+      expiresIn: 3600
     });
   } catch (error) {
     return handleError(res, error, 'Erro ao fazer login');
@@ -623,7 +633,8 @@ router.get('/users/verify-token', verificarToken, (req, res) => {
 // Endpoint para renovar token usando refresh token
 router.post('/users/refresh-token', async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    // 🔒 Ler refresh token: cookie (prioridade) > body (compat)
+    const refreshToken = (req.cookies && req.cookies[REFRESH_COOKIE_NAME]) || req.body.refreshToken;
     
     if (!refreshToken) {
       return res.status(400).json({ error: 'Refresh token é obrigatório' });
@@ -673,9 +684,11 @@ router.post('/users/refresh-token', async (req, res) => {
     
     console.log('🔄 Token renovado para:', user.cod_profissional);
     
+    // 🔒 Set new access token cookie
+    setAuthCookies(res, newToken, null);
+    
     res.json({ 
       token: newToken,
-      // refreshToken: newRefreshToken, // Descomente se rotacionar
       expiresIn: 3600,
       user: {
         id: user.id,
@@ -695,7 +708,9 @@ router.post('/users/refresh-token', async (req, res) => {
 // Endpoint para logout (revogar refresh token)
 router.post('/users/logout', verificarToken, async (req, res) => {
   try {
-    const { refreshToken, allDevices } = req.body;
+    // 🔒 Ler refresh token: cookie (prioridade) > body (compat)
+    const refreshToken = (req.cookies && req.cookies[REFRESH_COOKIE_NAME]) || req.body.refreshToken;
+    const { allDevices } = req.body;
     
     if (allDevices) {
       // Revogar todas as sessões
@@ -703,6 +718,7 @@ router.post('/users/logout', verificarToken, async (req, res) => {
       await registrarAuditoria(req, 'LOGOUT_ALL', AUDIT_CATEGORIES.AUTH, 'users', req.user.id, {
         sessoes_revogadas: count
       });
+      clearAuthCookies(res);
       return res.json({ message: `Logout realizado em ${count} dispositivo(s)` });
     }
     
@@ -713,6 +729,9 @@ router.post('/users/logout', verificarToken, async (req, res) => {
         await revogarRefreshToken(validacao.tokenId);
       }
     }
+    
+    // 🔒 Limpar cookies
+    clearAuthCookies(res);
     
     await registrarAuditoria(req, 'LOGOUT', AUDIT_CATEGORIES.AUTH, 'users', req.user.id);
     res.json({ message: 'Logout realizado com sucesso' });
@@ -979,6 +998,9 @@ router.post('/users/2fa/authenticate', async (req, res) => {
       response.warning = `Atenção: Você tem apenas ${backupCodesRemaining} código(s) de backup restante(s). Considere gerar novos.`;
     }
     
+    // 🔒 Set HttpOnly cookies
+    setAuthCookies(res, token, refreshToken);
+    
     res.json(response);
   } catch (error) {
     return handleError(res, error, 'Erro na autenticação 2FA');
@@ -1091,7 +1113,7 @@ router.get('/users', verificarToken, verificarAdmin, async (req, res) => {
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar usuários:', error);
-    res.status(500).json({ error: 'Erro ao listar usuários' });
+    res.status(500).json({ error: 'Erro ao listar usuários: ' + error.message });
   }
 });
 
@@ -1120,7 +1142,7 @@ router.post('/users/reset-password', verificarToken, verificarAdmin, async (req,
     res.json({ message: 'Senha alterada com sucesso', user: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao resetar senha:', error);
-    res.status(500).json({ error: 'Erro ao resetar senha' });
+    res.status(500).json({ error: 'Erro ao resetar senha: ' + error.message });
   }
 });
 
@@ -1161,7 +1183,7 @@ router.post('/users/change-password', verificarToken, async (req, res) => {
     res.json({ message: 'Senha alterada com sucesso' });
   } catch (error) {
     console.error('❌ Erro ao alterar senha:', error);
-    res.status(500).json({ error: 'Erro ao alterar senha' });
+    res.status(500).json({ error: 'Erro ao alterar senha: ' + error.message });
   }
 });
 
@@ -1213,7 +1235,7 @@ router.patch('/users/:codProfissional/role', verificarToken, async (req, res) =>
     res.json({ message: 'Role atualizado com sucesso', user: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao atualizar role:', error);
-    res.status(500).json({ error: 'Erro ao atualizar role' });
+    res.status(500).json({ error: 'Erro ao atualizar role: ' + error.message });
   }
 });
 
@@ -1328,7 +1350,7 @@ router.delete('/users/:codProfissional', verificarToken, async (req, res) => {
     
   } catch (error) {
     console.error('❌ Erro ao deletar usuário:', error);
-    res.status(500).json({ error: 'Erro ao deletar usuário' });
+    res.status(500).json({ error: 'Erro ao deletar usuário: ' + error.message });
   }
 });
 
@@ -1381,7 +1403,7 @@ router.post('/password-recovery', loginLimiter, async (req, res) => {
     res.status(201).json({ success: true, message: 'Solicitação enviada com sucesso' });
   } catch (error) {
     console.error('❌ Erro na recuperação de senha:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1394,7 +1416,7 @@ router.get('/password-recovery', verificarToken, verificarAdmin, async (req, res
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar recuperações:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1451,7 +1473,7 @@ router.patch('/password-recovery/:id/reset', verificarToken, verificarAdmin, asy
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao resetar senha:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1478,7 +1500,7 @@ router.delete('/password-recovery/:id', verificarToken, verificarAdmin, async (r
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao deletar solicitação:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 

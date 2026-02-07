@@ -6,9 +6,8 @@
 
 const express = require('express');
 
-function createTodoRouter(pool, verificarToken) {
+function createTodoRouter(pool) {
   const router = express.Router();
-  if (verificarToken) router.use(verificarToken);
 
 router.get('/todo/grupos', async (req, res) => {
   try {
@@ -931,7 +930,7 @@ router.put('/todo/tarefas/:id/kanban', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao mover tarefa no kanban:', err);
-    res.status(500).json({ error: 'Erro ao mover tarefa'})   ;
+    res.status(500).json({ error: 'Erro ao mover tarefa', details: err.message });
   }
 });
 
@@ -1253,7 +1252,9 @@ module.exports = { createTodoRouter, initTodoCron: function(pool) {
       if (reabertas > 0) console.log(`🔄 ${reabertas} tarefas recorrentes reabertas`);
     } catch (err) { console.error('❌ Erro ao processar recorrências:', err.message); }
   };
-  setInterval(processarRecorrencias, 60 * 60 * 1000);
-  setTimeout(processarRecorrencias, 10000);
-  console.log('🔄 Cron de recorrências Todo ativado (intervalo: 1h)');
+  if (process.env.WORKER_ENABLED !== 'true') {
+    setInterval(processarRecorrencias, 60 * 60 * 1000);
+    setTimeout(processarRecorrencias, 10000);
+    console.log('🔄 Cron de recorrências Todo ativado (intervalo: 1h)');
+  }
 } };
