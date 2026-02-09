@@ -7,7 +7,14 @@ const express = require('express');
 
 function createMiscRouter(pool, verificarToken) {
   const router = express.Router();
-  if (verificarToken) router.use(verificarToken);
+
+  // Aplicar verificarToken apenas a rotas deste módulo (não bloquear outros módulos)
+  router.use((req, res, next) => {
+    if (req.path.startsWith('/setores') || req.path.startsWith('/relatorios-diarios')) {
+      if (verificarToken) return verificarToken(req, res, next);
+    }
+    next();
+  });
 
 router.get('/setores', async (req, res) => {
   try {

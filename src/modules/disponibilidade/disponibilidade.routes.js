@@ -8,7 +8,14 @@ const express = require('express');
 
 function createDisponibilidadeRouter(pool, verificarToken) {
   const router = express.Router();
-  if (verificarToken) router.use(verificarToken);
+
+  // Aplicar verificarToken apenas a rotas de disponibilidade (não bloquear rotas de outros módulos)
+  router.use((req, res, next) => {
+    if (req.path.startsWith('/disponibilidade')) {
+      if (verificarToken) return verificarToken(req, res, next);
+    }
+    next();
+  });
 
 // GET /api/disponibilidade - Lista todas as regiões, lojas e linhas
 router.get('/disponibilidade', async (req, res) => {

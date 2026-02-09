@@ -19,7 +19,14 @@ const { createAnalyticsRoutes } = require('./routes/analytics.routes');
 
 function createBiRouter(pool, verificarToken) {
   const router = express.Router();
-  if (verificarToken) router.use(verificarToken);
+
+  // Aplicar verificarToken apenas a rotas /bi/ (não bloquear rotas de outros módulos)
+  router.use((req, res, next) => {
+    if (req.path.startsWith('/bi')) {
+      if (verificarToken) return verificarToken(req, res, next);
+    }
+    next();
+  });
 
   // Função compartilhada entre sub-routers
   const atualizarResumos = createAtualizarResumos(pool);
