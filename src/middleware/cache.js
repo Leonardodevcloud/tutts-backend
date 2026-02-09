@@ -24,7 +24,7 @@ const staticCache = new NodeCache({
 });
 
 const shortCache = new NodeCache({ 
-  stdTTL: 30,         // 30s — notificações, filas, contadores
+  stdTTL: 30,         // 30s — notificações, contadores
   checkperiod: 15
 });
 
@@ -73,7 +73,6 @@ const BI_STATIC = new Set([
   '/api/bi/uploads',
   '/api/bi/garantido/meta',
   '/api/bi/garantido/status',
-  '/api/disponibilidade',
 ]);
 
 // Cache 30s: endpoints polled com frequência
@@ -81,8 +80,6 @@ const SHORT_PREFIXES = [
   '/api/notifications/',
   '/api/withdrawals/contadores',
   '/api/withdrawals/pendentes',
-  '/api/disponibilidade/motoboys',
-  '/api/disponibilidade/em-loja',
 ];
 
 // Operações que invalidam o cache
