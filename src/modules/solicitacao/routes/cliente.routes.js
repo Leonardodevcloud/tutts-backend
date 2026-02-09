@@ -4,6 +4,7 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const httpRequest = require('../../../shared/utils/httpRequest');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
