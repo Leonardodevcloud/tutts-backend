@@ -55,6 +55,7 @@ const BI_HEAVY = new Set([
 
 // Cache 10 min: dados que mudam raramente
 const BI_STATIC = new Set([
+  '/api/bi/filtros-iniciais',
   '/api/bi/cidades',
   '/api/bi/clientes',
   '/api/bi/clientes-por-regiao',

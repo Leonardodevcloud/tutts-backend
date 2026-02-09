@@ -649,6 +649,62 @@ router.get('/bi/datas', async (req, res) => {
 // Listar uploads realizados
 // Listar histórico de uploads
 
+// ============================================
+// ENDPOINT COMBINADO: Todos os filtros em 1 request
+// Substitui 11 fetches separados por 1 único com queries paralelas
+// ============================================
+router.get('/bi/filtros-iniciais', async (req, res) => {
+  try {
+    const t0 = Date.now();
+    
+    // Executar TODAS as queries em paralelo (1 round-trip)
+    const [
+      clientesR, centrosCustoR, profissionaisR, datasR, uploadsR,
+      cidadesR, clienteCentrosR, categoriasR, regioesR, dadosFiltroR, mascarasR
+    ] = await Promise.all([
+      pool.query(`SELECT DISTINCT cod_cliente, nome_cliente FROM bi_entregas WHERE cod_cliente IS NOT NULL ORDER BY nome_cliente`),
+      pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`),
+      pool.query(`SELECT DISTINCT cod_prof, nome_prof FROM bi_entregas WHERE cod_prof IS NOT NULL ORDER BY nome_prof`),
+      pool.query(`SELECT DISTINCT data_solicitado as data, COUNT(*) as total FROM bi_entregas WHERE data_solicitado IS NOT NULL GROUP BY data_solicitado ORDER BY data_solicitado DESC`),
+      pool.query(`SELECT id, usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload FROM bi_upload_historico ORDER BY data_upload DESC LIMIT 50`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT DISTINCT cidade, COUNT(*) as total FROM bi_entregas WHERE cidade IS NOT NULL AND cidade != '' GROUP BY cidade ORDER BY total DESC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT cod_cliente, centro_custo FROM bi_entregas WHERE cod_cliente IS NOT NULL AND centro_custo IS NOT NULL AND centro_custo != '' GROUP BY cod_cliente, centro_custo ORDER BY cod_cliente, centro_custo`),
+      pool.query(`SELECT DISTINCT categoria FROM bi_entregas WHERE categoria IS NOT NULL AND categoria != '' ORDER BY categoria`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT * FROM bi_regioes ORDER BY nome`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT DISTINCT cod_cliente, centro_custo, categoria FROM bi_entregas WHERE cod_cliente IS NOT NULL`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT * FROM bi_mascaras ORDER BY cod_cliente`).catch(() => ({ rows: [] }))
+    ]);
+    
+    // Montar mapa cliente-centros
+    const clienteCentrosMapa = {};
+    clienteCentrosR.rows.forEach(r => {
+      const cod = String(r.cod_cliente);
+      if (!clienteCentrosMapa[cod]) clienteCentrosMapa[cod] = [];
+      clienteCentrosMapa[cod].push(r.centro_custo);
+    });
+    
+    const elapsed = Date.now() - t0;
+    console.log(`📊 /bi/filtros-iniciais: ${elapsed}ms (11 queries paralelas)`);
+    
+    res.json({
+      clientes: (clientesR.rows || []).sort((a, b) => (parseInt(a.cod_cliente) || 0) - (parseInt(b.cod_cliente) || 0)),
+      centros_custo: centrosCustoR.rows || [],
+      profissionais: profissionaisR.rows || [],
+      datas: datasR.rows || [],
+      uploads: uploadsR.rows || [],
+      cidades: cidadesR.rows || [],
+      cliente_centros: clienteCentrosMapa,
+      categorias: (categoriasR.rows || []).map(r => r.categoria),
+      regioes: regioesR.rows || [],
+      dados_filtro: dadosFiltroR.rows || [],
+      mascaras: mascarasR.rows || []
+    });
+  } catch (err) {
+    console.error('❌ Erro em /bi/filtros-iniciais:', err);
+    res.status(500).json({ error: 'Erro ao carregar filtros' });
+  }
+});
+
   return router;
 }
 
