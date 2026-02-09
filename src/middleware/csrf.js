@@ -74,6 +74,13 @@ function verificarCsrf(req, res, next) {
     return next();
   }
 
+  // JWT Bearer token no header Authorization já protege contra CSRF
+  // (browser não envia automaticamente como faz com cookies)
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+
   const cookieToken = req.cookies && req.cookies[CSRF_COOKIE_NAME];
   const headerToken = req.headers[CSRF_HEADER_NAME];
 
