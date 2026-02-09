@@ -27,6 +27,7 @@ const requestLogger = require('./src/middleware/requestLogger');
 const { sanitizeInput } = require("./src/middleware/inputSanitizer");
 const { verificarWebhookSignature, webhookBasicValidation } = require("./src/middleware/webhookAuth");
 const { verificarCsrf } = require("./src/middleware/csrf");
+const { cacheMiddleware, cacheInvalidationMiddleware } = require("./src/middleware/cache");
 
 // ─── Shared ───────────────────────────────────────────────
 const { AUDIT_CATEGORIES } = require('./src/shared/constants');
@@ -84,6 +85,10 @@ app.use(additionalSecurityHeaders);
 
 // 🔒 CSRF protection (after cookie parsing, before routes)
 app.use(verificarCsrf);
+
+// ⚡ Cache middleware (reduz compute hours no Neon)
+app.use(cacheMiddleware);
+app.use(cacheInvalidationMiddleware);
 
 // ─── Health checks ────────────────────────────────────────
 app.get('/health', (req, res) => {

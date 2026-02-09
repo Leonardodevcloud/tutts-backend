@@ -17,8 +17,8 @@ const isLocalhost = env.DATABASE_URL?.includes('localhost');
 const pool = new Pool({
   connectionString: env.DATABASE_URL,
   ssl: isLocalhost ? false : sslConfig,
-  max: 20,
-  idleTimeoutMillis: 30000,
+  max: 5,                       // reduzido de 20 — com Neon Pooler, 5 basta
+  idleTimeoutMillis: 10000,     // reduzido de 30s — libera conexões mais rápido
   connectionTimeoutMillis: 10000,
   application_name: 'tutts-backend',
 });
