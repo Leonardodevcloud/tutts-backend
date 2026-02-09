@@ -177,6 +177,135 @@ router.post('/submissions', verificarToken, async (req, res) => {
   }
 });
 
+// GET - Dashboard stats (LEVE - só contadores, 1 query)
+router.get('/submissions/dashboard', verificarToken, async (req, res) => {
+  try {
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    if (!isAdmin) return res.status(403).json({ error: 'Acesso negado' });
+
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE status = 'pendente') as pendentes,
+        COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados,
+        COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
+        COUNT(*) FILTER (WHERE status = 'pendente' 
+          AND created_at < NOW() - INTERVAL '24 hours'
+          AND EXTRACT(DOW FROM created_at) BETWEEN 1 AND 5
+          AND EXTRACT(HOUR FROM created_at) BETWEEN 9 AND 17
+        ) as atrasadas,
+        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) as hoje_total,
+        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE AND status != 'pendente') as hoje_processadas,
+        COALESCE(AVG(
+          CASE WHEN status != 'pendente' AND updated_at IS NOT NULL AND created_at IS NOT NULL
+            AND EXTRACT(DOW FROM created_at) BETWEEN 1 AND 5
+            AND EXTRACT(HOUR FROM created_at) BETWEEN 9 AND 17
+          THEN EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0
+          END
+        ), 0) as tempo_medio_horas
+      FROM submissions
+    `);
+
+    const motivos = await pool.query(`
+      SELECT motivo, COUNT(*) as total
+      FROM submissions
+      GROUP BY motivo
+      ORDER BY total DESC
+    `);
+
+    const atrasadasOS = await pool.query(`
+      SELECT ordem_servico
+      FROM submissions
+      WHERE status = 'pendente'
+        AND created_at < NOW() - INTERVAL '24 hours'
+      ORDER BY created_at ASC
+      LIMIT 10
+    `);
+
+    const stats = result.rows[0];
+    res.json({
+      total: parseInt(stats.total),
+      pendentes: parseInt(stats.pendentes),
+      aprovados: parseInt(stats.aprovados),
+      rejeitados: parseInt(stats.rejeitados),
+      atrasadas: parseInt(stats.atrasadas),
+      hoje_total: parseInt(stats.hoje_total),
+      hoje_processadas: parseInt(stats.hoje_processadas),
+      tempo_medio_horas: parseFloat(stats.tempo_medio_horas),
+      motivos: motivos.rows,
+      atrasadas_os: atrasadasOS.rows.map(r => r.ordem_servico)
+    });
+  } catch (error) {
+    console.error('❌ Erro dashboard submissions:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// GET - Busca com filtros (paginado)
+router.get('/submissions/busca', verificarToken, async (req, res) => {
+  try {
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    const { q, status, periodo, page = 1, limit = 50 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    let conditions = [];
+    let params = [];
+    let paramIdx = 1;
+
+    if (!isAdmin) {
+      conditions.push(`user_cod = $${paramIdx++}`);
+      params.push(req.user.codProfissional);
+    }
+
+    if (q && q.trim()) {
+      conditions.push(`(ordem_servico ILIKE $${paramIdx} OR user_cod ILIKE $${paramIdx} OR user_name ILIKE $${paramIdx})`);
+      params.push(`%${q.trim()}%`);
+      paramIdx++;
+    }
+
+    if (status) {
+      conditions.push(`status = $${paramIdx++}`);
+      params.push(status);
+    }
+
+    if (periodo === 'today') {
+      conditions.push(`created_at >= CURRENT_DATE`);
+    } else if (periodo === 'week') {
+      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '7 days'`);
+    } else if (periodo === 'month') {
+      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '30 days'`);
+    }
+
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM submissions ${where}`, params
+    );
+
+    const dataResult = await pool.query(`
+      SELECT 
+        id, ordem_servico, motivo, status, 
+        user_id, user_cod, user_name,
+        CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
+        observacao, validated_by, validated_by_name,
+        created_at, updated_at
+      FROM submissions ${where}
+      ORDER BY created_at DESC
+      LIMIT $${paramIdx++} OFFSET $${paramIdx}
+    `, [...params, parseInt(limit), offset]);
+
+    res.json({
+      submissions: dataResult.rows,
+      total: parseInt(countResult.rows[0].count),
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('❌ Erro busca submissions:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
 // GET - Listar submissões (REQUER AUTENTICAÇÃO)
 router.get('/submissions', verificarToken, async (req, res) => {
   try {
@@ -197,7 +326,7 @@ router.get('/submissions', verificarToken, async (req, res) => {
           created_at, updated_at
         FROM submissions 
         ORDER BY created_at DESC
-        LIMIT 10000
+        LIMIT 500
       `;
       params = [];
     } else {
