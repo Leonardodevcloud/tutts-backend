@@ -68,6 +68,7 @@ function verificarCsrf(req, res, next) {
     '/api/password-recovery',
     '/api/webhook',
     '/api/solicitacao/webhook',
+    '/api/solicitacao/login',
   ];
 
   if (rotasExcluidas.some(rota => req.path.startsWith(rota))) {
