@@ -81,7 +81,6 @@ const SHORT_PREFIXES = [
   '/api/notifications/',
   '/api/withdrawals/contadores',
   '/api/withdrawals/pendentes',
-  '/api/filas/',
   '/api/disponibilidade/motoboys',
   '/api/disponibilidade/em-loja',
 ];
