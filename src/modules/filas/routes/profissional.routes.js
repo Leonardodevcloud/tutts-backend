@@ -2,6 +2,7 @@
  * Sub-Router: Filas Profissional
  */
 const express = require('express');
+const { calcularDistanciaHaversine } = require('../filas.service');
 
 function createFilasProfRoutes(pool, verificarToken) {
   const router = express.Router();
