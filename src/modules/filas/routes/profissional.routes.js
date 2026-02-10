@@ -4,7 +4,7 @@
 const express = require('express');
 const { calcularDistanciaHaversine } = require('../filas.service');
 
-function createFilasProfRoutes(pool, verificarToken) {
+function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
   const router = express.Router();
 
   router.get('/minha-central', verificarToken, async (req, res) => {
