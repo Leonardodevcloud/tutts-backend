@@ -182,8 +182,7 @@ app.get('/api/init', verificarToken, async (req, res) => {
 });
 
 // ⚡ PERFORMANCE: Endpoint consolidado para módulo financeiro
-// Retorna CONTADORES + apenas registros PENDENTES (não todos os 4870)
-// Registros históricos carregam sob demanda quando muda de aba
+// SEM LEFT JOIN — restrições resolvidas em JS (instantâneo)
 app.get('/api/financeiro/init', verificarToken, async (req, res) => {
   try {
     const { role } = req.user;
@@ -192,94 +191,28 @@ app.get('/api/financeiro/init', verificarToken, async (req, res) => {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     
-    // Todas as queries em paralelo — mas LEVES
-    const [pendentesRes, countRes, pedidosRes, gratuidadesRes] = await Promise.all([
-      // 1. Apenas saques PENDENTES (tipicamente 10-30 registros = rápido)
-      pool.query(`
-        SELECT w.*, 
-          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-          r.reason as restriction_reason
-        FROM withdrawal_requests w
-        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.status IN ('pending', 'aguardando_aprovacao')
-        ORDER BY w.created_at DESC
-      `),
-      
-      // 2. Contadores por status (COUNT é rápido com índice)
-      pool.query(`
-        SELECT 
-          COUNT(*) FILTER (WHERE status = 'pending' OR status = 'aguardando_aprovacao') as pendentes,
-          COUNT(*) FILTER (WHERE status = 'approved') as aprovados,
-          COUNT(*) FILTER (WHERE status = 'rejected') as rejeitados,
-          COUNT(*) as total
-        FROM withdrawal_requests
-        WHERE created_at >= NOW() - INTERVAL '90 days'
-      `),
-      
-      // 3. Pedidos pendentes da loja
+    // 4 queries SIMPLES em paralelo — ZERO JOINs
+    const [saquesRes, restrictedRes, pedidosRes, gratuidadesRes] = await Promise.all([
+      pool.query(`SELECT * FROM withdrawal_requests ORDER BY created_at DESC LIMIT 100`),
+      pool.query(`SELECT user_cod, reason FROM restricted_professionals WHERE status = 'ativo'`),
       pool.query(`SELECT * FROM loja_pedidos WHERE status = 'pendente' ORDER BY created_at DESC LIMIT 50`),
-      
-      // 4. Gratuidades pendentes
       pool.query(`SELECT * FROM gratuities WHERE status = 'pending' ORDER BY created_at DESC LIMIT 50`)
     ]);
     
-    res.json({
-      withdrawals: pendentesRes.rows,
-      counts: countRes.rows[0] || { pendentes: 0, aprovados: 0, rejeitados: 0, total: 0 },
-      pedidos: pedidosRes.rows,
-      gratuidades: gratuidadesRes.rows,
-    });
+    // Enriquecer com restrições em JS (instantâneo)
+    const restrictedMap = {};
+    for (const r of restrictedRes.rows) restrictedMap[r.user_cod] = r.reason;
+    
+    const withdrawals = saquesRes.rows.map(w => ({
+      ...w,
+      is_restricted: !!restrictedMap[w.user_cod],
+      restriction_reason: restrictedMap[w.user_cod] || null,
+    }));
+    
+    res.json({ withdrawals, pedidos: pedidosRes.rows, gratuidades: gratuidadesRes.rows });
   } catch (error) {
     console.error('❌ Erro no /api/financeiro/init:', error.message);
     res.status(500).json({ error: 'Erro ao inicializar financeiro' });
-  }
-});
-
-// ⚡ PERFORMANCE: Endpoint para carregar saques por status (paginado)
-// Chamado quando admin clica em "Aprovadas", "Rejeitadas", etc.
-app.get('/api/financeiro/withdrawals-by-status', verificarToken, async (req, res) => {
-  try {
-    const { role } = req.user;
-    if (!['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
-      return res.status(403).json({ error: 'Acesso negado' });
-    }
-    
-    const { status, page = 1, limit = 50 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const safeLimit = Math.min(parseInt(limit) || 50, 200);
-    
-    let query, params;
-    if (status && status !== 'all') {
-      query = `
-        SELECT w.*, 
-          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-          r.reason as restriction_reason
-        FROM withdrawal_requests w
-        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.status = $1 AND w.created_at >= NOW() - INTERVAL '90 days'
-        ORDER BY w.created_at DESC
-        LIMIT $2 OFFSET $3
-      `;
-      params = [status, safeLimit, offset];
-    } else {
-      query = `
-        SELECT w.*, 
-          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-          r.reason as restriction_reason
-        FROM withdrawal_requests w
-        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.created_at >= NOW() - INTERVAL '90 days'
-        ORDER BY w.created_at DESC
-        LIMIT $1 OFFSET $2
-      `;
-      params = [safeLimit, offset];
-    }
-    
-    const result = await pool.query(query, params);
-    res.json(result.rows);
-  } catch (error) {
-    console.error('❌ Erro:', error.message);
-    res.status(500).json({ error: 'Erro ao buscar saques' });
   }
 });
 

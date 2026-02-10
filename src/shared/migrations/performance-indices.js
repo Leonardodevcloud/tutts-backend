@@ -21,11 +21,16 @@ async function createPerformanceIndices(pool) {
     // GIN index para busca em responsaveis JSONB
     'CREATE INDEX IF NOT EXISTS idx_todo_tarefas_responsaveis ON todo_tarefas USING GIN(responsaveis)',
     
-    // ===== FINANCIAL MODULE (withdrawals) =====
+    // ===== FINANCIAL MODULE (withdrawals) — ÍNDICES CRÍTICOS =====
+    // Composite index para a query principal (status + created_at DESC)
     'CREATE INDEX IF NOT EXISTS idx_withdrawals_status_created ON withdrawal_requests(status, created_at DESC)',
-    'CREATE INDEX IF NOT EXISTS idx_withdrawals_created_at ON withdrawal_requests(created_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_withdrawals_created_at_desc ON withdrawal_requests(created_at DESC)',
     'CREATE INDEX IF NOT EXISTS idx_withdrawals_user_cod ON withdrawal_requests(user_cod)',
+    // Índice para pendentes (a query mais frequente)
+    "CREATE INDEX IF NOT EXISTS idx_withdrawals_pending ON withdrawal_requests(created_at DESC) WHERE status IN ('pending','aguardando_aprovacao')",
+    // restricted_professionals — usado no LEFT JOIN
     'CREATE INDEX IF NOT EXISTS idx_restricted_prof_user_status ON restricted_professionals(user_cod, status)',
+    "CREATE INDEX IF NOT EXISTS idx_restricted_prof_ativo ON restricted_professionals(user_cod) WHERE status = 'ativo'",
     
     // ===== GRATUITIES =====
     'CREATE INDEX IF NOT EXISTS idx_gratuities_status ON gratuities(status)',

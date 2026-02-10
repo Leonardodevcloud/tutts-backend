@@ -1,25 +1,67 @@
 /**
  * Sub-Router: Withdrawals + Conciliação
+ * ⚡ PERFORMANCE V3: Cache em memória + queries sem JOIN pesado
  */
 const express = require('express');
 
 function createWithdrawalsRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, helpers) {
   const router = express.Router();
 
+// ═══════════════════════════════════════════════════════════
+// ⚡ CACHE EM MEMÓRIA — evita bater no banco repetidamente
+// ═══════════════════════════════════════════════════════════
+const cache = {
+  withdrawals: { data: null, timestamp: 0, key: '' },
+  counts: { data: null, timestamp: 0 },
+  restricted: { data: null, timestamp: 0 },
+};
+const CACHE_TTL = 30000; // 30 segundos
+
+// Helper: buscar lista de profissionais restritos (raramente muda)
+async function getRestrictedMap() {
+  if (cache.restricted.data && Date.now() - cache.restricted.timestamp < 120000) {
+    return cache.restricted.data; // cache 2 min
+  }
+  const res = await pool.query(
+    `SELECT user_cod, reason FROM restricted_professionals WHERE status = 'ativo'`
+  );
+  const map = {};
+  for (const r of res.rows) {
+    map[r.user_cod] = r.reason;
+  }
+  cache.restricted = { data: map, timestamp: Date.now() };
+  return map;
+}
+
+// Helper: enriquecer saques com info de restrição (em JS, não SQL)
+function enrichWithRestrictions(rows, restrictedMap) {
+  return rows.map(w => ({
+    ...w,
+    is_restricted: !!restrictedMap[w.user_cod],
+    restriction_reason: restrictedMap[w.user_cod] || null,
+  }));
+}
+
+// Invalidar cache quando houver mudança
+function invalidateCache() {
+  cache.withdrawals = { data: null, timestamp: 0, key: '' };
+  cache.counts = { data: null, timestamp: 0 };
+  console.log('🔄 Cache de withdrawals invalidado');
+}
+
 router.get('/withdrawals/pendentes', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT w.*, 
-        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-        r.reason as restriction_reason,
-        EXTRACT(EPOCH FROM (NOW() - w.created_at))/3600 as horas_aguardando
-      FROM withdrawal_requests w
-      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      WHERE w.status IN ('pending', 'aguardando_aprovacao')
-      ORDER BY w.created_at ASC
-    `);
+    const [restrictedMap, result] = await Promise.all([
+      getRestrictedMap(),
+      pool.query(`
+        SELECT *, EXTRACT(EPOCH FROM (NOW() - created_at))/3600 as horas_aguardando
+        FROM withdrawal_requests
+        WHERE status IN ('pending', 'aguardando_aprovacao')
+        ORDER BY created_at ASC
+      `)
+    ]);
     
-    const withdrawals = result.rows.map(w => ({
+    const withdrawals = enrichWithRestrictions(result.rows, restrictedMap).map(w => ({
       ...w,
       isDelayed: parseFloat(w.horas_aguardando) > 1
     }));
@@ -82,23 +124,23 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
     
     const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
     
-    const result = await pool.query(`
-      SELECT w.*, 
-        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-        r.reason as restriction_reason
-      FROM withdrawal_requests w
-      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      ${whereClause}
-      ORDER BY w.created_at DESC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `, [...params, parseInt(limit), offset]);
+    const [result, restrictedMap] = await Promise.all([
+      pool.query(`
+        SELECT w.*
+        FROM withdrawal_requests w
+        ${whereClause}
+        ORDER BY w.created_at DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      `, [...params, parseInt(limit), offset]),
+      getRestrictedMap()
+    ]);
     
     const countResult = await pool.query(`SELECT COUNT(*) as total FROM withdrawal_requests w ${whereClause}`, params);
     const total = parseInt(countResult.rows[0].total);
     const totalPages = Math.ceil(total / parseInt(limit));
     
     res.json({
-      data: result.rows,
+      data: enrichWithRestrictions(result.rows, restrictedMap),
       pagination: { page: parseInt(page), limit: parseInt(limit), total, totalPages, hasNext: parseInt(page) < totalPages, hasPrev: parseInt(page) > 1 }
     });
   } catch (error) {
@@ -227,47 +269,87 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   }
 });
 
-// Listar todos os saques (admin financeiro)
+// ⚡ CONTADORES — com cache de 30s
+router.get('/withdrawals/counts', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  try {
+    // Retornar cache se válido
+    if (cache.counts.data && Date.now() - cache.counts.timestamp < CACHE_TTL) {
+      return res.json(cache.counts.data);
+    }
+    
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status IN ('pending','aguardando_aprovacao')) as aguardando,
+        COUNT(*) FILTER (WHERE status = 'approved') as aprovadas,
+        COUNT(*) FILTER (WHERE status = 'approved' AND tipo_pagamento = 'gratuidade') as gratuidade,
+        COUNT(*) FILTER (WHERE status = 'rejected') as rejeitadas,
+        COUNT(*) FILTER (WHERE status = 'inactive') as inativo,
+        COUNT(*) FILTER (WHERE status IN ('pending','aguardando_aprovacao') AND created_at < NOW() - INTERVAL '1 hour') as atrasadas,
+        COUNT(*) as total
+      FROM withdrawal_requests
+      WHERE created_at >= NOW() - INTERVAL '90 days'
+    `);
+    
+    cache.counts = { data: result.rows[0], timestamp: Date.now() };
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro counts:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ⚡ Listar saques — COM CACHE 30s + SEM LEFT JOIN pesado
 router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { status, limit, dias } = req.query;
+    const { status, limit, dias, page, offset: offsetParam } = req.query;
     
-    // ⚡ PERFORMANCE: Reduzir default de 1000 para 100 (paginação no frontend)
+    // ⚡ HARD LIMIT: máximo 100 registros
+    const limiteFiltro = Math.min(parseInt(limit) || 100, 100);
     const diasFiltro = parseInt(dias) || 90;
-    const limiteFiltro = Math.min(parseInt(limit) || 100, 500);
+    const offset = parseInt(offsetParam) || ((parseInt(page) || 1) - 1) * limiteFiltro;
+    
+    // Chave de cache baseada nos parâmetros
+    const cacheKey = `${status || 'all'}-${limiteFiltro}-${diasFiltro}-${offset}`;
+    
+    // ⚡ Retornar cache se mesma query em 30s
+    if (cache.withdrawals.key === cacheKey && cache.withdrawals.data && Date.now() - cache.withdrawals.timestamp < CACHE_TTL) {
+      console.log('⚡ Cache hit: withdrawals');
+      return res.json(cache.withdrawals.data);
+    }
     
     let query, params = [];
-    let paramIndex = 1;
     
+    // ⚡ SEM LEFT JOIN — restrições resolvidas em JS
     if (status) {
       query = `
-        SELECT w.*, 
-          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-          r.reason as restriction_reason
-        FROM withdrawal_requests w
-        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.status = $${paramIndex++}
-          AND w.created_at >= NOW() - INTERVAL '1 day' * $${paramIndex++}
-        ORDER BY w.created_at DESC
-        LIMIT $${paramIndex++}
+        SELECT * FROM withdrawal_requests
+        WHERE status = $1 AND created_at >= NOW() - INTERVAL '1 day' * $2
+        ORDER BY created_at DESC
+        LIMIT $3 OFFSET $4
       `;
-      params = [status, diasFiltro, limiteFiltro];
+      params = [status, diasFiltro, limiteFiltro, offset];
     } else {
       query = `
-        SELECT w.*, 
-          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-          r.reason as restriction_reason
-        FROM withdrawal_requests w
-        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.created_at >= NOW() - INTERVAL '1 day' * $1
-        ORDER BY w.created_at DESC
-        LIMIT $2
+        SELECT * FROM withdrawal_requests
+        WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
       `;
-      params = [diasFiltro, limiteFiltro];
+      params = [diasFiltro, limiteFiltro, offset];
     }
 
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    // Executar em paralelo: saques + mapa de restritos
+    const [result, restrictedMap] = await Promise.all([
+      pool.query(query, params),
+      getRestrictedMap()
+    ]);
+    
+    const enriched = enrichWithRestrictions(result.rows, restrictedMap);
+    
+    // Salvar no cache
+    cache.withdrawals = { data: enriched, timestamp: Date.now(), key: cacheKey };
+    
+    res.json(enriched);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
     res.status(500).json({ error: error.message });
@@ -474,6 +556,9 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
 
     // Commit da transação
     await client.query('COMMIT');
+    
+    // ⚡ Invalidar cache após mudança
+    invalidateCache();
 
     // Registrar auditoria
     const saque = result.rows[0];
