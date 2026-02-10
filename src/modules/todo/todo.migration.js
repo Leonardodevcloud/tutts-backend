@@ -110,6 +110,10 @@ async function initTodoTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_grupo ON todo_tarefas(grupo_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_status ON todo_tarefas(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_tarefas_criador ON todo_tarefas(criado_por)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_anexos_tarefa ON todo_anexos(tarefa_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_comentarios_tarefa ON todo_comentarios(tarefa_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_subtarefas_tarefa ON todo_subtarefas(tarefa_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_todo_dependencias_tarefa ON todo_dependencias(tarefa_id)`).catch(() => {});
 
     // ============================================
     // NOVAS TABELAS TO-DO - MELHORIAS

@@ -99,13 +99,17 @@ router.get('/todo/tarefas', async (req, res) => {
     
     let query = `
       SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor,
-             (SELECT COUNT(*) FROM todo_anexos WHERE tarefa_id = t.id) as qtd_anexos,
-             (SELECT COUNT(*) FROM todo_comentarios WHERE tarefa_id = t.id) as qtd_comentarios,
-             (SELECT COUNT(*) FROM todo_subtarefas WHERE tarefa_id = t.id) as qtd_subtarefas,
-             (SELECT COUNT(*) FROM todo_subtarefas WHERE tarefa_id = t.id AND concluida = true) as qtd_subtarefas_concluidas,
-             (SELECT COUNT(*) FROM todo_dependencias WHERE tarefa_id = t.id) as qtd_dependencias
+             COALESCE(ca.qtd, 0)::int as qtd_anexos,
+             COALESCE(cc.qtd, 0)::int as qtd_comentarios,
+             COALESCE(cs.qtd, 0)::int as qtd_subtarefas,
+             COALESCE(cs.qtd_concluidas, 0)::int as qtd_subtarefas_concluidas,
+             COALESCE(cd.qtd, 0)::int as qtd_dependencias
       FROM todo_tarefas t
       LEFT JOIN todo_grupos g ON t.grupo_id = g.id
+      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_anexos GROUP BY tarefa_id) ca ON ca.tarefa_id = t.id
+      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_comentarios GROUP BY tarefa_id) cc ON cc.tarefa_id = t.id
+      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd, COUNT(*) FILTER (WHERE concluida = true) as qtd_concluidas FROM todo_subtarefas GROUP BY tarefa_id) cs ON cs.tarefa_id = t.id
+      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_dependencias GROUP BY tarefa_id) cd ON cd.tarefa_id = t.id
       WHERE 1=1
     `;
     const params = [];
