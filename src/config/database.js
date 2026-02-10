@@ -17,9 +17,10 @@ const isLocalhost = env.DATABASE_URL?.includes('localhost');
 const pool = new Pool({
   connectionString: env.DATABASE_URL,
   ssl: isLocalhost ? false : sslConfig,
-  max: 10,                      // 10 conexões — balanceia custo vs performance
+  max: 20,                      // ⚡ 20 conexões — suporta picos de login sem starvation
   idleTimeoutMillis: 30000,     // 30s — evita reconexões frequentes ao Neon
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: 15000, // ⚡ 15s — mais tolerante a cold-starts do Neon
+  statement_timeout: 30000,     // ⚡ Kill queries > 30s (evita queries infinitas)
   application_name: 'tutts-backend',
 });
 

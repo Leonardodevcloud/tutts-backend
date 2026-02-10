@@ -34,6 +34,8 @@ const { AUDIT_CATEGORIES } = require('./src/shared/constants');
 const { createAuditLogger } = require('./src/shared/utils/audit');
 const httpRequest = require('./src/shared/utils/httpRequest');
 
+const { createPerformanceIndices } = require('./src/shared/migrations/performance-indices');
+
 // ─── Modules ──────────────────────────────────────────────
 const { initScoreRoutes, initScoreTables, initScoreCron } = require('./src/modules/score');
 const { initAuditRoutes, initAuditTables } = require('./src/modules/audit');
@@ -109,6 +111,76 @@ app.get('/api/version', (req, res) => {
 app.use("/api/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
 app.use("/api/solicitacao/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
 
+// ⚡ PERFORMANCE: Endpoint consolidado para login — 1 chamada ao invés de 20
+app.get('/api/init', verificarToken, async (req, res) => {
+  try {
+    const { codProfissional, role } = req.user;
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(role);
+    
+    // Executar queries essenciais em paralelo (apenas contadores leves)
+    const queries = [];
+    
+    // 1. Contadores de notificação (sempre necessário)
+    queries.push(
+      pool.query(
+        `SELECT COUNT(*) FILTER (WHERE status = 'pending' OR status = 'aguardando_aprovacao') as saques_pendentes,
+                COUNT(*) FILTER (WHERE status = 'pending') as gratuidades_pendentes
+         FROM (
+           SELECT status FROM withdrawal_requests WHERE status IN ('pending','aguardando_aprovacao') LIMIT 100
+         ) w
+         FULL OUTER JOIN (
+           SELECT status FROM gratuities WHERE status = 'pending' LIMIT 100
+         ) g ON false`
+      ).catch(() => ({ rows: [{ saques_pendentes: 0, gratuidades_pendentes: 0 }] }))
+    );
+    
+    // 2. Social unread count
+    queries.push(
+      pool.query(
+        `SELECT COUNT(*) as unread FROM social_messages 
+         WHERE receiver_cod = $1 AND read = false`,
+        [codProfissional]
+      ).catch(() => ({ rows: [{ unread: 0 }] }))
+    );
+    
+    // 3. Todo pendentes count (se tem acesso)
+    queries.push(
+      pool.query(
+        `SELECT COUNT(*) as pendentes FROM todo_tarefas 
+         WHERE status != 'concluido' 
+         AND (criado_por = $1 OR responsaveis::text LIKE $2)
+         LIMIT 1`,
+        [codProfissional, `%${codProfissional}%`]
+      ).catch(() => ({ rows: [{ pendentes: 0 }] }))
+    );
+    
+    // 4. Social profile
+    queries.push(
+      pool.query(
+        `SELECT display_name, bio, avatar_url, status_text FROM social_profiles WHERE user_cod = $1`,
+        [codProfissional]
+      ).catch(() => ({ rows: [] }))
+    );
+    
+    const [countersRes, socialRes, todoRes, profileRes] = await Promise.all(queries);
+    
+    res.json({
+      counters: {
+        saquesPendentes: parseInt(countersRes.rows[0]?.saques_pendentes) || 0,
+        gratuidadesPendentes: parseInt(countersRes.rows[0]?.gratuidades_pendentes) || 0,
+        socialUnread: parseInt(socialRes.rows[0]?.unread) || 0,
+        todoPendentes: parseInt(todoRes.rows[0]?.pendentes) || 0,
+      },
+      socialProfile: profileRes.rows[0] || null,
+      role,
+      codProfissional,
+    });
+  } catch (error) {
+    console.error('❌ Erro no /api/init:', error.message);
+    res.status(500).json({ error: 'Erro ao inicializar' });
+  }
+});
+
 // ─── Mount modules ────────────────────────────────────────
 
 // Score
@@ -178,6 +250,7 @@ async function initDatabase() {
     await initOperacionalTables(pool);
     await initScoreTables(pool);
     await initAuditTables(pool);
+    await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);

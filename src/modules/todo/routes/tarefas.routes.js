@@ -14,18 +14,23 @@ router.get('/todo/grupos', async (req, res) => {
       SELECT * FROM todo_grupos 
       WHERE ativo = TRUE
     `;
+    const params = [];
+    let paramIndex = 1;
     
+    // 🔒 SECURITY: Usar parâmetros preparados
     if (role !== 'admin_master') {
       query += ` AND (
         tipo = 'compartilhado' 
-        OR criado_por = '${user_cod}'
-        OR visivel_para @> '"${user_cod}"'
+        OR criado_por = $${paramIndex}
+        OR visivel_para @> $${paramIndex + 1}::jsonb
       )`;
+      params.push(user_cod, JSON.stringify(user_cod));
+      paramIndex += 2;
     }
     
     query += ' ORDER BY ordem, nome';
     
-    const result = await pool.query(query);
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao listar grupos:', err);
@@ -95,8 +100,9 @@ router.delete('/todo/grupos/:id', async (req, res) => {
 // Listar tarefas (com filtros)
 router.get('/todo/tarefas', async (req, res) => {
   try {
-    const { user_cod, role, grupo_id, status, responsavel, coluna_kanban } = req.query;
+    const { user_cod, role, grupo_id, status, responsavel, coluna_kanban, limit } = req.query;
     
+    // ⚡ PERFORMANCE: Usar LATERAL JOINs com filtro ao invés de subqueries globais
     let query = `
       SELECT t.*, g.nome as grupo_nome, g.icone as grupo_icone, g.cor as grupo_cor,
              COALESCE(ca.qtd, 0)::int as qtd_anexos,
@@ -106,10 +112,10 @@ router.get('/todo/tarefas', async (req, res) => {
              COALESCE(cd.qtd, 0)::int as qtd_dependencias
       FROM todo_tarefas t
       LEFT JOIN todo_grupos g ON t.grupo_id = g.id
-      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_anexos GROUP BY tarefa_id) ca ON ca.tarefa_id = t.id
-      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_comentarios GROUP BY tarefa_id) cc ON cc.tarefa_id = t.id
-      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd, COUNT(*) FILTER (WHERE concluida = true) as qtd_concluidas FROM todo_subtarefas GROUP BY tarefa_id) cs ON cs.tarefa_id = t.id
-      LEFT JOIN (SELECT tarefa_id, COUNT(*) as qtd FROM todo_dependencias GROUP BY tarefa_id) cd ON cd.tarefa_id = t.id
+      LEFT JOIN LATERAL (SELECT COUNT(*) as qtd FROM todo_anexos WHERE tarefa_id = t.id) ca ON true
+      LEFT JOIN LATERAL (SELECT COUNT(*) as qtd FROM todo_comentarios WHERE tarefa_id = t.id) cc ON true
+      LEFT JOIN LATERAL (SELECT COUNT(*) as qtd, COUNT(*) FILTER (WHERE concluida = true) as qtd_concluidas FROM todo_subtarefas WHERE tarefa_id = t.id) cs ON true
+      LEFT JOIN LATERAL (SELECT COUNT(*) as qtd FROM todo_dependencias WHERE tarefa_id = t.id) cd ON true
       WHERE 1=1
     `;
     const params = [];
@@ -120,16 +126,16 @@ router.get('/todo/tarefas', async (req, res) => {
       query += ` AND t.grupo_id = $${paramIndex}`;
       params.push(grupo_id);
       paramIndex++;
-      // Não aplica filtro de usuário quando visualizando um grupo específico
     } else {
-      // Se não for admin_master e não tiver grupo específico, filtra por permissões
+      // 🔒 SECURITY: Usar parâmetros preparados (corrige SQL injection)
       if (role !== 'admin_master') {
         query += ` AND (
           t.tipo = 'compartilhado' 
-          OR t.criado_por = '${user_cod}'
-          OR t.responsaveis @> '[{"user_cod":"${user_cod}"}]'
-          OR t.responsaveis::text LIKE '%${user_cod}%'
+          OR t.criado_por = $${paramIndex}
+          OR t.responsaveis @> $${paramIndex + 1}::jsonb
         )`;
+        params.push(user_cod, JSON.stringify([{ user_cod }]));
+        paramIndex += 2;
       }
     }
     
@@ -152,6 +158,11 @@ router.get('/todo/tarefas', async (req, res) => {
     }
     
     query += ' ORDER BY t.ordem ASC, CASE t.prioridade WHEN \'urgente\' THEN 1 WHEN \'alta\' THEN 2 WHEN \'media\' THEN 3 ELSE 4 END, t.data_prazo ASC NULLS LAST, t.created_at DESC';
+    
+    // ⚡ PERFORMANCE: Limitar resultados (padrão 200)
+    const maxLimit = Math.min(parseInt(limit) || 200, 500);
+    query += ` LIMIT $${paramIndex}`;
+    params.push(maxLimit);
     
     const result = await pool.query(query, params);
     res.json(result.rows);

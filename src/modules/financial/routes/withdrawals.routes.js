@@ -232,9 +232,9 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
   try {
     const { status, limit, dias } = req.query;
     
-    // Limitar por período (padrão: últimos 90 dias para performance)
+    // ⚡ PERFORMANCE: Reduzir default de 1000 para 100 (paginação no frontend)
     const diasFiltro = parseInt(dias) || 90;
-    const limiteFiltro = parseInt(limit) || 1000;
+    const limiteFiltro = Math.min(parseInt(limit) || 100, 500);
     
     let query, params = [];
     let paramIndex = 1;
