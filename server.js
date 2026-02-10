@@ -182,37 +182,100 @@ app.get('/api/init', verificarToken, async (req, res) => {
 });
 
 // ⚡ PERFORMANCE: Endpoint consolidado para módulo financeiro
-// SEM LEFT JOIN — restrições resolvidas em JS (instantâneo)
 app.get('/api/financeiro/init', verificarToken, async (req, res) => {
   try {
     const { role } = req.user;
-    
     if (!['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     
-    // 4 queries SIMPLES em paralelo — ZERO JOINs
-    const [saquesRes, restrictedRes, pedidosRes, gratuidadesRes] = await Promise.all([
-      pool.query(`SELECT * FROM withdrawal_requests ORDER BY created_at DESC LIMIT 100`),
+    const [pendentesRes, countRes, restrictedRes, pedidosRes, gratuidadesRes] = await Promise.all([
+      pool.query(`SELECT * FROM withdrawal_requests WHERE status IN ('pending', 'aguardando_aprovacao') ORDER BY created_at DESC`),
+      pool.query(`
+        SELECT 
+          COUNT(*) FILTER (WHERE status IN ('pending','aguardando_aprovacao')) as aguardando,
+          COUNT(*) FILTER (WHERE status = 'approved') as aprovadas,
+          COUNT(*) FILTER (WHERE status = 'approved' AND tipo_pagamento = 'gratuidade') as gratuidade,
+          COUNT(*) FILTER (WHERE status = 'rejected') as rejeitadas,
+          COUNT(*) FILTER (WHERE status = 'inactive') as inativo,
+          COUNT(*) FILTER (WHERE status IN ('pending','aguardando_aprovacao') AND created_at < NOW() - INTERVAL '1 hour') as atrasadas,
+          COUNT(*) as total
+        FROM withdrawal_requests WHERE created_at >= NOW() - INTERVAL '90 days'
+      `),
       pool.query(`SELECT user_cod, reason FROM restricted_professionals WHERE status = 'ativo'`),
       pool.query(`SELECT * FROM loja_pedidos WHERE status = 'pendente' ORDER BY created_at DESC LIMIT 50`),
       pool.query(`SELECT * FROM gratuities WHERE status = 'pending' ORDER BY created_at DESC LIMIT 50`)
     ]);
     
-    // Enriquecer com restrições em JS (instantâneo)
     const restrictedMap = {};
     for (const r of restrictedRes.rows) restrictedMap[r.user_cod] = r.reason;
-    
-    const withdrawals = saquesRes.rows.map(w => ({
-      ...w,
-      is_restricted: !!restrictedMap[w.user_cod],
-      restriction_reason: restrictedMap[w.user_cod] || null,
+    const withdrawals = pendentesRes.rows.map(w => ({
+      ...w, is_restricted: !!restrictedMap[w.user_cod], restriction_reason: restrictedMap[w.user_cod] || null,
     }));
     
-    res.json({ withdrawals, pedidos: pedidosRes.rows, gratuidades: gratuidadesRes.rows });
+    res.json({ withdrawals, counts: countRes.rows[0] || {}, pedidos: pedidosRes.rows, gratuidades: gratuidadesRes.rows });
   } catch (error) {
-    console.error('❌ Erro no /api/financeiro/init:', error.message);
+    console.error('❌ Erro /financeiro/init:', error.message);
     res.status(500).json({ error: 'Erro ao inicializar financeiro' });
+  }
+});
+
+// ⚡⚡⚡ OVERRIDES DEFINITIVOS — registrados ANTES dos módulos para garantir prioridade
+// /api/withdrawals — HARD LIMIT 100, CACHE 30s, ZERO LEFT JOIN
+let _wCache = { data: null, ts: 0, key: '' };
+app.get('/api/withdrawals', verificarToken, async (req, res) => {
+  try {
+    const { role } = req.user;
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
+    const status = req.query.status || '';
+    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+    const offset = parseInt(req.query.offset) || 0;
+    const ck = `${status}-${limit}-${offset}`;
+    if (_wCache.key === ck && _wCache.data && Date.now() - _wCache.ts < 30000) return res.json(_wCache.data);
+    
+    let query, params;
+    if (status) {
+      query = `SELECT * FROM withdrawal_requests WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
+      params = [status, limit, offset];
+    } else {
+      query = `SELECT * FROM withdrawal_requests ORDER BY created_at DESC LIMIT $1 OFFSET $2`;
+      params = [limit, offset];
+    }
+    const [result, rRes] = await Promise.all([
+      pool.query(query, params),
+      pool.query(`SELECT user_cod, reason FROM restricted_professionals WHERE status = 'ativo'`)
+    ]);
+    const rm = {}; for (const r of rRes.rows) rm[r.user_cod] = r.reason;
+    const enriched = result.rows.map(w => ({ ...w, is_restricted: !!rm[w.user_cod], restriction_reason: rm[w.user_cod] || null }));
+    _wCache = { data: enriched, ts: Date.now(), key: ck };
+    console.log(`⚡ /withdrawals: ${enriched.length} regs (limit=${limit})`);
+    res.json(enriched);
+  } catch (error) {
+    console.error('❌ Erro /withdrawals:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// /api/gratuities — HARD LIMIT 50
+app.get('/api/gratuities', verificarToken, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const result = await pool.query(`SELECT * FROM gratuities ORDER BY created_at DESC LIMIT $1`, [limit]);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// /api/restricted — HARD LIMIT 100
+app.get('/api/restricted', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM restricted_professionals WHERE status = 'ativo' ORDER BY created_at DESC LIMIT 100`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
