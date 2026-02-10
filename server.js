@@ -181,6 +181,48 @@ app.get('/api/init', verificarToken, async (req, res) => {
   }
 });
 
+// ⚡ PERFORMANCE: Endpoint consolidado para módulo financeiro
+// Retorna saques + pedidos + gratuidades em 1 request ao invés de 3
+app.get('/api/financeiro/init', verificarToken, async (req, res) => {
+  try {
+    const { role } = req.user;
+    
+    if (!['admin', 'admin_master', 'admin_financeiro'].includes(role)) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
+    
+    const diasFiltro = parseInt(req.query.dias) || 90;
+    const limiteSaques = Math.min(parseInt(req.query.limit) || 100, 500);
+    
+    // 3 queries em paralelo — 1 conexão ao invés de 3
+    const [saquesRes, pedidosRes, gratuidadesRes] = await Promise.all([
+      pool.query(`
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        WHERE w.created_at >= NOW() - INTERVAL '1 day' * $1
+        ORDER BY w.created_at DESC
+        LIMIT $2
+      `, [diasFiltro, limiteSaques]),
+      
+      pool.query(`SELECT * FROM loja_pedidos ORDER BY created_at DESC LIMIT 200`),
+      
+      pool.query(`SELECT * FROM gratuities ORDER BY created_at DESC LIMIT 200`)
+    ]);
+    
+    res.json({
+      withdrawals: saquesRes.rows,
+      pedidos: pedidosRes.rows,
+      gratuidades: gratuidadesRes.rows,
+    });
+  } catch (error) {
+    console.error('❌ Erro no /api/financeiro/init:', error.message);
+    res.status(500).json({ error: 'Erro ao inicializar financeiro' });
+  }
+});
+
 // ─── Mount modules ────────────────────────────────────────
 
 // Score
