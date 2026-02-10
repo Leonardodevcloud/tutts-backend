@@ -230,16 +230,14 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
 // Listar todos os saques (admin financeiro)
 router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, limit, dias } = req.query;
     
-    let query = `
-      SELECT w.*, 
-        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-        r.reason as restriction_reason
-      FROM withdrawal_requests w
-      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      ORDER BY w.created_at DESC
-    `;
+    // Limitar por período (padrão: últimos 90 dias para performance)
+    const diasFiltro = parseInt(dias) || 90;
+    const limiteFiltro = parseInt(limit) || 1000;
+    
+    let query, params = [];
+    let paramIndex = 1;
     
     if (status) {
       query = `
@@ -248,15 +246,27 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
           r.reason as restriction_reason
         FROM withdrawal_requests w
         LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-        WHERE w.status = $1
+        WHERE w.status = $${paramIndex++}
+          AND w.created_at >= NOW() - INTERVAL '1 day' * $${paramIndex++}
         ORDER BY w.created_at DESC
+        LIMIT $${paramIndex++}
       `;
+      params = [status, diasFiltro, limiteFiltro];
+    } else {
+      query = `
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        WHERE w.created_at >= NOW() - INTERVAL '1 day' * $1
+        ORDER BY w.created_at DESC
+        LIMIT $2
+      `;
+      params = [diasFiltro, limiteFiltro];
     }
 
-    const result = status 
-      ? await pool.query(query, [status])
-      : await pool.query(query);
-
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
