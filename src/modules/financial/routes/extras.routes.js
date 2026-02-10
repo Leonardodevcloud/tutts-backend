@@ -8,17 +8,20 @@ function createExtrasRoutes(pool, verificarToken, verificarAdminOuFinanceiro, he
 
 router.get('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, limit } = req.query;
+    // ⚡ PERFORMANCE: Limitar resultados (padrão 200, máx 500)
+    const safeLimit = Math.min(parseInt(limit) || 200, 500);
     
-    let query = 'SELECT * FROM gratuities ORDER BY created_at DESC';
+    let query, params;
     if (status) {
-      query = 'SELECT * FROM gratuities WHERE status = $1 ORDER BY created_at DESC';
+      query = 'SELECT * FROM gratuities WHERE status = $1 ORDER BY created_at DESC LIMIT $2';
+      params = [status, safeLimit];
+    } else {
+      query = 'SELECT * FROM gratuities ORDER BY created_at DESC LIMIT $1';
+      params = [safeLimit];
     }
 
-    const result = status 
-      ? await pool.query(query, [status])
-      : await pool.query(query);
-
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar gratuidades:', error);
