@@ -245,7 +245,7 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
 router.get('/submissions/busca', verificarToken, async (req, res) => {
   try {
     const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
-    const { q, status, periodo, page = 1, limit = 50 } = req.query;
+    const { q, status, periodo, dataInicio, dataFim, page = 1, limit = 100 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let conditions = [];
@@ -268,10 +268,14 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
       params.push(status);
     }
 
-    if (periodo === 'today') {
+    if (dataInicio && dataFim) {
+      conditions.push(`created_at >= $${paramIdx}::date AND created_at < ($${paramIdx + 1}::date + INTERVAL '1 day')`);
+      params.push(dataInicio, dataFim);
+      paramIdx += 2;
+    } else if (periodo === 'today') {
       conditions.push(`created_at >= CURRENT_DATE`);
     } else if (periodo === 'week') {
-      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '7 days'`);
+      conditions.push(`created_at >= DATE_TRUNC('week', CURRENT_DATE)`);
     } else if (periodo === 'month') {
       conditions.push(`created_at >= DATE_TRUNC('month', CURRENT_DATE)`);
     }
@@ -312,20 +316,22 @@ router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
     const { periodo } = req.query;
     let dateFilter = '';
     if (periodo === 'today') dateFilter = `AND created_at >= CURRENT_DATE`;
-    else if (periodo === 'week') dateFilter = `AND created_at >= CURRENT_DATE - INTERVAL '7 days'`;
+    else if (periodo === 'week') dateFilter = `AND created_at >= DATE_TRUNC('week', CURRENT_DATE)`;
     else if (periodo === 'month') dateFilter = `AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
+    // 'all' = sem filtro de data
 
     const result = await pool.query(`
       SELECT 
-        user_cod, user_name,
+        user_cod, 
+        MAX(user_name) as user_name,
         COUNT(*) as total,
         json_agg(json_build_object(
           'id', id, 'ordemServico', ordem_servico, 'created_at', created_at,
           'temImagem', CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END
         ) ORDER BY created_at DESC) as solicitacoes
       FROM submissions
-      WHERE status = 'aprovado' AND motivo = 'Ajuste de Retorno' ${dateFilter}
-      GROUP BY user_cod, user_name
+      WHERE status = 'aprovado' AND LOWER(TRIM(motivo)) = 'ajuste de retorno' ${dateFilter}
+      GROUP BY user_cod
       ORDER BY total DESC
     `);
 
