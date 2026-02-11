@@ -26,7 +26,9 @@ const pool = new Pool({
 
 // 🕐 Forçar timezone Brasil em TODAS as conexões
 pool.on('connect', (client) => {
-  client.query("SET timezone = 'America/Sao_Paulo'");
+  client.query("SET timezone = 'America/Sao_Paulo'").catch(err => {
+    console.error('⚠️ Erro ao setar timezone:', err.message);
+  });
 });
 
 if (!isLocalhost) {
