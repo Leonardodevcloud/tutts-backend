@@ -24,7 +24,7 @@ const pool = new Pool({
   application_name: 'tutts-backend',
 });
 
-// 🕐 Forçar timezone Brasil em cada conexão
+// 🕐 Forçar timezone Brasil em TODAS as conexões
 pool.on('connect', (client) => {
   client.query("SET timezone = 'America/Sao_Paulo'");
 });
