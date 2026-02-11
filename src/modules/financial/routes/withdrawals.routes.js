@@ -303,8 +303,8 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
   try {
     const { status, limit, dias, page, offset: offsetParam } = req.query;
     
-    // ⚡ HARD LIMIT: máximo 100 registros
-    const limiteFiltro = Math.min(parseInt(limit) || 100, 100);
+    // ⚡ HARD LIMIT: máximo 200 registros
+    const limiteFiltro = Math.min(parseInt(limit) || 200, 200);
     const diasFiltro = parseInt(dias) || 90;
     const offset = parseInt(offsetParam) || ((parseInt(page) || 1) - 1) * limiteFiltro;
     
