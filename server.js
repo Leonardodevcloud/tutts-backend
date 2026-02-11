@@ -221,7 +221,7 @@ app.get('/api/financeiro/init', verificarToken, async (req, res) => {
 });
 
 // ⚡⚡⚡ OVERRIDES DEFINITIVOS — registrados ANTES dos módulos para garantir prioridade
-// /api/withdrawals — HARD LIMIT 100, CACHE 30s, ZERO LEFT JOIN
+// /api/withdrawals — HARD LIMIT 200, CACHE 30s, ZERO LEFT JOIN
 let _wCache = { data: null, ts: 0, key: '' };
 app.get('/api/withdrawals', verificarToken, async (req, res) => {
   try {
@@ -230,19 +230,34 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     const status = req.query.status || '';
-    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+    const dataInicio = req.query.dataInicio || '';
+    const dataFim = req.query.dataFim || '';
+    const tipoFiltro = req.query.tipoFiltro || 'solicitacao';
+    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
     const offset = parseInt(req.query.offset) || 0;
-    const ck = `${status}-${limit}-${offset}`;
+    const ck = `${status}-${limit}-${offset}-${dataInicio}-${dataFim}-${tipoFiltro}`;
     if (_wCache.key === ck && _wCache.data && Date.now() - _wCache.ts < 30000) return res.json(_wCache.data);
     
     let query, params;
-    if (status) {
+    
+    // Filtro por data (aba validação)
+    if (dataInicio && dataFim) {
+      const col = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
+      if (status) {
+        query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${col} >= $2::date AND ${col} < $3::date + interval '1 day' ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
+        params = [status, dataInicio, dataFim, limit, offset];
+      } else {
+        query = `SELECT * FROM withdrawal_requests WHERE ${col} >= $1::date AND ${col} < $2::date + interval '1 day' ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
+        params = [dataInicio, dataFim, limit, offset];
+      }
+    } else if (status) {
       query = `SELECT * FROM withdrawal_requests WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
       params = [status, limit, offset];
     } else {
       query = `SELECT * FROM withdrawal_requests ORDER BY created_at DESC LIMIT $1 OFFSET $2`;
       params = [limit, offset];
     }
+    
     const [result, rRes] = await Promise.all([
       pool.query(query, params),
       pool.query(`SELECT user_cod, reason FROM restricted_professionals WHERE status = 'ativo'`)
@@ -250,7 +265,7 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
     const rm = {}; for (const r of rRes.rows) rm[r.user_cod] = r.reason;
     const enriched = result.rows.map(w => ({ ...w, is_restricted: !!rm[w.user_cod], restriction_reason: rm[w.user_cod] || null }));
     _wCache = { data: enriched, ts: Date.now(), key: ck };
-    console.log(`⚡ /withdrawals: ${enriched.length} regs (limit=${limit})`);
+    console.log(`⚡ /withdrawals: ${enriched.length} regs (limit=${limit}, dataInicio=${dataInicio}, dataFim=${dataFim})`);
     res.json(enriched);
   } catch (error) {
     console.error('❌ Erro /withdrawals:', error.message);
