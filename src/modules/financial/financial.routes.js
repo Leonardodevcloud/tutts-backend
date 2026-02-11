@@ -550,38 +550,71 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     const { status, limit, dataInicio, dataFim, tipoFiltro } = req.query;
     const limiteFiltro = Math.min(parseInt(limit) || 200, 500);
     
-    let conditions = [];
-    let params = [];
-    let paramIdx = 1;
+    let query, params;
     
-    if (status) {
-      conditions.push(`w.status = $${paramIdx++}`);
-      params.push(status);
-    }
-    
-    // Filtro por data customizada (aba validação)
+    // Caso 1: Filtro por data (aba validação)
     if (dataInicio && dataFim) {
-      const coluna = tipoFiltro === 'lancamento' ? 'w.lancamento_at' : tipoFiltro === 'debito' ? 'w.debito_plific_at' : 'w.created_at';
-      conditions.push(`${coluna} >= $${paramIdx}::date AND ${coluna} < ($${paramIdx + 1}::date + INTERVAL '1 day')`);
-      params.push(dataInicio, dataFim);
-      paramIdx += 2;
+      const coluna = tipoFiltro === 'lancamento' ? 'w.lancamento_at' 
+                   : tipoFiltro === 'debito' ? 'w.debito_plific_at' 
+                   : 'w.created_at';
+      
+      if (status) {
+        query = `
+          SELECT w.*, 
+            CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+            r.reason as restriction_reason
+          FROM withdrawal_requests w
+          LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+          WHERE w.status = $1 AND ${coluna} >= $2::date AND ${coluna} < ($3::date + INTERVAL '1 day')
+          ORDER BY w.created_at DESC
+          LIMIT $4
+        `;
+        params = [status, dataInicio, dataFim, limiteFiltro];
+      } else {
+        query = `
+          SELECT w.*, 
+            CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+            r.reason as restriction_reason
+          FROM withdrawal_requests w
+          LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+          WHERE ${coluna} >= $1::date AND ${coluna} < ($2::date + INTERVAL '1 day')
+          ORDER BY w.created_at DESC
+          LIMIT $3
+        `;
+        params = [dataInicio, dataFim, limiteFiltro];
+      }
     }
-    
-    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
-    
-    const query = `
-      SELECT w.*, 
-        CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
-        r.reason as restriction_reason
-      FROM withdrawal_requests w
-      LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      ${where}
-      ORDER BY w.created_at DESC
-      LIMIT $${paramIdx}
-    `;
-    params.push(limiteFiltro);
+    // Caso 2: Filtro por status (sem data)
+    else if (status) {
+      query = `
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        WHERE w.status = $1
+        ORDER BY w.created_at DESC
+        LIMIT $2
+      `;
+      params = [status, limiteFiltro];
+    }
+    // Caso 3: Sem filtro
+    else {
+      query = `
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        ORDER BY w.created_at DESC
+        LIMIT $1
+      `;
+      params = [limiteFiltro];
+    }
 
+    console.log('📋 Withdrawals query:', { status, dataInicio, dataFim, tipoFiltro, limiteFiltro });
     const result = await pool.query(query, params);
+    console.log('📋 Withdrawals retornados:', result.rows.length);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
