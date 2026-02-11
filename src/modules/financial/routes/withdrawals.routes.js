@@ -301,15 +301,16 @@ router.get('/withdrawals/counts', verificarToken, verificarAdminOuFinanceiro, as
 // ⚡ Listar saques — COM CACHE 30s + SEM LEFT JOIN pesado
 router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { status, limit, dias, page, offset: offsetParam } = req.query;
+    const { status, limit, dias, page, offset: offsetParam, dataInicio, dataFim, tipoFiltro } = req.query;
     
-    // ⚡ HARD LIMIT: máximo 200 registros
-    const limiteFiltro = Math.min(parseInt(limit) || 200, 200);
+    // ⚡ HARD LIMIT: máximo 500 para validação com datas, 200 padrão
+    const maxLimit = (dataInicio && dataFim) ? 500 : 200;
+    const limiteFiltro = Math.min(parseInt(limit) || maxLimit, maxLimit);
     const diasFiltro = parseInt(dias) || 90;
     const offset = parseInt(offsetParam) || ((parseInt(page) || 1) - 1) * limiteFiltro;
     
     // Chave de cache baseada nos parâmetros
-    const cacheKey = `${status || 'all'}-${limiteFiltro}-${diasFiltro}-${offset}`;
+    const cacheKey = `${status || 'all'}-${limiteFiltro}-${diasFiltro}-${offset}-${dataInicio||''}-${dataFim||''}-${tipoFiltro||''}`;
     
     // ⚡ Retornar cache se mesma query em 30s
     if (cache.withdrawals.key === cacheKey && cache.withdrawals.data && Date.now() - cache.withdrawals.timestamp < CACHE_TTL) {
@@ -317,26 +318,35 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
       return res.json(cache.withdrawals.data);
     }
     
-    let query, params = [];
+    let conditions = [];
+    let params = [];
+    let paramIdx = 1;
     
-    // ⚡ SEM LEFT JOIN — restrições resolvidas em JS
     if (status) {
-      query = `
-        SELECT * FROM withdrawal_requests
-        WHERE status = $1 AND created_at >= NOW() - INTERVAL '1 day' * $2
-        ORDER BY created_at DESC
-        LIMIT $3 OFFSET $4
-      `;
-      params = [status, diasFiltro, limiteFiltro, offset];
-    } else {
-      query = `
-        SELECT * FROM withdrawal_requests
-        WHERE created_at >= NOW() - INTERVAL '1 day' * $1
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3
-      `;
-      params = [diasFiltro, limiteFiltro, offset];
+      conditions.push(`status = $${paramIdx++}`);
+      params.push(status);
     }
+    
+    // Filtro por data customizada (validação)
+    if (dataInicio && dataFim) {
+      const coluna = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
+      conditions.push(`${coluna} >= $${paramIdx}::date AND ${coluna} < ($${paramIdx + 1}::date + INTERVAL '1 day')`);
+      params.push(dataInicio, dataFim);
+      paramIdx += 2;
+    } else {
+      conditions.push(`created_at >= NOW() - INTERVAL '1 day' * $${paramIdx++}`);
+      params.push(diasFiltro);
+    }
+    
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    
+    const query = `
+      SELECT * FROM withdrawal_requests
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT $${paramIdx++} OFFSET $${paramIdx}
+    `;
+    params.push(limiteFiltro, offset);
 
     // Executar em paralelo: saques + mapa de restritos
     const [result, restrictedMap] = await Promise.all([
