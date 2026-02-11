@@ -336,17 +336,30 @@ router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Relatórios de submissões por mês/ano
+// GET - Relatórios de submissões por mês/ano ou período customizado
 router.get('/submissions/relatorios', verificarToken, async (req, res) => {
   try {
-    const mes = parseInt(req.query.mes ?? new Date().getMonth());
-    const ano = parseInt(req.query.ano ?? new Date().getFullYear());
+    const { dataInicio, dataFim } = req.query;
+    const usaCustom = dataInicio && dataFim;
     
-    // Mês no JS é 0-indexed, no SQL é 1-indexed
-    const mesSQL = mes + 1;
+    let dateFilter, dateParams, labelPeriodo;
+    
+    if (usaCustom) {
+      // Período customizado: data início e fim
+      dateFilter = `created_at >= $1::date AND created_at < ($2::date + INTERVAL '1 day')`;
+      dateParams = [dataInicio, dataFim];
+      labelPeriodo = `${dataInicio} a ${dataFim}`;
+    } else {
+      // Modo padrão: mês/ano
+      const mes = parseInt(req.query.mes ?? new Date().getMonth());
+      const ano = parseInt(req.query.ano ?? new Date().getFullYear());
+      const mesSQL = mes + 1;
+      dateFilter = `EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2`;
+      dateParams = [mesSQL, ano];
+      labelPeriodo = `${mesSQL}/${ano}`;
+    }
 
     const [statsRes, motivosRes, profRes, semanasRes, evolucaoRes, totalProfsRes] = await Promise.all([
-      // Stats gerais do mês
       pool.query(`
         SELECT 
           COUNT(*) as total,
@@ -354,10 +367,9 @@ router.get('/submissions/relatorios', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
           COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
         FROM submissions 
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-      `, [mesSQL, ano]),
+        WHERE ${dateFilter}
+      `, dateParams),
       
-      // Por motivo
       pool.query(`
         SELECT motivo,
           COUNT(*) as total,
@@ -365,64 +377,98 @@ router.get('/submissions/relatorios', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas,
           COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
         FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+        WHERE ${dateFilter}
         GROUP BY motivo ORDER BY total DESC
-      `, [mesSQL, ano]),
+      `, dateParams),
       
-      // Top 10 profissionais
       pool.query(`
         SELECT user_name as nome, user_cod as cod,
           COUNT(*) as total,
           COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas,
           COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas
         FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+        WHERE ${dateFilter}
         GROUP BY user_name, user_cod ORDER BY total DESC LIMIT 10
-      `, [mesSQL, ano]),
+      `, dateParams),
       
-      // Por semana
-      pool.query(`
-        SELECT 
-          CASE 
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 1 AND 7 THEN 'Semana 1'
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 8 AND 14 THEN 'Semana 2'
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 15 AND 21 THEN 'Semana 3'
-            ELSE 'Semana 4'
-          END as semana,
-          MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio,
-          MAX(EXTRACT(DAY FROM created_at))::int as dia_fim,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
-        FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-        GROUP BY 1 ORDER BY MIN(EXTRACT(DAY FROM created_at))
-      `, [mesSQL, ano]),
+      // Semanas - para custom agrupa por semana ISO
+      usaCustom 
+        ? pool.query(`
+            SELECT 
+              'Sem ' || EXTRACT(WEEK FROM created_at)::int as semana,
+              MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio,
+              MAX(EXTRACT(DAY FROM created_at))::int as dia_fim,
+              COUNT(*) as total,
+              COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+            FROM submissions
+            WHERE ${dateFilter}
+            GROUP BY 1, EXTRACT(WEEK FROM created_at) ORDER BY EXTRACT(WEEK FROM created_at)
+          `, dateParams)
+        : pool.query(`
+            SELECT 
+              CASE 
+                WHEN EXTRACT(DAY FROM created_at) BETWEEN 1 AND 7 THEN 'Semana 1'
+                WHEN EXTRACT(DAY FROM created_at) BETWEEN 8 AND 14 THEN 'Semana 2'
+                WHEN EXTRACT(DAY FROM created_at) BETWEEN 15 AND 21 THEN 'Semana 3'
+                ELSE 'Semana 4'
+              END as semana,
+              MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio,
+              MAX(EXTRACT(DAY FROM created_at))::int as dia_fim,
+              COUNT(*) as total,
+              COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+            FROM submissions
+            WHERE ${dateFilter}
+            GROUP BY 1 ORDER BY MIN(EXTRACT(DAY FROM created_at))
+          `, dateParams),
       
-      // Evolução últimos 6 meses
-      pool.query(`
-        SELECT 
-          TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label,
-          EXTRACT(MONTH FROM created_at)::int as mes,
-          EXTRACT(YEAR FROM created_at)::int as ano,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
-        FROM submissions
-        WHERE created_at >= DATE_TRUNC('month', make_date($2, $1, 1)) - INTERVAL '5 months'
-          AND created_at < DATE_TRUNC('month', make_date($2, $1, 1)) + INTERVAL '1 month'
-        GROUP BY 1, 2, 3
-        ORDER BY ano, mes
-      `, [mesSQL, ano]),
+      // Evolução - para custom mostra por mês dentro do range
+      usaCustom
+        ? pool.query(`
+            SELECT 
+              TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label,
+              EXTRACT(MONTH FROM created_at)::int as mes,
+              EXTRACT(YEAR FROM created_at)::int as ano,
+              COUNT(*) as total,
+              COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+            FROM submissions
+            WHERE ${dateFilter}
+            GROUP BY 1, 2, 3
+            ORDER BY ano, mes
+          `, dateParams)
+        : pool.query(`
+            SELECT 
+              TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label,
+              EXTRACT(MONTH FROM created_at)::int as mes,
+              EXTRACT(YEAR FROM created_at)::int as ano,
+              COUNT(*) as total,
+              COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+            FROM submissions
+            WHERE created_at >= DATE_TRUNC('month', make_date($2, $1, 1)) - INTERVAL '5 months'
+              AND created_at < DATE_TRUNC('month', make_date($2, $1, 1)) + INTERVAL '1 month'
+            GROUP BY 1, 2, 3
+            ORDER BY ano, mes
+          `, dateParams),
       
-      // Total profissionais ativos
       pool.query(`SELECT COUNT(DISTINCT user_cod) as total FROM submissions`)
     ]);
 
     const stats = statsRes.rows[0];
-    const mesAnterior = evolucaoRes.rows.find(r => {
-      const mAnt = mesSQL === 1 ? 12 : mesSQL - 1;
-      const aAnt = mesSQL === 1 ? ano - 1 : ano;
-      return r.mes === mAnt && r.ano === aAnt;
-    });
+    
+    // Calcular variação vs período anterior
+    let mesAnteriorTotal = 0;
+    if (!usaCustom) {
+      const mesSQL = dateParams[0];
+      const ano = dateParams[1];
+      const mesAnterior = evolucaoRes.rows.find(r => {
+        const mAnt = mesSQL === 1 ? 12 : mesSQL - 1;
+        const aAnt = mesSQL === 1 ? ano - 1 : ano;
+        return r.mes === mAnt && r.ano === aAnt;
+      });
+      mesAnteriorTotal = mesAnterior ? parseInt(mesAnterior.total) : 0;
+    }
+
+    const variacao = mesAnteriorTotal > 0 
+      ? ((stats.total - mesAnteriorTotal) / mesAnteriorTotal * 100).toFixed(1) : '0.0';
 
     res.json({
       total: parseInt(stats.total),
@@ -450,9 +496,9 @@ router.get('/submissions/relatorios', verificarToken, async (req, res) => {
       evolucao: evolucaoRes.rows.map(r => ({
         label: r.label, total: parseInt(r.total), aprovadas: parseInt(r.aprovadas)
       })),
-      mesAnteriorTotal: mesAnterior ? parseInt(mesAnterior.total) : 0,
-      variacao: mesAnterior && mesAnterior.total > 0 
-        ? ((stats.total - mesAnterior.total) / mesAnterior.total * 100).toFixed(1) : '0.0'
+      mesAnteriorTotal,
+      variacao,
+      periodoCustom: usaCustom || false
     });
   } catch (error) {
     console.error('❌ Erro relatórios submissions:', error);
