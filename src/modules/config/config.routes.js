@@ -186,18 +186,18 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
     const result = await pool.query(`
       SELECT 
         COUNT(*) as total,
-        COUNT(*) FILTER (WHERE status = 'pendente') as pendentes,
-        COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados,
-        COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
-        COUNT(*) FILTER (WHERE status = 'pendente' 
+        COUNT(*) FILTER (WHERE LOWER(TRIM(status)) = 'pendente') as pendentes,
+        COUNT(*) FILTER (WHERE LOWER(TRIM(status)) = 'aprovado') as aprovados,
+        COUNT(*) FILTER (WHERE LOWER(TRIM(status)) = 'rejeitado') as rejeitados,
+        COUNT(*) FILTER (WHERE LOWER(TRIM(status)) = 'pendente' 
           AND created_at < NOW() - INTERVAL '24 hours'
           AND EXTRACT(DOW FROM created_at) BETWEEN 1 AND 5
           AND EXTRACT(HOUR FROM created_at) BETWEEN 9 AND 17
         ) as atrasadas,
         COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) as hoje_total,
-        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE AND status != 'pendente') as hoje_processadas,
+        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE AND LOWER(TRIM(status)) != 'pendente') as hoje_processadas,
         COALESCE(AVG(
-          CASE WHEN status != 'pendente' AND updated_at IS NOT NULL AND created_at IS NOT NULL
+          CASE WHEN LOWER(TRIM(status)) != 'pendente' AND updated_at IS NOT NULL AND created_at IS NOT NULL
             AND EXTRACT(DOW FROM created_at) BETWEEN 1 AND 5
             AND EXTRACT(HOUR FROM created_at) BETWEEN 9 AND 17
           THEN EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0
@@ -210,6 +210,14 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
       SELECT motivo, COUNT(*) as total
       FROM submissions
       GROUP BY motivo
+      ORDER BY total DESC
+    `);
+
+    // Diagnóstico: todos os status distintos
+    const statusBreakdown = await pool.query(`
+      SELECT COALESCE(status, 'NULL') as status, COUNT(*) as total
+      FROM submissions
+      GROUP BY status
       ORDER BY total DESC
     `);
 
@@ -233,7 +241,8 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
       hoje_processadas: parseInt(stats.hoje_processadas),
       tempo_medio_horas: parseFloat(stats.tempo_medio_horas),
       motivos: motivos.rows,
-      atrasadas_os: atrasadasOS.rows.map(r => r.ordem_servico)
+      atrasadas_os: atrasadasOS.rows.map(r => r.ordem_servico),
+      statusBreakdown: statusBreakdown.rows
     });
   } catch (error) {
     console.error('❌ Erro dashboard submissions:', error);
