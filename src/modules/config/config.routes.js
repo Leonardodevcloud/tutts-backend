@@ -273,7 +273,7 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
     } else if (periodo === 'week') {
       conditions.push(`created_at >= CURRENT_DATE - INTERVAL '7 days'`);
     } else if (periodo === 'month') {
-      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '30 days'`);
+      conditions.push(`created_at >= DATE_TRUNC('month', CURRENT_DATE)`);
     }
 
     const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
@@ -302,6 +302,160 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Erro busca submissions:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// GET - Ranking de Retorno (aprovações agrupadas por profissional)
+router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
+  try {
+    const { periodo } = req.query;
+    let dateFilter = '';
+    if (periodo === 'today') dateFilter = `AND created_at >= CURRENT_DATE`;
+    else if (periodo === 'week') dateFilter = `AND created_at >= CURRENT_DATE - INTERVAL '7 days'`;
+    else if (periodo === 'month') dateFilter = `AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
+
+    const result = await pool.query(`
+      SELECT 
+        user_cod, user_name,
+        COUNT(*) as total,
+        json_agg(json_build_object(
+          'id', id, 'ordemServico', ordem_servico, 'created_at', created_at,
+          'temImagem', CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END
+        ) ORDER BY created_at DESC) as solicitacoes
+      FROM submissions
+      WHERE status = 'aprovado' AND motivo = 'Ajuste de Retorno' ${dateFilter}
+      GROUP BY user_cod, user_name
+      ORDER BY total DESC
+    `);
+
+    res.json({ ranking: result.rows });
+  } catch (error) {
+    console.error('❌ Erro ranking retorno:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// GET - Relatórios de submissões por mês/ano
+router.get('/submissions/relatorios', verificarToken, async (req, res) => {
+  try {
+    const mes = parseInt(req.query.mes ?? new Date().getMonth());
+    const ano = parseInt(req.query.ano ?? new Date().getFullYear());
+    
+    // Mês no JS é 0-indexed, no SQL é 1-indexed
+    const mesSQL = mes + 1;
+
+    const [statsRes, motivosRes, profRes, semanasRes, evolucaoRes, totalProfsRes] = await Promise.all([
+      // Stats gerais do mês
+      pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
+          COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
+        FROM submissions 
+        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+      `, [mesSQL, ano]),
+      
+      // Por motivo
+      pool.query(`
+        SELECT motivo,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas,
+          COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
+        FROM submissions
+        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+        GROUP BY motivo ORDER BY total DESC
+      `, [mesSQL, ano]),
+      
+      // Top 10 profissionais
+      pool.query(`
+        SELECT user_name as nome, user_cod as cod,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas
+        FROM submissions
+        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+        GROUP BY user_name, user_cod ORDER BY total DESC LIMIT 10
+      `, [mesSQL, ano]),
+      
+      // Por semana
+      pool.query(`
+        SELECT 
+          CASE 
+            WHEN EXTRACT(DAY FROM created_at) BETWEEN 1 AND 7 THEN 'Semana 1'
+            WHEN EXTRACT(DAY FROM created_at) BETWEEN 8 AND 14 THEN 'Semana 2'
+            WHEN EXTRACT(DAY FROM created_at) BETWEEN 15 AND 21 THEN 'Semana 3'
+            ELSE 'Semana 4'
+          END as semana,
+          MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio,
+          MAX(EXTRACT(DAY FROM created_at))::int as dia_fim,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+        FROM submissions
+        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
+        GROUP BY 1 ORDER BY MIN(EXTRACT(DAY FROM created_at))
+      `, [mesSQL, ano]),
+      
+      // Evolução últimos 6 meses
+      pool.query(`
+        SELECT 
+          TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label,
+          EXTRACT(MONTH FROM created_at)::int as mes,
+          EXTRACT(YEAR FROM created_at)::int as ano,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
+        FROM submissions
+        WHERE created_at >= DATE_TRUNC('month', make_date($2, $1, 1)) - INTERVAL '5 months'
+          AND created_at < DATE_TRUNC('month', make_date($2, $1, 1)) + INTERVAL '1 month'
+        GROUP BY 1, 2, 3
+        ORDER BY ano, mes
+      `, [mesSQL, ano]),
+      
+      // Total profissionais ativos
+      pool.query(`SELECT COUNT(DISTINCT user_cod) as total FROM submissions`)
+    ]);
+
+    const stats = statsRes.rows[0];
+    const mesAnterior = evolucaoRes.rows.find(r => {
+      const mAnt = mesSQL === 1 ? 12 : mesSQL - 1;
+      const aAnt = mesSQL === 1 ? ano - 1 : ano;
+      return r.mes === mAnt && r.ano === aAnt;
+    });
+
+    res.json({
+      total: parseInt(stats.total),
+      aprovados: parseInt(stats.aprovados),
+      rejeitados: parseInt(stats.rejeitados),
+      pendentes: parseInt(stats.pendentes),
+      taxaAprovacao: stats.total > 0 ? (stats.aprovados / stats.total * 100).toFixed(1) : '0.0',
+      taxaRejeicao: stats.total > 0 ? (stats.rejeitados / stats.total * 100).toFixed(1) : '0.0',
+      totalProfissionais: parseInt(totalProfsRes.rows[0].total),
+      mediaPorProfissional: totalProfsRes.rows[0].total > 0 
+        ? (stats.total / totalProfsRes.rows[0].total).toFixed(1) : '0.0',
+      motivos: motivosRes.rows.reduce((acc, r) => { 
+        acc[r.motivo || 'Outros'] = { total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas), pendentes: parseInt(r.pendentes) }; 
+        return acc; 
+      }, {}),
+      topProfissionais: profRes.rows.map(r => ({
+        nome: r.nome, cod: r.cod,
+        total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas),
+        taxa: r.total > 0 ? (r.aprovadas / r.total * 100).toFixed(0) : '0'
+      })),
+      semanas: semanasRes.rows.map(r => ({
+        label: r.semana, dias: [r.dia_inicio, r.dia_fim],
+        total: parseInt(r.total), aprovadas: parseInt(r.aprovadas)
+      })),
+      evolucao: evolucaoRes.rows.map(r => ({
+        label: r.label, total: parseInt(r.total), aprovadas: parseInt(r.aprovadas)
+      })),
+      mesAnteriorTotal: mesAnterior ? parseInt(mesAnterior.total) : 0,
+      variacao: mesAnterior && mesAnterior.total > 0 
+        ? ((stats.total - mesAnterior.total) / mesAnterior.total * 100).toFixed(1) : '0.0'
+    });
+  } catch (error) {
+    console.error('❌ Erro relatórios submissions:', error);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
