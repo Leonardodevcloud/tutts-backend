@@ -70,6 +70,37 @@ function createLiderancaRouter(pool) {
   liderancaRouter.get('/mensagens/pendentes/:userCod', async (req, res) => {
     try {
       const { userCod } = req.params;
+      
+      // Processar recorrências pendentes antes de buscar
+      const agora = new Date();
+      const recorrentes = await pool.query(`
+        SELECT * FROM lideranca_mensagens
+        WHERE recorrente = true AND ativo = true AND proxima_exibicao IS NOT NULL AND proxima_exibicao <= $1
+      `, [agora]);
+      
+      for (const msg of recorrentes.rows) {
+        // Limpar visualizações para reexibir
+        await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
+        
+        // Calcular próxima exibição
+        let proxima = new Date(agora);
+        switch (msg.tipo_recorrencia) {
+          case 'diaria':
+            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1));
+            break;
+          case 'semanal':
+            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1) * 7);
+            break;
+          case 'mensal':
+            proxima.setMonth(proxima.getMonth() + (msg.intervalo_recorrencia || 1));
+            break;
+        }
+        
+        await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
+        console.log(`🔄 Recorrência processada: "${msg.titulo}" - próxima: ${proxima.toISOString()}`);
+      }
+      
+      // Agora buscar pendentes normalmente
       const result = await pool.query(`
         SELECT m.* FROM lideranca_mensagens m
         WHERE m.ativo = true
