@@ -1251,6 +1251,86 @@ router.post('/indicacoes/verificar-expiradas', async (req, res) => {
   }
 });
 
+// Verificar cadastro de indicados via API Tutts (prof-status)
+router.post('/indicacoes/verificar-cadastros', async (req, res) => {
+  try {
+    const { celulares } = req.body;
+    if (!celulares || !Array.isArray(celulares) || celulares.length === 0) {
+      return res.status(400).json({ error: 'celulares é obrigatório (array)' });
+    }
+
+    const token = process.env.TUTTS_TOKEN_PROF_STATUS;
+    if (!token) {
+      console.warn('⚠️ TUTTS_TOKEN_PROF_STATUS não configurado');
+      return res.status(503).json({ error: 'Token prof-status não configurado' });
+    }
+
+    const lista = celulares.slice(0, 50);
+    const resultados = {};
+
+    const chunks = [];
+    for (let i = 0; i < lista.length; i += 5) {
+      chunks.push(lista.slice(i, i + 5));
+    }
+
+    for (const chunk of chunks) {
+      const promises = chunk.map(async (cel) => {
+        try {
+          const celLimpo = cel.replace(/\D/g, '');
+          if (!celLimpo || celLimpo.length < 10) {
+            resultados[cel] = { cadastrado: false, erro: 'número inválido' };
+            return;
+          }
+
+          let celFormatado = celLimpo;
+          if (celLimpo.length === 11) {
+            celFormatado = `(${celLimpo.slice(0,2)}) ${celLimpo.slice(2,7)}-${celLimpo.slice(7)}`;
+          } else if (celLimpo.length === 10) {
+            celFormatado = `(${celLimpo.slice(0,2)}) ${celLimpo.slice(2,6)}-${celLimpo.slice(6)}`;
+          }
+
+          const resp = await fetch('https://tutts.com.br/integracao', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+              'identificador': 'prof-status'
+            },
+            body: JSON.stringify({ celular: celFormatado })
+          });
+
+          const data = await resp.json();
+
+          if (data.Sucesso && data.Sucesso.length > 0) {
+            const prof = data.Sucesso[0];
+            resultados[cel] = {
+              cadastrado: true,
+              nome: prof.nome,
+              codigo: prof.codigo,
+              ativo: prof.ativo === 'S',
+              status: prof.status,
+              dataCadastro: prof.dataCadastro,
+              dataAtivacao: prof.dataAtivacao
+            };
+          } else {
+            resultados[cel] = { cadastrado: false };
+          }
+        } catch (err) {
+          console.error(`❌ Erro ao verificar ${cel}:`, err.message);
+          resultados[cel] = { cadastrado: false, erro: err.message };
+        }
+      });
+
+      await Promise.allSettled(promises);
+    }
+
+    res.json({ resultados });
+  } catch (error) {
+    console.error('❌ Erro verificar-cadastros:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // NOVO SISTEMA DE LINKS DE INDICAÇÃO
 // ============================================
