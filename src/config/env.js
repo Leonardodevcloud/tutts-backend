@@ -37,6 +37,7 @@ const env = {
     STATUS: process.env.TUTTS_TOKEN_STATUS,
     PROFISSIONAIS: process.env.TUTTS_TOKEN_PROFISSIONAIS,
     CANCELAR: process.env.TUTTS_TOKEN_CANCELAR,
+    PROF_STATUS: process.env.TUTTS_TOKEN_PROF_STATUS,
   },
 
   // External APIs
