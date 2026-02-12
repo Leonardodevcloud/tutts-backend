@@ -233,15 +233,21 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
     const dataInicio = req.query.dataInicio || '';
     const dataFim = req.query.dataFim || '';
     const tipoFiltro = req.query.tipoFiltro || 'solicitacao';
+    const userCod = req.query.userCod || '';
     const limit = Math.min(parseInt(req.query.limit) || 200, 500);
     const offset = parseInt(req.query.offset) || 0;
-    const ck = `${status}-${limit}-${offset}-${dataInicio}-${dataFim}-${tipoFiltro}`;
+    const ck = `${status}-${limit}-${offset}-${dataInicio}-${dataFim}-${tipoFiltro}-${userCod}`;
     if (_wCache.key === ck && _wCache.data && Date.now() - _wCache.ts < 30000) return res.json(_wCache.data);
     
     let query, params;
     
-    // Filtro por data (aba validação)
-    if (dataInicio && dataFim) {
+    // Filtro por user_cod (aba resumo)
+    if (userCod) {
+      query = `SELECT * FROM withdrawal_requests WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC LIMIT $2`;
+      params = [userCod, limit];
+    }
+    // Filtro por data (aba validação/conciliação)
+    else if (dataInicio && dataFim) {
       const col = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
       if (status) {
         query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${col} >= $2::date AND ${col} < $3::date + interval '1 day' ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
