@@ -53,6 +53,7 @@ const { initSolicitacaoRoutes, initSolicitacaoTables } = require('./src/modules/
 const { initBiRoutes, initBiTables } = require('./src/modules/bi');
 const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
+const { initCsRoutes, initCsTables } = require('./src/modules/cs');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -346,6 +347,9 @@ app.use('/api', initBiRoutes(pool, verificarToken));
 app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
 
+// Sucesso do Cliente (CS) — acesso admin/gestores
+app.use('/api', verificarToken, initCsRoutes(pool, verificarToken, verificarAdmin));
+
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
@@ -369,6 +373,7 @@ async function initDatabase() {
     await initOperacionalTables(pool);
     await initScoreTables(pool);
     await initAuditTables(pool);
+    await initCsTables(pool);
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
