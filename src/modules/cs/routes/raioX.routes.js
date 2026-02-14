@@ -681,6 +681,16 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
 </html>`;
 
       res.setHeader('Content-Type', 'text/html');
+      // CSP customizado para permitir Google Maps nesta página standalone
+      res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.ggpht.com",
+        "font-src 'self' https://fonts.gstatic.com",
+        "connect-src 'self' https://maps.googleapis.com https://*.googleapis.com",
+        "frame-src https://maps.googleapis.com https://*.google.com",
+      ].join('; '));
       res.send(html);
     } catch (error) {
       console.error('❌ Erro mapa de calor:', error);
