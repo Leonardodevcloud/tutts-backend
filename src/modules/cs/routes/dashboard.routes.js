@@ -1,6 +1,6 @@
 /**
  * CS Sub-Router: Dashboard
- * KPIs consolidados, visão operacional integrada com BI
+ * KPIs consolidados — MESMA FONTE DO BI (bi_resumo_diario + bi_resumo_cliente)
  */
 const express = require('express');
 const { STATUS_CLIENTE, TIPOS_INTERACAO, SEVERIDADES } = require('../cs.service');
@@ -9,16 +9,14 @@ function createDashboardRoutes(pool) {
   const router = express.Router();
 
   // ==================== GET /cs/dashboard ====================
-  // Dashboard completo do módulo CS
   router.get('/cs/dashboard', async (req, res) => {
     try {
       const { data_inicio, data_fim } = req.query;
 
-      // Período padrão: últimos 30 dias
       const inicio = data_inicio || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const fim = data_fim || new Date().toISOString().split('T')[0];
 
-      // 1. KPIs dos clientes
+      // 1. KPIs dos clientes CS
       const kpisClientes = await pool.query(`
         SELECT 
           COUNT(*) as total_clientes,
@@ -60,25 +58,35 @@ function createDashboardRoutes(pool) {
         FROM cs_ocorrencias
       `, [inicio]);
 
-      // 4. Métricas BI globais do período
+      // 4. Métricas operacionais — MESMA FONTE DO BI (bi_resumo_diario)
       const metricasBi = await pool.query(`
         SELECT
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo_global,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as faturamento_total,
-          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_cliente END) as clientes_ativos_bi,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END), 1) as tempo_medio_entrega
-        FROM bi_entregas
-        WHERE data_solicitado >= $1 AND data_solicitado <= $2
+          COALESCE(SUM(total_entregas), 0) as total_entregas,
+          ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 2) as taxa_prazo_global,
+          COALESCE(SUM(valor_total), 0) as faturamento_total,
+          COALESCE(SUM(total_retornos), 0) as total_retornos,
+          ROUND(AVG(tempo_medio_entrega), 2) as tempo_medio_entrega,
+          COALESCE(SUM(total_os), 0) as total_os,
+          COALESCE(SUM(valor_prof), 0) as valor_prof,
+          ROUND(SUM(valor_total)::numeric / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio
+        FROM bi_resumo_diario
+        WHERE data >= $1 AND data <= $2
       `, [inicio, fim]);
 
-      // 5. Top 5 clientes em risco (health score baixo + entregas)
+      // 5. Clientes ativos no período — MESMA FONTE DO BI (bi_resumo_cliente)
+      const clientesAtivosBi = await pool.query(`
+        SELECT COUNT(DISTINCT cod_cliente) as clientes_ativos_bi
+        FROM bi_resumo_cliente
+        WHERE data >= $1 AND data <= $2 AND total_entregas > 0
+      `, [inicio, fim]);
+
+      // 6. Top 5 clientes em risco (health score baixo + métricas do bi_resumo_cliente)
       const clientesRisco = await pool.query(`
         SELECT 
           c.cod_cliente, c.nome_fantasia, c.health_score, c.status,
           COALESCE(oc.abertas, 0) as ocorrencias_abertas,
-          bi.total_entregas_30d, bi.taxa_prazo_30d
+          COALESCE(bi.total_entregas_30d, 0) as total_entregas_30d,
+          COALESCE(bi.taxa_prazo_30d, 0) as taxa_prazo_30d
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as abertas FROM cs_ocorrencias
@@ -86,17 +94,17 @@ function createDashboardRoutes(pool) {
         ) oc ON true
         LEFT JOIN LATERAL (
           SELECT 
-            COUNT(*) FILTER (WHERE data_solicitado >= CURRENT_DATE - 30 AND COALESCE(ponto, 1) >= 2) as total_entregas_30d,
-            ROUND(SUM(CASE WHEN data_solicitado >= CURRENT_DATE - 30 AND COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                  NULLIF(COUNT(*) FILTER (WHERE data_solicitado >= CURRENT_DATE - 30 AND COALESCE(ponto, 1) >= 2), 0) * 100, 1) as taxa_prazo_30d
-          FROM bi_entregas WHERE cod_cliente = c.cod_cliente
+            SUM(total_entregas) as total_entregas_30d,
+            ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo_30d
+          FROM bi_resumo_cliente 
+          WHERE cod_cliente = c.cod_cliente AND data >= CURRENT_DATE - 30
         ) bi ON true
         WHERE c.health_score < 50 OR c.status IN ('em_risco', 'inativo')
         ORDER BY c.health_score ASC, oc.abertas DESC
         LIMIT 5
       `);
 
-      // 6. Interações recentes (últimas 10)
+      // 7. Interações recentes (últimas 10)
       const interacoesRecentes = await pool.query(`
         SELECT i.id, i.tipo, i.titulo, i.data_interacao, i.criado_por_nome, i.cod_cliente, c.nome_fantasia
         FROM cs_interacoes i
@@ -105,7 +113,7 @@ function createDashboardRoutes(pool) {
         LIMIT 10
       `);
 
-      // 7. Distribuição Health Score
+      // 8. Distribuição Health Score
       const distribuicaoHealth = await pool.query(`
         SELECT 
           CASE 
@@ -142,6 +150,10 @@ function createDashboardRoutes(pool) {
         ORDER BY MIN(health_score) DESC
       `);
 
+      // Merge clientes_ativos_bi
+      const operacao = metricasBi.rows[0] || {};
+      operacao.clientes_ativos_bi = parseInt(clientesAtivosBi.rows[0]?.clientes_ativos_bi) || 0;
+
       res.json({
         success: true,
         periodo: { inicio, fim },
@@ -149,7 +161,7 @@ function createDashboardRoutes(pool) {
           clientes: kpisClientes.rows[0],
           interacoes: kpisInteracoes.rows[0],
           ocorrencias: kpisOcorrencias.rows[0],
-          operacao: metricasBi.rows[0],
+          operacao,
         },
         clientes_risco: clientesRisco.rows,
         interacoes_recentes: interacoesRecentes.rows,
@@ -162,7 +174,6 @@ function createDashboardRoutes(pool) {
   });
 
   // ==================== GET /cs/constantes ====================
-  // Retorna todas as constantes para o frontend
   router.get('/cs/constantes', async (req, res) => {
     res.json({
       success: true,
