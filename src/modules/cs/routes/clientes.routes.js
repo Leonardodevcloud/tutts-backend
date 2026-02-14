@@ -44,21 +44,34 @@ function createClientesRoutes(pool) {
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT 
-            COUNT(*) as total_entregas_30d,
+            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_30d,
             ROUND(
-              SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-              NULLIF(COUNT(*), 0) * 100, 1
+              SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1
             ) as taxa_prazo_30d,
-            COALESCE(SUM(valor), 0) as valor_total_30d,
+            COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total_30d,
             MAX(data_solicitado) as ultima_entrega,
-            SUM(CASE WHEN (
-              LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
-              LOWER(ocorrencia) LIKE '%clienteaus%' OR 
-              LOWER(ocorrencia) LIKE '%cliente ausente%'
-            ) THEN 1 ELSE 0 END) as total_retornos_30d
+            SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+              LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR 
+              LOWER(ocorrencia) LIKE '%%clienteaus%%' OR 
+              LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR
+              LOWER(ocorrencia) LIKE '%%loja fechada%%' OR
+              LOWER(ocorrencia) LIKE '%%produto incorreto%%'
+            ) THEN 1 ELSE 0 END) as total_retornos_30d,
+            ROUND(
+              SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+                LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR 
+                LOWER(ocorrencia) LIKE '%%clienteaus%%' OR 
+                LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR
+                LOWER(ocorrencia) LIKE '%%loja fechada%%' OR
+                LOWER(ocorrencia) LIKE '%%produto incorreto%%'
+              ) THEN 1 ELSE 0 END)::numeric /
+              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1
+            ) as taxa_retorno_30d
           FROM bi_entregas 
           WHERE cod_cliente = c.cod_cliente
             AND data_solicitado >= CURRENT_DATE - 30
+            AND COALESCE(ponto, 1) >= 2
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -130,42 +143,69 @@ function createClientesRoutes(pool) {
         }
       }
 
-      // Métricas BI dos últimos 90 dias
+      // Métricas BI — HISTÓRICO COMPLETO (sem limite de dias)
       const metricasBi = await pool.query(`
         SELECT 
-          COUNT(*) as total_entregas,
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
           COUNT(DISTINCT os) as total_os,
-          SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
-          SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(valor), 0) as valor_total,
-          COALESCE(SUM(valor_prof), 0) as valor_prof,
-          ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 1) as tempo_medio,
-          ROUND(AVG(distancia), 1) as km_medio,
-          COUNT(DISTINCT cod_prof) as profissionais_unicos,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+          ROUND(AVG(
+            CASE 
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
+                   AND data_chegada IS NOT NULL 
+                   AND hora_chegada IS NOT NULL
+                   AND (data_chegada + hora_chegada::time) >= data_hora
+              THEN EXTRACT(EPOCH FROM (
+                (data_chegada + hora_chegada::time) - 
+                CASE WHEN DATE(data_chegada) <> DATE(data_hora)
+                     THEN DATE(data_chegada) + TIME '08:00:00'
+                     ELSE data_hora END
+              )) / 60
+              WHEN COALESCE(ponto, 1) >= 2
+                   AND data_hora IS NOT NULL 
+                   AND finalizado IS NOT NULL
+                   AND finalizado >= data_hora
+              THEN EXTRACT(EPOCH FROM (
+                finalizado - 
+                CASE WHEN DATE(finalizado) <> DATE(data_hora)
+                     THEN DATE(finalizado) + TIME '08:00:00'
+                     ELSE data_hora END
+              )) / 60
+              ELSE NULL
+            END
+          ), 1) as tempo_medio,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos,
           MAX(data_solicitado) as ultima_entrega,
           MIN(data_solicitado) as primeira_entrega,
-          SUM(CASE WHEN (
-            LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
-            LOWER(ocorrencia) LIKE '%clienteaus%' OR 
-            LOWER(ocorrencia) LIKE '%cliente ausente%'
-          ) THEN 1 ELSE 0 END) as total_retornos
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
+            LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR 
+            LOWER(ocorrencia) LIKE '%%clienteaus%%' OR 
+            LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR
+            LOWER(ocorrencia) LIKE '%%loja fechada%%' OR
+            LOWER(ocorrencia) LIKE '%%produto incorreto%%'
+          ) THEN 1 ELSE 0 END) as total_retornos,
+          CURRENT_DATE - MAX(data_solicitado) as dias_sem_entrega
         FROM bi_entregas
         WHERE cod_cliente = $1
-          AND data_solicitado >= CURRENT_DATE - 90
       `, [cod]);
 
-      // Evolução por semana (últimos 90 dias)
+      // Evolução por semana (últimos 180 dias — visão mais ampla)
       const evolucaoSemanal = await pool.query(`
         SELECT 
           DATE_TRUNC('week', data_solicitado)::date as semana,
-          COUNT(*) as entregas,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(valor), 0) as valor
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 90
+        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 180
         GROUP BY DATE_TRUNC('week', data_solicitado)
         ORDER BY semana
       `, [cod]);
@@ -188,16 +228,38 @@ function createClientesRoutes(pool) {
       // Calcular health score atualizado
       const metricas = metricasBi.rows[0];
       const healthScore = calcularHealthScore(metricas);
-      const diasSemEntrega = metricas.ultima_entrega
-        ? Math.floor((Date.now() - new Date(metricas.ultima_entrega).getTime()) / (1000 * 60 * 60 * 24))
-        : 999;
+      const diasSemEntrega = metricas.dias_sem_entrega != null
+        ? parseInt(metricas.dias_sem_entrega)
+        : (metricas.ultima_entrega
+            ? Math.floor((Date.now() - new Date(metricas.ultima_entrega).getTime()) / (1000 * 60 * 60 * 24))
+            : 999);
       const statusSugerido = determinarStatusCliente(healthScore, diasSemEntrega);
+
+      // Calcular taxa de retorno
+      const totalEntregas = parseInt(metricas.total_entregas) || 0;
+      const totalRetornos = parseInt(metricas.total_retornos) || 0;
+      const taxaRetorno = totalEntregas > 0 ? parseFloat(((totalRetornos / totalEntregas) * 100).toFixed(1)) : 0;
+
+      // Gerar alertas automáticos
+      const alertas = [];
+      if (taxaRetorno > 10) alertas.push({ tipo: 'critico', icone: '🔴', msg: `Taxa de retorno crítica: ${taxaRetorno}% (${totalRetornos} retornos)` });
+      else if (taxaRetorno > 5) alertas.push({ tipo: 'alto', icone: '🟠', msg: `Taxa de retorno alta: ${taxaRetorno}% (${totalRetornos} retornos)` });
+      else if (taxaRetorno > 3) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `Taxa de retorno elevada: ${taxaRetorno}% (${totalRetornos} retornos)` });
+
+      if (parseFloat(metricas.taxa_prazo || 0) < 70) alertas.push({ tipo: 'critico', icone: '🔴', msg: `Taxa de prazo abaixo de 70%: ${metricas.taxa_prazo}%` });
+      else if (parseFloat(metricas.taxa_prazo || 0) < 85) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `Taxa de prazo abaixo da meta (85%): ${metricas.taxa_prazo}%` });
+
+      if (diasSemEntrega > 15) alertas.push({ tipo: 'alto', icone: '🟠', msg: `${diasSemEntrega} dias sem entregas — risco de churn` });
+      else if (diasSemEntrega > 7) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `${diasSemEntrega} dias sem entregas` });
 
       // Atualizar health score no banco
       await pool.query(
         'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
         [healthScore, cod]
       ).catch(() => {});
+
+      // Enriquecer métricas com taxa calculada
+      metricas.taxa_retorno = taxaRetorno;
 
       res.json({
         success: true,
@@ -211,6 +273,8 @@ function createClientesRoutes(pool) {
           health_score: healthScore,
           status_sugerido: statusSugerido,
           dias_sem_entrega: diasSemEntrega,
+          taxa_retorno: taxaRetorno,
+          alertas,
         },
       });
     } catch (error) {
