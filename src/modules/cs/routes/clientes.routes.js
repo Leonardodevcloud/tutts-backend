@@ -1,6 +1,6 @@
 /**
  * CS Sub-Router: Gestão de Clientes
- * CRUD + sincronização com dados do BI
+ * CRUD + métricas do BI via bi_resumo_cliente (MESMA FONTE DO BI)
  */
 const express = require('express');
 const { calcularHealthScore, determinarStatusCliente, STATUS_CLIENTE } = require('../cs.service');
@@ -31,7 +31,7 @@ function createClientesRoutes(pool) {
         paramIndex++;
       }
 
-      // Buscar clientes com métricas dos últimos 30 dias do BI
+      // Buscar clientes com métricas dos últimos 30 dias via bi_resumo_cliente
       const query = `
         SELECT 
           c.*,
@@ -46,21 +46,13 @@ function createClientesRoutes(pool) {
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT 
-            COUNT(*) FILTER (WHERE data_solicitado >= CURRENT_DATE - 30) as total_entregas_30d,
-            ROUND(
-              SUM(CASE WHEN dentro_prazo = true AND data_solicitado >= CURRENT_DATE - 30 THEN 1 ELSE 0 END)::numeric /
-              NULLIF(COUNT(*) FILTER (WHERE data_solicitado >= CURRENT_DATE - 30), 0) * 100, 1
-            ) as taxa_prazo_30d,
-            COALESCE(SUM(CASE WHEN data_solicitado >= CURRENT_DATE - 30 THEN valor ELSE 0 END), 0) as valor_total_30d,
-            MAX(data_solicitado) as ultima_entrega,
-            SUM(CASE WHEN data_solicitado >= CURRENT_DATE - 30 AND (
-              LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
-              LOWER(ocorrencia) LIKE '%clienteaus%' OR 
-              LOWER(ocorrencia) LIKE '%cliente ausente%'
-            ) THEN 1 ELSE 0 END) as total_retornos_30d
-          FROM bi_entregas 
-          WHERE cod_cliente = c.cod_cliente
-            AND COALESCE(ponto, 1) >= 2
+            SUM(total_entregas) as total_entregas_30d,
+            ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo_30d,
+            COALESCE(SUM(valor_total), 0) as valor_total_30d,
+            MAX(data) as ultima_entrega,
+            COALESCE(SUM(total_retornos), 0) as total_retornos_30d
+          FROM bi_resumo_cliente
+          WHERE cod_cliente = c.cod_cliente AND data >= CURRENT_DATE - 30
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -117,17 +109,17 @@ function createClientesRoutes(pool) {
       let ficha = fichaResult.rows[0];
       if (!ficha) {
         const biInfo = await pool.query(
-          `SELECT DISTINCT nome_fantasia, nome_cliente, cidade, estado
-           FROM bi_entregas WHERE cod_cliente = $1 LIMIT 1`, [cod]
+          `SELECT DISTINCT nome_fantasia, cod_cliente
+           FROM bi_resumo_cliente WHERE cod_cliente = $1 LIMIT 1`, [cod]
         );
         if (biInfo.rows.length > 0) {
           const bi = biInfo.rows[0];
           const insertResult = await pool.query(
-            `INSERT INTO cs_clientes (cod_cliente, nome_fantasia, razao_social, cidade, estado, status)
-             VALUES ($1, LEFT($2, 255), LEFT($3, 255), LEFT($4, 100), LEFT($5, 10), 'ativo')
+            `INSERT INTO cs_clientes (cod_cliente, nome_fantasia, status)
+             VALUES ($1, LEFT($2, 255), 'ativo')
              ON CONFLICT (cod_cliente) DO NOTHING
              RETURNING *`,
-            [cod, bi.nome_fantasia || bi.nome_cliente, bi.nome_cliente, bi.cidade, bi.estado]
+            [cod, bi.nome_fantasia]
           );
           ficha = insertResult.rows[0] || { cod_cliente: cod, nome_fantasia: bi.nome_fantasia, status: 'ativo' };
         } else {
@@ -135,43 +127,36 @@ function createClientesRoutes(pool) {
         }
       }
 
-      // Métricas BI dos últimos 90 dias
+      // Métricas BI dos últimos 90 dias via bi_resumo_cliente
       const metricasBi = await pool.query(`
         SELECT 
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-          COUNT(DISTINCT os) as total_os,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
-          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END), 1) as tempo_medio,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
-          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos,
-          MAX(data_solicitado) as ultima_entrega,
-          MIN(data_solicitado) as primeira_entrega,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
-            LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR 
-            LOWER(ocorrencia) LIKE '%%clienteaus%%' OR 
-            LOWER(ocorrencia) LIKE '%%cliente ausente%%'
-          ) THEN 1 ELSE 0 END) as total_retornos
-        FROM bi_entregas
+          COALESCE(SUM(total_entregas), 0) as total_entregas,
+          COALESCE(SUM(total_os), 0) as total_os,
+          COALESCE(SUM(entregas_no_prazo), 0) as entregas_no_prazo,
+          COALESCE(SUM(entregas_fora_prazo), 0) as entregas_fora_prazo,
+          ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(valor_total), 0) as valor_total,
+          COALESCE(SUM(valor_prof), 0) as valor_prof,
+          ROUND(AVG(CASE WHEN tempo_medio_entrega > 0 THEN tempo_medio_entrega END), 1) as tempo_medio,
+          COALESCE(SUM(total_retornos), 0) as total_retornos,
+          COALESCE(SUM(total_profissionais), 0) as profissionais_unicos,
+          MAX(data) as ultima_entrega,
+          MIN(data) as primeira_entrega
+        FROM bi_resumo_cliente
         WHERE cod_cliente = $1
-          AND data_solicitado >= CURRENT_DATE - 90
+          AND data >= CURRENT_DATE - 90
       `, [cod]);
 
-      // Evolução por semana (últimos 90 dias)
+      // Evolução por semana (últimos 90 dias) via bi_resumo_cliente
       const evolucaoSemanal = await pool.query(`
         SELECT 
-          DATE_TRUNC('week', data_solicitado)::date as semana,
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
-        FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 90
-        GROUP BY DATE_TRUNC('week', data_solicitado)
+          DATE_TRUNC('week', data)::date as semana,
+          SUM(total_entregas) as entregas,
+          ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(valor_total), 0) as valor
+        FROM bi_resumo_cliente
+        WHERE cod_cliente = $1 AND data >= CURRENT_DATE - 90
+        GROUP BY DATE_TRUNC('week', data)
         ORDER BY semana
       `, [cod]);
 
@@ -281,18 +266,16 @@ function createClientesRoutes(pool) {
   router.post('/cs/clientes/sync-bi', async (req, res) => {
     try {
       const result = await pool.query(`
-        INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
+        INSERT INTO cs_clientes (cod_cliente, nome_fantasia, status)
         SELECT DISTINCT 
           e.cod_cliente, 
-          LEFT(e.nome_fantasia, 255),
-          LEFT(MAX(e.cidade), 100),
-          LEFT(MAX(e.estado), 10),
+          LEFT(MAX(e.nome_fantasia), 255),
           'ativo'
-        FROM bi_entregas e
+        FROM bi_resumo_cliente e
         WHERE e.cod_cliente IS NOT NULL
           AND e.cod_cliente NOT IN (SELECT cod_cliente FROM cs_clientes)
-          AND e.data_solicitado >= CURRENT_DATE - 90
-        GROUP BY e.cod_cliente, e.nome_fantasia
+          AND e.data >= CURRENT_DATE - 90
+        GROUP BY e.cod_cliente
         ON CONFLICT (cod_cliente) DO NOTHING
         RETURNING cod_cliente, nome_fantasia
       `);
