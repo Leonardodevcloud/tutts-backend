@@ -1,10 +1,10 @@
 /**
  * CS Sub-Router: Dashboard
  * KPIs consolidados — FONTE DIRETA: bi_entregas (mesma do BI dashboard-completo)
- * Health scores recalculados em massa a cada carregamento do dashboard
+ * Health scores recalculados em massa + análise inteligente de churn
  */
 const express = require('express');
-const { STATUS_CLIENTE, TIPOS_INTERACAO, SEVERIDADES, calcularHealthScore, determinarStatusCliente } = require('../cs.service');
+const { STATUS_CLIENTE, TIPOS_INTERACAO, SEVERIDADES, calcularHealthScore, determinarStatusCliente, analisarSinaisChurn } = require('../cs.service');
 
 // Controle para não recalcular a cada request — TTL de 5 min
 let lastRecalc = 0;
@@ -13,15 +13,15 @@ const RECALC_TTL = 5 * 60 * 1000;
 function createDashboardRoutes(pool) {
   const router = express.Router();
 
-  // ── Função: recalcular health scores de TODOS os clientes ──
+  // ── Função: recalcular health scores + status de TODOS os clientes ──
   async function recalcularHealthScores() {
     const agora = Date.now();
-    if (agora - lastRecalc < RECALC_TTL) return; // Skip se recalculou recentemente
+    if (agora - lastRecalc < RECALC_TTL) return;
 
     try {
       const t0 = Date.now();
 
-      // Buscar métricas de todos os clientes em uma única query
+      // 1. Métricas históricas de todos os clientes (uma única query)
       const metricasTodos = await pool.query(`
         SELECT 
           c.cod_cliente,
@@ -70,16 +70,45 @@ function createDashboardRoutes(pool) {
         GROUP BY c.cod_cliente
       `);
 
-      // Calcular e atualizar em batch
+      // 2. Volume semanal das últimas 6 semanas (para detectar oscilação)
+      const semanaisQuery = await pool.query(`
+        SELECT 
+          c.cod_cliente,
+          DATE_TRUNC('week', e.data_solicitado)::date as semana,
+          COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas
+        FROM cs_clientes c
+        LEFT JOIN bi_entregas e ON e.cod_cliente = c.cod_cliente
+          AND e.data_solicitado >= CURRENT_DATE - 42
+        WHERE e.data_solicitado IS NOT NULL
+        GROUP BY c.cod_cliente, DATE_TRUNC('week', e.data_solicitado)
+        ORDER BY c.cod_cliente, semana
+      `);
+
+      // Agrupar semanais por cliente
+      const semanaisPorCliente = {};
+      for (const row of semanaisQuery.rows) {
+        if (!semanaisPorCliente[row.cod_cliente]) semanaisPorCliente[row.cod_cliente] = [];
+        semanaisPorCliente[row.cod_cliente].push(row);
+      }
+
+      // 3. Calcular score + status com análise de oscilação
       const updates = [];
       for (const row of metricasTodos.rows) {
-        const hs = calcularHealthScore(row);
         const diasSem = row.dias_sem_entrega != null ? parseInt(row.dias_sem_entrega) : 999;
-        const status = determinarStatusCliente(hs, diasSem);
+        const isChurned = diasSem > 30;
+
+        // Churned NÃO calcula health score — fica 0
+        const hs = isChurned ? 0 : calcularHealthScore(row);
+
+        // Analisar oscilação semanal
+        const semanais = semanaisPorCliente[row.cod_cliente] || [];
+        const sinais = analisarSinaisChurn(semanais);
+
+        const status = determinarStatusCliente(hs, diasSem, sinais);
         updates.push({ cod: row.cod_cliente, hs, status });
       }
 
-      // Atualizar todos de uma vez com unnest
+      // 4. Batch update
       if (updates.length > 0) {
         const cods = updates.map(u => u.cod);
         const scores = updates.map(u => u.hs);
@@ -117,7 +146,7 @@ function createDashboardRoutes(pool) {
       // 0. Recalcular health scores de todos os clientes (com TTL de 5 min)
       await recalcularHealthScores();
 
-      // 1. KPIs dos clientes CS
+      // 1. KPIs dos clientes CS — health score médio EXCLUI churned
       const kpisClientes = await pool.query(`
         SELECT 
           COUNT(*) as total_clientes,
@@ -125,9 +154,9 @@ function createDashboardRoutes(pool) {
           COUNT(*) FILTER (WHERE status = 'em_risco') as em_risco,
           COUNT(*) FILTER (WHERE status = 'inativo') as inativos,
           COUNT(*) FILTER (WHERE status = 'churned') as churned,
-          ROUND(AVG(health_score), 1) as health_score_medio,
-          COUNT(*) FILTER (WHERE health_score >= 70) as saudaveis,
-          COUNT(*) FILTER (WHERE health_score < 30) as criticos
+          ROUND(AVG(health_score) FILTER (WHERE status != 'churned'), 1) as health_score_medio,
+          COUNT(*) FILTER (WHERE health_score >= 70 AND status != 'churned') as saudaveis,
+          COUNT(*) FILTER (WHERE health_score < 30 AND status != 'churned') as criticos
         FROM cs_clientes
       `);
 
@@ -276,7 +305,7 @@ function createDashboardRoutes(pool) {
         LIMIT 10
       `);
 
-      // 8. Distribuição Health Score
+      // 8. Distribuição Health Score — EXCLUI churned
       const distribuicaoHealth = await pool.query(`
         SELECT 
           CASE 
@@ -295,6 +324,7 @@ function createDashboardRoutes(pool) {
             ELSE '#EF4444'
           END as cor
         FROM cs_clientes
+        WHERE status != 'churned'
         GROUP BY 
           CASE 
             WHEN health_score >= 80 THEN 'Excelente (80-100)'
@@ -313,6 +343,90 @@ function createDashboardRoutes(pool) {
         ORDER BY MIN(health_score) DESC
       `);
 
+      // ============================================
+      // 9. CHURNED CONFIRMADO (>30 dias sem solicitar)
+      // ============================================
+      const churnedConfirmados = await pool.query(`
+        SELECT 
+          c.cod_cliente, c.nome_fantasia, c.status,
+          bi.ultima_entrega, bi.dias_sem_entrega,
+          bi.total_entregas_historico, bi.valor_total_historico
+        FROM cs_clientes c
+        LEFT JOIN LATERAL (
+          SELECT 
+            MAX(data_solicitado) as ultima_entrega,
+            CURRENT_DATE - MAX(data_solicitado) as dias_sem_entrega,
+            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_historico,
+            COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total_historico
+          FROM bi_entregas WHERE cod_cliente = c.cod_cliente
+        ) bi ON true
+        WHERE c.status = 'churned'
+        ORDER BY bi.dias_sem_entrega ASC
+        LIMIT 20
+      `);
+
+      // ============================================
+      // 10. POSSÍVEL CHURN (oscilação abrupta + 7-30 dias sem solicitar)
+      // ============================================
+      const possiveisChurn = await pool.query(`
+        WITH volume_semanal AS (
+          SELECT 
+            c.cod_cliente,
+            c.nome_fantasia,
+            c.health_score,
+            c.status,
+            DATE_TRUNC('week', e.data_solicitado)::date as semana,
+            COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas
+          FROM cs_clientes c
+          JOIN bi_entregas e ON e.cod_cliente = c.cod_cliente
+          WHERE c.status != 'churned'
+            AND e.data_solicitado >= CURRENT_DATE - 42
+          GROUP BY c.cod_cliente, c.nome_fantasia, c.health_score, c.status,
+                   DATE_TRUNC('week', e.data_solicitado)
+        ),
+        analise AS (
+          SELECT 
+            cod_cliente, nome_fantasia, health_score, status,
+            -- Média das 2 últimas semanas
+            AVG(entregas) FILTER (WHERE semana >= (SELECT MAX(semana) - 7 FROM volume_semanal vs2 WHERE vs2.cod_cliente = volume_semanal.cod_cliente)) as media_recente,
+            -- Média das semanas anteriores
+            AVG(entregas) FILTER (WHERE semana < (SELECT MAX(semana) - 7 FROM volume_semanal vs2 WHERE vs2.cod_cliente = volume_semanal.cod_cliente)) as media_anterior,
+            MAX(semana) as ultima_semana_ativa,
+            CURRENT_DATE - MAX(semana) as dias_desde_ultima_semana
+          FROM volume_semanal
+          GROUP BY cod_cliente, nome_fantasia, health_score, status
+          HAVING COUNT(DISTINCT semana) >= 2
+        )
+        SELECT 
+          cod_cliente, nome_fantasia, health_score, status,
+          ROUND(media_recente, 0) as media_recente,
+          ROUND(media_anterior, 0) as media_anterior,
+          CASE WHEN media_anterior > 0 
+            THEN ROUND(((media_recente - media_anterior) / media_anterior * 100)::numeric, 0)
+            ELSE 0 
+          END as oscilacao_pct,
+          dias_desde_ultima_semana,
+          CASE 
+            WHEN dias_desde_ultima_semana > 7 THEN 'sem_solicitacao_7d'
+            WHEN media_anterior > 0 AND ((media_recente - media_anterior) / media_anterior * 100) <= -50 THEN 'queda_abrupta'
+            WHEN media_anterior > 0 AND ((media_recente - media_anterior) / media_anterior * 100) <= -30 THEN 'queda_moderada'
+            ELSE NULL
+          END as motivo_alerta
+        FROM analise
+        WHERE 
+          -- >7 dias sem solicitar (possível churn)
+          dias_desde_ultima_semana > 7
+          -- OU queda abrupta (>50% de queda semana a semana)
+          OR (media_anterior > 0 AND ((media_recente - media_anterior) / media_anterior * 100) <= -30)
+        ORDER BY 
+          CASE 
+            WHEN dias_desde_ultima_semana > 7 THEN 0
+            ELSE 1
+          END,
+          oscilacao_pct ASC
+        LIMIT 15
+      `);
+
       // Montar objeto operação
       const operacao = metricasBi.rows[0] || {};
       operacao.clientes_ativos_bi = parseInt(clientesAtivosBi.rows[0]?.clientes_ativos_bi) || 0;
@@ -327,6 +441,8 @@ function createDashboardRoutes(pool) {
           operacao,
         },
         clientes_risco: clientesRisco.rows,
+        churned_confirmados: churnedConfirmados.rows,
+        possiveis_churn: possiveisChurn.rows,
         interacoes_recentes: interacoesRecentes.rows,
         distribuicao_health: distribuicaoHealth.rows,
       });
