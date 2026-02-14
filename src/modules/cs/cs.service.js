@@ -133,14 +133,74 @@ function calcularHealthScore(metricas) {
 }
 
 /**
- * Determina status do cliente baseado no health score
+ * Determina status do cliente baseado em múltiplos sinais
+ * @param {number} healthScore
+ * @param {number} diasSemEntrega
+ * @param {object} sinais - { oscilacao_pct, media_semanal_anterior, media_semanal_recente }
  */
-function determinarStatusCliente(healthScore, diasSemEntrega) {
+function determinarStatusCliente(healthScore, diasSemEntrega, sinais = {}) {
+  // 1. Churn confirmado: >30 dias sem solicitar
   if (diasSemEntrega > 30) return 'churned';
+
+  // 2. Inativo: >15 dias sem solicitar
   if (diasSemEntrega > 15) return 'inativo';
+
+  // 3. Em risco: >7 dias sem solicitar OU oscilação abrupta de demanda OU health score crítico
+  if (diasSemEntrega > 7) return 'em_risco';
+  if (sinais.oscilacao_pct && Math.abs(sinais.oscilacao_pct) > 50) return 'em_risco';
   if (healthScore < 30) return 'em_risco';
-  if (healthScore >= 70) return 'ativo';
+
+  // 4. Ativo
   return 'ativo';
+}
+
+/**
+ * Analisa sinais de churn para um cliente baseado no volume semanal
+ * Compara as 2 últimas semanas com as 2 anteriores
+ * @param {Array} semanais - [{ semana, entregas }] ordenado por semana ASC
+ * @returns {{ oscilacao_pct, tendencia, alerta_churn, media_recente, media_anterior }}
+ */
+function analisarSinaisChurn(semanais) {
+  if (!semanais || semanais.length < 2) {
+    return { oscilacao_pct: 0, tendencia: 'sem_dados', alerta_churn: false, media_recente: 0, media_anterior: 0 };
+  }
+
+  const len = semanais.length;
+  // Últimas 2 semanas vs 2 anteriores
+  const recentes = semanais.slice(Math.max(0, len - 2));
+  const anteriores = semanais.slice(Math.max(0, len - 4), Math.max(0, len - 2));
+
+  const mediaRecente = recentes.reduce((s, w) => s + (parseInt(w.entregas) || 0), 0) / recentes.length;
+  const mediaAnterior = anteriores.length > 0
+    ? anteriores.reduce((s, w) => s + (parseInt(w.entregas) || 0), 0) / anteriores.length
+    : mediaRecente;
+
+  const oscilacao = mediaAnterior > 0
+    ? ((mediaRecente - mediaAnterior) / mediaAnterior) * 100
+    : 0;
+
+  let tendencia = 'estavel';
+  let alertaChurn = false;
+
+  if (oscilacao <= -50) {
+    tendencia = 'queda_abrupta';
+    alertaChurn = true;
+  } else if (oscilacao <= -30) {
+    tendencia = 'queda_moderada';
+    alertaChurn = true;
+  } else if (oscilacao <= -15) {
+    tendencia = 'queda_leve';
+  } else if (oscilacao >= 30) {
+    tendencia = 'crescimento';
+  }
+
+  return {
+    oscilacao_pct: Math.round(oscilacao),
+    tendencia,
+    alerta_churn: alertaChurn,
+    media_recente: Math.round(mediaRecente),
+    media_anterior: Math.round(mediaAnterior),
+  };
 }
 
 module.exports = {
@@ -151,4 +211,5 @@ module.exports = {
   STATUS_CLIENTE,
   calcularHealthScore,
   determinarStatusCliente,
+  analisarSinaisChurn,
 };
