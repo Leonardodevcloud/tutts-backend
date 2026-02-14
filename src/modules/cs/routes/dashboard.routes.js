@@ -267,7 +267,7 @@ function createDashboardRoutes(pool) {
           AND cod_cliente IS NOT NULL
       `, [inicio, fim]);
 
-      // 6. Top 5 clientes em risco (health score baixo + métricas do bi_entregas)
+      // 6. Top 5 clientes em risco — EXCLUI churned (tem seção própria)
       const clientesRisco = await pool.query(`
         SELECT 
           c.cod_cliente, c.nome_fantasia, c.health_score, c.status,
@@ -291,7 +291,8 @@ function createDashboardRoutes(pool) {
             AND data_solicitado >= CURRENT_DATE - 30
             AND COALESCE(ponto, 1) >= 2
         ) bi ON true
-        WHERE c.health_score < 50 OR c.status IN ('em_risco', 'inativo')
+        WHERE c.status NOT IN ('churned')
+          AND (c.health_score < 50 OR c.status IN ('em_risco', 'inativo'))
         ORDER BY c.health_score ASC, oc.abertas DESC
         LIMIT 5
       `);
