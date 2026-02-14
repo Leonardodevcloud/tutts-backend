@@ -414,7 +414,9 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
     }
   });
 
+
   // ==================== GET /cs/mapa-calor/:cod ====================
+  // Mapa de calor — geocodificação no BACKEND com cache em DB
   router.get('/cs/mapa-calor/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
@@ -423,15 +425,26 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
       const fim = data_fim || new Date().toISOString().split('T')[0];
 
       const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
-      if (!GOOGLE_API_KEY) {
-        return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
-      }
+      if (!GOOGLE_API_KEY) return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
 
-      const clienteResult = await pool.query('SELECT nome_fantasia FROM cs_clientes WHERE cod_cliente = $1', [cod]);
-      const nomeCliente = clienteResult.rows[0]?.nome_fantasia || `Cliente ${cod}`;
+      // Tabela de cache
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+          endereco_hash VARCHAR(64) PRIMARY KEY,
+          endereco_original TEXT,
+          lat DOUBLE PRECISION,
+          lng DOUBLE PRECISION,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `).catch(() => {});
 
+      const clienteResult = await pool.query('SELECT nome_fantasia, cidade, estado FROM cs_clientes WHERE cod_cliente = $1', [cod]);
+      const ficha = clienteResult.rows[0] || {};
+      const nomeCliente = ficha.nome_fantasia || `Cliente ${cod}`;
+
+      // Todos os endereços agrupados — SEM LIMITE
       const entregas = await pool.query(`
-        SELECT 
+        SELECT
           endereco, bairro, cidade, estado,
           COUNT(*) as quantidade,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
@@ -444,244 +457,137 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
           AND endereco IS NOT NULL AND endereco != ''
         GROUP BY endereco, bairro, cidade, estado
         ORDER BY COUNT(*) DESC
-        LIMIT 300
       `, [cod, inicio, fim]);
 
       const totalEntregas = entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0);
 
-      const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mapa de Calor — ${nomeCliente}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Segoe UI', -apple-system, sans-serif; background: #0f172a; }
-    #header { 
-      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%); 
-      color: white; padding: 20px 28px;
-      display: flex; align-items: center; justify-content: space-between;
-    }
-    #header .left h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-    #header .left p { font-size: 13px; opacity: 0.85; margin-top: 4px; }
-    #header .right { text-align: right; }
-    #header .stat { font-size: 28px; font-weight: 800; }
-    #header .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; }
-    #map { height: calc(100vh - 80px); width: 100%; }
-    
-    .info-panel {
-      background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      padding: 16px 20px; font-size: 13px; line-height: 1.7; min-width: 200px;
-    }
-    .info-panel h3 { font-size: 14px; font-weight: 700; color: #1e293b; margin-bottom: 8px; }
-    .info-panel .progress { background: #e2e8f0; border-radius: 4px; height: 6px; margin: 4px 0 8px; }
-    .info-panel .progress-bar { height: 100%; border-radius: 4px; transition: width 0.5s; }
-    
-    .legend { 
-      background: white; border-radius: 10px; padding: 14px 18px; 
-      box-shadow: 0 4px 16px rgba(0,0,0,0.12); font-size: 12px;
-    }
-    .legend h4 { font-size: 12px; font-weight: 700; color: #475569; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .legend-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-    .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-    
-    .toggle-btn {
-      background: white; border: none; border-radius: 8px; padding: 8px 14px;
-      font-size: 12px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      display: flex; align-items: center; gap: 6px; color: #334155;
-    }
-    .toggle-btn:hover { background: #f1f5f9; }
-    .toggle-btn.active { background: #6366f1; color: white; }
-  </style>
-</head>
-<body>
-  <div id="header">
-    <div class="left">
-      <h1>🗺️ Mapa de Calor — ${nomeCliente}</h1>
-      <p>Período: ${inicio} a ${fim}</p>
-    </div>
-    <div class="right">
-      <div class="stat">${totalEntregas.toLocaleString('pt-BR')}</div>
-      <div class="stat-label">entregas mapeadas</div>
-    </div>
-  </div>
-  <div id="map"></div>
+      // ── Geocodificar no backend com cache ──
+      const crypto = require('crypto');
+      const pontosGeo = [];
+      let cacheHits = 0, apiCalls = 0;
 
-  <script>
-    const GOOGLE_KEY = '${GOOGLE_API_KEY}';
-    const enderecos = ${JSON.stringify(entregas.rows)};
-    
-    let map, heatmap, markers = [], heatData = [];
-    let showHeat = true, showMarkers = true;
+      for (const e of entregas.rows) {
+        const addrParts = [e.endereco, e.bairro, e.cidade, e.estado].filter(Boolean);
+        const addrStr = addrParts.join(', ');
+        const hash = crypto.createHash('md5').update(addrStr.toLowerCase().trim()).digest('hex');
 
-    function initMap() {
-      map = new google.maps.Map(document.getElementById('map'), {
-        zoom: 12, center: { lat: -12.97, lng: -38.51 },
-        mapTypeId: 'roadmap',
-        styles: [
-          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-          { featureType: 'transit', stylers: [{ visibility: 'simplified' }] }
-        ],
-        mapTypeControl: true,
-        mapTypeControlOptions: { position: google.maps.ControlPosition.TOP_LEFT },
-        fullscreenControl: true,
-      });
+        // Cache
+        const cached = await pool.query('SELECT lat, lng FROM geocode_cache WHERE endereco_hash = $1', [hash]);
 
-      // Legenda
-      const legendDiv = document.createElement('div');
-      legendDiv.className = 'legend';
-      legendDiv.style.margin = '10px';
-      legendDiv.innerHTML = \`
-        <h4>📊 Legenda SLA</h4>
-        <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Prazo ≥ 95%</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Prazo 85-95%</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> Prazo < 85%</div>
-        <div style="border-top: 1px solid #e2e8f0; margin: 8px 0; padding-top: 8px;">
-          <div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,0.5);width:8px;height:8px"></div> Menor volume</div>
-          <div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,0.8);width:16px;height:16px"></div> Maior volume</div>
-        </div>
-      \`;
-      map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(legendDiv);
+        if (cached.rows.length > 0) {
+          cacheHits++;
+          pontosGeo.push({
+            lat: cached.rows[0].lat, lng: cached.rows[0].lng,
+            quantidade: parseInt(e.quantidade), taxa_prazo: parseFloat(e.taxa_prazo || 0),
+            km_medio: e.km_medio, tempo_medio: e.tempo_medio,
+            bairro: e.bairro || '', cidade: e.cidade || '', endereco: e.endereco || '',
+          });
+        } else {
+          try {
+            const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(addrStr)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR`;
+            const geoRes = await fetch(url);
+            const geoData = await geoRes.json();
+            apiCalls++;
 
-      // Botões de toggle
-      const toggleDiv = document.createElement('div');
-      toggleDiv.style.margin = '10px';
-      toggleDiv.style.display = 'flex';
-      toggleDiv.style.gap = '6px';
-      toggleDiv.innerHTML = \`
-        <button id="btnHeat" class="toggle-btn active" onclick="toggleHeat()">🔥 Calor</button>
-        <button id="btnMarkers" class="toggle-btn active" onclick="toggleMarkers()">📍 Marcadores</button>
-      \`;
-      map.controls[google.maps.ControlPosition.TOP_RIGHT].push(toggleDiv);
-
-      // Info panel
-      const infoDiv = document.createElement('div');
-      infoDiv.className = 'info-panel';
-      infoDiv.id = 'infoPanel';
-      infoDiv.style.margin = '10px';
-      infoDiv.innerHTML = '<h3>⏳ Geocodificando endereços...</h3><p>0 / ' + enderecos.length + '</p>';
-      map.controls[google.maps.ControlPosition.LEFT_BOTTOM].push(infoDiv);
-
-      geocodeAll();
-    }
-
-    function toggleHeat() {
-      showHeat = !showHeat;
-      heatmap && heatmap.setMap(showHeat ? map : null);
-      document.getElementById('btnHeat').classList.toggle('active', showHeat);
-    }
-    function toggleMarkers() {
-      showMarkers = !showMarkers;
-      markers.forEach(m => m.setMap(showMarkers ? map : null));
-      document.getElementById('btnMarkers').classList.toggle('active', showMarkers);
-    }
-
-    async function geocode(addr) {
-      return new Promise((resolve) => {
-        const geocoder = new google.maps.Geocoder();
-        geocoder.geocode({ address: addr, region: 'BR' }, (results, status) => {
-          if (status === 'OK' && results[0]) {
-            resolve({ lat: results[0].geometry.location.lat(), lng: results[0].geometry.location.lng() });
-          } else {
-            resolve(null);
+            if (geoData.status === 'OK' && geoData.results[0]) {
+              const loc = geoData.results[0].geometry.location;
+              await pool.query(
+                'INSERT INTO geocode_cache (endereco_hash, endereco_original, lat, lng) VALUES ($1, $2, $3, $4) ON CONFLICT (endereco_hash) DO NOTHING',
+                [hash, addrStr, loc.lat, loc.lng]
+              ).catch(() => {});
+              pontosGeo.push({
+                lat: loc.lat, lng: loc.lng,
+                quantidade: parseInt(e.quantidade), taxa_prazo: parseFloat(e.taxa_prazo || 0),
+                km_medio: e.km_medio, tempo_medio: e.tempo_medio,
+                bairro: e.bairro || '', cidade: e.cidade || '', endereco: e.endereco || '',
+              });
+            }
+            if (apiCalls % 40 === 0) await new Promise(r => setTimeout(r, 1000));
+          } catch (geoErr) {
+            console.warn('Geocode falhou:', addrStr, geoErr.message);
           }
-        });
-      });
-    }
-
-    async function geocodeAll() {
-      const bounds = new google.maps.LatLngBounds();
-      let geocoded = 0;
-      let successCount = 0;
-
-      for (const e of enderecos) {
-        const addr = [e.endereco, e.bairro, e.cidade, e.estado].filter(Boolean).join(', ');
-        const coords = await geocode(addr);
-        geocoded++;
-
-        if (coords) {
-          successCount++;
-          const pos = new google.maps.LatLng(coords.lat, coords.lng);
-          const qty = parseInt(e.quantidade);
-          const prazo = parseFloat(e.taxa_prazo || 0);
-          
-          // Heatmap data (weighted)
-          heatData.push({ location: pos, weight: Math.min(qty, 30) });
-
-          // Marker com cor por SLA
-          const color = prazo >= 95 ? '#10b981' : prazo >= 85 ? '#f59e0b' : '#ef4444';
-          const size = Math.max(8, Math.min(qty * 1.5, 24));
-          
-          const marker = new google.maps.Marker({
-            position: pos, map: map,
-            icon: {
-              path: google.maps.SymbolPath.CIRCLE,
-              scale: size, fillColor: color, fillOpacity: 0.7,
-              strokeColor: 'white', strokeWeight: 2,
-            },
-          });
-
-          const infoWindow = new google.maps.InfoWindow({
-            content: \`<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:180px">
-              <b style="font-size:14px;color:#1e293b">\${e.bairro || e.endereco}</b>
-              <div style="color:#64748b;font-size:12px;margin-bottom:8px">\${e.cidade || ''}</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
-                <span>📦 Entregas</span><b>\${qty}</b>
-                <span>⏱️ Prazo</span><b style="color:\${color}">\${e.taxa_prazo}%</b>
-                <span>📏 KM médio</span><b>\${e.km_medio || '-'}</b>
-                <span>🕐 Tempo médio</span><b>\${e.tempo_medio || '-'} min</b>
-              </div>
-            </div>\`
-          });
-          marker.addListener('click', () => infoWindow.open(map, marker));
-          markers.push(marker);
-          bounds.extend(pos);
         }
-
-        // Update progress
-        if (geocoded % 5 === 0 || geocoded === enderecos.length) {
-          document.getElementById('infoPanel').innerHTML = \`
-            <h3>📍 Mapeando entregas</h3>
-            <p>\${successCount} de \${enderecos.length} endereços</p>
-            <div class="progress"><div class="progress-bar" style="width:\${(geocoded/enderecos.length*100).toFixed(0)}%;background:#6366f1"></div></div>
-          \`;
-        }
-
-        // Rate limit Google Geocoding (50/seg no plano pago, mas vamos ser conservadores)
-        await new Promise(r => setTimeout(r, 100));
       }
 
-      // Criar heatmap layer
-      if (heatData.length > 0) {
-        heatmap = new google.maps.visualization.HeatmapLayer({
-          data: heatData,
-          map: map,
-          radius: 40,
-          opacity: 0.6,
-          gradient: [
-            'rgba(0, 0, 0, 0)', 'rgba(99, 102, 241, 0.3)', 'rgba(59, 130, 246, 0.5)',
-            'rgba(16, 185, 129, 0.6)', 'rgba(245, 158, 11, 0.7)', 'rgba(239, 68, 68, 0.8)',
-            'rgba(220, 38, 38, 0.9)'
-          ],
-        });
-        map.fitBounds(bounds);
+      console.log(`🗺️ Mapa calor: ${pontosGeo.length} pontos (${cacheHits} cache, ${apiCalls} API)`);
+
+      // Centro = média dos pontos reais
+      let centerLat = -12.97, centerLng = -38.51;
+      if (pontosGeo.length > 0) {
+        centerLat = pontosGeo.reduce((s, p) => s + p.lat, 0) / pontosGeo.length;
+        centerLng = pontosGeo.reduce((s, p) => s + p.lng, 0) / pontosGeo.length;
       }
 
-      // Final info
-      document.getElementById('infoPanel').innerHTML = \`
-        <h3>✅ Mapa completo</h3>
-        <p><b>\${successCount}</b> de \${enderecos.length} endereços mapeados</p>
-        <p style="font-size:11px;color:#94a3b8;margin-top:4px">Use os botões 🔥 e 📍 para alternar camadas</p>
-      \`;
-    }
-  </script>
-  <script src="https://maps.googleapis.com/maps/api/js?key=${GOOGLE_API_KEY}&libraries=visualization&callback=initMap" async defer></script>
-</body>
-</html>`;
+      const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Mapa de Calor - ${nomeCliente}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',-apple-system,sans-serif;background:#0f172a}
+#header{background:linear-gradient(135deg,#6366f1,#8b5cf6,#a855f7);color:#fff;padding:20px 28px;display:flex;align-items:center;justify-content:space-between}
+#header .left h1{font-size:20px;font-weight:700}
+#header .left p{font-size:13px;opacity:.85;margin-top:4px}
+#header .right{text-align:right}
+#header .stat{font-size:28px;font-weight:800}
+#header .stat-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;opacity:.7}
+#map{height:calc(100vh - 80px);width:100%}
+.legend{background:#fff;border-radius:10px;padding:14px 18px;box-shadow:0 4px 16px rgba(0,0,0,.12);font-size:12px}
+.legend h4{font-size:12px;font-weight:700;color:#475569;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.legend-item{display:flex;align-items:center;gap:8px;margin:4px 0}
+.legend-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.toggle-btn{background:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.1);display:flex;align-items:center;gap:6px;color:#334155}
+.toggle-btn:hover{background:#f1f5f9}
+.toggle-btn.active{background:#6366f1;color:#fff}
+.info-panel{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.15);padding:16px 20px;font-size:13px;line-height:1.7;min-width:200px}
+.info-panel h3{font-size:14px;font-weight:700;color:#1e293b;margin-bottom:4px}
+</style></head><body>
+<div id="header"><div class="left"><h1>🗺️ Mapa de Calor — ${nomeCliente}</h1><p>Período: ${inicio} a ${fim}</p></div>
+<div class="right"><div class="stat">${totalEntregas.toLocaleString('pt-BR')}</div><div class="stat-label">entregas mapeadas</div></div></div>
+<div id="map"></div>
+<script>
+var pontos=${JSON.stringify(pontosGeo)};
+var map,heatmap,markers=[];
+var showHeat=true,showMarkers=true;
+function initMap(){
+  map=new google.maps.Map(document.getElementById('map'),{
+    zoom:13,center:{lat:${centerLat},lng:${centerLng}},mapTypeId:'roadmap',
+    styles:[{featureType:'poi',stylers:[{visibility:'off'}]},{featureType:'transit',stylers:[{visibility:'simplified'}]}],
+    mapTypeControl:true,mapTypeControlOptions:{position:google.maps.ControlPosition.TOP_LEFT},fullscreenControl:true
+  });
+  var ld=document.createElement('div');ld.className='legend';ld.style.margin='10px';
+  ld.innerHTML='<h4>📊 Legenda SLA</h4><div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Prazo ≥ 95%</div><div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Prazo 85-95%</div><div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> Prazo &lt; 85%</div><div style="border-top:1px solid #e2e8f0;margin:8px 0;padding-top:8px"><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.5);width:8px;height:8px"></div> Menor volume</div><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.8);width:16px;height:16px"></div> Maior volume</div></div>';
+  map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(ld);
+  var td=document.createElement('div');td.style.cssText='margin:10px;display:flex;gap:6px';
+  td.innerHTML='<button id="btnHeat" class="toggle-btn active" onclick="toggleHeat()">🔥 Calor</button><button id="btnMarkers" class="toggle-btn active" onclick="toggleMarkers()">📍 Marcadores</button>';
+  map.controls[google.maps.ControlPosition.TOP_RIGHT].push(td);
+  var ip=document.createElement('div');ip.className='info-panel';ip.style.margin='10px';
+  ip.innerHTML='<h3>✅ '+pontos.length+' endereços mapeados</h3><p style="font-size:11px;color:#94a3b8">Use 🔥 e 📍 para alternar camadas</p>';
+  map.controls[google.maps.ControlPosition.LEFT_BOTTOM].push(ip);
+  var bounds=new google.maps.LatLngBounds();
+  var heatData=[];
+  pontos.forEach(function(p){
+    var pos=new google.maps.LatLng(p.lat,p.lng);
+    heatData.push({location:pos,weight:Math.min(p.quantidade,30)});
+    bounds.extend(pos);
+    var color=p.taxa_prazo>=95?'#10b981':p.taxa_prazo>=85?'#f59e0b':'#ef4444';
+    var sz=Math.max(6,Math.min(p.quantidade*1.5,22));
+    var mk=new google.maps.Marker({position:pos,map:map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:sz,fillColor:color,fillOpacity:.7,strokeColor:'#fff',strokeWeight:2}});
+    var iw=new google.maps.InfoWindow({content:'<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:180px"><b style="font-size:14px;color:#1e293b">'+(p.bairro||p.endereco)+'</b><div style="color:#64748b;font-size:12px;margin-bottom:8px">'+p.cidade+'</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px"><span>📦 Entregas</span><b>'+p.quantidade+'</b><span>⏱️ Prazo</span><b style="color:'+color+'">'+p.taxa_prazo+'%</b><span>📏 KM</span><b>'+(p.km_medio||'-')+'</b><span>🕐 Tempo</span><b>'+(p.tempo_medio||'-')+' min</b></div></div>'});
+    mk.addListener('click',function(){iw.open(map,mk)});
+    markers.push(mk);
+  });
+  if(heatData.length>0){
+    heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:40,opacity:.6,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
+    map.fitBounds(bounds);
+  }
+}
+function toggleHeat(){showHeat=!showHeat;heatmap&&heatmap.setMap(showHeat?map:null);document.getElementById('btnHeat').classList.toggle('active',showHeat)}
+function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.setMap(showMarkers?map:null)});document.getElementById('btnMarkers').classList.toggle('active',showMarkers)}
+</script>
+<script src="https://maps.googleapis.com/maps/api/js?key=${GOOGLE_API_KEY}&libraries=visualization&callback=initMap" async defer></script>
+</body></html>`;
 
       res.setHeader('Content-Type', 'text/html');
-      // CSP customizado para permitir Google Maps nesta página standalone
       res.setHeader('Content-Security-Policy', [
         "default-src 'self'",
         "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com",
@@ -697,6 +603,7 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
       res.status(500).json({ error: 'Erro ao gerar mapa de calor' });
     }
   });
+
 
   router.get('/cs/raio-x/:id', async (req, res) => {
     try {
