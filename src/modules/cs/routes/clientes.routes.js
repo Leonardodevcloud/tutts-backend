@@ -124,7 +124,7 @@ function createClientesRoutes(pool) {
           const bi = biInfo.rows[0];
           const insertResult = await pool.query(
             `INSERT INTO cs_clientes (cod_cliente, nome_fantasia, razao_social, cidade, estado, status)
-             VALUES ($1, $2, $3, $4, $5, 'ativo')
+             VALUES ($1, LEFT($2, 255), LEFT($3, 255), LEFT($4, 100), LEFT($5, 10), 'ativo')
              ON CONFLICT (cod_cliente) DO NOTHING
              RETURNING *`,
             [cod, bi.nome_fantasia || bi.nome_cliente, bi.nome_cliente, bi.cidade, bi.estado]
@@ -284,9 +284,9 @@ function createClientesRoutes(pool) {
         INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
         SELECT DISTINCT 
           e.cod_cliente, 
-          e.nome_fantasia,
-          MAX(e.cidade),
-          MAX(e.estado),
+          LEFT(e.nome_fantasia, 255),
+          LEFT(MAX(e.cidade), 100),
+          LEFT(MAX(e.estado), 10),
           'ativo'
         FROM bi_entregas e
         WHERE e.cod_cliente IS NOT NULL
