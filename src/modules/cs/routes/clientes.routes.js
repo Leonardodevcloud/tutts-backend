@@ -11,7 +11,7 @@ function createClientesRoutes(pool) {
   // ==================== GET /cs/clientes ====================
   router.get('/cs/clientes', async (req, res) => {
     try {
-      const { status, search, ordem = 'nome', direcao = 'asc', page = 1, limit = 50 } = req.query;
+      const { status, search, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
       const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
 
       let whereClause = 'WHERE 1=1';
