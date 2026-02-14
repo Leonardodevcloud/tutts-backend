@@ -1,6 +1,6 @@
 /**
  * CS Sub-Router: Gestão de Clientes
- * CRUD + métricas do BI via bi_resumo_cliente (MESMA FONTE DO BI)
+ * CRUD + métricas diretas do bi_entregas
  */
 const express = require('express');
 const { calcularHealthScore, determinarStatusCliente, STATUS_CLIENTE } = require('../cs.service');
@@ -9,7 +9,6 @@ function createClientesRoutes(pool) {
   const router = express.Router();
 
   // ==================== GET /cs/clientes ====================
-  // Lista todos os clientes com métricas resumidas do BI
   router.get('/cs/clientes', async (req, res) => {
     try {
       const { status, search, ordem = 'nome', direcao = 'asc', page = 1, limit = 50 } = req.query;
@@ -31,7 +30,6 @@ function createClientesRoutes(pool) {
         paramIndex++;
       }
 
-      // Buscar clientes com métricas dos últimos 30 dias via bi_resumo_cliente
       const query = `
         SELECT 
           c.*,
@@ -46,13 +44,21 @@ function createClientesRoutes(pool) {
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT 
-            SUM(total_entregas) as total_entregas_30d,
-            ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo_30d,
-            COALESCE(SUM(valor_total), 0) as valor_total_30d,
-            MAX(data) as ultima_entrega,
-            COALESCE(SUM(total_retornos), 0) as total_retornos_30d
-          FROM bi_resumo_cliente
-          WHERE cod_cliente = c.cod_cliente AND data >= CURRENT_DATE - 30
+            COUNT(*) as total_entregas_30d,
+            ROUND(
+              SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+              NULLIF(COUNT(*), 0) * 100, 1
+            ) as taxa_prazo_30d,
+            COALESCE(SUM(valor), 0) as valor_total_30d,
+            MAX(data_solicitado) as ultima_entrega,
+            SUM(CASE WHEN (
+              LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+              LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+              LOWER(ocorrencia) LIKE '%cliente ausente%'
+            ) THEN 1 ELSE 0 END) as total_retornos_30d
+          FROM bi_entregas 
+          WHERE cod_cliente = c.cod_cliente
+            AND data_solicitado >= CURRENT_DATE - 30
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -73,7 +79,6 @@ function createClientesRoutes(pool) {
 
       const result = await pool.query(query, params);
 
-      // Count total
       const countResult = await pool.query(
         `SELECT COUNT(*) as total FROM cs_clientes c ${whereClause}`,
         params.slice(0, paramIndex - 1)
@@ -94,7 +99,6 @@ function createClientesRoutes(pool) {
   });
 
   // ==================== GET /cs/clientes/:cod ====================
-  // Detalhes completos de um cliente
   router.get('/cs/clientes/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
@@ -105,21 +109,20 @@ function createClientesRoutes(pool) {
         'SELECT * FROM cs_clientes WHERE cod_cliente = $1', [cod]
       );
 
-      // Se não existe ficha, criar automaticamente com dados do BI
       let ficha = fichaResult.rows[0];
       if (!ficha) {
         const biInfo = await pool.query(
-          `SELECT DISTINCT nome_fantasia, cod_cliente
-           FROM bi_resumo_cliente WHERE cod_cliente = $1 LIMIT 1`, [cod]
+          `SELECT DISTINCT nome_fantasia, nome_cliente, cidade, estado
+           FROM bi_entregas WHERE cod_cliente = $1 LIMIT 1`, [cod]
         );
         if (biInfo.rows.length > 0) {
           const bi = biInfo.rows[0];
           const insertResult = await pool.query(
-            `INSERT INTO cs_clientes (cod_cliente, nome_fantasia, status)
-             VALUES ($1, LEFT($2, 255), 'ativo')
+            `INSERT INTO cs_clientes (cod_cliente, nome_fantasia, razao_social, cidade, estado, status)
+             VALUES ($1, LEFT($2, 255), LEFT($3, 255), LEFT($4, 100), LEFT($5, 10), 'ativo')
              ON CONFLICT (cod_cliente) DO NOTHING
              RETURNING *`,
-            [cod, bi.nome_fantasia]
+            [cod, bi.nome_fantasia || bi.nome_cliente, bi.nome_cliente, bi.cidade, bi.estado]
           );
           ficha = insertResult.rows[0] || { cod_cliente: cod, nome_fantasia: bi.nome_fantasia, status: 'ativo' };
         } else {
@@ -127,36 +130,43 @@ function createClientesRoutes(pool) {
         }
       }
 
-      // Métricas BI dos últimos 90 dias via bi_resumo_cliente
+      // Métricas BI dos últimos 90 dias
       const metricasBi = await pool.query(`
         SELECT 
-          COALESCE(SUM(total_entregas), 0) as total_entregas,
-          COALESCE(SUM(total_os), 0) as total_os,
-          COALESCE(SUM(entregas_no_prazo), 0) as entregas_no_prazo,
-          COALESCE(SUM(entregas_fora_prazo), 0) as entregas_fora_prazo,
-          ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(valor_total), 0) as valor_total,
+          COUNT(*) as total_entregas,
+          COUNT(DISTINCT os) as total_os,
+          SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
+          SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
+          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+                NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(valor), 0) as valor_total,
           COALESCE(SUM(valor_prof), 0) as valor_prof,
-          ROUND(AVG(CASE WHEN tempo_medio_entrega > 0 THEN tempo_medio_entrega END), 1) as tempo_medio,
-          COALESCE(SUM(total_retornos), 0) as total_retornos,
-          COALESCE(SUM(total_profissionais), 0) as profissionais_unicos,
-          MAX(data) as ultima_entrega,
-          MIN(data) as primeira_entrega
-        FROM bi_resumo_cliente
+          ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 1) as tempo_medio,
+          ROUND(AVG(distancia), 1) as km_medio,
+          COUNT(DISTINCT cod_prof) as profissionais_unicos,
+          MAX(data_solicitado) as ultima_entrega,
+          MIN(data_solicitado) as primeira_entrega,
+          SUM(CASE WHEN (
+            LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
+            LOWER(ocorrencia) LIKE '%clienteaus%' OR 
+            LOWER(ocorrencia) LIKE '%cliente ausente%'
+          ) THEN 1 ELSE 0 END) as total_retornos
+        FROM bi_entregas
         WHERE cod_cliente = $1
-          AND data >= CURRENT_DATE - 90
+          AND data_solicitado >= CURRENT_DATE - 90
       `, [cod]);
 
-      // Evolução por semana (últimos 90 dias) via bi_resumo_cliente
+      // Evolução por semana (últimos 90 dias)
       const evolucaoSemanal = await pool.query(`
         SELECT 
-          DATE_TRUNC('week', data)::date as semana,
-          SUM(total_entregas) as entregas,
-          ROUND(SUM(entregas_no_prazo)::numeric / NULLIF(SUM(total_entregas), 0) * 100, 1) as taxa_prazo,
-          COALESCE(SUM(valor_total), 0) as valor
-        FROM bi_resumo_cliente
-        WHERE cod_cliente = $1 AND data >= CURRENT_DATE - 90
-        GROUP BY DATE_TRUNC('week', data)
+          DATE_TRUNC('week', data_solicitado)::date as semana,
+          COUNT(*) as entregas,
+          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+                NULLIF(COUNT(*), 0) * 100, 1) as taxa_prazo,
+          COALESCE(SUM(valor), 0) as valor
+        FROM bi_entregas
+        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 90
+        GROUP BY DATE_TRUNC('week', data_solicitado)
         ORDER BY semana
       `, [cod]);
 
@@ -210,7 +220,6 @@ function createClientesRoutes(pool) {
   });
 
   // ==================== PUT /cs/clientes/:cod ====================
-  // Atualizar ficha do cliente
   router.put('/cs/clientes/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
@@ -262,20 +271,21 @@ function createClientesRoutes(pool) {
   });
 
   // ==================== POST /cs/clientes/sync-bi ====================
-  // Sincroniza clientes do BI que ainda não têm ficha CS
   router.post('/cs/clientes/sync-bi', async (req, res) => {
     try {
       const result = await pool.query(`
-        INSERT INTO cs_clientes (cod_cliente, nome_fantasia, status)
+        INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
         SELECT DISTINCT 
           e.cod_cliente, 
-          LEFT(MAX(e.nome_fantasia), 255),
+          LEFT(e.nome_fantasia, 255),
+          LEFT(MAX(e.cidade), 100),
+          LEFT(MAX(e.estado), 10),
           'ativo'
-        FROM bi_resumo_cliente e
+        FROM bi_entregas e
         WHERE e.cod_cliente IS NOT NULL
           AND e.cod_cliente NOT IN (SELECT cod_cliente FROM cs_clientes)
-          AND e.data >= CURRENT_DATE - 90
-        GROUP BY e.cod_cliente
+          AND e.data_solicitado >= CURRENT_DATE - 90
+        GROUP BY e.cod_cliente, e.nome_fantasia
         ON CONFLICT (cod_cliente) DO NOTHING
         RETURNING cod_cliente, nome_fantasia
       `);
