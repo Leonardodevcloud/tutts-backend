@@ -356,8 +356,8 @@ IMPORTANTE: Celebre o que está bom. Seja honesto sobre problemas. Mostre que h�
         },
       });
     } catch (error) {
-      console.error('❌ Erro ao gerar Raio-X CS:', error);
-      res.status(500).json({ error: 'Erro ao gerar Raio-X' });
+      console.error('❌ Erro ao gerar Raio-X CS:', error.message, error.stack);
+      res.status(500).json({ error: `Erro ao gerar Raio-X: ${error.message}` });
     }
   });
 
