@@ -53,38 +53,83 @@ const STATUS_CLIENTE = {
 
 /**
  * Calcula Health Score do cliente baseado em métricas operacionais
- * Score de 0 a 100
+ * Score de 0 a 100 — fórmula granular com interpolação linear
+ * 
+ * Usa o HISTÓRICO COMPLETO do cliente no BI (sem limite de dias).
+ * 
+ * Composição (pesos somam 100):
+ *   1. Taxa de prazo .............. 35 pts  (métrica mais crítica para o cliente)
+ *   2. Volume de entregas ......... 20 pts  (engajamento / tamanho da operação)
+ *   3. Taxa de retornos ........... 15 pts  (qualidade operacional)
+ *   4. Tempo médio de entrega ..... 15 pts  (eficiência logística)
+ *   5. Recência (dias sem entrega)  15 pts  (atividade recente)
  */
 function calcularHealthScore(metricas) {
   if (!metricas) return 50;
 
-  let score = 50; // Base
-
-  // Taxa de prazo (peso 30)
-  const taxaPrazo = parseFloat(metricas.taxa_prazo) || 0;
-  if (taxaPrazo >= 95) score += 30;
-  else if (taxaPrazo >= 85) score += 20;
-  else if (taxaPrazo >= 70) score += 10;
-  else if (taxaPrazo >= 50) score += 0;
-  else score -= 15;
-
-  // Volume de entregas (peso 15)
   const totalEntregas = parseInt(metricas.total_entregas) || 0;
-  if (totalEntregas >= 100) score += 15;
-  else if (totalEntregas >= 50) score += 10;
-  else if (totalEntregas >= 20) score += 5;
-  else score -= 5;
+  if (totalEntregas === 0) return 10; // Sem entregas = score mínimo
 
-  // Retornos/Ocorrências (peso -15)
+  // ── 1. Taxa de prazo (35 pts) ──
+  // Interpolação: 0% → 0 pts | 70% → 14 pts | 85% → 25 pts | 95% → 32 pts | 100% → 35 pts
+  const taxaPrazo = parseFloat(metricas.taxa_prazo) || 0;
+  let scorePrazo = 0;
+  if (taxaPrazo >= 95) scorePrazo = 32 + ((taxaPrazo - 95) / 5) * 3;
+  else if (taxaPrazo >= 85) scorePrazo = 25 + ((taxaPrazo - 85) / 10) * 7;
+  else if (taxaPrazo >= 70) scorePrazo = 14 + ((taxaPrazo - 70) / 15) * 11;
+  else if (taxaPrazo >= 50) scorePrazo = 5 + ((taxaPrazo - 50) / 20) * 9;
+  else scorePrazo = (taxaPrazo / 50) * 5;
+
+  // ── 2. Volume de entregas (20 pts) ──
+  // Escala logarítmica: cresce rápido no início, estabiliza em volumes altos
+  // 1 ent → ~0 | 20 → 8 | 100 → 13 | 500 → 18 | 1000+ → 20
+  let scoreVolume = 0;
+  if (totalEntregas >= 1000) scoreVolume = 20;
+  else if (totalEntregas >= 1) scoreVolume = Math.min(20, (Math.log10(totalEntregas) / Math.log10(1000)) * 20);
+
+  // ── 3. Taxa de retornos (15 pts) ──
+  // Quanto menor, melhor: 0% → 15 pts | 2% → 12 pts | 5% → 8 pts | 10% → 3 pts | 15%+ → 0 pts
   const retornos = parseInt(metricas.total_retornos) || 0;
   const taxaRetorno = totalEntregas > 0 ? (retornos / totalEntregas) * 100 : 0;
-  if (taxaRetorno <= 2) score += 5;
-  else if (taxaRetorno <= 5) score += 0;
-  else if (taxaRetorno <= 10) score -= 10;
-  else score -= 15;
+  let scoreRetorno = 0;
+  if (taxaRetorno <= 0) scoreRetorno = 15;
+  else if (taxaRetorno <= 2) scoreRetorno = 15 - ((taxaRetorno / 2) * 3);
+  else if (taxaRetorno <= 5) scoreRetorno = 12 - (((taxaRetorno - 2) / 3) * 4);
+  else if (taxaRetorno <= 10) scoreRetorno = 8 - (((taxaRetorno - 5) / 5) * 5);
+  else if (taxaRetorno <= 15) scoreRetorno = 3 - (((taxaRetorno - 10) / 5) * 3);
+  else scoreRetorno = 0;
 
-  // Clamp entre 0 e 100
-  return Math.max(0, Math.min(100, Math.round(score)));
+  // ── 4. Tempo médio de entrega (15 pts) ──
+  // Referência mercado autopeças urbano: <=30min excelente, 45min bom, 60min ok, >90min ruim
+  const tempoMedio = parseFloat(metricas.tempo_medio) || parseFloat(metricas.tempo_medio_entrega) || 0;
+  let scoreTempo = 0;
+  if (tempoMedio <= 0) scoreTempo = 7.5; // Sem dados = neutro
+  else if (tempoMedio <= 30) scoreTempo = 15;
+  else if (tempoMedio <= 45) scoreTempo = 15 - (((tempoMedio - 30) / 15) * 3);
+  else if (tempoMedio <= 60) scoreTempo = 12 - (((tempoMedio - 45) / 15) * 4);
+  else if (tempoMedio <= 90) scoreTempo = 8 - (((tempoMedio - 60) / 30) * 5);
+  else if (tempoMedio <= 120) scoreTempo = 3 - (((tempoMedio - 90) / 30) * 3);
+  else scoreTempo = 0;
+
+  // ── 5. Recência — dias sem entrega (15 pts) ──
+  // 0 dias → 15 pts | 3 dias → 13 pts | 7 dias → 10 pts | 15 dias → 5 pts | 30+ dias → 0 pts
+  const diasSemEntrega = metricas.dias_sem_entrega != null
+    ? parseInt(metricas.dias_sem_entrega)
+    : (metricas.ultima_entrega
+        ? Math.floor((Date.now() - new Date(metricas.ultima_entrega).getTime()) / (1000 * 60 * 60 * 24))
+        : 999);
+  let scoreRecencia = 0;
+  if (diasSemEntrega <= 0) scoreRecencia = 15;
+  else if (diasSemEntrega <= 3) scoreRecencia = 15 - ((diasSemEntrega / 3) * 2);
+  else if (diasSemEntrega <= 7) scoreRecencia = 13 - (((diasSemEntrega - 3) / 4) * 3);
+  else if (diasSemEntrega <= 15) scoreRecencia = 10 - (((diasSemEntrega - 7) / 8) * 5);
+  else if (diasSemEntrega <= 30) scoreRecencia = 5 - (((diasSemEntrega - 15) / 15) * 5);
+  else scoreRecencia = 0;
+
+  // ── Score final ──
+  const scoreTotal = scorePrazo + scoreVolume + scoreRetorno + scoreTempo + scoreRecencia;
+
+  return Math.max(0, Math.min(100, Math.round(scoreTotal)));
 }
 
 /**
