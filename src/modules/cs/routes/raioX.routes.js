@@ -83,26 +83,55 @@ function createRaioXRoutes(pool) {
         ORDER BY COUNT(*) DESC LIMIT 20
       `, [codInt, data_inicio, data_fim]);
 
-      // 5. ANÁLISE DE CORRIDAS POR MOTOBOY
+      // 5. ANÁLISE DE CORRIDAS/ROTEIROS POR MOTOBOY
+      // Agrupa OS do mesmo motoboy criadas em janela de 10 minutos = mesmo roteiro/saída
       const corridasMotoboy = await pool.query(`
-        WITH saidas AS (
-          SELECT cod_prof, nome_prof, os, data_solicitado,
-            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as pontos_entrega,
-            COALESCE(SUM(distancia), 0) as km_total_os
+        WITH entregas_ordenadas AS (
+          SELECT 
+            cod_prof, nome_prof, os, data_solicitado, data_hora,
+            COALESCE(ponto, 1) as ponto,
+            distancia
           FROM bi_entregas
           WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
-          GROUP BY cod_prof, nome_prof, os, data_solicitado
+            AND data_hora IS NOT NULL
+        ),
+        roteiros AS (
+          SELECT 
+            cod_prof, nome_prof, os, data_solicitado, data_hora, ponto, distancia,
+            -- Detecta se esta OS pertence ao mesmo roteiro da anterior (mesma janela de 10min)
+            CASE WHEN data_hora - LAG(data_hora) OVER (PARTITION BY cod_prof, data_solicitado ORDER BY data_hora)
+                 <= INTERVAL '10 minutes'
+            THEN 0 ELSE 1 END as nova_saida
+          FROM entregas_ordenadas
+        ),
+        saidas_numeradas AS (
+          SELECT *,
+            SUM(nova_saida) OVER (PARTITION BY cod_prof, data_solicitado ORDER BY data_hora) as id_saida
+          FROM roteiros
+        ),
+        resumo_saidas AS (
+          SELECT 
+            cod_prof, nome_prof, data_solicitado, id_saida,
+            COUNT(DISTINCT os) as os_no_roteiro,
+            COUNT(CASE WHEN ponto >= 2 THEN 1 END) as entregas_no_roteiro,
+            COALESCE(SUM(CASE WHEN ponto >= 2 THEN distancia END), 0) as km_roteiro
+          FROM saidas_numeradas
+          GROUP BY cod_prof, nome_prof, data_solicitado, id_saida
         )
-        SELECT nome_prof,
-          COUNT(DISTINCT os) as total_corridas,
-          SUM(pontos_entrega) as total_entregas,
-          ROUND(SUM(pontos_entrega)::numeric / NULLIF(COUNT(DISTINCT os), 0), 1) as entregas_por_corrida,
+        SELECT 
+          nome_prof,
+          COUNT(*) as total_saidas,
+          SUM(entregas_no_roteiro) as total_entregas,
+          ROUND(SUM(entregas_no_roteiro)::numeric / NULLIF(COUNT(*), 0), 1) as entregas_por_saida,
+          ROUND(SUM(os_no_roteiro)::numeric / NULLIF(COUNT(*), 0), 1) as os_por_saida,
           COUNT(DISTINCT data_solicitado) as dias_trabalhados,
-          ROUND(COUNT(DISTINCT os)::numeric / NULLIF(COUNT(DISTINCT data_solicitado), 0), 1) as corridas_por_dia,
-          ROUND(AVG(km_total_os)::numeric, 1) as km_medio_por_corrida,
-          ROUND(SUM(km_total_os)::numeric, 1) as km_total
-        FROM saidas GROUP BY nome_prof
-        ORDER BY SUM(pontos_entrega) DESC LIMIT 15
+          ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT data_solicitado), 0), 1) as saidas_por_dia,
+          ROUND(AVG(km_roteiro)::numeric, 1) as km_medio_por_saida,
+          ROUND(SUM(km_roteiro)::numeric, 1) as km_total
+        FROM resumo_saidas
+        WHERE entregas_no_roteiro > 0
+        GROUP BY nome_prof
+        ORDER BY SUM(entregas_no_roteiro) DESC LIMIT 15
       `, [codInt, data_inicio, data_fim]);
 
       // 6. PADRÕES DE HORÁRIO
@@ -223,6 +252,10 @@ function createRaioXRoutes(pool) {
       const metrAnterior = metricasAnteriores.rows[0];
       const healthScore = calcularHealthScore(metricas);
 
+      // Link do mapa de calor interativo
+      const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
+      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}`;
+
       const dadosAnalise = {
         cliente: { nome: ficha.nome_fantasia || `Cliente ${cod_cliente}`, cidade: ficha.cidade || '', estado: estadoCliente, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
         periodo: { inicio: data_inicio, fim: data_fim, dias: diasPeriodo },
@@ -236,17 +269,23 @@ function createRaioXRoutes(pool) {
         retornos_detalhados: retornosDetalhe.rows,
         benchmark_regiao: { ...benchmark, estado: estadoCliente },
         ranking_regiao: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
+        link_mapa_calor: linkMapaCalor,
       };
 
       // 13. PROMPT GEMINI
       const prompt = `Você é um consultor sênior de operações logísticas da Tutts, plataforma de gestão de entregas de autopeças. Você está preparando um RELATÓRIO OPERACIONAL para apresentar diretamente ao cliente ${dadosAnalise.cliente.nome}.
 
-## REGRAS IMPORTANTES
-- Este relatório será APRESENTADO AO CLIENTE. Tom: profissional, consultivo, parceiro.
-- NÃO mencione valores financeiros, faturamento, ticket médio ou custos. Foque 100% na operação.
+## REGRAS OBRIGATÓRIAS
+- Este relatório será APRESENTADO AO CLIENTE FINAL. Tom: profissional, consultivo, parceiro.
+- NÃO mencione valores financeiros, faturamento, ticket médio ou custos em nenhuma parte do relatório.
 - Seja HONESTO: se houver problemas, aponte-os com clareza, mas sempre com a postura de "estamos juntos para resolver".
 - Use os dados reais fornecidos. NÃO invente métricas.
 - Formato: Markdown com emojis nos títulos. Português brasileiro.
+- O horário de operação é das 08:00 às 18:00. Qualquer análise de horário deve considerar esta janela. Entregas após 18h são exceções, não rotina.
+- NÃO faça observações óbvias como "quanto maior a distância, maior o tempo de entrega".
+- NÃO sugira ao cliente que mude sua operação interna, centro de distribuição, ou processos internos dele. As sugestões devem ser sobre o que a TUTTS pode fazer pela operação.
+- NÃO sugira serviços ou produtos fora do ramo de autopeças.
+- Se dados de bairro/rua estiverem como "Não informado" ou vazios, NÃO liste esses bairros. Em vez disso, mencione que disponibilizamos um mapa de calor interativo no link abaixo.
 
 ## DADOS DA OPERAÇÃO
 ${JSON.stringify(dadosAnalise, null, 2)}
@@ -256,59 +295,72 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 ### 📊 VISÃO GERAL DA OPERAÇÃO
 - Síntese executiva em 3-4 linhas da operação no período
 - Total de entregas, dias operados, profissionais envolvidos
-- Health Score: ${healthScore}/100 — explique o que significa para o cliente
+- Health Score: ${healthScore}/100 — explique o que significa para o cliente de forma simples
 - Classificação: [🟢 Excelente | 🟡 Boa com pontos de atenção | 🔴 Requer ação imediata]
 
 ### 🚀 ENTREGAS E DESEMPENHO
 - Entregas realizadas no período (vs anterior com ↑↓%)
 - Taxa de entregas no prazo (vs anterior com ↑↓%)
-- Tempo médio de entrega e comparação com a meta
-- Retornos: quantidade, motivos, o que está causando e como resolver
+- Tempo médio de entrega e comparação com a meta do setor (30-45min para autopeças urbano)
+- Se houver retornos: quantidade, motivos principais e plano de ação imediato. Se não houver, celebre.
 
-### 📍 MAPA DE COBERTURA E DISTÂNCIAS
-- Faixas de km: onde concentra a operação
-- Top bairros/regiões do mapa de calor
-- Regiões com SLA crítico
-- Correlação distância vs prazo
+### 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
+- Analise as faixas de KM: onde está concentrada a maior parte da operação e como o SLA se comporta em cada faixa
+- NÃO liste bairros com nome "Não informado". Se a maioria dos bairros estiver vazia, diga apenas:
+  "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** onde é possível ver cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+- Se houver dados de bairro válidos, mencione apenas os que têm nome real
 
-### 🏍️ ANÁLISE DAS CORRIDAS
-- Motoboys ativos e corridas de cada um
-- Entregas por saída — estão otimizadas?
-- Padrões: muitas corridas curtas vs rotas longas
-- Motoboys com performance acima/abaixo da média
+### 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
+- Os dados de corridas mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 minutos foram agrupadas como uma "saída" (roteiro).
+- Analise: quantas saídas/roteiros cada motoboy fez no período
+- Média de entregas por saída — se for 1, o motoboy saiu para entregar uma peça por vez (ineficiente). Se for 3+, está otimizado.
+- Saídas por dia: quantos roteiros o motoboy faz por dia
+- Identifique motoboys destaque (muitas entregas, eficiente) e os que podem melhorar
+- Compare a performance entre eles de forma construtiva
 
-### ⏰ PADRÕES DE HORÁRIO
-- Horários de pico de demanda
-- SLA por faixa horária
-- Sugestão de janelas operacionais
+### ⏰ JANELA OPERACIONAL (08h às 18h)
+- Analise a distribuição de entregas dentro da janela 08-18h
+- Identifique os horários de maior demanda (picos)
+- Compare o SLA entre faixas horárias — qual horário tem melhor/pior desempenho?
+- Se houver entregas após 18h, mencione como exceção e sugira ações para que o maior volume seja concentrado no horário operacional
+- NÃO sugira estender horário de operação
 
 ### 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
-- Operação vs média regional
-- Ranking: ${rankingData.rank_prazo || 'N/A'}º prazo, ${rankingData.rank_volume || 'N/A'}º volume de ${rankingData.total_ranqueados || 'N/A'}
-- Onde está acima (celebre) e abaixo (proponha ação)
+- Compare a operação com a média dos clientes Tutts na mesma região
+- Ranking: ${rankingData.rank_prazo || 'N/A'}º em prazo e ${rankingData.rank_volume || 'N/A'}º em volume entre ${rankingData.total_ranqueados || 'N/A'} operações
+- Celebre onde está acima da média. Onde estiver abaixo, diga o que a Tutts vai fazer para melhorar.
+- Use "média da região", "top 25% do mercado" — nunca nomes de outros clientes
 
 ### 📉 TENDÊNCIAS E PROJEÇÕES
-- Evolução semanal: crescendo, estável ou caindo?
-- Atual vs anterior
-- Projeção 30 dias
-- Riscos [Alta | Média | Baixa]
+- Evolução semanal: volume crescendo, estável ou caindo?
+- Comparação período atual vs anterior (volume, prazo)
+- Projeção para os próximos 30 dias
+- Riscos identificados [Alta | Média | Baixa]
 
-### ⚠️ PROBLEMAS E COMO VAMOS RESOLVER
-- Cada problema com: **Problema:** X → **Ação:** Y → **Resultado esperado:** Z
-- Prioridade: [🔴 Urgente | 🟠 Importante | 🟡 Melhoria]
+### ⚠️ PONTOS DE ATENÇÃO E AÇÕES
+- Liste cada problema real encontrado nos dados
+- Para cada: **Situação:** X → **O que faremos:** Y → **Meta:** Z
+- Priorize: [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua]
+- Foque apenas em problemas reais dos dados, não genéricos
 
 ### 🎯 PLANO DE AÇÃO — PRÓXIMOS PASSOS
-Top 5 ações: o que fazer, prazo, resultado esperado com meta numérica
+Top 5 ações CONCRETAS que a TUTTS vai realizar:
+1. O que será feito
+2. Prazo
+3. Meta numérica esperada
+As ações devem ser coisas que a Tutts controla (ex: realocar motoboys, ajustar roteiros, intensificar acompanhamento). NÃO peça ao cliente para mudar processos internos dele.
 
-### 💡 OPORTUNIDADES DE MELHORIA
-- Otimizações de roteiro
-- Melhorias de SLA por região/horário
-- Quick wins imediatos
-- Oportunidades de crescimento
+### 💡 OPORTUNIDADES
+- Sugestões de otimização que a Tutts pode implementar para melhorar a operação do cliente
+- Quick wins baseados nos dados (ex: concentrar entregas de regiões próximas no mesmo roteiro)
+- NÃO sugira produtos/serviços fora do ramo de autopeças
+- NÃO sugira que o cliente mude layout, equipe, ou processos internos
+- Foque no que PODEMOS FAZER por ele como parceiro logístico
 
-IMPORTANTE: Celebre o que está bom. Seja honesto sobre problemas. Mostre que há um plano. Use números exatos.`;
+ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para apresentar este relatório em detalhes".`;
 
-      // 14. CHAMADA GEMINI
+      // Incluir link do mapa no response final
+      // Incluir link do mapa no response final
       const geminiResponse = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
         {
@@ -353,11 +405,143 @@ IMPORTANTE: Celebre o que está bom. Seja honesto sobre problemas. Mostre que h�
         raio_x: {
           id: saveResult.rows[0].id, analise: analiseTexto, health_score: healthScore,
           dados_utilizados: dadosAnalise, tokens: tokensUsados, gerado_em: new Date().toISOString(),
+          link_mapa_calor: linkMapaCalor,
         },
       });
     } catch (error) {
       console.error('❌ Erro ao gerar Raio-X CS:', error.message, error.stack);
       res.status(500).json({ error: `Erro ao gerar Raio-X: ${error.message}` });
+    }
+  });
+
+  // ==================== GET /cs/mapa-calor/:cod ====================
+  // Mapa de calor interativo (Leaflet) — compartilhável via link
+  router.get('/cs/mapa-calor/:cod', async (req, res) => {
+    try {
+      const cod = parseInt(req.params.cod);
+      const { data_inicio, data_fim } = req.query;
+      const inicio = data_inicio || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const fim = data_fim || new Date().toISOString().split('T')[0];
+
+      // Buscar nome do cliente
+      const clienteResult = await pool.query('SELECT nome_fantasia FROM cs_clientes WHERE cod_cliente = $1', [cod]);
+      const nomeCliente = clienteResult.rows[0]?.nome_fantasia || `Cliente ${cod}`;
+
+      // Buscar endereços com coordenadas (usando cidade/bairro para agrupar)
+      const entregas = await pool.query(`
+        SELECT 
+          endereco, bairro, cidade, estado,
+          COUNT(*) as quantidade,
+          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          ROUND(AVG(distancia)::numeric, 1) as km_medio,
+          ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
+        FROM bi_entregas
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+          AND COALESCE(ponto, 1) >= 2
+          AND endereco IS NOT NULL AND endereco != ''
+        GROUP BY endereco, bairro, cidade, estado
+        ORDER BY COUNT(*) DESC
+        LIMIT 200
+      `, [cod, inicio, fim]);
+
+      // Gerar HTML do mapa interativo com Leaflet
+      const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapa de Calor — ${nomeCliente}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, sans-serif; }
+    #header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 16px 24px; }
+    #header h1 { font-size: 18px; font-weight: 600; }
+    #header p { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+    #map { height: calc(100vh - 70px); width: 100%; }
+    .info-box { background: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 13px; line-height: 1.6; }
+    .info-box b { color: #4f46e5; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>🗺️ Mapa de Calor — ${nomeCliente}</h1>
+    <p>Período: ${inicio} a ${fim} · ${entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0)} entregas</p>
+  </div>
+  <div id="map"></div>
+  <script>
+    const enderecos = ${JSON.stringify(entregas.rows)};
+    const map = L.map('map').setView([-12.97, -38.51], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap | Tutts'
+    }).addTo(map);
+
+    // Geocodificar endereços e plotar
+    let pontos = [];
+    let bounds = [];
+    let geocoded = 0;
+    
+    async function geocode(addr) {
+      try {
+        const q = encodeURIComponent(addr);
+        const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + q + '&limit=1&countrycodes=br');
+        const d = await r.json();
+        if (d && d.length > 0) return [parseFloat(d[0].lat), parseFloat(d[0].lon)];
+      } catch(e) {}
+      return null;
+    }
+
+    async function init() {
+      const info = L.control({ position: 'topright' });
+      info.onAdd = function() {
+        const div = L.DomUtil.create('div', 'info-box');
+        div.innerHTML = '<b>Carregando endereços...</b>';
+        this._div = div;
+        return div;
+      };
+      info.addTo(map);
+
+      for (const e of enderecos) {
+        const addr = [e.endereco, e.bairro, e.cidade, e.estado].filter(Boolean).join(', ');
+        const coords = await geocode(addr);
+        if (coords) {
+          const intensity = Math.min(parseInt(e.quantidade), 20);
+          pontos.push([coords[0], coords[1], intensity]);
+          bounds.push(coords);
+          
+          const prazoColor = parseFloat(e.taxa_prazo) >= 95 ? '#10b981' : parseFloat(e.taxa_prazo) >= 85 ? '#f59e0b' : '#ef4444';
+          L.circleMarker(coords, { radius: Math.max(5, Math.min(parseInt(e.quantidade) * 2, 18)), color: prazoColor, fillColor: prazoColor, fillOpacity: 0.6, weight: 1 })
+            .bindPopup('<b>' + (e.bairro || e.endereco) + '</b><br>' + e.cidade + '<br>📦 ' + e.quantidade + ' entregas<br>⏱️ Prazo: ' + e.taxa_prazo + '%<br>📏 ' + e.km_medio + ' km médio<br>🕐 ' + e.tempo_medio + ' min médio')
+            .addTo(map);
+        }
+        geocoded++;
+        // Rate limit Nominatim
+        await new Promise(r => setTimeout(r, 1100));
+        info._div.innerHTML = '<b>Processando: ' + geocoded + '/' + enderecos.length + '</b>';
+      }
+
+      if (pontos.length > 0) {
+        L.heatLayer(pontos, { radius: 25, blur: 15, maxZoom: 17, gradient: { 0.2: '#3b82f6', 0.4: '#10b981', 0.6: '#f59e0b', 0.8: '#f97316', 1.0: '#ef4444' } }).addTo(map);
+        map.fitBounds(bounds);
+      }
+
+      // Legenda
+      info._div.innerHTML = '<b>' + pontos.length + '/' + enderecos.length + ' endereços mapeados</b><br>'
+        + '🟢 Prazo ≥95% · 🟡 85-95% · 🔴 <85%';
+    }
+    init();
+  </script>
+</body>
+</html>`;
+
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } catch (error) {
+      console.error('❌ Erro mapa de calor:', error);
+      res.status(500).json({ error: 'Erro ao gerar mapa de calor' });
     }
   });
 
