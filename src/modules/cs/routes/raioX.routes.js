@@ -35,8 +35,8 @@ function createRaioXRoutes(pool) {
           SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
           ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
                 NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 2) as taxa_prazo,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 1) as tempo_medio_entrega,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 2) as km_medio,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_entrega,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 2) as km_medio,
           COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as km_total,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos,
           COUNT(DISTINCT data_solicitado) as dias_com_entregas,
@@ -45,8 +45,8 @@ function createRaioXRoutes(pool) {
             LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR LOWER(ocorrencia) LIKE '%%loja fechada%%' OR
             LOWER(ocorrencia) LIKE '%%produto incorreto%%'
           ) THEN 1 ELSE 0 END) as total_retornos,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END), 1) as tempo_medio_alocacao,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN velocidade_media END), 1) as velocidade_media
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_alocacao,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN velocidade_media END)::numeric, 1) as velocidade_media
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
       `, [codInt, data_inicio, data_fim]);
@@ -58,7 +58,7 @@ function createRaioXRoutes(pool) {
                WHEN distancia <= 10 THEN '5-10 km' WHEN distancia <= 20 THEN '10-20 km'
                WHEN distancia <= 30 THEN '20-30 km' ELSE '30+ km' END as faixa,
           COUNT(*) as quantidade,
-          ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio,
+          ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo_faixa
         FROM bi_entregas
@@ -73,8 +73,8 @@ function createRaioXRoutes(pool) {
       // 4. MAPA DE CALOR — por bairro/cidade
       const mapaCalor = await pool.query(`
         SELECT COALESCE(NULLIF(bairro, ''), 'Não informado') as bairro, COALESCE(cidade, '') as cidade,
-          COUNT(*) as entregas, ROUND(AVG(distancia), 1) as km_medio,
-          ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio,
+          COUNT(*) as entregas, ROUND(AVG(distancia)::numeric, 1) as km_medio,
+          ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo
         FROM bi_entregas
@@ -99,8 +99,8 @@ function createRaioXRoutes(pool) {
           ROUND(SUM(pontos_entrega)::numeric / NULLIF(COUNT(DISTINCT os), 0), 1) as entregas_por_corrida,
           COUNT(DISTINCT data_solicitado) as dias_trabalhados,
           ROUND(COUNT(DISTINCT os)::numeric / NULLIF(COUNT(DISTINCT data_solicitado), 0), 1) as corridas_por_dia,
-          ROUND(AVG(km_total_os), 1) as km_medio_por_corrida,
-          ROUND(SUM(km_total_os), 1) as km_total
+          ROUND(AVG(km_total_os)::numeric, 1) as km_medio_por_corrida,
+          ROUND(SUM(km_total_os)::numeric, 1) as km_total
         FROM saidas GROUP BY nome_prof
         ORDER BY SUM(pontos_entrega) DESC LIMIT 15
       `, [codInt, data_inicio, data_fim]);
@@ -117,7 +117,7 @@ function createRaioXRoutes(pool) {
           COUNT(*) as entregas,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
-          ROUND(AVG(tempo_execucao_minutos), 1) as tempo_medio
+          ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
           AND COALESCE(ponto, 1) >= 2 AND data_hora IS NOT NULL
@@ -135,7 +135,7 @@ function createRaioXRoutes(pool) {
         SELECT DATE_TRUNC('week', data_solicitado)::date as semana,
           COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
           SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
@@ -160,19 +160,19 @@ function createRaioXRoutes(pool) {
       )).rows[0]?.estado || 'N/A';
 
       const benchmarkRegiao = await pool.query(`
-        SELECT ROUND(AVG(taxa_prazo), 1) as media_taxa_prazo,
-          ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY taxa_prazo), 1) as mediana_taxa_prazo,
-          ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY taxa_prazo), 1) as p75_taxa_prazo,
-          ROUND(AVG(total_entregas), 0) as media_entregas,
-          ROUND(AVG(km_medio), 1) as media_km,
-          ROUND(AVG(tempo_medio), 1) as media_tempo_entrega,
-          ROUND(AVG(taxa_retorno), 2) as media_taxa_retorno,
+        SELECT ROUND(AVG(taxa_prazo)::numeric, 1) as media_taxa_prazo,
+          ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as mediana_taxa_prazo,
+          ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as p75_taxa_prazo,
+          ROUND(AVG(total_entregas)::numeric, 0) as media_entregas,
+          ROUND(AVG(km_medio)::numeric, 1) as media_km,
+          ROUND(AVG(tempo_medio)::numeric, 1) as media_tempo_entrega,
+          ROUND(AVG(taxa_retorno)::numeric, 2) as media_taxa_retorno,
           COUNT(*) as total_clientes_regiao
         FROM (
           SELECT cod_cliente,
             ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
-            COUNT(*) as total_entregas, ROUND(AVG(distancia), 1) as km_medio,
-            ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 1) as tempo_medio,
+            COUNT(*) as total_entregas, ROUND(AVG(distancia)::numeric, 1) as km_medio,
+            ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio,
             ROUND(SUM(CASE WHEN (LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR LOWER(ocorrencia) LIKE '%%clienteaus%%' OR
               LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR LOWER(ocorrencia) LIKE '%%loja fechada%%'
             ) THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_retorno
@@ -209,8 +209,8 @@ function createRaioXRoutes(pool) {
         SELECT COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
           ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 2) as taxa_prazo,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END), 1) as tempo_medio_entrega,
-          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_entrega,
+          ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
