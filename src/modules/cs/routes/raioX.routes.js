@@ -415,7 +415,6 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
   });
 
   // ==================== GET /cs/mapa-calor/:cod ====================
-  // Mapa de calor interativo (Leaflet) — compartilhável via link
   router.get('/cs/mapa-calor/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
@@ -423,11 +422,14 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
       const inicio = data_inicio || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const fim = data_fim || new Date().toISOString().split('T')[0];
 
-      // Buscar nome do cliente
+      const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+      if (!GOOGLE_API_KEY) {
+        return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
+      }
+
       const clienteResult = await pool.query('SELECT nome_fantasia FROM cs_clientes WHERE cod_cliente = $1', [cod]);
       const nomeCliente = clienteResult.rows[0]?.nome_fantasia || `Cliente ${cod}`;
 
-      // Buscar endereços com coordenadas (usando cidade/bairro para agrupar)
       const entregas = await pool.query(`
         SELECT 
           endereco, bairro, cidade, estado,
@@ -442,98 +444,239 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
           AND endereco IS NOT NULL AND endereco != ''
         GROUP BY endereco, bairro, cidade, estado
         ORDER BY COUNT(*) DESC
-        LIMIT 200
+        LIMIT 300
       `, [cod, inicio, fim]);
 
-      // Gerar HTML do mapa interativo com Leaflet
+      const totalEntregas = entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0);
+
       const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mapa de Calor — ${nomeCliente}</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, sans-serif; }
-    #header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 16px 24px; }
-    #header h1 { font-size: 18px; font-weight: 600; }
-    #header p { font-size: 13px; opacity: 0.85; margin-top: 4px; }
-    #map { height: calc(100vh - 70px); width: 100%; }
-    .info-box { background: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 13px; line-height: 1.6; }
-    .info-box b { color: #4f46e5; }
+    body { font-family: 'Segoe UI', -apple-system, sans-serif; background: #0f172a; }
+    #header { 
+      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%); 
+      color: white; padding: 20px 28px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    #header .left h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+    #header .left p { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+    #header .right { text-align: right; }
+    #header .stat { font-size: 28px; font-weight: 800; }
+    #header .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; }
+    #map { height: calc(100vh - 80px); width: 100%; }
+    
+    .info-panel {
+      background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      padding: 16px 20px; font-size: 13px; line-height: 1.7; min-width: 200px;
+    }
+    .info-panel h3 { font-size: 14px; font-weight: 700; color: #1e293b; margin-bottom: 8px; }
+    .info-panel .progress { background: #e2e8f0; border-radius: 4px; height: 6px; margin: 4px 0 8px; }
+    .info-panel .progress-bar { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    
+    .legend { 
+      background: white; border-radius: 10px; padding: 14px 18px; 
+      box-shadow: 0 4px 16px rgba(0,0,0,0.12); font-size: 12px;
+    }
+    .legend h4 { font-size: 12px; font-weight: 700; color: #475569; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    
+    .toggle-btn {
+      background: white; border: none; border-radius: 8px; padding: 8px 14px;
+      font-size: 12px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      display: flex; align-items: center; gap: 6px; color: #334155;
+    }
+    .toggle-btn:hover { background: #f1f5f9; }
+    .toggle-btn.active { background: #6366f1; color: white; }
   </style>
 </head>
 <body>
   <div id="header">
-    <h1>🗺️ Mapa de Calor — ${nomeCliente}</h1>
-    <p>Período: ${inicio} a ${fim} · ${entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0)} entregas</p>
+    <div class="left">
+      <h1>🗺️ Mapa de Calor — ${nomeCliente}</h1>
+      <p>Período: ${inicio} a ${fim}</p>
+    </div>
+    <div class="right">
+      <div class="stat">${totalEntregas.toLocaleString('pt-BR')}</div>
+      <div class="stat-label">entregas mapeadas</div>
+    </div>
   </div>
   <div id="map"></div>
-  <script>
-    const enderecos = ${JSON.stringify(entregas.rows)};
-    const map = L.map('map').setView([-12.97, -38.51], 12);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap | Tutts'
-    }).addTo(map);
 
-    // Geocodificar endereços e plotar
-    let pontos = [];
-    let bounds = [];
-    let geocoded = 0;
+  <script>
+    const GOOGLE_KEY = '${GOOGLE_API_KEY}';
+    const enderecos = ${JSON.stringify(entregas.rows)};
     
-    async function geocode(addr) {
-      try {
-        const q = encodeURIComponent(addr);
-        const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + q + '&limit=1&countrycodes=br');
-        const d = await r.json();
-        if (d && d.length > 0) return [parseFloat(d[0].lat), parseFloat(d[0].lon)];
-      } catch(e) {}
-      return null;
+    let map, heatmap, markers = [], heatData = [];
+    let showHeat = true, showMarkers = true;
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        zoom: 12, center: { lat: -12.97, lng: -38.51 },
+        mapTypeId: 'roadmap',
+        styles: [
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+          { featureType: 'transit', stylers: [{ visibility: 'simplified' }] }
+        ],
+        mapTypeControl: true,
+        mapTypeControlOptions: { position: google.maps.ControlPosition.TOP_LEFT },
+        fullscreenControl: true,
+      });
+
+      // Legenda
+      const legendDiv = document.createElement('div');
+      legendDiv.className = 'legend';
+      legendDiv.style.margin = '10px';
+      legendDiv.innerHTML = \`
+        <h4>📊 Legenda SLA</h4>
+        <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Prazo ≥ 95%</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Prazo 85-95%</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> Prazo < 85%</div>
+        <div style="border-top: 1px solid #e2e8f0; margin: 8px 0; padding-top: 8px;">
+          <div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,0.5);width:8px;height:8px"></div> Menor volume</div>
+          <div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,0.8);width:16px;height:16px"></div> Maior volume</div>
+        </div>
+      \`;
+      map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(legendDiv);
+
+      // Botões de toggle
+      const toggleDiv = document.createElement('div');
+      toggleDiv.style.margin = '10px';
+      toggleDiv.style.display = 'flex';
+      toggleDiv.style.gap = '6px';
+      toggleDiv.innerHTML = \`
+        <button id="btnHeat" class="toggle-btn active" onclick="toggleHeat()">🔥 Calor</button>
+        <button id="btnMarkers" class="toggle-btn active" onclick="toggleMarkers()">📍 Marcadores</button>
+      \`;
+      map.controls[google.maps.ControlPosition.TOP_RIGHT].push(toggleDiv);
+
+      // Info panel
+      const infoDiv = document.createElement('div');
+      infoDiv.className = 'info-panel';
+      infoDiv.id = 'infoPanel';
+      infoDiv.style.margin = '10px';
+      infoDiv.innerHTML = '<h3>⏳ Geocodificando endereços...</h3><p>0 / ' + enderecos.length + '</p>';
+      map.controls[google.maps.ControlPosition.LEFT_BOTTOM].push(infoDiv);
+
+      geocodeAll();
     }
 
-    async function init() {
-      const info = L.control({ position: 'topright' });
-      info.onAdd = function() {
-        const div = L.DomUtil.create('div', 'info-box');
-        div.innerHTML = '<b>Carregando endereços...</b>';
-        this._div = div;
-        return div;
-      };
-      info.addTo(map);
+    function toggleHeat() {
+      showHeat = !showHeat;
+      heatmap && heatmap.setMap(showHeat ? map : null);
+      document.getElementById('btnHeat').classList.toggle('active', showHeat);
+    }
+    function toggleMarkers() {
+      showMarkers = !showMarkers;
+      markers.forEach(m => m.setMap(showMarkers ? map : null));
+      document.getElementById('btnMarkers').classList.toggle('active', showMarkers);
+    }
+
+    async function geocode(addr) {
+      return new Promise((resolve) => {
+        const geocoder = new google.maps.Geocoder();
+        geocoder.geocode({ address: addr, region: 'BR' }, (results, status) => {
+          if (status === 'OK' && results[0]) {
+            resolve({ lat: results[0].geometry.location.lat(), lng: results[0].geometry.location.lng() });
+          } else {
+            resolve(null);
+          }
+        });
+      });
+    }
+
+    async function geocodeAll() {
+      const bounds = new google.maps.LatLngBounds();
+      let geocoded = 0;
+      let successCount = 0;
 
       for (const e of enderecos) {
         const addr = [e.endereco, e.bairro, e.cidade, e.estado].filter(Boolean).join(', ');
         const coords = await geocode(addr);
-        if (coords) {
-          const intensity = Math.min(parseInt(e.quantidade), 20);
-          pontos.push([coords[0], coords[1], intensity]);
-          bounds.push(coords);
-          
-          const prazoColor = parseFloat(e.taxa_prazo) >= 95 ? '#10b981' : parseFloat(e.taxa_prazo) >= 85 ? '#f59e0b' : '#ef4444';
-          L.circleMarker(coords, { radius: Math.max(5, Math.min(parseInt(e.quantidade) * 2, 18)), color: prazoColor, fillColor: prazoColor, fillOpacity: 0.6, weight: 1 })
-            .bindPopup('<b>' + (e.bairro || e.endereco) + '</b><br>' + e.cidade + '<br>📦 ' + e.quantidade + ' entregas<br>⏱️ Prazo: ' + e.taxa_prazo + '%<br>📏 ' + e.km_medio + ' km médio<br>🕐 ' + e.tempo_medio + ' min médio')
-            .addTo(map);
-        }
         geocoded++;
-        // Rate limit Nominatim
-        await new Promise(r => setTimeout(r, 1100));
-        info._div.innerHTML = '<b>Processando: ' + geocoded + '/' + enderecos.length + '</b>';
+
+        if (coords) {
+          successCount++;
+          const pos = new google.maps.LatLng(coords.lat, coords.lng);
+          const qty = parseInt(e.quantidade);
+          const prazo = parseFloat(e.taxa_prazo || 0);
+          
+          // Heatmap data (weighted)
+          heatData.push({ location: pos, weight: Math.min(qty, 30) });
+
+          // Marker com cor por SLA
+          const color = prazo >= 95 ? '#10b981' : prazo >= 85 ? '#f59e0b' : '#ef4444';
+          const size = Math.max(8, Math.min(qty * 1.5, 24));
+          
+          const marker = new google.maps.Marker({
+            position: pos, map: map,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: size, fillColor: color, fillOpacity: 0.7,
+              strokeColor: 'white', strokeWeight: 2,
+            },
+          });
+
+          const infoWindow = new google.maps.InfoWindow({
+            content: \`<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:180px">
+              <b style="font-size:14px;color:#1e293b">\${e.bairro || e.endereco}</b>
+              <div style="color:#64748b;font-size:12px;margin-bottom:8px">\${e.cidade || ''}</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px">
+                <span>📦 Entregas</span><b>\${qty}</b>
+                <span>⏱️ Prazo</span><b style="color:\${color}">\${e.taxa_prazo}%</b>
+                <span>📏 KM médio</span><b>\${e.km_medio || '-'}</b>
+                <span>🕐 Tempo médio</span><b>\${e.tempo_medio || '-'} min</b>
+              </div>
+            </div>\`
+          });
+          marker.addListener('click', () => infoWindow.open(map, marker));
+          markers.push(marker);
+          bounds.extend(pos);
+        }
+
+        // Update progress
+        if (geocoded % 5 === 0 || geocoded === enderecos.length) {
+          document.getElementById('infoPanel').innerHTML = \`
+            <h3>📍 Mapeando entregas</h3>
+            <p>\${successCount} de \${enderecos.length} endereços</p>
+            <div class="progress"><div class="progress-bar" style="width:\${(geocoded/enderecos.length*100).toFixed(0)}%;background:#6366f1"></div></div>
+          \`;
+        }
+
+        // Rate limit Google Geocoding (50/seg no plano pago, mas vamos ser conservadores)
+        await new Promise(r => setTimeout(r, 100));
       }
 
-      if (pontos.length > 0) {
-        L.heatLayer(pontos, { radius: 25, blur: 15, maxZoom: 17, gradient: { 0.2: '#3b82f6', 0.4: '#10b981', 0.6: '#f59e0b', 0.8: '#f97316', 1.0: '#ef4444' } }).addTo(map);
+      // Criar heatmap layer
+      if (heatData.length > 0) {
+        heatmap = new google.maps.visualization.HeatmapLayer({
+          data: heatData,
+          map: map,
+          radius: 40,
+          opacity: 0.6,
+          gradient: [
+            'rgba(0, 0, 0, 0)', 'rgba(99, 102, 241, 0.3)', 'rgba(59, 130, 246, 0.5)',
+            'rgba(16, 185, 129, 0.6)', 'rgba(245, 158, 11, 0.7)', 'rgba(239, 68, 68, 0.8)',
+            'rgba(220, 38, 38, 0.9)'
+          ],
+        });
         map.fitBounds(bounds);
       }
 
-      // Legenda
-      info._div.innerHTML = '<b>' + pontos.length + '/' + enderecos.length + ' endereços mapeados</b><br>'
-        + '🟢 Prazo ≥95% · 🟡 85-95% · 🔴 <85%';
+      // Final info
+      document.getElementById('infoPanel').innerHTML = \`
+        <h3>✅ Mapa completo</h3>
+        <p><b>\${successCount}</b> de \${enderecos.length} endereços mapeados</p>
+        <p style="font-size:11px;color:#94a3b8;margin-top:4px">Use os botões 🔥 e 📍 para alternar camadas</p>
+      \`;
     }
-    init();
   </script>
+  <script src="https://maps.googleapis.com/maps/api/js?key=${GOOGLE_API_KEY}&libraries=visualization&callback=initMap" async defer></script>
 </body>
 </html>`;
 
