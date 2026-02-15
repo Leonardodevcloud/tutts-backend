@@ -24,7 +24,9 @@ function createDashboardRoutes(pool) {
       // 1. Métricas históricas de todos os clientes (uma única query)
       const metricasTodos = await pool.query(`
         SELECT 
+          c.id,
           c.cod_cliente,
+          c.centro_custo,
           COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as total_entregas,
           ROUND(
             SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
@@ -67,50 +69,63 @@ function createDashboardRoutes(pool) {
           CURRENT_DATE - MAX(e.data_solicitado) as dias_sem_entrega
         FROM cs_clientes c
         LEFT JOIN bi_entregas e ON e.cod_cliente = c.cod_cliente
-        GROUP BY c.cod_cliente
+          AND (c.centro_custo IS NULL OR e.centro_custo = c.centro_custo)
+        GROUP BY c.id, c.cod_cliente, c.centro_custo
       `);
 
       // 2. Volume semanal das últimas 6 semanas (para detectar oscilação)
       const semanaisQuery = await pool.query(`
         SELECT 
+          c.id as cliente_id,
           c.cod_cliente,
           DATE_TRUNC('week', e.data_solicitado)::date as semana,
           COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas
         FROM cs_clientes c
         LEFT JOIN bi_entregas e ON e.cod_cliente = c.cod_cliente
+          AND (c.centro_custo IS NULL OR e.centro_custo = c.centro_custo)
           AND e.data_solicitado >= CURRENT_DATE - 42
         WHERE e.data_solicitado IS NOT NULL
-        GROUP BY c.cod_cliente, DATE_TRUNC('week', e.data_solicitado)
-        ORDER BY c.cod_cliente, semana
+        GROUP BY c.id, c.cod_cliente, DATE_TRUNC('week', e.data_solicitado)
+        ORDER BY c.id, semana
       `);
 
-      // Agrupar semanais por cliente
+      // Agrupar semanais por id do cliente
       const semanaisPorCliente = {};
       for (const row of semanaisQuery.rows) {
-        if (!semanaisPorCliente[row.cod_cliente]) semanaisPorCliente[row.cod_cliente] = [];
-        semanaisPorCliente[row.cod_cliente].push(row);
+        if (!semanaisPorCliente[row.cliente_id]) semanaisPorCliente[row.cliente_id] = [];
+        semanaisPorCliente[row.cliente_id].push(row);
       }
 
       // 3. Calcular score + status com análise de oscilação
+      // Buscar clientes com status manual (churned definido pelo usuário)
+      const statusManuais = await pool.query(
+        `SELECT id, status FROM cs_clientes WHERE status = 'churned' AND updated_at > NOW() - INTERVAL '365 days'`
+      );
+      const churnadosManuais = new Set(statusManuais.rows.map(r => r.id));
+
       const updates = [];
       for (const row of metricasTodos.rows) {
         const diasSem = row.dias_sem_entrega != null ? parseInt(row.dias_sem_entrega) : 999;
-        const isChurned = diasSem > 30;
 
-        // Churned NÃO calcula health score — fica 0
+        // Se o usuário marcou manualmente como churned, respeitar
+        if (churnadosManuais.has(row.id)) {
+          updates.push({ id: row.id, hs: 0, status: 'churned' });
+          continue;
+        }
+
+        const isChurned = diasSem > 30;
         const hs = isChurned ? 0 : calcularHealthScore(row);
 
-        // Analisar oscilação semanal
-        const semanais = semanaisPorCliente[row.cod_cliente] || [];
+        const semanais = semanaisPorCliente[row.id] || [];
         const sinais = analisarSinaisChurn(semanais);
 
         const status = determinarStatusCliente(hs, diasSem, sinais);
-        updates.push({ cod: row.cod_cliente, hs, status });
+        updates.push({ id: row.id, hs, status });
       }
 
-      // 4. Batch update
+      // 4. Batch update por ID
       if (updates.length > 0) {
-        const cods = updates.map(u => u.cod);
+        const ids = updates.map(u => u.id);
         const scores = updates.map(u => u.hs);
         const statuses = updates.map(u => u.status);
 
@@ -120,12 +135,12 @@ function createDashboardRoutes(pool) {
             status = batch.status,
             updated_at = NOW()
           FROM (
-            SELECT unnest($1::int[]) as cod_cliente,
+            SELECT unnest($1::int[]) as id,
                    unnest($2::int[]) as score,
                    unnest($3::text[]) as status
           ) batch
-          WHERE cs_clientes.cod_cliente = batch.cod_cliente
-        `, [cods, scores, statuses]);
+          WHERE cs_clientes.id = batch.id
+        `, [ids, scores, statuses]);
       }
 
       lastRecalc = Date.now();
