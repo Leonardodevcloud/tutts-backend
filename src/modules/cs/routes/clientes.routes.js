@@ -528,8 +528,31 @@ function createClientesRoutes(pool) {
       const totalResult = await pool.query('SELECT COUNT(*) as total FROM cs_clientes');
       const total = parseInt(totalResult.rows[0].total);
 
+      // Debug: estado do banco
+      const debugInfo = {};
+      try {
+        const constraints = await pool.query(`
+          SELECT con.conname, pg_get_constraintdef(con.oid) as def
+          FROM pg_constraint con JOIN pg_class rel ON rel.oid = con.conrelid
+          WHERE rel.relname = 'cs_clientes' AND con.contype = 'u'
+        `);
+        const indexes = await pool.query(`
+          SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cs_clientes' AND indexdef LIKE '%UNIQUE%'
+        `);
+        const sample767 = await pool.query(`SELECT id, cod_cliente, centro_custo, nome_fantasia, status FROM cs_clientes WHERE cod_cliente = 767`);
+        const biCC767 = await pool.query(`
+          SELECT DISTINCT centro_custo, COUNT(*) as qtd FROM bi_entregas 
+          WHERE cod_cliente = 767 AND centro_custo IS NOT NULL AND centro_custo != ''
+          GROUP BY centro_custo ORDER BY COUNT(*) DESC
+        `).catch(() => ({ rows: [] }));
+        debugInfo.unique_constraints = constraints.rows;
+        debugInfo.unique_indexes = indexes.rows;
+        debugInfo.cs_767 = sample767.rows;
+        debugInfo.bi_centros_custo_767 = biCC767.rows;
+      } catch (e) { debugInfo.error = e.message; }
+
       console.log(`📥 CS Sync: ${total} registros total. Logs:`, logs.join(' | '));
-      res.json({ success: true, importados: total, clientes_multi_cc: multiCcCount, logs });
+      res.json({ success: true, importados: total, clientes_multi_cc: multiCcCount, logs, debug: debugInfo });
     } catch (error) {
       console.error('❌ Erro ao sincronizar clientes do BI:', error);
       res.status(500).json({ error: 'Erro ao sincronizar: ' + error.message });
