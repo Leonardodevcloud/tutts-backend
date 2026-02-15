@@ -120,7 +120,10 @@ function createClientesRoutes(pool) {
       // Filtro de período opcional
       const { data_inicio, data_fim } = req.query;
       const temFiltro = data_inicio && data_fim;
-      const filtroSQL = temFiltro ? ` AND data_solicitado >= '${data_inicio}' AND data_solicitado <= '${data_fim}'` : '';
+
+      // Parâmetros para query de métricas: $1 = cod, $2 = data_inicio, $3 = data_fim
+      const metricasParams = temFiltro ? [cod, data_inicio, data_fim] : [cod];
+      const filtroSQL = temFiltro ? ' AND data_solicitado >= $2 AND data_solicitado <= $3' : '';
 
       // Dados da ficha
       const fichaResult = await pool.query(
@@ -149,14 +152,17 @@ function createClientesRoutes(pool) {
       }
 
       // Centros de custo do cliente
-      const centrosCusto = await pool.query(`
-        SELECT DISTINCT centro_custo, 
-          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
-        FROM bi_entregas 
-        WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
-        GROUP BY centro_custo
-        ORDER BY COUNT(*) DESC
-      `, [cod]);
+      let centrosCusto = { rows: [] };
+      try {
+        centrosCusto = await pool.query(`
+          SELECT DISTINCT centro_custo, 
+            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
+          FROM bi_entregas 
+          WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
+          GROUP BY centro_custo
+          ORDER BY COUNT(*) DESC
+        `, [cod]);
+      } catch (e) { console.warn('⚠️ Centros de custo não disponível:', e.message); }
 
       // Métricas BI — com filtro de período se informado
       const metricasBi = await pool.query(`
@@ -209,7 +215,7 @@ function createClientesRoutes(pool) {
           CURRENT_DATE - MAX(data_solicitado) as dias_sem_entrega
         FROM bi_entregas
         WHERE cod_cliente = $1 ${filtroSQL}
-      `, [cod]);
+      `, metricasParams);
 
       // Evolução por semana (últimos 180 dias — visão mais ampla)
       const evolucaoSemanal = await pool.query(`
