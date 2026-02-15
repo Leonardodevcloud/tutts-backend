@@ -396,13 +396,12 @@ function createClientesRoutes(pool) {
   // ==================== POST /cs/clientes/sync-bi ====================
   router.post('/cs/clientes/sync-bi', async (req, res) => {
     try {
-      // Verificar se coluna centro_custo existe no bi_entregas
+      // Verificar se coluna centro_custo existe no bi_entregas e cs_clientes
       const ccColumnExists = await pool.query(`
         SELECT column_name FROM information_schema.columns 
         WHERE table_name = 'bi_entregas' AND column_name = 'centro_custo'
       `).then(r => r.rows.length > 0).catch(() => false);
 
-      // Verificar se coluna centro_custo existe no cs_clientes
       const csCcExists = await pool.query(`
         SELECT column_name FROM information_schema.columns 
         WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
@@ -410,37 +409,32 @@ function createClientesRoutes(pool) {
 
       let importados = 0;
       let multiCcCount = 0;
+      const logs = [];
 
       if (ccColumnExists && csCcExists) {
-        // ── MODO COM CENTROS DE CUSTO ──
+        logs.push('Modo com centros de custo');
+
         // Passo 1: Detectar quais cod_cliente têm múltiplos centros de custo
         const multiCcClientes = await pool.query(`
-          SELECT cod_cliente FROM bi_entregas 
-          WHERE centro_custo IS NOT NULL AND centro_custo != '' AND data_solicitado >= CURRENT_DATE - 90
+          SELECT cod_cliente, COUNT(DISTINCT centro_custo) as qtd, 
+                 STRING_AGG(DISTINCT centro_custo, ', ') as centros
+          FROM bi_entregas 
+          WHERE centro_custo IS NOT NULL AND centro_custo != '' 
+            AND data_solicitado >= CURRENT_DATE - 90
           GROUP BY cod_cliente HAVING COUNT(DISTINCT centro_custo) > 1
         `);
         const multiCcSet = multiCcClientes.rows.map(r => r.cod_cliente);
         multiCcCount = multiCcSet.length;
+        logs.push(`Clientes com multi-CC: ${multiCcCount} (${multiCcClientes.rows.map(r => `${r.cod_cliente}:${r.qtd}cc`).join(', ')})`);
 
-        // Passo 2: Clientes SEM múltiplos CC
-        await pool.query(`
-          INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
-          SELECT 
-            e.cod_cliente, NULL,
-            LEFT(MAX(e.nome_fantasia), 255),
-            LEFT(MAX(e.cidade), 100),
-            LEFT(MAX(e.estado), 10),
-            'ativo'
-          FROM bi_entregas e
-          WHERE e.cod_cliente IS NOT NULL
-            AND e.data_solicitado >= CURRENT_DATE - 90
-            AND e.cod_cliente != ALL($1::int[])
-          GROUP BY e.cod_cliente
-          ON CONFLICT DO NOTHING
-        `, [multiCcSet.length > 0 ? multiCcSet : [0]]).catch(e => console.warn('Sync step 2:', e.message));
-
-        // Passo 3: Clientes COM múltiplos CC → uma linha por centro_custo
+        // Passo 2: Para clientes com múltiplos CC, deletar a linha genérica ANTES de inserir
         if (multiCcSet.length > 0) {
+          const delResult = await pool.query(`
+            DELETE FROM cs_clientes WHERE cod_cliente = ANY($1::int[]) AND (centro_custo IS NULL OR centro_custo = '')
+          `, [multiCcSet]).catch(e => { logs.push('Del genérica: ' + e.message); return { rowCount: 0 }; });
+          logs.push(`Removidas ${delResult.rowCount} linhas genéricas de clientes multi-CC`);
+
+          // Inserir cada centro de custo como linha separada
           const r2 = await pool.query(`
             INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
             SELECT 
@@ -456,20 +450,16 @@ function createClientesRoutes(pool) {
             GROUP BY e.cod_cliente, e.centro_custo
             ON CONFLICT DO NOTHING
             RETURNING cod_cliente, centro_custo
-          `, [multiCcSet]).catch(e => { console.warn('Sync step 3:', e.message); return { rows: [] }; });
+          `, [multiCcSet]).catch(e => { logs.push('Insert multi-CC: ' + e.message); return { rows: [] }; });
+          logs.push(`Inseridos ${r2.rows.length} centros de custo`);
           importados += r2.rows.length;
-
-          // Remover linha "genérica" dos clientes que agora têm CCs individuais
-          await pool.query(`
-            DELETE FROM cs_clientes WHERE cod_cliente = ANY($1::int[]) AND centro_custo IS NULL
-          `, [multiCcSet]).catch(() => {});
         }
-      } else {
-        // ── MODO SEM CENTROS DE CUSTO (compatibilidade) ──
-        await pool.query(`
-          INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
-          SELECT DISTINCT 
-            e.cod_cliente, 
+
+        // Passo 3: Clientes SEM múltiplos CC → linha única
+        const r1 = await pool.query(`
+          INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
+          SELECT 
+            e.cod_cliente, NULL,
             LEFT(MAX(e.nome_fantasia), 255),
             LEFT(MAX(e.cidade), 100),
             LEFT(MAX(e.estado), 10),
@@ -477,20 +467,72 @@ function createClientesRoutes(pool) {
           FROM bi_entregas e
           WHERE e.cod_cliente IS NOT NULL
             AND e.data_solicitado >= CURRENT_DATE - 90
+            AND e.cod_cliente != ALL($1::int[])
           GROUP BY e.cod_cliente
           ON CONFLICT DO NOTHING
-        `).catch(e => console.warn('Sync fallback:', e.message));
+          RETURNING cod_cliente
+        `, [multiCcSet.length > 0 ? multiCcSet : [0]]).catch(e => { logs.push('Insert single: ' + e.message); return { rows: [] }; });
+        importados += r1.rows.length;
+        logs.push(`Inseridos ${r1.rows.length} clientes simples`);
+
+      } else {
+        logs.push(`Modo compatibilidade (bi_cc=${ccColumnExists}, cs_cc=${csCcExists})`);
+        await pool.query(`
+          INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
+          SELECT DISTINCT 
+            e.cod_cliente, LEFT(MAX(e.nome_fantasia), 255),
+            LEFT(MAX(e.cidade), 100), LEFT(MAX(e.estado), 10), 'ativo'
+          FROM bi_entregas e
+          WHERE e.cod_cliente IS NOT NULL AND e.data_solicitado >= CURRENT_DATE - 90
+          GROUP BY e.cod_cliente
+          ON CONFLICT DO NOTHING
+        `).catch(e => logs.push('Sync fallback: ' + e.message));
       }
 
-      // Contar total
       const totalResult = await pool.query('SELECT COUNT(*) as total FROM cs_clientes');
-      importados = parseInt(totalResult.rows[0].total);
+      const total = parseInt(totalResult.rows[0].total);
 
-      console.log(`📥 CS Sync: ${importados} registros total (${multiCcCount} clientes com múltiplos CC)`);
-      res.json({ success: true, importados, clientes_multi_cc: multiCcCount });
+      console.log(`📥 CS Sync: ${total} registros total. Logs:`, logs.join(' | '));
+      res.json({ success: true, importados: total, clientes_multi_cc: multiCcCount, logs });
     } catch (error) {
       console.error('❌ Erro ao sincronizar clientes do BI:', error);
       res.status(500).json({ error: 'Erro ao sincronizar: ' + error.message });
+    }
+  });
+
+  // ==================== GET /cs/clientes/debug (temporário) ====================
+  router.get('/cs/clientes-debug', async (req, res) => {
+    try {
+      const constraints = await pool.query(`
+        SELECT con.conname, pg_get_constraintdef(con.oid) as def
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE rel.relname = 'cs_clientes'
+      `);
+      const indexes = await pool.query(`
+        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cs_clientes'
+      `);
+      const columns = await pool.query(`
+        SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'cs_clientes' ORDER BY ordinal_position
+      `);
+      const sample767 = await pool.query(`SELECT id, cod_cliente, centro_custo, nome_fantasia FROM cs_clientes WHERE cod_cliente = 767`);
+      const biCC767 = await pool.query(`
+        SELECT DISTINCT centro_custo, COUNT(*) as qtd FROM bi_entregas 
+        WHERE cod_cliente = 767 AND centro_custo IS NOT NULL AND centro_custo != ''
+        GROUP BY centro_custo ORDER BY COUNT(*) DESC
+      `).catch(() => ({ rows: [] }));
+      const totalCs = await pool.query(`SELECT COUNT(*) as total FROM cs_clientes`);
+
+      res.json({
+        constraints: constraints.rows,
+        indexes: indexes.rows,
+        columns: columns.rows.map(c => c.column_name),
+        cs_767: sample767.rows,
+        bi_centros_custo_767: biCC767.rows,
+        total_cs_clientes: totalCs.rows[0].total
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 
