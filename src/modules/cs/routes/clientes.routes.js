@@ -40,9 +40,7 @@ function createClientesRoutes(pool) {
           COALESCE(bi.total_retornos_30d, 0) as total_retornos_30d,
           COALESCE(oc.ocorrencias_abertas, 0) as ocorrencias_abertas,
           COALESCE(it.ultima_interacao, NULL) as ultima_interacao,
-          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d,
-          COALESCE(cc.centros_custo, '') as centros_custo,
-          COALESCE(cc.qtd_centros, 0) as qtd_centros_custo
+          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT 
@@ -72,6 +70,7 @@ function createClientesRoutes(pool) {
             ) as taxa_retorno_30d
           FROM bi_entregas 
           WHERE cod_cliente = c.cod_cliente
+            AND (c.centro_custo IS NULL OR centro_custo = c.centro_custo)
             AND data_solicitado >= CURRENT_DATE - 30
             AND COALESCE(ponto, 1) >= 2
         ) bi ON true
@@ -86,13 +85,6 @@ function createClientesRoutes(pool) {
             COUNT(*) FILTER (WHERE data_interacao >= NOW() - INTERVAL '30 days') as total_interacoes_30d
           FROM cs_interacoes WHERE cod_cliente = c.cod_cliente
         ) it ON true
-        LEFT JOIN LATERAL (
-          SELECT 
-            STRING_AGG(DISTINCT centro_custo, ', ' ORDER BY centro_custo) as centros_custo,
-            COUNT(DISTINCT centro_custo) as qtd_centros
-          FROM bi_entregas 
-          WHERE cod_cliente = c.cod_cliente AND centro_custo IS NOT NULL AND centro_custo != ''
-        ) cc ON true
         ${whereClause}
         ORDER BY ${ordem === 'health' ? 'c.health_score' : ordem === 'entregas' ? 'bi.total_entregas_30d' : 'c.nome_fantasia'} ${direcao === 'desc' ? 'DESC' : 'ASC'} NULLS LAST
         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -126,18 +118,37 @@ function createClientesRoutes(pool) {
       const cod = parseInt(req.params.cod);
       if (!cod || isNaN(cod)) return res.status(400).json({ error: 'Código inválido' });
 
-      // Filtro de período opcional
-      const { data_inicio, data_fim } = req.query;
+      // Filtro de período e centro de custo
+      const { data_inicio, data_fim, centro_custo } = req.query;
       const temFiltro = data_inicio && data_fim;
+      const temCC = centro_custo && centro_custo !== '';
 
-      // Parâmetros para query de métricas: $1 = cod, $2 = data_inicio, $3 = data_fim
-      const metricasParams = temFiltro ? [cod, data_inicio, data_fim] : [cod];
-      const filtroSQL = temFiltro ? ' AND data_solicitado >= $2 AND data_solicitado <= $3' : '';
+      // Construir parâmetros dinâmicos para métricas
+      let metricasParams = [cod];
+      let filtroSQL = '';
+      let paramIdx = 2;
+      if (temFiltro) {
+        filtroSQL += ` AND data_solicitado >= $${paramIdx} AND data_solicitado <= $${paramIdx + 1}`;
+        metricasParams.push(data_inicio, data_fim);
+        paramIdx += 2;
+      }
+      if (temCC) {
+        filtroSQL += ` AND centro_custo = $${paramIdx}`;
+        metricasParams.push(centro_custo);
+        paramIdx++;
+      }
 
-      // Dados da ficha
-      const fichaResult = await pool.query(
-        'SELECT * FROM cs_clientes WHERE cod_cliente = $1', [cod]
-      );
+      // Dados da ficha — buscar por cod_cliente + centro_custo
+      const fichaQuery = temCC
+        ? 'SELECT * FROM cs_clientes WHERE cod_cliente = $1 AND centro_custo = $2'
+        : 'SELECT * FROM cs_clientes WHERE cod_cliente = $1 AND centro_custo IS NULL';
+      const fichaParams = temCC ? [cod, centro_custo] : [cod];
+      let fichaResult = await pool.query(fichaQuery, fichaParams);
+      
+      // Fallback: se não encontrou com centro_custo, tentar sem
+      if (fichaResult.rows.length === 0) {
+        fichaResult = await pool.query('SELECT * FROM cs_clientes WHERE cod_cliente = $1 LIMIT 1', [cod]);
+      }
 
       let ficha = fichaResult.rows[0];
       if (!ficha) {
@@ -369,29 +380,65 @@ function createClientesRoutes(pool) {
   // ==================== POST /cs/clientes/sync-bi ====================
   router.post('/cs/clientes/sync-bi', async (req, res) => {
     try {
-      const result = await pool.query(`
-        INSERT INTO cs_clientes (cod_cliente, nome_fantasia, cidade, estado, status)
-        SELECT DISTINCT 
-          e.cod_cliente, 
-          LEFT(e.nome_fantasia, 255),
+      // Passo 1: Detectar quais cod_cliente têm múltiplos centros de custo
+      const multiCcClientes = await pool.query(`
+        SELECT cod_cliente FROM bi_entregas 
+        WHERE centro_custo IS NOT NULL AND centro_custo != '' AND data_solicitado >= CURRENT_DATE - 90
+        GROUP BY cod_cliente HAVING COUNT(DISTINCT centro_custo) > 1
+      `);
+      const multiCcSet = multiCcClientes.rows.map(r => r.cod_cliente);
+
+      let importados = 0;
+
+      // Passo 2: Clientes SEM múltiplos CC → linha única (centro_custo = NULL)
+      const r1 = await pool.query(`
+        INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
+        SELECT 
+          e.cod_cliente, NULL,
+          LEFT(MAX(e.nome_fantasia), 255),
           LEFT(MAX(e.cidade), 100),
           LEFT(MAX(e.estado), 10),
           'ativo'
         FROM bi_entregas e
         WHERE e.cod_cliente IS NOT NULL
-          AND e.cod_cliente NOT IN (SELECT cod_cliente FROM cs_clientes)
           AND e.data_solicitado >= CURRENT_DATE - 90
-        GROUP BY e.cod_cliente, e.nome_fantasia
-        ON CONFLICT (cod_cliente) DO NOTHING
-        RETURNING cod_cliente, nome_fantasia
-      `);
+          AND e.cod_cliente != ALL($1::int[])
+        GROUP BY e.cod_cliente
+        ON CONFLICT (cod_cliente, COALESCE(centro_custo, '')) DO UPDATE SET
+          nome_fantasia = COALESCE(EXCLUDED.nome_fantasia, cs_clientes.nome_fantasia)
+        RETURNING cod_cliente
+      `, [multiCcSet.length > 0 ? multiCcSet : [0]]);
+      importados += r1.rows.length;
 
-      console.log(`📥 CS Sync: ${result.rows.length} novos clientes importados do BI`);
-      res.json({
-        success: true,
-        importados: result.rows.length,
-        clientes: result.rows,
-      });
+      // Passo 3: Clientes COM múltiplos CC → uma linha por centro_custo
+      if (multiCcSet.length > 0) {
+        const r2 = await pool.query(`
+          INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
+          SELECT 
+            e.cod_cliente, e.centro_custo,
+            LEFT(COALESCE(NULLIF(e.centro_custo, ''), MAX(e.nome_fantasia)), 255),
+            LEFT(MAX(e.cidade), 100),
+            LEFT(MAX(e.estado), 10),
+            'ativo'
+          FROM bi_entregas e
+          WHERE e.cod_cliente = ANY($1::int[])
+            AND e.data_solicitado >= CURRENT_DATE - 90
+            AND e.centro_custo IS NOT NULL AND e.centro_custo != ''
+          GROUP BY e.cod_cliente, e.centro_custo
+          ON CONFLICT (cod_cliente, COALESCE(centro_custo, '')) DO UPDATE SET
+            nome_fantasia = COALESCE(EXCLUDED.nome_fantasia, cs_clientes.nome_fantasia)
+          RETURNING cod_cliente, centro_custo
+        `, [multiCcSet]);
+        importados += r2.rows.length;
+
+        // Remover linha "genérica" (centro_custo=NULL) dos clientes que agora têm CCs individuais
+        await pool.query(`
+          DELETE FROM cs_clientes WHERE cod_cliente = ANY($1::int[]) AND centro_custo IS NULL
+        `, [multiCcSet]).catch(() => {});
+      }
+
+      console.log(`📥 CS Sync: ${importados} registros (${multiCcSet.length} clientes com múltiplos CC)`);
+      res.json({ success: true, importados, clientes_multi_cc: multiCcSet.length });
     } catch (error) {
       console.error('❌ Erro ao sincronizar clientes do BI:', error);
       res.status(500).json({ error: 'Erro ao sincronizar' });
