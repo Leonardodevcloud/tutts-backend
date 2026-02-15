@@ -40,7 +40,9 @@ function createClientesRoutes(pool) {
           COALESCE(bi.total_retornos_30d, 0) as total_retornos_30d,
           COALESCE(oc.ocorrencias_abertas, 0) as ocorrencias_abertas,
           COALESCE(it.ultima_interacao, NULL) as ultima_interacao,
-          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d
+          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d,
+          COALESCE(cc.centros_custo, '') as centros_custo,
+          COALESCE(cc.qtd_centros, 0) as qtd_centros_custo
         FROM cs_clientes c
         LEFT JOIN LATERAL (
           SELECT 
@@ -84,6 +86,13 @@ function createClientesRoutes(pool) {
             COUNT(*) FILTER (WHERE data_interacao >= NOW() - INTERVAL '30 days') as total_interacoes_30d
           FROM cs_interacoes WHERE cod_cliente = c.cod_cliente
         ) it ON true
+        LEFT JOIN LATERAL (
+          SELECT 
+            STRING_AGG(DISTINCT centro_custo, ', ' ORDER BY centro_custo) as centros_custo,
+            COUNT(DISTINCT centro_custo) as qtd_centros
+          FROM bi_entregas 
+          WHERE cod_cliente = c.cod_cliente AND centro_custo IS NOT NULL AND centro_custo != ''
+        ) cc ON true
         ${whereClause}
         ORDER BY ${ordem === 'health' ? 'c.health_score' : ordem === 'entregas' ? 'bi.total_entregas_30d' : 'c.nome_fantasia'} ${direcao === 'desc' ? 'DESC' : 'ASC'} NULLS LAST
         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
