@@ -461,52 +461,80 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
 
       const totalEntregas = entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0);
 
-      // ── Geocodificar no backend com cache ──
+      // ── Geocodificar no backend com cache OTIMIZADO ──
       const crypto = require('crypto');
       const pontosGeo = [];
       let cacheHits = 0, apiCalls = 0;
 
-      for (const e of entregas.rows) {
+      // Preparar hashes de todos os endereços
+      const enderecosMapped = entregas.rows.map(e => {
         const addrParts = [e.endereco, e.bairro, e.cidade, e.estado].filter(Boolean);
         const addrStr = addrParts.join(', ');
         const hash = crypto.createHash('md5').update(addrStr.toLowerCase().trim()).digest('hex');
+        return { ...e, addrStr, hash };
+      });
 
-        // Cache
-        const cached = await pool.query('SELECT lat, lng FROM geocode_cache WHERE endereco_hash = $1', [hash]);
+      // Buscar TODOS os caches de uma vez (1 query em vez de N)
+      const allHashes = enderecosMapped.map(e => e.hash);
+      const cachedResult = await pool.query(
+        'SELECT endereco_hash, lat, lng FROM geocode_cache WHERE endereco_hash = ANY($1)',
+        [allHashes]
+      );
+      const cacheMap = {};
+      cachedResult.rows.forEach(r => { cacheMap[r.endereco_hash] = r; });
 
-        if (cached.rows.length > 0) {
+      // Separar: com cache vs precisam de API
+      const needsApi = [];
+      for (const e of enderecosMapped) {
+        const cached = cacheMap[e.hash];
+        if (cached) {
           cacheHits++;
           pontosGeo.push({
-            lat: cached.rows[0].lat, lng: cached.rows[0].lng,
+            lat: cached.lat, lng: cached.lng,
             quantidade: parseInt(e.quantidade), taxa_prazo: parseFloat(e.taxa_prazo || 0),
             km_medio: e.km_medio, tempo_medio: e.tempo_medio,
             bairro: e.bairro || '', cidade: e.cidade || '', endereco: e.endereco || '',
           });
         } else {
+          needsApi.push(e);
+        }
+      }
+
+      // Geocodificar os que faltam em lotes de 10 paralelos
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < needsApi.length; i += BATCH_SIZE) {
+        const batch = needsApi.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(batch.map(async (e) => {
           try {
-            const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(addrStr)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR`;
+            const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(e.addrStr)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR`;
             const geoRes = await fetch(url);
             const geoData = await geoRes.json();
             apiCalls++;
-
             if (geoData.status === 'OK' && geoData.results[0]) {
               const loc = geoData.results[0].geometry.location;
               await pool.query(
                 'INSERT INTO geocode_cache (endereco_hash, endereco_original, lat, lng) VALUES ($1, $2, $3, $4) ON CONFLICT (endereco_hash) DO NOTHING',
-                [hash, addrStr, loc.lat, loc.lng]
+                [e.hash, e.addrStr, loc.lat, loc.lng]
               ).catch(() => {});
-              pontosGeo.push({
-                lat: loc.lat, lng: loc.lng,
-                quantidade: parseInt(e.quantidade), taxa_prazo: parseFloat(e.taxa_prazo || 0),
-                km_medio: e.km_medio, tempo_medio: e.tempo_medio,
-                bairro: e.bairro || '', cidade: e.cidade || '', endereco: e.endereco || '',
-              });
+              return { lat: loc.lat, lng: loc.lng, e };
             }
-            if (apiCalls % 40 === 0) await new Promise(r => setTimeout(r, 1000));
-          } catch (geoErr) {
-            console.warn('Geocode falhou:', addrStr, geoErr.message);
+          } catch (err) { console.warn('Geocode falhou:', e.addrStr); }
+          return null;
+        }));
+
+        results.forEach(r => {
+          if (r.status === 'fulfilled' && r.value) {
+            pontosGeo.push({
+              lat: r.value.lat, lng: r.value.lng,
+              quantidade: parseInt(r.value.e.quantidade), taxa_prazo: parseFloat(r.value.e.taxa_prazo || 0),
+              km_medio: r.value.e.km_medio, tempo_medio: r.value.e.tempo_medio,
+              bairro: r.value.e.bairro || '', cidade: r.value.e.cidade || '', endereco: r.value.e.endereco || '',
+            });
           }
-        }
+        });
+
+        // Pause entre lotes para não estourar rate limit
+        if (i + BATCH_SIZE < needsApi.length) await new Promise(r => setTimeout(r, 200));
       }
 
       console.log(`🗺️ Mapa calor: ${pontosGeo.length} pontos (${cacheHits} cache, ${apiCalls} API)`);
