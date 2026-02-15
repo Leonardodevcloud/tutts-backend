@@ -46,9 +46,16 @@ async function initCsTables(pool) {
   // Migração: adicionar centro_custo para suportar múltiplos centros por cod_cliente
   await pool.query(`ALTER TABLE cs_clientes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`).catch(() => {});
   // Alterar constraint unique: de (cod_cliente) para (cod_cliente, centro_custo)
-  // Remover a antiga e criar nova (idempotente)
+  // Tentar remover constraint antiga (nome pode variar)
   await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS cs_clientes_cod_cliente_key`).catch(() => {});
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`).catch(() => {});
+  await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS cs_clientes_cod_cliente_unique`).catch(() => {});
+  // Tentar dropar o index antigo se for um unique index
+  await pool.query(`DROP INDEX IF EXISTS cs_clientes_cod_cliente_key`).catch(() => {});
+  await pool.query(`DROP INDEX IF EXISTS idx_cs_clientes_cod_cc`).catch(() => {});
+  // Criar novo unique index
+  await pool.query(`CREATE UNIQUE INDEX idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`).catch(e => {
+    console.log('⚠️ Unique index centro_custo:', e.message);
+  });
   
   console.log('✅ Tabela cs_clientes verificada');
 
