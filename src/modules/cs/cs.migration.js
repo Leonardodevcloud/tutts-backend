@@ -42,6 +42,14 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_clientes_cod ON cs_clientes(cod_cliente)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_clientes_status ON cs_clientes(status)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_clientes_health ON cs_clientes(health_score)`).catch(() => {});
+
+  // Migração: adicionar centro_custo para suportar múltiplos centros por cod_cliente
+  await pool.query(`ALTER TABLE cs_clientes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`).catch(() => {});
+  // Alterar constraint unique: de (cod_cliente) para (cod_cliente, centro_custo)
+  // Remover a antiga e criar nova (idempotente)
+  await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS cs_clientes_cod_cliente_key`).catch(() => {});
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`).catch(() => {});
+  
   console.log('✅ Tabela cs_clientes verificada');
 
   // ========== INTERAÇÕES (TIMELINE) ==========
