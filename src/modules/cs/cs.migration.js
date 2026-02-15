@@ -44,40 +44,63 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_clientes_health ON cs_clientes(health_score)`).catch(() => {});
 
   // Migração: adicionar centro_custo para suportar múltiplos centros por cod_cliente
-  await pool.query(`ALTER TABLE cs_clientes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`).catch(() => {});
+  console.log('🔧 CS Migration: Iniciando migração centro_custo...');
   
-  // Remover QUALQUER constraint/index unique que impeça múltiplas linhas por cod_cliente
+  // Passo 1: Adicionar coluna
   try {
-    // Buscar nome real da constraint unique em cod_cliente
-    const constraints = await pool.query(`
-      SELECT con.conname
-      FROM pg_constraint con
-      JOIN pg_class rel ON rel.oid = con.conrelid
-      WHERE rel.relname = 'cs_clientes' 
-        AND con.contype = 'u'
-    `);
-    for (const c of constraints.rows) {
-      console.log(`🔧 Removendo constraint: ${c.conname}`);
-      await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS "${c.conname}"`).catch(() => {});
-    }
-    
-    // Buscar unique indexes
-    const indexes = await pool.query(`
-      SELECT indexname FROM pg_indexes 
-      WHERE tablename = 'cs_clientes' AND indexdef LIKE '%UNIQUE%'
-        AND indexname != 'idx_cs_clientes_cod_cc'
-    `);
-    for (const idx of indexes.rows) {
-      console.log(`🔧 Removendo index: ${idx.indexname}`);
-      await pool.query(`DROP INDEX IF EXISTS "${idx.indexname}"`).catch(() => {});
-    }
-  } catch (e) { console.warn('⚠️ Limpeza constraints:', e.message); }
+    await pool.query(`ALTER TABLE cs_clientes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`);
+    console.log('✅ CS Migration: Coluna centro_custo adicionada/confirmada');
+  } catch (e) {
+    console.error('❌ CS Migration: Falha ao adicionar coluna centro_custo:', e.message);
+  }
 
-  // Criar novo unique index (cod_cliente + centro_custo)
-  await pool.query(`DROP INDEX IF EXISTS idx_cs_clientes_cod_cc`).catch(() => {});
-  await pool.query(`CREATE UNIQUE INDEX idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`).catch(e => {
-    console.log('⚠️ Unique index centro_custo:', e.message);
-  });
+  // Verificar se a coluna foi criada
+  const ccCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns 
+    WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
+  `);
+  console.log(`🔧 CS Migration: Coluna centro_custo existe? ${ccCheck.rows.length > 0}`);
+  
+  if (ccCheck.rows.length > 0) {
+    // Passo 2: Remover constraints e indexes unique antigos
+    try {
+      const constraints = await pool.query(`
+        SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE rel.relname = 'cs_clientes' 
+          AND con.contype = 'u'
+      `);
+      console.log(`🔧 CS Migration: ${constraints.rows.length} unique constraints encontradas:`, constraints.rows.map(c => c.conname));
+      for (const c of constraints.rows) {
+        await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT "${c.conname}"`);
+        console.log(`✅ CS Migration: Constraint ${c.conname} removida`);
+      }
+    } catch (e) { console.warn('⚠️ CS Migration: Limpeza constraints:', e.message); }
+
+    try {
+      const indexes = await pool.query(`
+        SELECT indexname FROM pg_indexes 
+        WHERE tablename = 'cs_clientes' AND indexdef LIKE '%UNIQUE%'
+          AND indexname != 'idx_cs_clientes_cod_cc'
+          AND indexname != 'cs_clientes_pkey'
+      `);
+      console.log(`🔧 CS Migration: ${indexes.rows.length} unique indexes encontrados:`, indexes.rows.map(i => i.indexname));
+      for (const idx of indexes.rows) {
+        await pool.query(`DROP INDEX "${idx.indexname}"`);
+        console.log(`✅ CS Migration: Index ${idx.indexname} removido`);
+      }
+    } catch (e) { console.warn('⚠️ CS Migration: Limpeza indexes:', e.message); }
+
+    // Passo 3: Criar novo unique index
+    try {
+      await pool.query(`DROP INDEX IF EXISTS idx_cs_clientes_cod_cc`);
+      await pool.query(`CREATE UNIQUE INDEX idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`);
+      console.log('✅ CS Migration: Unique index idx_cs_clientes_cod_cc criado');
+    } catch (e) {
+      console.error('❌ CS Migration: Falha ao criar index:', e.message);
+    }
+  }
   
   console.log('✅ Tabela cs_clientes verificada');
 
