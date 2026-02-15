@@ -45,14 +45,36 @@ async function initCsTables(pool) {
 
   // Migração: adicionar centro_custo para suportar múltiplos centros por cod_cliente
   await pool.query(`ALTER TABLE cs_clientes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`).catch(() => {});
-  // Alterar constraint unique: de (cod_cliente) para (cod_cliente, centro_custo)
-  // Tentar remover constraint antiga (nome pode variar)
-  await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS cs_clientes_cod_cliente_key`).catch(() => {});
-  await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS cs_clientes_cod_cliente_unique`).catch(() => {});
-  // Tentar dropar o index antigo se for um unique index
-  await pool.query(`DROP INDEX IF EXISTS cs_clientes_cod_cliente_key`).catch(() => {});
+  
+  // Remover QUALQUER constraint/index unique que impeça múltiplas linhas por cod_cliente
+  try {
+    // Buscar nome real da constraint unique em cod_cliente
+    const constraints = await pool.query(`
+      SELECT con.conname
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      WHERE rel.relname = 'cs_clientes' 
+        AND con.contype = 'u'
+    `);
+    for (const c of constraints.rows) {
+      console.log(`🔧 Removendo constraint: ${c.conname}`);
+      await pool.query(`ALTER TABLE cs_clientes DROP CONSTRAINT IF EXISTS "${c.conname}"`).catch(() => {});
+    }
+    
+    // Buscar unique indexes
+    const indexes = await pool.query(`
+      SELECT indexname FROM pg_indexes 
+      WHERE tablename = 'cs_clientes' AND indexdef LIKE '%UNIQUE%'
+        AND indexname != 'idx_cs_clientes_cod_cc'
+    `);
+    for (const idx of indexes.rows) {
+      console.log(`🔧 Removendo index: ${idx.indexname}`);
+      await pool.query(`DROP INDEX IF EXISTS "${idx.indexname}"`).catch(() => {});
+    }
+  } catch (e) { console.warn('⚠️ Limpeza constraints:', e.message); }
+
+  // Criar novo unique index (cod_cliente + centro_custo)
   await pool.query(`DROP INDEX IF EXISTS idx_cs_clientes_cod_cc`).catch(() => {});
-  // Criar novo unique index
   await pool.query(`CREATE UNIQUE INDEX idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`).catch(e => {
     console.log('⚠️ Unique index centro_custo:', e.message);
   });
