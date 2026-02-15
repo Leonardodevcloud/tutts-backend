@@ -14,6 +14,13 @@ function createClientesRoutes(pool) {
       const { status, search, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
       const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
 
+      // Verificar se coluna centro_custo existe
+      const ccExists = await pool.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
+      `).then(r => r.rows.length > 0).catch(() => false);
+      const ccFilter = ccExists ? 'AND (c.centro_custo IS NULL OR bi_e.centro_custo = c.centro_custo)' : '';
+
       let whereClause = 'WHERE 1=1';
       const params = [];
       let paramIndex = 1;
@@ -68,11 +75,11 @@ function createClientesRoutes(pool) {
               ) THEN 1 ELSE 0 END)::numeric /
               NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1
             ) as taxa_retorno_30d
-          FROM bi_entregas 
-          WHERE cod_cliente = c.cod_cliente
-            AND (c.centro_custo IS NULL OR centro_custo = c.centro_custo)
-            AND data_solicitado >= CURRENT_DATE - 30
-            AND COALESCE(ponto, 1) >= 2
+          FROM bi_entregas bi_e
+          WHERE bi_e.cod_cliente = c.cod_cliente
+            ${ccFilter}
+            AND bi_e.data_solicitado >= CURRENT_DATE - 30
+            AND COALESCE(bi_e.ponto, 1) >= 2
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -391,6 +398,7 @@ function createClientesRoutes(pool) {
       let importados = 0;
 
       // Passo 2: Clientes SEM múltiplos CC → linha única (centro_custo = NULL)
+      // Usa ON CONFLICT no index idx_cs_clientes_cod_cc
       const r1 = await pool.query(`
         INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
         SELECT 
@@ -404,10 +412,28 @@ function createClientesRoutes(pool) {
           AND e.data_solicitado >= CURRENT_DATE - 90
           AND e.cod_cliente != ALL($1::int[])
         GROUP BY e.cod_cliente
-        ON CONFLICT (cod_cliente, COALESCE(centro_custo, '')) DO UPDATE SET
+        ON CONFLICT ON CONSTRAINT cs_clientes_cod_cliente_key DO UPDATE SET
           nome_fantasia = COALESCE(EXCLUDED.nome_fantasia, cs_clientes.nome_fantasia)
         RETURNING cod_cliente
-      `, [multiCcSet.length > 0 ? multiCcSet : [0]]);
+      `, [multiCcSet.length > 0 ? multiCcSet : [0]]).catch(async () => {
+        // Fallback: se constraint antiga não existe, tentar com index novo
+        return pool.query(`
+          INSERT INTO cs_clientes (cod_cliente, centro_custo, nome_fantasia, cidade, estado, status)
+          SELECT 
+            e.cod_cliente, NULL,
+            LEFT(MAX(e.nome_fantasia), 255),
+            LEFT(MAX(e.cidade), 100),
+            LEFT(MAX(e.estado), 10),
+            'ativo'
+          FROM bi_entregas e
+          WHERE e.cod_cliente IS NOT NULL
+            AND e.data_solicitado >= CURRENT_DATE - 90
+            AND e.cod_cliente != ALL($1::int[])
+          GROUP BY e.cod_cliente
+          ON CONFLICT DO NOTHING
+          RETURNING cod_cliente
+        `, [multiCcSet.length > 0 ? multiCcSet : [0]]);
+      });
       importados += r1.rows.length;
 
       // Passo 3: Clientes COM múltiplos CC → uma linha por centro_custo
@@ -425,8 +451,7 @@ function createClientesRoutes(pool) {
             AND e.data_solicitado >= CURRENT_DATE - 90
             AND e.centro_custo IS NOT NULL AND e.centro_custo != ''
           GROUP BY e.cod_cliente, e.centro_custo
-          ON CONFLICT (cod_cliente, COALESCE(centro_custo, '')) DO UPDATE SET
-            nome_fantasia = COALESCE(EXCLUDED.nome_fantasia, cs_clientes.nome_fantasia)
+          ON CONFLICT DO NOTHING
           RETURNING cod_cliente, centro_custo
         `, [multiCcSet]);
         importados += r2.rows.length;
@@ -441,7 +466,7 @@ function createClientesRoutes(pool) {
       res.json({ success: true, importados, clientes_multi_cc: multiCcSet.length });
     } catch (error) {
       console.error('❌ Erro ao sincronizar clientes do BI:', error);
-      res.status(500).json({ error: 'Erro ao sincronizar' });
+      res.status(500).json({ error: 'Erro ao sincronizar: ' + error.message });
     }
   });
 
