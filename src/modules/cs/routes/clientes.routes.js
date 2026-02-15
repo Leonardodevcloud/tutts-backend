@@ -117,6 +117,11 @@ function createClientesRoutes(pool) {
       const cod = parseInt(req.params.cod);
       if (!cod || isNaN(cod)) return res.status(400).json({ error: 'Código inválido' });
 
+      // Filtro de período opcional
+      const { data_inicio, data_fim } = req.query;
+      const temFiltro = data_inicio && data_fim;
+      const filtroSQL = temFiltro ? ` AND data_solicitado >= '${data_inicio}' AND data_solicitado <= '${data_fim}'` : '';
+
       // Dados da ficha
       const fichaResult = await pool.query(
         'SELECT * FROM cs_clientes WHERE cod_cliente = $1', [cod]
@@ -143,7 +148,17 @@ function createClientesRoutes(pool) {
         }
       }
 
-      // Métricas BI — HISTÓRICO COMPLETO (sem limite de dias)
+      // Centros de custo do cliente
+      const centrosCusto = await pool.query(`
+        SELECT DISTINCT centro_custo, 
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
+        FROM bi_entregas 
+        WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
+        GROUP BY centro_custo
+        ORDER BY COUNT(*) DESC
+      `, [cod]);
+
+      // Métricas BI — com filtro de período se informado
       const metricasBi = await pool.query(`
         SELECT 
           COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
@@ -193,7 +208,7 @@ function createClientesRoutes(pool) {
           ) THEN 1 ELSE 0 END) as total_retornos,
           CURRENT_DATE - MAX(data_solicitado) as dias_sem_entrega
         FROM bi_entregas
-        WHERE cod_cliente = $1
+        WHERE cod_cliente = $1 ${filtroSQL}
       `, [cod]);
 
       // Evolução por semana (últimos 180 dias — visão mais ampla)
@@ -265,6 +280,8 @@ function createClientesRoutes(pool) {
         success: true,
         ficha: { ...ficha, health_score: healthScore },
         metricas_bi: metricas,
+        centros_custo: centrosCusto.rows,
+        periodo_filtrado: temFiltro ? { inicio: data_inicio, fim: data_fim } : null,
         evolucao_semanal: evolucaoSemanal.rows,
         interacoes: interacoes.rows,
         ocorrencias: ocorrencias.rows,
