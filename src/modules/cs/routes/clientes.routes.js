@@ -119,6 +119,42 @@ function createClientesRoutes(pool) {
     }
   });
 
+  // ==================== GET /cs/clientes-debug (temporário) ====================
+  router.get('/cs/clientes-debug', async (req, res) => {
+    try {
+      const constraints = await pool.query(`
+        SELECT con.conname, pg_get_constraintdef(con.oid) as def
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE rel.relname = 'cs_clientes'
+      `);
+      const indexes = await pool.query(`
+        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cs_clientes'
+      `);
+      const columns = await pool.query(`
+        SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'cs_clientes' ORDER BY ordinal_position
+      `);
+      const sample767 = await pool.query(`SELECT id, cod_cliente, centro_custo, nome_fantasia FROM cs_clientes WHERE cod_cliente = 767`);
+      const biCC767 = await pool.query(`
+        SELECT DISTINCT centro_custo, COUNT(*) as qtd FROM bi_entregas 
+        WHERE cod_cliente = 767 AND centro_custo IS NOT NULL AND centro_custo != ''
+        GROUP BY centro_custo ORDER BY COUNT(*) DESC
+      `).catch(() => ({ rows: [] }));
+      const totalCs = await pool.query(`SELECT COUNT(*) as total FROM cs_clientes`);
+
+      res.json({
+        constraints: constraints.rows,
+        indexes: indexes.rows,
+        columns: columns.rows.map(c => c.column_name),
+        cs_767: sample767.rows,
+        bi_centros_custo_767: biCC767.rows,
+        total_cs_clientes: totalCs.rows[0].total
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ==================== GET /cs/clientes/:cod ====================
   router.get('/cs/clientes/:cod', async (req, res) => {
     try {
@@ -497,42 +533,6 @@ function createClientesRoutes(pool) {
     } catch (error) {
       console.error('❌ Erro ao sincronizar clientes do BI:', error);
       res.status(500).json({ error: 'Erro ao sincronizar: ' + error.message });
-    }
-  });
-
-  // ==================== GET /cs/clientes/debug (temporário) ====================
-  router.get('/cs/clientes-debug', async (req, res) => {
-    try {
-      const constraints = await pool.query(`
-        SELECT con.conname, pg_get_constraintdef(con.oid) as def
-        FROM pg_constraint con
-        JOIN pg_class rel ON rel.oid = con.conrelid
-        WHERE rel.relname = 'cs_clientes'
-      `);
-      const indexes = await pool.query(`
-        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cs_clientes'
-      `);
-      const columns = await pool.query(`
-        SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'cs_clientes' ORDER BY ordinal_position
-      `);
-      const sample767 = await pool.query(`SELECT id, cod_cliente, centro_custo, nome_fantasia FROM cs_clientes WHERE cod_cliente = 767`);
-      const biCC767 = await pool.query(`
-        SELECT DISTINCT centro_custo, COUNT(*) as qtd FROM bi_entregas 
-        WHERE cod_cliente = 767 AND centro_custo IS NOT NULL AND centro_custo != ''
-        GROUP BY centro_custo ORDER BY COUNT(*) DESC
-      `).catch(() => ({ rows: [] }));
-      const totalCs = await pool.query(`SELECT COUNT(*) as total FROM cs_clientes`);
-
-      res.json({
-        constraints: constraints.rows,
-        indexes: indexes.rows,
-        columns: columns.rows.map(c => c.column_name),
-        cs_767: sample767.rows,
-        bi_centros_custo_767: biCC767.rows,
-        total_cs_clientes: totalCs.rows[0].total
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
     }
   });
 
