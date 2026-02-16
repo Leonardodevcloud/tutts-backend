@@ -9,6 +9,232 @@ const { calcularHealthScore } = require('../cs.service');
 function createRaioXRoutes(pool) {
   const router = express.Router();
 
+  // ══════════════════════════════════════════════════
+  // Gerador de gráficos SVG inline para o relatório
+  // ══════════════════════════════════════════════════
+
+  function gerarBarraSVG(dados, { titulo = '', width = 560, barHeight = 24, cor = '#6366f1', showPercent = false, maxVal = null } = {}) {
+    if (!dados || dados.length === 0) return '';
+    const max = maxVal || Math.max(...dados.map(d => d.valor), 1);
+    const gap = 6;
+    const labelW = 120;
+    const valueW = 60;
+    const chartW = width - labelW - valueW - 20;
+    const h = dados.length * (barHeight + gap) + 10;
+
+    let bars = '';
+    dados.forEach((d, i) => {
+      const y = i * (barHeight + gap) + 5;
+      const w = Math.max(2, (d.valor / max) * chartW);
+      const label = (d.label || '').substring(0, 18);
+      const displayVal = showPercent ? `${d.valor.toFixed(1)}%` : d.valor.toLocaleString('pt-BR');
+      bars += `
+        <text x="${labelW - 8}" y="${y + barHeight / 2 + 4}" text-anchor="end" font-size="11" fill="#475569" font-family="Segoe UI,sans-serif">${label}</text>
+        <rect x="${labelW}" y="${y}" width="${w}" height="${barHeight}" rx="4" fill="${d.cor || cor}" opacity="0.85"/>
+        <text x="${labelW + w + 6}" y="${y + barHeight / 2 + 4}" font-size="11" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${displayVal}</text>
+      `;
+    });
+
+    return `\n\n<div style="margin:16px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;overflow-x:auto">
+${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:10px">${titulo}</div>` : ''}
+<svg width="${width}" height="${h}" viewBox="0 0 ${width} ${h}" xmlns="http://www.w3.org/2000/svg">${bars}</svg></div>\n\n`;
+  }
+
+  function gerarBarraVerticalSVG(dados, { titulo = '', width = 560, cor = '#6366f1', dualAxis = false, dados2 = null, cor2 = '#10b981' } = {}) {
+    if (!dados || dados.length === 0) return '';
+    const max = Math.max(...dados.map(d => d.valor), 1);
+    const barW = Math.min(40, Math.floor((width - 80) / dados.length) - 8);
+    const chartH = 160;
+    const bottomY = chartH + 20;
+    const leftPad = 45;
+
+    let bars = '';
+    dados.forEach((d, i) => {
+      const x = leftPad + i * (barW + 8) + 4;
+      const h = Math.max(2, (d.valor / max) * chartH);
+      const y = bottomY - h;
+      bars += `
+        <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${d.cor || cor}" opacity="0.85"/>
+        <text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" font-size="10" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${d.valor}</text>
+        <text x="${x + barW / 2}" y="${bottomY + 14}" text-anchor="middle" font-size="9" fill="#64748b" font-family="Segoe UI,sans-serif">${(d.label || '').substring(0, 8)}</text>
+      `;
+    });
+
+    // Linhas de grade
+    let grid = '';
+    for (let i = 0; i <= 4; i++) {
+      const y = bottomY - (i / 4) * chartH;
+      const val = Math.round((i / 4) * max);
+      grid += `<line x1="${leftPad - 5}" y1="${y}" x2="${leftPad + dados.length * (barW + 8)}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`;
+      grid += `<text x="${leftPad - 8}" y="${y + 3}" text-anchor="end" font-size="9" fill="#94a3b8" font-family="Segoe UI,sans-serif">${val}</text>`;
+    }
+
+    // Linha de tendência (dados2) se dualAxis
+    let linePath = '';
+    if (dualAxis && dados2 && dados2.length > 0) {
+      const max2 = 100; // percentual
+      const points = dados2.map((d, i) => {
+        const x = leftPad + i * (barW + 8) + 4 + barW / 2;
+        const y = bottomY - (d.valor / max2) * chartH;
+        return `${x},${y}`;
+      }).join(' ');
+      linePath = `
+        <polyline points="${points}" fill="none" stroke="${cor2}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        ${dados2.map((d, i) => {
+          const x = leftPad + i * (barW + 8) + 4 + barW / 2;
+          const y = bottomY - (d.valor / max2) * chartH;
+          return `<circle cx="${x}" cy="${y}" r="3.5" fill="${cor2}" stroke="white" stroke-width="1.5"/>
+                  <text x="${x}" y="${y - 8}" text-anchor="middle" font-size="9" font-weight="600" fill="${cor2}" font-family="Segoe UI,sans-serif">${d.valor.toFixed(0)}%</text>`;
+        }).join('')}
+      `;
+      // Eixo Y direito
+      for (let i = 0; i <= 4; i++) {
+        const y = bottomY - (i / 4) * chartH;
+        const val = Math.round((i / 4) * 100);
+        grid += `<text x="${leftPad + dados.length * (barW + 8) + 8}" y="${y + 3}" font-size="9" fill="${cor2}" font-family="Segoe UI,sans-serif">${val}%</text>`;
+      }
+    }
+
+    const svgW = leftPad + dados.length * (barW + 8) + (dualAxis ? 40 : 10);
+    const svgH = bottomY + 28;
+
+    return `\n\n<div style="margin:16px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;overflow-x:auto">
+${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:10px">${titulo}</div>` : ''}
+<svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
+${grid}${bars}${linePath}
+<line x1="${leftPad}" y1="${bottomY}" x2="${leftPad + dados.length * (barW + 8)}" y2="${bottomY}" stroke="#cbd5e1" stroke-width="1"/>
+</svg>
+${dualAxis ? '<div style="font-size:10px;color:#94a3b8;margin-top:6px">🟦 Entregas &nbsp;&nbsp; 🟢 Taxa de Prazo (%)</div>' : ''}
+</div>\n\n`;
+  }
+
+  function gerarComparativoSVG(atual, anterior, labels, { titulo = '' } = {}) {
+    if (!atual || !anterior) return '';
+    const width = 480;
+    const barH = 22;
+    const gap = 32;
+    const labelW = 130;
+    const chartW = 240;
+
+    let bars = '';
+    labels.forEach((label, i) => {
+      const y = i * (barH * 2 + gap);
+      const maxV = Math.max(atual[i], anterior[i], 1);
+      const wAtual = Math.max(2, (atual[i] / maxV) * chartW);
+      const wAnterior = Math.max(2, (anterior[i] / maxV) * chartW);
+      const diff = atual[i] - anterior[i];
+      const pct = anterior[i] > 0 ? ((diff / anterior[i]) * 100).toFixed(1) : '0';
+      const arrow = diff >= 0 ? '↑' : '↓';
+      const arrowColor = diff >= 0 ? '#10b981' : '#ef4444';
+
+      bars += `
+        <text x="${labelW - 8}" y="${y + 10}" text-anchor="end" font-size="12" font-weight="600" fill="#334155" font-family="Segoe UI,sans-serif">${label}</text>
+        <rect x="${labelW}" y="${y}" width="${wAtual}" height="${barH}" rx="4" fill="#6366f1" opacity="0.85"/>
+        <text x="${labelW + wAtual + 6}" y="${y + barH / 2 + 4}" font-size="11" font-weight="700" fill="#1e293b" font-family="Segoe UI,sans-serif">${typeof atual[i] === 'number' && atual[i] % 1 !== 0 ? atual[i].toFixed(1) : atual[i]}</text>
+        <rect x="${labelW}" y="${y + barH + 3}" width="${wAnterior}" height="${barH}" rx="4" fill="#cbd5e1"/>
+        <text x="${labelW + wAnterior + 6}" y="${y + barH * 1.5 + 7}" font-size="11" fill="#64748b" font-family="Segoe UI,sans-serif">${typeof anterior[i] === 'number' && anterior[i] % 1 !== 0 ? anterior[i].toFixed(1) : anterior[i]}</text>
+        <text x="${width - 10}" y="${y + barH + 4}" text-anchor="end" font-size="12" font-weight="700" fill="${arrowColor}" font-family="Segoe UI,sans-serif">${arrow} ${Math.abs(pct)}%</text>
+      `;
+    });
+
+    const svgH = labels.length * (barH * 2 + gap);
+    return `\n\n<div style="margin:16px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;overflow-x:auto">
+${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:10px">${titulo}</div>` : ''}
+<svg width="${width}" height="${svgH}" viewBox="0 0 ${width} ${svgH}" xmlns="http://www.w3.org/2000/svg">${bars}</svg>
+<div style="font-size:10px;color:#94a3b8;margin-top:6px">🟦 Período Atual &nbsp;&nbsp; ⬜ Período Anterior</div>
+</div>\n\n`;
+  }
+
+  function injetarGraficos(texto, dados) {
+    if (!dados) return texto;
+    let resultado = texto;
+
+    try {
+      // 1. Após "ENTREGAS E DESEMPENHO" — comparativo atual vs anterior
+      const { metricas_atuais: ma, metricas_periodo_anterior: mp } = dados;
+      if (ma && mp) {
+        const grafico = gerarComparativoSVG(
+          [parseInt(ma.total_entregas) || 0, parseFloat(ma.taxa_prazo) || 0, parseFloat(ma.tempo_medio) || 0],
+          [parseInt(mp.total_entregas) || 0, parseFloat(mp.taxa_prazo) || 0, parseFloat(mp.tempo_medio) || 0],
+          ['Entregas', 'Taxa Prazo (%)', 'Tempo Médio (min)'],
+          { titulo: '📊 Comparativo: Período Atual vs Anterior' }
+        );
+        // Inserir antes da próxima seção H3 após ENTREGAS E DESEMPENHO
+        resultado = resultado.replace(
+          /(###\s*🚀.*?ENTREGAS.*?\n(?:[\s\S]*?))(\n###\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
+      // 2. Após "JANELA OPERACIONAL" — barras verticais com horários
+      const { padroes_horario } = dados;
+      if (padroes_horario && padroes_horario.length > 0) {
+        const dadosH = padroes_horario.map(p => ({
+          label: `${p.hora}h`,
+          valor: parseInt(p.entregas) || 0,
+          cor: parseInt(p.hora) >= 8 && parseInt(p.hora) <= 12 ? '#f59e0b' : parseInt(p.hora) >= 13 && parseInt(p.hora) <= 17 ? '#3b82f6' : '#6b7280',
+        }));
+        const taxaPrazoH = padroes_horario.map(p => ({ valor: parseFloat(p.taxa_prazo) || 0 }));
+        const grafico = gerarBarraVerticalSVG(dadosH, { titulo: '📊 Distribuição de Entregas por Horário', dualAxis: true, dados2: taxaPrazoH });
+        resultado = resultado.replace(
+          /(###\s*⏰.*?JANELA.*?\n(?:[\s\S]*?))(\n###\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
+      // 3. Após "ANÁLISE DOS ROTEIROS" — top motoboys
+      const { corridas_por_motoboy } = dados;
+      if (corridas_por_motoboy && corridas_por_motoboy.length > 0) {
+        const cores = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#818cf8', '#7c3aed', '#6d28d9', '#5b21b6'];
+        const dadosM = corridas_por_motoboy.slice(0, 8).map((m, i) => ({
+          label: (m.nome_prof || `Prof ${m.cod_prof}`).substring(0, 18),
+          valor: parseInt(m.entregas) || 0,
+          cor: cores[i % cores.length],
+        }));
+        const grafico = gerarBarraSVG(dadosM, { titulo: '📊 Entregas por Profissional' });
+        resultado = resultado.replace(
+          /(###\s*🏍️.*?ROTEIROS.*?\n(?:[\s\S]*?))(\n###\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
+      // 4. Após "TENDÊNCIAS" — evolução semanal
+      const { evolucao_semanal } = dados;
+      if (evolucao_semanal && evolucao_semanal.length > 0) {
+        const dadosE = evolucao_semanal.map(s => {
+          const d = new Date(s.semana);
+          return { label: `${d.getDate()}/${d.getMonth() + 1}`, valor: parseInt(s.entregas) || 0 };
+        });
+        const taxaE = evolucao_semanal.map(s => ({ valor: parseFloat(s.taxa_prazo) || 0 }));
+        const grafico = gerarBarraVerticalSVG(dadosE, { titulo: '📊 Evolução Semanal de Entregas', dualAxis: true, dados2: taxaE });
+        resultado = resultado.replace(
+          /(###\s*📈.*?TEND[ÊE]NCIAS.*?\n(?:[\s\S]*?))(\n###\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
+      // 5. Após "COBERTURA GEOGRÁFICA" — faixas de km
+      const { faixas_km } = dados;
+      if (faixas_km && faixas_km.length > 0) {
+        const dadosF = faixas_km.map(f => ({
+          label: f.faixa,
+          valor: parseInt(f.entregas) || 0,
+          cor: '#3b82f6',
+        }));
+        const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância' });
+        resultado = resultado.replace(
+          /(###\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n###\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
+    } catch (e) {
+      console.warn('⚠️ Erro ao injetar gráficos:', e.message);
+    }
+
+    return resultado;
+  }
+
   router.post('/cs/raio-x', async (req, res) => {
     try {
       const { cod_cliente, data_inicio, data_fim, tipo = 'completo' } = req.body;
@@ -382,7 +608,10 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
       const analiseTexto = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Erro ao gerar análise';
       const tokensUsados = geminiData.usageMetadata?.totalTokenCount || 0;
 
-      // 15. SALVAR HISTÓRICO
+      // 15. INJETAR GRÁFICOS SVG NO RELATÓRIO
+      const analiseComGraficos = injetarGraficos(analiseTexto, dadosAnalise);
+
+      // 16. SALVAR HISTÓRICO (texto original sem gráficos)
       const saveResult = await pool.query(`
         INSERT INTO cs_raio_x_historico (
           cod_cliente, nome_cliente, data_inicio, data_fim,
@@ -393,7 +622,7 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
         RETURNING id
       `, [
         codInt, ficha.nome_fantasia || `Cliente ${cod_cliente}`, data_inicio, data_fim,
-        JSON.stringify(dadosAnalise), JSON.stringify(benchmark), analiseTexto,
+        JSON.stringify(dadosAnalise), JSON.stringify(benchmark), analiseComGraficos,
         tipo, healthScore, JSON.stringify([]), JSON.stringify([]),
         req.user?.codProfissional, req.user?.nome, tokensUsados,
       ]);
@@ -403,7 +632,7 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
       res.json({
         success: true,
         raio_x: {
-          id: saveResult.rows[0].id, analise: analiseTexto, health_score: healthScore,
+          id: saveResult.rows[0].id, analise: analiseComGraficos, health_score: healthScore,
           dados_utilizados: dadosAnalise, tokens: tokensUsados, gerado_em: new Date().toISOString(),
           link_mapa_calor: linkMapaCalor,
         },
