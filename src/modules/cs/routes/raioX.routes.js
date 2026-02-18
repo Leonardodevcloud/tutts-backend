@@ -5,6 +5,7 @@
  */
 const express = require('express');
 const { calcularHealthScore } = require('../cs.service');
+const { enviarRaioXEmail } = require('../cs.email');
 
 function createRaioXRoutes(pool) {
   const router = express.Router();
@@ -906,6 +907,41 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
     } catch (error) {
       console.error('❌ Erro ao excluir Raio-X:', error);
       res.status(500).json({ error: 'Erro ao excluir relatório' });
+    }
+  });
+
+  // ==================== POST /cs/raio-x/enviar-email ====================
+  router.post('/cs/raio-x/enviar-email', async (req, res) => {
+    try {
+      const { raio_x_id, para, cc, remetente } = req.body;
+      if (!para) return res.status(400).json({ error: 'Email destinatário é obrigatório' });
+
+      // Buscar raio-x do banco
+      let raioX, cliente, periodo;
+
+      if (raio_x_id) {
+        // Enviar de um relatório salvo
+        const rxResult = await pool.query('SELECT * FROM cs_raio_x_historico WHERE id = $1', [raio_x_id]);
+        if (rxResult.rows.length === 0) return res.status(404).json({ error: 'Relatório não encontrado' });
+        const rx = rxResult.rows[0];
+        raioX = rx;
+        cliente = { nome: rx.nome_cliente };
+        periodo = { inicio: rx.data_inicio, fim: rx.data_fim };
+      } else if (req.body.analise) {
+        // Enviar da sessão atual (relatório acabou de ser gerado)
+        raioX = { analise_texto: req.body.analise, score_saude: req.body.health_score };
+        cliente = { nome: req.body.nome_cliente || 'Cliente' };
+        periodo = { inicio: req.body.data_inicio, fim: req.body.data_fim };
+      } else {
+        return res.status(400).json({ error: 'Informe raio_x_id ou analise' });
+      }
+
+      const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente });
+      console.log(`📧 Raio-X enviado por email: ${para} (${result.messageId})`);
+      res.json({ success: true, messageId: result.messageId });
+    } catch (error) {
+      console.error('❌ Erro ao enviar email Raio-X:', error.message);
+      res.status(500).json({ error: `Erro ao enviar email: ${error.message}` });
     }
   });
 
