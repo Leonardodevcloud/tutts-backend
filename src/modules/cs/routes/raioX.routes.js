@@ -482,6 +482,14 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
       const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}`;
 
+      // 12b. BUSCAR INTERAÇÕES DO PERÍODO
+      const interacoesCliente = await pool.query(`
+        SELECT tipo, titulo, descricao, resultado, proxima_acao, data_interacao, criado_por_nome
+        FROM cs_interacoes 
+        WHERE cod_cliente = $1 AND data_interacao >= $2 AND data_interacao <= $3
+        ORDER BY data_interacao DESC
+      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
+
       const dadosAnalise = {
         cliente: { nome: ficha.nome_fantasia || `Cliente ${cod_cliente}`, cidade: ficha.cidade || '', estado: estadoCliente, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
         periodo: { inicio: data_inicio, fim: data_fim, dias: diasPeriodo },
@@ -493,12 +501,31 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         padroes_horario: padroesHorario.rows,
         evolucao_semanal: evolucaoSemanal.rows,
         retornos_detalhados: retornosDetalhe.rows,
+        interacoes_periodo: interacoesCliente.rows,
         benchmark_regiao: { ...benchmark, estado: estadoCliente },
         ranking_regiao: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
         link_mapa_calor: linkMapaCalor,
       };
 
-      // 13. PROMPT GEMINI
+      // 13. Dados para o Gemini (sem bairros para evitar listagem)
+      const dadosParaGemini = { ...dadosAnalise };
+      delete dadosParaGemini.mapa_calor_bairros; // Remover para evitar que o Gemini liste bairros
+      // Simplificar benchmark para evitar comparações numéricas detalhadas
+      if (dadosParaGemini.benchmark_regiao) {
+        const br = dadosParaGemini.benchmark_regiao;
+        dadosParaGemini.benchmark_regiao = { estado: br.estado };
+      }
+      // Manter ranking para posicionamento percentual
+      const totalClientes = dadosParaGemini.ranking_regiao?.total_clientes || 1;
+      const posPrazo = dadosParaGemini.ranking_regiao?.posicao_prazo || 1;
+      const posVolume = dadosParaGemini.ranking_regiao?.posicao_volume || 1;
+      dadosParaGemini.ranking_regiao = {
+        ...dadosParaGemini.ranking_regiao,
+        percentil_prazo: Math.round((1 - posPrazo / totalClientes) * 100),
+        percentil_volume: Math.round((1 - posVolume / totalClientes) * 100),
+      };
+
+      // 14. PROMPT GEMINI
       const prompt = `Você é um consultor sênior de operações logísticas da Tutts, plataforma de gestão de entregas de autopeças. Você está preparando um RELATÓRIO OPERACIONAL para apresentar diretamente ao cliente ${dadosAnalise.cliente.nome}.
 
 ## REGRAS OBRIGATÓRIAS
@@ -508,6 +535,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 - Use os dados reais fornecidos. NÃO invente métricas.
 - Formato: Markdown com emojis nos títulos. Português brasileiro.
 - O horário de operação é das 08:00 às 18:00. Qualquer análise de horário deve considerar esta janela. Entregas após 18h são exceções, não rotina.
+- ⛔ NUNCA liste bairros, cidades, ruas ou endereços em NENHUMA parte do relatório.
+- ⛔ NUNCA defina prazos, datas ou cronogramas. A Tutts trabalha com melhoria contínua full time.
+- ⛔ NUNCA cite métricas numéricas de outros clientes (médias, medianas, taxas de prazo de terceiros).
 - NÃO faça observações óbvias como "quanto maior a distância, maior o tempo de entrega".
 - NÃO sugira ao cliente que mude sua operação interna, centro de distribuição, ou processos internos dele. As sugestões devem ser sobre o que a TUTTS pode fazer pela operação.
 - NÃO sugira serviços ou produtos fora do ramo de autopeças.
@@ -516,7 +546,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 - NÃO defina prazos nas ações (como "em 7 dias", "em 14 dias", "em 30 dias"). A Tutts trabalha com melhoria contínua full time.
 
 ## DADOS DA OPERAÇÃO
-${JSON.stringify(dadosAnalise, null, 2)}
+${JSON.stringify(dadosParaGemini, null, 2)}
 
 ## ESTRUTURA DO RELATÓRIO
 
@@ -534,8 +564,8 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 
 ### 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
 - Analise APENAS as faixas de KM: onde está concentrada a maior parte da operação e como o SLA se comporta em cada faixa
-- NÃO liste bairros, cidades, ruas ou endereços específicos. NUNCA. Mesmo que os dados tenham essa informação.
-- Diga apenas: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+- ⛔ PROIBIDO listar bairros, cidades, ruas, endereços ou nomes de localidades. ZERO tolerância. Mesmo que os dados contenham bairros, NÃO mencione nenhum.
+- Ao final desta seção, SEMPRE inclua: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
 - Foque a análise nas faixas de distância e na performance por faixa
 
 ### 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
@@ -554,11 +584,11 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 - NÃO sugira estender horário de operação
 
 ### 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
-- Posicione a operação do cliente em relação aos demais clientes que utilizam a logística da Tutts na região
-- Use linguagem genérica de posicionamento como: "sua operação performa acima de X% dos clientes que utilizam a logística da Tutts" ou "você está entre os top X% em desempenho"
-- NÃO cite médias numéricas específicas de outros clientes, NÃO cite taxa de prazo ou métricas de terceiros
-- NÃO cite nomes de outros clientes nem permita identificá-los
-- Celebre o posicionamento positivo. Se houver espaço para melhoria, diga genericamente o que a Tutts fará
+- Posicione a operação do cliente em relação aos demais de forma GENÉRICA e PERCENTUAL
+- Use APENAS frases como: "sua operação está entre as top X% em desempenho entre os clientes que utilizam a logística da Tutts" ou "performa acima de X% das operações na região"
+- ⛔ PROIBIDO citar médias numéricas de outros clientes, taxas de prazo de terceiros, medianas, ou qualquer métrica que não seja do próprio cliente
+- ⛔ PROIBIDO citar nomes de outros clientes
+- Celebre posicionamentos positivos. Se houver espaço para melhoria, diga genericamente que a Tutts vai intensificar o acompanhamento
 
 ### 📉 TENDÊNCIAS E PROJEÇÕES
 - Evolução semanal: volume crescendo, estável ou caindo?
@@ -570,14 +600,14 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 - Liste cada problema real encontrado nos dados
 - Para cada: **Situação:** X → **O que faremos:** Y → **Meta:** Z
 - Priorize: [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua]
-- NÃO defina prazos (como "em 7 dias", "em 30 dias"). A Tutts trabalha com melhoria contínua full time — todas as ações são aplicadas de forma imediata e constante.
+- ⛔ PROIBIDO definir prazos, datas ou cronogramas (ex: "em 7 dias", "em 30 dias", "em 14 dias"). A Tutts trabalha com melhoria contínua full time — todas as ações são aplicadas de forma IMEDIATA e CONSTANTE, não em ciclos.
 - Foque apenas em problemas reais dos dados, não genéricos
 
 ### 🎯 PLANO DE AÇÃO — PRÓXIMOS PASSOS
 Top 5 ações CONCRETAS que a TUTTS vai realizar:
 1. O que será feito
 2. Meta numérica esperada
-NÃO defina prazos ou datas. A Tutts opera no conceito de melhoria contínua — todas as ações corretivas são aplicadas de forma full time e imediata, não em sprints ou ciclos.
+⛔ PROIBIDO definir prazos ou datas em qualquer ação. NUNCA escreva "Prazo:", "em X dias", "em X semanas". A Tutts opera no conceito de melhoria contínua — todas as ações corretivas são aplicadas de forma full time e imediata.
 As ações devem ser coisas que a Tutts controla (ex: realocar motoboys, ajustar roteiros, intensificar acompanhamento). NÃO peça ao cliente para mudar processos internos dele.
 
 ### 💡 OPORTUNIDADES
@@ -586,6 +616,12 @@ As ações devem ser coisas que a Tutts controla (ex: realocar motoboys, ajustar
 - NÃO sugira produtos/serviços fora do ramo de autopeças
 - NÃO sugira que o cliente mude layout, equipe, ou processos internos
 - Foque no que PODEMOS FAZER por ele como parceiro logístico
+
+### 🤝 RELACIONAMENTO E ACOMPANHAMENTO
+${interacoesCliente.rows.length > 0 ? `- No período analisado, realizamos ${interacoesCliente.rows.length} interação(ões) com o cliente
+- Resuma cada interação registrada com base nos dados abaixo, destacando o que foi conversado, os resultados obtidos e as próximas ações definidas
+- Use o conteúdo detalhado de cada interação para enriquecer esta seção
+- Mostre que a Tutts está presente e acompanhando a operação de perto` : `- Não houve interações registradas no período. Mencione que a Tutts vai intensificar o contato com o cliente para acompanhar a operação de perto.`}
 
 ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para apresentar este relatório em detalhes".`;
 
@@ -889,6 +925,20 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
     } catch (error) {
       console.error('❌ Erro ao buscar histórico Raio-X:', error);
       res.status(500).json({ error: 'Erro ao buscar histórico' });
+    }
+  });
+
+  // ==================== DELETE /cs/raio-x/:id ====================
+  router.delete('/cs/raio-x/:id', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+      const result = await pool.query('DELETE FROM cs_raio_x_historico WHERE id = $1 RETURNING id', [id]);
+      if (result.rows.length === 0) return res.status(404).json({ error: 'Relatório não encontrado' });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('❌ Erro ao excluir Raio-X:', error);
+      res.status(500).json({ error: 'Erro ao excluir relatório' });
     }
   });
 
