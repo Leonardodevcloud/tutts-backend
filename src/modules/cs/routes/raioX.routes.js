@@ -511,7 +511,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 - NÃO faça observações óbvias como "quanto maior a distância, maior o tempo de entrega".
 - NÃO sugira ao cliente que mude sua operação interna, centro de distribuição, ou processos internos dele. As sugestões devem ser sobre o que a TUTTS pode fazer pela operação.
 - NÃO sugira serviços ou produtos fora do ramo de autopeças.
-- Se dados de bairro/rua estiverem como "Não informado" ou vazios, NÃO liste esses bairros. Em vez disso, mencione que disponibilizamos um mapa de calor interativo no link abaixo.
+- NÃO liste bairros, cidades, ruas ou endereços. Direcione sempre para o mapa de calor interativo.
+- NÃO cite métricas específicas de outros clientes no comparativo. Use posicionamento percentual genérico.
+- NÃO defina prazos nas ações (como "em 7 dias", "em 14 dias", "em 30 dias"). A Tutts trabalha com melhoria contínua full time.
 
 ## DADOS DA OPERAÇÃO
 ${JSON.stringify(dadosAnalise, null, 2)}
@@ -531,10 +533,10 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 - Se houver retornos: quantidade, motivos principais e plano de ação imediato. Se não houver, celebre.
 
 ### 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
-- Analise as faixas de KM: onde está concentrada a maior parte da operação e como o SLA se comporta em cada faixa
-- NÃO liste bairros com nome "Não informado". Se a maioria dos bairros estiver vazia, diga apenas:
-  "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** onde é possível ver cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
-- Se houver dados de bairro válidos, mencione apenas os que têm nome real
+- Analise APENAS as faixas de KM: onde está concentrada a maior parte da operação e como o SLA se comporta em cada faixa
+- NÃO liste bairros, cidades, ruas ou endereços específicos. NUNCA. Mesmo que os dados tenham essa informação.
+- Diga apenas: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+- Foque a análise nas faixas de distância e na performance por faixa
 
 ### 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
 - Os dados de corridas mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 minutos foram agrupadas como uma "saída" (roteiro).
@@ -552,10 +554,11 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 - NÃO sugira estender horário de operação
 
 ### 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
-- Compare a operação com a média dos clientes Tutts na mesma região
-- Ranking: ${rankingData.rank_prazo || 'N/A'}º em prazo e ${rankingData.rank_volume || 'N/A'}º em volume entre ${rankingData.total_ranqueados || 'N/A'} operações
-- Celebre onde está acima da média. Onde estiver abaixo, diga o que a Tutts vai fazer para melhorar.
-- Use "média da região", "top 25% do mercado" — nunca nomes de outros clientes
+- Posicione a operação do cliente em relação aos demais clientes que utilizam a logística da Tutts na região
+- Use linguagem genérica de posicionamento como: "sua operação performa acima de X% dos clientes que utilizam a logística da Tutts" ou "você está entre os top X% em desempenho"
+- NÃO cite médias numéricas específicas de outros clientes, NÃO cite taxa de prazo ou métricas de terceiros
+- NÃO cite nomes de outros clientes nem permita identificá-los
+- Celebre o posicionamento positivo. Se houver espaço para melhoria, diga genericamente o que a Tutts fará
 
 ### 📉 TENDÊNCIAS E PROJEÇÕES
 - Evolução semanal: volume crescendo, estável ou caindo?
@@ -567,13 +570,14 @@ ${JSON.stringify(dadosAnalise, null, 2)}
 - Liste cada problema real encontrado nos dados
 - Para cada: **Situação:** X → **O que faremos:** Y → **Meta:** Z
 - Priorize: [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua]
+- NÃO defina prazos (como "em 7 dias", "em 30 dias"). A Tutts trabalha com melhoria contínua full time — todas as ações são aplicadas de forma imediata e constante.
 - Foque apenas em problemas reais dos dados, não genéricos
 
 ### 🎯 PLANO DE AÇÃO — PRÓXIMOS PASSOS
 Top 5 ações CONCRETAS que a TUTTS vai realizar:
 1. O que será feito
-2. Prazo
-3. Meta numérica esperada
+2. Meta numérica esperada
+NÃO defina prazos ou datas. A Tutts opera no conceito de melhoria contínua — todas as ações corretivas são aplicadas de forma full time e imediata, não em sprints ou ciclos.
 As ações devem ser coisas que a Tutts controla (ex: realocar motoboys, ajustar roteiros, intensificar acompanhamento). NÃO peça ao cliente para mudar processos internos dele.
 
 ### 💡 OPORTUNIDADES
