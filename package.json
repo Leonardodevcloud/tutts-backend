@@ -20,6 +20,7 @@
     "node-cache": "^5.1.2",
     "node-cron": "^3.0.3",
     "pg": "^8.11.3",
+    "nodemailer": "^6.9.8",
     "ws": "^8.16.0"
   },
   "devDependencies": {
