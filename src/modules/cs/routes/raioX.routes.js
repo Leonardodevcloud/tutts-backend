@@ -159,46 +159,28 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ['Entregas', 'Taxa Prazo (%)', 'Tempo Médio (min)'],
           { titulo: '📊 Comparativo: Período Atual vs Anterior' }
         );
-        // Inserir antes da próxima seção H3 após ENTREGAS E DESEMPENHO
         resultado = resultado.replace(
           /(###\s*🚀.*?ENTREGAS.*?\n(?:[\s\S]*?))(\n###\s)/,
           `$1${grafico}$2`
         );
       }
 
-      // 2. Após "JANELA OPERACIONAL" — barras verticais com horários
-      const { padroes_horario } = dados;
-      if (padroes_horario && padroes_horario.length > 0) {
-        const dadosH = padroes_horario.map(p => ({
-          label: `${p.hora}h`,
-          valor: parseInt(p.entregas) || 0,
-          cor: parseInt(p.hora) >= 8 && parseInt(p.hora) <= 12 ? '#f59e0b' : parseInt(p.hora) >= 13 && parseInt(p.hora) <= 17 ? '#3b82f6' : '#6b7280',
+      // 2. Após "COBERTURA GEOGRÁFICA" — faixas de km (campo: quantidade)
+      const { faixas_km } = dados;
+      if (faixas_km && faixas_km.length > 0) {
+        const dadosF = faixas_km.map(f => ({
+          label: f.faixa,
+          valor: parseInt(f.quantidade) || parseInt(f.entregas) || 0,
+          cor: '#3b82f6',
         }));
-        const taxaPrazoH = padroes_horario.map(p => ({ valor: parseFloat(p.taxa_prazo) || 0 }));
-        const grafico = gerarBarraVerticalSVG(dadosH, { titulo: '📊 Distribuição de Entregas por Horário', dualAxis: true, dados2: taxaPrazoH });
+        const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância' });
         resultado = resultado.replace(
-          /(###\s*⏰.*?JANELA.*?\n(?:[\s\S]*?))(\n###\s)/,
+          /(###\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n###\s)/,
           `$1${grafico}$2`
         );
       }
 
-      // 3. Após "ANÁLISE DOS ROTEIROS" — top motoboys
-      const { corridas_por_motoboy } = dados;
-      if (corridas_por_motoboy && corridas_por_motoboy.length > 0) {
-        const cores = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#818cf8', '#7c3aed', '#6d28d9', '#5b21b6'];
-        const dadosM = corridas_por_motoboy.slice(0, 8).map((m, i) => ({
-          label: (m.nome_prof || `Prof ${m.cod_prof}`).substring(0, 18),
-          valor: parseInt(m.entregas) || 0,
-          cor: cores[i % cores.length],
-        }));
-        const grafico = gerarBarraSVG(dadosM, { titulo: '📊 Entregas por Profissional' });
-        resultado = resultado.replace(
-          /(###\s*🏍️.*?ROTEIROS.*?\n(?:[\s\S]*?))(\n###\s)/,
-          `$1${grafico}$2`
-        );
-      }
-
-      // 4. Após "TENDÊNCIAS" — evolução semanal
+      // 3. Após "TENDÊNCIAS" — evolução semanal
       const { evolucao_semanal } = dados;
       if (evolucao_semanal && evolucao_semanal.length > 0) {
         const dadosE = evolucao_semanal.map(s => {
@@ -209,21 +191,6 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         const grafico = gerarBarraVerticalSVG(dadosE, { titulo: '📊 Evolução Semanal de Entregas', dualAxis: true, dados2: taxaE });
         resultado = resultado.replace(
           /(###\s*📈.*?TEND[ÊE]NCIAS.*?\n(?:[\s\S]*?))(\n###\s)/,
-          `$1${grafico}$2`
-        );
-      }
-
-      // 5. Após "COBERTURA GEOGRÁFICA" — faixas de km
-      const { faixas_km } = dados;
-      if (faixas_km && faixas_km.length > 0) {
-        const dadosF = faixas_km.map(f => ({
-          label: f.faixa,
-          valor: parseInt(f.entregas) || 0,
-          cor: '#3b82f6',
-        }));
-        const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância' });
-        resultado = resultado.replace(
-          /(###\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n###\s)/,
           `$1${grafico}$2`
         );
       }
