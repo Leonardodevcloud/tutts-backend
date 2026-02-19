@@ -235,7 +235,7 @@ function createClientesRoutes(pool) {
         }
       }
 
-      // Centros de custo do cliente
+      // Centros de custo do cliente (do bi_entregas)
       let centrosCusto = { rows: [] };
       try {
         centrosCusto = await pool.query(`
@@ -246,6 +246,7 @@ function createClientesRoutes(pool) {
           GROUP BY centro_custo
           ORDER BY COUNT(*) DESC
         `, [cod]);
+        console.log(`📋 Cliente ${cod}: ${centrosCusto.rows.length} centros de custo encontrados`);
       } catch (e) { console.warn('⚠️ Centros de custo não disponível:', e.message); }
 
       // Métricas BI — com filtro de período se informado
