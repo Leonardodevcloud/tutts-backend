@@ -469,8 +469,18 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         ORDER BY data_interacao DESC
       `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
 
+      // Buscar máscara do BI
+      let mascara = null;
+      try {
+        const mascaraResult = await pool.query('SELECT mascara FROM bi_mascaras WHERE cod_cliente = $1', [codInt]);
+        if (mascaraResult.rows.length > 0) mascara = mascaraResult.rows[0].mascara;
+      } catch (e) { /* bi_mascaras pode não existir */ }
+
+      // Nome para o relatório: se tem CC selecionado usa o CC, senão usa máscara ou nome_fantasia
+      const nomeRelatorio = temCC ? centro_custo : (mascara || ficha.nome_fantasia || `Cliente ${cod_cliente}`);
+
       const dadosAnalise = {
-        cliente: { nome: ficha.nome_fantasia || `Cliente ${cod_cliente}`, cidade: ficha.cidade || '', estado: estadoCliente, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
+        cliente: { nome: nomeRelatorio, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
         periodo: { inicio: data_inicio, fim: data_fim, dias: diasPeriodo },
         metricas_atuais: metricas,
         metricas_periodo_anterior: metrAnterior,
@@ -505,7 +515,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       };
 
       // 14. PROMPT GEMINI
-      const prompt = `Você é um consultor sênior de operações logísticas da Tutts, plataforma de gestão de entregas de autopeças. Você está preparando um RELATÓRIO OPERACIONAL para apresentar diretamente ao cliente ${dadosAnalise.cliente.nome}.
+      const prompt = `Você é um consultor sênior de operações logísticas da Tutts, plataforma de gestão de entregas de autopeças. Você está preparando um RELATÓRIO OPERACIONAL para apresentar diretamente ao cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
 
 ## REGRAS OBRIGATÓRIAS
 - Este relatório será APRESENTADO AO CLIENTE FINAL. Tom: profissional, consultivo, parceiro.
@@ -904,6 +914,26 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
     } catch (error) {
       console.error('❌ Erro ao buscar histórico Raio-X:', error);
       res.status(500).json({ error: 'Erro ao buscar histórico' });
+    }
+  });
+
+  // ==================== PUT /cs/raio-x/:id ====================
+  router.put('/cs/raio-x/:id', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+      const { analise_texto } = req.body;
+      if (!analise_texto) return res.status(400).json({ error: 'Texto da análise é obrigatório' });
+      const result = await pool.query(
+        'UPDATE cs_raio_x_historico SET analise_texto = $1 WHERE id = $2 RETURNING id',
+        [analise_texto, id]
+      );
+      if (result.rows.length === 0) return res.status(404).json({ error: 'Relatório não encontrado' });
+      console.log(`✏️ Raio-X #${id} editado`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('❌ Erro ao editar Raio-X:', error);
+      res.status(500).json({ error: 'Erro ao editar relatório' });
     }
   });
 
