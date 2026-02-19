@@ -38,6 +38,10 @@ function createClientesRoutes(pool) {
 
       // Agrupar por cod_cliente para mostrar visão única do cliente
       // Métricas vêm do bi_entregas agregando TODOS os centros de custo
+      const distinctSQL = ccExists
+        ? `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente, centro_custo NULLS FIRST`
+        : `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente`;
+
       const query = `
         SELECT 
           c.*,
@@ -49,13 +53,9 @@ function createClientesRoutes(pool) {
           COALESCE(bi.taxa_retorno_30d, 0) as taxa_retorno_30d,
           COALESCE(oc.ocorrencias_abertas, 0) as ocorrencias_abertas,
           COALESCE(it.ultima_interacao, NULL) as ultima_interacao,
-          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d,
-          COALESCE(cc_count.qtd_centros, 0) as qtd_centros_custo
-        FROM (
-          SELECT DISTINCT ON (cod_cliente) *
-          FROM cs_clientes
-          ORDER BY cod_cliente, centro_custo NULLS FIRST
-        ) c
+          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d
+          ${ccExists ? ', COALESCE(cc_count.qtd_centros, 0) as qtd_centros_custo' : ', 0 as qtd_centros_custo'}
+        FROM (${distinctSQL}) c
         LEFT JOIN LATERAL (
           SELECT 
             COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_30d,
@@ -98,12 +98,12 @@ function createClientesRoutes(pool) {
             COUNT(*) FILTER (WHERE data_interacao >= NOW() - INTERVAL '30 days') as total_interacoes_30d
           FROM cs_interacoes WHERE cod_cliente = c.cod_cliente
         ) it ON true
-        LEFT JOIN LATERAL (
+        ${ccExists ? `LEFT JOIN LATERAL (
           SELECT COUNT(DISTINCT centro_custo) as qtd_centros
           FROM bi_entregas 
           WHERE cod_cliente = c.cod_cliente AND centro_custo IS NOT NULL AND centro_custo != ''
             AND data_solicitado >= CURRENT_DATE - 90
-        ) cc_count ON true
+        ) cc_count ON true` : ''}
         ${whereClause}
         ORDER BY ${ordem === 'health' ? 'c.health_score' : ordem === 'entregas' ? 'bi.total_entregas_30d' : 'c.nome_fantasia'} ${direcao === 'desc' ? 'DESC' : 'ASC'} NULLS LAST
         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
