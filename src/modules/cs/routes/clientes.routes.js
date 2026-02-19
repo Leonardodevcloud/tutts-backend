@@ -19,7 +19,6 @@ function createClientesRoutes(pool) {
         SELECT column_name FROM information_schema.columns 
         WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
       `).then(r => r.rows.length > 0).catch(() => false);
-      const ccFilter = ccExists ? 'AND (c.centro_custo IS NULL OR bi_e.centro_custo = c.centro_custo)' : '';
 
       let whereClause = 'WHERE 1=1';
       const params = [];
@@ -37,7 +36,19 @@ function createClientesRoutes(pool) {
         paramIndex++;
       }
 
+      // Agrupar por cod_cliente para mostrar visão única do cliente
+      // Métricas vêm do bi_entregas agregando TODOS os centros de custo
       const query = `
+        WITH clientes_unicos AS (
+          SELECT DISTINCT ON (cod_cliente) 
+            cod_cliente, nome_fantasia, razao_social, cnpj, telefone, email,
+            cidade, estado, segmento, porte, status, health_score, status_motivo,
+            responsavel_nome, responsavel_email, responsavel_telefone,
+            data_inicio_parceria, observacoes, tags, centro_custo,
+            created_at, updated_at
+          FROM cs_clientes
+          ORDER BY cod_cliente, centro_custo NULLS FIRST
+        )
         SELECT 
           c.*,
           COALESCE(bi.total_entregas_30d, 0) as total_entregas_30d,
@@ -45,10 +56,12 @@ function createClientesRoutes(pool) {
           COALESCE(bi.valor_total_30d, 0) as valor_total_30d,
           bi.ultima_entrega,
           COALESCE(bi.total_retornos_30d, 0) as total_retornos_30d,
+          COALESCE(bi.taxa_retorno_30d, 0) as taxa_retorno_30d,
           COALESCE(oc.ocorrencias_abertas, 0) as ocorrencias_abertas,
           COALESCE(it.ultima_interacao, NULL) as ultima_interacao,
-          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d
-        FROM cs_clientes c
+          COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d,
+          COALESCE(cc_count.qtd_centros, 0) as qtd_centros_custo
+        FROM clientes_unicos c
         LEFT JOIN LATERAL (
           SELECT 
             COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_30d,
@@ -77,7 +90,6 @@ function createClientesRoutes(pool) {
             ) as taxa_retorno_30d
           FROM bi_entregas bi_e
           WHERE bi_e.cod_cliente = c.cod_cliente
-            ${ccFilter}
             AND bi_e.data_solicitado >= CURRENT_DATE - 30
             AND COALESCE(bi_e.ponto, 1) >= 2
         ) bi ON true
@@ -92,6 +104,12 @@ function createClientesRoutes(pool) {
             COUNT(*) FILTER (WHERE data_interacao >= NOW() - INTERVAL '30 days') as total_interacoes_30d
           FROM cs_interacoes WHERE cod_cliente = c.cod_cliente
         ) it ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(DISTINCT centro_custo) as qtd_centros
+          FROM bi_entregas 
+          WHERE cod_cliente = c.cod_cliente AND centro_custo IS NOT NULL AND centro_custo != ''
+            AND data_solicitado >= CURRENT_DATE - 90
+        ) cc_count ON true
         ${whereClause}
         ORDER BY ${ordem === 'health' ? 'c.health_score' : ordem === 'entregas' ? 'bi.total_entregas_30d' : 'c.nome_fantasia'} ${direcao === 'desc' ? 'DESC' : 'ASC'} NULLS LAST
         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -101,7 +119,7 @@ function createClientesRoutes(pool) {
       const result = await pool.query(query, params);
 
       const countResult = await pool.query(
-        `SELECT COUNT(*) as total FROM cs_clientes c ${whereClause}`,
+        `SELECT COUNT(DISTINCT cod_cliente) as total FROM cs_clientes c ${whereClause}`,
         params.slice(0, paramIndex - 1)
       );
 
@@ -166,6 +184,12 @@ function createClientesRoutes(pool) {
       const temFiltro = data_inicio && data_fim;
       const temCC = centro_custo && centro_custo !== '';
 
+      // Verificar se coluna centro_custo existe no cs_clientes
+      const csCcExists = await pool.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
+      `).then(r => r.rows.length > 0).catch(() => false);
+
       // Construir parâmetros dinâmicos para métricas
       let metricasParams = [cod];
       let filtroSQL = '';
@@ -180,12 +204,6 @@ function createClientesRoutes(pool) {
         metricasParams.push(centro_custo);
         paramIdx++;
       }
-
-      // Verificar se coluna centro_custo existe no cs_clientes
-      const csCcExists = await pool.query(`
-        SELECT column_name FROM information_schema.columns 
-        WHERE table_name = 'cs_clientes' AND column_name = 'centro_custo'
-      `).then(r => r.rows.length > 0).catch(() => false);
 
       // Dados da ficha — buscar por cod_cliente + centro_custo
       let fichaResult;
