@@ -4,7 +4,7 @@
  * Focado em apresentação ao cliente final — sem dados financeiros
  */
 const express = require('express');
-const { calcularHealthScore } = require('../cs.service');
+const { calcularHealthScore, getClienteConfig } = require('../cs.service');
 const { enviarRaioXEmail } = require('../cs.email');
 
 function createRaioXRoutes(pool) {
@@ -455,7 +455,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const benchmark = benchmarkRegiao.rows[0] || {};
       const rankingData = ranking.rows[0] || {};
       const metrAnterior = metricasAnteriores.rows[0];
-      const healthScore = calcularHealthScore(metricas);
+      const healthScore = calcularHealthScore(metricas, getClienteConfig(codInt));
 
       // Link do mapa de calor interativo
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
