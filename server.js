@@ -369,11 +369,11 @@ async function initDatabase() {
     await initBiTables(pool);
     await initTodoTables(pool);
     await initMiscTables(pool);
-    await initSocialTables(pool);
-    await initOperacionalTables(pool);
-    await initScoreTables(pool);
-    await initAuditTables(pool);
-    await initCsTables(pool);
+    try { await initSocialTables(pool); } catch (e) { console.error('⚠️ Social tables error:', e.message); }
+    try { await initOperacionalTables(pool); } catch (e) { console.error('⚠️ Operacional tables error:', e.message); }
+    try { await initScoreTables(pool); } catch (e) { console.error('⚠️ Score tables error:', e.message); }
+    try { await initAuditTables(pool); } catch (e) { console.error('⚠️ Audit tables error:', e.message); }
+    try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
