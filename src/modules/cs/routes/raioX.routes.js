@@ -523,104 +523,128 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       };
 
       // 14. PROMPT GEMINI
-      const prompt = `Você é um consultor sênior de operações logísticas da Tutts, plataforma de gestão de entregas de autopeças. Você está preparando um RELATÓRIO OPERACIONAL para apresentar diretamente ao cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
+      const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
 
-## REGRAS OBRIGATÓRIAS
-- Este relatório será APRESENTADO AO CLIENTE FINAL. Tom: profissional, consultivo, parceiro.
-- NÃO mencione valores financeiros, faturamento, ticket médio ou custos em nenhuma parte do relatório.
-- Seja HONESTO: se houver problemas, aponte-os com clareza, mas sempre com a postura de "estamos juntos para resolver".
-- Use os dados reais fornecidos. NÃO invente métricas.
-- Formato: Markdown com emojis nos títulos. Português brasileiro.
-- O horário de operação é das 08:00 às 18:00. Qualquer análise de horário deve considerar esta janela. Entregas após 18h são exceções, não rotina.
-- ⛔ NUNCA liste bairros, cidades, ruas ou endereços em NENHUMA parte do relatório.
+## REGRAS DE FORMATO (OBRIGATÓRIO)
+- Siga EXATAMENTE a estrutura abaixo. NÃO adicione, remova ou reordene seções.
+- Cada seção deve ter o título EXATO indicado (com emoji).
+- Use SOMENTE parágrafos de texto corrido. ⛔ PROIBIDO usar tabelas markdown, listas com bullet points, listas numeradas ou qualquer formatação de lista.
+- Quando precisar apresentar dados por faixa (km, horário, motoboy), use frases como: "Na faixa X, foram realizadas Y entregas com taxa de prazo de Z% e tempo médio de W minutos."
+- Destaque números com **negrito** inline no texto.
+- Português brasileiro, tom profissional e consultivo, direcionado ao cliente final.
+
+## REGRAS DE CONTEÚDO (OBRIGATÓRIO)
+- Use APENAS os dados fornecidos. NÃO invente métricas.
+- ⛔ NUNCA liste bairros, cidades, ruas ou endereços.
+- ⛔ NUNCA mencione valores financeiros, faturamento ou custos.
+- ⛔ NUNCA cite métricas de outros clientes (médias, taxas de terceiros).
 - ⛔ NUNCA defina prazos, datas ou cronogramas. A Tutts trabalha com melhoria contínua full time.
-- ⛔ NUNCA cite métricas numéricas de outros clientes (médias, medianas, taxas de prazo de terceiros).
-- NÃO faça observações óbvias como "quanto maior a distância, maior o tempo de entrega".
-- NÃO sugira ao cliente que mude sua operação interna, centro de distribuição, ou processos internos dele. As sugestões devem ser sobre o que a TUTTS pode fazer pela operação.
-- NÃO sugira serviços ou produtos fora do ramo de autopeças.
-- NÃO liste bairros, cidades, ruas ou endereços. Direcione sempre para o mapa de calor interativo.
-- NÃO cite métricas específicas de outros clientes no comparativo. Use posicionamento percentual genérico.
-- NÃO defina prazos nas ações (como "em 7 dias", "em 14 dias", "em 30 dias"). A Tutts trabalha com melhoria contínua full time.
+- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que a TUTTS fará.
+- Horário operacional: 08:00 às 18:00. Fora disso = exceção.
 
 ## DADOS DA OPERAÇÃO
 ${JSON.stringify(dadosParaGemini, null, 2)}
 
-## ESTRUTURA DO RELATÓRIO
+## ESTRUTURA FIXA DO RELATÓRIO (siga exatamente)
 
-### 📊 VISÃO GERAL DA OPERAÇÃO
-- Síntese executiva em 3-4 linhas da operação no período
-- Total de entregas, dias operados, profissionais envolvidos
-- Health Score: ${healthScore}/100 — explique o que significa para o cliente de forma simples
-- Classificação: [🟢 Excelente | 🟡 Boa com pontos de atenção | 🔴 Requer ação imediata]
+---
 
-### 🚀 ENTREGAS E DESEMPENHO
-- Entregas realizadas no período (vs anterior com ↑↓%)
-- Taxa de entregas no prazo (vs anterior com ↑↓%)
-- Tempo médio de entrega e comparação com a meta do setor (30-45min para autopeças urbano)
-- Se houver retornos: quantidade, motivos principais e plano de ação imediato. Se não houver, celebre.
+## 📊 VISÃO GERAL DA OPERAÇÃO
 
-### 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
-- Analise APENAS as faixas de KM: onde está concentrada a maior parte da operação e como o SLA se comporta em cada faixa
-- ⛔ PROIBIDO listar bairros, cidades, ruas, endereços ou nomes de localidades. ZERO tolerância. Mesmo que os dados contenham bairros, NÃO mencione nenhum.
-- Ao final desta seção, SEMPRE inclua: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
-- Foque a análise nas faixas de distância e na performance por faixa
+Escreva um parágrafo de 3-4 linhas resumindo a operação: total de entregas, dias operados, profissionais envolvidos.
 
-### 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
-- Os dados de corridas mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 minutos foram agrupadas como uma "saída" (roteiro).
-- Analise: quantas saídas/roteiros cada motoboy fez no período
-- Média de entregas por saída — se for 1, o motoboy saiu para entregar uma peça por vez (ineficiente). Se for 3+, está otimizado.
-- Saídas por dia: quantos roteiros o motoboy faz por dia
-- Identifique motoboys destaque (muitas entregas, eficiente) e os que podem melhorar
-- Compare a performance entre eles de forma construtiva
+Escreva outro parágrafo explicando o Health Score de **${healthScore}/100** de forma simples para o cliente. Use a classificação: ${healthScore >= 80 ? '🟢 **Excelente**' : healthScore >= 50 ? '🟡 **Boa com pontos de atenção**' : '🔴 **Requer ação imediata**'}.
 
-### ⏰ JANELA OPERACIONAL (08h às 18h)
-- Analise a distribuição de entregas dentro da janela 08-18h
-- Identifique os horários de maior demanda (picos)
-- Compare o SLA entre faixas horárias — qual horário tem melhor/pior desempenho?
-- Se houver entregas após 18h, mencione como exceção e sugira ações para que o maior volume seja concentrado no horário operacional
-- NÃO sugira estender horário de operação
+---
 
-### 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
-- Posicione a operação do cliente em relação aos demais de forma GENÉRICA e PERCENTUAL
-- Use APENAS frases como: "sua operação está entre as top X% em desempenho entre os clientes que utilizam a logística da Tutts" ou "performa acima de X% das operações na região"
-- ⛔ PROIBIDO citar médias numéricas de outros clientes, taxas de prazo de terceiros, medianas, ou qualquer métrica que não seja do próprio cliente
-- ⛔ PROIBIDO citar nomes de outros clientes
-- Celebre posicionamentos positivos. Se houver espaço para melhoria, diga genericamente que a Tutts vai intensificar o acompanhamento
+## 🚀 ENTREGAS E DESEMPENHO
 
-### 📉 TENDÊNCIAS E PROJEÇÕES
-- Evolução semanal: volume crescendo, estável ou caindo?
-- Comparação período atual vs anterior (volume, prazo)
-- Projeção para os próximos 30 dias
-- Riscos identificados [Alta | Média | Baixa]
+Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação).
 
-### ⚠️ PONTOS DE ATENÇÃO E AÇÕES
-- Liste cada problema real encontrado nos dados
-- Para cada: **Situação:** X → **O que faremos:** Y → **Meta:** Z
-- Priorize: [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua]
-- ⛔ PROIBIDO definir prazos, datas ou cronogramas (ex: "em 7 dias", "em 30 dias", "em 14 dias"). A Tutts trabalha com melhoria contínua full time — todas as ações são aplicadas de forma IMEDIATA e CONSTANTE, não em ciclos.
-- Foque apenas em problemas reais dos dados, não genéricos
+Escreva outro parágrafo sobre taxa de prazo no período vs anterior (use ↑↓%).
 
-### 🎯 PLANO DE AÇÃO — PRÓXIMOS PASSOS
-Top 5 ações CONCRETAS que a TUTTS vai realizar:
-1. O que será feito
-2. Meta numérica esperada
-⛔ PROIBIDO definir prazos ou datas em qualquer ação. NUNCA escreva "Prazo:", "em X dias", "em X semanas". A Tutts opera no conceito de melhoria contínua — todas as ações corretivas são aplicadas de forma full time e imediata.
-As ações devem ser coisas que a Tutts controla (ex: realocar motoboys, ajustar roteiros, intensificar acompanhamento). NÃO peça ao cliente para mudar processos internos dele.
+Escreva outro parágrafo sobre tempo médio de entrega.
 
-### 💡 OPORTUNIDADES
-- Sugestões de otimização que a Tutts pode implementar para melhorar a operação do cliente
-- Quick wins baseados nos dados (ex: concentrar entregas de regiões próximas no mesmo roteiro)
-- NÃO sugira produtos/serviços fora do ramo de autopeças
-- NÃO sugira que o cliente mude layout, equipe, ou processos internos
-- Foque no que PODEMOS FAZER por ele como parceiro logístico
+Se houver retornos, escreva um parágrafo sobre quantidade, motivos principais e o que a Tutts fará. Se não houver, celebre em uma frase.
 
-### 🤝 RELACIONAMENTO E ACOMPANHAMENTO
-${interacoesCliente.rows.length > 0 ? `- No período analisado, realizamos ${interacoesCliente.rows.length} interação(ões) com o cliente
-- Resuma cada interação registrada com base nos dados abaixo, destacando o que foi conversado, os resultados obtidos e as próximas ações definidas
-- Use o conteúdo detalhado de cada interação para enriquecer esta seção
-- Mostre que a Tutts está presente e acompanhando a operação de perto` : `- Não houve interações registradas no período. Mencione que a Tutts vai intensificar o contato com o cliente para acompanhar a operação de perto.`}
+---
 
-ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para apresentar este relatório em detalhes".`;
+## 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
+
+Para cada faixa de KM nos dados, escreva UMA frase no formato: "Na faixa **X km**, foram realizadas **Y entregas** com taxa de prazo de **Z%** e tempo médio de **W minutos**."
+
+Escreva um parágrafo analítico identificando onde a operação concentra volume e como o SLA se comporta conforme a distância aumenta.
+
+Encerre a seção SEMPRE com: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+
+---
+
+## 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
+
+Os dados de "corridas_por_motoboy" mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 min = uma "saída".
+
+Para cada motoboy nos dados, escreva UMA frase: "O profissional **NOME** realizou **X entregas** em **Y saídas**, média de **Z entregas por saída** e **W saídas por dia**."
+
+Escreva um parágrafo identificando destaques positivos e oportunidades de melhoria entre os profissionais.
+
+---
+
+## ⏰ JANELA OPERACIONAL (08h às 18h)
+
+Para cada faixa horária nos dados, escreva UMA frase: "Entre **HH-HHh**, foram realizadas **X entregas** com taxa de prazo de **Y%** e tempo médio de **Z minutos**."
+
+Escreva um parágrafo identificando picos de demanda e comparando SLA entre faixas.
+
+Se houver entregas fora do horário, mencione como exceção em uma frase.
+
+---
+
+## 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
+
+Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL: "Sua operação está entre as top X% em desempenho" ou "performa acima de X% das operações". Use APENAS os dados de percentil fornecidos.
+
+---
+
+## 📉 TENDÊNCIAS E PROJEÇÕES
+
+Escreva um parágrafo sobre a evolução semanal: volume crescendo, estável ou caindo? Compare atual vs anterior.
+
+Escreva outro parágrafo sobre riscos identificados com classificação [🔴 Alto | 🟠 Médio | 🟡 Baixo].
+
+---
+
+## ⚠️ PONTOS DE ATENÇÃO
+
+Para cada problema REAL encontrado nos dados, escreva um parágrafo no formato:
+**Situação:** descreva o problema. **O que faremos:** ação concreta da Tutts. **Prioridade:** [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua].
+
+⛔ Apenas problemas reais dos dados, não genéricos. ⛔ Sem prazos ou datas.
+
+---
+
+## 🎯 PLANO DE AÇÃO
+
+Escreva exatamente 5 parágrafos curtos, cada um descrevendo UMA ação concreta que a Tutts realizará, com meta numérica. Formato: "**Ação N — Título:** Descrição do que será feito. **Meta:** resultado esperado."
+
+As ações devem ser sobre o que a Tutts controla (realocar motoboys, ajustar roteiros, intensificar acompanhamento).
+
+---
+
+## 💡 OPORTUNIDADES
+
+Escreva 2-3 parágrafos curtos com sugestões de otimização que a Tutts pode implementar, baseadas nos dados. Quick wins operacionais.
+
+---
+
+## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
+
+${interacoesCliente.rows.length > 0 ? `No período analisado foram registradas ${interacoesCliente.rows.length} interação(ões). Resuma cada uma em um parágrafo com o que foi conversado, resultados e próximas ações.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato.`}
+
+---
+
+Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresentar este relatório em detalhes."
+
+⛔ LEMBRETE FINAL: NÃO use tabelas markdown, bullet points ou listas numeradas em NENHUMA seção. Apenas parágrafos de texto corrido com dados em negrito inline.`;
 
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
