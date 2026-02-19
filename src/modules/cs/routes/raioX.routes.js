@@ -205,7 +205,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 
   router.post('/cs/raio-x', async (req, res) => {
     try {
-      const { cod_cliente, data_inicio, data_fim, tipo = 'completo' } = req.body;
+      const { cod_cliente, data_inicio, data_fim, tipo = 'completo', centro_custo } = req.body;
       if (!cod_cliente || !data_inicio || !data_fim) {
         return res.status(400).json({ error: 'cod_cliente, data_inicio e data_fim são obrigatórios' });
       }
@@ -213,11 +213,22 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       if (!GEMINI_API_KEY) {
         return res.status(400).json({ error: 'API Key do Gemini não configurada. Configure GEMINI_API_KEY no .env' });
       }
-      console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}`);
+      const temCC = centro_custo && centro_custo !== '';
+      console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}${temCC ? `, CC=${centro_custo}` : ''}`);
       const codInt = parseInt(cod_cliente);
 
+      // Filtro SQL de centro de custo (aplicado em todas as queries do bi_entregas)
+      const ccSQL = temCC ? ' AND centro_custo = $4' : '';
+      const baseParams = temCC ? [codInt, data_inicio, data_fim, centro_custo] : [codInt, data_inicio, data_fim];
+
       // 1. DADOS DO CLIENTE
-      const fichaResult = await pool.query('SELECT * FROM cs_clientes WHERE cod_cliente = $1', [codInt]);
+      let fichaResult;
+      if (temCC) {
+        fichaResult = await pool.query('SELECT * FROM cs_clientes WHERE cod_cliente = $1 AND centro_custo = $2', [codInt, centro_custo]);
+        if (fichaResult.rows.length === 0) fichaResult = await pool.query('SELECT * FROM cs_clientes WHERE cod_cliente = $1 LIMIT 1', [codInt]);
+      } else {
+        fichaResult = await pool.query('SELECT * FROM cs_clientes WHERE cod_cliente = $1 LIMIT 1', [codInt]);
+      }
       const ficha = fichaResult.rows[0] || {};
 
       // 2. MÉTRICAS OPERACIONAIS DO PERÍODO
@@ -242,8 +253,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_alocacao,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN velocidade_media END)::numeric, 1) as velocidade_media
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
-      `, [codInt, data_inicio, data_fim]);
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+      `, baseParams);
 
       // 3. FAIXAS DE KM
       const faixasKm = await pool.query(`
@@ -256,13 +267,13 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo_faixa
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND distancia IS NOT NULL AND distancia > 0
         GROUP BY CASE WHEN distancia <= 3 THEN '0-3 km' WHEN distancia <= 5 THEN '3-5 km'
                WHEN distancia <= 10 THEN '5-10 km' WHEN distancia <= 20 THEN '10-20 km'
                WHEN distancia <= 30 THEN '20-30 km' ELSE '30+ km' END
         ORDER BY MIN(distancia)
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 4. MAPA DE CALOR — por bairro/cidade
       const mapaCalor = await pool.query(`
@@ -272,10 +283,10 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3 AND COALESCE(ponto, 1) >= 2
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL} AND COALESCE(ponto, 1) >= 2
         GROUP BY COALESCE(NULLIF(bairro, ''), 'Não informado'), COALESCE(cidade, '')
         ORDER BY COUNT(*) DESC LIMIT 20
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 5. ANÁLISE DE CORRIDAS/ROTEIROS POR MOTOBOY
       // Agrupa OS do mesmo motoboy criadas em janela de 10 minutos = mesmo roteiro/saída
@@ -286,7 +297,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
             COALESCE(ponto, 1) as ponto,
             distancia
           FROM bi_entregas
-          WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+          WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
             AND data_hora IS NOT NULL
         ),
         roteiros AS (
@@ -326,7 +337,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         WHERE entregas_no_roteiro > 0
         GROUP BY nome_prof
         ORDER BY SUM(entregas_no_roteiro) DESC LIMIT 15
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 6. PADRÕES DE HORÁRIO
       const padroesHorario = await pool.query(`
@@ -342,7 +353,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND data_hora IS NOT NULL
         GROUP BY CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 6 AND 8 THEN '06-09h'
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 9 AND 11 THEN '09-12h'
@@ -351,7 +362,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 17 AND 19 THEN '17-20h'
                ELSE '20h+' END
         ORDER BY MIN(EXTRACT(HOUR FROM data_hora))
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 7. EVOLUÇÃO SEMANAL
       const evolucaoSemanal = await pool.query(`
@@ -361,21 +372,21 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
         GROUP BY DATE_TRUNC('week', data_solicitado) ORDER BY semana
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 8. RETORNOS DETALHADOS
       const retornosDetalhe = await pool.query(`
         SELECT ocorrencia, COUNT(*) as quantidade,
           ROUND(COUNT(*)::numeric / NULLIF((
-            SELECT COUNT(*) FROM bi_entregas WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3 AND COALESCE(ponto, 1) >= 2
+            SELECT COUNT(*) FROM bi_entregas WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL} AND COALESCE(ponto, 1) >= 2
           ), 0) * 100, 2) as percentual
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND ocorrencia IS NOT NULL AND ocorrencia != ''
         GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 10
-      `, [codInt, data_inicio, data_fim]);
+      `, baseParams);
 
       // 9. BENCHMARK DA REGIÃO
       const estadoCliente = ficha.estado || (await pool.query(
@@ -436,7 +447,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
       `, [codInt, inicioAnterior, fimAnterior]);
 
       // 12. MONTAR DADOS
@@ -456,7 +467,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         FROM cs_interacoes 
         WHERE cod_cliente = $1 AND data_interacao >= $2 AND data_interacao <= $3
         ORDER BY data_interacao DESC
-      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
+      `, baseParams).catch(() => ({ rows: [] }));
 
       const dadosAnalise = {
         cliente: { nome: ficha.nome_fantasia || `Cliente ${cod_cliente}`, cidade: ficha.cidade || '', estado: estadoCliente, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
