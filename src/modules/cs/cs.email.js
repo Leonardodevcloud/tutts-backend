@@ -1,44 +1,18 @@
 /**
  * CS Email Service — Envio de Raio-X por email
- * Usa Nodemailer com SMTP próprio (tutts.com.br)
+ * Usa Resend API (https://resend.com) para enviar como @tutts.com.br
+ * Gratuito até 100 emails/dia — sem bloqueio de IP cloud
  */
-const nodemailer = require('nodemailer');
 
-let transporter = null;
-
-function getTransporter() {
-  if (transporter) return transporter;
-
-  const host = process.env.SMTP_HOST || 'mail.tutts.com.br';
-  const port = parseInt(process.env.SMTP_PORT || '465');
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!user || !pass) {
-    console.warn('⚠️ SMTP não configurado: SMTP_USER e SMTP_PASS ausentes');
-    return null;
-  }
-
-  transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465, // true para 465, false para 587
-    auth: { user, pass },
-    tls: { rejectUnauthorized: false }, // Aceitar certificado auto-assinado
-  });
-
-  console.log(`📧 SMTP configurado: ${user}@${host}:${port}`);
-  return transporter;
-}
+const RESEND_URL = 'https://api.resend.com/emails';
 
 function gerarEmailHTML(raioX, cliente, periodo) {
   const score = raioX.score_saude || raioX.health_score || 0;
   const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
   const scoreLabel = score >= 80 ? 'Excelente' : score >= 60 ? 'Bom' : 'Atenção';
 
-  // Converter markdown para HTML (simplificado)
   let conteudo = raioX.analise_texto || raioX.analise || '';
-  
+
   // Proteger blocos SVG/HTML inline antes do processamento
   const htmlBlocks = [];
   let safetyCounter = 0;
@@ -55,13 +29,12 @@ function gerarEmailHTML(raioX, cliente, periodo) {
     }
     if (endIdx === -1) break;
     const block = conteudo.substring(startIdx, endIdx);
-    const placeholder = `__HTMLBLOCK_${htmlBlocks.length}__`;
     htmlBlocks.push(block);
-    conteudo = conteudo.substring(0, startIdx) + placeholder + conteudo.substring(endIdx);
+    conteudo = conteudo.substring(0, startIdx) + `__HTMLBLOCK_${htmlBlocks.length - 1}__` + conteudo.substring(endIdx);
     safetyCounter++;
   }
 
-  // Markdown → HTML
+  // Markdown → HTML (inline styles para compatibilidade com email)
   conteudo = conteudo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/^### (.+)$/gm, '<h3 style="font-size:16px;color:#4f46e5;margin-top:28px;margin-bottom:8px;border-bottom:2px solid #e0e7ff;padding-bottom:4px">$1</h3>')
@@ -95,8 +68,7 @@ function gerarEmailHTML(raioX, cliente, periodo) {
 
 <!-- Header -->
 <tr><td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center">
-  <img src="https://tutts.com.br/logo-branco.png" alt="Tutts" height="36" style="margin-bottom:16px;display:block;margin:0 auto 16px" onerror="this.style.display='none'">
-  <h1 style="color:white;font-size:24px;margin:0 0 4px">🔬 Raio-X Operacional</h1>
+  <h1 style="color:white;font-size:24px;margin:0 0 4px;font-family:'Segoe UI',sans-serif">🔬 Raio-X Operacional</h1>
   <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0">${cliente.nome || 'Cliente'}</p>
   <p style="color:rgba(255,255,255,0.65);font-size:12px;margin:8px 0 0">Período: ${periodo.inicio} a ${periodo.fim}</p>
 </td></tr>
@@ -123,7 +95,6 @@ ${conteudo}
 <tr><td style="background:#f8fafc;padding:24px 40px;border-top:1px solid #e2e8f0;text-align:center">
   <p style="font-size:12px;color:#94a3b8;margin:0">Relatório gerado automaticamente pela plataforma Tutts</p>
   <p style="font-size:12px;color:#94a3b8;margin:4px 0 0">© ${new Date().getFullYear()} Tutts — Logística Inteligente para Autopeças</p>
-  <p style="font-size:11px;color:#cbd5e1;margin:8px 0 0">Este email foi enviado por ${process.env.SMTP_FROM || 'contato@tutts.com.br'}</p>
 </td></tr>
 
 </table>
@@ -134,25 +105,41 @@ ${conteudo}
 }
 
 async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }) {
-  const transport = getTransporter();
-  if (!transport) throw new Error('SMTP não configurado. Configure SMTP_USER e SMTP_PASS no .env');
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) throw new Error('RESEND_API_KEY não configurada. Configure no .env');
 
-  const from = remetente || process.env.SMTP_FROM || process.env.SMTP_USER;
+  const from = remetente || 'contato@tutts.com.br';
   const html = gerarEmailHTML(raioX, cliente, periodo);
   const nomeCliente = cliente.nome || 'Cliente';
-  const subject = `🔬 Raio-X Operacional — ${nomeCliente} (${periodo.inicio} a ${periodo.fim})`;
+  const subject = `Raio-X Operacional - ${nomeCliente} (${periodo.inicio} a ${periodo.fim})`;
 
-  const mailOptions = {
-    from: `"Tutts Logística" <${from}>`,
-    to: para,
-    cc: cc || undefined,
+  const payload = {
+    from: `Tutts Logistica <${from}>`,
+    to: Array.isArray(para) ? para : [para],
+    reply_to: from,
     subject,
     html,
   };
+  if (cc) payload.cc = Array.isArray(cc) ? cc : [cc];
 
-  const info = await transport.sendMail(mailOptions);
-  console.log(`📧 Email Raio-X enviado: ${para} (${info.messageId})`);
-  return { messageId: info.messageId, accepted: info.accepted };
+  const response = await fetch(RESEND_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('❌ Resend API error:', data);
+    throw new Error(data.message || `Resend error: ${response.status}`);
+  }
+
+  console.log(`📧 Email Raio-X enviado via Resend: ${para} (ID: ${data.id})`);
+  return { messageId: data.id, accepted: [para] };
 }
 
-module.exports = { enviarRaioXEmail, getTransporter };
+module.exports = { enviarRaioXEmail };
