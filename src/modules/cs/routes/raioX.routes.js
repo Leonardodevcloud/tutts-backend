@@ -155,8 +155,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const { metricas_atuais: ma, metricas_periodo_anterior: mp } = dados;
       if (ma && mp) {
         const grafico = gerarComparativoSVG(
-          [parseInt(ma.total_entregas) || 0, parseFloat(ma.taxa_prazo) || 0, parseFloat(ma.tempo_medio) || 0],
-          [parseInt(mp.total_entregas) || 0, parseFloat(mp.taxa_prazo) || 0, parseFloat(mp.tempo_medio) || 0],
+          [parseInt(ma.total_entregas) || 0, parseFloat(ma.taxa_prazo) || 0, parseFloat(ma.tempo_medio_entrega || ma.tempo_medio) || 0],
+          [parseInt(mp.total_entregas) || 0, parseFloat(mp.taxa_prazo) || 0, parseFloat(mp.tempo_medio_entrega || mp.tempo_medio) || 0],
           ['Entregas', 'Taxa Prazo (%)', 'Tempo Médio (min)'],
           { titulo: '📊 Comparativo: Período Atual vs Anterior' }
         );
@@ -555,11 +555,11 @@ Escreva outro parágrafo explicando o Health Score de **${healthScore}/100**. Us
 
 ## 🚀 ENTREGAS E DESEMPENHO
 
-Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação).
+Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação). Se a variação for menor que 3%, diga que o volume se manteve estável e NÃO elabore sobre análise de fatores.
 
-Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%).
+Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%). Se a variação for menor que 3%, diga que se manteve estável.
 
-Escreva um parágrafo sobre tempo médio de entrega.
+Escreva um parágrafo sobre tempo médio de entrega. Se a variação for menor que 3%, diga que se manteve estável.
 
 Se houver retornos, escreva um parágrafo com quantidade, motivos e plano de ação. Se não houver, celebre.
 
