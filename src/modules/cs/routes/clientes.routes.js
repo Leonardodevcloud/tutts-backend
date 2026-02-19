@@ -39,16 +39,6 @@ function createClientesRoutes(pool) {
       // Agrupar por cod_cliente para mostrar visão única do cliente
       // Métricas vêm do bi_entregas agregando TODOS os centros de custo
       const query = `
-        WITH clientes_unicos AS (
-          SELECT DISTINCT ON (cod_cliente) 
-            cod_cliente, nome_fantasia, razao_social, cnpj, telefone, email,
-            cidade, estado, segmento, porte, status, health_score, status_motivo,
-            responsavel_nome, responsavel_email, responsavel_telefone,
-            data_inicio_parceria, observacoes, tags, centro_custo,
-            created_at, updated_at
-          FROM cs_clientes
-          ORDER BY cod_cliente, centro_custo NULLS FIRST
-        )
         SELECT 
           c.*,
           COALESCE(bi.total_entregas_30d, 0) as total_entregas_30d,
@@ -61,7 +51,11 @@ function createClientesRoutes(pool) {
           COALESCE(it.ultima_interacao, NULL) as ultima_interacao,
           COALESCE(it.total_interacoes_30d, 0) as total_interacoes_30d,
           COALESCE(cc_count.qtd_centros, 0) as qtd_centros_custo
-        FROM clientes_unicos c
+        FROM (
+          SELECT DISTINCT ON (cod_cliente) *
+          FROM cs_clientes
+          ORDER BY cod_cliente, centro_custo NULLS FIRST
+        ) c
         LEFT JOIN LATERAL (
           SELECT 
             COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas_30d,
