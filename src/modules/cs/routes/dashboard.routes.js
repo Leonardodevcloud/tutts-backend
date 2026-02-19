@@ -4,7 +4,7 @@
  * Health scores recalculados em massa + análise inteligente de churn
  */
 const express = require('express');
-const { STATUS_CLIENTE, TIPOS_INTERACAO, SEVERIDADES, calcularHealthScore, determinarStatusCliente, analisarSinaisChurn } = require('../cs.service');
+const { STATUS_CLIENTE, TIPOS_INTERACAO, SEVERIDADES, calcularHealthScore, determinarStatusCliente, analisarSinaisChurn, getClienteConfig } = require('../cs.service');
 
 // Controle para não recalcular a cada request — TTL de 5 min
 let lastRecalc = 0;
@@ -114,7 +114,8 @@ function createDashboardRoutes(pool) {
         }
 
         const isChurned = diasSem > 30;
-        const hs = isChurned ? 0 : calcularHealthScore(row);
+        const clienteConfig = getClienteConfig(row.cod_cliente);
+        const hs = isChurned ? 0 : calcularHealthScore(row, clienteConfig);
 
         const semanais = semanaisPorCliente[row.id] || [];
         const sinais = analisarSinaisChurn(semanais);
