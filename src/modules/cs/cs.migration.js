@@ -92,11 +92,11 @@ async function initCsTables(pool) {
       }
     } catch (e) { console.warn('⚠️ CS Migration: Limpeza indexes:', e.message); }
 
-    // Passo 3: Criar novo unique index
+    // Passo 3: Criar novo unique index (1 registro por cod_cliente)
     try {
       await pool.query(`DROP INDEX IF EXISTS idx_cs_clientes_cod_cc`);
-      await pool.query(`CREATE UNIQUE INDEX idx_cs_clientes_cod_cc ON cs_clientes(cod_cliente, COALESCE(centro_custo, ''))`);
-      console.log('✅ CS Migration: Unique index idx_cs_clientes_cod_cc criado');
+      await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_clientes_cod ON cs_clientes(cod_cliente)`);
+      console.log('✅ CS Migration: Unique index idx_cs_clientes_cod criado');
     } catch (e) {
       console.error('❌ CS Migration: Falha ao criar index:', e.message);
     }
