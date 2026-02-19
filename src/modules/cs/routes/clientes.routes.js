@@ -112,6 +112,19 @@ function createClientesRoutes(pool) {
 
       const result = await pool.query(query, params);
 
+      // Buscar máscaras do BI
+      let mascaras = {};
+      try {
+        const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+        mascarasResult.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
+      } catch (e) { /* bi_mascaras pode não existir */ }
+
+      // Aplicar máscaras
+      const clientes = result.rows.map(cli => ({
+        ...cli,
+        mascara: mascaras[String(cli.cod_cliente)] || null,
+      }));
+
       const countResult = await pool.query(
         `SELECT COUNT(DISTINCT cod_cliente) as total FROM cs_clientes c ${whereClause}`,
         params.slice(0, paramIndex - 1)
@@ -119,7 +132,7 @@ function createClientesRoutes(pool) {
 
       res.json({
         success: true,
-        clientes: result.rows,
+        clientes,
         total: parseInt(countResult.rows[0].total),
         page: parseInt(page),
         limit: parseInt(limit),
@@ -234,6 +247,13 @@ function createClientesRoutes(pool) {
           return res.status(404).json({ error: 'Cliente não encontrado no BI' });
         }
       }
+
+      // Máscara do BI (nome display alternativo)
+      let mascara = null;
+      try {
+        const mascaraResult = await pool.query('SELECT mascara FROM bi_mascaras WHERE cod_cliente = $1', [cod]);
+        if (mascaraResult.rows.length > 0) mascara = mascaraResult.rows[0].mascara;
+      } catch (e) { /* bi_mascaras pode não existir */ }
 
       // Centros de custo do cliente (do bi_entregas)
       let centrosCusto = { rows: [] };
@@ -369,7 +389,7 @@ function createClientesRoutes(pool) {
 
       res.json({
         success: true,
-        ficha: { ...ficha, health_score: healthScore },
+        ficha: { ...ficha, health_score: healthScore, mascara },
         metricas_bi: metricas,
         centros_custo: centrosCusto.rows,
         periodo_filtrado: temFiltro ? { inicio: data_inicio, fim: data_fim } : null,
