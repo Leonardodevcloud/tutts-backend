@@ -448,7 +448,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
-      `, [codInt, inicioAnterior, fimAnterior]);
+      `, temCC ? [codInt, inicioAnterior, fimAnterior, centro_custo] : [codInt, inicioAnterior, fimAnterior]);
 
       // 12. MONTAR DADOS
       const metricas = metricasCliente.rows[0];
@@ -467,7 +467,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         FROM cs_interacoes 
         WHERE cod_cliente = $1 AND data_interacao >= $2 AND data_interacao <= $3
         ORDER BY data_interacao DESC
-      `, baseParams).catch(() => ({ rows: [] }));
+      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
 
       const dadosAnalise = {
         cliente: { nome: ficha.nome_fantasia || `Cliente ${cod_cliente}`, cidade: ficha.cidade || '', estado: estadoCliente, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
