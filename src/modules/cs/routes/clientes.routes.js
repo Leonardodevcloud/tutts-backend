@@ -239,12 +239,12 @@ function createClientesRoutes(pool) {
       let centrosCusto = { rows: [] };
       try {
         centrosCusto = await pool.query(`
-          SELECT DISTINCT centro_custo, 
+          SELECT centro_custo, 
             COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
           FROM bi_entregas 
           WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
           GROUP BY centro_custo
-          ORDER BY COUNT(*) DESC
+          ORDER BY total_entregas DESC
         `, [cod]);
         console.log(`📋 Cliente ${cod}: ${centrosCusto.rows.length} centros de custo encontrados`);
       } catch (e) { console.warn('⚠️ Centros de custo não disponível:', e.message); }
