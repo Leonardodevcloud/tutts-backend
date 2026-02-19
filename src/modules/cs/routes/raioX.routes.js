@@ -161,7 +161,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           { titulo: '📊 Comparativo: Período Atual vs Anterior' }
         );
         resultado = resultado.replace(
-          /(###\s*🚀.*?ENTREGAS.*?\n(?:[\s\S]*?))(\n###\s)/,
+          /(#{2,3}\s*🚀.*?ENTREGAS.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
           `$1${grafico}$2`
         );
       }
@@ -176,7 +176,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         }));
         const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância' });
         resultado = resultado.replace(
-          /(###\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n###\s)/,
+          /(#{2,3}\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
           `$1${grafico}$2`
         );
       }
@@ -191,7 +191,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         const taxaE = evolucao_semanal.map(s => ({ valor: parseFloat(s.taxa_prazo) || 0 }));
         const grafico = gerarBarraVerticalSVG(dadosE, { titulo: '📊 Evolução Semanal de Entregas', dualAxis: true, dados2: taxaE });
         resultado = resultado.replace(
-          /(###\s*📈.*?TEND[ÊE]NCIAS.*?\n(?:[\s\S]*?))(\n###\s)/,
+          /(#{2,3}\s*📈.*?TEND[ÊE]NCIAS.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
           `$1${grafico}$2`
         );
       }
@@ -525,13 +525,13 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       // 14. PROMPT GEMINI
       const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
 
-## REGRAS DE FORMATO (OBRIGATÓRIO)
-- Siga EXATAMENTE a estrutura abaixo. NÃO adicione, remova ou reordene seções.
-- Cada seção deve ter o título EXATO indicado (com emoji).
-- Use SOMENTE parágrafos de texto corrido. ⛔ PROIBIDO usar tabelas markdown, listas com bullet points, listas numeradas ou qualquer formatação de lista.
-- Quando precisar apresentar dados por faixa (km, horário, motoboy), use frases como: "Na faixa X, foram realizadas Y entregas com taxa de prazo de Z% e tempo médio de W minutos."
-- Destaque números com **negrito** inline no texto.
-- Português brasileiro, tom profissional e consultivo, direcionado ao cliente final.
+## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
+- Siga EXATAMENTE a estrutura de seções abaixo. NÃO adicione, remova ou reordene seções.
+- Cada seção usa o título EXATO indicado com ## (h2) e o emoji correspondente.
+- ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
+- Destaque números com **negrito**.
+- Português brasileiro, tom profissional, consultivo e parceiro.
+- Quando apresentar dados por faixa (km, horário), use SEMPRE o formato de lista padronizado mostrado em cada seção.
 
 ## REGRAS DE CONTEÚDO (OBRIGATÓRIO)
 - Use APENAS os dados fornecidos. NÃO invente métricas.
@@ -545,106 +545,102 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 ## DADOS DA OPERAÇÃO
 ${JSON.stringify(dadosParaGemini, null, 2)}
 
-## ESTRUTURA FIXA DO RELATÓRIO (siga exatamente)
-
----
+## ESTRUTURA FIXA DO RELATÓRIO
 
 ## 📊 VISÃO GERAL DA OPERAÇÃO
 
-Escreva um parágrafo de 3-4 linhas resumindo a operação: total de entregas, dias operados, profissionais envolvidos.
+Escreva um parágrafo de 3-4 linhas com síntese executiva: total de entregas, dias operados, profissionais envolvidos.
 
-Escreva outro parágrafo explicando o Health Score de **${healthScore}/100** de forma simples para o cliente. Use a classificação: ${healthScore >= 80 ? '🟢 **Excelente**' : healthScore >= 50 ? '🟡 **Boa com pontos de atenção**' : '🔴 **Requer ação imediata**'}.
-
----
+Escreva outro parágrafo explicando o Health Score de **${healthScore}/100**. Use a classificação: ${healthScore >= 80 ? '🟢 **Excelente**' : healthScore >= 50 ? '🟡 **Boa com pontos de atenção**' : '🔴 **Requer ação imediata**'}. Explique de forma simples o que significa.
 
 ## 🚀 ENTREGAS E DESEMPENHO
 
 Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação).
 
-Escreva outro parágrafo sobre taxa de prazo no período vs anterior (use ↑↓%).
+Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%).
 
-Escreva outro parágrafo sobre tempo médio de entrega.
+Escreva um parágrafo sobre tempo médio de entrega.
 
-Se houver retornos, escreva um parágrafo sobre quantidade, motivos principais e o que a Tutts fará. Se não houver, celebre em uma frase.
-
----
+Se houver retornos, escreva um parágrafo com quantidade, motivos e plano de ação. Se não houver, celebre.
 
 ## 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
 
-Para cada faixa de KM nos dados, escreva UMA frase no formato: "Na faixa **X km**, foram realizadas **Y entregas** com taxa de prazo de **Z%** e tempo médio de **W minutos**."
+Apresente os dados de faixas de KM usando EXATAMENTE este formato de lista (uma linha por faixa):
 
-Escreva um parágrafo analítico identificando onde a operação concentra volume e como o SLA se comporta conforme a distância aumenta.
+- **0-5 km:** X entregas · taxa de prazo Y% · tempo médio Z min
+- **5-10 km:** X entregas · taxa de prazo Y% · tempo médio Z min
+(e assim por diante para cada faixa presente nos dados)
 
-Encerre a seção SEMPRE com: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+Após a lista, escreva um parágrafo analítico sobre concentração de volume e comportamento do SLA por distância.
 
----
+Encerre SEMPRE com: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
 
 ## 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
 
 Os dados de "corridas_por_motoboy" mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 min = uma "saída".
 
-Para cada motoboy nos dados, escreva UMA frase: "O profissional **NOME** realizou **X entregas** em **Y saídas**, média de **Z entregas por saída** e **W saídas por dia**."
+Apresente cada motoboy usando EXATAMENTE este formato de lista:
 
-Escreva um parágrafo identificando destaques positivos e oportunidades de melhoria entre os profissionais.
+- **NOME:** X entregas · Y saídas · média de Z entregas/saída · W saídas/dia
+(uma linha por motoboy)
 
----
+Após a lista, escreva um parágrafo identificando destaques e oportunidades de melhoria.
 
 ## ⏰ JANELA OPERACIONAL (08h às 18h)
 
-Para cada faixa horária nos dados, escreva UMA frase: "Entre **HH-HHh**, foram realizadas **X entregas** com taxa de prazo de **Y%** e tempo médio de **Z minutos**."
+Apresente as faixas horárias usando EXATAMENTE este formato de lista:
 
-Escreva um parágrafo identificando picos de demanda e comparando SLA entre faixas.
+- **08-10h:** X entregas · taxa de prazo Y% · tempo médio Z min
+- **10-12h:** X entregas · taxa de prazo Y% · tempo médio Z min
+- **12-14h:** X entregas · taxa de prazo Y% · tempo médio Z min
+- **14-16h:** X entregas · taxa de prazo Y% · tempo médio Z min
+- **16-18h:** X entregas · taxa de prazo Y% · tempo médio Z min
+(se houver "Fora do horário", adicione como última linha)
 
-Se houver entregas fora do horário, mencione como exceção em uma frase.
-
----
+Após a lista, escreva um parágrafo sobre picos de demanda e comparação de SLA entre faixas.
 
 ## 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
 
-Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL: "Sua operação está entre as top X% em desempenho" ou "performa acima de X% das operações". Use APENAS os dados de percentil fornecidos.
-
----
+Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL. Use APENAS os dados de percentil fornecidos.
 
 ## 📉 TENDÊNCIAS E PROJEÇÕES
 
-Escreva um parágrafo sobre a evolução semanal: volume crescendo, estável ou caindo? Compare atual vs anterior.
+Escreva um parágrafo sobre evolução semanal: volume crescendo, estável ou caindo? Compare atual vs anterior.
 
-Escreva outro parágrafo sobre riscos identificados com classificação [🔴 Alto | 🟠 Médio | 🟡 Baixo].
-
----
+Escreva outro parágrafo sobre riscos identificados: [🔴 Alto | 🟠 Médio | 🟡 Baixo].
 
 ## ⚠️ PONTOS DE ATENÇÃO
 
-Para cada problema REAL encontrado nos dados, escreva um parágrafo no formato:
-**Situação:** descreva o problema. **O que faremos:** ação concreta da Tutts. **Prioridade:** [🔴 Urgente | 🟠 Importante | 🟡 Melhoria contínua].
+Para cada problema REAL dos dados, use EXATAMENTE este formato:
 
-⛔ Apenas problemas reais dos dados, não genéricos. ⛔ Sem prazos ou datas.
+- **Situação:** descreva o problema · **Ação:** o que a Tutts fará · **Prioridade:** 🔴 Urgente / 🟠 Importante / 🟡 Melhoria contínua
 
----
+⛔ Apenas problemas reais, não genéricos. ⛔ Sem prazos ou datas.
 
 ## 🎯 PLANO DE AÇÃO
 
-Escreva exatamente 5 parágrafos curtos, cada um descrevendo UMA ação concreta que a Tutts realizará, com meta numérica. Formato: "**Ação N — Título:** Descrição do que será feito. **Meta:** resultado esperado."
+Liste exatamente 5 ações usando EXATAMENTE este formato:
 
-As ações devem ser sobre o que a Tutts controla (realocar motoboys, ajustar roteiros, intensificar acompanhamento).
+- **Ação 1 — Título:** Descrição. **Meta:** resultado esperado.
+- **Ação 2 — Título:** Descrição. **Meta:** resultado esperado.
+(até Ação 5)
 
----
+As ações devem ser sobre o que a Tutts controla.
 
 ## 💡 OPORTUNIDADES
 
-Escreva 2-3 parágrafos curtos com sugestões de otimização que a Tutts pode implementar, baseadas nos dados. Quick wins operacionais.
-
----
+Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados. Quick wins operacionais.
 
 ## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
 
-${interacoesCliente.rows.length > 0 ? `No período analisado foram registradas ${interacoesCliente.rows.length} interação(ões). Resuma cada uma em um parágrafo com o que foi conversado, resultados e próximas ações.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato.`}
+${interacoesCliente.rows.length > 0 ? `No período foram registradas ${interacoesCliente.rows.length} interação(ões). Resuma cada uma em formato de lista:
+- **Data — Tipo:** Resumo do que foi conversado, resultados e próximas ações.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato.`}
 
 ---
 
 Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresentar este relatório em detalhes."
 
-⛔ LEMBRETE FINAL: NÃO use tabelas markdown, bullet points ou listas numeradas em NENHUMA seção. Apenas parágrafos de texto corrido com dados em negrito inline.`;
+⛔ LEMBRETE: Siga os formatos de lista EXATOS indicados acima. NÃO use tabelas markdown. Mantenha o padrão consistente em todas as seções.`;
 
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
