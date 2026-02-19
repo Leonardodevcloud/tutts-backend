@@ -259,9 +259,13 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       // 3. FAIXAS DE KM
       const faixasKm = await pool.query(`
         SELECT 
-          CASE WHEN distancia <= 3 THEN '0-3 km' WHEN distancia <= 5 THEN '3-5 km'
-               WHEN distancia <= 10 THEN '5-10 km' WHEN distancia <= 20 THEN '10-20 km'
-               WHEN distancia <= 30 THEN '20-30 km' ELSE '30+ km' END as faixa,
+          CASE WHEN distancia <= 5 THEN '0-5 km'
+               WHEN distancia <= 10 THEN '5-10 km'
+               WHEN distancia <= 15 THEN '10-15 km'
+               WHEN distancia <= 20 THEN '15-20 km'
+               WHEN distancia <= 25 THEN '20-25 km'
+               WHEN distancia <= 30 THEN '25-30 km'
+               ELSE '30+ km' END as faixa,
           COUNT(*) as quantidade,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
@@ -269,9 +273,13 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND distancia IS NOT NULL AND distancia > 0
-        GROUP BY CASE WHEN distancia <= 3 THEN '0-3 km' WHEN distancia <= 5 THEN '3-5 km'
-               WHEN distancia <= 10 THEN '5-10 km' WHEN distancia <= 20 THEN '10-20 km'
-               WHEN distancia <= 30 THEN '20-30 km' ELSE '30+ km' END
+        GROUP BY CASE WHEN distancia <= 5 THEN '0-5 km'
+               WHEN distancia <= 10 THEN '5-10 km'
+               WHEN distancia <= 15 THEN '10-15 km'
+               WHEN distancia <= 20 THEN '15-20 km'
+               WHEN distancia <= 25 THEN '20-25 km'
+               WHEN distancia <= 30 THEN '25-30 km'
+               ELSE '30+ km' END
         ORDER BY MIN(distancia)
       `, baseParams);
 
@@ -342,12 +350,12 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       // 6. PADRÕES DE HORÁRIO
       const padroesHorario = await pool.query(`
         SELECT 
-          CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 6 AND 8 THEN '06-09h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 9 AND 11 THEN '09-12h'
+          CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 8 AND 9 THEN '08-10h'
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 10 AND 11 THEN '10-12h'
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 12 AND 13 THEN '12-14h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 14 AND 16 THEN '14-17h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 17 AND 19 THEN '17-20h'
-               ELSE '20h+' END as faixa_horaria,
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 14 AND 15 THEN '14-16h'
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 16 AND 17 THEN '16-18h'
+               ELSE 'Fora do horário' END as faixa_horaria,
           COUNT(*) as entregas,
           ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
@@ -355,12 +363,12 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND data_hora IS NOT NULL
-        GROUP BY CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 6 AND 8 THEN '06-09h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 9 AND 11 THEN '09-12h'
+        GROUP BY CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 8 AND 9 THEN '08-10h'
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 10 AND 11 THEN '10-12h'
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 12 AND 13 THEN '12-14h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 14 AND 16 THEN '14-17h'
-               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 17 AND 19 THEN '17-20h'
-               ELSE '20h+' END
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 14 AND 15 THEN '14-16h'
+               WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 16 AND 17 THEN '16-18h'
+               ELSE 'Fora do horário' END
         ORDER BY MIN(EXTRACT(HOUR FROM data_hora))
       `, baseParams);
 
@@ -650,7 +658,7 @@ ENCERRAMENTO: Feche com tom de parceria — "estamos à disposição para aprese
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING id
       `, [
-        codInt, ficha.nome_fantasia || `Cliente ${cod_cliente}`, data_inicio, data_fim,
+        codInt, temCC ? `${nomeRelatorio}` : (mascara || ficha.nome_fantasia || `Cliente ${cod_cliente}`), data_inicio, data_fim,
         JSON.stringify(dadosAnalise), JSON.stringify(benchmark), analiseComGraficos,
         tipo, healthScore, JSON.stringify([]), JSON.stringify([]),
         req.user?.codProfissional, req.user?.nome, tokensUsados,
