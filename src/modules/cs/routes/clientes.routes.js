@@ -3,7 +3,7 @@
  * CRUD + métricas diretas do bi_entregas
  */
 const express = require('express');
-const { calcularHealthScore, determinarStatusCliente, STATUS_CLIENTE } = require('../cs.service');
+const { calcularHealthScore, determinarStatusCliente, STATUS_CLIENTE, getClienteConfig } = require('../cs.service');
 
 function createClientesRoutes(pool) {
   const router = express.Router();
@@ -353,7 +353,8 @@ function createClientesRoutes(pool) {
 
       // Calcular health score atualizado
       const metricas = metricasBi.rows[0];
-      const healthScore = calcularHealthScore(metricas);
+      const clienteConfig = getClienteConfig(cod);
+      const healthScore = calcularHealthScore(metricas, clienteConfig);
       const diasSemEntrega = metricas.dias_sem_entrega != null
         ? parseInt(metricas.dias_sem_entrega)
         : (metricas.ultima_entrega
