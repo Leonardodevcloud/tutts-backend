@@ -348,7 +348,7 @@ function createClientesRoutes(pool) {
 
       // Últimos raio-x
       const raioXHistorico = await pool.query(
-        `SELECT id, data_inicio, data_fim, score_saude, tipo_analise, created_at FROM cs_raio_x_historico WHERE cod_cliente = $1 ORDER BY created_at DESC LIMIT 5`, [cod]
+        `SELECT id, data_inicio, data_fim, score_saude, tipo_analise, nome_cliente, gerado_por_nome, created_at FROM cs_raio_x_historico WHERE cod_cliente = $1 ORDER BY created_at DESC LIMIT 10`, [cod]
       );
 
       // Calcular health score atualizado
