@@ -49,6 +49,9 @@ function notifyWithdrawalUpdate(withdrawal, action) {
     id: withdrawal.id,
     user_cod: withdrawal.user_cod,
     status: withdrawal.status,
+    admin_name: withdrawal.admin_name,
+    approved_at: withdrawal.approved_at,
+    reject_reason: withdrawal.reject_reason,
     action,
   });
   sendToUser(withdrawal.user_cod, 'MY_WITHDRAWAL_UPDATE', {
