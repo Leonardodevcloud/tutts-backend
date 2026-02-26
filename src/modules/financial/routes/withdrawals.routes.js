@@ -357,13 +357,25 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     
     const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
     
-    const query = `
-      SELECT * FROM withdrawal_requests
-      ${where}
-      ORDER BY created_at DESC
-      LIMIT $${paramIdx++} OFFSET $${paramIdx}
-    `;
-    params.push(limiteFiltro, offset);
+    // Com filtro de datas: sem LIMIT (retorna tudo do período)
+    // Sem filtro de datas: usa LIMIT para performance
+    let query;
+    if (dataInicio && dataFim) {
+      query = `
+        SELECT * FROM withdrawal_requests
+        ${where}
+        ORDER BY created_at DESC
+      `;
+      console.log(`📋 [withdrawals] Buscando todos os registros do período ${dataInicio} a ${dataFim}`);
+    } else {
+      query = `
+        SELECT * FROM withdrawal_requests
+        ${where}
+        ORDER BY created_at DESC
+        LIMIT $${paramIdx++} OFFSET $${paramIdx}
+      `;
+      params.push(limiteFiltro, offset);
+    }
 
     // Executar em paralelo: saques + mapa de restritos
     const [result, restrictedMap] = await Promise.all([
