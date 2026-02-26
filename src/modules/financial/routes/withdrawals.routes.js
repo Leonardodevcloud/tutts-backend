@@ -320,9 +320,9 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
   try {
     const { status, limit, dias, page, offset: offsetParam, dataInicio, dataFim, tipoFiltro } = req.query;
     
-    // ⚡ HARD LIMIT: máximo 500 para validação com datas, 200 padrão
-    const maxLimit = (dataInicio && dataFim) ? 500 : 200;
-    const limiteFiltro = Math.min(parseInt(limit) || maxLimit, maxLimit);
+    // Com filtro de data (validação/conciliação) retorna todos os registros do período sem cap
+    const maxLimit = (dataInicio && dataFim) ? 999999 : 200;
+    const limiteFiltro = parseInt(limit) ? Math.min(parseInt(limit), maxLimit) : (dataInicio && dataFim ? maxLimit : 200);
     const diasFiltro = parseInt(dias) || 90;
     const offset = parseInt(offsetParam) || ((parseInt(page) || 1) - 1) * limiteFiltro;
     
