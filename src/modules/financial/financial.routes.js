@@ -548,12 +548,15 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
 router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status, limit, dataInicio, dataFim, tipoFiltro } = req.query;
-    const limiteFiltro = Math.min(parseInt(limit) || 200, 500);
+    // Com filtro de data: sem limite (retorna tudo do período)
+    // Sem filtro de data: máximo 200 para performance
+    const comFiltroData = !!(dataInicio && dataFim);
+    const limiteFiltro = comFiltroData ? null : Math.min(parseInt(limit) || 200, 200);
     
     let query, params;
     
-    // Caso 1: Filtro por data (aba validação)
-    if (dataInicio && dataFim) {
+    // Caso 1: Filtro por data (aba validação) — SEM LIMIT
+    if (comFiltroData) {
       const coluna = tipoFiltro === 'lancamento' ? 'w.lancamento_at' 
                    : tipoFiltro === 'debito' ? 'w.debito_plific_at' 
                    : 'w.created_at';
@@ -567,9 +570,8 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
           LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
           WHERE w.status = $1 AND ${coluna} >= $2::date AND ${coluna} < ($3::date + INTERVAL '1 day')
           ORDER BY w.created_at DESC
-          LIMIT $4
         `;
-        params = [status, dataInicio, dataFim, limiteFiltro];
+        params = [status, dataInicio, dataFim];
       } else {
         query = `
           SELECT w.*, 
@@ -579,9 +581,8 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
           LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
           WHERE ${coluna} >= $1::date AND ${coluna} < ($2::date + INTERVAL '1 day')
           ORDER BY w.created_at DESC
-          LIMIT $3
         `;
-        params = [dataInicio, dataFim, limiteFiltro];
+        params = [dataInicio, dataFim];
       }
     }
     // Caso 2: Filtro por status (sem data)
@@ -612,9 +613,9 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
       params = [limiteFiltro];
     }
 
-    console.log('📋 Withdrawals query:', { status, dataInicio, dataFim, tipoFiltro, limiteFiltro });
+    console.log('📋 Withdrawals query:', { status, dataInicio, dataFim, tipoFiltro, limiteFiltro, comFiltroData });
     const result = await pool.query(query, params);
-    console.log('📋 Withdrawals retornados:', result.rows.length);
+    console.log(`📋 Withdrawals retornados: ${result.rows.length} (sem limit: ${comFiltroData})`);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
