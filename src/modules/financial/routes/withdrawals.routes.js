@@ -152,7 +152,7 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
 // Criar solicitação de saque
 router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, async (req, res) => {
   try {
-    const { userCod, userName, cpf, pixKey, requestedAmount } = req.body;
+    const { userCod, userName, cpf, pixKey, requestedAmount, selectedGratuityId } = req.body;
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
     if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
@@ -169,11 +169,28 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
     );
     const isRestricted = restricted.rows.length > 0;
 
-    // Verificar gratuidade ativa
-    const gratuity = await pool.query(
-      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
-      [userCod]
-    );
+    // Verificar gratuidade ativa — usa a selecionada pelo usuário se fornecida e válida
+    let gratuityQuery;
+    if (selectedGratuityId) {
+      // Validar que a gratuidade selecionada pertence ao usuário e está ativa
+      gratuityQuery = await pool.query(
+        "SELECT * FROM gratuities WHERE id = $1 AND user_cod = $2 AND status = 'ativa' AND remaining > 0",
+        [selectedGratuityId, userCod]
+      );
+      if (gratuityQuery.rows.length === 0) {
+        // Gratuidade inválida ou não pertence ao usuário — buscar a padrão
+        gratuityQuery = await pool.query(
+          "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
+          [userCod]
+        );
+      }
+    } else {
+      gratuityQuery = await pool.query(
+        "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
+        [userCod]
+      );
+    }
+    const gratuity = gratuityQuery;
     
     const hasGratuity = gratuity.rows.length > 0;
     let gratuityId = null;
@@ -468,71 +485,10 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       );
     }
 
-    // Se for aprovação, fazer débito automático na API Plific
-    let debitoRealizado = false;
-    if (isAprovado) {
-      try {
-        const valorDebito = parseFloat(dadosSaque.requested_amount);
-        const idProf = dadosSaque.user_cod;
-        
-        // Definir descrição baseado no tipo de aprovação
-        const descricaoDebito = status === 'aprovado_gratuidade' 
-          ? 'Saque Emergencial - Gratuito'
-          : 'Saque emergencial - Prestação de Serviços';
-        
-        const dataDebitoFormatada = dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0];
-        console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
-        
-        const urlDebito = `${helpers.PLIFIC_BASE_URL}/lancarDebitoProfissional`;
-        const responseDebito = await fetch(urlDebito, {
-          method: 'POST',
-          headers: { 
-            'Authorization': `Bearer ${helpers.PLIFIC_TOKEN}`, 
-            'Content-Type': 'application/json' 
-          },
-          body: JSON.stringify({
-            idProf: parseInt(idProf),
-            valor: valorDebito,
-            descricao: descricaoDebito,
-            data: dataDebitoFormatada
-          })
-        });
-        
-        const respostaDebito = await responseDebito.json();
-        
-        if (respostaDebito.status !== '200' && respostaDebito.status !== 200) {
-          console.error('❌ Erro ao debitar Plific:', respostaDebito);
-          // Remover lock e fazer rollback
-          await client.query('ROLLBACK');
-          client.release();
-          return res.status(400).json({ 
-            error: 'Erro ao debitar no Plific', 
-            details: respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito'
-          });
-        }
-        
-        debitoRealizado = true;
-        console.log(`✅ Débito Plific realizado com sucesso - Prof: ${idProf}`);
-        
-        // Limpar cache do profissional para atualizar saldo
-        const cacheKey = `saldo_${idProf}`;
-        helpers.plificSaldoCache.delete(cacheKey);
-        
-      } catch (erroDebito) {
-        console.error('❌ Exceção ao debitar Plific:', erroDebito);
-        await client.query('ROLLBACK');
-        client.release();
-        return res.status(500).json({ 
-          error: 'Erro ao processar débito', 
-          details: erroDebito.message 
-        });
-      }
-    }
-    
-    // =============== ATUALIZAR REGISTRO NO BANCO ===============
-    // Definir a data do débito na Plific (a que foi enviada ou NOW())
+    // =============== ATUALIZAR STATUS NO BANCO IMEDIATAMENTE ===============
+    // A chamada Plific roda em background — não bloqueia a resposta ao admin
     const debitoPlificAt = isAprovado ? (dataDebito || new Date().toISOString()) : null;
-    
+
     const result = await client.query(
       `UPDATE withdrawal_requests 
        SET status = $1, 
@@ -559,35 +515,83 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
           [idempotencyKey, id, JSON.stringify(result.rows[0])]
         );
       } catch (idempErr) {
-        // Não falhar se a tabela não existir ainda
         console.log('⚠️ Aviso: Não foi possível salvar idempotência:', idempErr.message);
       }
     }
 
-    // Commit da transação
+    // Commit da transação — status já salvo
     await client.query('COMMIT');
-    
-    // ⚡ Invalidar cache após mudança
+    client.release();
+
+    // ⚡ Invalidar cache
     invalidateCache();
 
-    // Registrar auditoria
     const saque = result.rows[0];
-    await registrarAuditoria(req, `WITHDRAWAL_${status.toUpperCase()}`, AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+
+    // ==================== RESPONDER IMEDIATAMENTE ====================
+    res.json(saque);
+
+    // Notificar via WebSocket (imediato, não espera Plific)
+    if (global.notifyWithdrawalUpdate) {
+      global.notifyWithdrawalUpdate(saque, status);
+    }
+
+    // Auditoria em background
+    registrarAuditoria(req, `WITHDRAWAL_${status.toUpperCase()}`, AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
       user_cod: saque.user_cod,
       valor: saque.requested_amount,
       admin: adminName,
       motivo_rejeicao: rejectReason,
-      debito_plific: debitoRealizado ? 'realizado' : null,
       idempotency_key: idempotencyKey
-    });
+    }).catch(err => console.error('❌ Erro auditoria:', err));
 
-    // ==================== NOTIFICAR VIA WEBSOCKET ====================
-    if (global.notifyWithdrawalUpdate) {
-      global.notifyWithdrawalUpdate(result.rows[0], status);
+    // ==================== PLIFIC EM BACKGROUND ====================
+    // Roda depois da resposta enviada — zero impacto no tempo de resposta
+    if (isAprovado) {
+      (async () => {
+        try {
+          const valorDebito = parseFloat(dadosSaque.requested_amount);
+          const idProf = dadosSaque.user_cod;
+          const descricaoDebito = status === 'aprovado_gratuidade'
+            ? 'Saque Emergencial - Gratuito'
+            : 'Saque emergencial - Prestação de Serviços';
+          const dataDebitoFormatada = dataDebito ? dataDebito.split('T')[0] : new Date().toISOString().split('T')[0];
+
+          console.log(`💳 [BG] Débito Plific - Prof: ${idProf}, Valor: ${valorDebito}, Data: ${dataDebitoFormatada}`);
+
+          const responseDebito = await fetch(`${helpers.PLIFIC_BASE_URL}/lancarDebitoProfissional`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${helpers.PLIFIC_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              idProf: parseInt(idProf),
+              valor: valorDebito,
+              descricao: descricaoDebito,
+              data: dataDebitoFormatada
+            })
+          });
+
+          const respostaDebito = await responseDebito.json();
+
+          if (respostaDebito.status !== '200' && respostaDebito.status !== 200) {
+            console.error(`❌ [BG] Falha Plific saque ${id}:`, respostaDebito);
+            // Registrar falha no banco para reprocessamento manual
+            await pool.query(
+              `UPDATE withdrawal_requests SET debito_plific_at = NULL WHERE id = $1`,
+              [id]
+            ).catch(e => console.error('❌ Erro ao registrar falha:', e));
+          } else {
+            console.log(`✅ [BG] Débito Plific OK - Prof: ${idProf}`);
+            helpers.plificSaldoCache.delete(`saldo_${idProf}`);
+          }
+        } catch (erroDebito) {
+          console.error(`❌ [BG] Exceção Plific saque ${id}:`, erroDebito.message);
+        }
+      })();
     }
 
-    res.json(result.rows[0]);
-    
   } catch (error) {
     try {
       await client.query('ROLLBACK');
@@ -595,9 +599,13 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       console.error('❌ Erro no rollback:', rollbackErr);
     }
     console.error('❌ Erro ao atualizar saque:', error);
-    res.status(500).json({ error: error.message });
+    // Só responde se ainda não respondeu
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
   } finally {
-    client.release();
+    // client.release() só se não foi liberado ainda
+    try { client.release(); } catch (_) {}
   }
 });
 
