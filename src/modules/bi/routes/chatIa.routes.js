@@ -113,11 +113,17 @@ function createChatIaRoutes(pool) {
     }
 
     // Verificar se referencia apenas tabelas permitidas
-    // (não é 100% preciso mas pega os casos óbvios)
+    // Excluir falsos positivos como EXTRACT(HOUR FROM data_hora), INTERVAL '1 day' FROM, etc
     const tabelasUsadas = upper.match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
       const tabela = match.replace(/^(FROM|JOIN)\s+/i, '').trim().toLowerCase();
-      if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'pg_class') {
+      // Ignorar nomes de colunas usados em EXTRACT(... FROM coluna)
+      const posMatch = upper.indexOf(match.toUpperCase());
+      const antes = upper.substring(Math.max(0, posMatch - 30), posMatch).trim();
+      const isExtract = /EXTRACT\s*\(\s*\w+\s*$/i.test(antes) || /\(\s*\w+\s*$/i.test(antes);
+      if (isExtract) continue; // É EXTRACT(HOUR FROM data_hora), não uma tabela
+      
+      if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'pg_class' && tabela !== 'generate_series') {
         return { valido: false, erro: `Tabela "${tabela}" não está autorizada para consulta.` };
       }
     }
@@ -128,7 +134,7 @@ function createChatIaRoutes(pool) {
   // ==================== ENDPOINT: Chat IA ====================
   router.post('/bi/chat-ia', async (req, res) => {
     try {
-      const { prompt, historico } = req.body;
+      const { prompt, historico, filtros } = req.body;
 
       if (!prompt || prompt.trim().length < 3) {
         return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
@@ -140,6 +146,32 @@ function createChatIaRoutes(pool) {
       }
 
       console.log(`🤖 [Chat IA] Prompt: "${prompt.substring(0, 100)}..."`);
+
+      // Extrair filtros do contexto da conversa
+      const codCliente = filtros?.cod_cliente || null;
+      const centroCusto = filtros?.centro_custo || null;
+      const dataInicio = filtros?.data_inicio || null;
+      const dataFim = filtros?.data_fim || null;
+      const nomeCliente = filtros?.nome_fantasia || null;
+
+      // Montar contexto de filtros para injetar no prompt
+      let contextoFiltros = '';
+      let filtroSQLObrigatorio = '';
+      
+      if (codCliente) {
+        contextoFiltros += `\n🔹 CLIENTE: ${nomeCliente || 'cod ' + codCliente} (cod_cliente = ${parseInt(codCliente)})`;
+        filtroSQLObrigatorio += ` AND cod_cliente = ${parseInt(codCliente)}`;
+      }
+      if (centroCusto) {
+        contextoFiltros += `\n🔹 CENTRO DE CUSTO: ${centroCusto}`;
+        filtroSQLObrigatorio += ` AND centro_custo = '${centroCusto.replace(/'/g, "''")}'`;
+      }
+      if (dataInicio && dataFim) {
+        contextoFiltros += `\n🔹 PERÍODO: ${dataInicio} até ${dataFim}`;
+        filtroSQLObrigatorio += ` AND data_solicitado BETWEEN '${dataInicio}' AND '${dataFim}'`;
+      }
+
+      console.log(`🤖 [Chat IA] Filtros: cliente=${codCliente}, cc=${centroCusto}, periodo=${dataInicio}-${dataFim}`);
 
       // 1. Buscar schema do banco
       const schema = await getSchema();
@@ -304,7 +336,16 @@ REGRAS OBRIGATÓRIAS:
 7. Para filtrar período, use: data_solicitado BETWEEN '2026-01-01' AND '2026-01-31'
 8. Use nome_fantasia para exibir nome do cliente
 9. Agrupe quando fizer sentido (por cliente, profissional, dia, cidade, etc)
-10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)`;
+10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)
+${contextoFiltros ? `
+═══════════════════════════════════════
+⚡ FILTROS ATIVOS DA CONVERSA (OBRIGATÓRIOS)
+═══════════════════════════════════════
+${contextoFiltros}
+
+REGRA: TODAS as queries SQL DEVEM incluir estes filtros:
+${filtroSQLObrigatorio}
+Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
 
       // Adicionar histórico se existir (turnos anteriores)
       if (historico && Array.isArray(historico) && historico.length > 0) {
@@ -484,6 +525,47 @@ REGRAS DA RESPOSTA:
     } catch (err) {
       console.error('❌ [Chat IA] Erro geral:', err);
       res.status(500).json({ error: 'Erro interno no Chat IA: ' + err.message });
+    }
+  });
+
+  // ==================== ENDPOINT: Listar filtros (clientes e centros de custo) ====================
+  router.get('/bi/chat-ia/filtros', async (req, res) => {
+    try {
+      const clientes = await pool.query(`
+        SELECT DISTINCT cod_cliente, nome_fantasia 
+        FROM bi_entregas 
+        WHERE cod_cliente IS NOT NULL AND nome_fantasia IS NOT NULL AND nome_fantasia != ''
+        ORDER BY nome_fantasia
+      `);
+
+      const centrosCusto = await pool.query(`
+        SELECT DISTINCT centro_custo 
+        FROM bi_entregas 
+        WHERE centro_custo IS NOT NULL AND centro_custo != ''
+        ORDER BY centro_custo
+      `);
+
+      // Se recebeu cod_cliente, retornar centros de custo desse cliente
+      const codCliente = req.query.cod_cliente;
+      let centrosDoCliente = [];
+      if (codCliente) {
+        const result = await pool.query(`
+          SELECT DISTINCT centro_custo 
+          FROM bi_entregas 
+          WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
+          ORDER BY centro_custo
+        `, [parseInt(codCliente)]);
+        centrosDoCliente = result.rows.map(r => r.centro_custo);
+      }
+
+      res.json({
+        clientes: clientes.rows,
+        centros_custo: centrosCusto.rows.map(r => r.centro_custo),
+        centros_do_cliente: centrosDoCliente
+      });
+    } catch (err) {
+      console.error('❌ Erro ao buscar filtros:', err);
+      res.status(500).json({ error: err.message });
     }
   });
 
