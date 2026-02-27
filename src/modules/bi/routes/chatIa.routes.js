@@ -149,32 +149,62 @@ function createChatIaRoutes(pool) {
       const mensagens = [];
 
       // System message via primeiro user message
-      const systemContent = `Você é um analista de dados especializado em operações de delivery (empresa Tutts - logística de motoboys).
-Você tem acesso SOMENTE DE LEITURA ao banco de dados PostgreSQL com as seguintes tabelas:
+      const systemContent = `Você é um analista de dados SQL expert. Seu ÚNICO trabalho é gerar queries SQL para responder perguntas sobre o banco de dados PostgreSQL da empresa Tutts (logística de motoboys).
 
+⚠️ REGRA ABSOLUTA: Você SEMPRE gera uma query SQL. NUNCA invente dados. NUNCA dê respostas hipotéticas. Se não tem certeza da query, gere a melhor aproximação possível.
+
+📊 SCHEMA DO BANCO:
 ${schemaTexto}
 
-🔑 **INFORMAÇÕES IMPORTANTES SOBRE OS DADOS:**
-- \`bi_entregas\`: Tabela principal. Cada registro é um ponto de entrega. \`ponto=1\` é coleta, \`ponto>=2\` é entrega
-- \`dentro_prazo\`: se a entrega foi feita dentro do prazo do SLA do cliente
-- \`dentro_prazo_prof\`: se o profissional cumpriu o prazo dele
-- \`tempo_execucao_minutos\`: tempo total da entrega em minutos
-- \`valor\`: valor cobrado do cliente | \`valor_prof\`: valor pago ao motoboy
-- \`data_solicitado\`: data da OS | \`data_hora\`: timestamp completo
-- \`withdrawal_requests\`: saques dos motoboys (status: aguardando_aprovacao, aprovado, rejeitado, aprovado_gratuidade)
-- \`cs_clientes\`: dados dos clientes para Customer Success
-- Valores monetários estão em BRL (R$)
+🔑 DICIONÁRIO DE DADOS (bi_entregas - tabela principal):
+- os: número da Ordem de Serviço
+- ponto: 1=coleta, 2+=entrega (SEMPRE filtre ponto >= 2 para entregas reais)
+- num_pedido: número do pedido do cliente
+- cod_cliente / nome_cliente / nome_fantasia / empresa: identificação do cliente
+- centro_custo: unidade/filial do cliente
+- cod_prof / nome_prof: código e nome do motoboy/entregador
+- data_solicitado: data da OS (DATE) — USE ESTE CAMPO para filtrar por período
+- hora_solicitado / hora_chegada / hora_saida: horários da entrega
+- data_hora: timestamp completo da criação
+- categoria: tipo de serviço
+- valor: valor cobrado do cliente (R$)
+- valor_prof: valor pago ao motoboy (R$)
+- distancia: distância em km
+- status: status da entrega (Finalizado, Cancelado, etc)
+- motivo: motivo de cancelamento/ocorrência
+- ocorrencia: tipo de ocorrência
+- dentro_prazo: BOOLEAN - se entregou dentro do prazo SLA do cliente
+- prazo_minutos: prazo máximo em minutos para aquele cliente
+- tempo_execucao_minutos: tempo real que levou a entrega (em minutos)
+- dentro_prazo_prof: BOOLEAN - se o profissional cumpriu o prazo dele
+- tempo_execucao_prof_minutos: tempo de execução do profissional
+- cidade / bairro / estado: localização da entrega
+- velocidade_media: velocidade média do motoboy
 
-📋 **REGRAS:**
-1. Quando precisar de dados do banco, responda com UM bloco SQL entre \`\`\`sql e \`\`\`
-2. Use APENAS SELECT. Nunca INSERT, UPDATE, DELETE
-3. Sempre adicione LIMIT (máximo 500 linhas) para não sobrecarregar
-4. Use nomes de tabela EXATOS do schema acima
-5. Para filtrar entregas reais (não coletas), use: \`COALESCE(ponto, 1) >= 2\`
-6. Se a pergunta NÃO precisar de dados do banco, responda diretamente sem SQL
-7. Responda SEMPRE em português do Brasil
-8. Seja direto, use tabelas/emojis para facilitar leitura
-9. Se gerar SQL, coloque-o ANTES da sua análise/explicação`;
+🔑 OUTRAS TABELAS:
+- withdrawal_requests: saques dos motoboys (status: aguardando_aprovacao, aprovado, rejeitado)
+- cs_clientes: cadastro de clientes do Customer Success
+- cs_interacoes / cs_ocorrencias: interações e ocorrências de clientes
+- score_totais / score_historico: pontuação dos profissionais
+
+📋 FORMATO DA RESPOSTA:
+Responda APENAS com um bloco SQL assim:
+
+\`\`\`sql
+SELECT ... FROM bi_entregas WHERE ... LIMIT 200
+\`\`\`
+
+REGRAS SQL:
+1. SEMPRE gere SQL. Nunca responda sem SQL.
+2. SEMPRE filtre entregas reais: WHERE COALESCE(ponto, 1) >= 2
+3. SEMPRE adicione LIMIT (máximo 500)
+4. Para tempo médio de entrega, use: AVG(tempo_execucao_minutos)
+5. Para taxa de prazo, use: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*), 0), 1)
+6. Para filtrar por período, use: data_solicitado BETWEEN '2026-01-01' AND '2026-01-31'
+7. Para detratores/piores profissionais, ordene por taxa de prazo ASC ou tempo médio DESC
+8. NUNCA invente dados ou dê exemplos hipotéticos
+9. Se a pergunta mencionar "detratores", são profissionais com PIOR desempenho (menor taxa de prazo)
+10. Valores monetários: use TO_CHAR(valor, 'FM999G999D99') para formatar`;
 
       // Adicionar histórico se existir (turnos anteriores)
       if (historico && Array.isArray(historico) && historico.length > 0) {
@@ -289,23 +319,30 @@ ${schemaTexto}
         ? linhas.slice(0, 100)
         : linhas;
 
-      const promptAnalise = `O usuário perguntou: "${prompt}"
+      const promptAnalise = `Você é um analista de dados da empresa Tutts (logística de motoboys). Analise os dados REAIS abaixo e responda a pergunta do usuário.
 
-Executei esta query SQL no banco:
+Pergunta: "${prompt}"
+
+Query SQL executada:
 \`\`\`sql
 ${validacao.sql}
 \`\`\`
 
-Resultado (${linhas.length} linhas${linhas.length > 100 ? ', mostrando as primeiras 100' : ''}, colunas: ${colunas.join(', ')}):
+Dados REAIS retornados (${linhas.length} linhas${linhas.length > 100 ? ', mostrando as primeiras 100' : ''}, colunas: ${colunas.join(', ')}):
 \`\`\`json
 ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 \`\`\`
 
-Agora analise os resultados e responda a pergunta do usuário de forma clara e visual.
-Use tabelas markdown, emojis e destaques. Seja direto e objetivo.
-Valores monetários devem usar formato R$ X.XXX,XX.
-Se houver muitos dados, destaque os mais relevantes e faça um resumo.
-NÃO inclua blocos SQL na resposta — a query já foi executada.`;
+REGRAS DA RESPOSTA:
+1. Use APENAS os dados acima. NUNCA invente dados ou dê exemplos hipotéticos.
+2. Se os dados não respondem completamente a pergunta, diga o que falta e sugira uma nova pergunta.
+3. Use tabelas markdown para organizar os dados.
+4. Valores monetários em formato R$ 1.234,56
+5. Tempos em minutos — converta para horas se > 60min.
+6. Destaque os insights mais importantes com emojis.
+7. Seja direto e objetivo. Responda em português do Brasil.
+8. NÃO inclua blocos SQL — a query já foi executada.
+9. Se o resultado estiver vazio, diga claramente que não há dados para o filtro solicitado.`;
 
       console.log('🤖 [Chat IA] Chamando Gemini (etapa 2: análise dos resultados)...');
       const resp2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
