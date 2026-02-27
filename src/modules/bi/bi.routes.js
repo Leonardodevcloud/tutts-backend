@@ -16,6 +16,7 @@ const { createDadosRoutes } = require('./routes/dados.routes');
 const { createGarantidoRoutes } = require('./routes/garantido.routes');
 const { createRegioesRoutes } = require('./routes/regioes.routes');
 const { createAnalyticsRoutes } = require('./routes/analytics.routes');
+const { createChatIaRoutes } = require('./routes/chatIa.routes');
 
 function createBiRouter(pool, verificarToken) {
   const router = express.Router();
@@ -40,6 +41,7 @@ function createBiRouter(pool, verificarToken) {
   router.use(createGarantidoRoutes(pool));
   router.use(createRegioesRoutes(pool));
   router.use(createAnalyticsRoutes(pool));
+  router.use(createChatIaRoutes(pool));
 
   return router;
 }

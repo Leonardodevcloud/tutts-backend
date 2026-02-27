@@ -17,10 +17,10 @@ router.get('/bi/relatorio-ia', async (req, res) => {
     
     console.log(`🤖 Gerando relatório IA: tipos=${tipos.join(', ')}, período=${data_inicio} a ${data_fim}`);
     
-    // Verificar se tem API key do Gemini
-    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    if (!GEMINI_API_KEY) {
-      return res.status(400).json({ error: 'API Key do Gemini não configurada. Adicione GEMINI_API_KEY nas variáveis de ambiente.' });
+    // Verificar se tem API key do Claude (Anthropic)
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: 'API Key do Claude não configurada. Adicione ANTHROPIC_API_KEY nas variáveis de ambiente.' });
     }
     
     // Construir filtro WHERE
@@ -547,32 +547,34 @@ ${promptsCombinados}
 - Para status use ✅❌⚠️🔴🟡🟢
 ${tipos.length > 1 ? '- Faça TODAS as análises solicitadas, separadas por seção' : ''}`;
 
-    console.log('🤖 Chamando API Gemini...');
+    console.log('🤖 Chamando API Claude (Anthropic)...');
     
-    // Chamar API do Gemini - aumentar tokens para múltiplas análises
+    // Chamar API do Claude - aumentar tokens para múltiplas análises
     const maxTokens = tipos.length > 1 ? 4096 : 2048;
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+    const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: promptCompleto }] }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: maxTokens
-        }
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: promptCompleto }]
       })
     });
     
-    const geminiData = await geminiResponse.json();
+    const claudeData = await claudeResponse.json();
     
-    if (geminiData.error) {
-      console.error('❌ Erro Gemini:', geminiData.error);
-      return res.status(500).json({ error: 'Erro na API Gemini' });
+    if (claudeData.error) {
+      console.error('❌ Erro Claude:', claudeData.error);
+      return res.status(500).json({ error: `Erro na API Claude: ${claudeData.error.message}` });
     }
     
-    const relatorio = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível gerar o relatório.';
+    const relatorio = claudeData.content?.[0]?.text || 'Não foi possível gerar o relatório.';
     
-    console.log('✅ Relatório IA gerado com sucesso');
+    console.log('✅ Relatório IA gerado com sucesso (Claude)');
     
     // Buscar nome do cliente se filtrado
     let clienteInfo = null;
