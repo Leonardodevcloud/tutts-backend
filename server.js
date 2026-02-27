@@ -222,7 +222,7 @@ app.get('/api/financeiro/init', verificarToken, async (req, res) => {
 });
 
 // ⚡⚡⚡ OVERRIDES DEFINITIVOS — registrados ANTES dos módulos para garantir prioridade
-// /api/withdrawals — HARD LIMIT 200, CACHE 30s, ZERO LEFT JOIN
+// /api/withdrawals — CACHE 30s | Com filtro de data: SEM LIMIT | Sem filtro: LIMIT 500
 let _wCache = { data: null, ts: 0, key: '' };
 app.get('/api/withdrawals', verificarToken, async (req, res) => {
   try {
@@ -235,7 +235,10 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
     const dataFim = req.query.dataFim || '';
     const tipoFiltro = req.query.tipoFiltro || 'solicitacao';
     const userCod = req.query.userCod || '';
-    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
+    // Com filtro de data (validação/conciliação): sem cap — retorna tudo do período
+    // Sem filtro de data: máximo 500 para performance
+    const comFiltroData = !!(dataInicio && dataFim);
+    const limit = comFiltroData ? null : Math.min(parseInt(req.query.limit) || 200, 500);
     const offset = parseInt(req.query.offset) || 0;
     const ck = `${status}-${limit}-${offset}-${dataInicio}-${dataFim}-${tipoFiltro}-${userCod}`;
     if (_wCache.key === ck && _wCache.data && Date.now() - _wCache.ts < 30000) return res.json(_wCache.data);
@@ -245,17 +248,17 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
     // Filtro por user_cod (aba resumo)
     if (userCod) {
       query = `SELECT * FROM withdrawal_requests WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC LIMIT $2`;
-      params = [userCod, limit];
+      params = [userCod, Math.min(parseInt(req.query.limit) || 500, 500)];
     }
-    // Filtro por data (aba validação/conciliação)
-    else if (dataInicio && dataFim) {
+    // Filtro por data (aba validação/conciliação) — SEM LIMIT, retorna tudo do período
+    else if (comFiltroData) {
       const col = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
       if (status) {
-        query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${col} >= $2::date AND ${col} < $3::date + interval '1 day' ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
-        params = [status, dataInicio, dataFim, limit, offset];
+        query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${col} >= $2::date AND ${col} < $3::date + interval '1 day' ORDER BY created_at DESC`;
+        params = [status, dataInicio, dataFim];
       } else {
-        query = `SELECT * FROM withdrawal_requests WHERE ${col} >= $1::date AND ${col} < $2::date + interval '1 day' ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
-        params = [dataInicio, dataFim, limit, offset];
+        query = `SELECT * FROM withdrawal_requests WHERE ${col} >= $1::date AND ${col} < $2::date + interval '1 day' ORDER BY created_at DESC`;
+        params = [dataInicio, dataFim];
       }
     } else if (status) {
       query = `SELECT * FROM withdrawal_requests WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
@@ -272,7 +275,7 @@ app.get('/api/withdrawals', verificarToken, async (req, res) => {
     const rm = {}; for (const r of rRes.rows) rm[r.user_cod] = r.reason;
     const enriched = result.rows.map(w => ({ ...w, is_restricted: !!rm[w.user_cod], restriction_reason: rm[w.user_cod] || null }));
     _wCache = { data: enriched, ts: Date.now(), key: ck };
-    console.log(`⚡ /withdrawals: ${enriched.length} regs (limit=${limit}, dataInicio=${dataInicio}, dataFim=${dataFim})`);
+    console.log(`⚡ /withdrawals: ${enriched.length} regs (limit=${limit}, semLimit=${comFiltroData}, dataInicio=${dataInicio}, dataFim=${dataFim})`);
     res.json(enriched);
   } catch (error) {
     console.error('❌ Erro /withdrawals:', error.message);
