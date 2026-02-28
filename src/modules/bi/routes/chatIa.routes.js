@@ -389,10 +389,7 @@ GROUP BY dia_semana, dow ORDER BY dow
 
 3. Sempre use COALESCE(ponto, 1) >= 2 (com COALESCE pois ponto pode ser NULL).
 
-4. NUNCA gere duas queries separadas por ";". Use UNION ALL para combinar resultados:
-   SELECT 'faixa_km' AS tipo, faixa_km AS item, total, taxa_prazo FROM (...) 
-   UNION ALL 
-   SELECT 'horario' AS tipo, hora::text AS item, total, taxa_prazo FROM (...)
+4. Para perguntas com múltiplas partes, gere blocos de código SQL separados. O sistema executa todos automaticamente.
 
 REGRAS OBRIGATÓRIAS:
 1. SEMPRE gere SQL executável. NUNCA responda sem SQL. NUNCA sugira SQL — GERE diretamente.
@@ -405,10 +402,9 @@ REGRAS OBRIGATÓRIAS:
 8. Use nome_fantasia para exibir nome do cliente
 9. Agrupe quando fizer sentido (por cliente, profissional, dia, cidade, etc)
 10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)
-11. Se a pergunta tiver DUAS partes, gere UMA ÚNICA query que responda AMBAS (use subqueries, UNION ALL, ou múltiplas agregações). NUNCA gere duas queries separadas por ponto-e-vírgula.
-12. Gere APENAS UMA query. NUNCA separe com ";". Se não conseguir responder tudo em uma query, responda a parte principal.
-13. Quando a pergunta pedir MÚLTIPLAS análises (ex: "faixa de km E horário de pico"), prefira trazer DADOS COMPLETOS em vez de apenas 1 resultado. Use UNION ALL com uma coluna 'tipo' para separar os resultados:
-   SELECT 'faixa_km' AS analise, faixa_km AS detalhe, total::text AS valor FROM (...) UNION ALL SELECT 'horario_pico' AS analise, hora::text, total::text FROM (...) LIMIT 50
+11. Se a pergunta tiver DUAS ou mais partes, gere uma query para CADA parte em blocos SQL separados. O sistema executa todas automaticamente.
+12. PREFIRA gerar UMA query com UNION ALL se possível. Mas se for complexo, pode gerar blocos separados.
+13. Quando a pergunta pedir MÚLTIPLAS análises (ex: "faixa de km E horário de pico"), gere dados completos para CADA análise.
 14. SEMPRE traga dados suficientes para uma análise rica. Em vez de LIMIT 1 (só o top), traga LIMIT 10-20 para contexto completo.
 ${contextoFiltros ? `
 ═══════════════════════════════════════
@@ -473,22 +469,36 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
       const resposta1 = data1.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`🤖 [Chat IA] Resposta etapa 1: ${resposta1.substring(0, 200)}...`);
 
-      // 4. Verificar se há SQL na resposta
-      let sqlMatch = resposta1.match(/```sql\n?([\s\S]*?)\n?```/);
+      // 4. Extrair TODAS as queries SQL da resposta
+      const allSqlBlocks = [];
+      const sqlBlockRegex = /```sql\n?([\s\S]*?)\n?```/g;
+      let match;
+      while ((match = sqlBlockRegex.exec(resposta1)) !== null) {
+        allSqlBlocks.push(match[1].trim());
+      }
 
-      // Fallback: se não veio no formato ```sql```, tentar extrair SELECT/WITH direto do texto
-      if (!sqlMatch) {
+      // Fallback: se não veio em blocos ```sql```, tentar extrair SELECT/WITH direto
+      if (allSqlBlocks.length === 0) {
         const selectMatch = resposta1.match(/((?:WITH|SELECT)[\s\S]*?;)\s*$/im) || 
                            resposta1.match(/((?:WITH|SELECT)[\s\S]*?LIMIT\s+\d+)/im);
         if (selectMatch) {
           console.log('🔄 [Chat IA] SQL encontrado sem bloco de código, extraindo...');
-          sqlMatch = [null, selectMatch[1].trim()];
+          allSqlBlocks.push(selectMatch[1].trim());
         }
       }
 
-      if (!sqlMatch) {
-        // Sem SQL — tentar re-gerar forçando SQL
-        console.log('⚠️ [Chat IA] Gemini não gerou SQL, retornando resposta com aviso');
+      // Se um bloco contém múltiplas queries separadas por ;, splitá-las
+      const queriesParaExecutar = [];
+      for (const bloco of allSqlBlocks) {
+        const partes = bloco.split(/;\s*/).filter(q => {
+          const t = q.trim().toUpperCase();
+          return t.startsWith('SELECT') || t.startsWith('WITH');
+        });
+        queriesParaExecutar.push(...partes.map(q => q.trim()));
+      }
+
+      if (queriesParaExecutar.length === 0) {
+        console.log('⚠️ [Chat IA] Gemini não gerou SQL');
         return res.json({
           success: true,
           resposta: '⚠️ Não foi possível gerar uma consulta SQL para essa pergunta. Tente reformular de forma mais específica.\n\nExemplos:\n- "Quantas entregas foram feitas em janeiro?"\n- "Qual o top 10 motoboys por taxa de prazo?"\n- "Qual o horário com mais entregas?"',
@@ -497,93 +507,84 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
         });
       }
 
-      // 5. Extrair e validar SQL
-      const sqlBruto = sqlMatch[1].trim();
-      const validacao = validarSQL(sqlBruto);
+      console.log(`🤖 [Chat IA] ${queriesParaExecutar.length} query(ies) extraída(s)`);
 
-      if (!validacao.valido) {
-        console.error('❌ [Chat IA] SQL bloqueado:', validacao.erro);
+      // 5. Validar e executar CADA query
+      const todosResultados = [];
+      const todasColunas = new Set();
+      const sqlsExecutadas = [];
+
+      // Helper: executar uma query com retry
+      async function executarComRetry(sql, tentativa = 1) {
+        const validacao = validarSQL(sql);
+        if (!validacao.valido) {
+          console.error(`❌ [Chat IA] SQL bloqueado: ${validacao.erro}`);
+          return null;
+        }
+
+        try {
+          await pool.query('SET statement_timeout = 15000');
+          const result = await pool.query(validacao.sql);
+          await pool.query('SET statement_timeout = 0');
+          return { result, sql: validacao.sql };
+        } catch (sqlError) {
+          await pool.query('SET statement_timeout = 0').catch(() => {});
+          console.error(`❌ [Chat IA] Erro SQL (tentativa ${tentativa}):`, sqlError.message);
+
+          if (tentativa >= 2) return null;
+
+          // Retry: pedir ao Gemini para corrigir
+          try {
+            console.log('🔄 [Chat IA] Auto-correção via Gemini...');
+            const retryResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: `A query SQL abaixo deu erro no PostgreSQL. Corrija e retorne APENAS o SQL corrigido em um bloco \`\`\`sql\`\`\`.\n\nERRO: ${sqlError.message}\n\nSQL COM ERRO:\n\`\`\`sql\n${validacao.sql}\n\`\`\`\n\nREGRAS:\n- Retorne APENAS o bloco SQL corrigido.\n- Se o erro for GROUP BY, repita a expressão completa no GROUP BY.\n- NUNCA use strftime (PostgreSQL usa EXTRACT ou TO_CHAR).\n- Mantenha WHERE COALESCE(ponto, 1) >= 2 e LIMIT.` }] }],
+                generationConfig: { temperature: 0.1, maxOutputTokens: 2000 }
+              })
+            });
+            const retryData = await retryResp.json();
+            const retryText = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const retrySqlMatch = retryText.match(/```sql\n?([\s\S]*?)\n?```/);
+            if (retrySqlMatch) {
+              return await executarComRetry(retrySqlMatch[1].trim(), 2);
+            }
+          } catch (retryError) {
+            console.error('❌ [Chat IA] Retry falhou:', retryError.message);
+          }
+          return null;
+        }
+      }
+
+      // Executar todas as queries (em paralelo se > 1)
+      for (let i = 0; i < queriesParaExecutar.length; i++) {
+        const resultado = await executarComRetry(queriesParaExecutar[i]);
+        if (resultado) {
+          // Adicionar marcador de qual query veio o resultado
+          const queryLabel = queriesParaExecutar.length > 1 ? `query_${i + 1}` : null;
+          resultado.result.rows.forEach(row => {
+            if (queryLabel) row._query = queryLabel;
+            todosResultados.push(row);
+          });
+          resultado.result.fields?.forEach(f => todasColunas.add(f.name));
+          sqlsExecutadas.push(resultado.sql);
+        }
+      }
+
+      if (todosResultados.length === 0 && sqlsExecutadas.length === 0) {
         return res.json({
           success: true,
-          resposta: `⚠️ A query gerada foi bloqueada por segurança: ${validacao.erro}\n\nPor favor, reformule sua pergunta.`,
-          sql: sqlBruto,
-          dados: null,
-          bloqueado: true
+          resposta: '⚠️ Erro ao executar as queries. Tente reformular sua pergunta.',
+          sql: queriesParaExecutar.join(';\n\n'),
+          dados: null
         });
       }
 
-      // 6. Executar SQL com timeout de 15s
-      console.log(`🔍 [Chat IA] Executando SQL: ${validacao.sql.substring(0, 200)}...`);
-      let queryResult;
-      let sqlFinal = validacao.sql;
-      try {
-        await pool.query('SET statement_timeout = 15000');
-        queryResult = await pool.query(sqlFinal);
-        await pool.query('SET statement_timeout = 0');
-      } catch (sqlError) {
-        await pool.query('SET statement_timeout = 0').catch(() => {});
-        console.error('❌ [Chat IA] Erro SQL (tentativa 1):', sqlError.message);
-
-        // RETRY: Enviar erro para Gemini corrigir
-        try {
-          console.log('🔄 [Chat IA] Tentando auto-correção via Gemini...');
-          const retryResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: `A query SQL abaixo deu erro no PostgreSQL. Corrija e retorne APENAS o SQL corrigido em um bloco \`\`\`sql\`\`\`.
-
-ERRO: ${sqlError.message}
-
-SQL COM ERRO:
-\`\`\`sql
-${sqlFinal}
-\`\`\`
-
-REGRAS:
-- Retorne APENAS o bloco SQL corrigido. NADA MAIS.
-- Se o erro for de GROUP BY, repita a expressão completa no GROUP BY (não use alias).
-- Se o erro for coluna inexistente, use a coluna correta conforme o schema.
-- NUNCA use strftime (PostgreSQL usa EXTRACT ou TO_CHAR).
-- Mantenha WHERE COALESCE(ponto, 1) >= 2 e LIMIT.` }] }],
-              generationConfig: { temperature: 0.1, maxOutputTokens: 2000 }
-            })
-          });
-          const retryData = await retryResp.json();
-          const retryText = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          const retrySqlMatch = retryText.match(/```sql\n?([\s\S]*?)\n?```/);
-          
-          if (retrySqlMatch) {
-            const retryValidation = validarSQL(retrySqlMatch[1].trim());
-            if (retryValidation.valido) {
-              sqlFinal = retryValidation.sql;
-              console.log(`🔄 [Chat IA] SQL corrigido, re-executando: ${sqlFinal.substring(0, 200)}...`);
-              await pool.query('SET statement_timeout = 15000');
-              queryResult = await pool.query(sqlFinal);
-              await pool.query('SET statement_timeout = 0');
-              console.log(`✅ [Chat IA] Retry bem sucedido! ${queryResult.rows.length} linhas`);
-            }
-          }
-        } catch (retryError) {
-          await pool.query('SET statement_timeout = 0').catch(() => {});
-          console.error('❌ [Chat IA] Retry falhou:', retryError.message);
-        }
-
-        // Se retry não funcionou, retornar erro
-        if (!queryResult) {
-          return res.json({
-            success: true,
-            resposta: `⚠️ Erro ao executar a query:\n\`\`\`\n${sqlError.message}\n\`\`\`\n\nSQL tentada:\n\`\`\`sql\n${sqlFinal}\n\`\`\`\n\nTente reformular sua pergunta ou ser mais específico.`,
-            sql: sqlFinal,
-            dados: null,
-            erro_sql: sqlError.message
-          });
-        }
-      }
-
-      const linhas = queryResult.rows;
-      const colunas = queryResult.fields?.map(f => f.name) || [];
-      console.log(`✅ [Chat IA] Query retornou ${linhas.length} linhas, ${colunas.length} colunas`);
+      const linhas = todosResultados;
+      const colunas = [...todasColunas];
+      const sqlFinal = sqlsExecutadas.join(';\n\n');
+      console.log(`✅ [Chat IA] ${sqlsExecutadas.length} query(ies) executada(s), ${linhas.length} linhas total, ${colunas.length} colunas`);
 
       // 7. Enviar resultados para Gemini analisar
       // Limitar dados para não estourar o contexto
