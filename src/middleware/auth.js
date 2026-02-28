@@ -28,8 +28,19 @@ function extractToken(req) {
   return null;
 }
 
+// Rotas públicas que não precisam de autenticação
+const PUBLIC_PATHS = [
+  '/cs/mapa-calor/',
+];
+
 // Verificar token JWT (obrigatório)
 const verificarToken = (req, res, next) => {
+  // Bypass para rotas públicas (ex: mapa de calor CS)
+  if (PUBLIC_PATHS.some(p => (req.originalUrl || '').includes(p))) {
+    req.user = req.user || { nome: 'Acesso Público', role: 'viewer' };
+    return next();
+  }
+
   const token = extractToken(req);
 
   if (!token) {
