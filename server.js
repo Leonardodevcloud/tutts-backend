@@ -54,6 +54,7 @@ const { initBiRoutes, initBiTables } = require('./src/modules/bi');
 const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 const { initCsRoutes, initCsTables } = require('./src/modules/cs');
+const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -353,6 +354,7 @@ app.use('/api', initMiscRoutes(pool, verificarToken));
 // Sucesso do Cliente (CS) — acesso admin/gestores
 // (mapa-calor é público via PUBLIC_PATHS em auth.js)
 app.use('/api', verificarToken, initCsRoutes(pool, verificarToken, verificarAdmin));
+app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
@@ -378,6 +380,7 @@ async function initDatabase() {
     try { await initScoreTables(pool); } catch (e) { console.error('⚠️ Score tables error:', e.message); }
     try { await initAuditTables(pool); } catch (e) { console.error('⚠️ Audit tables error:', e.message); }
     try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
+    try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -403,6 +406,7 @@ initDatabase().then(() => {
 
     // Cron jobs
     initTodoCron(pool);
+    startAgentWorker(pool);
     // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
     if (process.env.WORKER_ENABLED === 'true') {
       console.log('⏰ Crons desativados no server (rodando no worker separado)');
