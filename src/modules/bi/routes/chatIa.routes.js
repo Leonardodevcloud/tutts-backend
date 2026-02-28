@@ -106,10 +106,16 @@ function createChatIaRoutes(pool) {
       return { valido: false, erro: 'Apenas queries SELECT ou WITH (CTE) são permitidas.' };
     }
 
-    // Bloquear múltiplas queries
+    // Se houver múltiplas queries, pegar apenas a primeira
     const semStrings = sqlLimpo.replace(/'[^']*'/g, '');
     if ((semStrings.match(/;/g) || []).length > 1) {
-      return { valido: false, erro: 'Apenas uma query por vez é permitida.' };
+      // Separar por ; e pegar a primeira query válida
+      const queries = sqlLimpo.split(/;\s*/).filter(q => q.trim().length > 0);
+      if (queries.length > 0) {
+        console.log(`⚠️ [Chat IA] Múltiplas queries detectadas (${queries.length}), usando apenas a primeira`);
+        sqlLimpo = queries[0].trim();
+        upper = sqlLimpo.toUpperCase();
+      }
     }
 
     // Verificar se referencia apenas tabelas permitidas
@@ -383,6 +389,11 @@ GROUP BY dia_semana, dow ORDER BY dow
 
 3. Sempre use COALESCE(ponto, 1) >= 2 (com COALESCE pois ponto pode ser NULL).
 
+4. NUNCA gere duas queries separadas por ";". Use UNION ALL para combinar resultados:
+   SELECT 'faixa_km' AS tipo, faixa_km AS item, total, taxa_prazo FROM (...) 
+   UNION ALL 
+   SELECT 'horario' AS tipo, hora::text AS item, total, taxa_prazo FROM (...)
+
 REGRAS OBRIGATÓRIAS:
 1. SEMPRE gere SQL executável. NUNCA responda sem SQL. NUNCA sugira SQL — GERE diretamente.
 2. SEMPRE filtre apenas entregas (não coletas): WHERE COALESCE(ponto, 1) >= 2
@@ -394,7 +405,8 @@ REGRAS OBRIGATÓRIAS:
 8. Use nome_fantasia para exibir nome do cliente
 9. Agrupe quando fizer sentido (por cliente, profissional, dia, cidade, etc)
 10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)
-11. Se a pergunta tiver DUAS partes, gere UMA query que responda AMBAS (use subqueries ou UNION)
+11. Se a pergunta tiver DUAS partes, gere UMA ÚNICA query que responda AMBAS (use subqueries, UNION ALL, ou múltiplas agregações). NUNCA gere duas queries separadas por ponto-e-vírgula.
+12. Gere APENAS UMA query. NUNCA separe com ";". Se não conseguir responder tudo em uma query, responda a parte principal.
 ${contextoFiltros ? `
 ═══════════════════════════════════════
 ⚡ FILTROS ATIVOS DA CONVERSA (OBRIGATÓRIOS)
