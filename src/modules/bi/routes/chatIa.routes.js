@@ -738,6 +738,45 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 - Quando identificar problema, seja claro e propositivo (foque em solução).
 - Use linguagem de parceria: "observamos", "identificamos", "recomendamos".
 
+## 📊 GRÁFICOS (QUANDO USAR)
+Quando os dados se beneficiarem de visualização, inclua UM ou MAIS blocos de gráfico usando este formato EXATO:
+
+[CHART]
+{"type":"bar","title":"Título do gráfico","labels":["Label1","Label2","Label3"],"datasets":[{"label":"Nome da série","data":[10,20,30],"color":"#10b981"}]}
+[/CHART]
+
+TIPOS DISPONÍVEIS:
+- "bar" → comparações (ranking de clientes, profissionais, faixas)
+- "horizontalBar" → rankings com nomes longos (top motoboys, clientes)
+- "line" → evolução temporal (por dia, semana, mês)
+- "pie" → distribuição/proporção (% dentro/fora prazo, motivos de retorno)
+- "doughnut" → similar a pie, para 2-4 categorias
+
+CORES PADRÃO TUTTS:
+- Verde: "#10b981" (dentro do prazo, bom)
+- Vermelho: "#ef4444" (fora do prazo, crítico)
+- Amarelo: "#f59e0b" (atenção)
+- Azul: "#3b82f6" (neutro/informativo)
+- Roxo: "#8b5cf6" (anomalia)
+- Cinza: "#6b7280" (secundário)
+
+REGRAS DE GRÁFICO:
+1. SEMPRE inclua gráfico quando houver RANKING (top 5+), COMPARATIVO, EVOLUÇÃO TEMPORAL ou DISTRIBUIÇÃO.
+2. O JSON deve ser válido e em UMA ÚNICA LINHA entre [CHART] e [/CHART].
+3. Máximo 2 gráficos por resposta.
+4. "datasets" pode ter múltiplas séries: [{"label":"No prazo","data":[...],"color":"#10b981"},{"label":"Fora prazo","data":[...],"color":"#ef4444"}]
+5. Para pie/doughnut, use "colors" (array) em vez de "color": {"type":"pie","labels":[...],"datasets":[{"data":[70,30],"colors":["#10b981","#ef4444"]}]}
+6. NÃO inclua gráfico para perguntas simples com 1-2 números.
+7. Coloque o bloco [CHART] APÓS o parágrafo que o contextualiza, nunca no início da resposta.
+8. Labels devem ser curtos (máx 15 chars). Truncar se necessário.
+
+EXEMPLOS POR TIPO DE PERGUNTA:
+- "Top 10 clientes" → horizontalBar com nomes e entregas
+- "Taxa de prazo por mês" → line com evolução
+- "Distribuição de retornos" → pie com motivos
+- "Faixas de km" → bar com entregas + line overlay de taxa
+- "Comparativo jan vs fev" → bar agrupado com 2 séries
+
 ## REGRA DE PROATIVIDADE (MUITO IMPORTANTE)
 - ⛔ NUNCA diga "seria útil saber", "com dados adicionais poderíamos", "para refinar a análise". Você TEM acesso aos dados!
 - ⛔ NUNCA sugira que o usuário execute queries manualmente ou que "seria necessário consultar".
