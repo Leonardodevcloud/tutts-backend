@@ -320,7 +320,10 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           SELECT 
             cod_prof, nome_prof, os, data_solicitado, data_hora,
             COALESCE(ponto, 1) as ponto,
-            distancia
+            distancia,
+            tempo_execucao_minutos,
+            CASE WHEN ${DP} THEN true ELSE false END as dp_ok,
+            CASE WHEN ${DP_NOT_NULL} THEN true ELSE false END as dp_valido
           FROM bi_entregas
           WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
             AND data_hora IS NOT NULL
@@ -328,6 +331,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         roteiros AS (
           SELECT 
             cod_prof, nome_prof, os, data_solicitado, data_hora, ponto, distancia,
+            tempo_execucao_minutos, dp_ok, dp_valido,
             -- Detecta se esta OS pertence ao mesmo roteiro da anterior (mesma janela de 10min)
             CASE WHEN data_hora - LAG(data_hora) OVER (PARTITION BY cod_prof, data_solicitado ORDER BY data_hora)
                  <= INTERVAL '10 minutes'
@@ -344,7 +348,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
             cod_prof, nome_prof, data_solicitado, id_saida,
             COUNT(DISTINCT os) as os_no_roteiro,
             COUNT(CASE WHEN ponto >= 2 THEN 1 END) as entregas_no_roteiro,
-            COALESCE(SUM(CASE WHEN ponto >= 2 THEN distancia END), 0) as km_roteiro
+            COALESCE(SUM(CASE WHEN ponto >= 2 THEN distancia END), 0) as km_roteiro,
+            SUM(CASE WHEN ponto >= 2 AND dp_ok THEN 1 ELSE 0 END) as no_prazo_roteiro,
+            SUM(CASE WHEN ponto >= 2 AND dp_valido THEN 1 ELSE 0 END) as valido_roteiro
           FROM saidas_numeradas
           GROUP BY cod_prof, nome_prof, data_solicitado, id_saida
         )
@@ -357,7 +363,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           COUNT(DISTINCT data_solicitado) as dias_trabalhados,
           ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT data_solicitado), 0), 1) as saidas_por_dia,
           ROUND(AVG(km_roteiro)::numeric, 1) as km_medio_por_saida,
-          ROUND(SUM(km_roteiro)::numeric, 1) as km_total
+          ROUND(SUM(km_roteiro)::numeric, 1) as km_total,
+          SUM(no_prazo_roteiro) as entregas_no_prazo,
+          ROUND(SUM(no_prazo_roteiro)::numeric / NULLIF(SUM(valido_roteiro), 0) * 100, 1) as taxa_prazo
         FROM resumo_saidas
         WHERE entregas_no_roteiro > 0
         GROUP BY nome_prof
@@ -482,9 +490,12 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const metrAnterior = metricasAnteriores.rows[0];
       const healthScore = calcularHealthScore(metricas, getClienteConfig(codInt));
 
-      // Link do mapa de calor interativo
+      // Link do mapa de calor interativo (com hash para acesso público)
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
-      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}`;
+      const crypto = require('crypto');
+      const mapaHash = crypto.createHmac('sha256', process.env.JWT_SECRET || 'tutts-secret')
+        .update(`mapa:${codInt}:${data_inicio}:${data_fim}`).digest('hex').substring(0, 16);
+      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}&h=${mapaHash}`;
 
       // 12b. BUSCAR INTERAÇÕES DO PERÍODO
       const interacoesCliente = await pool.query(`
@@ -613,10 +624,10 @@ Os dados de "corridas_por_motoboy" mostram ROTEIROS: OS do mesmo motoboy criadas
 
 Apresente cada motoboy usando EXATAMENTE este formato de lista:
 
-- **NOME:** X entregas · Y saídas · média de Z entregas/saída · W saídas/dia
+- **NOME:** X entregas · Y saídas · taxa prazo Z% · média de W entregas/saída · V saídas/dia
 (uma linha por motoboy)
 
-Após a lista, escreva um parágrafo identificando destaques e oportunidades de melhoria.
+Após a lista, escreva um parágrafo analítico: destaque os profissionais com melhor e pior taxa de prazo, identifique padrões (ex: motoboys com muitas entregas mas taxa baixa = possível sobrecarga).
 
 ## ⏰ JANELA OPERACIONAL (08h às 18h)
 
