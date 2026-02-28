@@ -281,6 +281,44 @@ Baseado na distância:
 - Acima de 100km = fora do prazo
 Clientes podem ter prazos personalizados (tabela bi_prazos_cliente).
 
+⚠️ EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km.
+Todos os outros clientes seguem a tabela de faixas acima.
+
+═══════════════════════════════════════
+🔍 ANÁLISE DE DETRATORES DE SLA
+═══════════════════════════════════════
+SLA completo = tempo entre CRIAÇÃO da OS (data_hora) e FINALIZAÇÃO (finalizado).
+Ponto 1 = COLETA (não é entrega), mas o tempo SLA começa a contar desde a criação.
+
+CLASSIFICAÇÃO DO MOTIVO DO ATRASO (aplicar em ordem de prioridade):
+Para OS fora do prazo (dentro_prazo = false), o motivo do atraso pode ser:
+
+1. Se SLA > 600min (10h):
+   - Se tempo de alocação > 300min → "Falha sistêmica" (OS nunca foi alocada no dia)
+   - Senão → "OS não encerrada" (motoboy entregou mas não fechou a OS no app)
+
+2. Se tempo de alocação > 30min → "Associado tarde" (demorou para alocar motoboy)
+
+3. Se tempo de direcionamento > 30min → "Direcionamento lento" (motoboy demorou pra sair)
+
+4. Se tempo até saída do P1 > 45min → "Coleta lenta" (loja demorou pra liberar)
+
+5. Caso contrário → "Atraso do motoboy" (tempo de deslocamento/entrega)
+
+CÁLCULOS:
+- tempo_alocacao = data_hora_alocado - data_hora (em minutos)
+- tempo_ate_saida_p1 = hora_saida do ponto 1 - data_hora (em minutos)
+- sla_total = finalizado - data_hora (em minutos)
+
+DEFINIÇÃO DE DETRATOR: profissional com 3+ OS atrasadas no período.
+
+SISTEMA DE SEVERIDADE:
+- 🔴 Crítico: taxa de atraso ≥ 6%
+- 🟠 Alto: taxa 5-6%
+- 🟣 Anomalia: SLA máximo > 6h (OS não encerrada ou falha sistêmica)
+- 🟡 Médio: taxa 3-5%
+- 🟢 Baixo: taxa < 3%
+
 ═══════════════════════════════════════
 🔄 REGRAS DE RETORNO
 ═══════════════════════════════════════
@@ -376,6 +414,29 @@ SELECT TO_CHAR(data_solicitado, 'Day') AS dia_semana,
   COUNT(*) AS total
 FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
 GROUP BY dia_semana, dow ORDER BY dow
+
+-- Detratores (profissionais com mais atrasos):
+SELECT cod_prof, nome_prof,
+  COUNT(*) AS total_entregas,
+  COUNT(*) FILTER (WHERE dentro_prazo = false) AS atrasadas,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*), 0), 1) AS taxa_atraso,
+  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) AS tempo_medio
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+GROUP BY cod_prof, nome_prof
+HAVING COUNT(*) FILTER (WHERE dentro_prazo = false) >= 3
+ORDER BY taxa_atraso DESC
+
+-- Análise de SLA por faixa de tempo de alocação:
+SELECT CASE
+  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 5 THEN '0-5 min'
+  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 15 THEN '5-15 min'
+  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 30 THEN '15-30 min'
+  ELSE '30+ min'
+END AS faixa_alocacao,
+COUNT(*) AS total,
+ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_hora_alocado IS NOT NULL
+GROUP BY faixa_alocacao ORDER BY faixa_alocacao
 
 ═══════════════════════════════════════
 ⚠️ ARMADILHAS SQL — CUIDADO
@@ -628,6 +689,7 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 - ⛔ NUNCA inclua blocos SQL na resposta — a query já foi executada.
 - Se os dados não respondem completamente a pergunta, diga CLARAMENTE o que falta e sugira uma nova pergunta.
 - Se o resultado estiver vazio (0 registros), diga claramente que não há dados para o filtro solicitado.
+- REGRA ESPECIAL: Cliente 767 (Grupo Comollati) tem prazo FIXO de 120min (2h) para qualquer distância. Outros clientes seguem tabela de faixas por km.
 
 ## ESTRUTURA DA RESPOSTA (adapte ao tipo de pergunta)
 
@@ -652,6 +714,17 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 1. Identifique o problema com dados
 2. Liste os fatores usando: - **Situação:** descrição · **Impacto:** números
 3. Sugira ações que a Tutts pode tomar
+
+### Se for ANÁLISE DE DETRATORES (ex: "quais profissionais estão atrasando", "detratores"):
+1. Liste cada detrator: - **Nome (cod):** X entregas · Y atrasadas · taxa Z% · severidade 🔴🟠🟡🟢
+2. Para os piores, classifique o MOTIVO predominante do atraso:
+   - "Associado tarde" = demorou para alocar motoboy (tempo alocação > 30min)
+   - "Atraso do motoboy" = deslocamento/entrega demorou
+   - "Coleta lenta" = loja demorou para liberar mercadoria
+   - "Falha sistêmica" = OS ficou > 10h sem alocação
+   - "OS não encerrada" = motoboy não fechou a OS no app
+3. Classifique a severidade: 🔴 Crítico (≥6%) · 🟠 Alto (5-6%) · 🟡 Médio (3-5%) · 🟢 Baixo (<3%)
+4. Encerre com ação recomendada para os mais críticos
 
 ### Se for PERGUNTA SIMPLES (ex: "quantas entregas ontem"):
 1. Responda direto com o número em destaque
