@@ -351,17 +351,8 @@ app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
 
 // Sucesso do Cliente (CS) — acesso admin/gestores
-// Mapa de calor é público (dados agregados sem info sensível)
-const csAuthMiddleware = (req, res, next) => {
-  // req.path dentro de app.use('/api') é relativo: /cs/mapa-calor/123
-  // req.originalUrl é completo: /api/cs/mapa-calor/123?...
-  if (req.originalUrl.includes('/cs/mapa-calor/')) {
-    req.user = req.user || { nome: 'Acesso Público (Mapa)' };
-    return next();
-  }
-  verificarToken(req, res, next);
-};
-app.use('/api', csAuthMiddleware, initCsRoutes(pool, verificarToken, verificarAdmin));
+// (mapa-calor é público via PUBLIC_PATHS em auth.js)
+app.use('/api', verificarToken, initCsRoutes(pool, verificarToken, verificarAdmin));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
