@@ -351,19 +351,13 @@ app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
 
 // Sucesso do Cliente (CS) — acesso admin/gestores
-// Mapa de calor aceita link assinado (hash) como alternativa ao JWT
+// Mapa de calor é público (dados agregados sem info sensível)
 const csAuthMiddleware = (req, res, next) => {
-  // Mapa de calor com hash válido = acesso público
-  if (req.path.startsWith('/cs/mapa-calor/') && req.query.h) {
-    const crypto = require('crypto');
-    const cod = req.path.split('/cs/mapa-calor/')[1]?.split('?')[0];
-    const { h, data_inicio, data_fim } = req.query;
-    const expected = crypto.createHmac('sha256', process.env.JWT_SECRET || 'tutts-secret')
-      .update(`mapa:${cod}:${data_inicio}:${data_fim}`).digest('hex').substring(0, 16);
-    if (h === expected) {
-      req.user = { nome: 'Acesso Público (Mapa)' };
-      return next();
-    }
+  // req.path dentro de app.use('/api') é relativo: /cs/mapa-calor/123
+  // req.originalUrl é completo: /api/cs/mapa-calor/123?...
+  if (req.originalUrl.includes('/cs/mapa-calor/')) {
+    req.user = req.user || { nome: 'Acesso Público (Mapa)' };
+    return next();
   }
   verificarToken(req, res, next);
 };
