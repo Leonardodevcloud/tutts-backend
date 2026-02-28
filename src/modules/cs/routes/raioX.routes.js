@@ -209,9 +209,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       if (!cod_cliente || !data_inicio || !data_fim) {
         return res.status(400).json({ error: 'cod_cliente, data_inicio e data_fim são obrigatórios' });
       }
-      const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-      if (!ANTHROPIC_API_KEY) {
-        return res.status(400).json({ error: 'API Key do Claude não configurada. Configure ANTHROPIC_API_KEY no .env' });
+      const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+      if (!GEMINI_API_KEY) {
+        return res.status(400).json({ error: 'API Key do Gemini não configurada. Configure GEMINI_API_KEY no .env' });
       }
       const temCC = centro_custo && centro_custo !== '';
       console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}${temCC ? `, CC=${centro_custo}` : ''}`);
@@ -522,7 +522,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         percentil_volume: Math.round((1 - posVolume / totalClientes) * 100),
       };
 
-      // 14. PROMPT CLAUDE
+      // 14. PROMPT GEMINI
       const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
 
 ## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
@@ -644,31 +644,28 @@ Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresen
 
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
-      const claudeResponse = await fetch(
-        'https://api.anthropic.com/v1/messages',
+      const geminiResponse = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
-            model: 'claude-sonnet-4-5-20250514',
-            max_tokens: 8192,
-            messages: [{ role: 'user', content: prompt }]
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
           }),
         }
       );
 
-      const claudeData = await claudeResponse.json();
-      if (claudeData.error) {
-        console.error('❌ Erro Claude Raio-X:', claudeData.error);
-        return res.status(500).json({ error: `Erro Claude: ${claudeData.error.message}` });
+      const geminiData = await geminiResponse.json();
+      if (geminiData.error) {
+        console.error('❌ Erro Gemini Raio-X:', geminiData.error);
+        return res.status(500).json({ error: `Erro Gemini: ${geminiData.error.message}` });
       }
 
-      const analiseTexto = claudeData.content?.[0]?.text || 'Erro ao gerar análise';
-      const tokensUsados = claudeData.usage?.output_tokens || 0;
+      const analiseTexto = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || 'Erro ao gerar análise';
+      const tokensUsados = geminiData.usageMetadata?.candidatesTokenCount || 0;
 
       // 15. INJETAR GRÁFICOS SVG NO RELATÓRIO
       const analiseComGraficos = injetarGraficos(analiseTexto, dadosAnalise);
