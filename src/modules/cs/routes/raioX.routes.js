@@ -490,20 +490,19 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const metrAnterior = metricasAnteriores.rows[0];
       const healthScore = calcularHealthScore(metricas, getClienteConfig(codInt));
 
-      // Link do mapa de calor interativo (com hash para acesso público)
+      // Link do mapa de calor interativo (acesso público)
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
-      const crypto = require('crypto');
-      const mapaHash = crypto.createHmac('sha256', process.env.JWT_SECRET || 'tutts-secret')
-        .update(`mapa:${codInt}:${data_inicio}:${data_fim}`).digest('hex').substring(0, 16);
-      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}&h=${mapaHash}`;
+      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}`;
 
       // 12b. BUSCAR INTERAÇÕES DO PERÍODO
       const interacoesCliente = await pool.query(`
-        SELECT tipo, titulo, descricao, resultado, proxima_acao, data_interacao, criado_por_nome
+        SELECT tipo, titulo, descricao, resultado, proxima_acao, 
+          TO_CHAR(data_interacao, 'DD/MM/YYYY') as data_fmt,
+          criado_por_nome
         FROM cs_interacoes 
-        WHERE cod_cliente = $1 AND data_interacao >= $2 AND data_interacao <= $3
+        WHERE cod_cliente = $1 AND data_interacao::date >= $2::date AND data_interacao::date <= $3::date
         ORDER BY data_interacao DESC
-      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
+      `, [codInt, data_inicio, data_fim]).catch(err => { console.error('⚠️ Erro buscando interações:', err.message); return { rows: [] }; });
 
       // 12c. BUSCAR OCORRÊNCIAS CS DO PERÍODO
       const ocorrenciasCliente = await pool.query(`
@@ -512,11 +511,13 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           TO_CHAR(data_abertura, 'DD/MM/YYYY') as data_abertura_fmt,
           TO_CHAR(data_resolucao, 'DD/MM/YYYY') as data_resolucao_fmt
         FROM cs_ocorrencias 
-        WHERE cod_cliente = $1 AND data_abertura >= $2 AND data_abertura <= $3
+        WHERE cod_cliente = $1 AND data_abertura::date >= $2::date AND data_abertura::date <= $3::date
         ORDER BY 
           CASE severidade WHEN 'critica' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
           data_abertura DESC
-      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
+      `, [codInt, data_inicio, data_fim]).catch(err => { console.error('⚠️ Erro buscando ocorrências:', err.message); return { rows: [] }; });
+
+      console.log(`📋 Raio-X dados CS: ${interacoesCliente.rows.length} interações, ${ocorrenciasCliente.rows.length} ocorrências (cliente=${codInt}, ${data_inicio} a ${data_fim})`);
 
       // Buscar máscara do BI
       let mascara = null;
@@ -676,7 +677,7 @@ Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados
 
 ## 📋 OCORRÊNCIAS REGISTRADAS
 
-${ocorrenciasCliente.rows.length > 0 ? `No período foram registradas **${ocorrenciasCliente.rows.length}** ocorrência(s). Analise cada uma usando EXATAMENTE este formato:
+${ocorrenciasCliente.rows.length > 0 ? `No período foram registradas **${ocorrenciasCliente.rows.length}** ocorrência(s). Os dados estão no campo "ocorrencias_periodo" dos DADOS DA OPERAÇÃO acima. Analise CADA UMA usando EXATAMENTE este formato:
 
 - **[SEVERIDADE] Título** (status) — Descrição do problema. ${ocorrenciasCliente.rows.some(o => o.resolucao) ? 'Resolução aplicada quando houver.' : ''} Impacto operacional quando informado.
 
@@ -687,7 +688,7 @@ Após listar, escreva um parágrafo analítico: quantas foram resolvidas vs aber
 
 ## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
 
-${interacoesCliente.rows.length > 0 ? `No período foram registradas **${interacoesCliente.rows.length}** interação(ões) com o cliente. Apresente cada uma usando EXATAMENTE este formato:
+${interacoesCliente.rows.length > 0 ? `No período foram registradas **${interacoesCliente.rows.length}** interação(ões) com o cliente. Os dados estão no campo "interacoes_periodo" dos DADOS DA OPERAÇÃO acima. Apresente CADA UMA usando EXATAMENTE este formato:
 
 - **Data — Tipo** (por Nome): Resumo do que foi tratado. Resultado obtido. Próxima ação definida.
 
