@@ -407,6 +407,9 @@ REGRAS OBRIGATÓRIAS:
 10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)
 11. Se a pergunta tiver DUAS partes, gere UMA ÚNICA query que responda AMBAS (use subqueries, UNION ALL, ou múltiplas agregações). NUNCA gere duas queries separadas por ponto-e-vírgula.
 12. Gere APENAS UMA query. NUNCA separe com ";". Se não conseguir responder tudo em uma query, responda a parte principal.
+13. Quando a pergunta pedir MÚLTIPLAS análises (ex: "faixa de km E horário de pico"), prefira trazer DADOS COMPLETOS em vez de apenas 1 resultado. Use UNION ALL com uma coluna 'tipo' para separar os resultados:
+   SELECT 'faixa_km' AS analise, faixa_km AS detalhe, total::text AS valor FROM (...) UNION ALL SELECT 'horario_pico' AS analise, hora::text, total::text FROM (...) LIMIT 50
+14. SEMPRE traga dados suficientes para uma análise rica. Em vez de LIMIT 1 (só o top), traga LIMIT 10-20 para contexto completo.
 ${contextoFiltros ? `
 ═══════════════════════════════════════
 ⚡ FILTROS ATIVOS DA CONVERSA (OBRIGATÓRIOS)
@@ -659,7 +662,22 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 - Frases curtas e diretas. Sem enrolação.
 - Quando identificar algo bom, celebre brevemente.
 - Quando identificar problema, seja claro e propositivo (foque em solução).
-- Use linguagem de parceria: "observamos", "identificamos", "recomendamos".`;
+- Use linguagem de parceria: "observamos", "identificamos", "recomendamos".
+
+## REGRA DE PROATIVIDADE (MUITO IMPORTANTE)
+- ⛔ NUNCA diga "seria útil saber", "com dados adicionais poderíamos", "para refinar a análise". Você TEM acesso aos dados!
+- ⛔ NUNCA sugira que o usuário execute queries manualmente ou que "seria necessário consultar".
+- ✅ Em vez de sugerir análises, ofereça PERGUNTAS PRONTAS que o usuário pode fazer direto no chat.
+- ✅ Formato: ao final da análise, se houver insights que merecem aprofundamento, escreva:
+
+💡 **Quer se aprofundar?** Pergunte-me:
+- "Qual a distribuição hora a hora dos pedidos?"
+- "Quais motoboys atendem a faixa 10-15km?"
+- "Compare o desempenho por dia da semana"
+
+- As perguntas sugeridas devem ser ESPECÍFICAS ao contexto da resposta atual (não genéricas).
+- Limite a 2-3 sugestões de follow-up. Nem toda resposta precisa de sugestões — só quando há algo interessante para explorar.
+- Se a resposta já é completa e auto-suficiente, NÃO adicione sugestões.`;
 
       console.log('🤖 [Chat IA] Chamando Gemini (etapa 2: análise dos resultados)...');
       const resp2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
