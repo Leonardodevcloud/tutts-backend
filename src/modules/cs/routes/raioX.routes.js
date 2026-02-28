@@ -494,6 +494,19 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         ORDER BY data_interacao DESC
       `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
 
+      // 12c. BUSCAR OCORRÊNCIAS CS DO PERÍODO
+      const ocorrenciasCliente = await pool.query(`
+        SELECT titulo, descricao, tipo, severidade, status, 
+          responsavel_nome, resolucao, impacto_operacional,
+          TO_CHAR(data_abertura, 'DD/MM/YYYY') as data_abertura_fmt,
+          TO_CHAR(data_resolucao, 'DD/MM/YYYY') as data_resolucao_fmt
+        FROM cs_ocorrencias 
+        WHERE cod_cliente = $1 AND data_abertura >= $2 AND data_abertura <= $3
+        ORDER BY 
+          CASE severidade WHEN 'critica' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+          data_abertura DESC
+      `, [codInt, data_inicio, data_fim]).catch(() => ({ rows: [] }));
+
       // Buscar máscara do BI
       let mascara = null;
       try {
@@ -516,6 +529,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         evolucao_semanal: evolucaoSemanal.rows,
         retornos_detalhados: retornosDetalhe.rows,
         interacoes_periodo: interacoesCliente.rows,
+        ocorrencias_periodo: ocorrenciasCliente.rows,
         benchmark_regiao: { ...benchmark, estado: estadoCliente },
         ranking_regiao: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
         link_mapa_calor: linkMapaCalor,
@@ -649,10 +663,24 @@ As ações devem ser sobre o que a Tutts controla.
 
 Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados. Quick wins operacionais.
 
+## 📋 OCORRÊNCIAS REGISTRADAS
+
+${ocorrenciasCliente.rows.length > 0 ? `No período foram registradas **${ocorrenciasCliente.rows.length}** ocorrência(s). Analise cada uma usando EXATAMENTE este formato:
+
+- **[SEVERIDADE] Título** (status) — Descrição do problema. ${ocorrenciasCliente.rows.some(o => o.resolucao) ? 'Resolução aplicada quando houver.' : ''} Impacto operacional quando informado.
+
+Use emojis de severidade: 🔴 Crítica · 🟠 Alta · 🟡 Média · 🟢 Baixa
+Use status: ✅ Resolvida · 🔄 Em andamento · 🕐 Aberta
+
+Após listar, escreva um parágrafo analítico: quantas foram resolvidas vs abertas, padrões identificados, e impacto na operação.` : `Não houve ocorrências registradas no período. Escreva um parágrafo positivo sobre a estabilidade operacional do cliente.`}
+
 ## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
 
-${interacoesCliente.rows.length > 0 ? `No período foram registradas ${interacoesCliente.rows.length} interação(ões). Resuma cada uma em formato de lista:
-- **Data — Tipo:** Resumo do que foi conversado, resultados e próximas ações.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato.`}
+${interacoesCliente.rows.length > 0 ? `No período foram registradas **${interacoesCliente.rows.length}** interação(ões) com o cliente. Apresente cada uma usando EXATAMENTE este formato:
+
+- **Data — Tipo** (por Nome): Resumo do que foi tratado. Resultado obtido. Próxima ação definida.
+
+Após listar, escreva um parágrafo avaliando a frequência de contato, se foi adequada ao perfil do cliente, e recomendações para o próximo período.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato com frequência mínima sugerida (semanal para clientes críticos, quinzenal para demais).`}
 
 ---
 
