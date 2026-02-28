@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
@@ -20,7 +21,7 @@
     "node-cache": "^5.1.2",
     "node-cron": "^3.0.3",
     "pg": "^8.11.3",
-    "playwright": "^1.58.2",
+    "playwright": "^1.41.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
