@@ -217,6 +217,20 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}${temCC ? `, CC=${centro_custo}` : ''}`);
       const codInt = parseInt(cod_cliente);
 
+      // Cliente 767 (Grupo Comollati): prazo FIXO de 120min (2h) para QUALQUER faixa de km
+      // Para os demais clientes, usa o campo dentro_prazo já calculado no banco
+      const isCliente767 = codInt === 767;
+      if (isCliente767) console.log('⚠️ [Raio-X] Cliente 767 (Comollati): SLA fixo 120min aplicado');
+      const DP = isCliente767
+        ? '(tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 120)'
+        : 'dentro_prazo = true';
+      const DP_FALSE = isCliente767
+        ? '(tempo_execucao_minutos IS NULL OR tempo_execucao_minutos <= 0 OR tempo_execucao_minutos > 120)'
+        : 'dentro_prazo = false';
+      const DP_NOT_NULL = isCliente767
+        ? '(tempo_execucao_minutos IS NOT NULL AND tempo_execucao_minutos > 0)'
+        : 'dentro_prazo IS NOT NULL';
+
       // Filtro SQL de centro de custo (aplicado em todas as queries do bi_entregas)
       const ccSQL = temCC ? ' AND centro_custo = $4' : '';
       const baseParams = temCC ? [codInt, data_inicio, data_fim, centro_custo] : [codInt, data_inicio, data_fim];
@@ -236,10 +250,10 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         SELECT 
           COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
           COUNT(DISTINCT os) as total_os,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as entregas_no_prazo,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
-          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 2) as taxa_prazo,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP} THEN 1 ELSE 0 END) as entregas_no_prazo,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP_FALSE} THEN 1 ELSE 0 END) as entregas_fora_prazo,
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP} THEN 1 ELSE 0 END)::numeric /
+                NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP_NOT_NULL} THEN 1 END), 0) * 100, 2) as taxa_prazo,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_entrega,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 2) as km_medio,
           COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as km_total,
@@ -268,8 +282,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
                ELSE '30+ km' END as faixa,
           COUNT(*) as quantidade,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo_faixa
+          ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo_faixa
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2 AND distancia IS NOT NULL AND distancia > 0
@@ -288,8 +302,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         SELECT COALESCE(NULLIF(bairro, ''), 'Não informado') as bairro, COALESCE(cidade, '') as cidade,
           COUNT(*) as entregas, ROUND(AVG(distancia)::numeric, 1) as km_medio,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo
+          ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL} AND COALESCE(ponto, 1) >= 2
         GROUP BY COALESCE(NULLIF(bairro, ''), 'Não informado'), COALESCE(cidade, '')
@@ -357,8 +371,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 16 AND 17 THEN '16-18h'
                ELSE 'Fora do horário' END as faixa_horaria,
           COUNT(*) as entregas,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
         FROM bi_entregas
         WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
@@ -376,7 +390,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const evolucaoSemanal = await pool.query(`
         SELECT DATE_TRUNC('week', data_solicitado)::date as semana,
           COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+          SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP} THEN 1 ELSE 0 END) as no_prazo,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
         FROM bi_entregas
@@ -412,7 +426,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           COUNT(*) as total_clientes_regiao
         FROM (
           SELECT cod_cliente,
-            ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+            ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
             COUNT(*) as total_entregas, ROUND(AVG(distancia)::numeric, 1) as km_medio,
             ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio,
             ROUND(SUM(CASE WHEN (LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR LOWER(ocorrencia) LIKE '%%clienteaus%%' OR
@@ -429,9 +443,9 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const ranking = await pool.query(`
         WITH ranking_clientes AS (
           SELECT cod_cliente,
-            ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+            ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
             COUNT(*) as total_entregas,
-            RANK() OVER (ORDER BY SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100 DESC) as rank_prazo,
+            RANK() OVER (ORDER BY SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100 DESC) as rank_prazo,
             RANK() OVER (ORDER BY COUNT(*) DESC) as rank_volume
           FROM bi_entregas
           WHERE data_solicitado >= $1 AND data_solicitado <= $2
@@ -449,8 +463,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 
       const metricasAnteriores = await pool.query(`
         SELECT COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
-          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 2) as taxa_prazo,
+          ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND ${DP_NOT_NULL} THEN 1 END), 0) * 100, 2) as taxa_prazo,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_entrega,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos
@@ -523,7 +537,8 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       };
 
       // 14. PROMPT GEMINI
-      const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}
+      const slaInfo767 = isCliente767 ? `\n\n⚠️ REGRA ESPECIAL DESTE CLIENTE: O Grupo Comollati (cliente 767) possui prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. Os dados de "dentro do prazo" já foram recalculados com base nessa regra. Ao analisar performance de prazo, considere sempre o SLA de 2h.\n` : '';
+      const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}${slaInfo767}
 
 ## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
 - Siga EXATAMENTE a estrutura de seções abaixo. NÃO adicione, remova ou reordene seções.
@@ -735,8 +750,8 @@ Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresen
         SELECT
           endereco, bairro, cidade, estado,
           COUNT(*) as quantidade,
-          ROUND(SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
           ROUND(AVG(distancia)::numeric, 1) as km_medio,
           ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
         FROM bi_entregas
