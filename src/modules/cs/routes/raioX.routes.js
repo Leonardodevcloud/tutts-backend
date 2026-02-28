@@ -109,7 +109,7 @@ ${dualAxis ? '<div style="font-size:10px;color:#94a3b8;margin-top:6px">🟦 Entr
 </div>\n\n`;
   }
 
-  function gerarComparativoSVG(atual, anterior, labels, { titulo = '' } = {}) {
+  function gerarComparativoSVG(atual, anterior, labels, { titulo = '', invertidos = [] } = {}) {
     if (!atual || !anterior) return '';
     const width = 480;
     const barH = 22;
@@ -126,7 +126,10 @@ ${dualAxis ? '<div style="font-size:10px;color:#94a3b8;margin-top:6px">🟦 Entr
       const diff = atual[i] - anterior[i];
       const pct = anterior[i] > 0 ? ((diff / anterior[i]) * 100).toFixed(1) : '0';
       const arrow = diff >= 0 ? '↑' : '↓';
-      const arrowColor = diff >= 0 ? '#10b981' : '#ef4444';
+      // Para métricas invertidas (ex: tempo), diminuir é positivo (verde)
+      const isInvertido = invertidos.includes(i);
+      const isPositivo = isInvertido ? diff <= 0 : diff >= 0;
+      const arrowColor = isPositivo ? '#10b981' : '#ef4444';
 
       bars += `
         <text x="${labelW - 8}" y="${y + 10}" text-anchor="end" font-size="12" font-weight="600" fill="#334155" font-family="Segoe UI,sans-serif">${label}</text>
@@ -158,7 +161,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           [parseInt(ma.total_entregas) || 0, parseFloat(ma.taxa_prazo) || 0, parseFloat(ma.tempo_medio_entrega || ma.tempo_medio) || 0],
           [parseInt(mp.total_entregas) || 0, parseFloat(mp.taxa_prazo) || 0, parseFloat(mp.tempo_medio_entrega || mp.tempo_medio) || 0],
           ['Entregas', 'Taxa Prazo (%)', 'Tempo Médio (min)'],
-          { titulo: '📊 Comparativo: Período Atual vs Anterior' }
+          { titulo: '📊 Comparativo: Período Atual vs Anterior', invertidos: [2] }
         );
         resultado = resultado.replace(
           /(#{2,3}\s*🚀.*?ENTREGAS.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
