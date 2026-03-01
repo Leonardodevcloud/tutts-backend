@@ -56,10 +56,14 @@ async function fazerLogin(page) {
   await page.fill('input[type="password"]', senha);
 
   // form#login garante que não clica em "Recuperar Senha"
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: TIMEOUT }),
-    page.click('form#login input[type="submit"]'),
-  ]);
+  // O login é via AJAX — não faz navegação, aguarda elemento pós-login aparecer
+  await page.click('form#login input[type="submit"]');
+
+  // Aguardar redirecionar OU aparecer elemento do painel principal
+  await page.waitForFunction(
+    () => !window.location.href.includes('loginFuncionarioNovo'),
+    { timeout: TIMEOUT }
+  );
 
   if (!(await isLoggedIn(page))) {
     const ss = await screenshot(page, 'login', 'falha');
