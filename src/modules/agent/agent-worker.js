@@ -95,11 +95,11 @@ async function processarProximoPendente(pool) {
     if (resultado.sucesso) {
       await pool.query(
         `UPDATE ajustes_automaticos
-         SET status = 'sucesso', processado_em = NOW()
+         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2
          WHERE id = $1`,
-        [registro.id]
+        [registro.id, resultado.endereco_corrigido || null]
       );
-      log(`✅ ID ${registro.id} concluído.`);
+      log(`✅ ID ${registro.id} concluído.${resultado.endereco_corrigido ? ` Endereço: ${resultado.endereco_corrigido}` : ''}`);
     } else {
       const detalhe = resultado.screenshot
         ? `${resultado.erro} [Screenshot: ${resultado.screenshot}]`
