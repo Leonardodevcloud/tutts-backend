@@ -12,7 +12,67 @@ const express = require('express');
 function createHistoricoRoutes(pool, verificarAdmin) {
   const router = express.Router();
 
-  // GET /agent/historico
+  // GET /agent/meu-historico (autenticado - motoboy vê só suas solicitações)
+  router.get('/meu-historico', async (req, res) => {
+    const usuarioId = req.user?.id;
+    if (!usuarioId) return res.status(401).json({ erro: 'Não autenticado.' });
+
+    const { page = 1, per_page = 20 } = req.query;
+    const offset = (parseInt(page, 10) - 1) * parseInt(per_page, 10);
+
+    try {
+      const [dataRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT id, os_numero, ponto, localizacao_raw, latitude, longitude,
+                  endereco_corrigido, status, detalhe_erro, criado_em, processado_em
+           FROM ajustes_automaticos
+           WHERE usuario_id = $1
+           ORDER BY criado_em DESC
+           LIMIT $2 OFFSET $3`,
+          [usuarioId, parseInt(per_page, 10), offset]
+        ),
+        pool.query(
+          `SELECT COUNT(*) AS total FROM ajustes_automaticos WHERE usuario_id = $1`,
+          [usuarioId]
+        ),
+      ]);
+
+      return res.json({
+        registros: dataRes.rows,
+        total:     parseInt(countRes.rows[0].total, 10),
+        page:      parseInt(page, 10),
+        per_page:  parseInt(per_page, 10),
+      });
+    } catch (err) {
+      console.error('[agent/meu-historico]', err.message);
+      return res.status(500).json({ erro: 'Erro ao carregar histórico.' });
+    }
+  });
+
+  // GET /agent/meu-historico/:id/foto (autenticado - motoboy vê foto da própria solicitação)
+  router.get('/meu-historico/:id/foto', async (req, res) => {
+    const usuarioId = req.user?.id;
+    if (!usuarioId) return res.status(401).json({ erro: 'Não autenticado.' });
+
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT foto_fachada FROM ajustes_automaticos WHERE id = $1 AND usuario_id = $2`,
+        [id, usuarioId]
+      );
+      if (rows.length === 0 || !rows[0].foto_fachada) {
+        return res.status(404).json({ erro: 'Foto não encontrada.' });
+      }
+      return res.json({ foto: rows[0].foto_fachada });
+    } catch (err) {
+      console.error('[agent/meu-historico/foto]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar foto.' });
+    }
+  });
+
+  // GET /agent/historico (admin)
   router.get('/historico', verificarAdmin, async (req, res) => {
     const { status, os_numero, de, ate, page = 1, per_page = 30 } = req.query;
 
