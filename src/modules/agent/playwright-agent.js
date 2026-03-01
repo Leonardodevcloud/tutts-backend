@@ -63,7 +63,7 @@ async function fazerLogin(page) {
   await page.locator('input[name="logar"], input[value="Logar"][type="button"]').first().click();
 
   // Aguardar sair da página de login
-  await page.waitForURL(url => !url.includes('loginFuncionarioNovo'), { timeout: TIMEOUT });
+  await page.waitForURL(url => !url.toString().includes('loginFuncionarioNovo'), { timeout: TIMEOUT });
   log(`✅ Login OK — URL: ${page.url()}`);
 }
 
