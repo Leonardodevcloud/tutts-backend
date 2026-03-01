@@ -2,18 +2,35 @@
  * routes/correcao.routes.js
  * POST /agent/corrigir-endereco
  * GET  /agent/status/:id
+ * GET  /agent/foto/:id
  */
 
 'use strict';
 
 const express = require('express');
 
-function validarEntrada({ os_numero, ponto, localizacao_raw }) {
+// ── Haversine: distância em km entre dois pontos ────────────────────────────
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+const RAIO_MAXIMO_KM = 2;
+
+function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada }) {
   const erros = [];
+
   if (!os_numero || String(os_numero).trim() === '')
     erros.push('os_numero é obrigatório.');
   if (!/^\d+$/.test(String(os_numero || '').trim()))
     erros.push('os_numero deve conter apenas dígitos.');
+
   const pontoNum = parseInt(ponto, 10);
   if (isNaN(pontoNum))
     erros.push('ponto deve ser um número inteiro.');
@@ -21,29 +38,59 @@ function validarEntrada({ os_numero, ponto, localizacao_raw }) {
     erros.push('O Ponto 1 nunca pode ser corrigido pelo agente.');
   else if (pontoNum < 2 || pontoNum > 7)
     erros.push('ponto deve ser entre 2 e 7.');
+
   if (!localizacao_raw || String(localizacao_raw).trim() === '')
     erros.push('localizacao_raw é obrigatório.');
+
+  if (motoboy_lat == null || motoboy_lng == null) {
+    erros.push('Localização GPS do motoboy é obrigatória. Ative o GPS e tente novamente.');
+  } else {
+    const lat = parseFloat(motoboy_lat);
+    const lng = parseFloat(motoboy_lng);
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      erros.push('Coordenadas GPS do motoboy inválidas.');
+    }
+  }
+
+  if (!foto_fachada || String(foto_fachada).trim() === '') {
+    erros.push('Foto da fachada é obrigatória.');
+  }
+
   return erros;
 }
 
 function createCorrecaoRoutes(pool) {
   const router = express.Router();
 
+  // Aumentar limite do body para aceitar foto base64
+  router.use(express.json({ limit: '10mb' }));
+
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
-    const { os_numero, ponto, localizacao_raw } = req.body || {};
+    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada } = req.body || {};
 
-    const erros = validarEntrada({ os_numero, ponto, localizacao_raw });
+    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
     }
 
     try {
+      if (foto_fachada && foto_fachada.length > 7_000_000) {
+        return res.status(400).json({ sucesso: false, erros: ['Foto muito grande. Máximo 5MB.'] });
+      }
+
       const { rows } = await pool.query(
-        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, status)
-         VALUES ($1, $2, $3, 'pendente')
+        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pendente')
          RETURNING id, status, criado_em`,
-        [String(os_numero).trim(), parseInt(ponto, 10), String(localizacao_raw).trim()]
+        [
+          String(os_numero).trim(),
+          parseInt(ponto, 10),
+          String(localizacao_raw).trim(),
+          parseFloat(motoboy_lat),
+          parseFloat(motoboy_lng),
+          foto_fachada,
+        ]
       );
 
       const reg = rows[0];
@@ -77,7 +124,27 @@ function createCorrecaoRoutes(pool) {
     }
   });
 
+  // GET /agent/foto/:id
+  router.get('/foto/:id', async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT foto_fachada FROM ajustes_automaticos WHERE id = $1`,
+        [id]
+      );
+      if (rows.length === 0 || !rows[0].foto_fachada) {
+        return res.status(404).json({ erro: 'Foto não encontrada.' });
+      }
+      return res.json({ foto: rows[0].foto_fachada });
+    } catch (err) {
+      console.error('[agent/foto]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar foto.' });
+    }
+  });
+
   return router;
 }
 
-module.exports = { createCorrecaoRoutes };
+module.exports = { createCorrecaoRoutes, haversineKm, RAIO_MAXIMO_KM };
