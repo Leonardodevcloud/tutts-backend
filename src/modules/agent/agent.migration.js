@@ -37,6 +37,7 @@ async function initAgentTables(pool) {
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_id INTEGER;
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_nome VARCHAR(100);
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS endereco_corrigido TEXT;
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS endereco_antigo TEXT;
     EXCEPTION WHEN OTHERS THEN NULL;
     END $$
   `);
