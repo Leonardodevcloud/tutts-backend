@@ -95,9 +95,9 @@ async function processarProximoPendente(pool) {
     if (resultado.sucesso) {
       await pool.query(
         `UPDATE ajustes_automaticos
-         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2
+         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3
          WHERE id = $1`,
-        [registro.id, resultado.endereco_corrigido || null]
+        [registro.id, resultado.endereco_corrigido || null, resultado.endereco_antigo || null]
       );
       log(`✅ ID ${registro.id} concluído.${resultado.endereco_corrigido ? ` Endereço: ${resultado.endereco_corrigido}` : ''}`);
     } else {
