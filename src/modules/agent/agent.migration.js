@@ -34,8 +34,16 @@ async function initAgentTables(pool) {
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lat DECIMAL(10, 8);
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lng DECIMAL(11, 8);
       ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS foto_fachada TEXT;
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_id INTEGER;
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_nome VARCHAR(100);
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS endereco_corrigido TEXT;
     EXCEPTION WHEN OTHERS THEN NULL;
     END $$
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_ajustes_usuario_id
+      ON ajustes_automaticos(usuario_id)
   `);
 
   await pool.query(`
