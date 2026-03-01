@@ -267,6 +267,35 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     log('✅ Modal carregado');
     await screenshot(page, os_numero, 'passo3_modal');
 
+    // Capturar endereço antigo do ponto antes de corrigir
+    let enderecoAntigo = '';
+    try {
+      // O endereço do ponto geralmente está no card/row do ponto, próximo ao botão Corrigir
+      const btnCorrigir = page.locator(`.btn-corrigir-endereco[data-ponto="${ponto}"]`).first();
+      enderecoAntigo = await btnCorrigir.evaluate((btn, p) => {
+        // Subir até o container do ponto (card, row, tr, div pai)
+        const container = btn.closest('tr') || btn.closest('.card') || btn.closest('.card-body') || btn.closest('[class*="ponto"]') || btn.parentElement?.parentElement;
+        if (!container) return '';
+        // Procurar texto que pareça endereço
+        const els = container.querySelectorAll('td, span, p, div, small');
+        for (const el of els) {
+          const txt = (el.textContent || '').trim();
+          if (txt.length > 10 && txt.includes(',') && !txt.includes('Corrigir') && !txt.includes('Ponto') && el !== btn) {
+            return txt;
+          }
+        }
+        // Fallback: pegar o texto inteiro do container e limpar
+        const full = container.textContent || '';
+        const cleaned = full.replace(/Corrigir|Ponto \d/g, '').trim();
+        return cleaned.length > 10 ? cleaned.substring(0, 200) : '';
+      }, ponto).catch(() => '');
+      if (enderecoAntigo) {
+        log(`📍 Endereço antigo capturado: ${enderecoAntigo}`);
+      }
+    } catch (e) {
+      log(`⚠️ Não foi possível capturar endereço antigo: ${e.message}`);
+    }
+
     // ── Passo 4: Clicar em Corrigir no ponto específico ──────────────────────
     log(`📌 Passo 4: Corrigindo Ponto ${ponto}`);
 
@@ -371,7 +400,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
     await screenshot(page, os_numero, 'passo6_concluido');
     log(`🎉 OS ${os_numero} Ponto ${ponto} corrigido com sucesso!`);
-    return { sucesso: true, endereco_corrigido: enderecoResolvido || null };
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || null, endereco_antigo: enderecoAntigo || null };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
