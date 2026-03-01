@@ -4,7 +4,10 @@
  * Sistema: tutts.com.br/expresso
  *
  * Seletores mapeados do HTML real:
- *   Botão END.    : button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="<OS>"]
+ *   Aba Execução : #pills-em-execucao-tab
+ *   Select Tipo  : #search-type (custom-select)
+ *   Autocomplete : .ui-menu-item .ui-menu-item-wrapper (jQuery UI)
+ *   Botão END.   : button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="<OS>"]
  *   Botão Corrigir: .btn-corrigir-endereco[data-ponto="${ponto}"]
  *   Input Lat     : input[placeholder="Latitude"]
  *   Input Lon     : input[placeholder="Longitude"]
@@ -138,56 +141,90 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
     await screenshot(page, os_numero, 'passo1_acompanhamento');
 
+    // ── Passo 1b: Garantir que está na aba "Em execução" ────────────────────
+    log('📌 Passo 1b: Clicando na aba "Em execução"');
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    const abaVisivel = await abaEmExecucao.isVisible().catch(() => false);
+    if (abaVisivel) {
+      await abaEmExecucao.click();
+      await page.waitForTimeout(2000);
+      log('✅ Aba "Em execução" selecionada');
+    }
+    await screenshot(page, os_numero, 'passo1b_aba_em_execucao');
+
     // ── Passo 2: Localizar botão END. da OS ────────────────────────────────
     log(`📌 Passo 2: Localizando OS ${os_numero}`);
 
-    // Tentativa 1: botão já visível na página (OS em execução aparece direto)
-    // data-text-id no botão é o número da OS conforme HTML inspecionado
-    let btnEndVisivel = await page.locator(
-      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`
-    ).isVisible().catch(() => false);
+    const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
+
+    // Tentativa 1: botão já visível na aba "Em execução"
+    let btnEndVisivel = await page.locator(btnSelector).isVisible().catch(() => false);
 
     if (!btnEndVisivel) {
-      log('🔍 Botão não visível na página — usando pesquisa...');
+      log('🔍 Botão não visível na aba — usando pesquisa...');
       await screenshot(page, os_numero, 'passo2_antes_pesquisa');
 
-      // Clicar na aba Pesquisar serviços
-      const tabPesquisa = page.locator('#pills-pesquisar-servicos-tab');
-      const tabVisivel  = await tabPesquisa.isVisible().catch(() => false);
-      if (tabVisivel) {
-        await tabPesquisa.click();
+      // Clicar na barra "Pesquisar serviços" para expandir
+      const barraPesquisa = page.locator('text=Pesquisar serviços').first();
+      const barraVisivel = await barraPesquisa.isVisible().catch(() => false);
+      if (barraVisivel) {
+        await barraPesquisa.click();
         await page.waitForTimeout(1000);
-        await screenshot(page, os_numero, 'passo2_aba_pesquisa');
+        log('✅ Barra de pesquisa expandida');
       }
+      await screenshot(page, os_numero, 'passo2_pesquisa_expandida');
 
-      // Selecionar tipo Serviço = SE
-      const selectVisivel = await page.locator('#search-type').isVisible().catch(() => false);
+      // Selecionar "Serviço" no select #search-type (classe custom-select)
+      const selectPesquisa = page.locator('#search-type');
+      const selectVisivel = await selectPesquisa.isVisible().catch(() => false);
       if (selectVisivel) {
-        await page.selectOption('#search-type', 'SE');
-        await page.waitForTimeout(600);
+        await selectPesquisa.selectOption({ label: 'Serviço' });
+        await page.waitForTimeout(1000);
+        log('✅ Tipo de pesquisa: Serviço');
+      }
+      await screenshot(page, os_numero, 'passo2_tipo_servico');
+
+      // Preencher número da OS no campo de busca
+      const inputBusca = page.locator('#search-autocomplete-input, input[placeholder*="número do serviço"]').first();
+      await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+      await screenshot(page, os_numero, 'passo2_campo_busca');
+
+      await inputBusca.fill(String(os_numero));
+      await page.waitForTimeout(2000); // Aguardar jQuery UI autocomplete carregar
+      await screenshot(page, os_numero, 'passo2_autocomplete');
+
+      // Clicar no item do autocomplete (jQuery UI: .ui-menu-item-wrapper)
+      const autoItem = page.locator('.ui-menu-item .ui-menu-item-wrapper').filter({ hasText: String(os_numero) }).first();
+      const autoVisivel = await autoItem.isVisible().catch(() => false);
+
+      if (autoVisivel) {
+        await autoItem.click();
+        log('✅ Item do autocomplete clicado');
+      } else {
+        // Fallback: tentar qualquer .ui-menu-item visível
+        const anyAutoItem = page.locator('.ui-menu-item-wrapper:visible').first();
+        const anyVisivel = await anyAutoItem.isVisible().catch(() => false);
+        if (anyVisivel) {
+          await anyAutoItem.click();
+          log('✅ Primeiro item do autocomplete clicado (fallback)');
+        } else {
+          log('⚠️ Autocomplete não encontrado — tentando Enter');
+          await inputBusca.press('Enter');
+        }
       }
 
-      // Preencher número da OS e buscar
-      await page.waitForSelector('#search-autocomplete-input', { state: 'visible', timeout: TIMEOUT });
-      await screenshot(page, os_numero, 'passo2_campo_busca');
-      await page.fill('#search-autocomplete-input', os_numero);
-      await page.waitForTimeout(400);
-      await page.press('#search-autocomplete-input', 'Enter');
+      await page.waitForTimeout(3000); // Aguardar resultado carregar
+      await screenshot(page, os_numero, 'passo2_resultado_busca');
 
-      // Aguardar botão aparecer após busca
-      await page.waitForSelector(
-        `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
-        { timeout: TIMEOUT }
-      );
+      // Aguardar botão END. aparecer após busca
+      await page.waitForSelector(btnSelector, { timeout: TIMEOUT });
     }
 
     await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
-    await page.locator(
-      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`
-    ).first().click();
+    await page.locator(btnSelector).first().click();
 
     // Aguardar modal abrir
     await page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in', {
