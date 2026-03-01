@@ -79,12 +79,25 @@ function createCorrecaoRoutes(pool) {
         return res.status(400).json({ sucesso: false, erros: ['Foto muito grande. Máximo 5MB.'] });
       }
 
-      const usuarioId   = req.user?.id   || null;
-      const usuarioNome = req.user?.nome || req.user?.name || req.user?.email || null;
+      const usuarioId       = req.user?.id   || null;
+      const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
+      const codProfissional = req.user?.codProfissional || req.user?.cod_profissional || null;
+
+      // Validar OS duplicada — cada OS só pode ser enviada uma vez
+      const osExistente = await pool.query(
+        `SELECT id, status FROM ajustes_automaticos WHERE os_numero = $1 LIMIT 1`,
+        [String(os_numero).trim()]
+      );
+      if (osExistente.rows.length > 0) {
+        return res.status(409).json({
+          sucesso: false,
+          erros: ['Essa ordem de serviço já foi enviada anteriormente. Por favor, entre em contato com o suporte.'],
+        });
+      }
 
       const { rows } = await pool.query(
-        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8)
+        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome, cod_profissional)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8, $9)
          RETURNING id, status, criado_em`,
         [
           String(os_numero).trim(),
@@ -95,6 +108,7 @@ function createCorrecaoRoutes(pool) {
           foto_fachada,
           usuarioId,
           usuarioNome,
+          codProfissional,
         ]
       );
 
