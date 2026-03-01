@@ -83,15 +83,15 @@ function createCorrecaoRoutes(pool) {
       const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
       const codProfissional = req.user?.codProfissional || req.user?.cod_profissional || null;
 
-      // Validar OS duplicada — cada OS só pode ser enviada uma vez
+      // Validar OS duplicada — bloqueia apenas se já teve sucesso
       const osExistente = await pool.query(
-        `SELECT id, status FROM ajustes_automaticos WHERE os_numero = $1 LIMIT 1`,
+        `SELECT id, status FROM ajustes_automaticos WHERE os_numero = $1 AND status = 'sucesso' LIMIT 1`,
         [String(os_numero).trim()]
       );
       if (osExistente.rows.length > 0) {
         return res.status(409).json({
           sucesso: false,
-          erros: ['Essa ordem de serviço já foi enviada anteriormente. Por favor, entre em contato com o suporte.'],
+          erros: ['Essa ordem de serviço já foi corrigida com sucesso anteriormente. Por favor, entre em contato com o suporte.'],
         });
       }
 
