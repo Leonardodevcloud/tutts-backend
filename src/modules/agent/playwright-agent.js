@@ -86,7 +86,18 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--mute-audio',
+      '--no-first-run',
+      '--single-process',        // Usa menos memória no Railway
+    ],
   });
 
   let contextOptions = {};
