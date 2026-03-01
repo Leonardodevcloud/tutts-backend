@@ -59,8 +59,8 @@ async function fazerLogin(page) {
   await page.fill('#loginEmail', process.env.SISTEMA_EXTERNO_EMAIL);
   await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
 
-  // Botão "Logar" — value exato para não pegar "Recuperar Senha"
-  await page.locator('input[type="submit"][value="Logar"]').first().click();
+    // Botão "Logar" — type="button" com onclick="validarLogin()"
+  await page.locator('input[name="logar"], input[value="Logar"][type="button"]').first().click();
 
   // Aguardar sair da página de login
   await page.waitForURL(url => !url.includes('loginFuncionarioNovo'), { timeout: TIMEOUT });
