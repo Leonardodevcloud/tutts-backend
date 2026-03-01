@@ -248,6 +248,64 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await page.waitForTimeout(500);
     await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
+    // ── Passo 2a: Validar que a OS está Em Execução (não concluída/cancelada) ──
+    log('📌 Passo 2a: Verificando status da OS');
+    try {
+      const statusOS = await btnEnd.evaluate((btn) => {
+        // Subir até a <tr> da OS
+        const row = btn.closest('tr');
+        if (!row) return 'desconhecido';
+
+        // Verificar classes da row
+        const classes = row.className || '';
+        if (classes.includes('osConcluidaHoje') || classes.includes('Concluida') || classes.includes('concluida')) return 'concluida';
+        if (classes.includes('osCancelada') || classes.includes('Cancelada') || classes.includes('cancelada')) return 'cancelada';
+        if (classes.includes('osEmExecucao') || classes.includes('EmExecucao') || classes.includes('emExecucao')) return 'em_execucao';
+
+        // Verificar a seção pai (div com texto "Serviço(s) concluído(s)" ou "Em execução")
+        let parent = row.parentElement;
+        while (parent) {
+          const prevSibling = parent.previousElementSibling;
+          if (prevSibling) {
+            const txt = (prevSibling.textContent || '').toLowerCase();
+            if (txt.includes('concluíd') || txt.includes('concluid')) return 'concluida';
+            if (txt.includes('cancelad')) return 'cancelada';
+            if (txt.includes('em execução') || txt.includes('em execucao')) return 'em_execucao';
+          }
+          // Também verificar o próprio parent
+          const parentTxt = (parent.className || '').toLowerCase();
+          if (parentTxt.includes('conclu')) return 'concluida';
+          if (parentTxt.includes('cancel')) return 'cancelada';
+          parent = parent.parentElement;
+        }
+        return 'em_execucao'; // default se não conseguiu identificar
+      }).catch(() => 'desconhecido');
+
+      log(`📋 Status da OS: ${statusOS}`);
+
+      if (statusOS === 'concluida') {
+        const ss = await screenshot(page, os_numero, 'passo2a_os_concluida');
+        await browser.close();
+        return {
+          sucesso: false,
+          erro: `[Validação] A OS ${os_numero} já está concluída/finalizada no sistema. Apenas OS em execução podem ter o endereço corrigido.`,
+          screenshot: ss,
+        };
+      }
+
+      if (statusOS === 'cancelada') {
+        const ss = await screenshot(page, os_numero, 'passo2a_os_cancelada');
+        await browser.close();
+        return {
+          sucesso: false,
+          erro: `[Validação] A OS ${os_numero} está cancelada. Não é possível corrigir endereço de OS cancelada.`,
+          screenshot: ss,
+        };
+      }
+    } catch (e) {
+      log(`⚠️ Não foi possível verificar status da OS: ${e.message} — prosseguindo`);
+    }
+
     // ── Passo 2b: Validar que o profissional da OS confere com quem solicitou ──
     if (cod_profissional) {
       log(`📌 Passo 2b: Validando profissional (cod: ${cod_profissional})`);
