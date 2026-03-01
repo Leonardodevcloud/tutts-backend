@@ -2,14 +2,6 @@
  * playwright-agent.js
  * Automação RPA: corrige endereço de um ponto numa OS do sistema externo.
  * Sistema: tutts.com.br/expresso
- *
- * Fluxo mapeado pelo HTML real:
- * 1. Login: #loginEmail + form#login submit
- * 2. Busca OS: select#search-type (valor "SE") + input#search-autocomplete-input
- * 3. Botão endereço: .btn-modal[data-action="funcaoEnderecoServico"] no resultado
- * 4. Modal: #modalPadrao → conteúdo carrega em #retorno-modal via AJAX
- * 5. Clicar no botão Corrigir do ponto correto dentro de #retorno-modal
- * 6. Preencher lat/lng, validar e confirmar
  */
 
 'use strict';
@@ -45,31 +37,32 @@ async function isLoggedIn(page) {
 
 async function fazerLogin(page) {
   log('🔐 Fazendo login...');
-  const url   = process.env.SISTEMA_EXTERNO_URL;
-  const email = process.env.SISTEMA_EXTERNO_EMAIL;
-  const senha = process.env.SISTEMA_EXTERNO_SENHA;
+  const loginUrl = process.env.SISTEMA_EXTERNO_URL;
+  const email    = process.env.SISTEMA_EXTERNO_EMAIL;
+  const senha    = process.env.SISTEMA_EXTERNO_SENHA;
 
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-  await page.waitForSelector('#loginEmail', { timeout: TIMEOUT });
+  // Sempre vai direto para a URL de login configurada
+  await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.waitForTimeout(1500);
+
+  // Verificar se a página de login carregou
+  const temCampoEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
+  if (!temCampoEmail) {
+    const ss = await screenshot(page, 'login', 'pagina_nao_carregou');
+    throw new Error(`Página de login não carregou. URL: ${page.url()}. Screenshot: ${ss}`);
+  }
 
   await page.fill('#loginEmail', email);
   await page.fill('input[type="password"]', senha);
 
-  // form#login garante que não clica em "Recuperar Senha"
-  // O login é via AJAX — não faz navegação, aguarda elemento pós-login aparecer
-  await page.click('form#login input[type="submit"]');
+  // Clicar no botão "Logar" — evita pegar "Recuperar Senha"
+  await page.locator('input[type="submit"][value="Logar"]').first().click();
 
-  // Aguardar redirecionar OU aparecer elemento do painel principal
-  await page.waitForFunction(
-    () => !window.location.href.includes('loginFuncionarioNovo'),
-    { timeout: TIMEOUT }
-  );
+  // Aguardar URL mudar (sair da página de login)
+  await page.waitForURL(url => !url.includes('loginFuncionarioNovo'), { timeout: TIMEOUT });
 
-  if (!(await isLoggedIn(page))) {
-    const ss = await screenshot(page, 'login', 'falha');
-    throw new Error(`Login falhou. URL: ${page.url()}. Screenshot: ${ss}`);
-  }
-  log('✅ Login OK');
+  await screenshot(page, 'login', 'pos_login');
+  log(`✅ Login OK — URL: ${page.url()}`);
 }
 
 async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude }) {
@@ -87,9 +80,16 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
 
-  const contextOptions = fs.existsSync(SESSION_FILE)
-    ? { storageState: SESSION_FILE }
-    : {};
+  // Tentar reutilizar sessão salva; se falhar, apaga e recomeça sem ela
+  let contextOptions = {};
+  if (fs.existsSync(SESSION_FILE)) {
+    try {
+      contextOptions = { storageState: SESSION_FILE };
+    } catch (_) {
+      fs.unlinkSync(SESSION_FILE);
+      log('⚠️  Sessão corrompida removida');
+    }
+  }
 
   const context = await browser.newContext({
     ...contextOptions,
@@ -104,8 +104,14 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     // ── Passo 1: Autenticação ────────────────────────────────────────────────
     log('📌 Passo 1: Autenticação');
     await page.goto(process.env.SISTEMA_EXTERNO_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.waitForTimeout(1000);
 
     if (!(await isLoggedIn(page))) {
+      // Sessão inválida — apaga e faz login fresh
+      if (fs.existsSync(SESSION_FILE)) {
+        fs.unlinkSync(SESSION_FILE);
+        log('🗑️  Sessão inválida removida');
+      }
       await fazerLogin(page);
       await context.storageState({ path: SESSION_FILE });
       log('💾 Sessão salva');
@@ -113,36 +119,32 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       log('♻️  Sessão reutilizada');
     }
 
+    await screenshot(page, os_numero, 'passo1_logado');
+
     // ── Passo 2: Pesquisar OS ────────────────────────────────────────────────
     log(`📌 Passo 2: Pesquisando OS ${os_numero}`);
 
-    // Clicar na aba "Pesquisar serviços"
     await page.click('#pills-pesquisar-servicos-tab');
     await page.waitForTimeout(800);
 
-    // Selecionar tipo "Serviço" = "SE"
     await page.selectOption('#search-type', 'SE');
     await page.waitForTimeout(600);
 
-    // Aguardar campo aparecer e preencher
     await page.waitForSelector('#search-autocomplete-input', { state: 'visible', timeout: TIMEOUT });
     await page.fill('#search-autocomplete-input', os_numero);
     await page.waitForTimeout(400);
     await page.press('#search-autocomplete-input', 'Enter');
 
-    // Aguardar resultado carregar em #search-response
     await page.waitForFunction(
-      () => document.querySelector('#search-response')?.innerHTML?.trim().length > 100,
+      () => (document.querySelector('#search-response')?.innerHTML?.trim().length ?? 0) > 100,
       { timeout: TIMEOUT }
     );
     await page.waitForTimeout(1500);
-
     await screenshot(page, os_numero, 'passo2_resultado');
 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
 
-    // Botão gerado via AJAX com class btn-modal e data-action="funcaoEnderecoServico"
     const seletorBtnEnd = '#search-response .btn-modal[data-action="funcaoEnderecoServico"]';
     const btnCount = await page.locator(seletorBtnEnd).count();
     log(`🔍 Botões de endereço encontrados: ${btnCount}`);
@@ -157,24 +159,18 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     }
 
     await page.locator(seletorBtnEnd).first().click();
-
-    // Aguardar modal visível
     await page.waitForSelector('#modalPadrao', { state: 'visible', timeout: TIMEOUT });
-
-    // Aguardar conteúdo AJAX em #retorno-modal
     await page.waitForFunction(
-      () => document.querySelector('#retorno-modal')?.innerHTML?.trim().length > 50,
+      () => (document.querySelector('#retorno-modal')?.innerHTML?.trim().length ?? 0) > 50,
       { timeout: TIMEOUT }
     );
     await page.waitForTimeout(1200);
-
     log('✅ Modal carregado');
     await screenshot(page, os_numero, 'passo3_modal');
 
     // ── Passo 4: Clicar no botão Corrigir do ponto ───────────────────────────
     log(`📌 Passo 4: Selecionando Ponto ${ponto}`);
 
-    // Os pontos aparecem listados em ordem no modal (ponto 1 = idx 0, ponto 2 = idx 1...)
     const seletorCorrigir = '#retorno-modal button:has-text("Corrigir"), #retorno-modal a:has-text("Corrigir")';
     const totalCorrigir   = await page.locator(seletorCorrigir).count();
     log(`🔍 Botões Corrigir no modal: ${totalCorrigir}`);
@@ -184,12 +180,12 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       return { sucesso: false, erro: 'Botões de Corrigir não encontrados no modal.', screenshot: ss };
     }
 
-    const idx = ponto - 1; // ponto 1 = idx 0
+    const idx = ponto - 1; // ponto 1 = idx 0, ponto 2 = idx 1...
     if (idx >= totalCorrigir) {
-      const ss = await screenshot(page, os_numero, `passo4_ponto_invalido`);
+      const ss = await screenshot(page, os_numero, 'passo4_ponto_invalido');
       return {
         sucesso: false,
-        erro: `Ponto ${ponto} não existe (total de pontos: ${totalCorrigir}).`,
+        erro: `Ponto ${ponto} não existe (total: ${totalCorrigir}).`,
         screenshot: ss,
       };
     }
@@ -214,15 +210,12 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     await inputLat.fill(String(latitude));
     await inputLng.click({ clickCount: 3 });
     await inputLng.fill(String(longitude));
-
     log(`📍 Preenchido: ${latitude}, ${longitude}`);
 
-    // Validar coordenadas
     await page.locator('button:has-text("Validar"), input[value="Validar"]').first().click();
     await page.waitForTimeout(4000);
     await screenshot(page, os_numero, 'passo5_pos_validar');
 
-    // Verificar se geocoder preencheu endereço
     const campoRua = page.locator(
       'input[name="rua"], input[name="logradouro"], input[id*="rua" i], input[id*="logradouro" i]'
     ).first();
