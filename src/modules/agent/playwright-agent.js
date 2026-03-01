@@ -127,47 +127,56 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
     await screenshot(page, os_numero, 'passo1_acompanhamento');
 
-    // ── Passo 2: Pesquisar OS pelo número ────────────────────────────────────
-    log(`📌 Passo 2: Pesquisando OS ${os_numero}`);
+    // ── Passo 2: Localizar botão END. da OS ────────────────────────────────
+    log(`📌 Passo 2: Localizando OS ${os_numero}`);
 
-    // Clicar na aba/seção "Pesquisar serviços"
-    await page.click('#pills-pesquisar-servicos-tab');
-    await page.waitForTimeout(800);
+    // Tentativa 1: botão já visível na página (OS em execução aparece direto)
+    // data-id no botão é o número da OS conforme HTML inspecionado
+    let btnEndVisivel = await page.locator(
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`
+    ).isVisible().catch(() => false);
 
-    // Selecionar tipo "Serviço" no select
-    await page.selectOption('#search-type', 'SE');
-    await page.waitForTimeout(600);
+    if (!btnEndVisivel) {
+      log('🔍 Botão não visível na página — usando pesquisa...');
+      await screenshot(page, os_numero, 'passo2_antes_pesquisa');
 
-    // Campo de texto para digitar o número da OS
-    await page.waitForSelector('#search-autocomplete-input', { state: 'visible', timeout: TIMEOUT });
-    await page.fill('#search-autocomplete-input', os_numero);
-    await page.waitForTimeout(400);
-    await page.press('#search-autocomplete-input', 'Enter');
+      // Clicar na aba Pesquisar serviços
+      const tabPesquisa = page.locator('#pills-pesquisar-servicos-tab');
+      const tabVisivel  = await tabPesquisa.isVisible().catch(() => false);
+      if (tabVisivel) {
+        await tabPesquisa.click();
+        await page.waitForTimeout(1000);
+        await screenshot(page, os_numero, 'passo2_aba_pesquisa');
+      }
 
-    // Aguardar qualquer botão de endereço aparecer no resultado
-    await page.waitForSelector(
-      'button.btn-modal[data-action="funcaoEnderecoServico"]',
-      { timeout: TIMEOUT }
-    );
-    await page.waitForTimeout(500);
-    await screenshot(page, os_numero, 'passo2_resultado');
+      // Selecionar tipo Serviço = SE
+      const selectVisivel = await page.locator('#search-type').isVisible().catch(() => false);
+      if (selectVisivel) {
+        await page.selectOption('#search-type', 'SE');
+        await page.waitForTimeout(600);
+      }
+
+      // Preencher número da OS e buscar
+      await page.waitForSelector('#search-autocomplete-input', { state: 'visible', timeout: TIMEOUT });
+      await screenshot(page, os_numero, 'passo2_campo_busca');
+      await page.fill('#search-autocomplete-input', os_numero);
+      await page.waitForTimeout(400);
+      await page.press('#search-autocomplete-input', 'Enter');
+
+      // Aguardar botão aparecer após busca
+      await page.waitForSelector(
+        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`,
+        { timeout: TIMEOUT }
+      );
+    }
+
+    await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
-
-    // Encontrar a linha (<tr>) que contém o número da OS e clicar no botão END. dela
-    // (data-id pode ser ID interno, não o número da OS — buscamos pela linha)
-    const linhaOS = page.locator(`tr:has-text("${os_numero}")`).first();
-    const btnEnd  = linhaOS.locator('button.btn-modal[data-action="funcaoEnderecoServico"]').first();
-
-    const temBtnNaLinha = await btnEnd.isVisible().catch(() => false);
-    if (!temBtnNaLinha) {
-      // Fallback: primeiro botão de endereço visível (quando há só 1 resultado)
-      log('⚠️  Botão não encontrado na linha, usando primeiro disponível');
-      await page.locator('button.btn-modal[data-action="funcaoEnderecoServico"]').first().click();
-    } else {
-      await btnEnd.click();
-    }
+    await page.locator(
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`
+    ).first().click();
 
     // Aguardar modal abrir
     await page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in', {
