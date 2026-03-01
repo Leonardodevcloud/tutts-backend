@@ -77,7 +77,7 @@ async function fazerLogin(page) {
   log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude }) {
+async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional }) {
   if (!process.env.SISTEMA_EXTERNO_URL) {
     return { sucesso: false, erro: 'SISTEMA_EXTERNO_URL não configurada.' };
   }
@@ -248,6 +248,49 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     await page.waitForTimeout(500);
     await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
+    // ── Passo 2b: Validar que o profissional da OS confere com quem solicitou ──
+    if (cod_profissional) {
+      log(`📌 Passo 2b: Validando profissional (cod: ${cod_profissional})`);
+      try {
+        // Localizar na row da OS o botão que contém data-motoboy ou o texto do profissional
+        const rowOS = page.locator(`tr`).filter({ has: btnEnd }).first();
+        
+        // Tentar pegar data-motoboy do botão de profissional na mesma row
+        const motoboyNaOS = await rowOS.evaluate((row, codProf) => {
+          // Buscar botão com data-motoboy
+          const btnMotoboy = row.querySelector('button[data-motoboy]');
+          if (btnMotoboy) {
+            return btnMotoboy.getAttribute('data-motoboy') || '';
+          }
+          // Fallback: procurar texto que contenha o código do profissional
+          const textos = row.querySelectorAll('td, span, button');
+          for (const el of textos) {
+            const txt = (el.textContent || '').trim();
+            if (txt.includes(String(codProf))) return String(codProf);
+          }
+          return '';
+        }, cod_profissional).catch(() => '');
+
+        if (motoboyNaOS) {
+          const codLimpo = String(cod_profissional).trim();
+          if (!motoboyNaOS.includes(codLimpo)) {
+            const ss = await screenshot(page, os_numero, 'passo2b_motoboy_divergente');
+            await browser.close();
+            return {
+              sucesso: false,
+              erro: `[Segurança] O profissional que solicitou (cód. ${codLimpo}) não corresponde ao profissional vinculado à OS ${os_numero} (cód. ${motoboyNaOS}). Correção não autorizada.`,
+              screenshot: ss,
+            };
+          }
+          log(`✅ Profissional validado: ${motoboyNaOS}`);
+        } else {
+          log('⚠️ Não foi possível extrair código do profissional da OS — prosseguindo');
+        }
+      } catch (e) {
+        log(`⚠️ Erro na validação do profissional: ${e.message} — prosseguindo`);
+      }
+    }
+
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
     await btnEnd.click({ force: true });
@@ -258,14 +301,29 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       timeout: TIMEOUT,
     });
 
-    // Aguardar botão do ponto correto aparecer no modal
-    await page.waitForSelector(
-      `.btn-corrigir-endereco[data-ponto="${ponto}"]`,
-      { timeout: TIMEOUT }
-    );
-    await page.waitForTimeout(800);
-    log('✅ Modal carregado');
+    await page.waitForTimeout(1500);
     await screenshot(page, os_numero, 'passo3_modal');
+
+    // ── Passo 3b: Verificar se o ponto solicitado existe na OS ───────────────
+    log(`📌 Passo 3b: Verificando se Ponto ${ponto} existe na OS`);
+    const pontoExiste = await page.locator(`.btn-corrigir-endereco[data-ponto="${ponto}"]`).count().catch(() => 0);
+    
+    if (pontoExiste === 0) {
+      // Contar quantos pontos a OS realmente tem
+      const totalPontos = await page.locator('.btn-corrigir-endereco').count().catch(() => 0);
+      const pontosDisponiveis = await page.locator('.btn-corrigir-endereco').evaluateAll(els => 
+        els.map(el => el.getAttribute('data-ponto')).filter(Boolean)
+      ).catch(() => []);
+      
+      const ss = await screenshot(page, os_numero, 'passo3b_ponto_inexistente');
+      await browser.close();
+      return {
+        sucesso: false,
+        erro: `[Validação] O Ponto ${ponto} não existe nesta OS. A OS ${os_numero} possui apenas ${totalPontos} ponto(s) corrigível(is)${pontosDisponiveis.length > 0 ? ` (pontos: ${pontosDisponiveis.join(', ')})` : ''}. Verifique o ponto correto e tente novamente.`,
+        screenshot: ss,
+      };
+    }
+    log(`✅ Ponto ${ponto} encontrado na OS`);
 
     // Capturar endereço antigo do ponto antes de corrigir
     let enderecoAntigo = '';
