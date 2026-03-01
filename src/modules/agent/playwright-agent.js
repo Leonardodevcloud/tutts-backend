@@ -50,10 +50,10 @@ async function fazerLogin(page) {
   // Campo senha
   await page.fill('input[type="password"]', senha);
 
-  // Botão "Logar"
+  // Botão "Logar" — dentro do form#login para não pegar "Recuperar Senha"
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: TIMEOUT }),
-    page.click('button:has-text("Logar"), input[type="submit"], button[type="submit"]'),
+    page.click('form#login input[type="submit"], form#login button[type="submit"], #btnLogar'),
   ]);
 
   if (!(await isLoggedIn(page))) {
