@@ -155,7 +155,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     // ── Passo 2: Localizar botão END. da OS ────────────────────────────────
     log(`📌 Passo 2: Localizando OS ${os_numero}`);
 
-    const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
+    const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
 
     // Tentativa 1: botão existe no DOM na aba "Em execução" (pode não estar visível no viewport)
     let btnCount = await page.locator(btnSelector).count();
@@ -165,9 +165,19 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       // Debug: capturar HTML dos botões btn-modal existentes na página
       const allBtnModals = await page.locator('button.btn-modal').count();
       log(`🔎 Debug: Total de button.btn-modal na página: ${allBtnModals}`);
-      if (allBtnModals > 0) {
-        const firstBtnHtml = await page.locator('button.btn-modal').first().evaluate(el => el.outerHTML);
-        log(`🔎 Debug: Primeiro btn-modal HTML: ${firstBtnHtml.substring(0, 300)}`);
+      
+      // Debug: procurar botões com funcaoEnderecoServico especificamente
+      const btnEndAll = await page.locator('button.btn-modal[data-action="funcaoEnderecoServico"]').count();
+      log(`🔎 Debug: Botões funcaoEnderecoServico: ${btnEndAll}`);
+      if (btnEndAll > 0) {
+        const endHtml = await page.locator('button.btn-modal[data-action="funcaoEnderecoServico"]').first().evaluate(el => el.outerHTML);
+        log(`🔎 Debug: Botão END HTML: ${endHtml.substring(0, 400)}`);
+      } else if (allBtnModals > 0) {
+        // Listar todos os data-action únicos para entender a estrutura
+        const actions = await page.locator('button.btn-modal').evaluateAll(els => 
+          [...new Set(els.map(el => `${el.getAttribute('data-action')}|id=${el.getAttribute('data-id')}|text-id=${el.getAttribute('data-text-id')}`))].slice(0, 5)
+        );
+        log(`🔎 Debug: Ações dos btn-modal: ${JSON.stringify(actions)}`);
       }
 
       log('🔍 Botão não encontrado no DOM — usando pesquisa...');
@@ -226,7 +236,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       await screenshot(page, os_numero, 'passo2_resultado_busca');
 
       // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
-      await page.waitForSelector(btnSelector, { state: 'attached', timeout: TIMEOUT });
+      await page.waitForSelector(
+        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
+        { state: 'attached', timeout: TIMEOUT }
+      );
     }
 
     // Scroll até o botão para garantir que está visível no viewport
