@@ -79,9 +79,12 @@ function createCorrecaoRoutes(pool) {
         return res.status(400).json({ sucesso: false, erros: ['Foto muito grande. Máximo 5MB.'] });
       }
 
+      const usuarioId   = req.user?.id   || null;
+      const usuarioNome = req.user?.nome || req.user?.name || req.user?.email || null;
+
       const { rows } = await pool.query(
-        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pendente')
+        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8)
          RETURNING id, status, criado_em`,
         [
           String(os_numero).trim(),
@@ -90,6 +93,8 @@ function createCorrecaoRoutes(pool) {
           parseFloat(motoboy_lat),
           parseFloat(motoboy_lng),
           foto_fachada,
+          usuarioId,
+          usuarioNome,
         ]
       );
 
