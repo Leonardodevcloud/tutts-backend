@@ -157,11 +157,20 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
     const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
 
-    // Tentativa 1: botão já visível na aba "Em execução"
-    let btnEndVisivel = await page.locator(btnSelector).isVisible().catch(() => false);
+    // Tentativa 1: botão existe no DOM na aba "Em execução" (pode não estar visível no viewport)
+    let btnCount = await page.locator(btnSelector).count();
+    log(`🔎 Botão END. encontrado no DOM: ${btnCount > 0 ? 'SIM' : 'NÃO'} (count: ${btnCount})`);
 
-    if (!btnEndVisivel) {
-      log('🔍 Botão não visível na aba — usando pesquisa...');
+    if (btnCount === 0) {
+      // Debug: capturar HTML dos botões btn-modal existentes na página
+      const allBtnModals = await page.locator('button.btn-modal').count();
+      log(`🔎 Debug: Total de button.btn-modal na página: ${allBtnModals}`);
+      if (allBtnModals > 0) {
+        const firstBtnHtml = await page.locator('button.btn-modal').first().evaluate(el => el.outerHTML);
+        log(`🔎 Debug: Primeiro btn-modal HTML: ${firstBtnHtml.substring(0, 300)}`);
+      }
+
+      log('🔍 Botão não encontrado no DOM — usando pesquisa...');
       await screenshot(page, os_numero, 'passo2_antes_pesquisa');
 
       // Clicar na barra "Pesquisar serviços" para expandir
@@ -216,15 +225,19 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       await page.waitForTimeout(3000); // Aguardar resultado carregar
       await screenshot(page, os_numero, 'passo2_resultado_busca');
 
-      // Aguardar botão END. aparecer após busca
-      await page.waitForSelector(btnSelector, { timeout: TIMEOUT });
+      // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
+      await page.waitForSelector(btnSelector, { state: 'attached', timeout: TIMEOUT });
     }
 
+    // Scroll até o botão para garantir que está visível no viewport
+    const btnEnd = page.locator(btnSelector).first();
+    await btnEnd.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(500);
     await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
-    await page.locator(btnSelector).first().click();
+    await btnEnd.click({ force: true });
 
     // Aguardar modal abrir
     await page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in', {
