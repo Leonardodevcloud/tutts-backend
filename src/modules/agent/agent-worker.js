@@ -86,10 +86,11 @@ async function processarProximoPendente(pool) {
     // Executar Playwright
     log(`🤖 Acionando Playwright para OS ${registro.os_numero}...`);
     const resultado = await executarCorrecaoEndereco({
-      os_numero:  registro.os_numero,
-      ponto:      registro.ponto,
-      latitude:   coords.latitude,
-      longitude:  coords.longitude,
+      os_numero:        registro.os_numero,
+      ponto:            registro.ponto,
+      latitude:         coords.latitude,
+      longitude:        coords.longitude,
+      cod_profissional: registro.cod_profissional || null,
     });
 
     if (resultado.sucesso) {
