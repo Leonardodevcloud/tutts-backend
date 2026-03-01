@@ -2,18 +2,26 @@
  * playwright-agent.js
  * Automação RPA: corrige endereço de um ponto numa OS do sistema externo.
  * Sistema: tutts.com.br/expresso
+ *
+ * Fluxo mapeado pelo HTML real:
+ * 1. Login: #loginEmail + form#login submit
+ * 2. Busca OS: select#search-type (valor "SE") + input#search-autocomplete-input
+ * 3. Botão endereço: .btn-modal[data-action="funcaoEnderecoServico"] no resultado
+ * 4. Modal: #modalPadrao → conteúdo carrega em #retorno-modal via AJAX
+ * 5. Clicar no botão Corrigir do ponto correto dentro de #retorno-modal
+ * 6. Preencher lat/lng, validar e confirmar
  */
 
 'use strict';
 
 const { chromium } = require('playwright');
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
 
-const SESSION_FILE   = path.join('/tmp', 'tutts-rpa-session.json');
+const SESSION_FILE   = '/tmp/tutts-rpa-session.json';
 const SCREENSHOT_DIR = '/tmp/screenshots';
-const TIMEOUT        = 20000;
+const TIMEOUT        = 25000;
 
 if (!fs.existsSync(SCREENSHOT_DIR)) {
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -23,13 +31,13 @@ function log(msg) {
   logger.info(`[playwright-agent] ${msg}`);
 }
 
-async function capturarScreenshot(page, osNumero, etapa) {
-  const file = path.join(SCREENSHOT_DIR, `erro_OS${osNumero}_${etapa}_${Date.now()}.png`);
+async function screenshot(page, os, etapa) {
+  const file = path.join(SCREENSHOT_DIR, `OS${os}_${etapa}_${Date.now()}.png`);
   try { await page.screenshot({ path: file, fullPage: true }); } catch (_) {}
+  log(`📸 Screenshot: ${path.basename(file)}`);
   return path.basename(file);
 }
 
-// Verifica se está logado: URL deve conter /expresso mas NÃO conter loginFuncionarioNovo
 async function isLoggedIn(page) {
   const url = page.url();
   return url.includes('/expresso') && !url.includes('loginFuncionarioNovo');
@@ -42,23 +50,20 @@ async function fazerLogin(page) {
   const senha = process.env.SISTEMA_EXTERNO_SENHA;
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-
-  // Seletor correto: id="loginEmail", name="login", type="text"
   await page.waitForSelector('#loginEmail', { timeout: TIMEOUT });
-  await page.fill('#loginEmail', email);
 
-  // Campo senha
+  await page.fill('#loginEmail', email);
   await page.fill('input[type="password"]', senha);
 
-  // Botão "Logar" — dentro do form#login para não pegar "Recuperar Senha"
+  // form#login garante que não clica em "Recuperar Senha"
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: TIMEOUT }),
-    page.click('form#login input[type="submit"], form#login button[type="submit"], #btnLogar'),
+    page.click('form#login input[type="submit"]'),
   ]);
 
   if (!(await isLoggedIn(page))) {
-    const ss = await capturarScreenshot(page, 'login', 'falha_login');
-    throw new Error(`Login falhou. URL atual: ${page.url()}. Screenshot: ${ss}`);
+    const ss = await screenshot(page, 'login', 'falha');
+    throw new Error(`Login falhou. URL: ${page.url()}. Screenshot: ${ss}`);
   }
   log('✅ Login OK');
 }
@@ -85,14 +90,14 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
   const context = await browser.newContext({
     ...contextOptions,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 },
+    viewport: { width: 1280, height: 900 },
   });
 
   const page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT);
 
   try {
-    // ── Passo 1: Autenticação ───────────────────────────────────────────────
+    // ── Passo 1: Autenticação ────────────────────────────────────────────────
     log('📌 Passo 1: Autenticação');
     await page.goto(process.env.SISTEMA_EXTERNO_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
 
@@ -104,73 +109,93 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
       log('♻️  Sessão reutilizada');
     }
 
-    // Screenshot pós-login para diagnóstico
-    await capturarScreenshot(page, os_numero, 'passo1_logado');
+    // ── Passo 2: Pesquisar OS ────────────────────────────────────────────────
+    log(`📌 Passo 2: Pesquisando OS ${os_numero}`);
 
-    // ── Passo 2: Localizar OS ───────────────────────────────────────────────
-    log(`📌 Passo 2: Localizar OS ${os_numero}`);
+    // Clicar na aba "Pesquisar serviços"
+    await page.click('#pills-pesquisar-servicos-tab');
+    await page.waitForTimeout(800);
 
-    // Aguardar campo de busca da tela de acompanhamento
-    const searchInput = await page.waitForSelector(
-      'input[placeholder*="Pesquisar" i], input[placeholder*="serviço" i], input[placeholder*="OS" i], input[type="search"], input[name*="pesquisa" i], input[id*="pesquisa" i]',
+    // Selecionar tipo "Serviço" = "SE"
+    await page.selectOption('#search-type', 'SE');
+    await page.waitForTimeout(600);
+
+    // Aguardar campo aparecer e preencher
+    await page.waitForSelector('#search-autocomplete-input', { state: 'visible', timeout: TIMEOUT });
+    await page.fill('#search-autocomplete-input', os_numero);
+    await page.waitForTimeout(400);
+    await page.press('#search-autocomplete-input', 'Enter');
+
+    // Aguardar resultado carregar em #search-response
+    await page.waitForFunction(
+      () => document.querySelector('#search-response')?.innerHTML?.trim().length > 100,
       { timeout: TIMEOUT }
     );
-    await searchInput.fill(os_numero);
-    await searchInput.press('Enter');
-    await page.waitForTimeout(2000);
-
-    // Verificar se a OS apareceu
-    const osVisivel = await page.locator(`text="${os_numero}"`).first().isVisible().catch(() => false);
-    if (!osVisivel) {
-      const ss = await capturarScreenshot(page, os_numero, 'passo2_os_nao_encontrada');
-      return { sucesso: false, erro: `OS ${os_numero} não encontrada no sistema externo.`, screenshot: ss };
-    }
-
-    // ── Passo 3: Abrir modal de endereços ──────────────────────────────────
-    log('📌 Passo 3: Abrir modal de endereços');
-
-    const linhaOS = page.locator(`tr:has-text("${os_numero}")`).first();
-    
-    // Clicar no ícone de endereço (coluna END.)
-    const btnEnd = linhaOS.locator(
-      'a[title*="ndereço" i], a[title*="END" i], button[title*="ndereço" i], [onclick*="endereco" i], td a, td button'
-    ).first();
-    await btnEnd.click();
-
-    // Aguardar modal abrir
-    await page.waitForSelector(
-      '.modal.in, .modal-dialog, [role="dialog"], [id*="modal" i]',
-      { state: 'visible', timeout: TIMEOUT }
-    );
-    log('✅ Modal aberto');
-    await capturarScreenshot(page, os_numero, 'passo3_modal_aberto');
-
-    // ── Passo 4: Selecionar ponto ───────────────────────────────────────────
-    log(`📌 Passo 4: Ponto ${ponto}`);
-
-    // Buscar todos os botões de corrigir endereço no modal
-    const btnCorrigir = page.locator(
-      'button:has-text("Corrigir"), a:has-text("Corrigir"), [onclick*="corrigir" i]'
-    );
-    await page.waitForTimeout(1000);
-    const allBtns = await btnCorrigir.all();
-    const idx = ponto - 2; // ponto 2 = índice 0
-
-    if (allBtns.length === 0) {
-      const ss = await capturarScreenshot(page, os_numero, 'passo4_sem_botoes');
-      return { sucesso: false, erro: 'Botões de correção não encontrados no modal.', screenshot: ss };
-    }
-    if (idx >= allBtns.length) {
-      const ss = await capturarScreenshot(page, os_numero, `passo4_ponto${ponto}`);
-      return { sucesso: false, erro: `Ponto ${ponto} não existe nesta OS (${allBtns.length} pontos disponíveis).`, screenshot: ss };
-    }
-
-    await allBtns[idx].click();
     await page.waitForTimeout(1500);
-    await capturarScreenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
-    // ── Passo 5: Preencher coordenadas e validar ───────────────────────────
-    log('📌 Passo 5: Preencher coordenadas');
+    await screenshot(page, os_numero, 'passo2_resultado');
+
+    // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
+    log('📌 Passo 3: Abrindo modal de endereços');
+
+    // Botão gerado via AJAX com class btn-modal e data-action="funcaoEnderecoServico"
+    const seletorBtnEnd = '#search-response .btn-modal[data-action="funcaoEnderecoServico"]';
+    const btnCount = await page.locator(seletorBtnEnd).count();
+    log(`🔍 Botões de endereço encontrados: ${btnCount}`);
+
+    if (btnCount === 0) {
+      const ss = await screenshot(page, os_numero, 'passo3_sem_botao');
+      return {
+        sucesso: false,
+        erro: `OS ${os_numero} não encontrada ou botão de endereço ausente.`,
+        screenshot: ss,
+      };
+    }
+
+    await page.locator(seletorBtnEnd).first().click();
+
+    // Aguardar modal visível
+    await page.waitForSelector('#modalPadrao', { state: 'visible', timeout: TIMEOUT });
+
+    // Aguardar conteúdo AJAX em #retorno-modal
+    await page.waitForFunction(
+      () => document.querySelector('#retorno-modal')?.innerHTML?.trim().length > 50,
+      { timeout: TIMEOUT }
+    );
+    await page.waitForTimeout(1200);
+
+    log('✅ Modal carregado');
+    await screenshot(page, os_numero, 'passo3_modal');
+
+    // ── Passo 4: Clicar no botão Corrigir do ponto ───────────────────────────
+    log(`📌 Passo 4: Selecionando Ponto ${ponto}`);
+
+    // Os pontos aparecem listados em ordem no modal (ponto 1 = idx 0, ponto 2 = idx 1...)
+    const seletorCorrigir = '#retorno-modal button:has-text("Corrigir"), #retorno-modal a:has-text("Corrigir")';
+    const totalCorrigir   = await page.locator(seletorCorrigir).count();
+    log(`🔍 Botões Corrigir no modal: ${totalCorrigir}`);
+
+    if (totalCorrigir === 0) {
+      const ss = await screenshot(page, os_numero, 'passo4_sem_corrigir');
+      return { sucesso: false, erro: 'Botões de Corrigir não encontrados no modal.', screenshot: ss };
+    }
+
+    const idx = ponto - 1; // ponto 1 = idx 0
+    if (idx >= totalCorrigir) {
+      const ss = await screenshot(page, os_numero, `passo4_ponto_invalido`);
+      return {
+        sucesso: false,
+        erro: `Ponto ${ponto} não existe (total de pontos: ${totalCorrigir}).`,
+        screenshot: ss,
+      };
+    }
+
+    await page.locator(seletorCorrigir).nth(idx).click();
+    await page.waitForTimeout(2000);
+    await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
+
+    // ── Passo 5: Preencher coordenadas e validar ─────────────────────────────
+    log('📌 Passo 5: Preenchendo coordenadas');
 
     const inputLat = await page.waitForSelector(
       'input[name="latitude"], input[id*="lat" i], input[placeholder*="atitude" i]',
@@ -186,40 +211,43 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     await inputLng.click({ clickCount: 3 });
     await inputLng.fill(String(longitude));
 
-    // Clicar em Validar
+    log(`📍 Preenchido: ${latitude}, ${longitude}`);
+
+    // Validar coordenadas
     await page.locator('button:has-text("Validar"), input[value="Validar"]').first().click();
     await page.waitForTimeout(4000);
+    await screenshot(page, os_numero, 'passo5_pos_validar');
 
-    // Verificar se geocoder preencheu algum campo de endereço
+    // Verificar se geocoder preencheu endereço
     const campoRua = page.locator(
-      'input[name="rua"], input[name="logradouro"], input[id*="rua" i], input[id*="logradouro" i], input[placeholder*="rua" i]'
+      'input[name="rua"], input[name="logradouro"], input[id*="rua" i], input[id*="logradouro" i]'
     ).first();
     const valorRua = await campoRua.inputValue().catch(() => '');
 
     if (!valorRua.trim()) {
-      const ss = await capturarScreenshot(page, os_numero, 'passo5_geocoder_vazio');
+      const ss = await screenshot(page, os_numero, 'passo5_geocoder_vazio');
       return {
         sucesso: false,
         erro: `Coordenadas (${latitude}, ${longitude}) não reconhecidas pelo geocoder.`,
         screenshot: ss,
       };
     }
-
     log(`✅ Geocoder: ${valorRua}`);
 
-    // ── Passo 6: Confirmar alteração ───────────────────────────────────────
-    log('📌 Passo 6: Confirmar alteração');
+    // ── Passo 6: Confirmar ───────────────────────────────────────────────────
+    log('📌 Passo 6: Confirmando');
     await page.locator(
-      'button:has-text("Confirmar"), button:has-text("Salvar"), input[value="Confirmar"]'
+      'button:has-text("Confirmar"), input[value="Confirmar"], button:has-text("Salvar")'
     ).first().click();
     await page.waitForTimeout(2000);
 
-    log(`🎉 OS ${os_numero} Ponto ${ponto} corrigido com sucesso!`);
+    await screenshot(page, os_numero, 'passo6_concluido');
+    log(`🎉 OS ${os_numero} Ponto ${ponto} corrigido!`);
     return { sucesso: true };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
-    const ss = await capturarScreenshot(page, os_numero, 'erro_inesperado');
+    const ss = await screenshot(page, os_numero, 'erro_inesperado');
     return { sucesso: false, erro: `Erro inesperado: ${err.message}`, screenshot: ss };
   } finally {
     await browser.close();
