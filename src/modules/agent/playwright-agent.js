@@ -4,7 +4,7 @@
  * Sistema: tutts.com.br/expresso
  *
  * Seletores mapeados do HTML real:
- *   Botão END.    : button.btn-modal[data-action="funcaoEnderecoServico"]
+ *   Botão END.    : button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="<OS>"]
  *   Botão Corrigir: .btn-corrigir-endereco[data-ponto="${ponto}"]
  *   Input Lat     : input[placeholder="Latitude"]
  *   Input Lon     : input[placeholder="Longitude"]
@@ -142,9 +142,9 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     log(`📌 Passo 2: Localizando OS ${os_numero}`);
 
     // Tentativa 1: botão já visível na página (OS em execução aparece direto)
-    // data-id no botão é o número da OS conforme HTML inspecionado
+    // data-text-id no botão é o número da OS conforme HTML inspecionado
     let btnEndVisivel = await page.locator(
-      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`
     ).isVisible().catch(() => false);
 
     if (!btnEndVisivel) {
@@ -176,7 +176,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
       // Aguardar botão aparecer após busca
       await page.waitForSelector(
-        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`,
+        `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
         { timeout: TIMEOUT }
       );
     }
@@ -186,7 +186,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
     await page.locator(
-      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"]`
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`
     ).first().click();
 
     // Aguardar modal abrir
