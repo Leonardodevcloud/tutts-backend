@@ -15,6 +15,9 @@ async function initAgentTables(pool) {
       localizacao_raw TEXT,
       latitude      DECIMAL(10, 8),
       longitude     DECIMAL(11, 8),
+      motoboy_lat   DECIMAL(10, 8),
+      motoboy_lng   DECIMAL(11, 8),
+      foto_fachada  TEXT,
       status        VARCHAR(20)    NOT NULL DEFAULT 'pendente'
                                    CHECK (status IN ('pendente', 'processando', 'sucesso', 'erro')),
       detalhe_erro  TEXT,
@@ -23,6 +26,16 @@ async function initAgentTables(pool) {
       validado_por  VARCHAR(100),
       validado_em   TIMESTAMP
     )
+  `);
+
+  // Adicionar colunas se não existirem (deploy incremental)
+  await pool.query(`
+    DO $$ BEGIN
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lat DECIMAL(10, 8);
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lng DECIMAL(11, 8);
+      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS foto_fachada TEXT;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$
   `);
 
   await pool.query(`
