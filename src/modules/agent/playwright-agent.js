@@ -311,6 +311,57 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
     }
     log('✅ Geocoder OK — botão Confirmar visível');
 
+    // Capturar endereço resolvido pelo geocoder (antes de confirmar)
+    let enderecoResolvido = '';
+    try {
+      // Tentar capturar o texto do endereço exibido no form de correção
+      // Seletores comuns: .endereco-resolvido, .endereco-geocoder, texto próximo ao botão confirmar
+      const possiveisSeletores = [
+        '.endereco-resolvido',
+        '.endereco-geocoder',
+        '.endereco-resultado',
+        '.resultado-geocoder',
+        '.text-success:visible',
+        '.alert-success:visible',
+      ];
+      for (const sel of possiveisSeletores) {
+        const el = page.locator(sel).first();
+        const visivel = await el.isVisible().catch(() => false);
+        if (visivel) {
+          enderecoResolvido = (await el.innerText().catch(() => '')).trim();
+          if (enderecoResolvido) {
+            log(`📍 Endereço resolvido (${sel}): ${enderecoResolvido}`);
+            break;
+          }
+        }
+      }
+
+      // Fallback: capturar qualquer texto que pareça endereço próximo ao botão confirmar
+      if (!enderecoResolvido) {
+        const formTexto = await page.locator('button.btn-confirmar-alteracao:visible').first()
+          .evaluate(btn => {
+            const parent = btn.closest('.card-body') || btn.closest('.modal-body') || btn.parentElement?.parentElement;
+            if (!parent) return '';
+            // Procurar elementos de texto que contenham vírgula (padrão de endereço)
+            const textos = parent.querySelectorAll('p, span, div, small, label');
+            for (const t of textos) {
+              const txt = t.textContent?.trim() || '';
+              // Endereço geralmente tem vírgula e mais de 15 chars
+              if (txt.length > 15 && txt.includes(',') && !txt.includes('Latitude') && !txt.includes('Longitude')) {
+                return txt;
+              }
+            }
+            return '';
+          }).catch(() => '');
+        if (formTexto) {
+          enderecoResolvido = formTexto;
+          log(`📍 Endereço resolvido (fallback DOM): ${enderecoResolvido}`);
+        }
+      }
+    } catch (e) {
+      log(`⚠️ Não foi possível capturar endereço resolvido: ${e.message}`);
+    }
+
     // ── Passo 6: Confirmar alteração ─────────────────────────────────────────
     log('📌 Passo 6: Confirmando alteração');
 
@@ -320,7 +371,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude 
 
     await screenshot(page, os_numero, 'passo6_concluido');
     log(`🎉 OS ${os_numero} Ponto ${ponto} corrigido com sucesso!`);
-    return { sucesso: true };
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || null };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
