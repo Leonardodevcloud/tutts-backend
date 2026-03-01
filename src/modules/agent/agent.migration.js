@@ -28,35 +28,40 @@ async function initAgentTables(pool) {
     )
   `);
 
-  // Adicionar colunas se não existirem (deploy incremental)
-  await pool.query(`
-    DO $$ BEGIN
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lat DECIMAL(10, 8);
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS motoboy_lng DECIMAL(11, 8);
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS foto_fachada TEXT;
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_id INTEGER;
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS usuario_nome VARCHAR(100);
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS endereco_corrigido TEXT;
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS endereco_antigo TEXT;
-      ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS cod_profissional VARCHAR(20);
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END $$
-  `);
+  // Adicionar colunas incrementalmente — cada uma isolada para não engolir erros
+  const colunas = [
+    { nome: 'motoboy_lat',        tipo: 'DECIMAL(10, 8)' },
+    { nome: 'motoboy_lng',        tipo: 'DECIMAL(11, 8)' },
+    { nome: 'foto_fachada',       tipo: 'TEXT' },
+    { nome: 'usuario_id',         tipo: 'INTEGER' },
+    { nome: 'usuario_nome',       tipo: 'VARCHAR(100)' },
+    { nome: 'endereco_corrigido', tipo: 'TEXT' },
+    { nome: 'endereco_antigo',    tipo: 'TEXT' },
+    { nome: 'cod_profissional',   tipo: 'VARCHAR(20)' },
+  ];
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_ajustes_usuario_id
-      ON ajustes_automaticos(usuario_id)
-  `);
+  for (const col of colunas) {
+    try {
+      await pool.query(`ALTER TABLE ajustes_automaticos ADD COLUMN IF NOT EXISTS ${col.nome} ${col.tipo}`);
+    } catch (err) {
+      console.log(`⚠️ Coluna ${col.nome}: ${err.message}`);
+    }
+  }
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_ajustes_status_criado
-      ON ajustes_automaticos(status, criado_em ASC)
-  `);
+  // Índices
+  const indices = [
+    'CREATE INDEX IF NOT EXISTS idx_ajustes_usuario_id ON ajustes_automaticos(usuario_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ajustes_status_criado ON ajustes_automaticos(status, criado_em ASC)',
+    'CREATE INDEX IF NOT EXISTS idx_ajustes_os_numero ON ajustes_automaticos(os_numero)',
+  ];
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_ajustes_os_numero
-      ON ajustes_automaticos(os_numero)
-  `);
+  for (const idx of indices) {
+    try {
+      await pool.query(idx);
+    } catch (err) {
+      console.log(`⚠️ Índice: ${err.message}`);
+    }
+  }
 
   console.log('✅ Módulo Agente RPA — tabela ajustes_automaticos verificada/criada');
 }
