@@ -9,6 +9,7 @@
 const { logger } = require('../../config/logger');
 const { normalizeLocation }        = require('./location-normalizer');
 const { executarCorrecaoEndereco } = require('./playwright-agent');
+const { haversineKm, RAIO_MAXIMO_KM } = require('./routes/correcao.routes');
 
 const INTERVALO_MS = 10_000;
 let   workerAtivo  = false;
@@ -60,6 +61,27 @@ async function processarProximoPendente(pool) {
       `UPDATE ajustes_automaticos SET latitude = $1, longitude = $2 WHERE id = $3`,
       [coords.latitude, coords.longitude, registro.id]
     );
+
+    // Validar proximidade: motoboy deve estar a no máximo 2km das coordenadas informadas
+    if (registro.motoboy_lat && registro.motoboy_lng) {
+      const distancia = haversineKm(
+        parseFloat(registro.motoboy_lat),
+        parseFloat(registro.motoboy_lng),
+        coords.latitude,
+        coords.longitude
+      );
+      log(`📏 Distância motoboy → ponto: ${distancia.toFixed(2)} km (máx: ${RAIO_MAXIMO_KM} km)`);
+
+      if (distancia > RAIO_MAXIMO_KM) {
+        await pool.query(
+          `UPDATE ajustes_automaticos
+           SET status = 'erro', detalhe_erro = $1, processado_em = NOW()
+           WHERE id = $2`,
+          [`[Segurança] Motoboy está a ${distancia.toFixed(2)} km do ponto informado. Máximo permitido: ${RAIO_MAXIMO_KM} km. Certifique-se de estar próximo ao local.`, registro.id]
+        );
+        return;
+      }
+    }
 
     // Executar Playwright
     log(`🤖 Acionando Playwright para OS ${registro.os_numero}...`);
