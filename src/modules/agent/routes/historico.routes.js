@@ -182,6 +182,107 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
   });
 
+  // GET /agent/analytics (admin)
+  router.get('/analytics', verificarAdmin, async (req, res) => {
+    try {
+      const [
+        totaisRes,
+        porMesRes,
+        porSemanaRes,
+        topProfissionaisRes,
+        topValidadoresRes,
+        redFlagsRes,
+      ] = await Promise.all([
+        // Totais gerais
+        pool.query(`
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro,
+            COUNT(*) FILTER (WHERE status = 'pendente' OR status = 'processando') AS pendentes,
+            COUNT(*) FILTER (WHERE validado_por IS NOT NULL) AS validados
+          FROM ajustes_automaticos
+        `),
+        // Por mês (últimos 6 meses)
+        pool.query(`
+          SELECT
+            TO_CHAR(criado_em, 'YYYY-MM') AS mes,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+          FROM ajustes_automaticos
+          WHERE criado_em >= NOW() - INTERVAL '6 months'
+          GROUP BY mes
+          ORDER BY mes DESC
+        `),
+        // Por semana (últimas 8 semanas)
+        pool.query(`
+          SELECT
+            TO_CHAR(DATE_TRUNC('week', criado_em), 'DD/MM') AS semana_inicio,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+          FROM ajustes_automaticos
+          WHERE criado_em >= NOW() - INTERVAL '8 weeks'
+          GROUP BY DATE_TRUNC('week', criado_em)
+          ORDER BY DATE_TRUNC('week', criado_em) DESC
+        `),
+        // Top profissionais que mais solicitam
+        pool.query(`
+          SELECT
+            usuario_nome,
+            cod_profissional,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+          FROM ajustes_automaticos
+          WHERE usuario_nome IS NOT NULL
+          GROUP BY usuario_nome, cod_profissional
+          ORDER BY total DESC
+          LIMIT 15
+        `),
+        // Top validadores
+        pool.query(`
+          SELECT
+            validado_por,
+            COUNT(*) AS total
+          FROM ajustes_automaticos
+          WHERE validado_por IS NOT NULL
+          GROUP BY validado_por
+          ORDER BY total DESC
+          LIMIT 10
+        `),
+        // Red flags: profissionais com mais de 10 solicitações na última semana
+        pool.query(`
+          SELECT
+            usuario_nome,
+            cod_profissional,
+            COUNT(*) AS total_semana,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+          FROM ajustes_automaticos
+          WHERE criado_em >= NOW() - INTERVAL '7 days'
+            AND usuario_nome IS NOT NULL
+          GROUP BY usuario_nome, cod_profissional
+          HAVING COUNT(*) > 10
+          ORDER BY total_semana DESC
+        `),
+      ]);
+
+      return res.json({
+        totais: totaisRes.rows[0],
+        por_mes: porMesRes.rows,
+        por_semana: porSemanaRes.rows,
+        top_profissionais: topProfissionaisRes.rows,
+        top_validadores: topValidadoresRes.rows,
+        red_flags: redFlagsRes.rows,
+      });
+    } catch (err) {
+      console.error('[agent/analytics]', err.message);
+      return res.status(500).json({ erro: 'Erro ao carregar analytics.' });
+    }
+  });
+
   return router;
 }
 
