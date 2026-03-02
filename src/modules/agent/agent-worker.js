@@ -94,13 +94,16 @@ async function processarProximoPendente(pool) {
     });
 
     if (resultado.sucesso) {
+      // Endereço corrigido: usa o que o playwright capturou, ou o localizacao_raw do motoboy
+      const endCorrigido = resultado.endereco_corrigido || registro.localizacao_raw || null;
+      const endAntigo = resultado.endereco_antigo || null;
       await pool.query(
         `UPDATE ajustes_automaticos
          SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3
          WHERE id = $1`,
-        [registro.id, resultado.endereco_corrigido || null, resultado.endereco_antigo || null]
+        [registro.id, endCorrigido, endAntigo]
       );
-      log(`✅ ID ${registro.id} concluído.${resultado.endereco_corrigido ? ` Endereço: ${resultado.endereco_corrigido}` : ''}`);
+      log(`✅ ID ${registro.id} concluído. Antigo: ${endAntigo || '—'} | Novo: ${endCorrigido || '—'}`);
     } else {
       const detalhe = resultado.screenshot
         ? `${resultado.erro} [Screenshot: ${resultado.screenshot}]`
