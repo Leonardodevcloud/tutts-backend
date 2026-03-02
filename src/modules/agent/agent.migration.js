@@ -7,6 +7,8 @@
  */
 
 async function initAgentTables(pool) {
+  console.log('🔧 Agent Migration v2 — ALTER individual (sem DO $$ block)');
+  
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ajustes_automaticos (
       id            SERIAL PRIMARY KEY,
@@ -38,6 +40,7 @@ async function initAgentTables(pool) {
     { nome: 'endereco_corrigido', tipo: 'TEXT' },
     { nome: 'endereco_antigo',    tipo: 'TEXT' },
     { nome: 'cod_profissional',   tipo: 'VARCHAR(20)' },
+    { nome: 'frete_recalculado', tipo: 'BOOLEAN DEFAULT false' },
   ];
 
   for (const col of colunas) {
