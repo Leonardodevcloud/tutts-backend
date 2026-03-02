@@ -507,15 +507,108 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
 
     // ── Passo 6: Confirmar alteração ─────────────────────────────────────────
-    log('📌 Passo 6: Confirmando alteração');
+    log('📌 Passo 6: Confirmando alteração de endereço');
 
-    // Classe exata do botão: btn-confirmar-alteracao
     await page.locator('button.btn-confirmar-alteracao:visible').first().click();
     await page.waitForTimeout(2000);
+    await screenshot(page, os_numero, 'passo6_endereco_confirmado');
+    log('✅ Endereço confirmado');
 
-    await screenshot(page, os_numero, 'passo6_concluido');
-    log(`🎉 OS ${os_numero} Ponto ${ponto} corrigido com sucesso!`);
-    return { sucesso: true, endereco_corrigido: enderecoResolvido || null, endereco_antigo: enderecoAntigo || null };
+    // ── Passo 7: Fechar modal e clicar no código da OS ────────────────────────
+    log('📌 Passo 7: Abrindo página de edição da OS para recalcular frete');
+
+    let freteRecalculado = false;
+
+    // Fechar o modal de endereços (se ainda aberto)
+    try {
+      const modalAberto = await page.locator('.modal.show .close, .modal.in .close, #modalPadrao .close, button[data-dismiss="modal"]').first().isVisible().catch(() => false);
+      if (modalAberto) {
+        await page.locator('.modal.show .close, .modal.in .close, #modalPadrao .close, button[data-dismiss="modal"]').first().click();
+        await page.waitForTimeout(1000);
+        log('📌 Modal fechado');
+      }
+    } catch {
+      log('⚠️ Modal já fechado ou sem botão close');
+    }
+
+    // Aguardar modal fechar completamente
+    await page.waitForTimeout(1500);
+
+    // Clicar no link do código da OS na tabela
+    try {
+      const linkOS = page.locator(`a.btn-outline-primary`).filter({ hasText: os_numero }).first();
+      const linkVisivel = await linkOS.isVisible().catch(() => false);
+
+      if (linkVisivel) {
+        const [novaAba] = await Promise.all([
+          page.context().waitForEvent('page', { timeout: 10000 }),
+          linkOS.click(),
+        ]).catch(async () => {
+          log('⚠️ Link não abriu nova aba, verificando navegação...');
+          return [null];
+        });
+
+        const paginaEdicao = novaAba || page;
+
+        if (novaAba) {
+          await novaAba.waitForLoadState('domcontentloaded', { timeout: 15000 });
+          log('📌 Página de edição aberta em nova aba');
+        } else {
+          await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
+          log('📌 Página de edição carregada');
+        }
+
+        await paginaEdicao.waitForTimeout(2000);
+        await screenshot(paginaEdicao, os_numero, 'passo7_pagina_edicao');
+
+        // ── Passo 8: Clicar em Calcular ────────────────────────────────────────
+        log('📌 Passo 8: Clicando em Calcular frete');
+
+        const btnCalcular = paginaEdicao.locator('#btnCalcFreteCEN').first();
+        const calcVisivel = await btnCalcular.isVisible().catch(() => false);
+
+        if (calcVisivel) {
+          await btnCalcular.click();
+          log('📌 Botão Calcular clicado, aguardando cálculo...');
+
+          await paginaEdicao.waitForTimeout(5000);
+          await screenshot(paginaEdicao, os_numero, 'passo8_pos_calcular');
+
+          // ── Passo 9: Clicar em Salvar alterações ───────────────────────────────
+          log('📌 Passo 9: Salvando alterações');
+
+          const btnSalvar = paginaEdicao.locator('#btnChamarMotoboy').first();
+          const salvarVisivel = await btnSalvar.isVisible().catch(() => false);
+
+          if (salvarVisivel) {
+            await btnSalvar.click();
+            await paginaEdicao.waitForTimeout(3000);
+            await screenshot(paginaEdicao, os_numero, 'passo9_salvo');
+            log('✅ Frete recalculado e alterações salvas!');
+            freteRecalculado = true;
+          } else {
+            log('⚠️ Botão "Salvar alterações" não encontrado');
+            await screenshot(paginaEdicao, os_numero, 'passo9_btn_salvar_ausente');
+          }
+        } else {
+          log('⚠️ Botão "Calcular" não encontrado');
+          await screenshot(paginaEdicao, os_numero, 'passo8_btn_calcular_ausente');
+        }
+
+        if (novaAba) {
+          await novaAba.close().catch(() => {});
+        }
+
+      } else {
+        log('⚠️ Link da OS não encontrado na tabela');
+      }
+    } catch (e) {
+      log(`⚠️ Erro no recálculo de frete: ${e.message}`);
+      await screenshot(page, os_numero, 'passo7_erro_recalculo');
+    }
+
+    log(`🎉 OS ${os_numero} Ponto ${ponto} — processo completo! Frete recalculado: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
