@@ -607,24 +607,20 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await screenshot(page, os_numero, 'passo6_endereco_confirmado');
     log('✅ Endereço confirmado');
 
-    // ── Passo 7: Navegar para edição da OS e recalcular frete ────────────────
-    log('📌 Passo 7: Recalculando frete da OS');
+    // ── Passo 7: Navegar para edição da OS ──────────────────────────────────
+    log('📌 Passo 7: Abrindo página de edição da OS');
 
     let freteRecalculado = false;
+    let enderecoParaPreencher = enderecoResolvido || '';
 
     try {
-      // Extrair o id do serviço do link na tabela (data-order-id na row, ou href do link)
-      // Pelo print do HTML: a.btn-outline-primary href="../../editarOS?tipo=E&idServico=XXXXX&destino=P"
+      // Extrair a URL de edição do link na tabela
       const urlEdicao = await page.evaluate((osNum) => {
-        // Procurar o link do código da OS
-        const links = document.querySelectorAll('a.btn-outline-primary');
+        const links = document.querySelectorAll('a.btn-outline-primary, a[href*="editarOS"]');
         for (const link of links) {
-          if ((link.textContent || '').trim().includes(osNum)) {
-            return link.href || '';
-          }
+          if ((link.textContent || '').trim().includes(osNum)) return link.href || '';
         }
-        // Fallback: buscar na row da OS
-        const rows = document.querySelectorAll('tr.osEmExecucao, tr');
+        const rows = document.querySelectorAll('tr');
         for (const row of rows) {
           if ((row.textContent || '').includes(osNum)) {
             const a = row.querySelector('a.btn-outline-primary, a[href*="editarOS"]');
@@ -634,105 +630,236 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         return '';
       }, os_numero).catch(() => '');
 
-      if (urlEdicao) {
-        log(`📌 URL de edição encontrada: ${urlEdicao}`);
+      if (!urlEdicao) {
+        log('⚠️ URL de edição da OS não encontrada');
+        await screenshot(page, os_numero, 'passo7_url_nao_encontrada');
+        throw new Error('URL_EDICAO_NAO_ENCONTRADA');
+      }
 
-        // Navegar diretamente para a URL de edição (na mesma page)
-        await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      log(`📌 URL: ${urlEdicao}`);
+      await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(3000);
+      await screenshot(page, os_numero, 'passo7_pagina_edicao');
+
+      // ── Passo 8: Atualizar endereço no input do ponto ───────────────────────
+      log(`📌 Passo 8: Atualizando endereço do Ponto ${ponto}`);
+
+      // O input do endereço: input#txtEnderecoE{ponto}  (ex: txtEnderecoE2, txtEnderecoE3)
+      const seletorInput = `#txtEnderecoE${ponto}`;
+      const inputEndereco = page.locator(seletorInput);
+      const inputExiste = await inputEndereco.count().catch(() => 0);
+
+      if (inputExiste === 0) {
+        log(`⚠️ Input ${seletorInput} não encontrado na página`);
+        await screenshot(page, os_numero, 'passo8_input_nao_encontrado');
+        throw new Error('INPUT_ENDERECO_NAO_ENCONTRADO');
+      }
+
+      // Resolver o endereço legível via geocodificação reversa
+      if (!enderecoParaPreencher || /^-?\d+\.\d+/.test(enderecoParaPreencher)) {
+        // Fazer geocodificação reversa para obter endereço legível
+        try {
+          const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+          if (GOOGLE_API_KEY) {
+            const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+            const geoRes = await fetch(geoUrl);
+            const geoData = await geoRes.json();
+            if (geoData.status === 'OK' && geoData.results?.[0]) {
+              enderecoParaPreencher = geoData.results[0].formatted_address;
+              log(`📍 Endereço via geocode: ${enderecoParaPreencher}`);
+            }
+          }
+        } catch (geoErr) {
+          log(`⚠️ Geocode falhou: ${geoErr.message}`);
+        }
+      }
+
+      if (!enderecoParaPreencher) {
+        log('⚠️ Sem endereço legível para preencher — usando coordenadas');
+        enderecoParaPreencher = `${latitude}, ${longitude}`;
+      }
+
+      // Scroll até o input
+      await inputEndereco.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(500);
+
+      // Limpar e preencher o endereço
+      await inputEndereco.click({ clickCount: 3 });
+      await inputEndereco.fill('');
+      await inputEndereco.fill(enderecoParaPreencher);
+      await page.waitForTimeout(500);
+
+      // Verificar que preencheu
+      const valorInput = await inputEndereco.inputValue().catch(() => '');
+      log(`📍 Input preenchido: "${valorInput}"`);
+      await screenshot(page, os_numero, 'passo8_endereco_preenchido');
+
+      // ── Passo 8b: Clicar na lupa (buscar endereço) ──────────────────────────
+      log('📌 Passo 8b: Clicando no botão buscar (lupa)');
+
+      // O botão da lupa: button.buscar-endereco{ponto} com onclick n20Resquest({ponto})
+      // ou button com classe btn-info dentro do input-group-btn do ponto
+      const seletoresLupa = [
+        `button.buscar-endereco${ponto}`,
+        `button[onclick*="n20Resquest(${ponto})"]`,
+        `button[onclick*="n20Resquest('${ponto}')"]`,
+        `#divEndAdd${ponto} button.btn-info`,
+        `#divEndereco${ponto} button.btn-info`,
+        `#divRuaNumero${ponto} button.btn-info`,
+      ];
+
+      let lupaClicada = false;
+      for (const sel of seletoresLupa) {
+        const btn = page.locator(sel).first();
+        const existe = await btn.count().catch(() => 0);
+        if (existe > 0) {
+          await btn.scrollIntoViewIfNeeded().catch(() => {});
+          await btn.click();
+          log(`📌 Lupa clicada: ${sel}`);
+          lupaClicada = true;
+          break;
+        }
+      }
+
+      if (!lupaClicada) {
+        // Fallback: procurar qualquer botão com fa-search próximo ao input
+        const lupaFallback = await page.evaluate((pontoNum) => {
+          const input = document.getElementById(`txtEnderecoE${pontoNum}`);
+          if (!input) return false;
+          // Subir até o form-group e procurar botão com ícone de busca
+          const parent = input.closest('.form-group') || input.closest('.input-group') || input.parentElement?.parentElement;
+          if (parent) {
+            const btn = parent.querySelector('button.btn-info, button.buscar-endereco, button:has(.fa-search)');
+            if (btn) { btn.click(); return true; }
+          }
+          // Procurar o próximo botão com fa-search
+          const allBtns = document.querySelectorAll(`button[onclick*="n20Resquest"]`);
+          for (const b of allBtns) {
+            const onclick = b.getAttribute('onclick') || '';
+            if (onclick.includes(String(pontoNum))) { b.click(); return true; }
+          }
+          return false;
+        }, ponto).catch(() => false);
+
+        if (lupaFallback) {
+          log('📌 Lupa clicada via fallback JS');
+          lupaClicada = true;
+        } else {
+          log('⚠️ Botão lupa não encontrado');
+          await screenshot(page, os_numero, 'passo8b_lupa_nao_encontrada');
+        }
+      }
+
+      if (lupaClicada) {
+        // Aguardar busca processar
         await page.waitForTimeout(3000);
-        await screenshot(page, os_numero, 'passo7_pagina_edicao');
+        await screenshot(page, os_numero, 'passo8b_pos_busca');
 
-        // ── Passo 8: Clicar em Calcular ──────────────────────────────────────
-        log('📌 Passo 8: Clicando em Calcular frete');
+        // ── Passo 8c: Se aparecer validação/confirmação, aceitar ─────────────
+        // O dialog handler já está ativo (page.on('dialog')), mas pode haver
+        // botão de validar verde (btn-success validar) na tela
+        log('📌 Passo 8c: Verificando validação');
 
-        // Aguardar o botão Calcular ficar visível
-        const btnCalcular = page.locator('#btnCalcFreteCEN');
-        const calcExiste = await btnCalcular.count().catch(() => 0);
+        const btnValidarEndereco = page.locator('button.btn-success.validar, button.btn-success:has(.fa-check-circle-o)').first();
+        const validarExiste = await btnValidarEndereco.count().catch(() => 0);
 
-        if (calcExiste > 0) {
-          // Scroll até o botão
-          await btnCalcular.scrollIntoViewIfNeeded().catch(() => {});
-          await page.waitForTimeout(500);
+        if (validarExiste > 0) {
+          const validarVisivel = await btnValidarEndereco.isVisible().catch(() => false);
+          if (validarVisivel) {
+            await btnValidarEndereco.click();
+            log('📌 Validação aceita (botão verde)');
+            await page.waitForTimeout(2000);
+            await screenshot(page, os_numero, 'passo8c_validacao_aceita');
+          }
+        }
 
-          await btnCalcular.click();
-          log('📌 Botão Calcular clicado, aguardando cálculo...');
+        // Verificar se apareceu split de rua/número/bairro (print 3)
+        // Se checkEdit ficou true, o sistema já validou
+        const checkEdit = await page.evaluate((p) => {
+          const inp = document.getElementById(`checkEdit-${p}`);
+          return inp ? inp.value : '';
+        }, ponto).catch(() => '');
 
-          // Aguardar cálculo — esperar que "Distância aproximada" ou "Valor" apareçam
-          // ou que o botão Salvar fique habilitado
-          await page.waitForTimeout(6000);
-          await screenshot(page, os_numero, 'passo8_pos_calcular');
+        if (checkEdit) {
+          log(`📌 Endereço validado pelo sistema: ${checkEdit}`);
+        }
+      }
 
-          // Verificar se o cálculo funcionou (valor aparece)
-          const valorCalculado = await page.evaluate(() => {
+      // ── Passo 9: Calcular frete ─────────────────────────────────────────────
+      log('📌 Passo 9: Calculando frete');
+
+      const btnCalcular = page.locator('#btnCalcFreteCEN');
+      const calcExiste = await btnCalcular.count().catch(() => 0);
+
+      if (calcExiste > 0) {
+        await btnCalcular.scrollIntoViewIfNeeded().catch(() => {});
+        await page.waitForTimeout(500);
+        await btnCalcular.click();
+        log('📌 Botão Calcular clicado');
+
+        // Aguardar cálculo — polling por resultado
+        let valorEncontrado = false;
+        for (let i = 0; i < 12; i++) {
+          await page.waitForTimeout(1000);
+          const temValor = await page.evaluate(() => {
             const els = document.querySelectorAll('div, span, p, td');
             for (const el of els) {
-              const txt = (el.textContent || '').trim();
-              if (txt.includes('R$') && txt.match(/R\$\s*\d/)) return txt;
+              if ((el.textContent || '').match(/R\$\s*\d+[.,]\d{2}/)) return true;
             }
-            return '';
-          }).catch(() => '');
-
-          if (valorCalculado) {
-            log(`💰 Valor calculado: ${valorCalculado}`);
-          } else {
-            log('⚠️ Valor não encontrado após calcular');
+            return false;
+          }).catch(() => false);
+          if (temValor) {
+            valorEncontrado = true;
+            break;
           }
+        }
 
-          // ── Passo 9: Clicar em Salvar alterações ─────────────────────────────
-          log('📌 Passo 9: Salvando alterações');
+        await screenshot(page, os_numero, 'passo9_pos_calcular');
 
-          const btnSalvar = page.locator('#btnChamarMotoboy');
-          const salvarExiste = await btnSalvar.count().catch(() => 0);
+        if (valorEncontrado) {
+          log('💰 Valor calculado com sucesso');
+        } else {
+          log('⚠️ Valor não apareceu após 12s — tentando salvar mesmo assim');
+        }
 
-          if (salvarExiste > 0) {
-            await btnSalvar.scrollIntoViewIfNeeded().catch(() => {});
-            await page.waitForTimeout(500);
-            await btnSalvar.click();
-            log('📌 Botão Salvar clicado, aguardando...');
+        // ── Passo 10: Salvar alterações ─────────────────────────────────────────
+        log('📌 Passo 10: Salvando alterações');
 
-            // Aguardar processamento
-            await page.waitForTimeout(4000);
-            await screenshot(page, os_numero, 'passo9_pos_salvar');
+        const btnSalvar = page.locator('#btnChamarMotoboy');
+        const salvarExiste = await btnSalvar.count().catch(() => 0);
 
-            // Verificar se salvou (pode redirecionar, mostrar alerta de sucesso, etc.)
-            const urlAtual = page.url();
-            const alertaSucesso = await page.locator('.alert-success:visible, .swal2-success:visible').count().catch(() => 0);
-            
-            if (alertaSucesso > 0 || urlAtual.includes('acompanhamento')) {
-              log('✅ Frete recalculado e alterações salvas com sucesso!');
-              freteRecalculado = true;
-            } else {
-              // Verificar se não houve erro visível
-              const alertaErro = await page.locator('.alert-danger:visible, .swal2-error:visible').count().catch(() => 0);
-              if (alertaErro > 0) {
-                log('⚠️ Erro ao salvar — alerta de erro detectado');
-              } else {
-                // Sem alerta de erro = provavelmente salvou
-                log('✅ Salvar clicado sem erro aparente — marcando como recalculado');
-                freteRecalculado = true;
-              }
-            }
+        if (salvarExiste > 0) {
+          await btnSalvar.scrollIntoViewIfNeeded().catch(() => {});
+          await page.waitForTimeout(500);
+          await btnSalvar.click();
+          log('📌 Botão Salvar clicado');
 
-            await screenshot(page, os_numero, 'passo9_final');
+          await page.waitForTimeout(4000);
+          await screenshot(page, os_numero, 'passo10_pos_salvar');
+
+          // Verificar resultado
+          const alertaErro = await page.locator('.alert-danger:visible, .swal2-error:visible').count().catch(() => 0);
+          if (alertaErro > 0) {
+            log('⚠️ Erro detectado ao salvar');
           } else {
-            log('⚠️ Botão "Salvar alterações" (#btnChamarMotoboy) não encontrado na página');
-            await screenshot(page, os_numero, 'passo9_btn_salvar_ausente');
+            log('✅ Frete recalculado e alterações salvas!');
+            freteRecalculado = true;
           }
         } else {
-          log('⚠️ Botão "Calcular" (#btnCalcFreteCEN) não encontrado na página');
-          await screenshot(page, os_numero, 'passo8_btn_calcular_ausente');
+          log('⚠️ Botão Salvar (#btnChamarMotoboy) não encontrado');
+          await screenshot(page, os_numero, 'passo10_btn_salvar_ausente');
         }
       } else {
-        log('⚠️ URL de edição da OS não encontrada na tabela');
-        await screenshot(page, os_numero, 'passo7_url_nao_encontrada');
+        log('⚠️ Botão Calcular (#btnCalcFreteCEN) não encontrado');
+        await screenshot(page, os_numero, 'passo9_btn_calcular_ausente');
       }
     } catch (e) {
-      log(`⚠️ Erro no recálculo de frete: ${e.message}`);
+      log(`⚠️ Erro no recálculo: ${e.message}`);
       await screenshot(page, os_numero, 'passo7_erro_recalculo').catch(() => null);
     }
 
-    log(`🎉 OS ${os_numero} Ponto ${ponto} — processo completo! Frete recalculado: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
-    return { sucesso: true, endereco_corrigido: enderecoResolvido || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado };
+    log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
