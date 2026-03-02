@@ -94,9 +94,35 @@ async function processarProximoPendente(pool) {
     });
 
     if (resultado.sucesso) {
-      // Endereço corrigido: usa o que o playwright capturou, ou o localizacao_raw do motoboy
-      const endCorrigido = resultado.endereco_corrigido || registro.localizacao_raw || null;
+      // Endereço antigo: capturado pelo playwright do modal
       const endAntigo = resultado.endereco_antigo || null;
+
+      // Endereço corrigido: tentar geocodificação reversa das coordenadas
+      let endCorrigido = resultado.endereco_corrigido || null;
+
+      if (!endCorrigido || /^-?\d+\.\d+/.test(endCorrigido)) {
+        // É coordenada ou vazio — fazer geocodificação reversa
+        try {
+          const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+          if (GOOGLE_API_KEY && coords.latitude && coords.longitude) {
+            const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${coords.latitude},${coords.longitude}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+            const geoRes = await fetch(url, { signal: AbortSignal.timeout(8000) });
+            const geoData = await geoRes.json();
+            if (geoData.status === 'OK' && geoData.results && geoData.results[0]) {
+              endCorrigido = geoData.results[0].formatted_address;
+              log(`📍 Geocode reverso: ${endCorrigido}`);
+            }
+          }
+        } catch (geoErr) {
+          log(`⚠️ Geocode reverso falhou: ${geoErr.message}`);
+        }
+      }
+
+      // Fallback final: coordenadas + localizacao_raw
+      if (!endCorrigido) {
+        endCorrigido = registro.localizacao_raw || `${coords.latitude}, ${coords.longitude}`;
+      }
+
       await pool.query(
         `UPDATE ajustes_automaticos
          SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3
