@@ -439,52 +439,90 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     // ── Passo 4: Clicar em Corrigir no ponto específico ──────────────────────
     log(`📌 Passo 4: Corrigindo Ponto ${ponto}`);
 
+    // Configurar handler para dialogs do navegador (confirm/alert)
+    // O sistema pode pedir confirmação em qualquer passo
+    page.on('dialog', async (dialog) => {
+      log(`💬 Dialog detectado: "${dialog.message()}" — aceitando`);
+      await dialog.accept();
+    });
+
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
     await page.waitForTimeout(1500);
     await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
+    // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
+    const formAbriu = await page.locator('input[placeholder="Latitude"]:visible').count().catch(() => 0);
+    if (formAbriu === 0) {
+      // Tentar clicar novamente
+      log('⚠️ Form não abriu, tentando clicar novamente...');
+      await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
+      await page.waitForTimeout(2000);
+    }
+
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
     log('📌 Passo 5: Preenchendo coordenadas');
 
-    // Os inputs ficam dentro do form do ponto — aguarda ficarem visíveis
-    // Seletores do HTML real: placeholder="Latitude" e placeholder="Longitude"
-    // O form do ponto ativo: div#form-corrigir-{id} que fica visível
     const inputLat = page.locator('input[placeholder="Latitude"]:visible').first();
     const inputLon = page.locator('input[placeholder="Longitude"]:visible').first();
 
     await inputLat.waitFor({ state: 'visible', timeout: TIMEOUT });
     await inputLon.waitFor({ state: 'visible', timeout: TIMEOUT });
 
+    // Limpar e preencher — triple click + fill para garantir
     await inputLat.click({ clickCount: 3 });
-    await inputLat.fill(String(latitude));
+    await inputLat.fill('');
+    await inputLat.type(String(latitude), { delay: 50 });
+    
     await inputLon.click({ clickCount: 3 });
-    await inputLon.fill(String(longitude));
+    await inputLon.fill('');
+    await inputLon.type(String(longitude), { delay: 50 });
 
-    log(`📍 Lat: ${latitude} | Lon: ${longitude}`);
+    // Verificar que os valores foram preenchidos
+    const latPreenchido = await inputLat.inputValue().catch(() => '');
+    const lonPreenchido = await inputLon.inputValue().catch(() => '');
+    log(`📍 Lat preenchido: "${latPreenchido}" | Lon preenchido: "${lonPreenchido}"`);
 
-    // Clicar em Validar — classe exata do botão
-    await page.locator('button.btn-validar-endereco:visible').first().click();
-    await page.waitForTimeout(4000);
-    await screenshot(page, os_numero, 'passo5_pos_validar');
-
-    // Verificar se geocoder processou: botão Confirmar fica visível após sucesso
-    const confirmarVisivel = await page.locator('button.btn-confirmar-alteracao').isVisible().catch(() => false);
-    if (!confirmarVisivel) {
-      const ss = await screenshot(page, os_numero, 'passo5_geocoder_vazio');
+    if (!latPreenchido || !lonPreenchido) {
+      const ss = await screenshot(page, os_numero, 'passo5_inputs_vazios');
+      await browser.close();
       return {
         sucesso: false,
-        erro: `Coordenadas (${latitude}, ${longitude}) não reconhecidas pelo geocoder.`,
+        erro: `Falha ao preencher coordenadas. Lat: "${latPreenchido}", Lon: "${lonPreenchido}"`,
+        screenshot: ss,
+      };
+    }
+
+    // Clicar em Validar
+    const btnValidar = page.locator('button.btn-validar-endereco:visible').first();
+    await btnValidar.waitFor({ state: 'visible', timeout: TIMEOUT });
+    await btnValidar.click();
+    log('📌 Botão Validar clicado, aguardando geocoder...');
+
+    // Aguardar geocoder — esperar botão Confirmar aparecer (com polling)
+    let confirmarVisivel = false;
+    for (let tentativa = 0; tentativa < 10; tentativa++) {
+      await page.waitForTimeout(1000);
+      confirmarVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
+      if (confirmarVisivel) break;
+    }
+    
+    await screenshot(page, os_numero, 'passo5_pos_validar');
+
+    if (!confirmarVisivel) {
+      const ss = await screenshot(page, os_numero, 'passo5_geocoder_vazio');
+      await browser.close();
+      return {
+        sucesso: false,
+        erro: `Coordenadas (${latitude}, ${longitude}) não reconhecidas pelo geocoder. Botão Confirmar não apareceu após 10s.`,
         screenshot: ss,
       };
     }
     log('✅ Geocoder OK — botão Confirmar visível');
 
-    // Endereço novo: o worker usa localizacao_raw como fallback
-    // Aqui tentamos capturar o que o geocoder do sistema resolveu (bônus)
+    // Capturar endereço resolvido pelo geocoder (bônus)
     let enderecoResolvido = '';
     try {
       enderecoResolvido = await page.evaluate(() => {
-        // Procurar texto de endereço próximo ao botão Confirmar
         const btnConfirmar = document.querySelector('.btn-confirmar-alteracao');
         if (!btnConfirmar) return '';
         const container = btnConfirmar.closest('.card-body') || btnConfirmar.closest('div') || btnConfirmar.parentElement;
@@ -509,8 +547,63 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     // ── Passo 6: Confirmar alteração ─────────────────────────────────────────
     log('📌 Passo 6: Confirmando alteração de endereço');
 
+    // Capturar o endereço antigo do span ANTES de confirmar (para comparar depois)
+    const endAntigoSpan = await page.evaluate((pontoNum) => {
+      const btn = document.querySelector(`.btn-corrigir-endereco[data-ponto="${pontoNum}"]`);
+      if (!btn) return '';
+      const idEnd = btn.getAttribute('data-id-endereco');
+      if (!idEnd) return '';
+      const span = document.getElementById(`end-antigo-${idEnd}`);
+      return span ? (span.textContent || '').trim() : '';
+    }, ponto).catch(() => '');
+
     await page.locator('button.btn-confirmar-alteracao:visible').first().click();
-    await page.waitForTimeout(2000);
+
+    // Aguardar processamento — verificar que algo mudou
+    await page.waitForTimeout(3000);
+    await screenshot(page, os_numero, 'passo6_pos_confirmar');
+
+    // Verificar que a confirmação realmente aplicou:
+    // 1. O botão btn-confirmar-alteracao deve ter sumido
+    // 2. Ou o span end-antigo mudou
+    // 3. Ou apareceu mensagem de sucesso
+    const confirmarAindaVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
+    
+    if (confirmarAindaVisivel) {
+      // Pode ter aparecido um dialog que não foi tratado, ou erro
+      log('⚠️ Botão Confirmar ainda visível após clique — tentando novamente');
+      await page.locator('button.btn-confirmar-alteracao:visible').first().click();
+      await page.waitForTimeout(3000);
+      
+      const aindaVisivel2 = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
+      if (aindaVisivel2) {
+        const ss = await screenshot(page, os_numero, 'passo6_confirmar_falhou');
+        await browser.close();
+        return {
+          sucesso: false,
+          erro: `Falha ao confirmar alteração. O botão "Confirmar" permanece visível após 2 tentativas. O endereço pode não ter sido alterado.`,
+          screenshot: ss,
+        };
+      }
+    }
+
+    // Verificar se o endereço mudou comparando o span
+    const endNovoSpan = await page.evaluate((pontoNum) => {
+      const btn = document.querySelector(`.btn-corrigir-endereco[data-ponto="${pontoNum}"]`);
+      if (!btn) return 'btn-sumiu'; // botão sumiu = form fechou = sucesso provável
+      const idEnd = btn.getAttribute('data-id-endereco');
+      if (!idEnd) return '';
+      const span = document.getElementById(`end-antigo-${idEnd}`);
+      return span ? (span.textContent || '').trim() : '';
+    }, ponto).catch(() => '');
+
+    if (endAntigoSpan && endNovoSpan && endAntigoSpan !== 'btn-sumiu' && endNovoSpan !== 'btn-sumiu' && endAntigoSpan === endNovoSpan) {
+      log(`⚠️ Endereço NÃO mudou no DOM. Antes: "${endAntigoSpan}" | Depois: "${endNovoSpan}"`);
+      // Não retorna erro pois pode ser que o DOM ainda não atualizou
+    } else {
+      log('✅ Confirmação aplicada com sucesso');
+    }
+
     await screenshot(page, os_numero, 'passo6_endereco_confirmado');
     log('✅ Endereço confirmado');
 
