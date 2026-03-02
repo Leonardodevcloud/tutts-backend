@@ -607,97 +607,128 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await screenshot(page, os_numero, 'passo6_endereco_confirmado');
     log('✅ Endereço confirmado');
 
-    // ── Passo 7: Fechar modal e clicar no código da OS ────────────────────────
-    log('📌 Passo 7: Abrindo página de edição da OS para recalcular frete');
+    // ── Passo 7: Navegar para edição da OS e recalcular frete ────────────────
+    log('📌 Passo 7: Recalculando frete da OS');
 
     let freteRecalculado = false;
 
-    // Fechar o modal de endereços (se ainda aberto)
     try {
-      const modalAberto = await page.locator('.modal.show .close, .modal.in .close, #modalPadrao .close, button[data-dismiss="modal"]').first().isVisible().catch(() => false);
-      if (modalAberto) {
-        await page.locator('.modal.show .close, .modal.in .close, #modalPadrao .close, button[data-dismiss="modal"]').first().click();
-        await page.waitForTimeout(1000);
-        log('📌 Modal fechado');
-      }
-    } catch {
-      log('⚠️ Modal já fechado ou sem botão close');
-    }
-
-    // Aguardar modal fechar completamente
-    await page.waitForTimeout(1500);
-
-    // Clicar no link do código da OS na tabela
-    try {
-      const linkOS = page.locator(`a.btn-outline-primary`).filter({ hasText: os_numero }).first();
-      const linkVisivel = await linkOS.isVisible().catch(() => false);
-
-      if (linkVisivel) {
-        const [novaAba] = await Promise.all([
-          page.context().waitForEvent('page', { timeout: 10000 }),
-          linkOS.click(),
-        ]).catch(async () => {
-          log('⚠️ Link não abriu nova aba, verificando navegação...');
-          return [null];
-        });
-
-        const paginaEdicao = novaAba || page;
-
-        if (novaAba) {
-          await novaAba.waitForLoadState('domcontentloaded', { timeout: 15000 });
-          log('📌 Página de edição aberta em nova aba');
-        } else {
-          await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-          log('📌 Página de edição carregada');
+      // Extrair o id do serviço do link na tabela (data-order-id na row, ou href do link)
+      // Pelo print do HTML: a.btn-outline-primary href="../../editarOS?tipo=E&idServico=XXXXX&destino=P"
+      const urlEdicao = await page.evaluate((osNum) => {
+        // Procurar o link do código da OS
+        const links = document.querySelectorAll('a.btn-outline-primary');
+        for (const link of links) {
+          if ((link.textContent || '').trim().includes(osNum)) {
+            return link.href || '';
+          }
         }
+        // Fallback: buscar na row da OS
+        const rows = document.querySelectorAll('tr.osEmExecucao, tr');
+        for (const row of rows) {
+          if ((row.textContent || '').includes(osNum)) {
+            const a = row.querySelector('a.btn-outline-primary, a[href*="editarOS"]');
+            if (a) return a.href || '';
+          }
+        }
+        return '';
+      }, os_numero).catch(() => '');
 
-        await paginaEdicao.waitForTimeout(2000);
-        await screenshot(paginaEdicao, os_numero, 'passo7_pagina_edicao');
+      if (urlEdicao) {
+        log(`📌 URL de edição encontrada: ${urlEdicao}`);
 
-        // ── Passo 8: Clicar em Calcular ────────────────────────────────────────
+        // Navegar diretamente para a URL de edição (na mesma page)
+        await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(3000);
+        await screenshot(page, os_numero, 'passo7_pagina_edicao');
+
+        // ── Passo 8: Clicar em Calcular ──────────────────────────────────────
         log('📌 Passo 8: Clicando em Calcular frete');
 
-        const btnCalcular = paginaEdicao.locator('#btnCalcFreteCEN').first();
-        const calcVisivel = await btnCalcular.isVisible().catch(() => false);
+        // Aguardar o botão Calcular ficar visível
+        const btnCalcular = page.locator('#btnCalcFreteCEN');
+        const calcExiste = await btnCalcular.count().catch(() => 0);
 
-        if (calcVisivel) {
+        if (calcExiste > 0) {
+          // Scroll até o botão
+          await btnCalcular.scrollIntoViewIfNeeded().catch(() => {});
+          await page.waitForTimeout(500);
+
           await btnCalcular.click();
           log('📌 Botão Calcular clicado, aguardando cálculo...');
 
-          await paginaEdicao.waitForTimeout(5000);
-          await screenshot(paginaEdicao, os_numero, 'passo8_pos_calcular');
+          // Aguardar cálculo — esperar que "Distância aproximada" ou "Valor" apareçam
+          // ou que o botão Salvar fique habilitado
+          await page.waitForTimeout(6000);
+          await screenshot(page, os_numero, 'passo8_pos_calcular');
 
-          // ── Passo 9: Clicar em Salvar alterações ───────────────────────────────
+          // Verificar se o cálculo funcionou (valor aparece)
+          const valorCalculado = await page.evaluate(() => {
+            const els = document.querySelectorAll('div, span, p, td');
+            for (const el of els) {
+              const txt = (el.textContent || '').trim();
+              if (txt.includes('R$') && txt.match(/R\$\s*\d/)) return txt;
+            }
+            return '';
+          }).catch(() => '');
+
+          if (valorCalculado) {
+            log(`💰 Valor calculado: ${valorCalculado}`);
+          } else {
+            log('⚠️ Valor não encontrado após calcular');
+          }
+
+          // ── Passo 9: Clicar em Salvar alterações ─────────────────────────────
           log('📌 Passo 9: Salvando alterações');
 
-          const btnSalvar = paginaEdicao.locator('#btnChamarMotoboy').first();
-          const salvarVisivel = await btnSalvar.isVisible().catch(() => false);
+          const btnSalvar = page.locator('#btnChamarMotoboy');
+          const salvarExiste = await btnSalvar.count().catch(() => 0);
 
-          if (salvarVisivel) {
+          if (salvarExiste > 0) {
+            await btnSalvar.scrollIntoViewIfNeeded().catch(() => {});
+            await page.waitForTimeout(500);
             await btnSalvar.click();
-            await paginaEdicao.waitForTimeout(3000);
-            await screenshot(paginaEdicao, os_numero, 'passo9_salvo');
-            log('✅ Frete recalculado e alterações salvas!');
-            freteRecalculado = true;
+            log('📌 Botão Salvar clicado, aguardando...');
+
+            // Aguardar processamento
+            await page.waitForTimeout(4000);
+            await screenshot(page, os_numero, 'passo9_pos_salvar');
+
+            // Verificar se salvou (pode redirecionar, mostrar alerta de sucesso, etc.)
+            const urlAtual = page.url();
+            const alertaSucesso = await page.locator('.alert-success:visible, .swal2-success:visible').count().catch(() => 0);
+            
+            if (alertaSucesso > 0 || urlAtual.includes('acompanhamento')) {
+              log('✅ Frete recalculado e alterações salvas com sucesso!');
+              freteRecalculado = true;
+            } else {
+              // Verificar se não houve erro visível
+              const alertaErro = await page.locator('.alert-danger:visible, .swal2-error:visible').count().catch(() => 0);
+              if (alertaErro > 0) {
+                log('⚠️ Erro ao salvar — alerta de erro detectado');
+              } else {
+                // Sem alerta de erro = provavelmente salvou
+                log('✅ Salvar clicado sem erro aparente — marcando como recalculado');
+                freteRecalculado = true;
+              }
+            }
+
+            await screenshot(page, os_numero, 'passo9_final');
           } else {
-            log('⚠️ Botão "Salvar alterações" não encontrado');
-            await screenshot(paginaEdicao, os_numero, 'passo9_btn_salvar_ausente');
+            log('⚠️ Botão "Salvar alterações" (#btnChamarMotoboy) não encontrado na página');
+            await screenshot(page, os_numero, 'passo9_btn_salvar_ausente');
           }
         } else {
-          log('⚠️ Botão "Calcular" não encontrado');
-          await screenshot(paginaEdicao, os_numero, 'passo8_btn_calcular_ausente');
+          log('⚠️ Botão "Calcular" (#btnCalcFreteCEN) não encontrado na página');
+          await screenshot(page, os_numero, 'passo8_btn_calcular_ausente');
         }
-
-        if (novaAba) {
-          await novaAba.close().catch(() => {});
-        }
-
       } else {
-        log('⚠️ Link da OS não encontrado na tabela');
+        log('⚠️ URL de edição da OS não encontrada na tabela');
+        await screenshot(page, os_numero, 'passo7_url_nao_encontrada');
       }
     } catch (e) {
       log(`⚠️ Erro no recálculo de frete: ${e.message}`);
-      await screenshot(page, os_numero, 'passo7_erro_recalculo');
+      await screenshot(page, os_numero, 'passo7_erro_recalculo').catch(() => null);
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — processo completo! Frete recalculado: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
