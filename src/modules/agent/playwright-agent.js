@@ -383,41 +383,64 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
     log(`✅ Ponto ${ponto} encontrado na OS`);
 
-    // Capturar endereço antigo do ponto antes de corrigir
+    // Capturar endereço antigo do ponto ANTES de clicar em Corrigir
     let enderecoAntigo = '';
+
     try {
-      // O endereço do ponto geralmente está no card/row do ponto, próximo ao botão Corrigir
-      const btnCorrigir = page.locator(`.btn-corrigir-endereco[data-ponto="${ponto}"]`).first();
-      enderecoAntigo = await btnCorrigir.evaluate((btn, p) => {
-        // Subir até o container do ponto (card, row, tr, div pai)
-        const container = btn.closest('tr') || btn.closest('.card') || btn.closest('.card-body') || btn.closest('[class*="ponto"]') || btn.parentElement?.parentElement;
-        if (!container) return '';
-        // Procurar texto que pareça endereço
-        const els = container.querySelectorAll('td, span, p, div, small');
-        for (const el of els) {
-          const txt = (el.textContent || '').trim();
-          if (txt.length > 10 && txt.includes(',') && !txt.includes('Corrigir') && !txt.includes('Ponto') && el !== btn) {
-            return txt;
+      // HTML exato: <span id="end-antigo-{idEndereco}"> contém o endereço antigo
+      // O botão tem data-id-endereco="{idEndereco}" e data-ponto="{N}"
+      enderecoAntigo = await page.evaluate((pontoNum) => {
+        const btn = document.querySelector(`.btn-corrigir-endereco[data-ponto="${pontoNum}"]`);
+        if (!btn) return '';
+
+        const idEndereco = btn.getAttribute('data-id-endereco');
+
+        // Estratégia 1: span#end-antigo-{id} (o conteúdo pode estar display:none mas textContent funciona)
+        if (idEndereco) {
+          const span = document.getElementById(`end-antigo-${idEndereco}`);
+          if (span) {
+            const txt = (span.textContent || '').trim();
+            if (txt.length > 5) return txt;
           }
         }
-        // Fallback: pegar o texto inteiro do container e limpar
-        const full = container.textContent || '';
-        const cleaned = full.replace(/Corrigir|Ponto \d/g, '').trim();
-        return cleaned.length > 10 ? cleaned.substring(0, 200) : '';
+
+        // Estratégia 2: O endereço está como texto direto no container pai, antes do botão
+        // Estrutura: "📍 Ponto N [ENDEREÇO] PEC Nº nota: XXXXX [Botão Corrigir]"
+        // Subir até o div que contém todo o bloco do ponto
+        let container = btn.parentElement;
+        while (container && !container.textContent.includes('Ponto')) {
+          container = container.parentElement;
+          if (container && container.classList.contains('modal-body')) break;
+        }
+        if (container) {
+          // Pegar o texto completo do bloco e extrair o endereço
+          const fullText = container.textContent || '';
+          // O endereço vem depois de "Ponto N " e antes de "PEC" ou "Corrigir"
+          const regexEnd = /Ponto\s*\d+\s*([\s\S]*?)(?:PEC|Corrigir|$)/i;
+          const match = fullText.match(regexEnd);
+          if (match) {
+            const addr = match[1].replace(/\s+/g, ' ').trim();
+            if (addr.length > 10) return addr.substring(0, 300);
+          }
+        }
+
+        return '';
       }, ponto).catch(() => '');
+
       if (enderecoAntigo) {
-        log(`📍 Endereço antigo capturado: ${enderecoAntigo}`);
+        log(`📍 Endereço antigo Ponto ${ponto}: ${enderecoAntigo}`);
+      } else {
+        log('⚠️ Endereço antigo não capturado');
       }
     } catch (e) {
-      log(`⚠️ Não foi possível capturar endereço antigo: ${e.message}`);
+      log(`⚠️ Erro ao capturar endereço antigo: ${e.message}`);
     }
 
     // ── Passo 4: Clicar em Corrigir no ponto específico ──────────────────────
     log(`📌 Passo 4: Corrigindo Ponto ${ponto}`);
 
-    // Usa data-ponto para selecionar o ponto exato — sem contar botões!
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
     await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
@@ -456,55 +479,31 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
     log('✅ Geocoder OK — botão Confirmar visível');
 
-    // Capturar endereço resolvido pelo geocoder (antes de confirmar)
+    // Endereço novo: o worker usa localizacao_raw como fallback
+    // Aqui tentamos capturar o que o geocoder do sistema resolveu (bônus)
     let enderecoResolvido = '';
     try {
-      // Tentar capturar o texto do endereço exibido no form de correção
-      // Seletores comuns: .endereco-resolvido, .endereco-geocoder, texto próximo ao botão confirmar
-      const possiveisSeletores = [
-        '.endereco-resolvido',
-        '.endereco-geocoder',
-        '.endereco-resultado',
-        '.resultado-geocoder',
-        '.text-success:visible',
-        '.alert-success:visible',
-      ];
-      for (const sel of possiveisSeletores) {
-        const el = page.locator(sel).first();
-        const visivel = await el.isVisible().catch(() => false);
-        if (visivel) {
-          enderecoResolvido = (await el.innerText().catch(() => '')).trim();
-          if (enderecoResolvido) {
-            log(`📍 Endereço resolvido (${sel}): ${enderecoResolvido}`);
-            break;
+      enderecoResolvido = await page.evaluate(() => {
+        // Procurar texto de endereço próximo ao botão Confirmar
+        const btnConfirmar = document.querySelector('.btn-confirmar-alteracao');
+        if (!btnConfirmar) return '';
+        const container = btnConfirmar.closest('.card-body') || btnConfirmar.closest('div') || btnConfirmar.parentElement;
+        if (!container) return '';
+        const els = container.querySelectorAll('p, span, div, small, strong');
+        for (const el of els) {
+          const txt = (el.textContent || '').trim();
+          if (txt.length > 15 && txt.includes(',') &&
+              !txt.includes('Latitude') && !txt.includes('Longitude') &&
+              !txt.includes('Confirmar') && !txt.includes('Validar') &&
+              el.children.length === 0 && el.offsetParent !== null) {
+            return txt.substring(0, 300);
           }
         }
-      }
-
-      // Fallback: capturar qualquer texto que pareça endereço próximo ao botão confirmar
-      if (!enderecoResolvido) {
-        const formTexto = await page.locator('button.btn-confirmar-alteracao:visible').first()
-          .evaluate(btn => {
-            const parent = btn.closest('.card-body') || btn.closest('.modal-body') || btn.parentElement?.parentElement;
-            if (!parent) return '';
-            // Procurar elementos de texto que contenham vírgula (padrão de endereço)
-            const textos = parent.querySelectorAll('p, span, div, small, label');
-            for (const t of textos) {
-              const txt = t.textContent?.trim() || '';
-              // Endereço geralmente tem vírgula e mais de 15 chars
-              if (txt.length > 15 && txt.includes(',') && !txt.includes('Latitude') && !txt.includes('Longitude')) {
-                return txt;
-              }
-            }
-            return '';
-          }).catch(() => '');
-        if (formTexto) {
-          enderecoResolvido = formTexto;
-          log(`📍 Endereço resolvido (fallback DOM): ${enderecoResolvido}`);
-        }
-      }
+        return '';
+      }).catch(() => '');
+      if (enderecoResolvido) log(`📍 Endereço novo (DOM): ${enderecoResolvido}`);
     } catch (e) {
-      log(`⚠️ Não foi possível capturar endereço resolvido: ${e.message}`);
+      log(`⚠️ Endereço novo não capturado do DOM: ${e.message}`);
     }
 
     // ── Passo 6: Confirmar alteração ─────────────────────────────────────────
