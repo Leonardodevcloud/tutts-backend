@@ -125,11 +125,11 @@ async function processarProximoPendente(pool) {
 
       await pool.query(
         `UPDATE ajustes_automaticos
-         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3
+         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3, frete_recalculado = $4
          WHERE id = $1`,
-        [registro.id, endCorrigido, endAntigo]
+        [registro.id, endCorrigido, endAntigo, resultado.frete_recalculado || false]
       );
-      log(`✅ ID ${registro.id} concluído. Antigo: ${endAntigo || '—'} | Novo: ${endCorrigido || '—'}`);
+      log(`✅ ID ${registro.id} concluído. Antigo: ${endAntigo || '—'} | Novo: ${endCorrigido || '—'} | Frete: ${resultado.frete_recalculado ? 'SIM' : 'NÃO'}`);
     } else {
       const detalhe = resultado.screenshot
         ? `${resultado.erro} [Screenshot: ${resultado.screenshot}]`
