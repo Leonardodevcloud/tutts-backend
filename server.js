@@ -354,6 +354,32 @@ app.use('/api', initMiscRoutes(pool, verificarToken));
 // Sucesso do Cliente (CS) — acesso admin/gestores
 // (mapa-calor é público via PUBLIC_PATHS em auth.js)
 app.use('/api', verificarToken, initCsRoutes(pool, verificarToken, verificarAdmin));
+// ── Screenshots RPA (público com chave, temporário) ──────────────────
+const SCREENSHOT_DIR_TMP = '/tmp/screenshots';
+const SCREENSHOT_KEY = process.env.SCREENSHOT_KEY || 'tutts-debug-2025';
+
+app.get('/api/rpa-screenshots', (req, res) => {
+  if (req.query.key !== SCREENSHOT_KEY) return res.status(403).json({ erro: 'Use ?key=CHAVE' });
+  try {
+    const fss = require('fs');
+    const pathh = require('path');
+    if (!fss.existsSync(SCREENSHOT_DIR_TMP)) return res.type('html').send('<h1>Nenhum screenshot</h1>');
+    const files = fss.readdirSync(SCREENSHOT_DIR_TMP).filter(f => f.endsWith('.png')).sort((a, b) => b.localeCompare(a));
+    const k = SCREENSHOT_KEY;
+    const cards = files.map(f => '<div style="background:#1a1a2e;padding:12px;border-radius:8px;margin:12px 0"><p style="color:#a78bfa;font-size:13px;margin:0 0 8px">' + f + '</p><img src="/api/rpa-screenshots/' + encodeURIComponent(f) + '?key=' + k + '" style="max-width:100%;border-radius:6px" loading="lazy"></div>').join('');
+    res.type('html').send('<html><body style="font-family:sans-serif;padding:20px;background:#111;color:#eee"><h1>Screenshots RPA (' + files.length + ')</h1>' + cards + '</body></html>');
+  } catch(e) { res.status(500).json({erro:e.message}); }
+});
+
+app.get('/api/rpa-screenshots/:filename', (req, res) => {
+  if (req.query.key !== SCREENSHOT_KEY) return res.status(403).json({ erro: 'Acesso negado' });
+  const fss = require('fs');
+  const pathh = require('path');
+  const file = pathh.join(SCREENSHOT_DIR_TMP, req.params.filename);
+  if (!fss.existsSync(file)) return res.status(404).json({ erro: 'Nao encontrada' });
+  res.type('image/png').sendFile(file);
+});
+
 app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
 
 // ─── Error handlers (MUST be last) ───────────────────────
