@@ -41,6 +41,9 @@ async function initAgentTables(pool) {
     { nome: 'endereco_antigo',    tipo: 'TEXT' },
     { nome: 'cod_profissional',   tipo: 'VARCHAR(20)' },
     { nome: 'frete_recalculado', tipo: 'BOOLEAN DEFAULT false' },
+    { nome: 'ponto1_lat',        tipo: 'DECIMAL(10, 8)' },
+    { nome: 'ponto1_lng',        tipo: 'DECIMAL(11, 8)' },
+    { nome: 'ponto1_endereco',   tipo: 'TEXT' },
   ];
 
   for (const col of colunas) {
