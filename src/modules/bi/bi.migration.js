@@ -309,6 +309,30 @@ async function initBiTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_loja_sugestoes_status ON loja_sugestoes(status)`).catch(() => {});
 
     // ============================================
-}
+    // TABELA CACHE DE GARANTIDO (dados vindos da planilha Google Sheets)
+    // Sincronizada via endpoint /bi/garantido/sync-cache
+    // ============================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bi_garantido_cache (
+        id SERIAL PRIMARY KEY,
+        cod_cliente VARCHAR(20) NOT NULL,
+        data DATE NOT NULL,
+        cod_prof VARCHAR(20),
+        profissional VARCHAR(255),
+        valor_negociado DECIMAL(10,2) NOT NULL DEFAULT 0,
+        valor_produzido DECIMAL(10,2) DEFAULT 0,
+        complemento DECIMAL(10,2) DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'pendente',
+        entregas INTEGER DEFAULT 0,
+        synced_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(cod_prof, data, cod_cliente)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_garantido_cache_data ON bi_garantido_cache(data)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_garantido_cache_cliente ON bi_garantido_cache(cod_cliente)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_garantido_cache_prof ON bi_garantido_cache(cod_prof)`).catch(() => {});
+    console.log('✅ Tabela bi_garantido_cache verificada');
 
+    // ============================================
+}
 module.exports = { initBiTables };
