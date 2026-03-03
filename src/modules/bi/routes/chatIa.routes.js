@@ -1,15 +1,31 @@
 /**
  * BI Sub-Router: Chat IA com acesso ao banco de dados
  * Permite prompts livres — Gemini gera SQL, executa e analisa os resultados
+ * 
+ * v2.0 — Melhorias de assertividade:
+ *  1. Classificador de intenção (etapa 0) — prompts menores e focados
+ *  2. Detecção semântica de perguntas conceituais (sem lista estática)
+ *  3. Pós-validação automática de SQL (filtros obrigatórios)
+ *  4. Amostras de valores distintos no prompt (ocorrências, status, etc)
+ *  5. Prompt de análise dinâmico por categoria
+ *  6. Retry inteligente com contexto do prompt original (até 3 tentativas)
+ *  7. Cache de queries semelhantes (10 min TTL)
  */
 const express = require('express');
 
 function createChatIaRoutes(pool) {
   const router = express.Router();
 
-  // ==================== SCHEMA CACHE ====================
+  // ==================== CACHES ====================
   let schemaCache = { data: null, timestamp: 0 };
   const SCHEMA_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+  let samplesCache = { data: null, timestamp: 0 };
+  const SAMPLES_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+  // Cache de queries por similaridade (melhoria 7)
+  const queryCache = new Map();
+  const QUERY_CACHE_TTL = 10 * 60 * 1000; // 10 minutos
 
   // Tabelas permitidas para consulta (segurança)
   const TABELAS_PERMITIDAS = [
@@ -28,53 +44,95 @@ function createChatIaRoutes(pool) {
     'loja_produtos', 'loja_pedidos', 'loja_estoque'
   ];
 
-  // Buscar schema das tabelas permitidas
+  // ==================== HELPER: Chamar Gemini ====================
+  async function chamarGemini(apiKey, prompt, opts = {}) {
+    const { temperature = 0.3, maxTokens = 4096, contents = null } = opts;
+    const body = {
+      contents: contents || [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature, maxOutputTokens: maxTokens }
+    };
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    );
+    const data = await resp.json();
+    if (data.error) throw new Error(`Gemini: ${data.error.message}`);
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  }
+
+  // ==================== MELHORIA 5: Amostras de valores distintos ====================
+  async function getSamples() {
+    if (samplesCache.data && Date.now() - samplesCache.timestamp < SAMPLES_CACHE_TTL) {
+      return samplesCache.data;
+    }
+    const samples = {};
+    try {
+      const [oc, st, cat, datas] = await Promise.all([
+        pool.query(`SELECT DISTINCT ocorrencia, COUNT(*)::int as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 20`),
+        pool.query(`SELECT DISTINCT status, COUNT(*)::int as qtd FROM bi_entregas WHERE status IS NOT NULL AND status != '' GROUP BY status ORDER BY qtd DESC LIMIT 15`),
+        pool.query(`SELECT DISTINCT categoria, COUNT(*)::int as qtd FROM bi_entregas WHERE categoria IS NOT NULL AND categoria != '' GROUP BY categoria ORDER BY qtd DESC LIMIT 10`),
+        pool.query(`SELECT MIN(data_solicitado) as min_data, MAX(data_solicitado) as max_data, COUNT(DISTINCT data_solicitado)::int as dias FROM bi_entregas`)
+      ]);
+      samples.ocorrencias = oc.rows;
+      samples.status = st.rows;
+      samples.categorias = cat.rows;
+      samples.periodo = datas.rows[0];
+    } catch (e) {
+      console.error('⚠️ [Chat IA] Erro ao buscar amostras:', e.message);
+    }
+    samplesCache = { data: samples, timestamp: Date.now() };
+    return samples;
+  }
+
+  function formatarSamples(samples) {
+    if (!samples) return '';
+    let texto = '\n═══════════════════════════════════════\n📊 VALORES REAIS NO BANCO (use para filtrar corretamente)\n═══════════════════════════════════════\n';
+    if (samples.ocorrencias?.length) {
+      texto += `\nValores de ocorrencia: ${samples.ocorrencias.map(o => `"${o.ocorrencia}" (${o.qtd}x)`).join(', ')}\n`;
+    }
+    if (samples.status?.length) {
+      texto += `Valores de status: ${samples.status.map(s => `"${s.status}" (${s.qtd}x)`).join(', ')}\n`;
+    }
+    if (samples.categorias?.length) {
+      texto += `Valores de categoria: ${samples.categorias.map(c => `"${c.categoria}" (${c.qtd}x)`).join(', ')}\n`;
+    }
+    if (samples.periodo) {
+      texto += `Período disponível: ${samples.periodo.min_data} até ${samples.periodo.max_data} (${samples.periodo.dias} dias)\n`;
+    }
+    return texto;
+  }
+
+  // ==================== SCHEMA ====================
   async function getSchema() {
     if (schemaCache.data && Date.now() - schemaCache.timestamp < SCHEMA_CACHE_TTL) {
       return schemaCache.data;
     }
-
     const result = await pool.query(`
-      SELECT 
-        table_name,
-        column_name,
-        data_type,
-        is_nullable,
-        column_default
+      SELECT table_name, column_name, data_type, is_nullable
       FROM information_schema.columns 
-      WHERE table_schema = 'public' 
-        AND table_name = ANY($1)
+      WHERE table_schema = 'public' AND table_name = ANY($1)
       ORDER BY table_name, ordinal_position
     `, [TABELAS_PERMITIDAS]);
 
-    // Agrupar por tabela
     const schema = {};
     for (const row of result.rows) {
-      if (!schema[row.table_name]) {
-        schema[row.table_name] = [];
-      }
+      if (!schema[row.table_name]) schema[row.table_name] = [];
       schema[row.table_name].push({
         coluna: row.column_name,
         tipo: row.data_type,
         nullable: row.is_nullable === 'YES'
       });
     }
-
-    // Contar registros por tabela (aprox)
     for (const tabela of Object.keys(schema)) {
       try {
         const countResult = await pool.query(`SELECT reltuples::bigint AS count FROM pg_class WHERE relname = $1`, [tabela]);
         schema[tabela].count = parseInt(countResult.rows[0]?.count) || 0;
-      } catch (e) {
-        schema[tabela].count = '?';
-      }
+      } catch (e) { schema[tabela].count = '?'; }
     }
-
     schemaCache = { data: schema, timestamp: Date.now() };
     return schema;
   }
 
-  // Formatar schema para o prompt
   function formatarSchema(schema) {
     let texto = '';
     for (const [tabela, colunas] of Object.entries(schema)) {
@@ -88,15 +146,13 @@ function createChatIaRoutes(pool) {
     return texto;
   }
 
-  // Validar SQL - APENAS SELECT permitido
+  // ==================== VALIDAÇÃO SQL ====================
   function validarSQL(sql) {
-    const sqlLimpo = sql.trim().replace(/^```sql\n?/i, '').replace(/\n?```$/i, '').trim();
-    const upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim();
+    let sqlLimpo = sql.trim().replace(/^```sql\n?/i, '').replace(/\n?```$/i, '').trim();
+    let upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim();
 
-    // Bloquear qualquer coisa que não seja SELECT
     const proibidos = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'TRUNCATE', 'GRANT', 'REVOKE', 'EXEC', 'EXECUTE', 'COPY', 'VACUUM', 'REINDEX'];
     for (const cmd of proibidos) {
-      // Verificar se o comando aparece como primeira palavra ou após ;
       if (upper.startsWith(cmd + ' ') || upper.includes('; ' + cmd) || upper.includes(';' + cmd)) {
         return { valido: false, erro: `Comando ${cmd} não é permitido. Apenas SELECT é autorizado.` };
       }
@@ -109,26 +165,22 @@ function createChatIaRoutes(pool) {
     // Se houver múltiplas queries, pegar apenas a primeira
     const semStrings = sqlLimpo.replace(/'[^']*'/g, '');
     if ((semStrings.match(/;/g) || []).length > 1) {
-      // Separar por ; e pegar a primeira query válida
       const queries = sqlLimpo.split(/;\s*/).filter(q => q.trim().length > 0);
       if (queries.length > 0) {
         console.log(`⚠️ [Chat IA] Múltiplas queries detectadas (${queries.length}), usando apenas a primeira`);
         sqlLimpo = queries[0].trim();
-        upper = sqlLimpo.toUpperCase();
+        upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim();
       }
     }
 
-    // Verificar se referencia apenas tabelas permitidas
-    // Excluir falsos positivos como EXTRACT(HOUR FROM data_hora), INTERVAL '1 day' FROM, etc
+    // Verificar tabelas permitidas
     const tabelasUsadas = upper.match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
       const tabela = match.replace(/^(FROM|JOIN)\s+/i, '').trim().toLowerCase();
-      // Ignorar nomes de colunas usados em EXTRACT(... FROM coluna)
       const posMatch = upper.indexOf(match.toUpperCase());
       const antes = upper.substring(Math.max(0, posMatch - 30), posMatch).trim();
       const isExtract = /EXTRACT\s*\(\s*\w+\s*$/i.test(antes) || /\(\s*\w+\s*$/i.test(antes);
-      if (isExtract) continue; // É EXTRACT(HOUR FROM data_hora), não uma tabela
-      
+      if (isExtract) continue;
       if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'pg_class' && tabela !== 'generate_series') {
         return { valido: false, erro: `Tabela "${tabela}" não está autorizada para consulta.` };
       }
@@ -137,7 +189,507 @@ function createChatIaRoutes(pool) {
     return { valido: true, sql: sqlLimpo };
   }
 
-  // ==================== ENDPOINT: Chat IA ====================
+  // ==================== MELHORIA 3: Pós-validação automática ====================
+  function posValidarSQL(sql, filtroSQLObrigatorio) {
+    let resultado = sql;
+    const upper = resultado.toUpperCase();
+
+    // Garantir filtro de entregas (não coletas) — se não está no CTE principal
+    if (!upper.includes('COALESCE(PONTO') && !upper.includes('PONTO >= 2') && !upper.includes('PONTO > 1')) {
+      // Só injetar se a query opera sobre bi_entregas diretamente (não em sub-CTEs)
+      if (upper.includes('BI_ENTREGAS') && upper.includes('WHERE')) {
+        resultado = resultado.replace(/WHERE\s/i, 'WHERE COALESCE(ponto, 1) >= 2 AND ');
+        console.log('🔧 [Chat IA] Pós-validação: injetado filtro COALESCE(ponto, 1) >= 2');
+      }
+    }
+
+    // Garantir LIMIT
+    if (!upper.includes('LIMIT')) {
+      resultado += ' LIMIT 200';
+      console.log('🔧 [Chat IA] Pós-validação: injetado LIMIT 200');
+    }
+
+    // Garantir filtros obrigatórios da conversa (cliente, período)
+    if (filtroSQLObrigatorio) {
+      const upperR = resultado.toUpperCase();
+      // Verificar se filtro de cliente está presente
+      if (filtroSQLObrigatorio.includes('cod_cliente') && !upperR.includes('COD_CLIENTE')) {
+        if (upperR.includes('WHERE')) {
+          resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
+          console.log('🔧 [Chat IA] Pós-validação: injetados filtros obrigatórios da conversa');
+        }
+      }
+      // Verificar se filtro de período está presente
+      if (filtroSQLObrigatorio.includes('data_solicitado') && !upperR.includes('DATA_SOLICITADO')) {
+        if (upperR.includes('WHERE')) {
+          resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
+          console.log('🔧 [Chat IA] Pós-validação: injetado filtro de período');
+        }
+      }
+    }
+
+    return resultado;
+  }
+
+  // ==================== MELHORIA 7: Cache de queries ====================
+  function normalizarPergunta(prompt, filtros) {
+    const clean = prompt.toLowerCase()
+      .replace(/[?!.,;:'"]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return `${clean}|${filtros?.cod_cliente || ''}|${filtros?.centro_custo || ''}|${filtros?.data_inicio || ''}|${filtros?.data_fim || ''}`;
+  }
+
+  function limparCacheExpirado() {
+    const agora = Date.now();
+    for (const [key, val] of queryCache.entries()) {
+      if (agora - val.timestamp > QUERY_CACHE_TTL) queryCache.delete(key);
+    }
+  }
+
+  // ==================== MELHORIA 1: Classificador de intenção ====================
+  const CATEGORIAS = {
+    SQL_ENTREGAS: {
+      label: 'Entregas, prazos, clientes, profissionais, rankings, volumes',
+      tabelas: ['bi_entregas', 'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_resumo_cliente', 'bi_resumo_diario', 'bi_resumo_profissional'],
+      dicionario: 'ENTREGAS_COMPLETO'
+    },
+    SQL_FINANCEIRO: {
+      label: 'Faturamento, ticket médio, valores, garantido, custos, saques',
+      tabelas: ['bi_entregas', 'withdrawal_requests', 'gratuities'],
+      dicionario: 'FINANCEIRO'
+    },
+    SQL_RETORNO: {
+      label: 'Retornos, devoluções, ocorrências',
+      tabelas: ['bi_entregas'],
+      dicionario: 'RETORNO'
+    },
+    SQL_ATRASO: {
+      label: 'Atrasos, motivos de atraso, detratores, SLA',
+      tabelas: ['bi_entregas', 'bi_prazos_cliente'],
+      dicionario: 'ATRASO'
+    },
+    SQL_FROTA: {
+      label: 'Motos por dia, profissionais, dimensionamento, escala',
+      tabelas: ['bi_entregas', 'disponibilidade_linhas', 'disponibilidade_lojas'],
+      dicionario: 'FROTA'
+    },
+    SQL_COMPARATIVO: {
+      label: 'Comparações entre clientes, períodos, mercado',
+      tabelas: ['bi_entregas', 'bi_resumo_cliente', 'cs_clientes'],
+      dicionario: 'COMPARATIVO'
+    },
+    SQL_CS: {
+      label: 'Customer Success, health score, interações, ocorrências CS',
+      tabelas: ['cs_clientes', 'cs_interacoes', 'cs_ocorrencias', 'bi_entregas'],
+      dicionario: 'CS'
+    },
+    CONCEITUAL: {
+      label: 'Explicações, definições, como funciona, o que significa'
+    },
+    SAUDACAO: {
+      label: 'Cumprimentos, saudações, agradecimentos'
+    }
+  };
+
+  async function classificarIntencao(prompt, apiKey) {
+    const classificadorPrompt = `Classifique a pergunta abaixo em EXATAMENTE UMA categoria. Responda APENAS com o nome da categoria, nada mais.
+
+CATEGORIAS:
+- SQL_ENTREGAS: perguntas sobre entregas, prazos, clientes, profissionais, rankings, volumes, top motoboys, cidades, bairros, evolução diária, horário de pico
+- SQL_FINANCEIRO: perguntas sobre faturamento, ticket médio, valores, garantido, custos, saques, receita, margem, lucro, variação de demanda
+- SQL_RETORNO: perguntas sobre retornos, devoluções, ocorrências de retorno, cliente fechado, cliente ausente, taxa de retorno
+- SQL_ATRASO: perguntas sobre atrasos, motivos de atraso, detratores, SLA, coleta lenta, associado tarde, direcionamento lento, atraso do motoboy, fora do prazo, taxa de prazo
+- SQL_FROTA: perguntas sobre motos por dia, quantidade de profissionais, dimensionamento, escala, frota, quantos motoboys
+- SQL_COMPARATIVO: perguntas que COMPARAM clientes entre si, períodos entre si, comparar com mercado, ranking, versus, comparar
+- SQL_CS: perguntas sobre customer success, health score, interações CS, ocorrências CS, NPS
+- CONCEITUAL: perguntas sobre o que significa algo, como funciona, explicações de conceitos, definições, o que é, o que considera, me explique
+- SAUDACAO: cumprimentos ("oi", "olá", "bom dia", "tudo bem", "obrigado")
+
+PERGUNTA: "${prompt}"
+
+CATEGORIA:`;
+
+    try {
+      const resp = await chamarGemini(apiKey, classificadorPrompt, { temperature: 0.1, maxTokens: 50 });
+      const categoria = resp.trim().replace(/[^A-Z_]/g, '');
+      if (CATEGORIAS[categoria]) {
+        console.log(`🏷️ [Chat IA] Categoria: ${categoria}`);
+        return categoria;
+      }
+      // Fallback: tentar extrair do texto
+      for (const cat of Object.keys(CATEGORIAS)) {
+        if (resp.toUpperCase().includes(cat)) {
+          console.log(`🏷️ [Chat IA] Categoria (fallback): ${cat}`);
+          return cat;
+        }
+      }
+    } catch (e) {
+      console.error('⚠️ [Chat IA] Erro classificador:', e.message);
+    }
+    // Fallback seguro
+    console.log('🏷️ [Chat IA] Categoria: SQL_ENTREGAS (fallback padrão)');
+    return 'SQL_ENTREGAS';
+  }
+
+  // ==================== DICIONÁRIOS POR CATEGORIA (Melhoria 1 — prompts focados) ====================
+  const DICIONARIO_BASE = `Tabela principal: bi_entregas. Cada linha = um PONTO de uma OS.
+Uma OS pode ter vários pontos: ponto 1 = COLETA, ponto 2+ = ENTREGAS.
+
+COLUNAS ESSENCIAIS:
+- os (INT): número da Ordem de Serviço
+- ponto (INT): 1=coleta, 2+=entregas. SEMPRE filtrar: WHERE COALESCE(ponto, 1) >= 2
+- cod_cliente (INT), nome_fantasia (VARCHAR): cliente (USE nome_fantasia para exibição)
+- centro_custo (VARCHAR): filial/unidade do cliente
+- cod_prof (INT), nome_prof (VARCHAR): motoboy
+- data_solicitado (DATE): data da OS — USE PARA FILTRAR POR PERÍODO
+- data_hora (TIMESTAMP): timestamp da criação
+- data_hora_alocado (TIMESTAMP): quando o motoboy foi alocado
+- hora_chegada (TIME), hora_saida (TIME): chegada/saída no ponto
+- finalizado (TIMESTAMP): quando a OS foi finalizada
+- valor (DECIMAL): valor cobrado do cliente (R$)
+- valor_prof (DECIMAL): valor pago ao motoboy
+- distancia (DECIMAL): distância em KM
+- tempo_execucao_minutos (INT): tempo real em minutos
+- dentro_prazo (BOOLEAN): se cumpriu SLA
+- prazo_minutos (INT): prazo SLA do cliente
+- dentro_prazo_prof (BOOLEAN): se o profissional cumpriu prazo dele
+- ocorrencia (VARCHAR): tipo de ocorrência no ponto
+- status (VARCHAR): status da OS
+- bairro, cidade, estado (VARCHAR): localização
+- latitude, longitude (DECIMAL): GPS`;
+
+  const DICIONARIOS_ESPECIFICOS = {
+    ENTREGAS_COMPLETO: `${DICIONARIO_BASE}
+
+FÓRMULAS:
+- Total Entregas: COUNT(*) WHERE COALESCE(ponto, 1) >= 2
+- Taxa Prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
+- Tempo Médio: ROUND(AVG(tempo_execucao_minutos)::numeric, 2)
+- Faturamento: SUM(valor) - SUM(valor_prof)
+- KM Total: SUM(distancia)
+- Motos por dia: COUNT(DISTINCT cod_prof) por data_solicitado
+
+RECEITAS SQL:
+-- Horário de pico:
+SELECT EXTRACT(HOUR FROM data_hora) AS hora, COUNT(*) AS total FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY total DESC
+
+-- Evolução diária (SEMPRE inclua motos):
+SELECT data_solicitado, COUNT(*) AS entregas, COUNT(DISTINCT cod_prof) as motos, ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY data_solicitado ORDER BY data_solicitado`,
+
+    FINANCEIRO: `${DICIONARIO_BASE}
+
+COLUNAS FINANCEIRAS:
+- valor (DECIMAL): cobrado do cliente
+- valor_prof (DECIMAL): pago ao motoboy
+- faturamento = valor - valor_prof (calcular na query)
+- Ticket Médio = SUM(valor) / NULLIF(COUNT(*), 0)
+
+TABELA withdrawal_requests: saques dos motoboys
+- cod_prof, valor, status ('aguardando_aprovacao', 'aprovado', 'rejeitado', 'aprovado_gratuidade'), created_at
+- status = 'aprovado_gratuidade' é o MÍNIMO GARANTIDO
+
+RECEITAS SQL:
+-- Ticket médio por cliente com variação semanal:
+WITH semana_atual AS (
+  SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio, SUM(valor) as faturamento
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_solicitado BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE
+  GROUP BY cod_cliente, nome_fantasia
+), semana_anterior AS (
+  SELECT cod_cliente, COUNT(*) as entregas_ant,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_ant
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_solicitado BETWEEN CURRENT_DATE - 14 AND CURRENT_DATE - 8
+  GROUP BY cod_cliente
+)
+SELECT sa.*, COALESCE(san.entregas_ant, 0) as entregas_sem_anterior, COALESCE(san.ticket_medio_ant, 0) as ticket_medio_sem_anterior,
+  CASE WHEN COALESCE(san.ticket_medio_ant, 0) > 0 THEN ROUND(100.0 * (sa.ticket_medio - san.ticket_medio_ant) / san.ticket_medio_ant, 1) ELSE NULL END as variacao_ticket_pct,
+  CASE WHEN COALESCE(san.entregas_ant, 0) > 0 THEN ROUND(100.0 * (sa.entregas - san.entregas_ant)::numeric / san.entregas_ant, 1) ELSE NULL END as variacao_demanda_pct
+FROM semana_atual sa LEFT JOIN semana_anterior san ON sa.cod_cliente = san.cod_cliente ORDER BY sa.faturamento DESC LIMIT 30
+
+REGRAS FINANCEIRAS:
+- Ticket médio: informar variação %. Se variação > 5%, destacar valor anterior.
+- Variação de demanda: Se > 5%, informar valor anterior e variação.
+- Mínimo garantido: comparar custo com garantido vs faturamento do cliente.`,
+
+    RETORNO: `${DICIONARIO_BASE}
+
+OCORRÊNCIAS DE RETORNO (filtrar com LOWER):
+- 'cliente fechado' | 'clienteaus' | 'cliente ausente' | 'loja fechada' | 'produto incorreto' | 'retorno'
+
+REFERÊNCIA DE TAXA DE RETORNO:
+- Até 2% = SAUDÁVEL (normal para autopeças)
+- 2% a 5% = ATENÇÃO
+- Acima de 5% = PREOCUPANTE
+
+RECEITA SQL:
+SELECT cod_cliente, nome_fantasia, COUNT(*) as total_entregas,
+  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') as retornos,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY cod_cliente, nome_fantasia ORDER BY taxa_retorno DESC LIMIT 30`,
+
+    ATRASO: `${DICIONARIO_BASE}
+
+CLASSIFICAÇÃO DO MOTIVO DE ATRASO (em ordem de prioridade):
+1. SLA > 600min E alocação > 300min → "Falha sistêmica" (OS nunca alocada)
+2. SLA > 600min → "OS não encerrada" (motoboy não fechou a OS no app)
+3. Tempo alocação > 30min → "Associado tarde" (mesa de operações demorou — problema NOSSO)
+4. Direcionamento > 30min → "Direcionamento lento" (motoboy demorou para ir à coleta)
+5. Tempo no P1 > 45min → "Coleta lenta" (loja do CLIENTE demorou — problema do CLIENTE)
+6. Caso contrário → "Atraso do motoboy" (trânsito, rota, motoboy lento)
+
+SEVERIDADE: 🔴 Crítico ≥6% | 🟠 Alto 5-6% | 🟣 Anomalia SLA>6h | 🟡 Médio 3-5% | 🟢 Baixo <3%
+DETRATOR: profissional com 3+ OS atrasadas no período.
+
+EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO 120min para QUALQUER km. SLA MÍNIMO exigido: 95% no prazo — abaixo disso é CRÍTICO.
+
+CÁLCULOS:
+- tempo_alocacao = EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60
+- sla_total = EXTRACT(EPOCH FROM (finalizado - data_hora))/60
+
+RECEITA SQL — Motivos de atraso:
+WITH atrasos AS (
+  SELECT e.os, e.cod_prof, e.nome_prof,
+    EXTRACT(EPOCH FROM (e.finalizado - e.data_hora))/60 as sla_total,
+    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 as tempo_alocacao,
+    e.tempo_execucao_minutos
+  FROM bi_entregas e WHERE COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = false AND e.finalizado IS NOT NULL AND e.data_hora IS NOT NULL
+)
+SELECT CASE
+    WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
+    WHEN sla_total > 600 THEN 'OS não encerrada'
+    WHEN tempo_alocacao > 30 THEN 'Associado tarde'
+    ELSE 'Atraso do motoboy'
+  END as motivo_atraso,
+  COUNT(*) as quantidade, ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
+FROM atrasos GROUP BY motivo_atraso ORDER BY quantidade DESC`,
+
+    FROTA: `${DICIONARIO_BASE}
+
+MOTOS POR DIA = COUNT(DISTINCT cod_prof) onde COALESCE(ponto, 1) >= 2
+
+RECEITA SQL:
+SELECT data_solicitado as dia,
+  COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+  COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as motos,
+  ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric /
+    NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
+FROM bi_entregas GROUP BY data_solicitado ORDER BY data_solicitado`,
+
+    COMPARATIVO: `${DICIONARIO_BASE}
+
+REGRA: Quando comparar cliente com mercado, usar a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas da região — pode haver regiões com 1 cliente só).
+
+RECEITA SQL — Comparativo cliente vs média geral:
+WITH media_geral AS (
+  SELECT
+    ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_geral,
+    ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_geral,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_geral,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_geral
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+)
+SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_cliente,
+  mg.taxa_prazo_geral,
+  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_cliente, mg.tempo_medio_geral,
+  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_cliente, mg.ticket_medio_geral
+FROM bi_entregas, media_geral mg WHERE COALESCE(ponto, 1) >= 2
+GROUP BY cod_cliente, nome_fantasia, mg.taxa_prazo_geral, mg.tempo_medio_geral, mg.taxa_retorno_geral, mg.ticket_medio_geral
+ORDER BY entregas DESC LIMIT 30`,
+
+    CS: `${DICIONARIO_BASE}
+
+TABELAS CS:
+- cs_clientes: cod_cliente, nome_fantasia, health_score (0-100), status, segmento, regiao, created_at
+- cs_interacoes: cliente_id (FK cs_clientes.id), tipo, titulo, descricao, resultado, data_interacao
+- cs_ocorrencias: cliente_id, titulo, descricao, tipo, severidade, status, resolucao, created_at`
+  };
+
+  // ==================== PROMPT CONCEITUAL (Melhoria 2 — sem lista estática) ====================
+  function getPromptConceitual(prompt, contextoFiltros) {
+    return `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys). Você faz parte do time.
+
+Responda a pergunta do usuário usando seu conhecimento profundo do sistema:
+
+PERGUNTA: "${prompt}"
+${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
+
+## GLOSSÁRIO COMPLETO DO SISTEMA TUTTS:
+
+### MOTIVOS DE ATRASO (para OS fora do SLA):
+1. **Falha sistêmica**: OS com SLA total > 10h (600min) e tempo de alocação > 5h (300min). OS nunca foi alocada — ficou "perdida" no sistema.
+2. **OS não encerrada**: SLA total > 10h, mas alocação normal. Motoboy entregou mas não fechou a OS no app.
+3. **Associado tarde**: Tempo de alocação > 30 minutos. Nossa mesa de operações demorou para alocar um motoboy. Problema INTERNO da Tutts.
+4. **Direcionamento lento**: Após ser alocado, motoboy demorou > 30min para ir até a coleta. Pode estar longe ou ocupado.
+5. **Coleta lenta**: Tempo até saída do Ponto 1 > 45min. A LOJA DO CLIENTE demorou para liberar a mercadoria. Problema do CLIENTE, não nosso.
+6. **Atraso do motoboy**: Nenhuma das causas acima. Deslocamento/entrega foi longo — trânsito, rota, ou motoboy lento.
+
+### MÉTRICAS:
+- **Taxa de prazo**: % de entregas dentro do SLA (meta geral ≥85%, Comollati exige ≥95%)
+- **Taxa de retorno**: % que resultaram em retorno. Até 2% = SAUDÁVEL (normal para autopeças). 2-5% = ATENÇÃO. >5% = PREOCUPANTE. Sempre comparar com média geral de TODOS os clientes da Tutts.
+- **Health Score**: 0-100 combinando taxa de prazo (50pts), retornos (25pts) e tempo médio (25pts)
+- **SLA**: Prazo máximo por distância (10km=60min, 15km=75min, 20km=90min, 25km=105min, 30km=120min)
+- **Cliente 767 (Grupo Comollati)**: SLA FIXO de 120 minutos para QUALQUER distância. Mínimo OBRIGATÓRIO: 95% no prazo — abaixo é CRÍTICO e pode gerar perda do contrato.
+- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — quantos motoboys operaram. Essencial para dimensionamento.
+- **Detrator**: profissional com 3+ OS atrasadas no período.
+- **Severidade**: 🔴 Crítico ≥6% | 🟠 Alto 5-6% | 🟡 Médio 3-5% | 🟢 Baixo <3%
+
+### RETORNOS (tipos de ocorrência):
+- "Cliente Fechado", "ClienteAus"/"Cliente Ausente", "Loja Fechada", "Produto Incorreto", "Retorno"
+
+### ANÁLISES FINANCEIRAS:
+- **Ticket médio**: Valor médio por entrega. Informar variação %. Se >5% entre semanas, destacar anterior.
+- **Variação de demanda**: Entregas por cliente semana a semana. Se >5%, destacar.
+- **Mínimo garantido**: Valor investido para manter motoboys disponíveis. Comparar custo vs faturamento do cliente.
+
+### COMPARATIVO COM MERCADO:
+Comparar com MÉDIA GERAL de TODOS os clientes (não só da região — pode ter região com 1 cliente só).
+
+## REGRAS:
+- Fale como funcionário da Tutts: "nós", "nossa operação", "identificamos"
+- Seja objetivo e claro
+- Use emojis e formatação markdown
+- ⛔ NUNCA sugira aumentar contato com cliente`;
+  }
+
+  // ==================== MELHORIA 4: Prompt de análise dinâmico por categoria ====================
+  function getRegrasAnalisePorCategoria(categoria) {
+    const regrasBase = `## IDENTIDADE
+- Você É funcionário da Tutts. Use "nós", "nossa operação", "nosso time".
+- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria".
+- ⛔ NUNCA sugira aumentar frequência de contato com o cliente.
+- Sugestões devem ser sobre melhorias INTERNAS.
+
+## REGRAS DE FORMATO
+- ⛔ PROIBIDO tabelas markdown (| --- |). Use bullet points.
+- Destaque números com **negrito**.
+- Português brasileiro, tom profissional.
+- Emojis para performance: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
+- Valores: R$ 1.234,56 | Tempos: Xh XXmin se >60min | Taxas: 1 decimal (87,3%)
+- ⛔ NUNCA inclua blocos SQL na resposta.
+- Use APENAS os dados retornados. NUNCA invente dados.
+- Se resultado vazio, diga claramente.`;
+
+    const regrasEspecificas = {
+      SQL_ENTREGAS: `
+## REGRAS ESPECÍFICAS — ENTREGAS
+- Sempre inclua motos por dia (COUNT DISTINCT cod_prof) quando mostrar evolução.
+- Para rankings, formato: - **Nome:** entregas · taxa prazo · tempo médio
+- Cliente 767 (Comollati): SLA fixo 120min, mínimo 95% no prazo.`,
+
+      SQL_FINANCEIRO: `
+## REGRAS ESPECÍFICAS — FINANCEIRO
+- Inclua valores monetários em R$.
+- Compare ticket médio com período anterior. Se variação > 5%, destaque com ↑ ou ↓ e informe valor anterior.
+- Para mínimo garantido, compare custo vs faturamento (ROI).
+- Variação de demanda: se > 5%, informar valor anterior.`,
+
+      SQL_RETORNO: `
+## REGRAS ESPECÍFICAS — RETORNO
+- SEMPRE informe a referência: até 2% = SAUDÁVEL (normal para autopeças) | 2-5% = ATENÇÃO | >5% = PREOCUPANTE.
+- Compare com a média geral de TODOS os clientes da Tutts.
+- Detalhe os tipos de retorno (Cliente Fechado, Ausente, Loja Fechada, etc).`,
+
+      SQL_ATRASO: `
+## REGRAS ESPECÍFICAS — ATRASO
+- Classifique cada motivo com emoji de severidade (🔴🟠🟡🟢).
+- Explique o que cada motivo significa quando mencioná-lo.
+- "Associado tarde" = problema nosso (operação). "Coleta lenta" = problema do cliente.
+- Sugira ações INTERNAS para os principais detratores.
+- Cliente 767 (Comollati): mínimo 95% no prazo, abaixo é CRÍTICO.
+- Severidade: 🔴 ≥6% | 🟠 5-6% | 🟣 Anomalia SLA>6h | 🟡 3-5% | 🟢 <3%`,
+
+      SQL_FROTA: `
+## REGRAS ESPECÍFICAS — FROTA
+- "Motos" = motoboys distintos operando (COUNT DISTINCT cod_prof).
+- Média ideal: 10 entregas/moto/dia.
+- Mostrar evolução dia a dia: entregas, motos, entregas/moto.`,
+
+      SQL_COMPARATIVO: `
+## REGRAS ESPECÍFICAS — COMPARATIVO
+- SEMPRE compare com a MÉDIA GERAL de TODOS os clientes da Tutts.
+- Nunca compare só com a região (pode ter 1 cliente só).
+- Use ↑ e ↓ para variações.
+- Se variação < 3%, diga que está estável.`,
+
+      SQL_CS: `
+## REGRAS ESPECÍFICAS — CS
+- Health Score: 0-100 (50pts prazo + 25pts retornos + 25pts tempo).
+- Classifique: 🟢 ≥80 | 🟡 60-79 | 🔴 <60.`
+    };
+
+    return regrasBase + (regrasEspecificas[categoria] || '');
+  }
+
+  // ==================== PROMPT SQL PRINCIPAL ====================
+  function getPromptSQL(categoria, schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio) {
+    const dicionarioKey = CATEGORIAS[categoria]?.dicionario || 'ENTREGAS_COMPLETO';
+    const dicionario = DICIONARIOS_ESPECIFICOS[dicionarioKey] || DICIONARIOS_ESPECIFICOS.ENTREGAS_COMPLETO;
+
+    return `Você é um analista SQL expert da Tutts (logística de motoboys). Gere queries PostgreSQL.
+
+⚠️ REGRA ABSOLUTA: Sua resposta INTEIRA deve ser APENAS um bloco \`\`\`sql ... \`\`\`. Nada antes, nada depois.
+
+📊 SCHEMA:
+${schemaTexto}
+${samplesTexto}
+
+═══════════════════════════════════════
+🔑 DICIONÁRIO
+═══════════════════════════════════════
+${dicionario}
+
+═══════════════════════════════════════
+⚠️ ARMADILHAS SQL
+═══════════════════════════════════════
+1. NUNCA use GROUP BY por alias se o alias tem MESMO NOME de coluna da tabela. Use a expressão completa.
+2. NUNCA use strftime() — PostgreSQL usa EXTRACT() ou TO_CHAR().
+3. Sempre use COALESCE(ponto, 1) >= 2 (ponto pode ser NULL).
+4. Para múltiplas partes, gere blocos SQL separados.
+5. Inclua SEMPRE motos por dia (COUNT(DISTINCT cod_prof)) em evolução por dia.
+
+REGRAS:
+1. SEMPRE gere SQL executável. NUNCA responda sem SQL.
+2. SEMPRE filtre entregas: WHERE COALESCE(ponto, 1) >= 2
+3. SEMPRE adicione LIMIT (máx 500)
+4. NUNCA invente dados ou use tabelas inexistentes
+5. Use nome_fantasia para exibir cliente
+6. Traga LIMIT 10-20 para contexto (não LIMIT 1)
+7. Inclua métricas relevantes mesmo que não pedidas
+8. Em evolução por dia, SEMPRE inclua COUNT(DISTINCT cod_prof) as motos
+9. Para retornos, use: LOWER(ocorrencia) LIKE '%cliente fechado%' OR LIKE '%clienteaus%' OR LIKE '%cliente ausente%' OR LIKE '%loja fechada%' OR LIKE '%produto incorreto%' OR LIKE '%retorno%'
+10. Para comparativo com mercado, compare com TODOS os clientes (não só região)
+${contextoFiltros ? `
+═══════════════════════════════════════
+⚡ FILTROS ATIVOS (OBRIGATÓRIOS)
+═══════════════════════════════════════
+${contextoFiltros}
+TODAS as queries DEVEM incluir: ${filtroSQLObrigatorio}` : ''}`;
+  }
+
+  // ==================== GRÁFICOS + SUGESTÕES (prompt de análise) ====================
+  const REGRAS_GRAFICOS = `
+## GRÁFICOS
+Quando dados beneficiarem de visualização, inclua:
+[CHART]
+{"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}
+[/CHART]
+
+Tipos: "bar", "horizontalBar", "line", "pie", "doughnut"
+Cores: Verde "#10b981", Vermelho "#ef4444", Amarelo "#f59e0b", Azul "#3b82f6", Roxo "#8b5cf6"
+- Máximo 2 gráficos. JSON válido em UMA linha.
+- Inclua gráfico para RANKINGS (5+), COMPARATIVOS, EVOLUÇÃO TEMPORAL, DISTRIBUIÇÃO.
+
+## PROATIVIDADE
+- ⛔ NUNCA diga "seria útil saber" ou "com dados adicionais poderíamos".
+- ✅ Ofereça perguntas prontas ao final se houver insights para aprofundar:
+💡 **Quer se aprofundar?** Pergunte-me:
+- "pergunta específica 1"
+- "pergunta específica 2"
+- Máx 2-3 sugestões, só quando relevante.`;
+
+  // ==================== ENDPOINT PRINCIPAL: Chat IA ====================
   router.post('/bi/chat-ia', async (req, res) => {
     try {
       const { prompt, historico, filtros } = req.body;
@@ -148,22 +700,20 @@ function createChatIaRoutes(pool) {
 
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
       if (!GEMINI_API_KEY) {
-        return res.status(400).json({ error: 'API Key do Gemini não configurada. Adicione GEMINI_API_KEY nas variáveis de ambiente.' });
+        return res.status(400).json({ error: 'API Key do Gemini não configurada.' });
       }
 
       console.log(`🤖 [Chat IA] Prompt: "${prompt.substring(0, 100)}..."`);
 
-      // Extrair filtros do contexto da conversa
+      // Extrair filtros
       const codCliente = filtros?.cod_cliente || null;
       const centroCusto = filtros?.centro_custo || null;
       const dataInicio = filtros?.data_inicio || null;
       const dataFim = filtros?.data_fim || null;
       const nomeCliente = filtros?.nome_fantasia || null;
 
-      // Montar contexto de filtros para injetar no prompt
       let contextoFiltros = '';
       let filtroSQLObrigatorio = '';
-      
       if (codCliente) {
         contextoFiltros += `\n🔹 CLIENTE: ${nomeCliente || 'cod ' + codCliente} (cod_cliente = ${parseInt(codCliente)})`;
         filtroSQLObrigatorio += ` AND cod_cliente = ${parseInt(codCliente)}`;
@@ -177,513 +727,86 @@ function createChatIaRoutes(pool) {
         filtroSQLObrigatorio += ` AND data_solicitado BETWEEN '${dataInicio}' AND '${dataFim}'`;
       }
 
-      console.log(`🤖 [Chat IA] Filtros: cliente=${codCliente}, cc=${centroCusto}, periodo=${dataInicio}-${dataFim}`);
+      // ========== MELHORIA 7: Verificar cache ==========
+      limparCacheExpirado();
+      const cacheKey = normalizarPergunta(prompt, filtros);
+      if (queryCache.has(cacheKey)) {
+        const cached = queryCache.get(cacheKey);
+        if (Date.now() - cached.timestamp < QUERY_CACHE_TTL) {
+          console.log('⚡ [Chat IA] Cache hit!');
+          return res.json(cached.response);
+        }
+      }
 
-      // 1. Buscar schema do banco
-      const schema = await getSchema();
+      // ========== MELHORIA 1: Classificar intenção (etapa 0) ==========
+      const categoria = await classificarIntencao(prompt, GEMINI_API_KEY);
+
+      // ========== MELHORIA 2: Perguntas conceituais e saudações ==========
+      if (categoria === 'SAUDACAO') {
+        const resp = { success: true, resposta: '👋 Olá! Sou o assistente de dados da Tutts. Faça uma pergunta sobre entregas, prazos, profissionais, financeiro, retornos ou qualquer outra métrica do BI. Posso também explicar conceitos do sistema — é só perguntar!', sql: null, dados: null };
+        return res.json(resp);
+      }
+
+      if (categoria === 'CONCEITUAL') {
+        console.log('📚 [Chat IA] Pergunta conceitual — respondendo sem SQL');
+        try {
+          const respostaConc = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          if (respostaConc) {
+            const resp = { success: true, resposta: respostaConc, sql: null, dados: null };
+            queryCache.set(cacheKey, { response: resp, timestamp: Date.now() });
+            return res.json(resp);
+          }
+        } catch (concErr) {
+          console.error('❌ [Chat IA] Erro conceitual:', concErr.message);
+        }
+      }
+
+      // ========== ETAPA 1: Buscar schema + amostras + gerar SQL ==========
+      const [schema, samples] = await Promise.all([getSchema(), getSamples()]);
       const schemaTexto = formatarSchema(schema);
+      const samplesTexto = formatarSamples(samples);
 
-      // 2. Montar histórico de mensagens (se houver)
+      const promptSQL = getPromptSQL(categoria, schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio);
+
+      // Montar histórico
       const mensagens = [];
-
-      // System message via primeiro user message
-      const systemContent = `Você é um analista de dados SQL expert que trabalha NA empresa Tutts (logística de motoboys/entregadores). Você faz parte do time operacional e conhece profundamente o sistema.
-Seu ÚNICO trabalho é gerar queries SQL PostgreSQL para responder perguntas sobre o banco de dados.
-
-⚠️ REGRA ABSOLUTA: Você SEMPRE gera uma query SQL executável. NUNCA invente dados. NUNCA dê respostas hipotéticas. NUNCA dê exemplos fictícios.
-⚠️ NUNCA diga "seria necessário analisar", "podemos executar", "sugiro a seguinte query". GERE A QUERY DIRETAMENTE.
-⚠️ Sua resposta INTEIRA deve ser APENAS um bloco \`\`\`sql ... \`\`\`. Nada antes, nada depois.
-
-📊 SCHEMA DO BANCO:
-${schemaTexto}
-
-═══════════════════════════════════════
-🔑 DICIONÁRIO COMPLETO — bi_entregas
-═══════════════════════════════════════
-Tabela principal. Alimentada por upload de Excel do sistema operacional.
-Cada linha = um PONTO de uma OS (Ordem de Serviço).
-Uma OS pode ter vários pontos: ponto 1 = COLETA, ponto 2+ = ENTREGAS.
-
-IDENTIFICAÇÃO DA OS:
-- os (INTEGER): número da Ordem de Serviço (chave principal junto com ponto)
-- ponto (INTEGER): sequência do ponto. 1=coleta no remetente, 2,3,4...=entregas nos destinatários
-- num_pedido (VARCHAR): número do pedido do cliente (pode ser nulo)
-
-CLIENTE:
-- cod_cliente (INTEGER): código do cliente no sistema
-- nome_cliente (VARCHAR): razão social do cliente
-- empresa (VARCHAR): nome da empresa
-- nome_fantasia (VARCHAR): nome fantasia do cliente (USE ESTE para exibição)
-- centro_custo (VARCHAR): filial/unidade do cliente (ex: "GEFPEL SERGIPE", "RMA", "MATRIZ")
-
-LOCALIZAÇÃO:
-- cidade_p1 (VARCHAR): cidade do ponto 1 (coleta)
-- endereco (TEXT): endereço completo (formato "Ponto X - Rua..., Bairro, Cidade, UF - CEP")
-- bairro (VARCHAR): bairro da entrega
-- cidade (VARCHAR): cidade da entrega (cuidado: pode ter variações como "Salvador", "SALVADOR", "salvador")
-- estado (VARCHAR): UF (BA, SE, PE, GO, etc)
-- latitude / longitude (DECIMAL): coordenadas GPS
-
-PROFISSIONAL (MOTOBOY):
-- cod_prof (INTEGER): código do profissional/motoboy
-- nome_prof (VARCHAR): nome completo do motoboy
-
-DATAS E HORÁRIOS:
-- data_solicitado (DATE): data da OS ← USE ESTE PARA FILTRAR POR PERÍODO
-- hora_solicitado (TIME): hora que a OS foi criada
-- data_hora (TIMESTAMP): timestamp completo da criação da OS
-- data_hora_alocado (TIMESTAMP): quando o motoboy foi alocado
-- data_chegada (DATE) + hora_chegada (TIME): quando o motoboy CHEGOU no ponto
-- data_saida (DATE) + hora_saida (TIME): quando o motoboy SAIU do ponto
-- finalizado (TIMESTAMP): quando a OS foi finalizada
-
-VALORES:
-- valor (DECIMAL): valor COBRADO do cliente (R$)
-- valor_prof (DECIMAL): valor PAGO ao motoboy (R$)
-- faturamento = valor - valor_prof (calcular na query)
-- distancia (DECIMAL): distância em KM
-
-EXECUÇÃO:
-- execucao_comp (VARCHAR): tempo total de execução no formato HH:MM:SS
-- execucao_espera (VARCHAR): tempo de espera no formato HH:MM:SS
-- categoria (VARCHAR): tipo de serviço (ex: "Motofrete (Expresso)")
-- velocidade_media (DECIMAL): velocidade média do motoboy em km/h
-
-STATUS E OCORRÊNCIAS:
-- status (VARCHAR): status da OS (ex: "já recebido", "Finalizado", "Cancelado")
-- motivo (VARCHAR): motivo (ex: "Sucesso", "Cancelado pelo cliente")
-- ocorrencia (VARCHAR): tipo de ocorrência no ponto. Valores importantes:
-  • "Coletado" = coleta realizada (ponto 1)
-  • "Entregue" = entrega realizada com sucesso
-  • "Cliente Fechado" = RETORNO (cliente estava fechado)
-  • "ClienteAus" ou "Cliente Ausente" = RETORNO (cliente ausente)
-  • "Loja Fechada" = RETORNO
-  • "Produto Incorreto" = RETORNO
-  • "Retorno" = RETORNO genérico
-
-═══════════════════════════════════════
-📐 MÉTRICAS CALCULADAS (no banco)
-═══════════════════════════════════════
-- dentro_prazo (BOOLEAN): se a entrega cumpriu o SLA do cliente (calculado pelo sistema)
-- prazo_minutos (INTEGER): prazo máximo para este cliente/distância
-- tempo_execucao_minutos (INTEGER): tempo REAL da entrega em minutos
-- dentro_prazo_prof (BOOLEAN): se o profissional cumpriu o prazo dele
-- prazo_prof_minutos (INTEGER): prazo do profissional
-- tempo_execucao_prof_minutos (INTEGER): tempo de execução do profissional
-- tempo_entrega_prof_minutos (INTEGER): tempo de entrega do profissional
-
-═══════════════════════════════════════
-📏 REGRAS DE PRAZO (SLA) PADRÃO
-═══════════════════════════════════════
-Baseado na distância:
-- Até 10km = 60min | 15km = 75min | 20km = 90min | 25km = 105min
-- 30km = 120min | 35km = 135min | 40km = 150min | 50km = 180min
-- Acima de 100km = fora do prazo
-Clientes podem ter prazos personalizados (tabela bi_prazos_cliente).
-
-⚠️ EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. O SLA MÍNIMO exigido pelo Comollati é de 95% no prazo — abaixo disso é CRÍTICO.
-Todos os outros clientes seguem a tabela de faixas acima.
-
-═══════════════════════════════════════
-🔍 ANÁLISE DE DETRATORES DE SLA (MUITO IMPORTANTE — ENTENDA BEM)
-═══════════════════════════════════════
-SLA completo = tempo entre CRIAÇÃO da OS (data_hora) e FINALIZAÇÃO (finalizado).
-Ponto 1 = COLETA (não é entrega), mas o tempo SLA começa a contar desde a criação.
-
-CLASSIFICAÇÃO DO MOTIVO DO ATRASO (aplicar em ordem de prioridade):
-Para OS fora do prazo (dentro_prazo = false), o motivo do atraso pode ser:
-
-1. Se SLA > 600min (10h):
-   - Se tempo de alocação > 300min → "Falha sistêmica" (OS nunca foi alocada no dia)
-   - Senão → "OS não encerrada" (motoboy entregou mas não fechou a OS no app)
-
-2. Se tempo de alocação > 30min → "Associado tarde" (demorou para o operacional alocar um motoboy à OS — problema da mesa de operações da Tutts)
-
-3. Se tempo de direcionamento > 30min → "Direcionamento lento" (após ser alocado, o motoboy demorou para se deslocar até o ponto de coleta — pode indicar que o motoboy estava longe ou ocupado com outra entrega)
-
-4. Se tempo até saída do P1 > 45min → "Coleta lenta" (a LOJA do cliente demorou para separar/liberar a mercadoria para o motoboy — problema do CLIENTE, não da Tutts)
-
-5. Caso contrário → "Atraso do motoboy" (tempo de deslocamento/entrega foi longo — pode ser trânsito, rota ruim ou motoboy lento)
-
-⚠️ QUANDO O USUÁRIO PERGUNTAR SOBRE ESSES TERMOS:
-- "o que é coleta lenta?" → Explique que é quando a loja do cliente demora para liberar a mercadoria (tempo > 45min no P1)
-- "o que é associado tarde?" → É quando a mesa de operações demorou para alocar um motoboy (> 30min)
-- "o que é direcionamento lento?" → É quando o motoboy alocado demorou para se deslocar até a coleta (> 30min)
-- "motivo de atraso" → Use a classificação acima para categorizar
-- Para cada motivo, GERE SQL que calcule os tempos e classifique automaticamente
-
-CÁLCULOS:
-- tempo_alocacao = data_hora_alocado - data_hora (em minutos)
-- tempo_ate_saida_p1 = hora_saida do ponto 1 - data_hora (em minutos)
-- sla_total = finalizado - data_hora (em minutos)
-
-DEFINIÇÃO DE DETRATOR: profissional com 3+ OS atrasadas no período.
-
-SISTEMA DE SEVERIDADE:
-- 🔴 Crítico: taxa de atraso ≥ 6%
-- 🟠 Alto: taxa 5-6%
-- 🟣 Anomalia: SLA máximo > 6h (OS não encerrada ou falha sistêmica)
-- 🟡 Médio: taxa 3-5%
-- 🟢 Baixo: taxa < 3%
-
-═══════════════════════════════════════
-🔄 REGRAS DE RETORNO
-═══════════════════════════════════════
-Uma OS é RETORNO quando algum ponto tem ocorrência:
-LOWER(ocorrencia) LIKE '%cliente fechado%'
-OR LOWER(ocorrencia) LIKE '%clienteaus%'
-OR LOWER(ocorrencia) LIKE '%cliente ausente%'
-OR LOWER(ocorrencia) LIKE '%loja fechada%'
-OR LOWER(ocorrencia) LIKE '%produto incorreto%'
-OR LOWER(ocorrencia) LIKE '%retorno%'
-
-REFERÊNCIA DE TAXA DE RETORNO:
-- Até 2% = SAUDÁVEL (normal para operações logísticas de autopeças)
-- 2% a 5% = ATENÇÃO (monitorar, mas não é crítico)
-- Acima de 5% = PREOCUPANTE (requer ação)
-
-═══════════════════════════════════════
-🏍️ MOTOS/FROTA POR DIA
-═══════════════════════════════════════
-Para calcular quantidade de motoboys (motos) por dia:
-SELECT data_solicitado, COUNT(DISTINCT cod_prof) as motos
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY data_solicitado ORDER BY data_solicitado
-
-═══════════════════════════════════════
-🔢 FÓRMULAS PADRÃO DO BI
-═══════════════════════════════════════
-- Total OS: COUNT(DISTINCT os)
-- Total Entregas: COUNT(*) WHERE COALESCE(ponto, 1) >= 2
-- Taxa de Prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-- Taxa Prazo Prof: mesma lógica com dentro_prazo_prof
-- Tempo Médio Entrega: ROUND(AVG(tempo_execucao_minutos)::numeric, 2) — apenas ponto >= 2
-- Tempo Médio Coleta: AVG(tempo_execucao_minutos) — apenas ponto = 1
-- Valor Total: SUM(valor) — apenas ponto >= 2
-- Valor Profissional: SUM(valor_prof) — apenas ponto >= 2
-- Faturamento: SUM(valor) - SUM(valor_prof)
-- Ticket Médio: SUM(valor) / NULLIF(COUNT(*), 0)
-- KM Total: SUM(distancia)
-- Total Entregadores: COUNT(DISTINCT cod_prof)
-- Média Entregas/Entregador: COUNT(*) / NULLIF(COUNT(DISTINCT cod_prof), 0)
-- Retornos: COUNT de OS com ocorrências de retorno (ver regras acima)
-- Taxa de Retorno: Retornos / Total Entregas * 100
-
-═══════════════════════════════════════
-🗃️ OUTRAS TABELAS
-═══════════════════════════════════════
-- withdrawal_requests: saques dos motoboys (status: 'aguardando_aprovacao', 'aprovado', 'rejeitado', 'aprovado_gratuidade')
-- cs_clientes: cadastro de clientes Customer Success (campos: cod_cliente, nome_fantasia, health_score, status, etc)
-- cs_interacoes: interações com clientes CS (tipo, titulo, descricao, resultado, data_interacao)
-- cs_ocorrencias: ocorrências registradas no CS (titulo, descricao, tipo, severidade, status, resolucao)
-- score_totais: pontuação acumulada dos profissionais
-- score_historico: histórico de pontuação
-- bi_prazos_cliente: prazos SLA personalizados por cliente
-- bi_faixas_prazo: faixas de km para cálculo de prazo
-- bi_resumo_cliente: resumo agregado por cliente
-- bi_resumo_diario: resumo agregado por dia
-- bi_resumo_profissional: resumo agregado por profissional
-
-═══════════════════════════════════════
-📋 FORMATO DA RESPOSTA
-═══════════════════════════════════════
-
-⚠️⚠️⚠️ REGRA ABSOLUTA: Sua resposta deve conter APENAS um bloco SQL executável. NADA MAIS.
-NUNCA diga "seria necessário", "podemos executar", "sugiro a query". APENAS GERE O SQL.
-NUNCA explique, comente ou sugira. Apenas o bloco SQL puro.
-
-\\\`\\\`\\\`sql
-SELECT ... FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND ... LIMIT 200
-\\\`\\\`\\\`
-
-═══════════════════════════════════════
-🧩 RECEITAS SQL PRONTAS (use como base)
-═══════════════════════════════════════
-
--- Horário de pico (hora com mais pedidos):
-SELECT EXTRACT(HOUR FROM data_hora) AS hora,
-       COUNT(*) AS total_pedidos
-FROM bi_entregas
-WHERE COALESCE(ponto, 1) >= 2
-GROUP BY EXTRACT(HOUR FROM data_hora)
-ORDER BY total_pedidos DESC
-
--- Faixa de KM com mais pedidos:
-SELECT CASE
-  WHEN distancia <= 5 THEN '0-5 km'
-  WHEN distancia <= 10 THEN '5-10 km'
-  WHEN distancia <= 15 THEN '10-15 km'
-  WHEN distancia <= 20 THEN '15-20 km'
-  WHEN distancia <= 30 THEN '20-30 km'
-  ELSE '30+ km'
-END AS faixa_km,
-COUNT(*) AS total,
-ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo,
-ROUND(AVG(tempo_execucao_minutos)::numeric, 1) AS tempo_medio
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY faixa_km ORDER BY total DESC
-
--- Evolução diária:
-SELECT data_solicitado, COUNT(*) AS entregas,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY data_solicitado ORDER BY data_solicitado
-
--- Dia da semana com mais entregas:
-SELECT TO_CHAR(data_solicitado, 'Day') AS dia_semana,
-  EXTRACT(DOW FROM data_solicitado) AS dow,
-  COUNT(*) AS total
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY dia_semana, dow ORDER BY dow
-
--- Detratores (profissionais com mais atrasos):
-SELECT cod_prof, nome_prof,
-  COUNT(*) AS total_entregas,
-  COUNT(*) FILTER (WHERE dentro_prazo = false) AS atrasadas,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*), 0), 1) AS taxa_atraso,
-  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) AS tempo_medio
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY cod_prof, nome_prof
-HAVING COUNT(*) FILTER (WHERE dentro_prazo = false) >= 3
-ORDER BY taxa_atraso DESC
-
--- Análise de SLA por faixa de tempo de alocação:
-SELECT CASE
-  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 5 THEN '0-5 min'
-  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 15 THEN '5-15 min'
-  WHEN EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 <= 30 THEN '15-30 min'
-  ELSE '30+ min'
-END AS faixa_alocacao,
-COUNT(*) AS total,
-ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_hora_alocado IS NOT NULL
-GROUP BY faixa_alocacao ORDER BY faixa_alocacao
-
--- Classificação de motivo de atraso por OS (RECEITA FUNDAMENTAL):
-WITH atrasos AS (
-  SELECT e.os, e.cod_prof, e.nome_prof,
-    EXTRACT(EPOCH FROM (e.finalizado - e.data_hora))/60 as sla_total,
-    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 as tempo_alocacao,
-    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 +
-      COALESCE((SELECT EXTRACT(EPOCH FROM (p1.hora_saida::time - e.data_hora::time))/60
-                FROM bi_entregas p1 WHERE p1.os = e.os AND COALESCE(p1.ponto, 1) = 1 AND p1.hora_saida IS NOT NULL LIMIT 1), 0) as tempo_direcionamento,
-    COALESCE((SELECT EXTRACT(EPOCH FROM (p1.hora_saida::time - p1.hora_chegada::time))/60
-              FROM bi_entregas p1 WHERE p1.os = e.os AND COALESCE(p1.ponto, 1) = 1 AND p1.hora_saida IS NOT NULL AND p1.hora_chegada IS NOT NULL LIMIT 1), 0) as tempo_no_p1,
-    e.tempo_execucao_minutos
-  FROM bi_entregas e
-  WHERE COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = false
-    AND e.finalizado IS NOT NULL AND e.data_hora IS NOT NULL
-)
-SELECT 
-  CASE
-    WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
-    WHEN sla_total > 600 THEN 'OS não encerrada'
-    WHEN tempo_alocacao > 30 THEN 'Associado tarde'
-    WHEN tempo_direcionamento > 30 THEN 'Direcionamento lento'
-    WHEN tempo_no_p1 > 45 THEN 'Coleta lenta'
-    ELSE 'Atraso do motoboy'
-  END as motivo_atraso,
-  COUNT(*) as quantidade,
-  ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
-FROM atrasos
-GROUP BY motivo_atraso
-ORDER BY quantidade DESC
-
--- Motos (profissionais) por dia:
-SELECT data_solicitado as dia,
-  COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-  COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as motos,
-  ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric /
-    NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
-FROM bi_entregas
-GROUP BY data_solicitado ORDER BY data_solicitado
-
--- Taxa de retorno por cliente:
-SELECT cod_cliente, nome_fantasia,
-  COUNT(*) as total_entregas,
-  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') as retornos,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-GROUP BY cod_cliente, nome_fantasia
-ORDER BY taxa_retorno DESC
-
--- Ticket médio por cliente com variação semanal:
-WITH semana_atual AS (
-  SELECT cod_cliente, nome_fantasia,
-    COUNT(*) as entregas,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
-    SUM(valor) as faturamento
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-    AND data_solicitado BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE
-  GROUP BY cod_cliente, nome_fantasia
-),
-semana_anterior AS (
-  SELECT cod_cliente,
-    COUNT(*) as entregas_ant,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_ant,
-    SUM(valor) as faturamento_ant
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-    AND data_solicitado BETWEEN CURRENT_DATE - 14 AND CURRENT_DATE - 8
-  GROUP BY cod_cliente
-)
-SELECT sa.cod_cliente, sa.nome_fantasia, sa.entregas, sa.ticket_medio, sa.faturamento,
-  COALESCE(san.entregas_ant, 0) as entregas_sem_anterior,
-  COALESCE(san.ticket_medio_ant, 0) as ticket_medio_sem_anterior,
-  CASE WHEN COALESCE(san.ticket_medio_ant, 0) > 0 THEN
-    ROUND(100.0 * (sa.ticket_medio - san.ticket_medio_ant) / san.ticket_medio_ant, 1)
-  ELSE NULL END as variacao_ticket_pct,
-  CASE WHEN COALESCE(san.entregas_ant, 0) > 0 THEN
-    ROUND(100.0 * (sa.entregas - san.entregas_ant)::numeric / san.entregas_ant, 1)
-  ELSE NULL END as variacao_demanda_pct
-FROM semana_atual sa
-LEFT JOIN semana_anterior san ON sa.cod_cliente = san.cod_cliente
-ORDER BY sa.faturamento DESC LIMIT 30
-
--- Custo com mínimo garantido por cliente vs faturamento:
-WITH garantido AS (
-  SELECT cod_prof, SUM(valor) as custo_garantido
-  FROM withdrawal_requests
-  WHERE status = 'aprovado_gratuidade'
-  GROUP BY cod_prof
-),
-faturamento AS (
-  SELECT cod_cliente, nome_fantasia,
-    SUM(valor) as faturamento,
-    COUNT(DISTINCT cod_prof) as profs_utilizados
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-  GROUP BY cod_cliente, nome_fantasia
-)
-SELECT f.cod_cliente, f.nome_fantasia, f.faturamento,
-  COALESCE(SUM(g.custo_garantido), 0) as custo_garantido_total,
-  ROUND(100.0 * COALESCE(SUM(g.custo_garantido), 0) / NULLIF(f.faturamento, 0), 2) as pct_garantido_sobre_fat
-FROM faturamento f
-LEFT JOIN bi_entregas be ON f.cod_cliente = be.cod_cliente AND COALESCE(be.ponto, 1) >= 2
-LEFT JOIN garantido g ON be.cod_prof = g.cod_prof
-GROUP BY f.cod_cliente, f.nome_fantasia, f.faturamento
-ORDER BY custo_garantido_total DESC LIMIT 20
-
--- Comparativo de cliente com média geral da Tutts (mercado):
-WITH media_geral AS (
-  SELECT
-    ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_geral,
-    ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_geral,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_geral,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_geral
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-)
-SELECT cod_cliente, nome_fantasia,
-  COUNT(*) as entregas,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_cliente,
-  mg.taxa_prazo_geral,
-  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_cliente,
-  mg.tempo_medio_geral,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_cliente,
-  mg.taxa_retorno_geral,
-  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_cliente,
-  mg.ticket_medio_geral
-FROM bi_entregas, media_geral mg
-WHERE COALESCE(ponto, 1) >= 2
-GROUP BY cod_cliente, nome_fantasia, mg.taxa_prazo_geral, mg.tempo_medio_geral, mg.taxa_retorno_geral, mg.ticket_medio_geral
-ORDER BY entregas DESC LIMIT 30
-
-═══════════════════════════════════════
-⚠️ ARMADILHAS SQL — CUIDADO
-═══════════════════════════════════════
-1. NUNCA use GROUP BY por alias se o alias tem o MESMO NOME de uma coluna da tabela.
-   Exemplo ERRADO: SELECT EXTRACT(HOUR FROM data_hora) AS hora_solicitado ... GROUP BY hora_solicitado
-   (hora_solicitado É UMA COLUNA da tabela, o PostgreSQL vai usar a coluna, não o alias!)
-   Exemplo CORRETO: SELECT EXTRACT(HOUR FROM data_hora) AS hora ... GROUP BY EXTRACT(HOUR FROM data_hora)
-
-2. NUNCA use strftime() — isso é SQLite, não PostgreSQL. Use EXTRACT() ou TO_CHAR().
-
-3. Sempre use COALESCE(ponto, 1) >= 2 (com COALESCE pois ponto pode ser NULL).
-
-4. Para perguntas com múltiplas partes, gere blocos de código SQL separados. O sistema executa todos automaticamente.
-
-REGRAS OBRIGATÓRIAS:
-1. SEMPRE gere SQL executável. NUNCA responda sem SQL. NUNCA sugira SQL — GERE diretamente.
-2. SEMPRE filtre apenas entregas (não coletas): WHERE COALESCE(ponto, 1) >= 2
-3. SEMPRE adicione LIMIT (máximo 500)
-4. NUNCA invente dados, dê exemplos hipotéticos ou use tabelas que não existem
-5. Se a pergunta mencionar "detratores" ou "piores", ordene por taxa de prazo ASC
-6. Se mencionar "promotores" ou "melhores", ordene por taxa de prazo DESC
-7. Para filtrar período, use: data_solicitado BETWEEN '2026-01-01' AND '2026-01-31'
-8. Use nome_fantasia para exibir nome do cliente
-9. Agrupe quando fizer sentido (por cliente, profissional, dia, cidade, etc)
-10. Inclua métricas relevantes mesmo que não pedidas (taxa prazo, total entregas, etc)
-11. Se a pergunta tiver DUAS ou mais partes, gere uma query para CADA parte em blocos SQL separados. O sistema executa todas automaticamente.
-12. PREFIRA gerar UMA query com UNION ALL se possível. Mas se for complexo, pode gerar blocos separados.
-13. Quando a pergunta pedir MÚLTIPLAS análises (ex: "faixa de km E horário de pico"), gere dados completos para CADA análise.
-14. SEMPRE traga dados suficientes para uma análise rica. Em vez de LIMIT 1 (só o top), traga LIMIT 10-20 para contexto completo.
-15. Em relatórios de período/evolução, SEMPRE inclua COUNT(DISTINCT cod_prof) como "motos" para mostrar a quantidade de motoboys por dia.
-16. Quando analisar taxa de retorno, inclua a referência: até 2% = saudável, 2-5% = atenção, >5% = preocupante.
-17. Para análises financeiras (ticket médio, variação de demanda, garantido), use as receitas SQL da seção de receitas prontas.
-18. Quando comparar cliente com mercado/média, compare com TODOS os clientes da Tutts (não apenas da região).
-19. Para o cliente 767 (Comollati), SEMPRE destacar que o SLA mínimo exigido é 95% no prazo.
-${contextoFiltros ? `
-═══════════════════════════════════════
-⚡ FILTROS ATIVOS DA CONVERSA (OBRIGATÓRIOS)
-═══════════════════════════════════════
-${contextoFiltros}
-
-REGRA: TODAS as queries SQL DEVEM incluir estes filtros:
-${filtroSQLObrigatorio}
-Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
-
-      // Adicionar histórico se existir (turnos anteriores)
       if (historico && Array.isArray(historico) && historico.length > 0) {
-        // Primeiro turno com system content
         mensagens.push({
           role: 'user',
-          content: systemContent + '\n\n---\n\nPergunta do usuário: ' + historico[0].prompt
+          content: promptSQL + '\n\n---\n\nPergunta do usuário: ' + historico[0].prompt
         });
         if (historico[0].resposta) {
           mensagens.push({ role: 'assistant', content: historico[0].resposta });
         }
-        // Turnos subsequentes
         for (let i = 1; i < historico.length; i++) {
           mensagens.push({ role: 'user', content: historico[i].prompt });
           if (historico[i].resposta) {
             mensagens.push({ role: 'assistant', content: historico[i].resposta });
           }
         }
-        // Prompt atual
         mensagens.push({ role: 'user', content: prompt });
       } else {
         mensagens.push({
           role: 'user',
-          content: systemContent + '\n\n---\n\nPergunta do usuário: ' + prompt
+          content: promptSQL + '\n\n---\n\nPergunta do usuário: ' + prompt
         });
       }
 
-      // 3. Primeira chamada: Gemini decide se precisa de SQL ou responde direto
-      console.log('🤖 [Chat IA] Chamando Gemini (etapa 1: análise do prompt)...');
-      
-      // Montar conteúdo para Gemini (formato parts)
+      console.log('🤖 [Chat IA] Chamando Gemini (etapa 1: gerar SQL)...');
       const geminiContents = mensagens.map(m => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }]
       }));
 
-      const resp1 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: geminiContents,
-          generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
-        })
+      const resposta1 = await chamarGemini(GEMINI_API_KEY, null, {
+        temperature: 0.3,
+        maxTokens: 4096,
+        contents: geminiContents
       });
 
-      const data1 = await resp1.json();
-      if (data1.error) {
-        console.error('❌ [Chat IA] Erro Gemini etapa 1:', data1.error);
-        return res.status(500).json({ error: `Erro Gemini: ${data1.error.message}` });
-      }
-
-      const resposta1 = data1.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`🤖 [Chat IA] Resposta etapa 1: ${resposta1.substring(0, 200)}...`);
 
-      // 4. Extrair TODAS as queries SQL da resposta
+      // ========== Extrair queries SQL ==========
       const allSqlBlocks = [];
       const sqlBlockRegex = /```sql\n?([\s\S]*?)\n?```/g;
       let match;
@@ -691,17 +814,16 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
         allSqlBlocks.push(match[1].trim());
       }
 
-      // Fallback: se não veio em blocos ```sql```, tentar extrair SELECT/WITH direto
       if (allSqlBlocks.length === 0) {
-        const selectMatch = resposta1.match(/((?:WITH|SELECT)[\s\S]*?;)\s*$/im) || 
+        const selectMatch = resposta1.match(/((?:WITH|SELECT)[\s\S]*?;)\s*$/im) ||
                            resposta1.match(/((?:WITH|SELECT)[\s\S]*?LIMIT\s+\d+)/im);
         if (selectMatch) {
-          console.log('🔄 [Chat IA] SQL encontrado sem bloco de código, extraindo...');
+          console.log('🔄 [Chat IA] SQL encontrado sem bloco de código');
           allSqlBlocks.push(selectMatch[1].trim());
         }
       }
 
-      // Se um bloco contém múltiplas queries separadas por ;, splitá-las
+      // Splittar blocos com múltiplas queries
       const queriesParaExecutar = [];
       for (const bloco of allSqlBlocks) {
         const partes = bloco.split(/;\s*/).filter(q => {
@@ -712,97 +834,16 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
       }
 
       if (queriesParaExecutar.length === 0) {
-        console.log('⚠️ [Chat IA] Gemini não gerou SQL — tentando resposta conceitual...');
-        
-        // Verificar se é uma pergunta conceitual/explicativa (não requer dados)
-        const promptLower = prompt.toLowerCase();
-        const ehConceitual = [
-          'o que é', 'o que significa', 'o que considera', 'me explique', 'como funciona',
-          'qual a diferença', 'defina', 'definição', 'explique', 'conceito de',
-          'o que vc considera', 'o que você considera', 'quais são os', 'quais os motivos',
-          'coleta lenta', 'coleta lentam', 'associado tarde', 'direcionamento lento', 'atraso do motoboy',
-          'os não encerrada', 'falha sistêmica', 'motivo de atraso', 'motivos de atraso',
-          'taxa de retorno', 'health score', 'sla', 'como é calculado',
-          'o que voce considera', 'oque é', 'oque significa', 'oq é', 'oq significa',
-          'me fala sobre', 'me diga o que', 'qual o conceito', 'como voce calcula',
-          'como vc calcula', 'como que funciona', 'pra que serve', 'para que serve',
-          'o que são', 'oque são', 'quais motivos', 'quais os tipos',
-          'mínimo garantido', 'minimo garantido', 'ticket médio', 'ticket medio',
-          'como interpretar', 'como analisar', 'como entender', 'como ler',
-          'referência', 'referencia', 'benchmark', 'meta de', 'qual a meta'
-        ].some(termo => promptLower.includes(termo));
-
-        if (ehConceitual) {
-          // Responder direto com conhecimento do sistema, sem SQL
-          const promptConceitual = `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys). Você faz parte do time.
-          
-Responda a pergunta do usuário usando seu conhecimento profundo do sistema:
-
-PERGUNTA: "${prompt}"
-${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
-
-## GLOSSÁRIO COMPLETO DO SISTEMA TUTTS:
-
-### MOTIVOS DE ATRASO (para OS fora do SLA):
-1. **Falha sistêmica**: OS com SLA total > 10h (600min) e tempo de alocação > 5h (300min). Significa que a OS nunca foi alocada a um motoboy no dia — ficou "perdida" no sistema.
-2. **OS não encerrada**: SLA total > 10h, mas tempo de alocação foi normal. O motoboy provavelmente entregou, mas não encerrou a OS no aplicativo.
-3. **Associado tarde**: Tempo de alocação > 30 minutos. Nossa mesa de operações demorou para associar/alocar um motoboy à OS. Problema INTERNO da Tutts (operação).
-4. **Direcionamento lento**: Após ser alocado, o motoboy demorou > 30min para se deslocar até o ponto de coleta. Pode ser: motoboy estava longe, ocupado com outra entrega, ou trânsito.
-5. **Coleta lenta**: Tempo até saída do Ponto 1 > 45 minutos. A LOJA DO CLIENTE demorou para separar/liberar a mercadoria. Problema do CLIENTE, não nosso.
-6. **Atraso do motoboy**: Nenhuma das causas acima. O tempo de deslocamento/entrega em si foi longo — trânsito, rota ruim, ou motoboy lento.
-
-### MÉTRICAS:
-- **Taxa de prazo**: % de entregas dentro do SLA (meta geral: ≥85%, Comollati exige ≥95%)
-- **Taxa de retorno**: % de entregas que resultaram em retorno (devolução). REFERÊNCIA IMPORTANTE: até 2% = SAUDÁVEL e normal para operações logísticas de autopeças; entre 2% e 5% = ATENÇÃO, monitorar mas não é crítico; acima de 5% = PREOCUPANTE e requer ação imediata. Ao analisar taxa de retorno de um cliente, SEMPRE compare com a média geral de TODOS os clientes da Tutts (não apenas da mesma região, pois algumas regiões têm apenas 1 cliente).
-- **Health Score**: Score de 0-100 que combina taxa de prazo (50pts), retornos (25pts) e tempo médio (25pts)
-- **SLA**: Prazo máximo para entrega, baseado na distância (ex: até 10km = 60min, até 20km = 90min)
-- **Cliente 767 (Grupo Comollati)**: SLA fixo de 120 minutos (2h) para QUALQUER distância. O SLA MÍNIMO exigido pelo Comollati é 95% no prazo — abaixo disso é CRÍTICO e pode gerar perda do contrato. Esse é o cliente mais exigente da carteira.
-- **Motos por dia**: Quantidade de motoboys distintos (COUNT DISTINCT cod_prof) que operaram em cada dia. Métrica essencial para dimensionamento de frota e análise de capacidade operacional.
-
-### TIPOS DE OCORRÊNCIA (RETORNOS):
-- "Cliente Fechado" = cliente estava com a loja fechada
-- "ClienteAus" / "Cliente Ausente" = cliente não estava no endereço
-- "Loja Fechada" = estabelecimento fechado
-- "Produto Incorreto" = mercadoria errada
-- "Retorno" = retorno genérico
-
-### ANÁLISES FINANCEIRAS:
-- **Ticket médio**: Valor médio cobrado por entrega (SUM(valor) / COUNT entregas). Quando comparar períodos, informar a variação em %. Se a variação for > 5% de uma semana para outra, informar o valor da semana anterior.
-- **Variação de demanda**: Quantidade de entregas por cliente de uma semana para outra. Se variação > 5%, informar o valor anterior e a variação percentual.
-- **Mínimo garantido**: Valor investido em garantido por cliente. Comparar o custo com garantido vs o faturamento do cliente para avaliar se o investimento se paga. Dados na tabela withdrawal_requests com status 'aprovado_gratuidade'.
-
-### COMPARATIVO COM MERCADO:
-Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas os da mesma região, pois pode haver regiões com um cliente só).
-
-### CÁLCULOS:
-- tempo_alocacao = data_hora_alocado - data_hora (minutos)
-- sla_total = finalizado - data_hora (minutos)
-- Detrator = profissional com 3+ OS atrasadas
-
-## REGRAS:
-- Fale como funcionário da Tutts: "nós", "nossa operação", "identificamos"
-- Seja objetivo e claro
-- Use emojis e formatação markdown
-- ⛔ NUNCA sugira aumentar contato com cliente`;
-
-          try {
-            const respConc = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: promptConceitual }] }],
-                generationConfig: { temperature: 0.5, maxOutputTokens: 3000 }
-              })
-            });
-            const dataConc = await respConc.json();
-            const respostaConc = dataConc.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            if (respostaConc) {
-              console.log('✅ [Chat IA] Resposta conceitual gerada');
-              return res.json({ success: true, resposta: respostaConc, sql: null, dados: null });
-            }
-          } catch (concErr) {
-            console.error('❌ [Chat IA] Erro resposta conceitual:', concErr.message);
+        console.log('⚠️ [Chat IA] Sem SQL — tentando resposta conceitual como fallback');
+        // Fallback: tentar responder como conceitual
+        try {
+          const respostaFallback = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          if (respostaFallback) {
+            const resp = { success: true, resposta: respostaFallback, sql: null, dados: null };
+            return res.json(resp);
           }
+        } catch (e) {
+          console.error('❌ [Chat IA] Fallback conceitual também falhou:', e.message);
         }
 
         return res.json({
@@ -815,14 +856,16 @@ Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TO
 
       console.log(`🤖 [Chat IA] ${queriesParaExecutar.length} query(ies) extraída(s)`);
 
-      // 5. Validar e executar CADA query
+      // ========== ETAPA 2: Validar e executar queries ==========
       const todosResultados = [];
       const todasColunas = new Set();
       const sqlsExecutadas = [];
 
-      // Helper: executar uma query com retry
+      // ========== MELHORIA 6: Retry inteligente com contexto (até 3 tentativas) ==========
       async function executarComRetry(sql, tentativa = 1) {
-        const validacao = validarSQL(sql);
+        // MELHORIA 3: Pós-validação automática
+        const sqlPosValidada = posValidarSQL(sql, filtroSQLObrigatorio);
+        const validacao = validarSQL(sqlPosValidada);
         if (!validacao.valido) {
           console.error(`❌ [Chat IA] SQL bloqueado: ${validacao.erro}`);
           return null;
@@ -835,26 +878,38 @@ Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TO
           return { result, sql: validacao.sql };
         } catch (sqlError) {
           await pool.query('SET statement_timeout = 0').catch(() => {});
-          console.error(`❌ [Chat IA] Erro SQL (tentativa ${tentativa}):`, sqlError.message);
+          console.error(`❌ [Chat IA] Erro SQL (tentativa ${tentativa}/3):`, sqlError.message);
 
-          if (tentativa >= 2) return null;
+          if (tentativa >= 3) return null;
 
-          // Retry: pedir ao Gemini para corrigir
+          // Retry com contexto completo do prompt original
           try {
-            console.log('🔄 [Chat IA] Auto-correção via Gemini...');
-            const retryResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: `A query SQL abaixo deu erro no PostgreSQL. Corrija e retorne APENAS o SQL corrigido em um bloco \`\`\`sql\`\`\`.\n\nERRO: ${sqlError.message}\n\nSQL COM ERRO:\n\`\`\`sql\n${validacao.sql}\n\`\`\`\n\nREGRAS:\n- Retorne APENAS o bloco SQL corrigido.\n- Se o erro for GROUP BY, repita a expressão completa no GROUP BY.\n- NUNCA use strftime (PostgreSQL usa EXTRACT ou TO_CHAR).\n- Mantenha WHERE COALESCE(ponto, 1) >= 2 e LIMIT.` }] }],
-                generationConfig: { temperature: 0.1, maxOutputTokens: 2000 }
-              })
-            });
-            const retryData = await retryResp.json();
-            const retryText = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            console.log(`🔄 [Chat IA] Auto-correção via Gemini (tentativa ${tentativa + 1})...`);
+            const retryText = await chamarGemini(GEMINI_API_KEY,
+              `A query SQL abaixo deu erro no PostgreSQL. Corrija mantendo a MESMA lógica.
+
+PERGUNTA ORIGINAL DO USUÁRIO: "${prompt}"
+
+ERRO PostgreSQL: ${sqlError.message}
+
+SQL COM ERRO:
+\`\`\`sql
+${validacao.sql}
+\`\`\`
+
+REGRAS:
+- Mantenha a mesma lógica e colunas.
+- Corrija APENAS o erro reportado.
+- Se o erro for GROUP BY, repita a expressão completa (NÃO use alias que tenha mesmo nome de coluna).
+- NUNCA use strftime (PostgreSQL usa EXTRACT ou TO_CHAR).
+- WHERE COALESCE(ponto, 1) >= 2 é obrigatório.
+- LIMIT é obrigatório.
+- Retorne APENAS o SQL corrigido em bloco \`\`\`sql\`\`\`.`,
+              { temperature: 0.1, maxTokens: 2000 }
+            );
             const retrySqlMatch = retryText.match(/```sql\n?([\s\S]*?)\n?```/);
             if (retrySqlMatch) {
-              return await executarComRetry(retrySqlMatch[1].trim(), 2);
+              return await executarComRetry(retrySqlMatch[1].trim(), tentativa + 1);
             }
           } catch (retryError) {
             console.error('❌ [Chat IA] Retry falhou:', retryError.message);
@@ -863,11 +918,9 @@ Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TO
         }
       }
 
-      // Executar todas as queries (em paralelo se > 1)
       for (let i = 0; i < queriesParaExecutar.length; i++) {
         const resultado = await executarComRetry(queriesParaExecutar[i]);
         if (resultado) {
-          // Adicionar marcador de qual query veio o resultado
           const queryLabel = queriesParaExecutar.length > 1 ? `query_${i + 1}` : null;
           resultado.result.rows.forEach(row => {
             if (queryLabel) row._query = queryLabel;
@@ -890,213 +943,63 @@ Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TO
       const linhas = todosResultados;
       const colunas = [...todasColunas];
       const sqlFinal = sqlsExecutadas.join(';\n\n');
-      console.log(`✅ [Chat IA] ${sqlsExecutadas.length} query(ies) executada(s), ${linhas.length} linhas total, ${colunas.length} colunas`);
+      console.log(`✅ [Chat IA] ${sqlsExecutadas.length} query(ies) executada(s), ${linhas.length} linhas, ${colunas.length} colunas`);
 
-      // 7. Enviar resultados para Gemini analisar
-      // Limitar dados para não estourar o contexto
-      const dadosParaAnalise = linhas.length > 100
-        ? linhas.slice(0, 100)
-        : linhas;
+      // ========== ETAPA 3: Análise com prompt dinâmico (Melhoria 4) ==========
+      const dadosParaAnalise = linhas.length > 100 ? linhas.slice(0, 100) : linhas;
 
-      const promptAnalise = `Você é um profissional sênior do time operacional da Tutts, empresa de logística de entregas com motoboys. Você faz parte do time e conhece profundamente a operação. Analise os dados REAIS abaixo e responda a pergunta do usuário de forma profissional, consultiva e analítica.
+      const regrasAnalise = getRegrasAnalisePorCategoria(categoria);
 
-## IDENTIDADE (OBRIGATÓRIO)
-- Você É funcionário da Tutts. Use "nós", "nossa operação", "nosso time", "identificamos", "vamos atuar".
-- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria", "recomendo que a Tutts".
-- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar comercialmente.
-- Sugestões devem ser sobre melhorias INTERNAS (roteirização, alocação, treinamento de motoboys).
+      const promptAnalise = `Analise os dados REAIS abaixo e responda a pergunta do usuário.
 
-## PERGUNTA DO USUÁRIO
+## PERGUNTA
 "${prompt}"
-${contextoFiltros ? `\n## CONTEXTO ATIVO\n${contextoFiltros}\nTodos os dados abaixo já estão filtrados por este contexto.` : ''}
+${contextoFiltros ? `\n## CONTEXTO ATIVO\n${contextoFiltros}\nDados filtrados por este contexto.` : ''}
 
 ## QUERY SQL EXECUTADA
 \`\`\`sql
 ${sqlFinal}
 \`\`\`
 
-## DADOS REAIS (${linhas.length} registros${linhas.length > 100 ? ', mostrando os primeiros 100' : ''} · Colunas: ${colunas.join(', ')})
+## DADOS REAIS (${linhas.length} registros${linhas.length > 100 ? ', primeiros 100' : ''} · Colunas: ${colunas.join(', ')})
 \`\`\`json
 ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 \`\`\`
 
-## GLOSSÁRIO OPERACIONAL TUTTS (USE QUANDO RELEVANTE)
-Quando o usuário perguntar sobre motivos de atraso ou conceitos operacionais, EXPLIQUE com contexto:
-- **Associado tarde**: Nossa mesa de operações demorou mais de 30min para alocar um motoboy à OS. Problema nosso interno de alocação.
-- **Direcionamento lento**: Após ser alocado, o motoboy demorou mais de 30min para se deslocar até o ponto de coleta. Pode indicar que o motoboy estava longe ou ocupado.
-- **Coleta lenta**: A loja do CLIENTE demorou mais de 45min para separar/liberar a mercadoria. Problema do cliente, não nosso.
-- **Atraso do motoboy**: Tempo de deslocamento/entrega foi longo (trânsito, rota ruim, motoboy lento).
-- **OS não encerrada**: Motoboy entregou mas não fechou a OS no app (SLA > 10h sem alocação longa).
-- **Falha sistêmica**: OS nunca foi alocada (SLA > 10h com alocação > 5h).
-- **Taxa de retorno**: Até 2% = SAUDÁVEL (normal para autopeças) | 2-5% = ATENÇÃO | >5% = PREOCUPANTE. Sempre que mencionar taxa de retorno, informe essa referência para contextualizar se está bom ou ruim.
-- **Cliente 767 (Grupo Comollati)**: SLA fixo de 120min para QUALQUER distância. Mínimo OBRIGATÓRIO de 95% no prazo — abaixo disso é CRÍTICO e pode gerar perda do contrato. Sempre destacar essa exigência quando analisar o Comollati.
-- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — indica quantos motoboys operaram. Sempre incluir essa informação em relatórios e análises de período.
-- **Comparativo com mercado**: Quando comparar um cliente, usar a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas da região, pois pode haver regiões com 1 cliente só).
-- **Ticket médio**: Valor médio cobrado por entrega. Quando comparar períodos, informar variação %. Se variação > 5%, destacar o valor anterior.
-- **Variação de demanda**: Variação na quantidade de entregas entre períodos. Se > 5%, destacar e informar o valor anterior.
-- **Mínimo garantido**: Valor investido em garantido para manter motoboys disponíveis. Comparar com faturamento do cliente para avaliar ROI.
+${regrasAnalise}
 
-## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
-- ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
-- Destaque números e métricas com **negrito**.
-- Português brasileiro, tom profissional, consultivo e de parceria interna.
-- Use emojis para classificar performance: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
-- Organize a resposta em parágrafos claros. Use ## (h2) e ### (h3) para seções quando a resposta for longa.
-- Para listas de dados (rankings, comparativos), use SEMPRE o formato padronizado:
-  - **Item:** métrica1 · métrica2 · métrica3
-- Valores monetários: formato R$ 1.234,56
-- Tempos: em minutos (converta para "Xh XXmin" se > 60 minutos)
-- Taxas/percentuais: sempre com 1 casa decimal (ex: **87,3%**)
+${REGRAS_GRAFICOS}`;
 
-## REGRAS DE CONTEÚDO (OBRIGATÓRIO)
-- Use APENAS os dados retornados acima. NUNCA invente métricas, dados hipotéticos ou exemplos fictícios.
-- ⛔ NUNCA mencione valores financeiros, faturamento ou custos EXCETO se a pergunta pedir explicitamente.
-- ⛔ NUNCA cite métricas de outros clientes para comparação (a menos que os dados retornados incluam).
-- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que NÓS podemos fazer.
-- ⛔ NUNCA inclua blocos SQL na resposta — a query já foi executada.
-- Se os dados não respondem completamente a pergunta, diga CLARAMENTE o que falta e sugira uma nova pergunta.
-- Se o resultado estiver vazio (0 registros), diga claramente que não há dados para o filtro solicitado.
-- REGRA ESPECIAL: Cliente 767 (Grupo Comollati) tem prazo FIXO de 120min (2h) para qualquer distância e exige mínimo 95% no prazo. Outros clientes seguem tabela de faixas por km.
-
-## ESTRUTURA DA RESPOSTA (adapte ao tipo de pergunta)
-
-### Se for RANKING/TOP (ex: "top 10 clientes", "piores motoboys"):
-1. Comece com uma frase de contexto (período, total analisado)
-2. Liste os resultados no formato: - **Nome:** entregas · taxa de prazo · tempo médio
-3. Encerre com 1-2 frases de insight (destaques, padrões, alertas)
-
-### Se for COMPARATIVO (ex: "janeiro vs fevereiro", "cliente A vs B"):
-1. Comece com visão geral da comparação
-2. Liste cada item com variação ↑↓: - **Item:** métrica atual vs anterior (↑X% ou ↓X%)
-3. Se variação < 3%, diga que se manteve estável e NÃO elabore
-4. Encerre com conclusão sobre tendência
-
-### Se for ANÁLISE DE PERFORMANCE (ex: "como está a taxa de prazo"):
-1. Apresente o número principal em destaque
-2. Classifique com emoji: 🟢🟡🔴
-3. Contextualize com métricas complementares
-4. Encerre com 1-2 pontos de atenção ou destaques positivos
-
-### Se for DIAGNÓSTICO/PROBLEMA (ex: "por que caiu", "quais retornos"):
-1. Identifique o problema com dados
-2. Liste os fatores usando: - **Situação:** descrição · **Impacto:** números
-3. Sugira ações que a Tutts pode tomar
-
-### Se for ANÁLISE DE DETRATORES (ex: "quais profissionais estão atrasando", "detratores"):
-1. Liste cada detrator: - **Nome (cod):** X entregas · Y atrasadas · taxa Z% · severidade 🔴🟠🟡🟢
-2. Para os piores, classifique o MOTIVO predominante do atraso:
-   - "Associado tarde" = demorou para alocar motoboy (tempo alocação > 30min)
-   - "Atraso do motoboy" = deslocamento/entrega demorou
-   - "Coleta lenta" = loja demorou para liberar mercadoria
-   - "Falha sistêmica" = OS ficou > 10h sem alocação
-   - "OS não encerrada" = motoboy não fechou a OS no app
-3. Classifique a severidade: 🔴 Crítico (≥6%) · 🟠 Alto (5-6%) · 🟡 Médio (3-5%) · 🟢 Baixo (<3%)
-4. Encerre com ação recomendada para os mais críticos
-
-### Se for PERGUNTA SIMPLES (ex: "quantas entregas ontem"):
-1. Responda direto com o número em destaque
-2. Adicione 1-2 métricas complementares relevantes
-3. Mantenha a resposta curta (3-5 linhas)
-
-## TOM E ESTILO
-- Você É do time da Tutts. Use "nós", "identificamos", "vamos atuar", "nossa operação".
-- ⛔ NUNCA fale como pessoa de fora. NUNCA use "a Tutts deveria" ou "recomendo à Tutts".
-- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar.
-- Frases curtas e diretas. Sem enrolação.
-- Quando identificar algo bom, celebre brevemente.
-- Quando identificar problema, seja claro e propositivo (foque em solução INTERNA).
-- Use linguagem de equipe: "observamos", "identificamos", "vamos trabalhar".
-
-## 📊 GRÁFICOS (QUANDO USAR)
-Quando os dados se beneficiarem de visualização, inclua UM ou MAIS blocos de gráfico usando este formato EXATO:
-
-[CHART]
-{"type":"bar","title":"Título do gráfico","labels":["Label1","Label2","Label3"],"datasets":[{"label":"Nome da série","data":[10,20,30],"color":"#10b981"}]}
-[/CHART]
-
-TIPOS DISPONÍVEIS:
-- "bar" → comparações (ranking de clientes, profissionais, faixas)
-- "horizontalBar" → rankings com nomes longos (top motoboys, clientes)
-- "line" → evolução temporal (por dia, semana, mês)
-- "pie" → distribuição/proporção (% dentro/fora prazo, motivos de retorno)
-- "doughnut" → similar a pie, para 2-4 categorias
-
-CORES PADRÃO TUTTS:
-- Verde: "#10b981" (dentro do prazo, bom)
-- Vermelho: "#ef4444" (fora do prazo, crítico)
-- Amarelo: "#f59e0b" (atenção)
-- Azul: "#3b82f6" (neutro/informativo)
-- Roxo: "#8b5cf6" (anomalia)
-- Cinza: "#6b7280" (secundário)
-
-REGRAS DE GRÁFICO:
-1. SEMPRE inclua gráfico quando houver RANKING (top 5+), COMPARATIVO, EVOLUÇÃO TEMPORAL ou DISTRIBUIÇÃO.
-2. O JSON deve ser válido e em UMA ÚNICA LINHA entre [CHART] e [/CHART].
-3. Máximo 2 gráficos por resposta.
-4. "datasets" pode ter múltiplas séries: [{"label":"No prazo","data":[...],"color":"#10b981"},{"label":"Fora prazo","data":[...],"color":"#ef4444"}]
-5. Para pie/doughnut, use "colors" (array) em vez de "color": {"type":"pie","labels":[...],"datasets":[{"data":[70,30],"colors":["#10b981","#ef4444"]}]}
-6. NÃO inclua gráfico para perguntas simples com 1-2 números.
-7. Coloque o bloco [CHART] APÓS o parágrafo que o contextualiza, nunca no início da resposta.
-8. Labels devem ser curtos (máx 15 chars). Truncar se necessário.
-
-EXEMPLOS POR TIPO DE PERGUNTA:
-- "Top 10 clientes" → horizontalBar com nomes e entregas
-- "Taxa de prazo por mês" → line com evolução
-- "Distribuição de retornos" → pie com motivos
-- "Faixas de km" → bar com entregas + line overlay de taxa
-- "Comparativo jan vs fev" → bar agrupado com 2 séries
-
-## REGRA DE PROATIVIDADE (MUITO IMPORTANTE)
-- ⛔ NUNCA diga "seria útil saber", "com dados adicionais poderíamos", "para refinar a análise". Você TEM acesso aos dados!
-- ⛔ NUNCA sugira que o usuário execute queries manualmente ou que "seria necessário consultar".
-- ✅ Em vez de sugerir análises, ofereça PERGUNTAS PRONTAS que o usuário pode fazer direto no chat.
-- ✅ Formato: ao final da análise, se houver insights que merecem aprofundamento, escreva:
-
-💡 **Quer se aprofundar?** Pergunte-me:
-- "Qual a distribuição hora a hora dos pedidos?"
-- "Quais motoboys atendem a faixa 10-15km?"
-- "Compare o desempenho por dia da semana"
-
-- As perguntas sugeridas devem ser ESPECÍFICAS ao contexto da resposta atual (não genéricas).
-- Limite a 2-3 sugestões de follow-up. Nem toda resposta precisa de sugestões — só quando há algo interessante para explorar.
-- Se a resposta já é completa e auto-suficiente, NÃO adicione sugestões.`;
-
-      console.log('🤖 [Chat IA] Chamando Gemini (etapa 2: análise dos resultados)...');
-      const resp2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: promptAnalise }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
-        })
-      });
-
-      const data2 = await resp2.json();
-      if (data2.error) {
-        console.error('❌ [Chat IA] Erro Gemini etapa 2:', data2.error);
-        // Retornar os dados brutos pelo menos
-        return res.json({
+      console.log('🤖 [Chat IA] Chamando Gemini (etapa 3: análise)...');
+      let respostaFinal;
+      try {
+        respostaFinal = await chamarGemini(GEMINI_API_KEY, promptAnalise, { temperature: 0.7, maxTokens: 4096 });
+      } catch (err2) {
+        console.error('❌ [Chat IA] Erro Gemini etapa 3:', err2.message);
+        const resp = {
           success: true,
           resposta: `Consegui buscar os dados mas houve um erro na análise. Aqui estão os dados brutos (${linhas.length} registros):`,
           sql: sqlFinal,
           dados: { colunas, linhas: dadosParaAnalise, total: linhas.length }
-        });
+        };
+        return res.json(resp);
       }
 
-      const respostaFinal = data2.candidates?.[0]?.content?.parts?.[0]?.text || 'Não foi possível analisar os resultados.';
+      if (!respostaFinal) respostaFinal = 'Não foi possível analisar os resultados.';
       console.log('✅ [Chat IA] Análise completa');
 
-      // 8. Retornar tudo
-      return res.json({
+      // Montar resposta final
+      const respFinal = {
         success: true,
         resposta: respostaFinal,
         sql: sqlFinal,
-        dados: {
-          colunas,
-          linhas: dadosParaAnalise,
-          total: linhas.length
-        }
-      });
+        dados: { colunas, linhas: dadosParaAnalise, total: linhas.length }
+      };
+
+      // Salvar no cache (Melhoria 7)
+      queryCache.set(cacheKey, { response: respFinal, timestamp: Date.now() });
+
+      return res.json(respFinal);
 
     } catch (err) {
       console.error('❌ [Chat IA] Erro geral:', err);
@@ -1104,7 +1007,7 @@ EXEMPLOS POR TIPO DE PERGUNTA:
     }
   });
 
-  // ==================== ENDPOINT: Listar filtros (clientes e centros de custo) ====================
+  // ==================== ENDPOINT: Listar filtros ====================
   router.get('/bi/chat-ia/filtros', async (req, res) => {
     try {
       const clientes = await pool.query(`
@@ -1121,7 +1024,6 @@ EXEMPLOS POR TIPO DE PERGUNTA:
         ORDER BY centro_custo
       `);
 
-      // Se recebeu cod_cliente, retornar centros de custo desse cliente
       const codCliente = req.query.cod_cliente;
       let centrosDoCliente = [];
       if (codCliente) {
@@ -1145,7 +1047,7 @@ EXEMPLOS POR TIPO DE PERGUNTA:
     }
   });
 
-  // ==================== ENDPOINT: Schema (para debug/frontend) ====================
+  // ==================== ENDPOINT: Schema (debug) ====================
   router.get('/bi/chat-ia/schema', async (req, res) => {
     try {
       const schema = await getSchema();
