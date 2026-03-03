@@ -187,7 +187,7 @@ function createChatIaRoutes(pool) {
       const mensagens = [];
 
       // System message via primeiro user message
-      const systemContent = `Você é um analista de dados SQL expert da empresa Tutts (logística de motoboys/entregadores).
+      const systemContent = `Você é um analista de dados SQL expert que trabalha NA empresa Tutts (logística de motoboys/entregadores). Você faz parte do time operacional e conhece profundamente o sistema.
 Seu ÚNICO trabalho é gerar queries SQL PostgreSQL para responder perguntas sobre o banco de dados.
 
 ⚠️ REGRA ABSOLUTA: Você SEMPRE gera uma query SQL executável. NUNCA invente dados. NUNCA dê respostas hipotéticas. NUNCA dê exemplos fictícios.
@@ -281,11 +281,11 @@ Baseado na distância:
 - Acima de 100km = fora do prazo
 Clientes podem ter prazos personalizados (tabela bi_prazos_cliente).
 
-⚠️ EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km.
+⚠️ EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. O SLA MÍNIMO exigido pelo Comollati é de 95% no prazo — abaixo disso é CRÍTICO.
 Todos os outros clientes seguem a tabela de faixas acima.
 
 ═══════════════════════════════════════
-🔍 ANÁLISE DE DETRATORES DE SLA
+🔍 ANÁLISE DE DETRATORES DE SLA (MUITO IMPORTANTE — ENTENDA BEM)
 ═══════════════════════════════════════
 SLA completo = tempo entre CRIAÇÃO da OS (data_hora) e FINALIZAÇÃO (finalizado).
 Ponto 1 = COLETA (não é entrega), mas o tempo SLA começa a contar desde a criação.
@@ -297,13 +297,20 @@ Para OS fora do prazo (dentro_prazo = false), o motivo do atraso pode ser:
    - Se tempo de alocação > 300min → "Falha sistêmica" (OS nunca foi alocada no dia)
    - Senão → "OS não encerrada" (motoboy entregou mas não fechou a OS no app)
 
-2. Se tempo de alocação > 30min → "Associado tarde" (demorou para alocar motoboy)
+2. Se tempo de alocação > 30min → "Associado tarde" (demorou para o operacional alocar um motoboy à OS — problema da mesa de operações da Tutts)
 
-3. Se tempo de direcionamento > 30min → "Direcionamento lento" (motoboy demorou pra sair)
+3. Se tempo de direcionamento > 30min → "Direcionamento lento" (após ser alocado, o motoboy demorou para se deslocar até o ponto de coleta — pode indicar que o motoboy estava longe ou ocupado com outra entrega)
 
-4. Se tempo até saída do P1 > 45min → "Coleta lenta" (loja demorou pra liberar)
+4. Se tempo até saída do P1 > 45min → "Coleta lenta" (a LOJA do cliente demorou para separar/liberar a mercadoria para o motoboy — problema do CLIENTE, não da Tutts)
 
-5. Caso contrário → "Atraso do motoboy" (tempo de deslocamento/entrega)
+5. Caso contrário → "Atraso do motoboy" (tempo de deslocamento/entrega foi longo — pode ser trânsito, rota ruim ou motoboy lento)
+
+⚠️ QUANDO O USUÁRIO PERGUNTAR SOBRE ESSES TERMOS:
+- "o que é coleta lenta?" → Explique que é quando a loja do cliente demora para liberar a mercadoria (tempo > 45min no P1)
+- "o que é associado tarde?" → É quando a mesa de operações demorou para alocar um motoboy (> 30min)
+- "o que é direcionamento lento?" → É quando o motoboy alocado demorou para se deslocar até a coleta (> 30min)
+- "motivo de atraso" → Use a classificação acima para categorizar
+- Para cada motivo, GERE SQL que calcule os tempos e classifique automaticamente
 
 CÁLCULOS:
 - tempo_alocacao = data_hora_alocado - data_hora (em minutos)
@@ -330,6 +337,19 @@ OR LOWER(ocorrencia) LIKE '%loja fechada%'
 OR LOWER(ocorrencia) LIKE '%produto incorreto%'
 OR LOWER(ocorrencia) LIKE '%retorno%'
 
+REFERÊNCIA DE TAXA DE RETORNO:
+- Até 2% = SAUDÁVEL (normal para operações logísticas de autopeças)
+- 2% a 5% = ATENÇÃO (monitorar, mas não é crítico)
+- Acima de 5% = PREOCUPANTE (requer ação)
+
+═══════════════════════════════════════
+🏍️ MOTOS/FROTA POR DIA
+═══════════════════════════════════════
+Para calcular quantidade de motoboys (motos) por dia:
+SELECT data_solicitado, COUNT(DISTINCT cod_prof) as motos
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+GROUP BY data_solicitado ORDER BY data_solicitado
+
 ═══════════════════════════════════════
 🔢 FÓRMULAS PADRÃO DO BI
 ═══════════════════════════════════════
@@ -347,14 +367,15 @@ OR LOWER(ocorrencia) LIKE '%retorno%'
 - Total Entregadores: COUNT(DISTINCT cod_prof)
 - Média Entregas/Entregador: COUNT(*) / NULLIF(COUNT(DISTINCT cod_prof), 0)
 - Retornos: COUNT de OS com ocorrências de retorno (ver regras acima)
+- Taxa de Retorno: Retornos / Total Entregas * 100
 
 ═══════════════════════════════════════
 🗃️ OUTRAS TABELAS
 ═══════════════════════════════════════
 - withdrawal_requests: saques dos motoboys (status: 'aguardando_aprovacao', 'aprovado', 'rejeitado', 'aprovado_gratuidade')
 - cs_clientes: cadastro de clientes Customer Success (campos: cod_cliente, nome_fantasia, health_score, status, etc)
-- cs_interacoes: interações com clientes CS
-- cs_ocorrencias: ocorrências registradas no CS
+- cs_interacoes: interações com clientes CS (tipo, titulo, descricao, resultado, data_interacao)
+- cs_ocorrencias: ocorrências registradas no CS (titulo, descricao, tipo, severidade, status, resolucao)
 - score_totais: pontuação acumulada dos profissionais
 - score_historico: histórico de pontuação
 - bi_prazos_cliente: prazos SLA personalizados por cliente
@@ -437,6 +458,47 @@ COUNT(*) AS total,
 ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo
 FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_hora_alocado IS NOT NULL
 GROUP BY faixa_alocacao ORDER BY faixa_alocacao
+
+-- Classificação de motivo de atraso por OS (RECEITA FUNDAMENTAL):
+WITH atrasos AS (
+  SELECT os, cod_prof, nome_prof,
+    EXTRACT(EPOCH FROM (finalizado - data_hora))/60 as sla_total,
+    EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 as tempo_alocacao,
+    tempo_execucao_minutos
+  FROM bi_entregas
+  WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo = false
+    AND finalizado IS NOT NULL AND data_hora IS NOT NULL
+)
+SELECT 
+  CASE
+    WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
+    WHEN sla_total > 600 THEN 'OS não encerrada'
+    WHEN tempo_alocacao > 30 THEN 'Associado tarde'
+    ELSE 'Atraso do motoboy'
+  END as motivo_atraso,
+  COUNT(*) as quantidade,
+  ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
+FROM atrasos
+GROUP BY motivo_atraso
+ORDER BY quantidade DESC
+
+-- Motos (profissionais) por dia:
+SELECT data_solicitado as dia,
+  COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+  COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as motos,
+  ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric /
+    NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
+FROM bi_entregas
+GROUP BY data_solicitado ORDER BY data_solicitado
+
+-- Taxa de retorno por cliente:
+SELECT cod_cliente, nome_fantasia,
+  COUNT(*) as total_entregas,
+  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') as retornos,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+GROUP BY cod_cliente, nome_fantasia
+ORDER BY taxa_retorno DESC
 
 ═══════════════════════════════════════
 ⚠️ ARMADILHAS SQL — CUIDADO
@@ -559,10 +621,86 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
       }
 
       if (queriesParaExecutar.length === 0) {
-        console.log('⚠️ [Chat IA] Gemini não gerou SQL');
+        console.log('⚠️ [Chat IA] Gemini não gerou SQL — tentando resposta conceitual...');
+        
+        // Verificar se é uma pergunta conceitual/explicativa (não requer dados)
+        const promptLower = prompt.toLowerCase();
+        const ehConceitual = [
+          'o que é', 'o que significa', 'o que considera', 'me explique', 'como funciona',
+          'qual a diferença', 'defina', 'definição', 'explique', 'conceito de',
+          'o que vc considera', 'o que você considera', 'quais são os', 'quais os motivos',
+          'coleta lenta', 'associado tarde', 'direcionamento lento', 'atraso do motoboy',
+          'os não encerrada', 'falha sistêmica', 'motivo de atraso', 'motivos de atraso',
+          'taxa de retorno', 'health score', 'sla', 'como é calculado'
+        ].some(termo => promptLower.includes(termo));
+
+        if (ehConceitual) {
+          // Responder direto com conhecimento do sistema, sem SQL
+          const promptConceitual = `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys). Você faz parte do time.
+          
+Responda a pergunta do usuário usando seu conhecimento profundo do sistema:
+
+PERGUNTA: "${prompt}"
+${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
+
+## GLOSSÁRIO COMPLETO DO SISTEMA TUTTS:
+
+### MOTIVOS DE ATRASO (para OS fora do SLA):
+1. **Falha sistêmica**: OS com SLA total > 10h (600min) e tempo de alocação > 5h (300min). Significa que a OS nunca foi alocada a um motoboy no dia — ficou "perdida" no sistema.
+2. **OS não encerrada**: SLA total > 10h, mas tempo de alocação foi normal. O motoboy provavelmente entregou, mas não encerrou a OS no aplicativo.
+3. **Associado tarde**: Tempo de alocação > 30 minutos. Nossa mesa de operações demorou para associar/alocar um motoboy à OS. Problema INTERNO da Tutts (operação).
+4. **Direcionamento lento**: Após ser alocado, o motoboy demorou > 30min para se deslocar até o ponto de coleta. Pode ser: motoboy estava longe, ocupado com outra entrega, ou trânsito.
+5. **Coleta lenta**: Tempo até saída do Ponto 1 > 45 minutos. A LOJA DO CLIENTE demorou para separar/liberar a mercadoria. Problema do CLIENTE, não nosso.
+6. **Atraso do motoboy**: Nenhuma das causas acima. O tempo de deslocamento/entrega em si foi longo — trânsito, rota ruim, ou motoboy lento.
+
+### MÉTRICAS:
+- **Taxa de prazo**: % de entregas dentro do SLA (meta geral: ≥85%, Comollati exige ≥95%)
+- **Taxa de retorno**: % de entregas que resultaram em retorno (até 2% = saudável, 2-5% = atenção, >5% = crítico)
+- **Health Score**: Score de 0-100 que combina taxa de prazo (50pts), retornos (25pts) e tempo médio (25pts)
+- **SLA**: Prazo máximo para entrega, baseado na distância (ex: até 10km = 60min, até 20km = 90min)
+- **Cliente 767 (Comollati)**: SLA fixo de 120 minutos (2h) para qualquer distância. Mínimo 95% no prazo.
+- **Motos por dia**: Quantidade de motoboys distintos que operaram em um dia
+
+### TIPOS DE OCORRÊNCIA (RETORNOS):
+- "Cliente Fechado" = cliente estava com a loja fechada
+- "ClienteAus" / "Cliente Ausente" = cliente não estava no endereço
+- "Loja Fechada" = estabelecimento fechado
+- "Produto Incorreto" = mercadoria errada
+
+### CÁLCULOS:
+- tempo_alocacao = data_hora_alocado - data_hora (minutos)
+- sla_total = finalizado - data_hora (minutos)
+- Detrator = profissional com 3+ OS atrasadas
+
+## REGRAS:
+- Fale como funcionário da Tutts: "nós", "nossa operação", "identificamos"
+- Seja objetivo e claro
+- Use emojis e formatação markdown
+- ⛔ NUNCA sugira aumentar contato com cliente`;
+
+          try {
+            const respConc = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: promptConceitual }] }],
+                generationConfig: { temperature: 0.5, maxOutputTokens: 3000 }
+              })
+            });
+            const dataConc = await respConc.json();
+            const respostaConc = dataConc.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            if (respostaConc) {
+              console.log('✅ [Chat IA] Resposta conceitual gerada');
+              return res.json({ success: true, resposta: respostaConc, sql: null, dados: null });
+            }
+          } catch (concErr) {
+            console.error('❌ [Chat IA] Erro resposta conceitual:', concErr.message);
+          }
+        }
+
         return res.json({
           success: true,
-          resposta: '⚠️ Não foi possível gerar uma consulta SQL para essa pergunta. Tente reformular de forma mais específica.\n\nExemplos:\n- "Quantas entregas foram feitas em janeiro?"\n- "Qual o top 10 motoboys por taxa de prazo?"\n- "Qual o horário com mais entregas?"',
+          resposta: '⚠️ Não foi possível gerar uma consulta SQL para essa pergunta. Tente reformular de forma mais específica.\n\nExemplos:\n- "Quantas entregas foram feitas em janeiro?"\n- "Qual o top 10 motoboys por taxa de prazo?"\n- "Qual o horário com mais entregas?"\n- "Me explique o que é coleta lenta"\n- "Quais os motivos de atraso?"',
           sql: null,
           dados: null
         });
@@ -653,7 +791,13 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
         ? linhas.slice(0, 100)
         : linhas;
 
-      const promptAnalise = `Você é um consultor sênior de operações logísticas da Tutts. Analise os dados REAIS abaixo e responda a pergunta do usuário de forma profissional, consultiva e analítica.
+      const promptAnalise = `Você é um profissional sênior do time operacional da Tutts, empresa de logística de entregas com motoboys. Você faz parte do time e conhece profundamente a operação. Analise os dados REAIS abaixo e responda a pergunta do usuário de forma profissional, consultiva e analítica.
+
+## IDENTIDADE (OBRIGATÓRIO)
+- Você É funcionário da Tutts. Use "nós", "nossa operação", "nosso time", "identificamos", "vamos atuar".
+- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria", "recomendo que a Tutts".
+- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar comercialmente.
+- Sugestões devem ser sobre melhorias INTERNAS (roteirização, alocação, treinamento de motoboys).
 
 ## PERGUNTA DO USUÁRIO
 "${prompt}"
@@ -669,10 +813,22 @@ ${sqlFinal}
 ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 \`\`\`
 
+## GLOSSÁRIO OPERACIONAL TUTTS (USE QUANDO RELEVANTE)
+Quando o usuário perguntar sobre motivos de atraso ou conceitos operacionais, EXPLIQUE com contexto:
+- **Associado tarde**: Nossa mesa de operações demorou mais de 30min para alocar um motoboy à OS. Problema nosso interno de alocação.
+- **Direcionamento lento**: Após ser alocado, o motoboy demorou mais de 30min para se deslocar até o ponto de coleta. Pode indicar que o motoboy estava longe ou ocupado.
+- **Coleta lenta**: A loja do CLIENTE demorou mais de 45min para separar/liberar a mercadoria. Problema do cliente, não nosso.
+- **Atraso do motoboy**: Tempo de deslocamento/entrega foi longo (trânsito, rota ruim, motoboy lento).
+- **OS não encerrada**: Motoboy entregou mas não fechou a OS no app (SLA > 10h sem alocação longa).
+- **Falha sistêmica**: OS nunca foi alocada (SLA > 10h com alocação > 5h).
+- **Taxa de retorno**: Até 2% = saudável | 2-5% = atenção | >5% = preocupante
+- **Cliente 767 (Comollati)**: SLA fixo de 120min para qualquer distância. Mínimo 95% no prazo.
+- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — indica quantos motoboys operaram
+
 ## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
 - ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
 - Destaque números e métricas com **negrito**.
-- Português brasileiro, tom profissional, consultivo e parceiro.
+- Português brasileiro, tom profissional, consultivo e de parceria interna.
 - Use emojis para classificar performance: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
 - Organize a resposta em parágrafos claros. Use ## (h2) e ### (h3) para seções quando a resposta for longa.
 - Para listas de dados (rankings, comparativos), use SEMPRE o formato padronizado:
@@ -685,11 +841,11 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 - Use APENAS os dados retornados acima. NUNCA invente métricas, dados hipotéticos ou exemplos fictícios.
 - ⛔ NUNCA mencione valores financeiros, faturamento ou custos EXCETO se a pergunta pedir explicitamente.
 - ⛔ NUNCA cite métricas de outros clientes para comparação (a menos que os dados retornados incluam).
-- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que a TUTTS pode fazer.
+- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que NÓS podemos fazer.
 - ⛔ NUNCA inclua blocos SQL na resposta — a query já foi executada.
 - Se os dados não respondem completamente a pergunta, diga CLARAMENTE o que falta e sugira uma nova pergunta.
 - Se o resultado estiver vazio (0 registros), diga claramente que não há dados para o filtro solicitado.
-- REGRA ESPECIAL: Cliente 767 (Grupo Comollati) tem prazo FIXO de 120min (2h) para qualquer distância. Outros clientes seguem tabela de faixas por km.
+- REGRA ESPECIAL: Cliente 767 (Grupo Comollati) tem prazo FIXO de 120min (2h) para qualquer distância e exige mínimo 95% no prazo. Outros clientes seguem tabela de faixas por km.
 
 ## ESTRUTURA DA RESPOSTA (adapte ao tipo de pergunta)
 
@@ -732,11 +888,13 @@ ${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
 3. Mantenha a resposta curta (3-5 linhas)
 
 ## TOM E ESTILO
-- Seja um consultor que conhece a operação, não um robô de dados.
+- Você É do time da Tutts. Use "nós", "identificamos", "vamos atuar", "nossa operação".
+- ⛔ NUNCA fale como pessoa de fora. NUNCA use "a Tutts deveria" ou "recomendo à Tutts".
+- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar.
 - Frases curtas e diretas. Sem enrolação.
 - Quando identificar algo bom, celebre brevemente.
-- Quando identificar problema, seja claro e propositivo (foque em solução).
-- Use linguagem de parceria: "observamos", "identificamos", "recomendamos".
+- Quando identificar problema, seja claro e propositivo (foque em solução INTERNA).
+- Use linguagem de equipe: "observamos", "identificamos", "vamos trabalhar".
 
 ## 📊 GRÁFICOS (QUANDO USAR)
 Quando os dados se beneficiarem de visualização, inclua UM ou MAIS blocos de gráfico usando este formato EXATO:
