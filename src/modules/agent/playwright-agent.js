@@ -385,6 +385,31 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // Capturar endereço antigo do ponto ANTES de clicar em Corrigir
     let enderecoAntigo = '';
+    let ponto1Info = { lat: null, lng: null, endereco: '' };
+
+    // Capturar coordenadas e endereço do Ponto 1
+    try {
+      ponto1Info = await page.evaluate(() => {
+        const btn1 = document.querySelector('.btn-corrigir-endereco[data-ponto="1"]');
+        if (!btn1) return { lat: null, lng: null, endereco: '' };
+        const lat = parseFloat(btn1.getAttribute('data-lat'));
+        const lon = parseFloat(btn1.getAttribute('data-lon'));
+        const idEnd = btn1.getAttribute('data-id-endereco');
+        let endereco = '';
+        if (idEnd) {
+          const span = document.getElementById('end-antigo-' + idEnd);
+          if (span) endereco = (span.textContent || '').trim();
+        }
+        return {
+          lat: isNaN(lat) ? null : lat,
+          lng: isNaN(lon) ? null : lon,
+          endereco: endereco || '',
+        };
+      }).catch(() => ({ lat: null, lng: null, endereco: '' }));
+      if (ponto1Info.lat) log('Ponto 1 capturado: ' + ponto1Info.lat + ', ' + ponto1Info.lng + ' — ' + ponto1Info.endereco);
+    } catch (e) {
+      log('Ponto 1 nao capturado: ' + e.message);
+    }
 
     try {
       // HTML exato: <span id="end-antigo-{idEndereco}"> contém o endereço antigo
@@ -886,7 +911,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
-    return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado };
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado, ponto1: ponto1Info };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
