@@ -199,11 +199,68 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         );
       }
 
+      // 4. Após "FROTA DIÁRIA" — motos por dia
+      const { motos_por_dia } = dados;
+      if (motos_por_dia && motos_por_dia.length > 0) {
+        const grafico = gerarGraficoMotosDia(motos_por_dia, { titulo: '📊 Profissionais por Dia' });
+        resultado = resultado.replace(
+          /(#{2,3}\s*🏍️.*?FROTA.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
+          `$1${grafico}$2`
+        );
+      }
+
     } catch (e) {
       console.warn('⚠️ Erro ao injetar gráficos:', e.message);
     }
 
     return resultado;
+  }
+
+  // Função auxiliar para gráfico de motos por dia
+  function gerarGraficoMotosDia(dados, { titulo = '', width = 560, cor = '#8b5cf6', cor2 = '#10b981' } = {}) {
+    if (!dados || dados.length === 0) return '';
+    const max = Math.max(...dados.map(d => Math.max(d.motos || 0, d.entregas_por_moto || 0)), 1);
+    const barW = Math.min(28, Math.floor((width - 80) / dados.length) - 6);
+    const chartH = 140;
+    const bottomY = chartH + 20;
+    const leftPad = 45;
+
+    let bars = '';
+    const maxMotos = Math.max(...dados.map(d => parseInt(d.motos) || 0), 1);
+    dados.forEach((d, i) => {
+      const x = leftPad + i * (barW + 6) + 4;
+      const motos = parseInt(d.motos) || 0;
+      const h = Math.max(2, (motos / maxMotos) * chartH);
+      const y = bottomY - h;
+      const dia = new Date(d.dia);
+      const label = `${dia.getDate()}/${dia.getMonth() + 1}`;
+      bars += `
+        <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${cor}" opacity="0.85"/>
+        <text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" font-size="9" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${motos}</text>
+        <text x="${x + barW / 2}" y="${bottomY + 12}" text-anchor="middle" font-size="8" fill="#64748b" font-family="Segoe UI,sans-serif">${label}</text>
+      `;
+    });
+
+    // Linhas de grade
+    let grid = '';
+    for (let i = 0; i <= 4; i++) {
+      const y = bottomY - (i / 4) * chartH;
+      const val = Math.round((i / 4) * maxMotos);
+      grid += `<line x1="${leftPad - 5}" y1="${y}" x2="${leftPad + dados.length * (barW + 6)}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`;
+      grid += `<text x="${leftPad - 8}" y="${y + 3}" text-anchor="end" font-size="9" fill="#94a3b8" font-family="Segoe UI,sans-serif">${val}</text>`;
+    }
+
+    const svgW = leftPad + dados.length * (barW + 6) + 10;
+    const svgH = bottomY + 24;
+
+    return `\n\n<div style="margin:16px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;overflow-x:auto">
+${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:10px">${titulo}</div>` : ''}
+<svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
+${grid}${bars}
+<line x1="${leftPad}" y1="${bottomY}" x2="${leftPad + dados.length * (barW + 6)}" y2="${bottomY}" stroke="#cbd5e1" stroke-width="1"/>
+</svg>
+<div style="font-size:10px;color:#94a3b8;margin-top:6px">🟪 Motos por dia</div>
+</div>\n\n`;
   }
 
   router.post('/cs/raio-x', async (req, res) => {
@@ -421,12 +478,25 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 10
       `, baseParams);
 
-      // 9. BENCHMARK DA REGIÃO
+      // 8b. MOTOS POR DIA — quantidade de profissionais distintos por dia
+      const motosPorDia = await pool.query(`
+        SELECT data_solicitado as dia,
+          COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
+          COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as motos,
+          ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
+            NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
+        FROM bi_entregas
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        GROUP BY data_solicitado
+        ORDER BY data_solicitado
+      `, baseParams);
+
+      // 9. BENCHMARK GERAL TUTTS (todos os clientes, não apenas da região)
       const estadoCliente = ficha.estado || (await pool.query(
         `SELECT estado FROM bi_entregas WHERE cod_cliente = $1 AND estado IS NOT NULL LIMIT 1`, [codInt]
       )).rows[0]?.estado || 'N/A';
 
-      const benchmarkRegiao = await pool.query(`
+      const benchmarkGeral = await pool.query(`
         SELECT ROUND(AVG(taxa_prazo)::numeric, 1) as media_taxa_prazo,
           ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as mediana_taxa_prazo,
           ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as p75_taxa_prazo,
@@ -434,7 +504,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
           ROUND(AVG(km_medio)::numeric, 1) as media_km,
           ROUND(AVG(tempo_medio)::numeric, 1) as media_tempo_entrega,
           ROUND(AVG(taxa_retorno)::numeric, 2) as media_taxa_retorno,
-          COUNT(*) as total_clientes_regiao
+          COUNT(*) as total_clientes
         FROM (
           SELECT cod_cliente,
             ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
@@ -445,12 +515,12 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
             ) THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_retorno
           FROM bi_entregas
           WHERE data_solicitado >= $1 AND data_solicitado <= $2 AND COALESCE(ponto, 1) >= 2
-            AND cod_cliente IS NOT NULL AND estado = $3
+            AND cod_cliente IS NOT NULL
           GROUP BY cod_cliente HAVING COUNT(*) >= 5
         ) sub
-      `, [data_inicio, data_fim, estadoCliente]);
+      `, [data_inicio, data_fim]);
 
-      // 10. RANKING REGIONAL
+      // 10. RANKING GERAL TUTTS
       const ranking = await pool.query(`
         WITH ranking_clientes AS (
           SELECT cod_cliente,
@@ -460,12 +530,12 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
             RANK() OVER (ORDER BY COUNT(*) DESC) as rank_volume
           FROM bi_entregas
           WHERE data_solicitado >= $1 AND data_solicitado <= $2
-            AND COALESCE(ponto, 1) >= 2 AND cod_cliente IS NOT NULL AND estado = $3
+            AND COALESCE(ponto, 1) >= 2 AND cod_cliente IS NOT NULL
           GROUP BY cod_cliente HAVING COUNT(*) >= 5
         )
         SELECT rank_prazo, rank_volume, (SELECT COUNT(*) FROM ranking_clientes) as total_ranqueados
-        FROM ranking_clientes WHERE cod_cliente = $4
-      `, [data_inicio, data_fim, estadoCliente, codInt]);
+        FROM ranking_clientes WHERE cod_cliente = $3
+      `, [data_inicio, data_fim, codInt]);
 
       // 11. PERÍODO ANTERIOR
       const diasPeriodo = Math.ceil((new Date(data_fim) - new Date(data_inicio)) / (1000 * 60 * 60 * 24));
@@ -485,10 +555,21 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
 
       // 12. MONTAR DADOS
       const metricas = metricasCliente.rows[0];
-      const benchmark = benchmarkRegiao.rows[0] || {};
+      const benchmark = benchmarkGeral.rows[0] || {};
       const rankingData = ranking.rows[0] || {};
       const metrAnterior = metricasAnteriores.rows[0];
       const healthScore = calcularHealthScore(metricas, getClienteConfig(codInt));
+
+      // Calcular taxa de retorno explícita
+      const totalEntregasNum = parseInt(metricas.total_entregas) || 0;
+      const totalRetornos = parseInt(metricas.total_retornos) || 0;
+      const taxaRetorno = totalEntregasNum > 0 ? ((totalRetornos / totalEntregasNum) * 100).toFixed(2) : '0';
+
+      // Média de motos por dia
+      const motosDiaRows = motosPorDia.rows;
+      const mediaMotosdia = motosDiaRows.length > 0
+        ? (motosDiaRows.reduce((s, r) => s + parseInt(r.motos || 0), 0) / motosDiaRows.length).toFixed(1)
+        : '0';
 
       // Link do mapa de calor interativo (acesso público)
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
@@ -532,7 +613,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const dadosAnalise = {
         cliente: { nome: nomeRelatorio, segmento: ficha.segmento || 'autopeças', health_score: healthScore },
         periodo: { inicio: data_inicio, fim: data_fim, dias: diasPeriodo },
-        metricas_atuais: metricas,
+        metricas_atuais: { ...metricas, taxa_retorno: taxaRetorno },
         metricas_periodo_anterior: metrAnterior,
         faixas_km: faixasKm.rows,
         mapa_calor_bairros: mapaCalor.rows,
@@ -540,51 +621,62 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
         padroes_horario: padroesHorario.rows,
         evolucao_semanal: evolucaoSemanal.rows,
         retornos_detalhados: retornosDetalhe.rows,
+        motos_por_dia: motosDiaRows,
+        media_motos_dia: mediaMotosdia,
         interacoes_periodo: interacoesCliente.rows,
         ocorrencias_periodo: ocorrenciasCliente.rows,
-        benchmark_regiao: { ...benchmark, estado: estadoCliente },
-        ranking_regiao: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
+        benchmark_geral_tutts: { ...benchmark, total_clientes: benchmark.total_clientes },
+        ranking_geral: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
         link_mapa_calor: linkMapaCalor,
       };
 
       // 13. Dados para o Gemini (sem bairros para evitar listagem)
       const dadosParaGemini = { ...dadosAnalise };
       delete dadosParaGemini.mapa_calor_bairros; // Remover para evitar que o Gemini liste bairros
-      // Simplificar benchmark para evitar comparações numéricas detalhadas
-      if (dadosParaGemini.benchmark_regiao) {
-        const br = dadosParaGemini.benchmark_regiao;
-        dadosParaGemini.benchmark_regiao = { estado: br.estado };
-      }
+      // Manter benchmark geral para comparação com todos os clientes Tutts
       // Manter ranking para posicionamento percentual
-      const totalClientes = dadosParaGemini.ranking_regiao?.total_clientes || 1;
-      const posPrazo = dadosParaGemini.ranking_regiao?.posicao_prazo || 1;
-      const posVolume = dadosParaGemini.ranking_regiao?.posicao_volume || 1;
-      dadosParaGemini.ranking_regiao = {
-        ...dadosParaGemini.ranking_regiao,
+      const totalClientes = dadosParaGemini.ranking_geral?.total_clientes || 1;
+      const posPrazo = dadosParaGemini.ranking_geral?.posicao_prazo || 1;
+      const posVolume = dadosParaGemini.ranking_geral?.posicao_volume || 1;
+      dadosParaGemini.ranking_geral = {
+        ...dadosParaGemini.ranking_geral,
         percentil_prazo: Math.round((1 - posPrazo / totalClientes) * 100),
         percentil_volume: Math.round((1 - posVolume / totalClientes) * 100),
       };
 
       // 14. PROMPT GEMINI
-      const slaInfo767 = isCliente767 ? `\n\n⚠️ REGRA ESPECIAL DESTE CLIENTE: O Grupo Comollati (cliente 767) possui prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. Os dados de "dentro do prazo" já foram recalculados com base nessa regra. Ao analisar performance de prazo, considere sempre o SLA de 2h.\n` : '';
-      const prompt = `Você é um consultor sênior de operações logísticas da Tutts. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}${slaInfo767}
+      const slaInfo767 = isCliente767 ? `\n\n⚠️ REGRA ESPECIAL DESTE CLIENTE: O Grupo Comollati (cliente 767) possui prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. Os dados de "dentro do prazo" já foram recalculados com base nessa regra. O SLA MÍNIMO exigido pelo Comollati é de **95% no prazo** — qualquer taxa abaixo disso é considerada CRÍTICA e requer plano de ação urgente.\n` : '';
+      const prompt = `Você é um profissional sênior da equipe de Sucesso do Cliente (CS) da Tutts, empresa de logística de entregas com motoboys. Você faz parte do time e conhece profundamente a operação. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}${slaInfo767}
+
+## IDENTIDADE E TOM (OBRIGATÓRIO)
+- Você É um funcionário da Tutts. Fale em primeira pessoa do plural: "nós", "nossa equipe", "nosso time", "identificamos", "vamos trabalhar".
+- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria", "recomendo que a Tutts". Você É a Tutts.
+- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar comercialmente. Foque na qualidade do atendimento, não na quantidade.
+- ⛔ NUNCA sugira ações que possam incomodar ou pressionar o cliente (ex: "visitas mais frequentes", "reuniões semanais" a menos que o cliente tenha solicitado).
+- Sugestões devem ser sobre melhorias INTERNAS da operação (roteirização, alocação, treinamento de motoboys, otimização de rotas).
 
 ## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
 - Siga EXATAMENTE a estrutura de seções abaixo. NÃO adicione, remova ou reordene seções.
 - Cada seção usa o título EXATO indicado com ## (h2) e o emoji correspondente.
 - ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
 - Destaque números com **negrito**.
-- Português brasileiro, tom profissional, consultivo e parceiro.
+- Português brasileiro, tom profissional, consultivo e de parceria interna.
 - Quando apresentar dados por faixa (km, horário), use SEMPRE o formato de lista padronizado mostrado em cada seção.
 
 ## REGRAS DE CONTEÚDO (OBRIGATÓRIO)
 - Use APENAS os dados fornecidos. NÃO invente métricas.
 - ⛔ NUNCA liste bairros, cidades, ruas ou endereços.
 - ⛔ NUNCA mencione valores financeiros, faturamento ou custos.
-- ⛔ NUNCA cite métricas de outros clientes (médias, taxas de terceiros).
-- ⛔ NUNCA defina prazos, datas ou cronogramas. A Tutts trabalha com melhoria contínua full time.
-- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que a TUTTS fará.
+- ⛔ NUNCA cite métricas individuais de outros clientes (médias, taxas de terceiros).
+- ⛔ NUNCA defina prazos, datas ou cronogramas. Trabalhamos com melhoria contínua full time.
+- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que NÓS faremos.
 - Horário operacional: 08:00 às 18:00. Fora disso = exceção.
+
+## REGRAS DE RETORNO (IMPORTANTE)
+- Taxa de retorno até **2%** é considerada SAUDÁVEL e normal para operações logísticas de autopeças. Não trate como problema.
+- Taxa de retorno entre **2% e 5%** merece atenção mas não é crítica.
+- Taxa de retorno acima de **5%** é preocupante e requer ação.
+- Ao analisar retornos, sempre informe a taxa percentual e contextualize se está dentro do aceitável.
 
 ## DADOS DA OPERAÇÃO
 ${JSON.stringify(dadosParaGemini, null, 2)}
@@ -601,11 +693,20 @@ Escreva outro parágrafo explicando o Health Score de **${healthScore}/100**. Us
 
 Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação). Se a variação for menor que 3%, diga que o volume se manteve estável e NÃO elabore sobre análise de fatores.
 
-Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%). Se a variação for menor que 3%, diga que se manteve estável.
+Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%). Se a variação for menor que 3%, diga que se manteve estável.${isCliente767 ? ' LEMBRE-SE: Para o Comollati, o mínimo aceitável é 95% no prazo. Se estiver abaixo, destaque como CRÍTICO.' : ''}
 
 Escreva um parágrafo sobre tempo médio de entrega. Se a variação for menor que 3%, diga que se manteve estável.
 
-Se houver retornos, escreva um parágrafo com quantidade, motivos e plano de ação. Se não houver, celebre.
+Escreva um parágrafo sobre retornos: informe a quantidade total, a **taxa de retorno (${taxaRetorno}%)**, os principais motivos e contextualize (até 2% = saudável). Se estiver acima de 2%, apresente plano de ação. Se não houver retornos, celebre.
+
+## 🏍️ FROTA DIÁRIA (Motos por Dia)
+
+Os dados de "motos_por_dia" mostram quantos profissionais distintos operaram por dia. A média foi de **${mediaMotosdia} motos/dia**.
+
+Apresente uma análise da distribuição diária de motos usando os dados. Destaque:
+- Dias com pico e dias com menos motos
+- Relação entre quantidade de motos e entregas por moto
+- Se houve dias com excesso ou falta de profissionais alocados
 
 ## 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
 
@@ -643,9 +744,11 @@ Apresente as faixas horárias usando EXATAMENTE este formato de lista:
 
 Após a lista, escreva um parágrafo sobre picos de demanda e comparação de SLA entre faixas.
 
-## 📈 COMPARATIVO COM O MERCADO (${estadoCliente})
+## 📈 COMPARATIVO COM O MERCADO (Todos os Clientes Tutts)
 
-Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL. Use APENAS os dados de percentil fornecidos.
+O benchmark foi calculado com TODOS os clientes ativos da Tutts (não apenas da região). Os dados de "benchmark_geral_tutts" e "ranking_geral" mostram a posição deste cliente entre todos.
+
+Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL em relação a todos os clientes Tutts. Use APENAS os dados de percentil e ranking fornecidos. NÃO cite números de outros clientes individualmente.
 
 ## 📉 TENDÊNCIAS E PROJEÇÕES
 
@@ -657,11 +760,13 @@ Escreva outro parágrafo sobre riscos identificados: [🔴 Alto | 🟠 Médio | 
 
 Para cada problema REAL dos dados, use EXATAMENTE este formato:
 
-- **Situação:** descreva o problema · **Ação:** o que a Tutts fará · **Prioridade:** 🔴 Urgente / 🟠 Importante / 🟡 Melhoria contínua
+- **Situação:** descreva o problema · **Ação:** o que nós (Tutts) faremos · **Prioridade:** 🔴 Urgente / 🟠 Importante / 🟡 Melhoria contínua
 
 ⛔ Apenas problemas reais, não genéricos. ⛔ Sem prazos ou datas.
 
 ## 🎯 PLANO DE AÇÃO
+
+${ocorrenciasCliente.rows.length > 0 || interacoesCliente.rows.length > 0 ? `⚠️ IMPORTANTE: As ocorrências e interações registradas no período DEVEM ser consideradas como insumo para este plano de ação. Se houve reclamações, problemas reportados ou compromissos assumidos nas interações, as ações devem ENDEREÇAR esses pontos diretamente.` : ''}
 
 Liste exatamente 5 ações usando EXATAMENTE este formato:
 
@@ -669,11 +774,11 @@ Liste exatamente 5 ações usando EXATAMENTE este formato:
 - **Ação 2 — Título:** Descrição. **Meta:** resultado esperado.
 (até Ação 5)
 
-As ações devem ser sobre o que a Tutts controla.
+As ações devem ser sobre o que NÓS (Tutts) controlamos e faremos. Inclua ações relacionadas às ocorrências e interações quando existirem.
 
 ## 💡 OPORTUNIDADES
 
-Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados. Quick wins operacionais.
+Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados. Quick wins operacionais INTERNOS.
 
 ## 📋 OCORRÊNCIAS REGISTRADAS
 
@@ -684,7 +789,7 @@ ${ocorrenciasCliente.rows.length > 0 ? `No período foram registradas **${ocorre
 Use emojis de severidade: 🔴 Crítica · 🟠 Alta · 🟡 Média · 🟢 Baixa
 Use status: ✅ Resolvida · 🔄 Em andamento · 🕐 Aberta
 
-Após listar, escreva um parágrafo analítico: quantas foram resolvidas vs abertas, padrões identificados, e impacto na operação.` : `Não houve ocorrências registradas no período. Escreva um parágrafo positivo sobre a estabilidade operacional do cliente.`}
+Após listar, escreva um parágrafo analítico: quantas foram resolvidas vs abertas, padrões identificados, e impacto na operação. VINCULE as ocorrências ao plano de ação acima.` : `Não houve ocorrências registradas no período. Escreva um parágrafo positivo sobre a estabilidade operacional do cliente.`}
 
 ## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
 
@@ -692,13 +797,13 @@ ${interacoesCliente.rows.length > 0 ? `No período foram registradas **${interac
 
 - **Data — Tipo** (por Nome): Resumo do que foi tratado. Resultado obtido. Próxima ação definida.
 
-Após listar, escreva um parágrafo avaliando a frequência de contato, se foi adequada ao perfil do cliente, e recomendações para o próximo período.` : `Não houve interações registradas no período. Escreva um parágrafo informando que a Tutts vai intensificar o contato com frequência mínima sugerida (semanal para clientes críticos, quinzenal para demais).`}
+Após listar, escreva um parágrafo avaliando o que foi tratado e se os compromissos assumidos estão refletidos no plano de ação. NÃO sugira aumentar frequência de contato.` : `Não houve interações registradas no período. Escreva um parágrafo breve informando que vamos manter o acompanhamento operacional de rotina.`}
 
 ---
 
-Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresentar este relatório em detalhes."
+Encerre com um parágrafo de tom parceria INTERNA: "Estamos à disposição para apresentar este relatório em detalhes."
 
-⛔ LEMBRETE: Siga os formatos de lista EXATOS indicados acima. NÃO use tabelas markdown. Mantenha o padrão consistente em todas as seções.`;
+⛔ LEMBRETE: Siga os formatos de lista EXATOS indicados acima. NÃO use tabelas markdown. Mantenha o padrão consistente em todas as seções. Fale como FUNCIONÁRIO da Tutts.`;
 
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
@@ -773,6 +878,15 @@ Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresen
       const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
       if (!GOOGLE_API_KEY) return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
 
+      // Cliente 767 (Comollati): prazo FIXO de 120min para qualquer faixa
+      const isCliente767Mapa = cod === 767;
+      const DP_MAPA = isCliente767Mapa
+        ? '(tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 120)'
+        : 'dentro_prazo = true';
+      const DP_NOT_NULL_MAPA = isCliente767Mapa
+        ? '(tempo_execucao_minutos IS NOT NULL AND tempo_execucao_minutos > 0)'
+        : 'dentro_prazo IS NOT NULL';
+
       // Tabela de cache
       await pool.query(`
         CREATE TABLE IF NOT EXISTS geocode_cache (
@@ -793,8 +907,8 @@ Encerre com um parágrafo de tom parceria: "Estamos à disposição para apresen
         SELECT
           endereco, bairro, cidade, estado,
           COUNT(*) as quantidade,
-          ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
-            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
+          ROUND(SUM(CASE WHEN ${DP_MAPA} THEN 1 ELSE 0 END)::numeric /
+            NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL_MAPA} THEN 1 END), 0) * 100, 1) as taxa_prazo,
           ROUND(AVG(distancia)::numeric, 1) as km_medio,
           ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
         FROM bi_entregas
