@@ -188,7 +188,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       const barraVisivel = await barraPesquisa.isVisible().catch(() => false);
       if (barraVisivel) {
         await barraPesquisa.click();
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(500);
         log('✅ Barra de pesquisa expandida');
       }
       await screenshot(page, os_numero, 'passo2_pesquisa_expandida');
@@ -359,7 +359,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       timeout: TIMEOUT,
     });
 
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(800);
     await screenshot(page, os_numero, 'passo3_modal');
 
     // ── Passo 3b: Verificar se o ponto solicitado existe na OS ───────────────
@@ -447,7 +447,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     });
 
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(800);
     await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
     // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
@@ -456,7 +456,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Tentar clicar novamente
       log('⚠️ Form não abriu, tentando clicar novamente...');
       await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
     }
 
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
@@ -501,7 +501,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     // Aguardar geocoder — esperar botão Confirmar aparecer (com polling)
     let confirmarVisivel = false;
     for (let tentativa = 0; tentativa < 10; tentativa++) {
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(700);
       confirmarVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (confirmarVisivel) break;
     }
@@ -518,30 +518,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       };
     }
     log('✅ Geocoder OK — botão Confirmar visível');
-
-
-    // ── Check: Verificar alerta de endereço já corrigido ─────────────────────
-    const alertaJaCorrigido = await page.evaluate(() => {
-      const alertas = document.querySelectorAll('.alert-warning, .alert-info, .alert-danger');
-      for (const a of alertas) {
-        const txt = (a.textContent || '').toLowerCase();
-        if (txt.includes('corrigido anteriormente') || txt.includes('j\u00e1 foi corrigido')) {
-          return (a.textContent || '').trim();
-        }
-      }
-      return '';
-    }).catch(() => '');
-
-    if (alertaJaCorrigido) {
-      log('\u26a0\ufe0f Alerta detectado: ' + alertaJaCorrigido);
-      const ss = await screenshot(page, os_numero, 'passo5b_ja_corrigido');
-      await browser.close();
-      return {
-        sucesso: false,
-        erro: 'Este endere\u00e7o j\u00e1 foi corrigido anteriormente no sistema Mapp. Entre em contato com o suporte Tutts para solicitar uma nova corre\u00e7\u00e3o.',
-        screenshot: ss,
-      };
-    }
 
     // Capturar endereço resolvido pelo geocoder (bônus)
     let enderecoResolvido = '';
@@ -584,7 +560,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await page.locator('button.btn-confirmar-alteracao:visible').first().click();
 
     // Aguardar processamento — verificar que algo mudou
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(1500);
     await screenshot(page, os_numero, 'passo6_pos_confirmar');
 
     // Verificar que a confirmação realmente aplicou:
@@ -597,7 +573,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Pode ter aparecido um dialog que não foi tratado, ou erro
       log('⚠️ Botão Confirmar ainda visível após clique — tentando novamente');
       await page.locator('button.btn-confirmar-alteracao:visible').first().click();
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(1500);
       
       const aindaVisivel2 = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (aindaVisivel2) {
@@ -662,32 +638,19 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       log(`📌 URL: ${urlEdicao}`);
       await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-      // Aguardar a página de edição carregar completamente (spinner sumir + inputs renderizar)
-      const seletorInput = `#txtEnderecoE${ponto}`;
-      let inputEncontrado = false;
-      for (let tentativa = 0; tentativa < 15; tentativa++) {
-        await page.waitForTimeout(1000);
-        const existe = await page.locator(seletorInput).count().catch(() => 0);
-        if (existe > 0) {
-          inputEncontrado = true;
-          log(`✅ Input ${seletorInput} encontrado após ${tentativa + 1}s`);
-          break;
-        }
-        if (tentativa === 4) {
-          log('⏳ Página ainda carregando... aguardando mais...');
-        }
-      }
-
+      await page.waitForTimeout(1500);
       await screenshot(page, os_numero, 'passo7_pagina_edicao');
 
       // ── Passo 8: Atualizar endereço no input do ponto ───────────────────────
       log(`📌 Passo 8: Atualizando endereço do Ponto ${ponto}`);
 
+      // O input do endereço: input#txtEnderecoE{ponto}  (ex: txtEnderecoE2, txtEnderecoE3)
+      const seletorInput = `#txtEnderecoE${ponto}`;
       const inputEndereco = page.locator(seletorInput);
+      const inputExiste = await inputEndereco.count().catch(() => 0);
 
-      if (!inputEncontrado) {
-        log(`⚠️ Input ${seletorInput} não encontrado após 15s`);
+      if (inputExiste === 0) {
+        log(`⚠️ Input ${seletorInput} não encontrado na página`);
         await screenshot(page, os_numero, 'passo8_input_nao_encontrado');
         throw new Error('INPUT_ENDERECO_NAO_ENCONTRADO');
       }
@@ -789,7 +752,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       if (lupaClicada) {
         // Aguardar busca processar
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(2000);
         await screenshot(page, os_numero, 'passo8b_pos_busca');
 
         // ── Passo 8c: Se aparecer validação/confirmação, aceitar ─────────────
@@ -805,7 +768,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           if (validarVisivel) {
             await btnValidarEndereco.click();
             log('📌 Validação aceita (botão verde)');
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(1000);
             await screenshot(page, os_numero, 'passo8c_validacao_aceita');
           }
         }
@@ -823,71 +786,98 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
 
       // ── Passo 9: Calcular frete ─────────────────────────────────────────────
-      log('📌 Passo 9: Calculando frete');
+      log('\u{1f4cc} Passo 9: Calculando frete');
 
-      const btnCalcular = page.locator('#btnCalcFreteCEN');
-      const calcExiste = await btnCalcular.count().catch(() => 0);
+      // Aguardar spinner da lupa sumir antes de calcular
+      for (let sw = 0; sw < 10; sw++) {
+        const spinnerAtivo = await page.evaluate(() => {
+          const spinners = document.querySelectorAll('.fa-spinner, .fa-spin, .loading, img[src*="loading"]');
+          for (const s of spinners) { if (s.offsetParent !== null) return true; }
+          return false;
+        }).catch(() => false);
+        if (!spinnerAtivo) break;
+        log('\u23f3 Spinner ativo, aguardando...');
+        await page.waitForTimeout(1000);
+      }
 
-      if (calcExiste > 0) {
-        await btnCalcular.scrollIntoViewIfNeeded().catch(() => {});
+      // Procurar botao Calcular
+      const seletoresCalc = ['#btnCalcFreteCEN', '#btnCalcular', 'button:has-text("Calcular")', 'input[value="Calcular"]'];
+      let btnCalcEncontrado = null;
+      for (const sel of seletoresCalc) {
+        const btn = page.locator(sel).first();
+        const existe = await btn.count().catch(() => 0);
+        if (existe > 0) {
+          btnCalcEncontrado = btn;
+          log('\u{1f4cc} Botao Calcular encontrado: ' + sel);
+          break;
+        }
+      }
+
+      if (btnCalcEncontrado) {
+        await btnCalcEncontrado.scrollIntoViewIfNeeded().catch(() => {});
         await page.waitForTimeout(500);
-        await btnCalcular.click();
-        log('📌 Botão Calcular clicado');
+        await btnCalcEncontrado.click();
+        log('\u{1f4cc} Botao Calcular clicado');
 
-        // Aguardar cálculo — polling por resultado
+        // Aguardar calculo - polling por valor R$ E botao Salvar
         let valorEncontrado = false;
-        for (let i = 0; i < 12; i++) {
+        let salvarApareceu = false;
+        for (let i = 0; i < 20; i++) {
           await page.waitForTimeout(1000);
-          const temValor = await page.evaluate(() => {
-            const els = document.querySelectorAll('div, span, p, td');
-            for (const el of els) {
-              if ((el.textContent || '').match(/R\$\s*\d+[.,]\d{2}/)) return true;
-            }
-            return false;
-          }).catch(() => false);
-          if (temValor) {
-            valorEncontrado = true;
-            break;
-          }
+          const status = await page.evaluate(() => {
+            const temValor = !!(document.body.textContent || '').match(/R\$\s*\d+[.,]\d{2}/);
+            const btnSalvar = document.getElementById('btnChamarMotoboy');
+            const salvarVisivel = btnSalvar && btnSalvar.offsetParent !== null;
+            return { temValor, salvarVisivel };
+          }).catch(() => ({ temValor: false, salvarVisivel: false }));
+          if (status.temValor) valorEncontrado = true;
+          if (status.salvarVisivel) { salvarApareceu = true; break; }
+          if (i === 5) log('\u23f3 Aguardando calculo do frete...');
+          if (i === 10) log('\u23f3 Ainda aguardando (10s)...');
         }
 
         await screenshot(page, os_numero, 'passo9_pos_calcular');
-
         if (valorEncontrado) {
-          log('💰 Valor calculado com sucesso');
+          log('\u{1f4b0} Valor calculado com sucesso');
         } else {
-          log('⚠️ Valor não apareceu após 12s — tentando salvar mesmo assim');
+          log('\u26a0\ufe0f Valor R$ nao detectado apos 20s');
         }
 
-        // ── Passo 10: Salvar alterações ─────────────────────────────────────────
-        log('📌 Passo 10: Salvando alterações');
+        // Passo 10: Salvar alteracoes
+        log('\u{1f4cc} Passo 10: Salvando alteracoes');
 
-        const btnSalvar = page.locator('#btnChamarMotoboy');
-        const salvarExiste = await btnSalvar.count().catch(() => 0);
+        if (!salvarApareceu) {
+          for (let j = 0; j < 10; j++) {
+            await page.waitForTimeout(1000);
+            const visivel = await page.locator('#btnChamarMotoboy').isVisible().catch(() => false);
+            if (visivel) { salvarApareceu = true; break; }
+            if (j === 3) log('\u23f3 Aguardando botao Salvar aparecer...');
+          }
+        }
 
-        if (salvarExiste > 0) {
+        if (salvarApareceu) {
+          const btnSalvar = page.locator('#btnChamarMotoboy');
           await btnSalvar.scrollIntoViewIfNeeded().catch(() => {});
           await page.waitForTimeout(500);
           await btnSalvar.click();
-          log('📌 Botão Salvar clicado');
+          log('\u{1f4cc} Botao Salvar clicado');
 
-          await page.waitForTimeout(3000);
+          await page.waitForTimeout(5000);
           await screenshot(page, os_numero, 'passo10_pos_salvar');
 
-          // Verificar resultado
           const alertaErro = await page.locator('.alert-danger:visible, .swal2-error:visible').count().catch(() => 0);
           if (alertaErro > 0) {
-            log('⚠️ Erro detectado ao salvar');
+            log('\u26a0\ufe0f Erro detectado ao salvar');
           } else {
-            log('✅ Frete recalculado e alterações salvas!');
+            log('\u2705 Frete recalculado e alteracoes salvas!');
             freteRecalculado = true;
           }
         } else {
-          log('⚠️ Botão Salvar (#btnChamarMotoboy) não encontrado');
+          log('\u26a0\ufe0f Botao Salvar (#btnChamarMotoboy) nao apareceu apos polling');
           await screenshot(page, os_numero, 'passo10_btn_salvar_ausente');
         }
       } else {
-        log('⚠️ Botão Calcular (#btnCalcFreteCEN) não encontrado');
+        log('\u26a0\ufe0f Botao Calcular nao encontrado');
         await screenshot(page, os_numero, 'passo9_btn_calcular_ausente');
       }
     } catch (e) {
