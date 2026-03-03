@@ -164,42 +164,32 @@ function createCorrecaoRoutes(pool) {
   });
 
 
-  // ── Screenshots debug (temporário) ──────────────────────────────────
-  const SCREENSHOT_DIR = '/tmp/screenshots';
+  // Screenshots debug (temporario - acesso via chave)
+  const SDIR = '/tmp/screenshots';
+  const SKEY = process.env.SCREENSHOT_KEY || 'tutts-debug-2025';
 
-  // GET /agent/screenshots — lista todas as screenshots
   router.get('/screenshots', async (req, res) => {
+    if (req.query.key !== SKEY) return res.status(403).json({ erro: 'Use ?key=CHAVE' });
     try {
       const fs = require('fs');
       const path = require('path');
-      if (!fs.existsSync(SCREENSHOT_DIR)) return res.json({ arquivos: [] });
-      const files = fs.readdirSync(SCREENSHOT_DIR)
-        .filter(f => f.endsWith('.png'))
-        .sort((a, b) => b.localeCompare(a));
-      const lista = files.map(f => ({
-        nome: f,
-        url: '/api/agent/screenshots/' + encodeURIComponent(f),
-        tamanho: fs.statSync(path.join(SCREENSHOT_DIR, f)).size,
-      }));
-      // Return HTML page for easy viewing
-      const html = '<html><head><title>Screenshots RPA</title><style>body{font-family:sans-serif;padding:20px;background:#1a1a2e;color:#eee}img{max-width:100%;border:2px solid #333;border-radius:8px;margin:10px 0}h2{color:#7c3aed}a{color:#a78bfa}.card{background:#16213e;padding:16px;border-radius:12px;margin:16px 0}</style></head><body><h1>Screenshots RPA</h1><p>' + files.length + ' screenshots</p>' + files.map(f => '<div class="card"><h2>' + f + '</h2><img src="/api/agent/screenshots/' + encodeURIComponent(f) + '" loading="lazy"/></div>').join('') + '</body></html>';
+      if (!fs.existsSync(SDIR)) return res.json({ total: 0, files: [] });
+      const files = fs.readdirSync(SDIR).filter(f => f.endsWith('.png')).sort((a, b) => b.localeCompare(a));
+      const k = SKEY;
+      const html = '<html><head><title>Screenshots</title><style>body{font-family:sans-serif;padding:20px;background:#111;color:#eee}img{max-width:100%;border:1px solid #333;border-radius:8px;margin:8px 0}.c{background:#1a1a2e;padding:12px;border-radius:8px;margin:12px 0}h2{color:#a78bfa;font-size:13px}</style></head><body><h1>Screenshots (' + files.length + ')</h1>' + files.map(function(f){return '<div class=c><h2>' + f + '</h2><img src=/api/agent/screenshots/' + encodeURIComponent(f) + '?key=' + k + ' loading=lazy></div>'}).join('') + '</body></html>';
       res.type('html').send(html);
-    } catch (err) {
-      res.status(500).json({ erro: err.message });
-    }
+    } catch(e) { res.status(500).json({erro:e.message}); }
   });
 
-  // GET /agent/screenshots/:filename — serve uma screenshot
   router.get('/screenshots/:filename', async (req, res) => {
+    if (req.query.key !== SKEY) return res.status(403).json({ erro: 'Acesso negado' });
     try {
       const fs = require('fs');
       const path = require('path');
-      const file = path.join(SCREENSHOT_DIR, req.params.filename);
-      if (!fs.existsSync(file)) return res.status(404).json({ erro: 'Screenshot nao encontrada' });
+      const file = path.join(SDIR, req.params.filename);
+      if (!fs.existsSync(file)) return res.status(404).json({ erro: 'Nao encontrada' });
       res.type('image/png').sendFile(file);
-    } catch (err) {
-      res.status(500).json({ erro: err.message });
-    }
+    } catch(e) { res.status(500).json({erro:e.message}); }
   });
 
   return router;
