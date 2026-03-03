@@ -788,6 +788,123 @@ pool.query(`
 
 // Listar regiões
 
+// ==================== SYNC CACHE: Materializar dados da planilha no banco ====================
+// POST /bi/garantido/sync-cache — Sincroniza dados da planilha Google Sheets para bi_garantido_cache
+router.post('/bi/garantido/sync-cache', async (req, res) => {
+  try {
+    console.log('🔄 [Garantido] Iniciando sync da planilha para bi_garantido_cache...');
+
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    let sheetText = await sheetResponse.text();
+
+    // Parser CSV (mesmo do endpoint principal)
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') { inQuotes = !inQuotes; }
+        else if (char === ',' && !inQuotes) { result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim()); current = ''; }
+        else { current += char; }
+      }
+      result.push(current.replace(/[\r\n]/g, '').replace(/^"|"$/g, '').trim());
+      return result;
+    };
+
+    const parseCSVWithMultilineFields = (text) => {
+      const lines = [];
+      let currentLine = '';
+      let inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === '"') { inQuotes = !inQuotes; currentLine += char; }
+        else if ((char === '\n' || char === '\r') && !inQuotes) {
+          if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+          currentLine = '';
+          if (char === '\r' && text[i + 1] === '\n') i++;
+        } else if (char !== '\r') { currentLine += char; }
+      }
+      if (currentLine.trim()) lines.push(currentLine.replace(/\r/g, ''));
+      return lines;
+    };
+
+    const sheetLines = parseCSVWithMultilineFields(sheetText).slice(1);
+    console.log(`🔄 [Garantido] ${sheetLines.length} linhas na planilha`);
+
+    let inseridos = 0;
+    let erros = 0;
+
+    for (const line of sheetLines) {
+      if (!line.trim()) continue;
+      const cols = parseCSVLine(line);
+      const codClientePlan = cols[0];
+      const dataStr = cols[1];
+      const profissional = cols[2] || '(Vazio)';
+      const codProfPlan = cols[3] || '';
+      const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
+
+      if (!dataStr || valorNegociado <= 0) continue;
+
+      let dataFormatada = null;
+      if (dataStr && dataStr.includes('/')) {
+        const partes = dataStr.split('/');
+        if (partes.length === 3) {
+          dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
+        }
+      }
+      if (!dataFormatada) continue;
+
+      // Buscar produção real do profissional neste dia
+      let valorProduzido = 0;
+      let totalEntregas = 0;
+      if (codProfPlan) {
+        try {
+          const prodResult = await pool.query(`
+            WITH os_dados AS (
+              SELECT os, MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
+                     COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as entregas_os
+              FROM bi_entregas WHERE cod_prof = $1 AND data_solicitado::date = $2::date GROUP BY os
+            )
+            SELECT COALESCE(SUM(valor_os), 0) as valor_produzido, COALESCE(SUM(entregas_os), 0) as total_entregas
+            FROM os_dados
+          `, [parseInt(codProfPlan), dataFormatada]);
+          valorProduzido = parseFloat(prodResult.rows[0]?.valor_produzido) || 0;
+          totalEntregas = parseInt(prodResult.rows[0]?.total_entregas) || 0;
+        } catch (e) { /* ignora, mantém 0 */ }
+      }
+
+      const complemento = Math.max(0, valorNegociado - valorProduzido);
+      const status = totalEntregas === 0 ? 'nao_rodou' : (valorProduzido < valorNegociado ? 'abaixo' : 'acima');
+
+      try {
+        await pool.query(`
+          INSERT INTO bi_garantido_cache (cod_cliente, data, cod_prof, profissional, valor_negociado, valor_produzido, complemento, status, entregas, synced_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+          ON CONFLICT (cod_prof, data, cod_cliente) DO UPDATE SET
+            profissional = EXCLUDED.profissional,
+            valor_negociado = EXCLUDED.valor_negociado,
+            valor_produzido = EXCLUDED.valor_produzido,
+            complemento = EXCLUDED.complemento,
+            status = EXCLUDED.status,
+            entregas = EXCLUDED.entregas,
+            synced_at = NOW()
+        `, [codClientePlan, dataFormatada, codProfPlan || profissional, profissional, valorNegociado, valorProduzido, complemento, status, totalEntregas]);
+        inseridos++;
+      } catch (e) {
+        erros++;
+      }
+    }
+
+    console.log(`✅ [Garantido] Sync finalizado: ${inseridos} inseridos/atualizados, ${erros} erros`);
+    res.json({ success: true, inseridos, erros, total_planilha: sheetLines.length });
+  } catch (err) {
+    console.error('❌ [Garantido] Erro sync cache:', err);
+    res.status(500).json({ error: 'Erro ao sincronizar garantido: ' + err.message });
+  }
+});
+
   return router;
 }
 
