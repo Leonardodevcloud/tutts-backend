@@ -41,7 +41,8 @@ function createChatIaRoutes(pool) {
     'disponibilidade_linhas', 'disponibilidade_lojas', 'disponibilidade_regioes',
     'score_totais', 'score_historico',
     'indicacoes', 'indicacao_links',
-    'loja_produtos', 'loja_pedidos', 'loja_estoque'
+    'loja_produtos', 'loja_pedidos', 'loja_estoque',
+    'bi_garantido_cache', 'garantido_status'
   ];
 
   // ==================== HELPER: Chamar Gemini ====================
@@ -385,11 +386,46 @@ COLUNAS FINANCEIRAS:
 - faturamento = valor - valor_prof (calcular na query)
 - Ticket Médio = SUM(valor) / NULLIF(COUNT(*), 0)
 
-TABELA withdrawal_requests: saques dos motoboys
+TABELA bi_garantido_cache: dados de mínimo garantido (sincronizados da planilha)
+- cod_cliente (VARCHAR): código do cliente que contratou o garantido
+- data (DATE): data do garantido
+- cod_prof (VARCHAR): código do profissional
+- profissional (VARCHAR): nome do profissional
+- valor_negociado (DECIMAL): valor diário garantido ao motoboy
+- valor_produzido (DECIMAL): quanto o motoboy produziu naquele dia
+- complemento (DECIMAL): diferença que a Tutts paga (valor_negociado - valor_produzido, mín 0). ESTE É O CUSTO COM GARANTIDO.
+- status (VARCHAR): 'nao_rodou' (não trabalhou), 'abaixo' (produziu menos que o garantido), 'acima' (produziu mais)
+- entregas (INTEGER): quantas entregas fez no dia
+
+⚠️ IMPORTANTE: O "custo com garantido" de um cliente = SUM(complemento) da tabela bi_garantido_cache filtrado por cod_cliente.
+- Quando status='nao_rodou', o complemento é o valor_negociado inteiro (a Tutts paga mesmo sem produção).
+- Quando status='abaixo', o complemento é a diferença.
+- Quando status='acima', o complemento é 0 (motoboy produziu mais que o garantido).
+
+TABELA withdrawal_requests: saques dos motoboys (NÃO é garantido)
 - cod_prof, valor, status ('aguardando_aprovacao', 'aprovado', 'rejeitado', 'aprovado_gratuidade'), created_at
-- status = 'aprovado_gratuidade' é o MÍNIMO GARANTIDO
 
 RECEITAS SQL:
+-- Custo com garantido por cliente:
+SELECT cod_cliente, SUM(complemento) as custo_garantido, SUM(valor_negociado) as total_negociado,
+  COUNT(*) as dias_garantido, COUNT(*) FILTER (WHERE status = 'nao_rodou') as dias_nao_rodou,
+  COUNT(*) FILTER (WHERE status = 'abaixo') as dias_abaixo, COUNT(*) FILTER (WHERE status = 'acima') as dias_acima
+FROM bi_garantido_cache GROUP BY cod_cliente ORDER BY custo_garantido DESC LIMIT 20
+
+-- Custo garantido vs faturamento por cliente:
+WITH garantido AS (
+  SELECT cod_cliente::int as cod_cliente, SUM(complemento) as custo_garantido
+  FROM bi_garantido_cache GROUP BY cod_cliente
+), faturamento AS (
+  SELECT cod_cliente, nome_fantasia, SUM(valor) as faturamento, COUNT(*) as entregas
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY cod_cliente, nome_fantasia
+)
+SELECT f.cod_cliente, f.nome_fantasia, f.faturamento, f.entregas,
+  COALESCE(g.custo_garantido, 0) as custo_garantido,
+  CASE WHEN f.faturamento > 0 THEN ROUND(100.0 * COALESCE(g.custo_garantido, 0) / f.faturamento, 2) ELSE 0 END as pct_garantido_sobre_fat
+FROM faturamento f LEFT JOIN garantido g ON f.cod_cliente = g.cod_cliente
+ORDER BY custo_garantido DESC NULLS LAST LIMIT 20
+
 -- Ticket médio por cliente com variação semanal:
 WITH semana_atual AS (
   SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
@@ -410,7 +446,8 @@ FROM semana_atual sa LEFT JOIN semana_anterior san ON sa.cod_cliente = san.cod_c
 REGRAS FINANCEIRAS:
 - Ticket médio: informar variação %. Se variação > 5%, destacar valor anterior.
 - Variação de demanda: Se > 5%, informar valor anterior e variação.
-- Mínimo garantido: comparar custo com garantido vs faturamento do cliente.`,
+- Mínimo garantido: usar tabela bi_garantido_cache. Custo = SUM(complemento). Comparar com faturamento.
+- NUNCA usar withdrawal_requests para calcular custo com garantido.`,
 
     RETORNO: `${DICIONARIO_BASE}
 
@@ -541,7 +578,7 @@ ${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
 ### ANÁLISES FINANCEIRAS:
 - **Ticket médio**: Valor médio por entrega. Informar variação %. Se >5% entre semanas, destacar anterior.
 - **Variação de demanda**: Entregas por cliente semana a semana. Se >5%, destacar.
-- **Mínimo garantido**: Valor investido para manter motoboys disponíveis. Comparar custo vs faturamento do cliente.
+- **Mínimo garantido**: Valor diário acordado com motoboys para garantir disponibilidade. Se o motoboy produz menos que o valor negociado, a Tutts paga a diferença (complemento). Se não rodou, paga o valor inteiro. O custo com garantido de um cliente = soma dos complementos. Dados na tabela bi_garantido_cache.
 
 ### COMPARATIVO COM MERCADO:
 Comparar com MÉDIA GERAL de TODOS os clientes (não só da região — pode ter região com 1 cliente só).
