@@ -129,6 +129,14 @@ async function processarProximoPendente(pool) {
          WHERE id = $1`,
         [registro.id, endCorrigido, endAntigo, resultado.frete_recalculado || false]
       );
+            // Salvar coordenadas do Ponto 1 se capturadas pelo playwright
+      if (resultado.ponto1 && resultado.ponto1.lat) {
+        await pool.query(
+          `UPDATE ajustes_automaticos SET ponto1_lat = $1, ponto1_lng = $2, ponto1_endereco = $3 WHERE id = $4`,
+          [resultado.ponto1.lat, resultado.ponto1.lng, resultado.ponto1.endereco || null, registro.id]
+        ).catch(e => log(`⚠️ Erro ao salvar ponto1: ${e.message}`));
+      }
+
       log(`✅ ID ${registro.id} concluído. Antigo: ${endAntigo || '—'} | Novo: ${endCorrigido || '—'} | Frete: ${resultado.frete_recalculado ? 'SIM' : 'NÃO'}`);
     } else {
       const detalhe = resultado.screenshot
