@@ -348,8 +348,10 @@ COLUNAS ESSENCIAIS:
 - data_hora_alocado (TIMESTAMP): quando o motoboy foi alocado
 - hora_chegada (TIME), hora_saida (TIME): chegada/saída no ponto
 - finalizado (TIMESTAMP): quando a OS foi finalizada
-- valor (DECIMAL): valor cobrado do cliente (R$)
-- valor_prof (DECIMAL): valor pago ao motoboy
+- valor (DECIMAL): valor BRUTO cobrado do cliente (R$). NÃO é faturamento líquido!
+- valor_prof (DECIMAL): valor pago ao motoboy (custo operacional)
+- ⚠️ FATURAMENTO LÍQUIDO = SUM(valor) - SUM(valor_prof). NUNCA use SUM(valor) sozinho como "faturamento líquido".
+- ⚠️ SUM(valor) = receita bruta / valor total cobrado. SUM(valor_prof) = custo com profissionais.
 - distancia (DECIMAL): distância em KM
 - tempo_execucao_minutos (INT): tempo real em minutos
 - dentro_prazo (BOOLEAN): se cumpriu SLA
@@ -367,7 +369,9 @@ FÓRMULAS:
 - Total Entregas: COUNT(*) WHERE COALESCE(ponto, 1) >= 2
 - Taxa Prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
 - Tempo Médio: ROUND(AVG(tempo_execucao_minutos)::numeric, 2)
-- Faturamento: SUM(valor) - SUM(valor_prof)
+- Receita Bruta: SUM(valor) — total cobrado do cliente
+- Custo Profissionais: SUM(valor_prof) — total pago aos motoboys
+- Faturamento Líquido: SUM(valor) - SUM(valor_prof) — SEMPRE calcular assim, NUNCA usar SUM(valor) sozinho
 - KM Total: SUM(distancia)
 - Motos por dia: COUNT(DISTINCT cod_prof) por data_solicitado
 
@@ -381,10 +385,14 @@ SELECT data_solicitado, COUNT(*) AS entregas, COUNT(DISTINCT cod_prof) as motos,
     FINANCEIRO: `${DICIONARIO_BASE}
 
 COLUNAS FINANCEIRAS:
-- valor (DECIMAL): cobrado do cliente
-- valor_prof (DECIMAL): pago ao motoboy
-- faturamento = valor - valor_prof (calcular na query)
+- valor (DECIMAL): valor BRUTO cobrado do cliente. NÃO é faturamento líquido!
+- valor_prof (DECIMAL): valor pago ao motoboy (custo operacional)
+- FATURAMENTO LÍQUIDO = SUM(valor) - SUM(valor_prof). SEMPRE calcular assim.
+- RECEITA BRUTA = SUM(valor) (total cobrado do cliente)
+- CUSTO PROFISSIONAIS = SUM(valor_prof) (total pago aos motoboys)
 - Ticket Médio = SUM(valor) / NULLIF(COUNT(*), 0)
+
+⚠️ REGRA ABSOLUTA: Quando o usuário pedir "faturamento líquido" ou "faturamento", SEMPRE calcule SUM(valor) - SUM(valor_prof). NUNCA retorne SUM(valor) como faturamento líquido.
 
 TABELA bi_garantido_cache: dados de mínimo garantido (sincronizados da planilha)
 - cod_cliente (VARCHAR): código do cliente que contratou o garantido
@@ -617,9 +625,10 @@ Comparar com MÉDIA GERAL de TODOS os clientes (não só da região — pode ter
 
       SQL_FINANCEIRO: `
 ## REGRAS ESPECÍFICAS — FINANCEIRO
+- FATURAMENTO LÍQUIDO = receita (SUM valor) MENOS custo com profissionais (SUM valor_prof). NUNCA apresente SUM(valor) como faturamento líquido.
 - Inclua valores monetários em R$.
 - Compare ticket médio com período anterior. Se variação > 5%, destaque com ↑ ou ↓ e informe valor anterior.
-- Para mínimo garantido, compare custo vs faturamento (ROI).
+- Para mínimo garantido, compare custo vs faturamento (ROI). Custo com garantido = SUM(complemento) da tabela bi_garantido_cache.
 - Variação de demanda: se > 5%, informar valor anterior.`,
 
       SQL_RETORNO: `
