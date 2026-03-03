@@ -117,7 +117,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                   criado_em, processado_em, validado_por, validado_em,
                   usuario_id, usuario_nome, endereco_antigo, endereco_corrigido,
                   cod_profissional, frete_recalculado,
-                  latitude, longitude, motoboy_lat, motoboy_lng
+                  latitude, longitude, motoboy_lat, motoboy_lng,
+                  ponto1_lat, ponto1_lng, ponto1_endereco
            FROM ajustes_automaticos ${where}
            ORDER BY criado_em DESC
            LIMIT $${p} OFFSET $${p + 1}`,
@@ -156,7 +157,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                 criado_em, processado_em,
                 validado_por, validado_em,
                 usuario_nome, cod_profissional,
-                frete_recalculado
+                frete_recalculado,
+                ponto1_lat, ponto1_lng, ponto1_endereco
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
@@ -357,45 +359,57 @@ function createHistoricoRoutes(pool, verificarAdmin) {
   });
 
 
-  // GET /agent/historico/ponto1/:os_numero (admin — buscar Ponto 1 da OS para mapa)
+  // GET /agent/historico/ponto1/:os_numero (admin - buscar Ponto 1)
+  // Tenta 1: da propria tabela ajustes_automaticos (capturado pelo playwright)
+  // Tenta 2: da tabela solicitacoes_corrida -> solicitacoes_pontos
   router.get('/historico/ponto1/:os_numero', verificarAdmin, async (req, res) => {
     const osNumero = req.params.os_numero;
-    if (!osNumero) return res.status(400).json({ erro: 'OS numero obrigatorio.' });
+    if (!osNumero) return res.status(400).json({ erro: 'OS obrigatoria.' });
 
     try {
-      // Buscar solicitacao pela OS
+      // Tentativa 1: ponto1 salvo na propria tabela ajustes_automaticos
+      const ajuste = await pool.query(
+        `SELECT ponto1_lat, ponto1_lng, ponto1_endereco FROM ajustes_automaticos WHERE os_numero = $1 AND ponto1_lat IS NOT NULL LIMIT 1`,
+        [osNumero]
+      );
+      if (ajuste.rows.length > 0 && ajuste.rows[0].ponto1_lat) {
+        return res.json({
+          encontrado: true,
+          fonte: 'ajustes_automaticos',
+          ponto1: {
+            latitude: parseFloat(ajuste.rows[0].ponto1_lat),
+            longitude: parseFloat(ajuste.rows[0].ponto1_lng),
+            endereco: ajuste.rows[0].ponto1_endereco || '',
+          }
+        });
+      }
+
+      // Tentativa 2: tabela solicitacoes_corrida -> solicitacoes_pontos
       const sol = await pool.query(
         `SELECT id FROM solicitacoes_corrida WHERE tutts_os_numero = $1 LIMIT 1`,
         [osNumero]
       );
-
-      if (sol.rows.length === 0) {
-        return res.json({ encontrado: false, motivo: 'OS nao encontrada em solicitacoes_corrida' });
-      }
-
-      // Buscar ponto 1 (ordem = 1) desta OS
-      const ponto = await pool.query(
-        `SELECT ordem, endereco_completo, rua, numero, bairro, cidade, uf, cep,
-                latitude, longitude
-         FROM solicitacoes_pontos
-         WHERE solicitacao_id = $1 AND ordem = 1
-         LIMIT 1`,
-        [sol.rows[0].id]
-      );
-
-      if (ponto.rows.length === 0) {
-        return res.json({ encontrado: false, motivo: 'Ponto 1 nao encontrado' });
-      }
-
-      const p = ponto.rows[0];
-      return res.json({
-        encontrado: true,
-        ponto1: {
-          endereco: p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(Boolean).join(', '),
-          latitude: p.latitude ? parseFloat(p.latitude) : null,
-          longitude: p.longitude ? parseFloat(p.longitude) : null,
+      if (sol.rows.length > 0) {
+        const ponto = await pool.query(
+          `SELECT endereco_completo, rua, numero, bairro, cidade, uf, latitude, longitude
+           FROM solicitacoes_pontos WHERE solicitacao_id = $1 AND ordem = 1 LIMIT 1`,
+          [sol.rows[0].id]
+        );
+        if (ponto.rows.length > 0 && ponto.rows[0].latitude) {
+          const p = ponto.rows[0];
+          return res.json({
+            encontrado: true,
+            fonte: 'solicitacoes_pontos',
+            ponto1: {
+              latitude: parseFloat(p.latitude),
+              longitude: parseFloat(p.longitude),
+              endereco: p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(Boolean).join(', '),
+            }
+          });
         }
-      });
+      }
+
+      return res.json({ encontrado: false, motivo: 'Ponto 1 sem coordenadas em nenhuma fonte' });
     } catch (err) {
       console.error('[agent/historico/ponto1]', err.message);
       return res.status(500).json({ erro: 'Erro ao buscar ponto 1.' });
