@@ -356,6 +356,52 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
   });
 
+
+  // GET /agent/historico/ponto1/:os_numero (admin — buscar Ponto 1 da OS para mapa)
+  router.get('/historico/ponto1/:os_numero', verificarAdmin, async (req, res) => {
+    const osNumero = req.params.os_numero;
+    if (!osNumero) return res.status(400).json({ erro: 'OS numero obrigatorio.' });
+
+    try {
+      // Buscar solicitacao pela OS
+      const sol = await pool.query(
+        `SELECT id FROM solicitacoes_corrida WHERE tutts_os_numero = $1 LIMIT 1`,
+        [osNumero]
+      );
+
+      if (sol.rows.length === 0) {
+        return res.json({ encontrado: false, motivo: 'OS nao encontrada em solicitacoes_corrida' });
+      }
+
+      // Buscar ponto 1 (ordem = 1) desta OS
+      const ponto = await pool.query(
+        `SELECT ordem, endereco_completo, rua, numero, bairro, cidade, uf, cep,
+                latitude, longitude
+         FROM solicitacoes_pontos
+         WHERE solicitacao_id = $1 AND ordem = 1
+         LIMIT 1`,
+        [sol.rows[0].id]
+      );
+
+      if (ponto.rows.length === 0) {
+        return res.json({ encontrado: false, motivo: 'Ponto 1 nao encontrado' });
+      }
+
+      const p = ponto.rows[0];
+      return res.json({
+        encontrado: true,
+        ponto1: {
+          endereco: p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(Boolean).join(', '),
+          latitude: p.latitude ? parseFloat(p.latitude) : null,
+          longitude: p.longitude ? parseFloat(p.longitude) : null,
+        }
+      });
+    } catch (err) {
+      console.error('[agent/historico/ponto1]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar ponto 1.' });
+    }
+  });
+
   return router;
 }
 
