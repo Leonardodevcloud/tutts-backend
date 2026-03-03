@@ -188,7 +188,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       const barraVisivel = await barraPesquisa.isVisible().catch(() => false);
       if (barraVisivel) {
         await barraPesquisa.click();
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(1000);
         log('✅ Barra de pesquisa expandida');
       }
       await screenshot(page, os_numero, 'passo2_pesquisa_expandida');
@@ -359,7 +359,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       timeout: TIMEOUT,
     });
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1500);
     await screenshot(page, os_numero, 'passo3_modal');
 
     // ── Passo 3b: Verificar se o ponto solicitado existe na OS ───────────────
@@ -447,7 +447,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     });
 
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1500);
     await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
     // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
@@ -456,7 +456,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Tentar clicar novamente
       log('⚠️ Form não abriu, tentando clicar novamente...');
       await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(2000);
     }
 
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
@@ -501,7 +501,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     // Aguardar geocoder — esperar botão Confirmar aparecer (com polling)
     let confirmarVisivel = false;
     for (let tentativa = 0; tentativa < 10; tentativa++) {
-      await page.waitForTimeout(700);
+      await page.waitForTimeout(1000);
       confirmarVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (confirmarVisivel) break;
     }
@@ -518,6 +518,30 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       };
     }
     log('✅ Geocoder OK — botão Confirmar visível');
+
+
+    // ── Check: Verificar alerta de endereço já corrigido ─────────────────────
+    const alertaJaCorrigido = await page.evaluate(() => {
+      const alertas = document.querySelectorAll('.alert-warning, .alert-info, .alert-danger');
+      for (const a of alertas) {
+        const txt = (a.textContent || '').toLowerCase();
+        if (txt.includes('corrigido anteriormente') || txt.includes('j\u00e1 foi corrigido')) {
+          return (a.textContent || '').trim();
+        }
+      }
+      return '';
+    }).catch(() => '');
+
+    if (alertaJaCorrigido) {
+      log('\u26a0\ufe0f Alerta detectado: ' + alertaJaCorrigido);
+      const ss = await screenshot(page, os_numero, 'passo5b_ja_corrigido');
+      await browser.close();
+      return {
+        sucesso: false,
+        erro: 'Este endere\u00e7o j\u00e1 foi corrigido anteriormente no sistema Mapp. Entre em contato com o suporte Tutts para solicitar uma nova corre\u00e7\u00e3o.',
+        screenshot: ss,
+      };
+    }
 
     // Capturar endereço resolvido pelo geocoder (bônus)
     let enderecoResolvido = '';
@@ -560,7 +584,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await page.locator('button.btn-confirmar-alteracao:visible').first().click();
 
     // Aguardar processamento — verificar que algo mudou
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(3000);
     await screenshot(page, os_numero, 'passo6_pos_confirmar');
 
     // Verificar que a confirmação realmente aplicou:
@@ -573,7 +597,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Pode ter aparecido um dialog que não foi tratado, ou erro
       log('⚠️ Botão Confirmar ainda visível após clique — tentando novamente');
       await page.locator('button.btn-confirmar-alteracao:visible').first().click();
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(3000);
       
       const aindaVisivel2 = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (aindaVisivel2) {
@@ -638,19 +662,32 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       log(`📌 URL: ${urlEdicao}`);
       await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(1500);
+
+      // Aguardar a página de edição carregar completamente (spinner sumir + inputs renderizar)
+      const seletorInput = `#txtEnderecoE${ponto}`;
+      let inputEncontrado = false;
+      for (let tentativa = 0; tentativa < 15; tentativa++) {
+        await page.waitForTimeout(1000);
+        const existe = await page.locator(seletorInput).count().catch(() => 0);
+        if (existe > 0) {
+          inputEncontrado = true;
+          log(`✅ Input ${seletorInput} encontrado após ${tentativa + 1}s`);
+          break;
+        }
+        if (tentativa === 4) {
+          log('⏳ Página ainda carregando... aguardando mais...');
+        }
+      }
+
       await screenshot(page, os_numero, 'passo7_pagina_edicao');
 
       // ── Passo 8: Atualizar endereço no input do ponto ───────────────────────
       log(`📌 Passo 8: Atualizando endereço do Ponto ${ponto}`);
 
-      // O input do endereço: input#txtEnderecoE{ponto}  (ex: txtEnderecoE2, txtEnderecoE3)
-      const seletorInput = `#txtEnderecoE${ponto}`;
       const inputEndereco = page.locator(seletorInput);
-      const inputExiste = await inputEndereco.count().catch(() => 0);
 
-      if (inputExiste === 0) {
-        log(`⚠️ Input ${seletorInput} não encontrado na página`);
+      if (!inputEncontrado) {
+        log(`⚠️ Input ${seletorInput} não encontrado após 15s`);
         await screenshot(page, os_numero, 'passo8_input_nao_encontrado');
         throw new Error('INPUT_ENDERECO_NAO_ENCONTRADO');
       }
@@ -752,7 +789,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       if (lupaClicada) {
         // Aguardar busca processar
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(3000);
         await screenshot(page, os_numero, 'passo8b_pos_busca');
 
         // ── Passo 8c: Se aparecer validação/confirmação, aceitar ─────────────
@@ -768,7 +805,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           if (validarVisivel) {
             await btnValidarEndereco.click();
             log('📌 Validação aceita (botão verde)');
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(2000);
             await screenshot(page, os_numero, 'passo8c_validacao_aceita');
           }
         }
@@ -800,7 +837,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         // Aguardar cálculo — polling por resultado
         let valorEncontrado = false;
         for (let i = 0; i < 12; i++) {
-          await page.waitForTimeout(700);
+          await page.waitForTimeout(1000);
           const temValor = await page.evaluate(() => {
             const els = document.querySelectorAll('div, span, p, td');
             for (const el of els) {
@@ -834,7 +871,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           await btnSalvar.click();
           log('📌 Botão Salvar clicado');
 
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(3000);
           await screenshot(page, os_numero, 'passo10_pos_salvar');
 
           // Verificar resultado
