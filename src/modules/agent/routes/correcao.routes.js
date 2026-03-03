@@ -163,6 +163,45 @@ function createCorrecaoRoutes(pool) {
     }
   });
 
+
+  // ── Screenshots debug (temporário) ──────────────────────────────────
+  const SCREENSHOT_DIR = '/tmp/screenshots';
+
+  // GET /agent/screenshots — lista todas as screenshots
+  router.get('/screenshots', async (req, res) => {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      if (!fs.existsSync(SCREENSHOT_DIR)) return res.json({ arquivos: [] });
+      const files = fs.readdirSync(SCREENSHOT_DIR)
+        .filter(f => f.endsWith('.png'))
+        .sort((a, b) => b.localeCompare(a));
+      const lista = files.map(f => ({
+        nome: f,
+        url: '/api/agent/screenshots/' + encodeURIComponent(f),
+        tamanho: fs.statSync(path.join(SCREENSHOT_DIR, f)).size,
+      }));
+      // Return HTML page for easy viewing
+      const html = '<html><head><title>Screenshots RPA</title><style>body{font-family:sans-serif;padding:20px;background:#1a1a2e;color:#eee}img{max-width:100%;border:2px solid #333;border-radius:8px;margin:10px 0}h2{color:#7c3aed}a{color:#a78bfa}.card{background:#16213e;padding:16px;border-radius:12px;margin:16px 0}</style></head><body><h1>Screenshots RPA</h1><p>' + files.length + ' screenshots</p>' + files.map(f => '<div class="card"><h2>' + f + '</h2><img src="/api/agent/screenshots/' + encodeURIComponent(f) + '" loading="lazy"/></div>').join('') + '</body></html>';
+      res.type('html').send(html);
+    } catch (err) {
+      res.status(500).json({ erro: err.message });
+    }
+  });
+
+  // GET /agent/screenshots/:filename — serve uma screenshot
+  router.get('/screenshots/:filename', async (req, res) => {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const file = path.join(SCREENSHOT_DIR, req.params.filename);
+      if (!fs.existsSync(file)) return res.status(404).json({ erro: 'Screenshot nao encontrada' });
+      res.type('image/png').sendFile(file);
+    } catch (err) {
+      res.status(500).json({ erro: err.message });
+    }
+  });
+
   return router;
 }
 
