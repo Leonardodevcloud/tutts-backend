@@ -461,19 +461,26 @@ GROUP BY faixa_alocacao ORDER BY faixa_alocacao
 
 -- Classificação de motivo de atraso por OS (RECEITA FUNDAMENTAL):
 WITH atrasos AS (
-  SELECT os, cod_prof, nome_prof,
-    EXTRACT(EPOCH FROM (finalizado - data_hora))/60 as sla_total,
-    EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 as tempo_alocacao,
-    tempo_execucao_minutos
-  FROM bi_entregas
-  WHERE COALESCE(ponto, 1) >= 2 AND dentro_prazo = false
-    AND finalizado IS NOT NULL AND data_hora IS NOT NULL
+  SELECT e.os, e.cod_prof, e.nome_prof,
+    EXTRACT(EPOCH FROM (e.finalizado - e.data_hora))/60 as sla_total,
+    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 as tempo_alocacao,
+    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 +
+      COALESCE((SELECT EXTRACT(EPOCH FROM (p1.hora_saida::time - e.data_hora::time))/60
+                FROM bi_entregas p1 WHERE p1.os = e.os AND COALESCE(p1.ponto, 1) = 1 AND p1.hora_saida IS NOT NULL LIMIT 1), 0) as tempo_direcionamento,
+    COALESCE((SELECT EXTRACT(EPOCH FROM (p1.hora_saida::time - p1.hora_chegada::time))/60
+              FROM bi_entregas p1 WHERE p1.os = e.os AND COALESCE(p1.ponto, 1) = 1 AND p1.hora_saida IS NOT NULL AND p1.hora_chegada IS NOT NULL LIMIT 1), 0) as tempo_no_p1,
+    e.tempo_execucao_minutos
+  FROM bi_entregas e
+  WHERE COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = false
+    AND e.finalizado IS NOT NULL AND e.data_hora IS NOT NULL
 )
 SELECT 
   CASE
     WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
     WHEN sla_total > 600 THEN 'OS não encerrada'
     WHEN tempo_alocacao > 30 THEN 'Associado tarde'
+    WHEN tempo_direcionamento > 30 THEN 'Direcionamento lento'
+    WHEN tempo_no_p1 > 45 THEN 'Coleta lenta'
     ELSE 'Atraso do motoboy'
   END as motivo_atraso,
   COUNT(*) as quantidade,
@@ -499,6 +506,85 @@ SELECT cod_cliente, nome_fantasia,
 FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
 GROUP BY cod_cliente, nome_fantasia
 ORDER BY taxa_retorno DESC
+
+-- Ticket médio por cliente com variação semanal:
+WITH semana_atual AS (
+  SELECT cod_cliente, nome_fantasia,
+    COUNT(*) as entregas,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+    SUM(valor) as faturamento
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+    AND data_solicitado BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE
+  GROUP BY cod_cliente, nome_fantasia
+),
+semana_anterior AS (
+  SELECT cod_cliente,
+    COUNT(*) as entregas_ant,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_ant,
+    SUM(valor) as faturamento_ant
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+    AND data_solicitado BETWEEN CURRENT_DATE - 14 AND CURRENT_DATE - 8
+  GROUP BY cod_cliente
+)
+SELECT sa.cod_cliente, sa.nome_fantasia, sa.entregas, sa.ticket_medio, sa.faturamento,
+  COALESCE(san.entregas_ant, 0) as entregas_sem_anterior,
+  COALESCE(san.ticket_medio_ant, 0) as ticket_medio_sem_anterior,
+  CASE WHEN COALESCE(san.ticket_medio_ant, 0) > 0 THEN
+    ROUND(100.0 * (sa.ticket_medio - san.ticket_medio_ant) / san.ticket_medio_ant, 1)
+  ELSE NULL END as variacao_ticket_pct,
+  CASE WHEN COALESCE(san.entregas_ant, 0) > 0 THEN
+    ROUND(100.0 * (sa.entregas - san.entregas_ant)::numeric / san.entregas_ant, 1)
+  ELSE NULL END as variacao_demanda_pct
+FROM semana_atual sa
+LEFT JOIN semana_anterior san ON sa.cod_cliente = san.cod_cliente
+ORDER BY sa.faturamento DESC LIMIT 30
+
+-- Custo com mínimo garantido por cliente vs faturamento:
+WITH garantido AS (
+  SELECT cod_prof, SUM(valor) as custo_garantido
+  FROM withdrawal_requests
+  WHERE status = 'aprovado_gratuidade'
+  GROUP BY cod_prof
+),
+faturamento AS (
+  SELECT cod_cliente, nome_fantasia,
+    SUM(valor) as faturamento,
+    COUNT(DISTINCT cod_prof) as profs_utilizados
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+  GROUP BY cod_cliente, nome_fantasia
+)
+SELECT f.cod_cliente, f.nome_fantasia, f.faturamento,
+  COALESCE(SUM(g.custo_garantido), 0) as custo_garantido_total,
+  ROUND(100.0 * COALESCE(SUM(g.custo_garantido), 0) / NULLIF(f.faturamento, 0), 2) as pct_garantido_sobre_fat
+FROM faturamento f
+LEFT JOIN bi_entregas be ON f.cod_cliente = be.cod_cliente AND COALESCE(be.ponto, 1) >= 2
+LEFT JOIN garantido g ON be.cod_prof = g.cod_prof
+GROUP BY f.cod_cliente, f.nome_fantasia, f.faturamento
+ORDER BY custo_garantido_total DESC LIMIT 20
+
+-- Comparativo de cliente com média geral da Tutts (mercado):
+WITH media_geral AS (
+  SELECT
+    ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_geral,
+    ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_geral,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_geral,
+    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_geral
+  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
+)
+SELECT cod_cliente, nome_fantasia,
+  COUNT(*) as entregas,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_cliente,
+  mg.taxa_prazo_geral,
+  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_cliente,
+  mg.tempo_medio_geral,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_cliente,
+  mg.taxa_retorno_geral,
+  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_cliente,
+  mg.ticket_medio_geral
+FROM bi_entregas, media_geral mg
+WHERE COALESCE(ponto, 1) >= 2
+GROUP BY cod_cliente, nome_fantasia, mg.taxa_prazo_geral, mg.tempo_medio_geral, mg.taxa_retorno_geral, mg.ticket_medio_geral
+ORDER BY entregas DESC LIMIT 30
 
 ═══════════════════════════════════════
 ⚠️ ARMADILHAS SQL — CUIDADO
@@ -529,6 +615,11 @@ REGRAS OBRIGATÓRIAS:
 12. PREFIRA gerar UMA query com UNION ALL se possível. Mas se for complexo, pode gerar blocos separados.
 13. Quando a pergunta pedir MÚLTIPLAS análises (ex: "faixa de km E horário de pico"), gere dados completos para CADA análise.
 14. SEMPRE traga dados suficientes para uma análise rica. Em vez de LIMIT 1 (só o top), traga LIMIT 10-20 para contexto completo.
+15. Em relatórios de período/evolução, SEMPRE inclua COUNT(DISTINCT cod_prof) como "motos" para mostrar a quantidade de motoboys por dia.
+16. Quando analisar taxa de retorno, inclua a referência: até 2% = saudável, 2-5% = atenção, >5% = preocupante.
+17. Para análises financeiras (ticket médio, variação de demanda, garantido), use as receitas SQL da seção de receitas prontas.
+18. Quando comparar cliente com mercado/média, compare com TODOS os clientes da Tutts (não apenas da região).
+19. Para o cliente 767 (Comollati), SEMPRE destacar que o SLA mínimo exigido é 95% no prazo.
 ${contextoFiltros ? `
 ═══════════════════════════════════════
 ⚡ FILTROS ATIVOS DA CONVERSA (OBRIGATÓRIOS)
@@ -629,9 +720,16 @@ Adicione esses filtros em TODA query que gerar, sem exceção.` : ''}`;
           'o que é', 'o que significa', 'o que considera', 'me explique', 'como funciona',
           'qual a diferença', 'defina', 'definição', 'explique', 'conceito de',
           'o que vc considera', 'o que você considera', 'quais são os', 'quais os motivos',
-          'coleta lenta', 'associado tarde', 'direcionamento lento', 'atraso do motoboy',
+          'coleta lenta', 'coleta lentam', 'associado tarde', 'direcionamento lento', 'atraso do motoboy',
           'os não encerrada', 'falha sistêmica', 'motivo de atraso', 'motivos de atraso',
-          'taxa de retorno', 'health score', 'sla', 'como é calculado'
+          'taxa de retorno', 'health score', 'sla', 'como é calculado',
+          'o que voce considera', 'oque é', 'oque significa', 'oq é', 'oq significa',
+          'me fala sobre', 'me diga o que', 'qual o conceito', 'como voce calcula',
+          'como vc calcula', 'como que funciona', 'pra que serve', 'para que serve',
+          'o que são', 'oque são', 'quais motivos', 'quais os tipos',
+          'mínimo garantido', 'minimo garantido', 'ticket médio', 'ticket medio',
+          'como interpretar', 'como analisar', 'como entender', 'como ler',
+          'referência', 'referencia', 'benchmark', 'meta de', 'qual a meta'
         ].some(termo => promptLower.includes(termo));
 
         if (ehConceitual) {
@@ -655,17 +753,26 @@ ${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
 
 ### MÉTRICAS:
 - **Taxa de prazo**: % de entregas dentro do SLA (meta geral: ≥85%, Comollati exige ≥95%)
-- **Taxa de retorno**: % de entregas que resultaram em retorno (até 2% = saudável, 2-5% = atenção, >5% = crítico)
+- **Taxa de retorno**: % de entregas que resultaram em retorno (devolução). REFERÊNCIA IMPORTANTE: até 2% = SAUDÁVEL e normal para operações logísticas de autopeças; entre 2% e 5% = ATENÇÃO, monitorar mas não é crítico; acima de 5% = PREOCUPANTE e requer ação imediata. Ao analisar taxa de retorno de um cliente, SEMPRE compare com a média geral de TODOS os clientes da Tutts (não apenas da mesma região, pois algumas regiões têm apenas 1 cliente).
 - **Health Score**: Score de 0-100 que combina taxa de prazo (50pts), retornos (25pts) e tempo médio (25pts)
 - **SLA**: Prazo máximo para entrega, baseado na distância (ex: até 10km = 60min, até 20km = 90min)
-- **Cliente 767 (Comollati)**: SLA fixo de 120 minutos (2h) para qualquer distância. Mínimo 95% no prazo.
-- **Motos por dia**: Quantidade de motoboys distintos que operaram em um dia
+- **Cliente 767 (Grupo Comollati)**: SLA fixo de 120 minutos (2h) para QUALQUER distância. O SLA MÍNIMO exigido pelo Comollati é 95% no prazo — abaixo disso é CRÍTICO e pode gerar perda do contrato. Esse é o cliente mais exigente da carteira.
+- **Motos por dia**: Quantidade de motoboys distintos (COUNT DISTINCT cod_prof) que operaram em cada dia. Métrica essencial para dimensionamento de frota e análise de capacidade operacional.
 
 ### TIPOS DE OCORRÊNCIA (RETORNOS):
 - "Cliente Fechado" = cliente estava com a loja fechada
 - "ClienteAus" / "Cliente Ausente" = cliente não estava no endereço
 - "Loja Fechada" = estabelecimento fechado
 - "Produto Incorreto" = mercadoria errada
+- "Retorno" = retorno genérico
+
+### ANÁLISES FINANCEIRAS:
+- **Ticket médio**: Valor médio cobrado por entrega (SUM(valor) / COUNT entregas). Quando comparar períodos, informar a variação em %. Se a variação for > 5% de uma semana para outra, informar o valor da semana anterior.
+- **Variação de demanda**: Quantidade de entregas por cliente de uma semana para outra. Se variação > 5%, informar o valor anterior e a variação percentual.
+- **Mínimo garantido**: Valor investido em garantido por cliente. Comparar o custo com garantido vs o faturamento do cliente para avaliar se o investimento se paga. Dados na tabela withdrawal_requests com status 'aprovado_gratuidade'.
+
+### COMPARATIVO COM MERCADO:
+Quando o usuário pedir comparativo, comparar o cliente com a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas os da mesma região, pois pode haver regiões com um cliente só).
 
 ### CÁLCULOS:
 - tempo_alocacao = data_hora_alocado - data_hora (minutos)
@@ -821,9 +928,13 @@ Quando o usuário perguntar sobre motivos de atraso ou conceitos operacionais, E
 - **Atraso do motoboy**: Tempo de deslocamento/entrega foi longo (trânsito, rota ruim, motoboy lento).
 - **OS não encerrada**: Motoboy entregou mas não fechou a OS no app (SLA > 10h sem alocação longa).
 - **Falha sistêmica**: OS nunca foi alocada (SLA > 10h com alocação > 5h).
-- **Taxa de retorno**: Até 2% = saudável | 2-5% = atenção | >5% = preocupante
-- **Cliente 767 (Comollati)**: SLA fixo de 120min para qualquer distância. Mínimo 95% no prazo.
-- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — indica quantos motoboys operaram
+- **Taxa de retorno**: Até 2% = SAUDÁVEL (normal para autopeças) | 2-5% = ATENÇÃO | >5% = PREOCUPANTE. Sempre que mencionar taxa de retorno, informe essa referência para contextualizar se está bom ou ruim.
+- **Cliente 767 (Grupo Comollati)**: SLA fixo de 120min para QUALQUER distância. Mínimo OBRIGATÓRIO de 95% no prazo — abaixo disso é CRÍTICO e pode gerar perda do contrato. Sempre destacar essa exigência quando analisar o Comollati.
+- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — indica quantos motoboys operaram. Sempre incluir essa informação em relatórios e análises de período.
+- **Comparativo com mercado**: Quando comparar um cliente, usar a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas da região, pois pode haver regiões com 1 cliente só).
+- **Ticket médio**: Valor médio cobrado por entrega. Quando comparar períodos, informar variação %. Se variação > 5%, destacar o valor anterior.
+- **Variação de demanda**: Variação na quantidade de entregas entre períodos. Se > 5%, destacar e informar o valor anterior.
+- **Mínimo garantido**: Valor investido em garantido para manter motoboys disponíveis. Comparar com faturamento do cliente para avaliar ROI.
 
 ## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
 - ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
