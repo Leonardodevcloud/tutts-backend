@@ -1,8 +1,10 @@
 /**
  * routes/historico.routes.js
- * GET   /agent/historico        (admin)
- * PATCH /agent/validar/:id      (admin)
- * GET   /agent/historico/csv    (admin)
+ * GET   /agent/historico           (admin)
+ * GET   /agent/historico/:id/detalhes (admin - dados completos p/ mapa)
+ * PATCH /agent/validar/:id         (admin)
+ * DELETE /agent/historico/:id       (admin - excluir solicitacao)
+ * GET   /agent/historico/csv       (admin)
  */
 
 'use strict';
@@ -12,10 +14,10 @@ const express = require('express');
 function createHistoricoRoutes(pool, verificarAdmin) {
   const router = express.Router();
 
-  // GET /agent/meu-historico (autenticado - motoboy vê só suas solicitações)
+  // GET /agent/meu-historico (autenticado - motoboy ve so suas solicitacoes)
   router.get('/meu-historico', async (req, res) => {
     const usuarioId = req.user?.id;
-    if (!usuarioId) return res.status(401).json({ erro: 'Não autenticado.' });
+    if (!usuarioId) return res.status(401).json({ erro: 'Nao autenticado.' });
 
     const { page = 1, per_page = 20 } = req.query;
     const offset = (parseInt(page, 10) - 1) * parseInt(per_page, 10);
@@ -45,17 +47,17 @@ function createHistoricoRoutes(pool, verificarAdmin) {
       });
     } catch (err) {
       console.error('[agent/meu-historico]', err.message);
-      return res.status(500).json({ erro: 'Erro ao carregar histórico.' });
+      return res.status(500).json({ erro: 'Erro ao carregar historico.' });
     }
   });
 
-  // GET /agent/meu-historico/:id/foto (autenticado - motoboy vê foto da própria solicitação)
+  // GET /agent/meu-historico/:id/foto
   router.get('/meu-historico/:id/foto', async (req, res) => {
     const usuarioId = req.user?.id;
-    if (!usuarioId) return res.status(401).json({ erro: 'Não autenticado.' });
+    if (!usuarioId) return res.status(401).json({ erro: 'Nao autenticado.' });
 
     const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
 
     try {
       const { rows } = await pool.query(
@@ -63,7 +65,7 @@ function createHistoricoRoutes(pool, verificarAdmin) {
         [id, usuarioId]
       );
       if (rows.length === 0 || !rows[0].foto_fachada) {
-        return res.status(404).json({ erro: 'Foto não encontrada.' });
+        return res.status(404).json({ erro: 'Foto nao encontrada.' });
       }
       return res.json({ foto: rows[0].foto_fachada });
     } catch (err) {
@@ -72,7 +74,27 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
   });
 
-  // GET /agent/historico (admin)
+  // GET /agent/foto/:id (admin)
+  router.get('/foto/:id', verificarAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT foto_fachada FROM ajustes_automaticos WHERE id = $1`,
+        [id]
+      );
+      if (rows.length === 0 || !rows[0].foto_fachada) {
+        return res.status(404).json({ erro: 'Foto nao encontrada.' });
+      }
+      return res.json({ foto: rows[0].foto_fachada });
+    } catch (err) {
+      console.error('[agent/foto]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar foto.' });
+    }
+  });
+
+  // GET /agent/historico (admin) — agora retorna coords para o mapa
   router.get('/historico', verificarAdmin, async (req, res) => {
     const { status, os_numero, de, ate, page = 1, per_page = 30 } = req.query;
 
@@ -93,7 +115,9 @@ function createHistoricoRoutes(pool, verificarAdmin) {
         pool.query(
           `SELECT id, os_numero, ponto, status, detalhe_erro,
                   criado_em, processado_em, validado_por, validado_em,
-                  usuario_id, usuario_nome, endereco_antigo, endereco_corrigido, cod_profissional, frete_recalculado
+                  usuario_id, usuario_nome, endereco_antigo, endereco_corrigido,
+                  cod_profissional, frete_recalculado,
+                  latitude, longitude, motoboy_lat, motoboy_lng
            FROM ajustes_automaticos ${where}
            ORDER BY criado_em DESC
            LIMIT $${p} OFFSET $${p + 1}`,
@@ -113,14 +137,45 @@ function createHistoricoRoutes(pool, verificarAdmin) {
       });
     } catch (err) {
       console.error('[agent/historico]', err.message);
-      return res.status(500).json({ erro: 'Erro ao carregar histórico.' });
+      return res.status(500).json({ erro: 'Erro ao carregar historico.' });
+    }
+  });
+
+  // GET /agent/historico/:id/detalhes (admin — dados completos p/ mapa)
+  router.get('/historico/:id/detalhes', verificarAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, os_numero, ponto, status,
+                endereco_antigo, endereco_corrigido,
+                latitude, longitude,
+                motoboy_lat, motoboy_lng,
+                localizacao_raw, detalhe_erro,
+                criado_em, processado_em,
+                validado_por, validado_em,
+                usuario_nome, cod_profissional,
+                frete_recalculado
+         FROM ajustes_automaticos WHERE id = $1`,
+        [id]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ erro: 'Registro nao encontrado.' });
+      }
+
+      return res.json(rows[0]);
+    } catch (err) {
+      console.error('[agent/historico/detalhes]', err.message);
+      return res.status(500).json({ erro: 'Erro ao carregar detalhes.' });
     }
   });
 
   // PATCH /agent/validar/:id
   router.patch('/validar/:id', verificarAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
 
     const usuarioNome = req.user?.nome || req.user?.email || req.user?.name || 'Admin';
 
@@ -132,11 +187,35 @@ function createHistoricoRoutes(pool, verificarAdmin) {
          RETURNING id, validado_por, validado_em`,
         [usuarioNome, id]
       );
-      if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado.' });
+      if (rows.length === 0) return res.status(404).json({ erro: 'Nao encontrado.' });
       return res.json({ sucesso: true, ...rows[0] });
     } catch (err) {
       console.error('[agent/validar]', err.message);
       return res.status(500).json({ erro: 'Erro ao validar.' });
+    }
+  });
+
+  // DELETE /agent/historico/:id (admin — excluir solicitacao)
+  router.delete('/historico/:id', verificarAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `DELETE FROM ajustes_automaticos WHERE id = $1 RETURNING id, os_numero`,
+        [id]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ erro: 'Registro nao encontrado.' });
+      }
+
+      const admin = req.user?.nome || req.user?.email || 'Admin';
+      console.log(`[agent] Solicitacao excluida: ID ${rows[0].id} OS ${rows[0].os_numero} por ${admin}`);
+      return res.json({ sucesso: true, mensagem: 'Solicitacao excluida com sucesso.' });
+    } catch (err) {
+      console.error('[agent/historico/delete]', err.message);
+      return res.status(500).json({ erro: 'Erro ao excluir registro.' });
     }
   });
 
@@ -193,7 +272,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
         topValidadoresRes,
         redFlagsRes,
       ] = await Promise.all([
-        // Totais gerais
         pool.query(`
           SELECT
             COUNT(*) AS total,
@@ -203,7 +281,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
             COUNT(*) FILTER (WHERE validado_por IS NOT NULL) AS validados
           FROM ajustes_automaticos
         `),
-        // Por mês (últimos 6 meses)
         pool.query(`
           SELECT
             TO_CHAR(criado_em, 'YYYY-MM') AS mes,
@@ -215,7 +292,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
           GROUP BY mes
           ORDER BY mes DESC
         `),
-        // Por semana (últimas 8 semanas)
         pool.query(`
           SELECT
             TO_CHAR(DATE_TRUNC('week', criado_em), 'DD/MM') AS semana_inicio,
@@ -227,7 +303,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
           GROUP BY DATE_TRUNC('week', criado_em)
           ORDER BY DATE_TRUNC('week', criado_em) DESC
         `),
-        // Top profissionais que mais solicitam
         pool.query(`
           SELECT
             usuario_nome,
@@ -241,7 +316,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
           ORDER BY total DESC
           LIMIT 15
         `),
-        // Top validadores
         pool.query(`
           SELECT
             validado_por,
@@ -252,7 +326,6 @@ function createHistoricoRoutes(pool, verificarAdmin) {
           ORDER BY total DESC
           LIMIT 10
         `),
-        // Red flags: profissionais com mais de 10 solicitações na última semana
         pool.query(`
           SELECT
             usuario_nome,
