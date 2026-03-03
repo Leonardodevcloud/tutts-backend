@@ -11,7 +11,7 @@ const { normalizeLocation }        = require('./location-normalizer');
 const { executarCorrecaoEndereco } = require('./playwright-agent');
 const { haversineKm, RAIO_MAXIMO_KM } = require('./routes/correcao.routes');
 
-const INTERVALO_MS = 10_000;
+const INTERVALO_MS = 3_000;
 let   workerAtivo  = false;
 
 function log(msg) {
