@@ -109,7 +109,75 @@ function createGeocodeRouter(pool) {
     }
   });
 
-  // Estatísticas do cache
+  // Geocodificacao REVERSA (coordenadas -> endereco)
+  router.get('/reverse', async (req, res) => {
+    try {
+      const { lat, lng } = req.query;
+      const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+
+      if (!lat || !lng) {
+        return res.status(400).json({ error: 'Informe lat e lng' });
+      }
+
+      const latNum = parseFloat(lat);
+      const lngNum = parseFloat(lng);
+      if (isNaN(latNum) || isNaN(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+        return res.status(400).json({ error: 'Coordenadas invalidas' });
+      }
+
+      if (!GOOGLE_API_KEY) {
+        console.log('GOOGLE_GEOCODING_API_KEY nao configurada para reverse');
+        return res.status(500).json({ error: 'API Key nao configurada no servidor' });
+      }
+
+      // Verificar cache reverso no banco
+      try {
+        const cacheResult = await pool.query(
+          `SELECT endereco_formatado FROM enderecos_geocodificados WHERE ABS(latitude - $1) < 0.0001 AND ABS(longitude - $2) < 0.0001 LIMIT 1`,
+          [latNum, lngNum]
+        );
+        if (cacheResult.rows.length > 0) {
+          console.log('Reverse cache HIT:', latNum, lngNum);
+          return res.json({ endereco: cacheResult.rows[0].endereco_formatado, fonte: 'cache' });
+        }
+      } catch (dbErr) {
+        console.log('Erro cache reverso:', dbErr.message);
+      }
+
+      // Google Reverse Geocoding
+      console.log('Reverse geocode Google:', latNum, lngNum);
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latNum},${lngNum}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+
+      const resp = await fetch(url);
+      const data = await resp.json();
+
+      if (data.status === 'OK' && data.results && data.results.length > 0) {
+        const endereco = data.results[0].formatted_address;
+        console.log('Reverse geocode OK:', endereco);
+
+        // Salvar no cache
+        const endNorm = normalizarEndereco(endereco);
+        pool.query(
+          `INSERT INTO enderecos_geocodificados (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+          [`${latNum},${lngNum}`, endNorm, endereco, latNum, lngNum, 'google-reverse']
+        ).catch(e => console.log('Erro ao salvar cache reverso:', e.message));
+
+        return res.json({ endereco, latitude: latNum, longitude: lngNum, fonte: 'google-reverse' });
+      }
+
+      if (data.status === 'ZERO_RESULTS') {
+        return res.status(404).json({ error: 'Endereco nao encontrado para estas coordenadas' });
+      }
+
+      console.log('Google reverse erro:', data.status, data.error_message);
+      return res.status(500).json({ error: 'Erro na API Google', status: data.status });
+    } catch (err) {
+      console.error('Erro Reverse Geocoding:', err);
+      res.status(500).json({ error: 'Erro ao geocodificar reversamente' });
+    }
+  });
+
+    // Estatísticas do cache
   router.get('/stats', async (req, res) => {
     try {
       const stats = await pool.query(`
