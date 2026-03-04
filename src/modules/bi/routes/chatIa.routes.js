@@ -171,7 +171,9 @@ function createChatIaRoutes(pool) {
 
   // ==================== CACHE DE RESPOSTAS ====================
   function normalizarPergunta(prompt, filtros) {
-    return `${prompt.toLowerCase().replace(/[?!.,;:'"]/g, '').replace(/\s+/g, ' ').trim()}|${filtros?.cod_cliente || ''}|${filtros?.centro_custo || ''}|${filtros?.data_inicio || ''}|${filtros?.data_fim || ''}`;
+    const clientes = Array.isArray(filtros?.cod_cliente) ? filtros.cod_cliente.sort().join(',') : (filtros?.cod_cliente || '');
+    const centros = Array.isArray(filtros?.centro_custo) ? filtros.centro_custo.sort().join(',') : (filtros?.centro_custo || '');
+    return `${prompt.toLowerCase().replace(/[?!.,;:'"]/g, '').replace(/\s+/g, ' ').trim()}|${clientes}|${centros}|${filtros?.data_inicio || ''}|${filtros?.data_fim || ''}`;
   }
 
   function limparCacheExpirado() {
@@ -239,9 +241,43 @@ CATEGORIA:`;
     const conditions = [];
     const params = [];
     let idx = 1;
-    if (codCliente) { conditions.push(`cod_cliente = $${idx++}`); params.push(parseInt(codCliente)); }
-    if (centroCusto) { conditions.push(`centro_custo = $${idx++}`); params.push(centroCusto); }
-    if (dataInicio && dataFim) { conditions.push(`data_solicitado BETWEEN $${idx++} AND $${idx++}`); params.push(dataInicio, dataFim); }
+
+    // codCliente pode ser número/string ou array
+    if (codCliente) {
+      const clientes = Array.isArray(codCliente)
+        ? codCliente.map(c => parseInt(c)).filter(c => !isNaN(c))
+        : [parseInt(codCliente)].filter(c => !isNaN(c));
+
+      if (clientes.length === 1) {
+        conditions.push(`cod_cliente = $${idx++}`);
+        params.push(clientes[0]);
+      } else if (clientes.length > 1) {
+        const placeholders = clientes.map((_, i) => `$${idx + i}`).join(', ');
+        conditions.push(`cod_cliente IN (${placeholders})`);
+        clientes.forEach(c => { params.push(c); idx++; });
+      }
+    }
+
+    // centroCusto pode ser string ou array
+    if (centroCusto) {
+      const centros = Array.isArray(centroCusto)
+        ? centroCusto.filter(c => c && c.trim())
+        : [centroCusto].filter(c => c && c.trim());
+
+      if (centros.length === 1) {
+        conditions.push(`centro_custo = $${idx++}`);
+        params.push(centros[0]);
+      } else if (centros.length > 1) {
+        const placeholders = centros.map((_, i) => `$${idx + i}`).join(', ');
+        conditions.push(`centro_custo IN (${placeholders})`);
+        centros.forEach(c => { params.push(c); idx++; });
+      }
+    }
+
+    if (dataInicio && dataFim) {
+      conditions.push(`data_solicitado BETWEEN $${idx++} AND $${idx++}`);
+      params.push(dataInicio, dataFim);
+    }
     return { where: conditions.length ? 'WHERE ' + conditions.join(' AND ') : '', params };
   }
 
@@ -403,11 +439,15 @@ CATEGORIA:`;
       const result = await pool.query(sql, params);
       // Buscar garantido se houver filtro de cliente
       let garantidoRows = [];
-      if (filtros.cod_cliente) {
+      const clientesFiltro = filtros.cod_cliente
+        ? (Array.isArray(filtros.cod_cliente) ? filtros.cod_cliente : [filtros.cod_cliente]).map(c => String(c))
+        : [];
+      if (clientesFiltro.length > 0) {
         try {
-          const gParams = [filtros.cod_cliente];
-          let gWhere = 'WHERE cod_cliente = $1';
-          let idx = 2;
+          const gParams = [...clientesFiltro];
+          const placeholders = gParams.map((_, i) => `$${i + 1}`).join(', ');
+          let gWhere = `WHERE cod_cliente IN (${placeholders})`;
+          let idx = gParams.length + 1;
           if (filtros.data_inicio && filtros.data_fim) { gWhere += ` AND data BETWEEN $${idx++} AND $${idx++}`; gParams.push(filtros.data_inicio, filtros.data_fim); }
           const g = await pool.query(`SELECT SUM(complemento)::numeric as custo_garantido, SUM(valor_negociado)::numeric as total_negociado, COUNT(*) as registros FROM bi_garantido_cache ${gWhere}`, gParams);
           garantidoRows = g.rows;
@@ -687,6 +727,7 @@ ${JSON.stringify(linhas, null, 2).substring(0, 15000)}
 - Emojis: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
 - Valores: R$ 1.234,56 | Tempos: Xh XXmin se >60min | Taxas: 1 decimal
 - ⛔ NUNCA inclua blocos SQL. ⛔ NUNCA invente dados.
+- ⛔ NUNCA inclua sugestões de perguntas no final (como "Quer se aprofundar?" ou "Pergunte-me:"). Termine a análise de forma direta.
 - Se resultado vazio, diga claramente.`;
 
     const regrasEspecificas = {
@@ -706,7 +747,7 @@ ${JSON.stringify(linhas, null, 2).substring(0, 15000)}
 
     const graficos = `\n## GRÁFICOS\nQuando dados beneficiarem de visualização:\n[CHART]\n{"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}\n[/CHART]\nTipos: "bar", "horizontalBar", "line", "pie", "doughnut". Máx 2 gráficos.`;
 
-    const proatividade = `\n## PROATIVIDADE\n- ⛔ NUNCA diga "seria útil saber".\n- ✅ Ofereça perguntas prontas no final (máx 2-3):\n💡 **Quer se aprofundar?** Pergunte-me:\n- "pergunta 1"\n- "pergunta 2"`;
+    const proatividade = ``;
 
     return regrasBase + (regrasEspecificas[categoria] || '') + graficos + proatividade;
   }
@@ -776,22 +817,43 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
 
       console.log(`🤖 [Chat IA] Prompt: "${prompt.substring(0, 100)}..."`);
 
-      const codCliente = filtros?.cod_cliente || null;
-      const centroCusto = filtros?.centro_custo || null;
+      // Suporte a múltiplos clientes e centros de custo
+      // cod_cliente pode ser: número, string, ou array de números/strings
+      // centro_custo pode ser: string ou array de strings
+      const rawCliente = filtros?.cod_cliente || null;
+      const rawCentro = filtros?.centro_custo || null;
       const dataInicio = filtros?.data_inicio || null;
       const dataFim = filtros?.data_fim || null;
       const nomeCliente = filtros?.nome_fantasia || null;
 
+      // Normalizar para arrays
+      const codClientes = rawCliente
+        ? (Array.isArray(rawCliente) ? rawCliente : [rawCliente]).map(c => parseInt(c)).filter(c => !isNaN(c))
+        : [];
+      const centrosCusto = rawCentro
+        ? (Array.isArray(rawCentro) ? rawCentro : [rawCentro]).filter(c => c && c.trim())
+        : [];
+
       let contextoFiltros = '';
       let filtroSQLObrigatorio = '';
-      if (codCliente) {
-        contextoFiltros += `\n🔹 CLIENTE: ${nomeCliente || 'cod ' + codCliente} (cod_cliente = ${parseInt(codCliente)})`;
-        filtroSQLObrigatorio += ` AND cod_cliente = ${parseInt(codCliente)}`;
+
+      if (codClientes.length === 1) {
+        contextoFiltros += `\n🔹 CLIENTE: ${nomeCliente || 'cod ' + codClientes[0]} (cod_cliente = ${codClientes[0]})`;
+        filtroSQLObrigatorio += ` AND cod_cliente = ${codClientes[0]}`;
+      } else if (codClientes.length > 1) {
+        const nomes = filtros?.nomes_clientes || codClientes.map(c => 'cod ' + c).join(', ');
+        contextoFiltros += `\n🔹 CLIENTES (${codClientes.length}): ${nomes}`;
+        filtroSQLObrigatorio += ` AND cod_cliente IN (${codClientes.join(',')})`;
       }
-      if (centroCusto) {
-        contextoFiltros += `\n🔹 CENTRO DE CUSTO: ${centroCusto}`;
-        filtroSQLObrigatorio += ` AND centro_custo = '${centroCusto.replace(/'/g, "''")}'`;
+
+      if (centrosCusto.length === 1) {
+        contextoFiltros += `\n🔹 CENTRO DE CUSTO: ${centrosCusto[0]}`;
+        filtroSQLObrigatorio += ` AND centro_custo = '${centrosCusto[0].replace(/'/g, "''")}'`;
+      } else if (centrosCusto.length > 1) {
+        contextoFiltros += `\n🔹 CENTROS DE CUSTO (${centrosCusto.length}): ${centrosCusto.join(', ')}`;
+        filtroSQLObrigatorio += ` AND centro_custo IN (${centrosCusto.map(c => `'${c.replace(/'/g, "''")}'`).join(',')})`;
       }
+
       if (dataInicio && dataFim) {
         contextoFiltros += `\n🔹 PERÍODO: ${dataInicio} até ${dataFim}`;
         filtroSQLObrigatorio += ` AND data_solicitado BETWEEN '${dataInicio}' AND '${dataFim}'`;
@@ -1007,10 +1069,25 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
         ORDER BY nome_fantasia
       `);
       const centrosCusto = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`);
-      const codCliente = req.query.cod_cliente;
+
+      // Suporte a múltiplos clientes: ?cod_cliente=767&cod_cliente=949 ou ?cod_cliente=767,949
+      let rawCodCliente = req.query.cod_cliente;
+      let codClientes = [];
+      if (rawCodCliente) {
+        if (Array.isArray(rawCodCliente)) {
+          codClientes = rawCodCliente.map(c => parseInt(c)).filter(c => !isNaN(c));
+        } else {
+          codClientes = String(rawCodCliente).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+        }
+      }
+
       let centrosDoCliente = [];
-      if (codCliente) {
-        const r = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`, [parseInt(codCliente)]);
+      if (codClientes.length > 0) {
+        const placeholders = codClientes.map((_, i) => `$${i + 1}`).join(', ');
+        const r = await pool.query(
+          `SELECT DISTINCT centro_custo FROM bi_entregas WHERE cod_cliente IN (${placeholders}) AND centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`,
+          codClientes
+        );
         centrosDoCliente = r.rows.map(r => r.centro_custo);
       }
       res.json({ clientes: clientes.rows, centros_custo: centrosCusto.rows.map(r => r.centro_custo), centros_do_cliente: centrosDoCliente });
