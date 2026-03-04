@@ -197,7 +197,6 @@ function createChatIaRoutes(pool) {
 
     // Garantir filtro de entregas (não coletas) — se não está no CTE principal
     if (!upper.includes('COALESCE(PONTO') && !upper.includes('PONTO >= 2') && !upper.includes('PONTO > 1')) {
-      // Só injetar se a query opera sobre bi_entregas diretamente (não em sub-CTEs)
       if (upper.includes('BI_ENTREGAS') && upper.includes('WHERE')) {
         resultado = resultado.replace(/WHERE\s/i, 'WHERE COALESCE(ponto, 1) >= 2 AND ');
         console.log('🔧 [Chat IA] Pós-validação: injetado filtro COALESCE(ponto, 1) >= 2');
@@ -209,6 +208,14 @@ function createChatIaRoutes(pool) {
       resultado += ' LIMIT 200';
       console.log('🔧 [Chat IA] Pós-validação: injetado LIMIT 200');
     }
+
+    // Corrigir divisões sem NULLIF (divisão por zero)
+    // Padrão: / expressão) * 100  →  / NULLIF(expressão, 0)) * 100
+    resultado = resultado.replace(/\/\s*(\w+\.\w+)\)\s*\*\s*100/g, (match, col) => {
+      if (match.includes('NULLIF')) return match; // já tem proteção
+      console.log(`🔧 [Chat IA] Pós-validação: protegendo divisão por zero em ${col}`);
+      return `/ NULLIF(${col}, 0)) * 100`;
+    });
 
     // Garantir filtros obrigatórios da conversa (cliente, período)
     if (filtroSQLObrigatorio) {
@@ -714,6 +721,9 @@ ${dicionario}
 5. Inclua SEMPRE motos por dia (COUNT(DISTINCT cod_prof)) em evolução por dia.
 6. NUNCA invente nomes de tabela. Use APENAS as tabelas listadas no SCHEMA acima.
 7. NUNCA traduza palavras-chave SQL para português. Use SELECT, WITH, AS, FROM, WHERE, etc.
+8. SEMPRE proteja divisões com NULLIF: use / NULLIF(x, 0) para evitar divisão por zero.
+9. NUNCA use SUM(CASE WHEN bool = TRUE THEN 1 ELSE 0 END) — use COUNT(*) FILTER (WHERE bool = true) que é mais limpo.
+10. Para taxa de prazo use SEMPRE: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
 
 REGRAS:
 1. SEMPRE gere SQL executável. NUNCA responda sem SQL.
