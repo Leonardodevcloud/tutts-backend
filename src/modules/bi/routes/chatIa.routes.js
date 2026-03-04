@@ -1,15 +1,10 @@
 /**
  * BI Sub-Router: Chat IA com acesso ao banco de dados
- * Permite prompts livres — Gemini gera SQL, executa e analisa os resultados
- * 
- * v2.0 — Melhorias de assertividade:
- *  1. Classificador de intenção (etapa 0) — prompts menores e focados
- *  2. Detecção semântica de perguntas conceituais (sem lista estática)
- *  3. Pós-validação automática de SQL (filtros obrigatórios)
- *  4. Amostras de valores distintos no prompt (ocorrências, status, etc)
- *  5. Prompt de análise dinâmico por categoria
- *  6. Retry inteligente com contexto do prompt original (até 3 tentativas)
- *  7. Cache de queries semelhantes (10 min TTL)
+ * v3.0 — Arquitetura Data-First:
+ *  - Etapa 0: Classificar intenção (Gemini Flash rápido)
+ *  - Etapa 1: Buscar dados DIRETO das tabelas de resumo (queries fixas, sem Gemini)
+ *  - Etapa 2: Gemini só ANALISA os dados e responde em linguagem natural
+ *  - Fallback: Se nenhum template casar, aí sim gera SQL pelo Gemini
  */
 const express = require('express');
 
@@ -18,16 +13,13 @@ function createChatIaRoutes(pool) {
 
   // ==================== CACHES ====================
   let schemaCache = { data: null, timestamp: 0 };
-  const SCHEMA_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
-
+  const SCHEMA_CACHE_TTL = 5 * 60 * 1000;
   let samplesCache = { data: null, timestamp: 0 };
-  const SAMPLES_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+  const SAMPLES_CACHE_TTL = 30 * 60 * 1000;
+  const queryResponseCache = new Map();
+  const QUERY_CACHE_TTL = 10 * 60 * 1000;
 
-  // Cache de queries por similaridade (melhoria 7)
-  const queryCache = new Map();
-  const QUERY_CACHE_TTL = 10 * 60 * 1000; // 10 minutos
-
-  // Tabelas permitidas para consulta (segurança)
+  // ==================== TABELAS PERMITIDAS ====================
   const TABELAS_PERMITIDAS = [
     'bi_entregas', 'bi_upload_historico', 'bi_relatorios_ia',
     'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_prazo_padrao',
@@ -61,73 +53,23 @@ function createChatIaRoutes(pool) {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   }
 
-  // ==================== MELHORIA 5: Amostras de valores distintos ====================
-  async function getSamples() {
-    if (samplesCache.data && Date.now() - samplesCache.timestamp < SAMPLES_CACHE_TTL) {
-      return samplesCache.data;
-    }
-    const samples = {};
-    try {
-      const [oc, st, cat, datas] = await Promise.all([
-        pool.query(`SELECT DISTINCT ocorrencia, COUNT(*)::int as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 20`),
-        pool.query(`SELECT DISTINCT status, COUNT(*)::int as qtd FROM bi_entregas WHERE status IS NOT NULL AND status != '' GROUP BY status ORDER BY qtd DESC LIMIT 15`),
-        pool.query(`SELECT DISTINCT categoria, COUNT(*)::int as qtd FROM bi_entregas WHERE categoria IS NOT NULL AND categoria != '' GROUP BY categoria ORDER BY qtd DESC LIMIT 10`),
-        pool.query(`SELECT MIN(data_solicitado) as min_data, MAX(data_solicitado) as max_data, COUNT(DISTINCT data_solicitado)::int as dias FROM bi_entregas`)
-      ]);
-      samples.ocorrencias = oc.rows;
-      samples.status = st.rows;
-      samples.categorias = cat.rows;
-      samples.periodo = datas.rows[0];
-    } catch (e) {
-      console.error('⚠️ [Chat IA] Erro ao buscar amostras:', e.message);
-    }
-    samplesCache = { data: samples, timestamp: Date.now() };
-    return samples;
-  }
-
-  function formatarSamples(samples) {
-    if (!samples) return '';
-    let texto = '\n═══════════════════════════════════════\n📊 VALORES REAIS NO BANCO (use para filtrar corretamente)\n═══════════════════════════════════════\n';
-    if (samples.ocorrencias?.length) {
-      texto += `\nValores de ocorrencia: ${samples.ocorrencias.map(o => `"${o.ocorrencia}" (${o.qtd}x)`).join(', ')}\n`;
-    }
-    if (samples.status?.length) {
-      texto += `Valores de status: ${samples.status.map(s => `"${s.status}" (${s.qtd}x)`).join(', ')}\n`;
-    }
-    if (samples.categorias?.length) {
-      texto += `Valores de categoria: ${samples.categorias.map(c => `"${c.categoria}" (${c.qtd}x)`).join(', ')}\n`;
-    }
-    if (samples.periodo) {
-      texto += `Período disponível: ${samples.periodo.min_data} até ${samples.periodo.max_data} (${samples.periodo.dias} dias)\n`;
-    }
-    return texto;
-  }
-
-  // ==================== SCHEMA ====================
+  // ==================== SCHEMA + SAMPLES ====================
   async function getSchema() {
-    if (schemaCache.data && Date.now() - schemaCache.timestamp < SCHEMA_CACHE_TTL) {
-      return schemaCache.data;
-    }
+    if (schemaCache.data && Date.now() - schemaCache.timestamp < SCHEMA_CACHE_TTL) return schemaCache.data;
     const result = await pool.query(`
       SELECT table_name, column_name, data_type, is_nullable
-      FROM information_schema.columns 
-      WHERE table_schema = 'public' AND table_name = ANY($1)
+      FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ANY($1)
       ORDER BY table_name, ordinal_position
     `, [TABELAS_PERMITIDAS]);
-
     const schema = {};
     for (const row of result.rows) {
       if (!schema[row.table_name]) schema[row.table_name] = [];
-      schema[row.table_name].push({
-        coluna: row.column_name,
-        tipo: row.data_type,
-        nullable: row.is_nullable === 'YES'
-      });
+      schema[row.table_name].push({ coluna: row.column_name, tipo: row.data_type, nullable: row.is_nullable === 'YES' });
     }
     for (const tabela of Object.keys(schema)) {
       try {
-        const countResult = await pool.query(`SELECT reltuples::bigint AS count FROM pg_class WHERE relname = $1`, [tabela]);
-        schema[tabela].count = parseInt(countResult.rows[0]?.count) || 0;
+        const c = await pool.query(`SELECT reltuples::bigint AS count FROM pg_class WHERE relname = $1`, [tabela]);
+        schema[tabela].count = parseInt(c.rows[0]?.count) || 0;
       } catch (e) { schema[tabela].count = '?'; }
     }
     schemaCache = { data: schema, timestamp: Date.now() };
@@ -140,650 +82,531 @@ function createChatIaRoutes(pool) {
       const count = colunas.count !== undefined ? ` (~${colunas.count} registros)` : '';
       texto += `\n📋 ${tabela}${count}:\n`;
       const cols = Array.isArray(colunas) ? colunas : [];
-      for (const col of cols) {
-        texto += `  - ${col.coluna} (${col.tipo}${col.nullable ? ', nullable' : ''})\n`;
-      }
+      for (const col of cols) texto += `  - ${col.coluna} (${col.tipo}${col.nullable ? ', nullable' : ''})\n`;
     }
     return texto;
   }
 
-  // ==================== VALIDAÇÃO SQL ====================
+  async function getSamples() {
+    if (samplesCache.data && Date.now() - samplesCache.timestamp < SAMPLES_CACHE_TTL) return samplesCache.data;
+    const samples = {};
+    try {
+      const [oc, st, cat, datas] = await Promise.all([
+        pool.query(`SELECT DISTINCT ocorrencia, COUNT(*)::int as qtd FROM bi_entregas WHERE ocorrencia IS NOT NULL AND ocorrencia != '' GROUP BY ocorrencia ORDER BY qtd DESC LIMIT 20`),
+        pool.query(`SELECT DISTINCT status, COUNT(*)::int as qtd FROM bi_entregas WHERE status IS NOT NULL AND status != '' GROUP BY status ORDER BY qtd DESC LIMIT 15`),
+        pool.query(`SELECT DISTINCT categoria, COUNT(*)::int as qtd FROM bi_entregas WHERE categoria IS NOT NULL AND categoria != '' GROUP BY categoria ORDER BY qtd DESC LIMIT 10`),
+        pool.query(`SELECT MIN(data_solicitado) as min_data, MAX(data_solicitado) as max_data, COUNT(DISTINCT data_solicitado)::int as dias FROM bi_entregas`)
+      ]);
+      samples.ocorrencias = oc.rows;
+      samples.status = st.rows;
+      samples.categorias = cat.rows;
+      samples.periodo = datas.rows[0];
+    } catch (e) { console.error('⚠️ [Chat IA] Erro amostras:', e.message); }
+    samplesCache = { data: samples, timestamp: Date.now() };
+    return samples;
+  }
+
+  function formatarSamples(samples) {
+    if (!samples) return '';
+    let texto = '\n📊 VALORES REAIS NO BANCO:\n';
+    if (samples.ocorrencias?.length) texto += `Ocorrências: ${samples.ocorrencias.map(o => `"${o.ocorrencia}" (${o.qtd}x)`).join(', ')}\n`;
+    if (samples.status?.length) texto += `Status: ${samples.status.map(s => `"${s.status}" (${s.qtd}x)`).join(', ')}\n`;
+    if (samples.periodo) texto += `Período: ${samples.periodo.min_data} até ${samples.periodo.max_data} (${samples.periodo.dias} dias)\n`;
+    return texto;
+  }
+
+  // ==================== VALIDAÇÃO SQL (para fallback) ====================
   function validarSQL(sql) {
     let sqlLimpo = sql.trim().replace(/^```sql\n?/i, '').replace(/\n?```$/i, '').trim();
     let upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim();
-
     const proibidos = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'TRUNCATE', 'GRANT', 'REVOKE', 'EXEC', 'EXECUTE', 'COPY', 'VACUUM', 'REINDEX'];
     for (const cmd of proibidos) {
-      if (upper.startsWith(cmd + ' ') || upper.includes('; ' + cmd) || upper.includes(';' + cmd)) {
-        return { valido: false, erro: `Comando ${cmd} não é permitido. Apenas SELECT é autorizado.` };
-      }
+      if (upper.startsWith(cmd + ' ') || upper.includes('; ' + cmd) || upper.includes(';' + cmd))
+        return { valido: false, erro: `Comando ${cmd} não permitido.` };
     }
-
-    if (!upper.startsWith('SELECT') && !upper.startsWith('WITH')) {
-      return { valido: false, erro: 'Apenas queries SELECT ou WITH (CTE) são permitidas.' };
-    }
-
-    // Se houver múltiplas queries, pegar apenas a primeira
+    if (!upper.startsWith('SELECT') && !upper.startsWith('WITH'))
+      return { valido: false, erro: 'Apenas SELECT ou WITH permitidos.' };
     const semStrings = sqlLimpo.replace(/'[^']*'/g, '');
     if ((semStrings.match(/;/g) || []).length > 1) {
       const queries = sqlLimpo.split(/;\s*/).filter(q => q.trim().length > 0);
-      if (queries.length > 0) {
-        console.log(`⚠️ [Chat IA] Múltiplas queries detectadas (${queries.length}), usando apenas a primeira`);
-        sqlLimpo = queries[0].trim();
-        upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim();
-      }
+      if (queries.length > 0) { sqlLimpo = queries[0].trim(); upper = sqlLimpo.toUpperCase().replace(/\s+/g, ' ').trim(); }
     }
-
-    // Verificar tabelas permitidas
     const tabelasUsadas = upper.match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
       const tabela = match.replace(/^(FROM|JOIN)\s+/i, '').trim().toLowerCase();
       const posMatch = upper.indexOf(match.toUpperCase());
       const antes = upper.substring(Math.max(0, posMatch - 30), posMatch).trim();
-      const isExtract = /EXTRACT\s*\(\s*\w+\s*$/i.test(antes) || /\(\s*\w+\s*$/i.test(antes);
-      if (isExtract) continue;
-      if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'pg_class' && tabela !== 'generate_series') {
-        return { valido: false, erro: `Tabela "${tabela}" não está autorizada para consulta.` };
-      }
+      if (/EXTRACT\s*\(\s*\w+\s*$/i.test(antes) || /\(\s*\w+\s*$/i.test(antes)) continue;
+      if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'pg_class' && tabela !== 'generate_series')
+        return { valido: false, erro: `Tabela "${tabela}" não autorizada.` };
     }
-
     return { valido: true, sql: sqlLimpo };
   }
 
-  // ==================== MELHORIA 3: Pós-validação automática ====================
   function posValidarSQL(sql, filtroSQLObrigatorio) {
     let resultado = sql;
     const upper = resultado.toUpperCase();
-
-    // Garantir filtro de entregas (não coletas) — se não está no CTE principal
     if (!upper.includes('COALESCE(PONTO') && !upper.includes('PONTO >= 2') && !upper.includes('PONTO > 1')) {
       if (upper.includes('BI_ENTREGAS') && upper.includes('WHERE')) {
         resultado = resultado.replace(/WHERE\s/i, 'WHERE COALESCE(ponto, 1) >= 2 AND ');
-        console.log('🔧 [Chat IA] Pós-validação: injetado filtro COALESCE(ponto, 1) >= 2');
       }
     }
-
-    // Garantir LIMIT
-    if (!upper.includes('LIMIT')) {
-      resultado += ' LIMIT 200';
-      console.log('🔧 [Chat IA] Pós-validação: injetado LIMIT 200');
-    }
-
-    // Corrigir divisões sem NULLIF (divisão por zero)
-    // Padrão: / expressão) * 100  →  / NULLIF(expressão, 0)) * 100
+    if (!upper.includes('LIMIT')) resultado += ' LIMIT 200';
+    // Proteger divisão por zero
     resultado = resultado.replace(/\/\s*(\w+\.\w+)\)\s*\*\s*100/g, (match, col) => {
-      if (match.includes('NULLIF')) return match; // já tem proteção
-      console.log(`🔧 [Chat IA] Pós-validação: protegendo divisão por zero em ${col}`);
+      if (match.includes('NULLIF')) return match;
       return `/ NULLIF(${col}, 0)) * 100`;
     });
-
-    // Garantir filtros obrigatórios da conversa (cliente, período)
     if (filtroSQLObrigatorio) {
       const upperR = resultado.toUpperCase();
-      // Verificar se filtro de cliente está presente
       if (filtroSQLObrigatorio.includes('cod_cliente') && !upperR.includes('COD_CLIENTE')) {
-        if (upperR.includes('WHERE')) {
-          resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
-          console.log('🔧 [Chat IA] Pós-validação: injetados filtros obrigatórios da conversa');
-        }
+        if (upperR.includes('WHERE')) resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
       }
-      // Verificar se filtro de período está presente
       if (filtroSQLObrigatorio.includes('data_solicitado') && !upperR.includes('DATA_SOLICITADO')) {
-        if (upperR.includes('WHERE')) {
-          resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
-          console.log('🔧 [Chat IA] Pós-validação: injetado filtro de período');
-        }
+        if (upperR.includes('WHERE')) resultado = resultado.replace(/WHERE\s/i, `WHERE 1=1 ${filtroSQLObrigatorio} AND `);
       }
     }
-
     return resultado;
   }
 
-  // ==================== MELHORIA 7: Cache de queries ====================
+  // ==================== CACHE DE RESPOSTAS ====================
   function normalizarPergunta(prompt, filtros) {
-    const clean = prompt.toLowerCase()
-      .replace(/[?!.,;:'"]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return `${clean}|${filtros?.cod_cliente || ''}|${filtros?.centro_custo || ''}|${filtros?.data_inicio || ''}|${filtros?.data_fim || ''}`;
+    return `${prompt.toLowerCase().replace(/[?!.,;:'"]/g, '').replace(/\s+/g, ' ').trim()}|${filtros?.cod_cliente || ''}|${filtros?.centro_custo || ''}|${filtros?.data_inicio || ''}|${filtros?.data_fim || ''}`;
   }
 
   function limparCacheExpirado() {
     const agora = Date.now();
-    for (const [key, val] of queryCache.entries()) {
-      if (agora - val.timestamp > QUERY_CACHE_TTL) queryCache.delete(key);
+    for (const [key, val] of queryResponseCache.entries()) {
+      if (agora - val.timestamp > QUERY_CACHE_TTL) queryResponseCache.delete(key);
     }
   }
 
-  // ==================== MELHORIA 1: Classificador de intenção ====================
-  const CATEGORIAS = {
-    SQL_ENTREGAS: {
-      label: 'Entregas, prazos, clientes, profissionais, rankings, volumes',
-      tabelas: ['bi_entregas', 'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_resumo_cliente', 'bi_resumo_diario', 'bi_resumo_profissional'],
-      dicionario: 'ENTREGAS_COMPLETO'
-    },
-    SQL_FINANCEIRO: {
-      label: 'Faturamento, ticket médio, valores, garantido, custos, saques',
-      tabelas: ['bi_entregas', 'withdrawal_requests', 'gratuities'],
-      dicionario: 'FINANCEIRO'
-    },
-    SQL_RETORNO: {
-      label: 'Retornos, devoluções, ocorrências',
-      tabelas: ['bi_entregas'],
-      dicionario: 'RETORNO'
-    },
-    SQL_ATRASO: {
-      label: 'Atrasos, motivos de atraso, detratores, SLA',
-      tabelas: ['bi_entregas', 'bi_prazos_cliente'],
-      dicionario: 'ATRASO'
-    },
-    SQL_FROTA: {
-      label: 'Motos por dia, profissionais, dimensionamento, escala',
-      tabelas: ['bi_entregas', 'disponibilidade_linhas', 'disponibilidade_lojas'],
-      dicionario: 'FROTA'
-    },
-    SQL_COMPARATIVO: {
-      label: 'Comparações entre clientes, períodos, mercado',
-      tabelas: ['bi_entregas', 'bi_resumo_cliente', 'cs_clientes'],
-      dicionario: 'COMPARATIVO'
-    },
-    SQL_CS: {
-      label: 'Customer Success, health score, interações, ocorrências CS',
-      tabelas: ['cs_clientes', 'cs_interacoes', 'cs_ocorrencias', 'bi_entregas'],
-      dicionario: 'CS'
-    },
-    CONCEITUAL: {
-      label: 'Explicações, definições, como funciona, o que significa'
-    },
-    SAUDACAO: {
-      label: 'Cumprimentos, saudações, agradecimentos'
-    }
-  };
-
+  // ==================== ETAPA 0: CLASSIFICADOR DE INTENÇÃO ====================
   async function classificarIntencao(prompt, apiKey) {
-    const classificadorPrompt = `Classifique a pergunta abaixo em EXATAMENTE UMA categoria. Responda APENAS com o nome da categoria, nada mais.
+    const p = `Classifique a pergunta em EXATAMENTE UMA categoria. Responda APENAS o nome da categoria.
 
 CATEGORIAS:
-- SQL_ENTREGAS: perguntas sobre entregas, prazos, profissionais, rankings, volumes, top motoboys, cidades, bairros, evolução diária, horário de pico, resumo de performance de UM cliente, visão geral, panorama
-- SQL_FINANCEIRO: perguntas sobre faturamento, ticket médio, valores, garantido, custos, saques, receita, margem, lucro, variação de demanda
-- SQL_RETORNO: perguntas sobre retornos, devoluções, ocorrências de retorno, cliente fechado, cliente ausente, taxa de retorno
-- SQL_ATRASO: perguntas sobre atrasos, motivos de atraso, detratores, SLA, coleta lenta, associado tarde, direcionamento lento, atraso do motoboy, fora do prazo, taxa de prazo
-- SQL_FROTA: perguntas sobre motos por dia, quantidade de profissionais, dimensionamento, escala, frota, quantos motoboys
-- SQL_COMPARATIVO: perguntas que COMPARAM MÚLTIPLOS clientes entre si, períodos entre si, comparar com mercado/média geral, ranking de vários clientes, versus
-- SQL_CS: perguntas sobre customer success, health score, interações CS, ocorrências CS, NPS
-- CONCEITUAL: perguntas sobre o que significa algo, como funciona, explicações de conceitos, definições, o que é, o que considera, me explique
-- SAUDACAO: cumprimentos ("oi", "olá", "bom dia", "tudo bem", "obrigado")
+- RESUMO_CLIENTE: resumo, performance, como está, panorama, visão geral de UM cliente
+- RESUMO_GERAL: resumo geral, como estamos, panorama geral, performance geral (sem cliente específico)
+- EVOLUCAO_DIARIA: evolução por dia, dia a dia, tendência, entregas por dia
+- TOP_PROFISSIONAIS: top motoboys, ranking profissionais, melhores profissionais, piores profissionais, detratores
+- TOP_CLIENTES: ranking clientes, maiores clientes, top clientes por volume
+- PRAZO_PROFISSIONAL: prazo dos motoboys, dentro e fora do prazo por profissional, taxa de prazo profissional
+- ATRASO_MOTIVOS: motivos de atraso, por que atrasou, causas de atraso, detratores de prazo, coleta lenta, associado tarde
+- RETORNOS: retornos, devoluções, taxa de retorno, cliente fechado, cliente ausente
+- FINANCEIRO: faturamento, ticket médio, valores, custos, garantido, receita
+- COMPARATIVO: comparar clientes entre si, comparar com mercado, comparar períodos
+- FROTA: motos por dia, quantos motoboys, dimensionamento, frota
+- HORARIO_PICO: horário de pico, hora com mais entregas, distribuição por hora
+- BAIRRO_CIDADE: entregas por bairro, por cidade, por região, mapa
+- CONCEITUAL: o que significa, como funciona, me explique, o que é, o que considera
+- SAUDACAO: oi, olá, bom dia, obrigado
+- AD_HOC: qualquer outra pergunta que não se encaixa acima
 
-REGRA: Se a pergunta é sobre UM cliente específico (resumo, performance, como está), use SQL_ENTREGAS. SQL_COMPARATIVO é só quando compara MÚLTIPLOS clientes ou com média geral.
+REGRA: Se a pergunta é sobre UM cliente e pede resumo/performance → RESUMO_CLIENTE. Se pede ranking/comparação → outro.
 
 PERGUNTA: "${prompt}"
 
 CATEGORIA:`;
-
     try {
-      const resp = await chamarGemini(apiKey, classificadorPrompt, { temperature: 0.1, maxTokens: 50 });
-      const categoria = resp.trim().replace(/[^A-Z_]/g, '');
-      if (CATEGORIAS[categoria]) {
-        console.log(`🏷️ [Chat IA] Categoria: ${categoria}`);
-        return categoria;
-      }
-      // Fallback: tentar extrair do texto
-      for (const cat of Object.keys(CATEGORIAS)) {
-        if (resp.toUpperCase().includes(cat)) {
-          console.log(`🏷️ [Chat IA] Categoria (fallback): ${cat}`);
-          return cat;
-        }
-      }
-    } catch (e) {
-      console.error('⚠️ [Chat IA] Erro classificador:', e.message);
-    }
-    // Fallback seguro
-    console.log('🏷️ [Chat IA] Categoria: SQL_ENTREGAS (fallback padrão)');
-    return 'SQL_ENTREGAS';
+      const resp = await chamarGemini(apiKey, p, { temperature: 0.1, maxTokens: 50 });
+      const cat = resp.trim().replace(/[^A-Z_]/g, '');
+      const validas = ['RESUMO_CLIENTE','RESUMO_GERAL','EVOLUCAO_DIARIA','TOP_PROFISSIONAIS','TOP_CLIENTES',
+        'PRAZO_PROFISSIONAL','ATRASO_MOTIVOS','RETORNOS','FINANCEIRO','COMPARATIVO','FROTA',
+        'HORARIO_PICO','BAIRRO_CIDADE','CONCEITUAL','SAUDACAO','AD_HOC'];
+      if (validas.includes(cat)) { console.log(`🏷️ [Chat IA] Categoria: ${cat}`); return cat; }
+      for (const v of validas) { if (resp.toUpperCase().includes(v)) { console.log(`🏷️ [Chat IA] Categoria (fallback): ${v}`); return v; } }
+    } catch (e) { console.error('⚠️ [Chat IA] Erro classificador:', e.message); }
+    console.log('🏷️ [Chat IA] Categoria: AD_HOC (fallback)');
+    return 'AD_HOC';
   }
 
-  // ==================== DICIONÁRIOS POR CATEGORIA (Melhoria 1 — prompts focados) ====================
-  const DICIONARIO_BASE = `Tabela principal: bi_entregas. Cada linha = um PONTO de uma OS.
-Uma OS pode ter vários pontos: ponto 1 = COLETA, ponto 2+ = ENTREGAS.
+  // ==================== ETAPA 1: QUERIES DIRETAS (sem Gemini) ====================
+  function montarFiltroSQL(codCliente, centroCusto, dataInicio, dataFim) {
+    const conditions = [];
+    const params = [];
+    let idx = 1;
+    if (codCliente) { conditions.push(`cod_cliente = $${idx++}`); params.push(parseInt(codCliente)); }
+    if (centroCusto) { conditions.push(`centro_custo = $${idx++}`); params.push(centroCusto); }
+    if (dataInicio && dataFim) { conditions.push(`data_solicitado BETWEEN $${idx++} AND $${idx++}`); params.push(dataInicio, dataFim); }
+    return { where: conditions.length ? 'WHERE ' + conditions.join(' AND ') : '', params };
+  }
 
-COLUNAS ESSENCIAIS:
-- os (INT): número da Ordem de Serviço
-- ponto (INT): 1=coleta, 2+=entregas. SEMPRE filtrar: WHERE COALESCE(ponto, 1) >= 2
-- cod_cliente (INT), nome_fantasia (VARCHAR): cliente (USE nome_fantasia para exibição)
-- centro_custo (VARCHAR): filial/unidade do cliente
-- cod_prof (INT), nome_prof (VARCHAR): motoboy
-- data_solicitado (DATE): data da OS — USE PARA FILTRAR POR PERÍODO
-- data_hora (TIMESTAMP): timestamp da criação
-- data_hora_alocado (TIMESTAMP): quando o motoboy foi alocado
-- hora_chegada (TIME), hora_saida (TIME): chegada/saída no ponto
-- finalizado (TIMESTAMP): quando a OS foi finalizada
-- valor (DECIMAL): valor BRUTO cobrado do cliente (R$). NÃO é faturamento líquido!
-- valor_prof (DECIMAL): valor pago ao motoboy (custo operacional)
-- ⚠️ FATURAMENTO LÍQUIDO = SUM(valor) - SUM(valor_prof). NUNCA use SUM(valor) sozinho como "faturamento líquido".
-- ⚠️ SUM(valor) = receita bruta / valor total cobrado. SUM(valor_prof) = custo com profissionais.
-- distancia (DECIMAL): distância em KM
-- tempo_execucao_minutos (INT): tempo real em minutos
-- dentro_prazo (BOOLEAN): se cumpriu SLA
-- prazo_minutos (INT): prazo SLA do cliente
-- dentro_prazo_prof (BOOLEAN): se o profissional cumpriu prazo dele
-- ocorrencia (VARCHAR): tipo de ocorrência no ponto
-- status (VARCHAR): status da OS
-- bairro, cidade, estado (VARCHAR): localização
-- latitude, longitude (DECIMAL): GPS`;
+  // Cada template retorna { rows, colunas, sql_descricao }
+  const TEMPLATES = {
+    RESUMO_CLIENTE: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT
+        COUNT(*) as total_entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_min,
+        COUNT(DISTINCT cod_prof) as total_motos,
+        COUNT(DISTINCT data_solicitado) as dias_operados,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT data_solicitado), 0), 1) as media_entregas_dia,
+        ROUND(SUM(valor)::numeric, 2) as receita_bruta,
+        ROUND(SUM(valor_prof)::numeric, 2) as custo_profissionais,
+        ROUND((SUM(valor) - COALESCE(SUM(valor_prof), 0))::numeric, 2) as faturamento_liquido,
+        ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') as retornos,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno,
+        ROUND(SUM(distancia)::numeric, 1) as km_total,
+        ROUND(AVG(distancia)::numeric, 1) as km_medio
+      FROM bi_entregas ${entregas_where}`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Resumo completo do cliente (query direta)' };
+    },
 
-  const DICIONARIOS_ESPECIFICOS = {
-    ENTREGAS_COMPLETO: `${DICIONARIO_BASE}
+    RESUMO_GERAL: async (filtros) => {
+      const { where, params } = montarFiltroSQL(null, null, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT
+        COUNT(*) as total_entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_min,
+        COUNT(DISTINCT cod_prof) as total_motos,
+        COUNT(DISTINCT cod_cliente) as total_clientes,
+        COUNT(DISTINCT data_solicitado) as dias_operados,
+        ROUND(SUM(valor)::numeric, 2) as receita_bruta,
+        ROUND((SUM(valor) - COALESCE(SUM(valor_prof), 0))::numeric, 2) as faturamento_liquido,
+        ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%') as retornos,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
+      FROM bi_entregas ${entregas_where}`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Resumo geral (query direta)' };
+    },
 
-FÓRMULAS:
-- Total Entregas: COUNT(*) WHERE COALESCE(ponto, 1) >= 2
-- Taxa Prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-- Tempo Médio: ROUND(AVG(tempo_execucao_minutos)::numeric, 2)
-- Receita Bruta: SUM(valor) — total cobrado do cliente
-- Custo Profissionais: SUM(valor_prof) — total pago aos motoboys
-- Faturamento Líquido: SUM(valor) - SUM(valor_prof) — SEMPRE calcular assim, NUNCA usar SUM(valor) sozinho
-- KM Total: SUM(distancia)
-- Motos por dia: COUNT(DISTINCT cod_prof) por data_solicitado
+    EVOLUCAO_DIARIA: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT data_solicitado as dia, COUNT(*) as entregas, COUNT(DISTINCT cod_prof) as motos,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as receita,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%') as retornos
+      FROM bi_entregas ${entregas_where} GROUP BY data_solicitado ORDER BY data_solicitado LIMIT 60`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Evolução diária (query direta)' };
+    },
 
-RECEITAS SQL:
--- Horário de pico:
-SELECT EXTRACT(HOUR FROM data_hora) AS hora, COUNT(*) AS total FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY total DESC
+    TOP_PROFISSIONAIS: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT cod_prof, nome_prof, COUNT(*) as entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
+        COUNT(DISTINCT data_solicitado) as dias_rodou,
+        ROUND(SUM(distancia)::numeric, 1) as km_total
+      FROM bi_entregas ${entregas_where} AND cod_prof IS NOT NULL
+      GROUP BY cod_prof, nome_prof HAVING COUNT(*) >= 5 ORDER BY entregas DESC LIMIT 20`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Top profissionais (query direta)' };
+    },
 
--- Evolução diária (SEMPRE inclua motos):
-SELECT data_solicitado, COUNT(*) AS entregas, COUNT(DISTINCT cod_prof) as motos, ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY data_solicitado ORDER BY data_solicitado
+    TOP_CLIENTES: async (filtros) => {
+      const { where, params } = montarFiltroSQL(null, null, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
+        ROUND(SUM(valor)::numeric, 2) as receita,
+        COUNT(DISTINCT cod_prof) as motos
+      FROM bi_entregas ${entregas_where}
+      GROUP BY cod_cliente, nome_fantasia ORDER BY entregas DESC LIMIT 20`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Top clientes por volume (query direta)' };
+    },
 
--- Resumo de performance (quando pedirem "resumo", "performance", "como está", "panorama"):
-SELECT COUNT(*) as total_entregas,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
-  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_min,
-  COUNT(DISTINCT cod_prof) as total_motos,
-  ROUND(SUM(valor)::numeric, 2) as receita_bruta,
-  ROUND(SUM(valor_prof)::numeric, 2) as custo_profissionais,
-  ROUND((SUM(valor) - SUM(valor_prof))::numeric, 2) as faturamento_liquido,
-  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
-  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') as retornos,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 LIMIT 1`,
+    PRAZO_PROFISSIONAL: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT cod_prof, nome_prof, COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE dentro_prazo = true) as no_prazo,
+        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
+      FROM bi_entregas ${entregas_where} AND cod_prof IS NOT NULL
+      GROUP BY cod_prof, nome_prof ORDER BY total_entregas DESC LIMIT 30`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Prazo por profissional (query direta)' };
+    },
 
-    FINANCEIRO: `${DICIONARIO_BASE}
+    ATRASO_MOTIVOS: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `WITH atrasos AS (
+        SELECT os, cod_prof, nome_prof,
+          EXTRACT(EPOCH FROM (finalizado - data_hora))/60 as sla_total,
+          EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 as tempo_alocacao,
+          tempo_execucao_minutos
+        FROM bi_entregas ${entregas_where} AND dentro_prazo = false AND finalizado IS NOT NULL AND data_hora IS NOT NULL
+      )
+      SELECT CASE
+          WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
+          WHEN sla_total > 600 THEN 'OS não encerrada'
+          WHEN tempo_alocacao > 30 THEN 'Associado tarde'
+          WHEN tempo_execucao_minutos > 0 AND sla_total > 0 AND (sla_total - tempo_alocacao - tempo_execucao_minutos) > 45 THEN 'Coleta lenta'
+          ELSE 'Atraso do motoboy'
+        END as motivo,
+        COUNT(*) as quantidade,
+        ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
+      FROM atrasos GROUP BY motivo ORDER BY quantidade DESC`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Motivos de atraso (query direta)' };
+    },
 
-COLUNAS FINANCEIRAS:
-- valor (DECIMAL): valor BRUTO cobrado do cliente. NÃO é faturamento líquido!
-- valor_prof (DECIMAL): valor pago ao motoboy (custo operacional)
-- FATURAMENTO LÍQUIDO = SUM(valor) - SUM(valor_prof). SEMPRE calcular assim.
-- RECEITA BRUTA = SUM(valor) (total cobrado do cliente)
-- CUSTO PROFISSIONAIS = SUM(valor_prof) (total pago aos motoboys)
-- Ticket Médio = SUM(valor) / NULLIF(COUNT(*), 0)
+    RETORNOS: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT
+        COUNT(*) as total_entregas,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%') as cliente_fechado,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%') as cliente_ausente,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%loja fechada%') as loja_fechada,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%produto incorreto%') as produto_incorreto,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%') as retorno_generico,
+        COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') as total_retornos,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
+      FROM bi_entregas ${entregas_where}`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Análise de retornos (query direta)' };
+    },
 
-⚠️ REGRA ABSOLUTA: Quando o usuário pedir "faturamento líquido" ou "faturamento", SEMPRE calcule SUM(valor) - SUM(valor_prof). NUNCA retorne SUM(valor) como faturamento líquido.
+    FINANCEIRO: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT
+        COUNT(*) as total_entregas,
+        ROUND(SUM(valor)::numeric, 2) as receita_bruta,
+        ROUND(SUM(valor_prof)::numeric, 2) as custo_profissionais,
+        ROUND((SUM(valor) - COALESCE(SUM(valor_prof), 0))::numeric, 2) as faturamento_liquido,
+        ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+        ROUND(SUM(valor_prof)::numeric / NULLIF(COUNT(*), 0), 2) as custo_medio_por_entrega,
+        ROUND(SUM(distancia)::numeric, 1) as km_total,
+        ROUND(SUM(valor)::numeric / NULLIF(SUM(distancia)::numeric, 0), 2) as receita_por_km
+      FROM bi_entregas ${entregas_where}`;
+      const result = await pool.query(sql, params);
+      // Buscar garantido se houver filtro de cliente
+      let garantidoRows = [];
+      if (filtros.cod_cliente) {
+        try {
+          const gParams = [filtros.cod_cliente];
+          let gWhere = 'WHERE cod_cliente = $1';
+          let idx = 2;
+          if (filtros.data_inicio && filtros.data_fim) { gWhere += ` AND data BETWEEN $${idx++} AND $${idx++}`; gParams.push(filtros.data_inicio, filtros.data_fim); }
+          const g = await pool.query(`SELECT SUM(complemento)::numeric as custo_garantido, SUM(valor_negociado)::numeric as total_negociado, COUNT(*) as registros FROM bi_garantido_cache ${gWhere}`, gParams);
+          garantidoRows = g.rows;
+        } catch (e) { /* tabela pode não existir ainda */ }
+      }
+      return { rows: [...result.rows, ...(garantidoRows.length && garantidoRows[0].registros > 0 ? [{ _tipo: 'garantido', ...garantidoRows[0] }] : [])], sql_descricao: 'Análise financeira (query direta)' };
+    },
 
-TABELA bi_garantido_cache: dados de mínimo garantido (sincronizados da planilha)
-- cod_cliente (VARCHAR): código do cliente que contratou o garantido
-- data (DATE): data do garantido
-- cod_prof (VARCHAR): código do profissional
-- profissional (VARCHAR): nome do profissional
-- valor_negociado (DECIMAL): valor diário garantido ao motoboy
-- valor_produzido (DECIMAL): quanto o motoboy produziu naquele dia
-- complemento (DECIMAL): diferença que a Tutts paga (valor_negociado - valor_produzido, mín 0). ESTE É O CUSTO COM GARANTIDO.
-- status (VARCHAR): 'nao_rodou' (não trabalhou), 'abaixo' (produziu menos que o garantido), 'acima' (produziu mais)
-- entregas (INTEGER): quantas entregas fez no dia
+    COMPARATIVO: async (filtros) => {
+      const { where, params } = montarFiltroSQL(null, null, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `WITH media_geral AS (
+        SELECT
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_geral,
+          ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_geral,
+          ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_geral
+        FROM bi_entregas ${entregas_where}
+      )
+      SELECT e.cod_cliente, e.nome_fantasia, COUNT(*) as entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE e.dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE e.dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+        mg.taxa_prazo_geral,
+        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 1) as tempo_medio, mg.tempo_medio_geral,
+        ROUND(SUM(e.valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio, mg.ticket_medio_geral
+      FROM bi_entregas e, media_geral mg ${entregas_where ? entregas_where.replace('WHERE', 'WHERE COALESCE(e.ponto, 1) >= 2 AND') : 'WHERE COALESCE(e.ponto, 1) >= 2'}
+      GROUP BY e.cod_cliente, e.nome_fantasia, mg.taxa_prazo_geral, mg.tempo_medio_geral, mg.ticket_medio_geral
+      ORDER BY entregas DESC LIMIT 20`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Comparativo clientes vs média geral (query direta)' };
+    },
 
-⚠️ IMPORTANTE: O "custo com garantido" de um cliente = SUM(complemento) da tabela bi_garantido_cache filtrado por cod_cliente.
-- Quando status='nao_rodou', o complemento é o valor_negociado inteiro (a Tutts paga mesmo sem produção).
-- Quando status='abaixo', o complemento é a diferença.
-- Quando status='acima', o complemento é 0 (motoboy produziu mais que o garantido).
+    FROTA: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT data_solicitado as dia, COUNT(*) as entregas,
+        COUNT(DISTINCT cod_prof) as motos,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 1) as entregas_por_moto
+      FROM bi_entregas ${entregas_where} GROUP BY data_solicitado ORDER BY data_solicitado LIMIT 60`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Frota por dia (query direta)' };
+    },
 
-TABELA withdrawal_requests: saques dos motoboys (NÃO é garantido)
-- cod_prof, valor, status ('aguardando_aprovacao', 'aprovado', 'rejeitado', 'aprovado_gratuidade'), created_at
+    HORARIO_PICO: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT EXTRACT(HOUR FROM data_hora) as hora, COUNT(*) as entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo
+      FROM bi_entregas ${entregas_where} AND data_hora IS NOT NULL
+      GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Distribuição por hora (query direta)' };
+    },
 
-RECEITAS SQL:
--- Custo com garantido por cliente:
-SELECT cod_cliente, SUM(complemento) as custo_garantido, SUM(valor_negociado) as total_negociado,
-  COUNT(*) as dias_garantido, COUNT(*) FILTER (WHERE status = 'nao_rodou') as dias_nao_rodou,
-  COUNT(*) FILTER (WHERE status = 'abaixo') as dias_abaixo, COUNT(*) FILTER (WHERE status = 'acima') as dias_acima
-FROM bi_garantido_cache GROUP BY cod_cliente ORDER BY custo_garantido DESC LIMIT 20
-
--- Custo garantido vs faturamento por cliente:
-WITH garantido AS (
-  SELECT cod_cliente::int as cod_cliente, SUM(complemento) as custo_garantido
-  FROM bi_garantido_cache GROUP BY cod_cliente
-), faturamento AS (
-  SELECT cod_cliente, nome_fantasia, SUM(valor) as faturamento, COUNT(*) as entregas
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY cod_cliente, nome_fantasia
-)
-SELECT f.cod_cliente, f.nome_fantasia, f.faturamento, f.entregas,
-  COALESCE(g.custo_garantido, 0) as custo_garantido,
-  CASE WHEN f.faturamento > 0 THEN ROUND(100.0 * COALESCE(g.custo_garantido, 0) / f.faturamento, 2) ELSE 0 END as pct_garantido_sobre_fat
-FROM faturamento f LEFT JOIN garantido g ON f.cod_cliente = g.cod_cliente
-ORDER BY custo_garantido DESC NULLS LAST LIMIT 20
-
--- Ticket médio por cliente com variação semanal:
-WITH semana_atual AS (
-  SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio, SUM(valor) as faturamento
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_solicitado BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE
-  GROUP BY cod_cliente, nome_fantasia
-), semana_anterior AS (
-  SELECT cod_cliente, COUNT(*) as entregas_ant,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_ant
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND data_solicitado BETWEEN CURRENT_DATE - 14 AND CURRENT_DATE - 8
-  GROUP BY cod_cliente
-)
-SELECT sa.*, COALESCE(san.entregas_ant, 0) as entregas_sem_anterior, COALESCE(san.ticket_medio_ant, 0) as ticket_medio_sem_anterior,
-  CASE WHEN COALESCE(san.ticket_medio_ant, 0) > 0 THEN ROUND(100.0 * (sa.ticket_medio - san.ticket_medio_ant) / san.ticket_medio_ant, 1) ELSE NULL END as variacao_ticket_pct,
-  CASE WHEN COALESCE(san.entregas_ant, 0) > 0 THEN ROUND(100.0 * (sa.entregas - san.entregas_ant)::numeric / san.entregas_ant, 1) ELSE NULL END as variacao_demanda_pct
-FROM semana_atual sa LEFT JOIN semana_anterior san ON sa.cod_cliente = san.cod_cliente ORDER BY sa.faturamento DESC LIMIT 30
-
-REGRAS FINANCEIRAS:
-- Ticket médio: informar variação %. Se variação > 5%, destacar valor anterior.
-- Variação de demanda: Se > 5%, informar valor anterior e variação.
-- Mínimo garantido: usar tabela bi_garantido_cache. Custo = SUM(complemento). Comparar com faturamento.
-- NUNCA usar withdrawal_requests para calcular custo com garantido.`,
-
-    RETORNO: `${DICIONARIO_BASE}
-
-OCORRÊNCIAS DE RETORNO (filtrar com LOWER):
-- 'cliente fechado' | 'clienteaus' | 'cliente ausente' | 'loja fechada' | 'produto incorreto' | 'retorno'
-
-REFERÊNCIA DE TAXA DE RETORNO:
-- Até 2% = SAUDÁVEL (normal para autopeças)
-- 2% a 5% = ATENÇÃO
-- Acima de 5% = PREOCUPANTE
-
-RECEITA SQL:
-SELECT cod_cliente, nome_fantasia, COUNT(*) as total_entregas,
-  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') as retornos,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
-FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY cod_cliente, nome_fantasia ORDER BY taxa_retorno DESC LIMIT 30`,
-
-    ATRASO: `${DICIONARIO_BASE}
-
-CLASSIFICAÇÃO DO MOTIVO DE ATRASO (em ordem de prioridade):
-1. SLA > 600min E alocação > 300min → "Falha sistêmica" (OS nunca alocada)
-2. SLA > 600min → "OS não encerrada" (motoboy não fechou a OS no app)
-3. Tempo alocação > 30min → "Associado tarde" (mesa de operações demorou — problema NOSSO)
-4. Direcionamento > 30min → "Direcionamento lento" (motoboy demorou para ir à coleta)
-5. Tempo no P1 > 45min → "Coleta lenta" (loja do CLIENTE demorou — problema do CLIENTE)
-6. Caso contrário → "Atraso do motoboy" (trânsito, rota, motoboy lento)
-
-SEVERIDADE: 🔴 Crítico ≥6% | 🟠 Alto 5-6% | 🟣 Anomalia SLA>6h | 🟡 Médio 3-5% | 🟢 Baixo <3%
-DETRATOR: profissional com 3+ OS atrasadas no período.
-
-EXCEÇÃO CLIENTE 767 (Grupo Comollati): prazo FIXO 120min para QUALQUER km. SLA MÍNIMO exigido: 95% no prazo — abaixo disso é CRÍTICO.
-
-CÁLCULOS:
-- tempo_alocacao = EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60
-- sla_total = EXTRACT(EPOCH FROM (finalizado - data_hora))/60
-
-RECEITA SQL — Motivos de atraso:
-WITH atrasos AS (
-  SELECT e.os, e.cod_prof, e.nome_prof,
-    EXTRACT(EPOCH FROM (e.finalizado - e.data_hora))/60 as sla_total,
-    EXTRACT(EPOCH FROM (e.data_hora_alocado - e.data_hora))/60 as tempo_alocacao,
-    e.tempo_execucao_minutos
-  FROM bi_entregas e WHERE COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = false AND e.finalizado IS NOT NULL AND e.data_hora IS NOT NULL
-)
-SELECT CASE
-    WHEN sla_total > 600 AND tempo_alocacao > 300 THEN 'Falha sistêmica'
-    WHEN sla_total > 600 THEN 'OS não encerrada'
-    WHEN tempo_alocacao > 30 THEN 'Associado tarde'
-    ELSE 'Atraso do motoboy'
-  END as motivo_atraso,
-  COUNT(*) as quantidade, ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
-FROM atrasos GROUP BY motivo_atraso ORDER BY quantidade DESC`,
-
-    FROTA: `${DICIONARIO_BASE}
-
-MOTOS POR DIA = COUNT(DISTINCT cod_prof) onde COALESCE(ponto, 1) >= 2
-
-RECEITA SQL:
-SELECT data_solicitado as dia,
-  COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-  COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as motos,
-  ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric /
-    NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
-FROM bi_entregas GROUP BY data_solicitado ORDER BY data_solicitado`,
-
-    COMPARATIVO: `${DICIONARIO_BASE}
-
-REGRA: Quando comparar cliente com mercado, usar a MÉDIA GERAL de TODOS os clientes da Tutts (não apenas da região — pode haver regiões com 1 cliente só).
-
-RECEITA SQL — Comparativo cliente vs média geral:
-WITH media_geral AS (
-  SELECT
-    ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_geral,
-    ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_geral,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%produto incorreto%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno_geral,
-    ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_geral
-  FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2
-)
-SELECT cod_cliente, nome_fantasia, COUNT(*) as entregas,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo_cliente,
-  mg.taxa_prazo_geral,
-  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_cliente, mg.tempo_medio_geral,
-  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio_cliente, mg.ticket_medio_geral
-FROM bi_entregas, media_geral mg WHERE COALESCE(ponto, 1) >= 2
-GROUP BY cod_cliente, nome_fantasia, mg.taxa_prazo_geral, mg.tempo_medio_geral, mg.taxa_retorno_geral, mg.ticket_medio_geral
-ORDER BY entregas DESC LIMIT 30`,
-
-    CS: `${DICIONARIO_BASE}
-
-TABELAS CS:
-- cs_clientes: cod_cliente, nome_fantasia, health_score (0-100), status, segmento, regiao, created_at
-- cs_interacoes: cliente_id (FK cs_clientes.id), tipo, titulo, descricao, resultado, data_interacao
-- cs_ocorrencias: cliente_id, titulo, descricao, tipo, severidade, status, resolucao, created_at`
+    BAIRRO_CIDADE: async (filtros) => {
+      const { where, params } = montarFiltroSQL(filtros.cod_cliente, filtros.centro_custo, filtros.data_inicio, filtros.data_fim);
+      const entregas_where = where ? where + ' AND COALESCE(ponto, 1) >= 2' : 'WHERE COALESCE(ponto, 1) >= 2';
+      const sql = `SELECT COALESCE(bairro, 'Sem bairro') as bairro, cidade, COUNT(*) as entregas,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
+        ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
+      FROM bi_entregas ${entregas_where} GROUP BY bairro, cidade ORDER BY entregas DESC LIMIT 30`;
+      const result = await pool.query(sql, params);
+      return { rows: result.rows, sql_descricao: 'Entregas por bairro/cidade (query direta)' };
+    }
   };
 
-  // ==================== PROMPT CONCEITUAL (Melhoria 2 — sem lista estática) ====================
+  // ==================== PROMPT CONCEITUAL ====================
   function getPromptConceitual(prompt, contextoFiltros) {
-    return `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys). Você faz parte do time.
+    return `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys).
 
-Responda a pergunta do usuário usando seu conhecimento profundo do sistema:
-
-PERGUNTA: "${prompt}"
+Responda a pergunta do usuário:
+"${prompt}"
 ${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
 
-## GLOSSÁRIO COMPLETO DO SISTEMA TUTTS:
-
-### MOTIVOS DE ATRASO (para OS fora do SLA):
-1. **Falha sistêmica**: OS com SLA total > 10h (600min) e tempo de alocação > 5h (300min). OS nunca foi alocada — ficou "perdida" no sistema.
-2. **OS não encerrada**: SLA total > 10h, mas alocação normal. Motoboy entregou mas não fechou a OS no app.
-3. **Associado tarde**: Tempo de alocação > 30 minutos. Nossa mesa de operações demorou para alocar um motoboy. Problema INTERNO da Tutts.
-4. **Direcionamento lento**: Após ser alocado, motoboy demorou > 30min para ir até a coleta. Pode estar longe ou ocupado.
-5. **Coleta lenta**: Tempo até saída do Ponto 1 > 45min. A LOJA DO CLIENTE demorou para liberar a mercadoria. Problema do CLIENTE, não nosso.
-6. **Atraso do motoboy**: Nenhuma das causas acima. Deslocamento/entrega foi longo — trânsito, rota, ou motoboy lento.
+## GLOSSÁRIO TUTTS:
+### MOTIVOS DE ATRASO:
+1. **Falha sistêmica**: SLA > 10h e alocação > 5h. OS "perdida" no sistema.
+2. **OS não encerrada**: SLA > 10h, alocação normal. Motoboy não fechou a OS no app.
+3. **Associado tarde**: Alocação > 30min. Mesa de operações demorou. Problema NOSSO.
+4. **Direcionamento lento**: Motoboy demorou > 30min para ir à coleta após ser alocado.
+5. **Coleta lenta**: Tempo no P1 > 45min. Loja do CLIENTE demorou. Problema do CLIENTE.
+6. **Atraso do motoboy**: Deslocamento/entrega longo — trânsito, rota, ou motoboy lento.
 
 ### MÉTRICAS:
-- **Taxa de prazo**: % de entregas dentro do SLA (meta geral ≥85%, Comollati exige ≥95%)
-- **Taxa de retorno**: % que resultaram em retorno. Até 2% = SAUDÁVEL (normal para autopeças). 2-5% = ATENÇÃO. >5% = PREOCUPANTE. Sempre comparar com média geral de TODOS os clientes da Tutts.
-- **Health Score**: 0-100 combinando taxa de prazo (50pts), retornos (25pts) e tempo médio (25pts)
-- **SLA**: Prazo máximo por distância (10km=60min, 15km=75min, 20km=90min, 25km=105min, 30km=120min)
-- **Cliente 767 (Grupo Comollati)**: SLA FIXO de 120 minutos para QUALQUER distância. Mínimo OBRIGATÓRIO: 95% no prazo — abaixo é CRÍTICO e pode gerar perda do contrato.
-- **Motos por dia**: COUNT(DISTINCT cod_prof) por data — quantos motoboys operaram. Essencial para dimensionamento.
-- **Detrator**: profissional com 3+ OS atrasadas no período.
-- **Severidade**: 🔴 Crítico ≥6% | 🟠 Alto 5-6% | 🟡 Médio 3-5% | 🟢 Baixo <3%
-
-### RETORNOS (tipos de ocorrência):
-- "Cliente Fechado", "ClienteAus"/"Cliente Ausente", "Loja Fechada", "Produto Incorreto", "Retorno"
-
-### ANÁLISES FINANCEIRAS:
-- **Ticket médio**: Valor médio por entrega. Informar variação %. Se >5% entre semanas, destacar anterior.
-- **Variação de demanda**: Entregas por cliente semana a semana. Se >5%, destacar.
-- **Mínimo garantido**: Valor diário acordado com motoboys para garantir disponibilidade. Se o motoboy produz menos que o valor negociado, a Tutts paga a diferença (complemento). Se não rodou, paga o valor inteiro. O custo com garantido de um cliente = soma dos complementos. Dados na tabela bi_garantido_cache.
-
-### COMPARATIVO COM MERCADO:
-Comparar com MÉDIA GERAL de TODOS os clientes (não só da região — pode ter região com 1 cliente só).
+- **Taxa de prazo**: % dentro do SLA. Meta ≥85%, Comollati exige ≥95%.
+- **Taxa de retorno**: Até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE.
+- **Faturamento líquido**: Receita (valor cobrado) MENOS custo com profissionais (valor_prof).
+- **Ticket médio**: Valor médio por entrega.
+- **Motos por dia**: Motoboys distintos operando.
+- **Mínimo garantido**: Valor diário acordado. Se produziu menos, Tutts paga a diferença (complemento).
+- **Cliente 767 (Comollati)**: SLA fixo 120min, mínimo 95% no prazo.
+- **Detrator**: Profissional com 3+ OS atrasadas.
 
 ## REGRAS:
-- Fale como funcionário da Tutts: "nós", "nossa operação", "identificamos"
-- Seja objetivo e claro
-- Use emojis e formatação markdown
+- Fale como funcionário da Tutts: "nós", "nossa operação"
+- Seja objetivo e claro, use emojis e markdown
 - ⛔ NUNCA sugira aumentar contato com cliente`;
   }
 
-  // ==================== MELHORIA 4: Prompt de análise dinâmico por categoria ====================
-  function getRegrasAnalisePorCategoria(categoria) {
-    const regrasBase = `## IDENTIDADE
-- Você É funcionário da Tutts. Use "nós", "nossa operação", "nosso time".
-- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria".
-- ⛔ NUNCA sugira aumentar frequência de contato com o cliente.
+  // ==================== PROMPT DE ANÁLISE (dinâmico por categoria) ====================
+  function getPromptAnalise(categoria, prompt, contextoFiltros, dados, sqlDescricao) {
+    const linhas = dados.length > 100 ? dados.slice(0, 100) : dados;
+    const colunas = linhas.length > 0 ? Object.keys(linhas[0]) : [];
+
+    const regrasBase = `Analise os dados REAIS abaixo e responda a pergunta do usuário.
+
+## IDENTIDADE
+- Você É funcionário da Tutts. Use "nós", "nossa operação".
+- ⛔ NUNCA fale como consultor externo. NUNCA sugira aumentar contato com cliente.
 - Sugestões devem ser sobre melhorias INTERNAS.
 
-## REGRAS DE FORMATO
+## PERGUNTA: "${prompt}"
+${contextoFiltros ? `\n## CONTEXTO: ${contextoFiltros}` : ''}
+
+## DADOS (${linhas.length} registros · ${sqlDescricao})
+\`\`\`json
+${JSON.stringify(linhas, null, 2).substring(0, 15000)}
+\`\`\`
+
+## FORMATO
 - ⛔ PROIBIDO tabelas markdown (| --- |). Use bullet points.
 - Destaque números com **negrito**.
-- Português brasileiro, tom profissional.
-- Emojis para performance: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
-- Valores: R$ 1.234,56 | Tempos: Xh XXmin se >60min | Taxas: 1 decimal (87,3%)
-- ⛔ NUNCA inclua blocos SQL na resposta.
-- Use APENAS os dados retornados. NUNCA invente dados.
+- Emojis: 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
+- Valores: R$ 1.234,56 | Tempos: Xh XXmin se >60min | Taxas: 1 decimal
+- ⛔ NUNCA inclua blocos SQL. ⛔ NUNCA invente dados.
 - Se resultado vazio, diga claramente.`;
 
     const regrasEspecificas = {
-      SQL_ENTREGAS: `
-## REGRAS ESPECÍFICAS — ENTREGAS
-- Sempre inclua motos por dia (COUNT DISTINCT cod_prof) quando mostrar evolução.
-- Para rankings, formato: - **Nome:** entregas · taxa prazo · tempo médio
-- Cliente 767 (Comollati): SLA fixo 120min, mínimo 95% no prazo.`,
-
-      SQL_FINANCEIRO: `
-## REGRAS ESPECÍFICAS — FINANCEIRO
-- FATURAMENTO LÍQUIDO = receita (SUM valor) MENOS custo com profissionais (SUM valor_prof). NUNCA apresente SUM(valor) como faturamento líquido.
-- Inclua valores monetários em R$.
-- Compare ticket médio com período anterior. Se variação > 5%, destaque com ↑ ou ↓ e informe valor anterior.
-- Para mínimo garantido, compare custo vs faturamento (ROI). Custo com garantido = SUM(complemento) da tabela bi_garantido_cache.
-- Variação de demanda: se > 5%, informar valor anterior.`,
-
-      SQL_RETORNO: `
-## REGRAS ESPECÍFICAS — RETORNO
-- SEMPRE informe a referência: até 2% = SAUDÁVEL (normal para autopeças) | 2-5% = ATENÇÃO | >5% = PREOCUPANTE.
-- Compare com a média geral de TODOS os clientes da Tutts.
-- Detalhe os tipos de retorno (Cliente Fechado, Ausente, Loja Fechada, etc).`,
-
-      SQL_ATRASO: `
-## REGRAS ESPECÍFICAS — ATRASO
-- Classifique cada motivo com emoji de severidade (🔴🟠🟡🟢).
-- Explique o que cada motivo significa quando mencioná-lo.
-- "Associado tarde" = problema nosso (operação). "Coleta lenta" = problema do cliente.
-- Sugira ações INTERNAS para os principais detratores.
-- Cliente 767 (Comollati): mínimo 95% no prazo, abaixo é CRÍTICO.
-- Severidade: 🔴 ≥6% | 🟠 5-6% | 🟣 Anomalia SLA>6h | 🟡 3-5% | 🟢 <3%`,
-
-      SQL_FROTA: `
-## REGRAS ESPECÍFICAS — FROTA
-- "Motos" = motoboys distintos operando (COUNT DISTINCT cod_prof).
-- Média ideal: 10 entregas/moto/dia.
-- Mostrar evolução dia a dia: entregas, motos, entregas/moto.`,
-
-      SQL_COMPARATIVO: `
-## REGRAS ESPECÍFICAS — COMPARATIVO
-- SEMPRE compare com a MÉDIA GERAL de TODOS os clientes da Tutts.
-- Nunca compare só com a região (pode ter 1 cliente só).
-- Use ↑ e ↓ para variações.
-- Se variação < 3%, diga que está estável.`,
-
-      SQL_CS: `
-## REGRAS ESPECÍFICAS — CS
-- Health Score: 0-100 (50pts prazo + 25pts retornos + 25pts tempo).
-- Classifique: 🟢 ≥80 | 🟡 60-79 | 🔴 <60.`
+      RESUMO_CLIENTE: `\n## REGRAS ESPECÍFICAS\n- Faturamento líquido = receita_bruta - custo_profissionais. NUNCA apresente receita_bruta como faturamento.\n- Inclua TODOS os KPIs: entregas, taxa prazo, tempo médio, motos, faturamento líquido, ticket médio, taxa retorno.\n- Classifique cada KPI com emoji.\n- Cliente 767 (Comollati): mínimo 95% no prazo.\n- Taxa retorno: até 2% SAUDÁVEL, 2-5% ATENÇÃO, >5% PREOCUPANTE.`,
+      RESUMO_GERAL: `\n## REGRAS ESPECÍFICAS\n- Visão geral da operação com todos os KPIs.\n- Faturamento líquido = receita_bruta - custo_profissionais.`,
+      EVOLUCAO_DIARIA: `\n## REGRAS ESPECÍFICAS\n- Identifique tendências (crescimento, queda, estabilidade).\n- Destaque dias com pico ou queda.\n- Sempre mencione motos por dia.`,
+      TOP_PROFISSIONAIS: `\n## REGRAS ESPECÍFICAS\n- Formato ranking: - **Nome (cod):** X entregas · Y% prazo · Zmin tempo médio\n- Destaque top 3 e piores 3 se houver.\n- Detrator = 3+ OS atrasadas.`,
+      PRAZO_PROFISSIONAL: `\n## REGRAS ESPECÍFICAS\n- Mostre entregas no prazo e fora do prazo de cada motoboy.\n- Formato: - **Nome:** X entregas · Y no prazo · Z fora · W% taxa\n- Classifique: 🟢 ≥90% · 🟡 75-89% · 🔴 <75%`,
+      ATRASO_MOTIVOS: `\n## REGRAS ESPECÍFICAS\n- EXPLIQUE cada motivo quando mencioná-lo.\n- "Associado tarde" = problema nosso. "Coleta lenta" = problema do cliente.\n- Severidade: 🔴 ≥6% | 🟠 5-6% | 🟡 3-5% | 🟢 <3%`,
+      RETORNOS: `\n## REGRAS ESPECÍFICAS\n- SEMPRE informe referência: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE.\n- Detalhe por tipo (Cliente Fechado, Ausente, Loja Fechada, etc).`,
+      FINANCEIRO: `\n## REGRAS ESPECÍFICAS\n- FATURAMENTO LÍQUIDO = receita_bruta - custo_profissionais. NUNCA apresente receita como faturamento.\n- Se houver dados de garantido (_tipo='garantido'), inclua custo com garantido.\n- Variação > 5% → destaque com ↑ ou ↓.`,
+      COMPARATIVO: `\n## REGRAS ESPECÍFICAS\n- Compare cada cliente com a média geral.\n- Use ↑ e ↓ para variações vs média.\n- Se variação < 3%, diga estável.`,
+      FROTA: `\n## REGRAS ESPECÍFICAS\n- Motos = motoboys distintos. Média ideal: 10 entregas/moto/dia.\n- Destaque dias com sub/super utilização.`,
+      HORARIO_PICO: `\n## REGRAS ESPECÍFICAS\n- Identifique horário de pico e vale.\n- Sugira otimizações de alocação nos horários críticos.`,
+      BAIRRO_CIDADE: `\n## REGRAS ESPECÍFICAS\n- Destaque bairros com mais volume e piores taxas de prazo.\n- Identifique regiões problemáticas.`
     };
 
-    return regrasBase + (regrasEspecificas[categoria] || '');
+    const graficos = `\n## GRÁFICOS\nQuando dados beneficiarem de visualização:\n[CHART]\n{"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}\n[/CHART]\nTipos: "bar", "horizontalBar", "line", "pie", "doughnut". Máx 2 gráficos.`;
+
+    const proatividade = `\n## PROATIVIDADE\n- ⛔ NUNCA diga "seria útil saber".\n- ✅ Ofereça perguntas prontas no final (máx 2-3):\n💡 **Quer se aprofundar?** Pergunte-me:\n- "pergunta 1"\n- "pergunta 2"`;
+
+    return regrasBase + (regrasEspecificas[categoria] || '') + graficos + proatividade;
   }
 
-  // ==================== PROMPT SQL PRINCIPAL ====================
-  function getPromptSQL(categoria, schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio) {
-    const dicionarioKey = CATEGORIAS[categoria]?.dicionario || 'ENTREGAS_COMPLETO';
-    const dicionario = DICIONARIOS_ESPECIFICOS[dicionarioKey] || DICIONARIOS_ESPECIFICOS.ENTREGAS_COMPLETO;
-
+  // ==================== FALLBACK: Geração SQL pelo Gemini ====================
+  function getPromptSQLFallback(schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio) {
     return `You are a PostgreSQL SQL expert. Generate ONLY valid PostgreSQL queries.
 
-⚠️ ABSOLUTE RULE: Your ENTIRE response must be ONLY a \`\`\`sql ... \`\`\` block. Nothing before, nothing after.
-⚠️ SQL MUST be in ENGLISH keywords (SELECT, FROM, WHERE, WITH, AS, COUNT, ROUND, AVG, SUM, etc). NEVER use Portuguese SQL keywords.
-⚠️ When a RECEITA SQL (ready-made query) exists in the dictionary below, USE IT as base. Adapt the filters but keep the structure.
-⚠️ ONLY use tables that exist in the SCHEMA below. NEVER invent table names.
+⚠️ Your ENTIRE response must be ONLY a \`\`\`sql ... \`\`\` block. Nothing else.
+⚠️ SQL MUST use ENGLISH keywords (SELECT, FROM, WHERE, WITH, COUNT, ROUND, AVG, SUM). NEVER Portuguese.
+⚠️ ONLY use tables from the SCHEMA below. NEVER invent table names.
 
 📊 SCHEMA:
 ${schemaTexto}
 ${samplesTexto}
 
-═══════════════════════════════════════
-🔑 DICIONÁRIO
-═══════════════════════════════════════
-${dicionario}
-
-═══════════════════════════════════════
-⚠️ ARMADILHAS SQL
-═══════════════════════════════════════
-1. NUNCA use GROUP BY por alias se o alias tem MESMO NOME de coluna da tabela. Use a expressão completa.
-2. NUNCA use strftime() — PostgreSQL usa EXTRACT() ou TO_CHAR().
-3. Sempre use COALESCE(ponto, 1) >= 2 (ponto pode ser NULL).
-4. Para múltiplas partes, gere blocos SQL separados.
-5. Inclua SEMPRE motos por dia (COUNT(DISTINCT cod_prof)) em evolução por dia.
-6. NUNCA invente nomes de tabela. Use APENAS as tabelas listadas no SCHEMA acima.
-7. NUNCA traduza palavras-chave SQL para português. Use SELECT, WITH, AS, FROM, WHERE, etc.
-8. SEMPRE proteja divisões com NULLIF: use / NULLIF(x, 0) para evitar divisão por zero.
-9. NUNCA use SUM(CASE WHEN bool = TRUE THEN 1 ELSE 0 END) — use COUNT(*) FILTER (WHERE bool = true) que é mais limpo.
-10. Para taxa de prazo use SEMPRE: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-
-REGRAS:
-1. SEMPRE gere SQL executável. NUNCA responda sem SQL.
-2. SEMPRE filtre entregas: WHERE COALESCE(ponto, 1) >= 2
-3. SEMPRE adicione LIMIT (máx 500)
-4. NUNCA invente dados ou use tabelas inexistentes
-5. Use nome_fantasia para exibir cliente
-6. Traga LIMIT 10-20 para contexto (não LIMIT 1)
-7. Inclua métricas relevantes mesmo que não pedidas
-8. Em evolução por dia, SEMPRE inclua COUNT(DISTINCT cod_prof) as motos
-9. Para retornos, use: LOWER(ocorrencia) LIKE '%cliente fechado%' OR LIKE '%clienteaus%' OR LIKE '%cliente ausente%' OR LIKE '%loja fechada%' OR LIKE '%produto incorreto%' OR LIKE '%retorno%'
-10. Para comparativo com mercado, compare com TODOS os clientes (não só região)
-11. Se o DICIONÁRIO acima contém RECEITA SQL pronta, USE-A como base adaptando os filtros.
-12. Para "resumo de performance", inclua: total entregas, taxa prazo, tempo médio, taxa retorno, motos por dia, ticket médio.
-${contextoFiltros ? `
-═══════════════════════════════════════
-⚡ FILTROS ATIVOS (OBRIGATÓRIOS)
-═══════════════════════════════════════
-${contextoFiltros}
-TODAS as queries DEVEM incluir: ${filtroSQLObrigatorio}` : ''}`;
+RULES:
+1. ALWAYS filter deliveries: WHERE COALESCE(ponto, 1) >= 2
+2. ALWAYS add LIMIT (max 500)
+3. ALWAYS protect division with NULLIF(x, 0)
+4. Use COUNT(*) FILTER (WHERE ...) instead of SUM(CASE WHEN)
+5. For prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
+6. Use nome_fantasia for client display
+7. Faturamento líquido = SUM(valor) - SUM(valor_prof). NEVER use SUM(valor) alone as faturamento.
+8. For returns: LOWER(ocorrencia) LIKE '%cliente fechado%' OR LIKE '%clienteaus%' OR LIKE '%retorno%'
+${contextoFiltros ? `\nACTIVE FILTERS (mandatory): ${contextoFiltros}\nAll queries MUST include: ${filtroSQLObrigatorio}` : ''}`;
   }
 
-  // ==================== GRÁFICOS + SUGESTÕES (prompt de análise) ====================
-  const REGRAS_GRAFICOS = `
-## GRÁFICOS
-Quando dados beneficiarem de visualização, inclua:
-[CHART]
-{"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}
-[/CHART]
+  async function executarComRetry(sql, filtroSQLObrigatorio, prompt, apiKey, tentativa = 1) {
+    const sqlPV = posValidarSQL(sql, filtroSQLObrigatorio);
+    const v = validarSQL(sqlPV);
+    if (!v.valido) { console.error(`❌ [Chat IA] SQL bloqueado: ${v.erro}`); return null; }
+    try {
+      await pool.query('SET statement_timeout = 15000');
+      const result = await pool.query(v.sql);
+      await pool.query('SET statement_timeout = 0');
+      return { result, sql: v.sql };
+    } catch (sqlError) {
+      await pool.query('SET statement_timeout = 0').catch(() => {});
+      console.error(`❌ [Chat IA] Erro SQL (${tentativa}/3):`, sqlError.message);
+      if (tentativa >= 3) return null;
+      try {
+        const retryText = await chamarGemini(apiKey,
+          `Fix this PostgreSQL query. Return ONLY the corrected SQL in a \`\`\`sql\`\`\` block.
 
-Tipos: "bar", "horizontalBar", "line", "pie", "doughnut"
-Cores: Verde "#10b981", Vermelho "#ef4444", Amarelo "#f59e0b", Azul "#3b82f6", Roxo "#8b5cf6"
-- Máximo 2 gráficos. JSON válido em UMA linha.
-- Inclua gráfico para RANKINGS (5+), COMPARATIVOS, EVOLUÇÃO TEMPORAL, DISTRIBUIÇÃO.
+ORIGINAL QUESTION: "${prompt}"
+ERROR: ${sqlError.message}
+QUERY:\n\`\`\`sql\n${v.sql}\n\`\`\`
 
-## PROATIVIDADE
-- ⛔ NUNCA diga "seria útil saber" ou "com dados adicionais poderíamos".
-- ✅ Ofereça perguntas prontas ao final se houver insights para aprofundar:
-💡 **Quer se aprofundar?** Pergunte-me:
-- "pergunta específica 1"
-- "pergunta específica 2"
-- Máx 2-3 sugestões, só quando relevante.`;
+RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALESCE(ponto,1)>=2. Add LIMIT.`,
+          { temperature: 0.1, maxTokens: 2000 });
+        const m = retryText.match(/```sql\n?([\s\S]*?)\n?```/);
+        if (m) return await executarComRetry(m[1].trim(), filtroSQLObrigatorio, prompt, apiKey, tentativa + 1);
+      } catch (e) { console.error('❌ [Chat IA] Retry falhou:', e.message); }
+      return null;
+    }
+  }
 
-  // ==================== ENDPOINT PRINCIPAL: Chat IA ====================
+  // ==================== ENDPOINT PRINCIPAL ====================
   router.post('/bi/chat-ia', async (req, res) => {
     try {
       const { prompt, historico, filtros } = req.body;
-
-      if (!prompt || prompt.trim().length < 3) {
-        return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
-      }
+      if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
 
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-      if (!GEMINI_API_KEY) {
-        return res.status(400).json({ error: 'API Key do Gemini não configurada.' });
-      }
+      if (!GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada.' });
 
       console.log(`🤖 [Chat IA] Prompt: "${prompt.substring(0, 100)}..."`);
 
-      // Extrair filtros
       const codCliente = filtros?.cod_cliente || null;
       const centroCusto = filtros?.centro_custo || null;
       const dataInicio = filtros?.data_inicio || null;
@@ -805,279 +628,183 @@ Cores: Verde "#10b981", Vermelho "#ef4444", Amarelo "#f59e0b", Azul "#3b82f6", R
         filtroSQLObrigatorio += ` AND data_solicitado BETWEEN '${dataInicio}' AND '${dataFim}'`;
       }
 
-      // ========== MELHORIA 7: Verificar cache ==========
+      // Cache check
       limparCacheExpirado();
       const cacheKey = normalizarPergunta(prompt, filtros);
-      if (queryCache.has(cacheKey)) {
-        const cached = queryCache.get(cacheKey);
+      if (queryResponseCache.has(cacheKey)) {
+        const cached = queryResponseCache.get(cacheKey);
         if (Date.now() - cached.timestamp < QUERY_CACHE_TTL) {
           console.log('⚡ [Chat IA] Cache hit!');
           return res.json(cached.response);
         }
       }
 
-      // ========== MELHORIA 1: Classificar intenção (etapa 0) ==========
+      // ========== ETAPA 0: Classificar ==========
       const categoria = await classificarIntencao(prompt, GEMINI_API_KEY);
 
-      // ========== MELHORIA 2: Perguntas conceituais e saudações ==========
+      // ========== SAUDAÇÃO ==========
       if (categoria === 'SAUDACAO') {
-        const resp = { success: true, resposta: '👋 Olá! Sou o assistente de dados da Tutts. Faça uma pergunta sobre entregas, prazos, profissionais, financeiro, retornos ou qualquer outra métrica do BI. Posso também explicar conceitos do sistema — é só perguntar!', sql: null, dados: null };
-        return res.json(resp);
+        return res.json({ success: true, resposta: '👋 Olá! Sou o assistente de dados da Tutts. Pergunte sobre entregas, prazos, profissionais, financeiro, retornos ou qualquer outra métrica. Posso também explicar conceitos — é só perguntar!', sql: null, dados: null });
       }
 
+      // ========== CONCEITUAL ==========
       if (categoria === 'CONCEITUAL') {
-        console.log('📚 [Chat IA] Pergunta conceitual — respondendo sem SQL');
+        console.log('📚 [Chat IA] Conceitual — sem SQL');
         try {
-          const respostaConc = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
-          if (respostaConc) {
-            const resp = { success: true, resposta: respostaConc, sql: null, dados: null };
-            queryCache.set(cacheKey, { response: resp, timestamp: Date.now() });
-            return res.json(resp);
+          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          if (resp) {
+            const r = { success: true, resposta: resp, sql: null, dados: null };
+            queryResponseCache.set(cacheKey, { response: r, timestamp: Date.now() });
+            return res.json(r);
           }
-        } catch (concErr) {
-          console.error('❌ [Chat IA] Erro conceitual:', concErr.message);
+        } catch (e) { console.error('❌ [Chat IA] Erro conceitual:', e.message); }
+      }
+
+      // ========== ETAPA 1: Tentar query direta (template) ==========
+      let dadosDirectos = null;
+      let sqlDescricao = null;
+      const templateFn = TEMPLATES[categoria];
+
+      if (templateFn) {
+        try {
+          console.log(`📊 [Chat IA] Executando template: ${categoria}`);
+          const resultado = await templateFn(filtros || {});
+          if (resultado.rows && resultado.rows.length > 0) {
+            dadosDirectos = resultado.rows;
+            sqlDescricao = resultado.sql_descricao;
+            console.log(`✅ [Chat IA] Template ${categoria}: ${dadosDirectos.length} registros`);
+          } else {
+            console.log(`⚠️ [Chat IA] Template ${categoria}: 0 registros`);
+          }
+        } catch (templateErr) {
+          console.error(`❌ [Chat IA] Erro template ${categoria}:`, templateErr.message);
         }
       }
 
-      // ========== ETAPA 1: Buscar schema + amostras + gerar SQL ==========
+      // ========== Se template funcionou → Etapa 2: Análise ==========
+      if (dadosDirectos && dadosDirectos.length > 0) {
+        console.log('🤖 [Chat IA] Chamando Gemini (análise dos dados diretos)...');
+        const promptAnalise = getPromptAnalise(categoria, prompt, contextoFiltros, dadosDirectos, sqlDescricao);
+        try {
+          const analise = await chamarGemini(GEMINI_API_KEY, promptAnalise, { temperature: 0.7, maxTokens: 4096 });
+          const resp = {
+            success: true,
+            resposta: analise || 'Dados encontrados mas não foi possível gerar análise.',
+            sql: sqlDescricao,
+            dados: { colunas: Object.keys(dadosDirectos[0] || {}), linhas: dadosDirectos.slice(0, 100), total: dadosDirectos.length }
+          };
+          queryResponseCache.set(cacheKey, { response: resp, timestamp: Date.now() });
+          console.log('✅ [Chat IA] Resposta via template + análise');
+          return res.json(resp);
+        } catch (analiseErr) {
+          console.error('❌ [Chat IA] Erro análise:', analiseErr.message);
+          const resp = {
+            success: true,
+            resposta: `Dados encontrados (${dadosDirectos.length} registros) mas houve erro na análise.`,
+            sql: sqlDescricao,
+            dados: { colunas: Object.keys(dadosDirectos[0] || {}), linhas: dadosDirectos.slice(0, 100), total: dadosDirectos.length }
+          };
+          return res.json(resp);
+        }
+      }
+
+      // ========== FALLBACK: Gerar SQL pelo Gemini ==========
+      console.log('🔄 [Chat IA] Fallback: gerando SQL pelo Gemini...');
       const [schema, samples] = await Promise.all([getSchema(), getSamples()]);
       const schemaTexto = formatarSchema(schema);
       const samplesTexto = formatarSamples(samples);
 
-      const promptSQL = getPromptSQL(categoria, schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio);
+      const promptSQL = getPromptSQLFallback(schemaTexto, samplesTexto, contextoFiltros, filtroSQLObrigatorio);
 
-      // Montar histórico
       const mensagens = [];
-      if (historico && Array.isArray(historico) && historico.length > 0) {
-        mensagens.push({
-          role: 'user',
-          content: promptSQL + '\n\n---\n\nPergunta do usuário: ' + historico[0].prompt
-        });
-        if (historico[0].resposta) {
-          mensagens.push({ role: 'assistant', content: historico[0].resposta });
-        }
+      if (historico?.length > 0) {
+        mensagens.push({ role: 'user', content: promptSQL + '\n\nUser question: ' + historico[0].prompt });
+        if (historico[0].resposta) mensagens.push({ role: 'assistant', content: historico[0].resposta });
         for (let i = 1; i < historico.length; i++) {
           mensagens.push({ role: 'user', content: historico[i].prompt });
-          if (historico[i].resposta) {
-            mensagens.push({ role: 'assistant', content: historico[i].resposta });
-          }
+          if (historico[i].resposta) mensagens.push({ role: 'assistant', content: historico[i].resposta });
         }
         mensagens.push({ role: 'user', content: prompt });
       } else {
-        mensagens.push({
-          role: 'user',
-          content: promptSQL + '\n\n---\n\nPergunta do usuário: ' + prompt
-        });
+        mensagens.push({ role: 'user', content: promptSQL + '\n\nUser question: ' + prompt });
       }
 
-      console.log('🤖 [Chat IA] Chamando Gemini (etapa 1: gerar SQL)...');
       const geminiContents = mensagens.map(m => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }]
       }));
 
-      const resposta1 = await chamarGemini(GEMINI_API_KEY, null, {
-        temperature: 0.3,
-        maxTokens: 4096,
-        contents: geminiContents
-      });
+      const resposta1 = await chamarGemini(GEMINI_API_KEY, null, { temperature: 0.3, maxTokens: 4096, contents: geminiContents });
 
-      console.log(`🤖 [Chat IA] Resposta etapa 1: ${resposta1.substring(0, 200)}...`);
-
-      // ========== Extrair queries SQL ==========
+      // Extrair SQL
       const allSqlBlocks = [];
       const sqlBlockRegex = /```sql\n?([\s\S]*?)\n?```/g;
       let match;
-      while ((match = sqlBlockRegex.exec(resposta1)) !== null) {
-        allSqlBlocks.push(match[1].trim());
-      }
-
+      while ((match = sqlBlockRegex.exec(resposta1)) !== null) allSqlBlocks.push(match[1].trim());
       if (allSqlBlocks.length === 0) {
-        const selectMatch = resposta1.match(/((?:WITH|SELECT)[\s\S]*?;)\s*$/im) ||
-                           resposta1.match(/((?:WITH|SELECT)[\s\S]*?LIMIT\s+\d+)/im);
-        if (selectMatch) {
-          console.log('🔄 [Chat IA] SQL encontrado sem bloco de código');
-          allSqlBlocks.push(selectMatch[1].trim());
-        }
+        const selectMatch = resposta1.match(/((?:WITH|SELECT)[\s\S]*?;)\s*$/im) || resposta1.match(/((?:WITH|SELECT)[\s\S]*?LIMIT\s+\d+)/im);
+        if (selectMatch) allSqlBlocks.push(selectMatch[1].trim());
       }
 
-      // Splittar blocos com múltiplas queries
       const queriesParaExecutar = [];
       for (const bloco of allSqlBlocks) {
-        const partes = bloco.split(/;\s*/).filter(q => {
-          const t = q.trim().toUpperCase();
-          return t.startsWith('SELECT') || t.startsWith('WITH');
-        });
+        const partes = bloco.split(/;\s*/).filter(q => { const t = q.trim().toUpperCase(); return t.startsWith('SELECT') || t.startsWith('WITH'); });
         queriesParaExecutar.push(...partes.map(q => q.trim()));
       }
 
       if (queriesParaExecutar.length === 0) {
-        console.log('⚠️ [Chat IA] Sem SQL — tentando resposta conceitual como fallback');
-        // Fallback: tentar responder como conceitual
+        // Último fallback: conceitual
         try {
-          const respostaFallback = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
-          if (respostaFallback) {
-            const resp = { success: true, resposta: respostaFallback, sql: null, dados: null };
-            return res.json(resp);
-          }
-        } catch (e) {
-          console.error('❌ [Chat IA] Fallback conceitual também falhou:', e.message);
-        }
-
+          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          if (resp) return res.json({ success: true, resposta: resp, sql: null, dados: null });
+        } catch (e) {}
         return res.json({
           success: true,
-          resposta: '⚠️ Não foi possível gerar uma consulta SQL para essa pergunta. Tente reformular de forma mais específica.\n\nExemplos:\n- "Quantas entregas foram feitas em janeiro?"\n- "Qual o top 10 motoboys por taxa de prazo?"\n- "Qual o horário com mais entregas?"\n- "Me explique o que é coleta lenta"\n- "Quais os motivos de atraso?"',
-          sql: null,
-          dados: null
+          resposta: '⚠️ Não consegui processar essa pergunta. Tente reformular.\n\nExemplos:\n- "Qual o resumo de performance?"\n- "Top 10 motoboys por taxa de prazo"\n- "Motivos de atraso"\n- "Me explique o que é coleta lenta"',
+          sql: null, dados: null
         });
       }
 
-      console.log(`🤖 [Chat IA] ${queriesParaExecutar.length} query(ies) extraída(s)`);
-
-      // ========== ETAPA 2: Validar e executar queries ==========
+      // Executar queries
       const todosResultados = [];
       const todasColunas = new Set();
       const sqlsExecutadas = [];
-
-      // ========== MELHORIA 6: Retry inteligente com contexto (até 3 tentativas) ==========
-      async function executarComRetry(sql, tentativa = 1) {
-        // MELHORIA 3: Pós-validação automática
-        const sqlPosValidada = posValidarSQL(sql, filtroSQLObrigatorio);
-        const validacao = validarSQL(sqlPosValidada);
-        if (!validacao.valido) {
-          console.error(`❌ [Chat IA] SQL bloqueado: ${validacao.erro}`);
-          return null;
-        }
-
-        try {
-          await pool.query('SET statement_timeout = 15000');
-          const result = await pool.query(validacao.sql);
-          await pool.query('SET statement_timeout = 0');
-          return { result, sql: validacao.sql };
-        } catch (sqlError) {
-          await pool.query('SET statement_timeout = 0').catch(() => {});
-          console.error(`❌ [Chat IA] Erro SQL (tentativa ${tentativa}/3):`, sqlError.message);
-
-          if (tentativa >= 3) return null;
-
-          // Retry com contexto completo do prompt original
-          try {
-            console.log(`🔄 [Chat IA] Auto-correção via Gemini (tentativa ${tentativa + 1})...`);
-            const retryText = await chamarGemini(GEMINI_API_KEY,
-              `A query SQL abaixo deu erro no PostgreSQL. Corrija mantendo a MESMA lógica.
-
-PERGUNTA ORIGINAL DO USUÁRIO: "${prompt}"
-
-ERRO PostgreSQL: ${sqlError.message}
-
-SQL COM ERRO:
-\`\`\`sql
-${validacao.sql}
-\`\`\`
-
-REGRAS:
-- Mantenha a mesma lógica e colunas.
-- Corrija APENAS o erro reportado.
-- Se o erro for GROUP BY, repita a expressão completa (NÃO use alias que tenha mesmo nome de coluna).
-- NUNCA use strftime (PostgreSQL usa EXTRACT ou TO_CHAR).
-- WHERE COALESCE(ponto, 1) >= 2 é obrigatório.
-- LIMIT é obrigatório.
-- Retorne APENAS o SQL corrigido em bloco \`\`\`sql\`\`\`.`,
-              { temperature: 0.1, maxTokens: 2000 }
-            );
-            const retrySqlMatch = retryText.match(/```sql\n?([\s\S]*?)\n?```/);
-            if (retrySqlMatch) {
-              return await executarComRetry(retrySqlMatch[1].trim(), tentativa + 1);
-            }
-          } catch (retryError) {
-            console.error('❌ [Chat IA] Retry falhou:', retryError.message);
-          }
-          return null;
-        }
-      }
-
       for (let i = 0; i < queriesParaExecutar.length; i++) {
-        const resultado = await executarComRetry(queriesParaExecutar[i]);
+        const resultado = await executarComRetry(queriesParaExecutar[i], filtroSQLObrigatorio, prompt, GEMINI_API_KEY);
         if (resultado) {
-          const queryLabel = queriesParaExecutar.length > 1 ? `query_${i + 1}` : null;
-          resultado.result.rows.forEach(row => {
-            if (queryLabel) row._query = queryLabel;
-            todosResultados.push(row);
-          });
+          resultado.result.rows.forEach(row => todosResultados.push(row));
           resultado.result.fields?.forEach(f => todasColunas.add(f.name));
           sqlsExecutadas.push(resultado.sql);
         }
       }
 
-      if (todosResultados.length === 0 && sqlsExecutadas.length === 0) {
-        return res.json({
-          success: true,
-          resposta: '⚠️ Erro ao executar as queries. Tente reformular sua pergunta.',
-          sql: queriesParaExecutar.join(';\n\n'),
-          dados: null
-        });
+      if (todosResultados.length === 0) {
+        return res.json({ success: true, resposta: '⚠️ Erro ao executar as queries. Tente reformular.', sql: queriesParaExecutar.join(';\n'), dados: null });
       }
 
       const linhas = todosResultados;
       const colunas = [...todasColunas];
       const sqlFinal = sqlsExecutadas.join(';\n\n');
-      console.log(`✅ [Chat IA] ${sqlsExecutadas.length} query(ies) executada(s), ${linhas.length} linhas, ${colunas.length} colunas`);
 
-      // ========== ETAPA 3: Análise com prompt dinâmico (Melhoria 4) ==========
+      // Análise do fallback
       const dadosParaAnalise = linhas.length > 100 ? linhas.slice(0, 100) : linhas;
+      const promptAnaliseFallback = getPromptAnalise('AD_HOC', prompt, contextoFiltros, dadosParaAnalise, `SQL gerado pelo Gemini`);
 
-      const regrasAnalise = getRegrasAnalisePorCategoria(categoria);
-
-      const promptAnalise = `Analise os dados REAIS abaixo e responda a pergunta do usuário.
-
-## PERGUNTA
-"${prompt}"
-${contextoFiltros ? `\n## CONTEXTO ATIVO\n${contextoFiltros}\nDados filtrados por este contexto.` : ''}
-
-## QUERY SQL EXECUTADA
-\`\`\`sql
-${sqlFinal}
-\`\`\`
-
-## DADOS REAIS (${linhas.length} registros${linhas.length > 100 ? ', primeiros 100' : ''} · Colunas: ${colunas.join(', ')})
-\`\`\`json
-${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 15000)}
-\`\`\`
-
-${regrasAnalise}
-
-${REGRAS_GRAFICOS}`;
-
-      console.log('🤖 [Chat IA] Chamando Gemini (etapa 3: análise)...');
       let respostaFinal;
       try {
-        respostaFinal = await chamarGemini(GEMINI_API_KEY, promptAnalise, { temperature: 0.7, maxTokens: 4096 });
-      } catch (err2) {
-        console.error('❌ [Chat IA] Erro Gemini etapa 3:', err2.message);
-        const resp = {
-          success: true,
-          resposta: `Consegui buscar os dados mas houve um erro na análise. Aqui estão os dados brutos (${linhas.length} registros):`,
-          sql: sqlFinal,
-          dados: { colunas, linhas: dadosParaAnalise, total: linhas.length }
-        };
-        return res.json(resp);
+        respostaFinal = await chamarGemini(GEMINI_API_KEY, promptAnaliseFallback, { temperature: 0.7, maxTokens: 4096 });
+      } catch (e) {
+        respostaFinal = `Dados encontrados (${linhas.length} registros):`;
       }
 
-      if (!respostaFinal) respostaFinal = 'Não foi possível analisar os resultados.';
-      console.log('✅ [Chat IA] Análise completa');
-
-      // Montar resposta final
-      const respFinal = {
+      const resp = {
         success: true,
-        resposta: respostaFinal,
+        resposta: respostaFinal || 'Não foi possível analisar.',
         sql: sqlFinal,
         dados: { colunas, linhas: dadosParaAnalise, total: linhas.length }
       };
-
-      // Salvar no cache (Melhoria 7)
-      queryCache.set(cacheKey, { response: respFinal, timestamp: Date.now() });
-
-      return res.json(respFinal);
+      queryResponseCache.set(cacheKey, { response: resp, timestamp: Date.now() });
+      return res.json(resp);
 
     } catch (err) {
       console.error('❌ [Chat IA] Erro geral:', err);
@@ -1085,42 +812,20 @@ ${REGRAS_GRAFICOS}`;
     }
   });
 
-  // ==================== ENDPOINT: Listar filtros ====================
+  // ==================== ENDPOINT: Filtros ====================
   router.get('/bi/chat-ia/filtros', async (req, res) => {
     try {
-      const clientes = await pool.query(`
-        SELECT DISTINCT cod_cliente, nome_fantasia 
-        FROM bi_entregas 
-        WHERE cod_cliente IS NOT NULL AND nome_fantasia IS NOT NULL AND nome_fantasia != ''
-        ORDER BY nome_fantasia
-      `);
-
-      const centrosCusto = await pool.query(`
-        SELECT DISTINCT centro_custo 
-        FROM bi_entregas 
-        WHERE centro_custo IS NOT NULL AND centro_custo != ''
-        ORDER BY centro_custo
-      `);
-
+      const clientes = await pool.query(`SELECT DISTINCT cod_cliente, nome_fantasia FROM bi_entregas WHERE cod_cliente IS NOT NULL AND nome_fantasia IS NOT NULL AND nome_fantasia != '' ORDER BY nome_fantasia`);
+      const centrosCusto = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`);
       const codCliente = req.query.cod_cliente;
       let centrosDoCliente = [];
       if (codCliente) {
-        const result = await pool.query(`
-          SELECT DISTINCT centro_custo 
-          FROM bi_entregas 
-          WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != ''
-          ORDER BY centro_custo
-        `, [parseInt(codCliente)]);
-        centrosDoCliente = result.rows.map(r => r.centro_custo);
+        const r = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE cod_cliente = $1 AND centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`, [parseInt(codCliente)]);
+        centrosDoCliente = r.rows.map(r => r.centro_custo);
       }
-
-      res.json({
-        clientes: clientes.rows,
-        centros_custo: centrosCusto.rows.map(r => r.centro_custo),
-        centros_do_cliente: centrosDoCliente
-      });
+      res.json({ clientes: clientes.rows, centros_custo: centrosCusto.rows.map(r => r.centro_custo), centros_do_cliente: centrosDoCliente });
     } catch (err) {
-      console.error('❌ Erro ao buscar filtros:', err);
+      console.error('❌ Erro filtros:', err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -1130,10 +835,7 @@ ${REGRAS_GRAFICOS}`;
     try {
       const schema = await getSchema();
       res.json({ tabelas: Object.keys(schema).length, schema });
-    } catch (err) {
-      console.error('❌ Erro ao buscar schema:', err);
-      res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   return router;
