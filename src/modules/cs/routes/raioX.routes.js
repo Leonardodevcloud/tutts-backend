@@ -573,7 +573,7 @@ ${grid}${bars}
 
       // Link do mapa de calor interativo (acesso público)
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
-      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}`;
+      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}${temCC ? `&centro_custo=${encodeURIComponent(centro_custo)}` : ''}`;
 
       // 12b. BUSCAR INTERAÇÕES DO PERÍODO
       const interacoesCliente = await pool.query(`
@@ -918,9 +918,12 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
   router.get('/cs/mapa-calor/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
-      const { data_inicio, data_fim } = req.query;
+      const { data_inicio, data_fim, centro_custo } = req.query;
       const inicio = data_inicio || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const fim = data_fim || new Date().toISOString().split('T')[0];
+      const temCC = centro_custo && centro_custo.trim() !== '';
+      const ccSQL = temCC ? ' AND centro_custo = $4' : '';
+      const baseParams = temCC ? [cod, inicio, fim, centro_custo] : [cod, inicio, fim];
 
       const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
       if (!GOOGLE_API_KEY) return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
@@ -947,7 +950,9 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
 
       const clienteResult = await pool.query('SELECT nome_fantasia, cidade, estado FROM cs_clientes WHERE cod_cliente = $1', [cod]);
       const ficha = clienteResult.rows[0] || {};
-      const nomeCliente = ficha.nome_fantasia || `Cliente ${cod}`;
+      const nomeCliente = temCC
+        ? `${ficha.nome_fantasia || `Cliente ${cod}`} — ${centro_custo}`
+        : (ficha.nome_fantasia || `Cliente ${cod}`);
 
       // Todos os endereços agrupados — SEM LIMITE
       const entregas = await pool.query(`
@@ -959,12 +964,12 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
           ROUND(AVG(distancia)::numeric, 1) as km_medio,
           ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
           AND COALESCE(ponto, 1) >= 2
           AND endereco IS NOT NULL AND endereco != ''
         GROUP BY endereco, bairro, cidade, estado
         ORDER BY COUNT(*) DESC
-      `, [cod, inicio, fim]);
+      `, baseParams);
 
       const totalEntregas = entregas.rows.reduce((s, r) => s + parseInt(r.quantidade), 0);
 
