@@ -182,7 +182,14 @@ function createChatIaRoutes(pool) {
   }
 
   // ==================== ETAPA 0: CLASSIFICADOR DE INTENÇÃO ====================
-  async function classificarIntencao(prompt, apiKey) {
+  async function classificarIntencao(prompt, apiKey, historico) {
+    // Montar contexto do histórico para o classificador entender follow-ups
+    let contextoHistorico = '';
+    if (historico?.length > 0) {
+      const ultimaMsg = historico[historico.length - 1];
+      contextoHistorico = `\nÚLTIMA INTERAÇÃO DO CHAT:\n- Pergunta anterior: "${ultimaMsg.prompt?.substring(0, 150) || ''}"\n- Resposta anterior (trecho): "${ultimaMsg.resposta?.substring(0, 300) || ''}"`;
+    }
+
     const p = `Classifique a pergunta em EXATAMENTE UMA categoria. Responda APENAS o nome da categoria.
 
 CATEGORIAS:
@@ -199,11 +206,17 @@ CATEGORIAS:
 - FROTA: motos por dia, quantos motoboys, dimensionamento, frota
 - HORARIO_PICO: horário de pico, hora com mais entregas, distribuição por hora
 - BAIRRO_CIDADE: entregas por bairro, por cidade, por região, mapa
-- CONCEITUAL: o que significa, como funciona, me explique, o que é, o que considera
+- METODOLOGIA: perguntas sobre COMO o sistema calcula, metrifica ou classifica algo. Inclui: "como chegou a essa conclusão", "como vc metrifica", "qual prazo usou", "que critérios usa", "por que classificou assim", "como calcula", "o que considera", "quais são os possíveis motivos", "como funciona o cálculo", "me explique a regra", "qual a lógica", "como é definido"
+- CONCEITUAL: o que significa algo, me explique um conceito, o que é algo (quando NÃO está perguntando sobre como o sistema calcula)
 - SAUDACAO: oi, olá, bom dia, obrigado
 - AD_HOC: qualquer outra pergunta que não se encaixa acima
 
-REGRA: Se a pergunta é sobre UM cliente e pede resumo/performance → RESUMO_CLIENTE. Se pede ranking/comparação → outro.
+REGRAS:
+- Se a pergunta é sobre UM cliente e pede resumo/performance → RESUMO_CLIENTE
+- Se pergunta "como chegou a isso", "como calcula", "como metrifica", "qual prazo", "que critérios", "quais motivos considera", "como classifica" → METODOLOGIA
+- Se pergunta sobre a DEFINIÇÃO de um conceito ("o que é SLA?") → CONCEITUAL
+- METODOLOGIA tem prioridade sobre CONCEITUAL quando o usuário questiona a lógica de cálculo
+${contextoHistorico}
 
 PERGUNTA: "${prompt}"
 
@@ -213,7 +226,7 @@ CATEGORIA:`;
       const cat = resp.trim().replace(/[^A-Z_]/g, '');
       const validas = ['RESUMO_CLIENTE','RESUMO_GERAL','EVOLUCAO_DIARIA','TOP_PROFISSIONAIS','TOP_CLIENTES',
         'PRAZO_PROFISSIONAL','ATRASO_MOTIVOS','RETORNOS','FINANCEIRO','COMPARATIVO','FROTA',
-        'HORARIO_PICO','BAIRRO_CIDADE','CONCEITUAL','SAUDACAO','AD_HOC'];
+        'HORARIO_PICO','BAIRRO_CIDADE','METODOLOGIA','CONCEITUAL','SAUDACAO','AD_HOC'];
       if (validas.includes(cat)) { console.log(`🏷️ [Chat IA] Categoria: ${cat}`); return cat; }
       for (const v of validas) { if (resp.toUpperCase().includes(v)) { console.log(`🏷️ [Chat IA] Categoria (fallback): ${v}`); return v; } }
     } catch (e) { console.error('⚠️ [Chat IA] Erro classificador:', e.message); }
@@ -459,32 +472,188 @@ CATEGORIA:`;
     }
   };
 
+  // ==================== KNOWLEDGE BASE: Regras de Negócio da Tutts ====================
+  const KNOWLEDGE_BASE = `
+## 1. SISTEMA DE PRAZOS (SLA)
+
+### Como o prazo é definido:
+O prazo de cada entrega é calculado com base na DISTÂNCIA (km) do ponto de entrega. Existem 3 níveis de configuração:
+1. **Prazo por cliente específico**: Se o cliente tem faixas de prazo configuradas, usa essas.
+2. **Prazo por centro de custo**: Se não tem prazo por cliente, busca pelo centro de custo.
+3. **Prazo padrão (regras DAX)**: Se não tem nenhuma configuração específica, usa a tabela padrão:
+   - 0-10km → 60min | 10-15km → 75min | 15-20km → 90min | 20-25km → 105min
+   - 25-30km → 120min | 30-35km → 135min | 35-40km → 150min | 40-45km → 165min
+   - 45-50km → 180min | 50-55km → 195min | 55-60km → 210min | 60-65km → 225min
+   - 65-70km → 240min | 70-75km → 255min | 75-80km → 270min | 80-85km → 285min
+   - 85-90km → 300min | 90-95km → 315min | 95-100km → 330min | >100km → Sempre fora do prazo
+
+### Exceção - Cliente 767 (Comollati):
+- SLA fixo de 120 minutos independente da distância
+- Meta mínima: 95% no prazo (abaixo disso é CRÍTICO)
+
+### Como "dentro do prazo" é calculado:
+- **Tempo de execução** = tempo entre a criação da OS (data_hora) e a finalização (finalizado)
+- Se o campo execucao_comp (execução complementar) existir, usa ele prioritariamente
+- **dentro_prazo = true** quando tempo_execucao_minutos ≤ prazo_minutos
+- Esse cálculo é feito no momento do upload do Excel e armazenado no banco
+
+### Prazo do Profissional (segundo prazo):
+- Mede o tempo do MOTOBOY especificamente: de data_hora_alocado (quando foi alocado) até finalizado
+- Configuração análoga (por cliente, centro de custo ou padrão profissional)
+- Fallback profissional: 60 minutos para qualquer distância
+- Salvo em dentro_prazo_prof e tempo_entrega_prof_minutos
+
+### Taxa de prazo:
+- Fórmula: (entregas dentro do prazo / entregas com prazo calculado) × 100
+- Entregas sem prazo calculado (prazo_minutos = NULL) são ignoradas no cálculo
+- Meta geral: ≥ 85%. Meta Comollati: ≥ 95%.
+
+## 2. CLASSIFICAÇÃO DE MOTIVOS DE ATRASO
+
+Quando uma entrega está FORA do prazo (dentro_prazo = false), classificamos o MOTIVO automaticamente com base nos tempos:
+
+### Tempos utilizados no cálculo:
+- **SLA total** = (finalizado - data_hora) convertido em minutos. É o tempo total desde a criação da OS até ser finalizada.
+- **Tempo de alocação** = (data_hora_alocado - data_hora) convertido em minutos. É quanto tempo a mesa de operações levou para alocar um motoboy à OS.
+- **Tempo de execução** = campo tempo_execucao_minutos (calculado no upload a partir do campo execucao_comp, ou se vazio, pela diferença data_hora→finalizado). Representa o tempo efetivo de trabalho do motoboy.
+- **Tempo residual** = sla_total - tempo_alocacao - tempo_execucao. É o tempo "sobrando" que não é nem alocação nem execução — na prática, é o tempo que o motoboy ficou ESPERANDO na loja do cliente para coletar a mercadoria.
+
+### Classificação (nesta ORDEM DE PRIORIDADE — a ordem importa, o sistema checa de cima pra baixo e para na primeira que bater):
+1. **Falha sistêmica** (🔴): Condição: sla_total > 600min (10h) E tempo_alocacao > 300min (5h). OS ficou "perdida" no sistema — nem alocaram nem finalizaram por horas. É uma anomalia grave.
+2. **OS não encerrada** (🔴): Condição: sla_total > 600min (10h), MAS a alocação foi normal (≤ 5h). O motoboy foi alocado normalmente, entregou, mas esqueceu de finalizar a OS no app. O SLA parece enorme mas a entrega real provavelmente aconteceu no prazo.
+3. **Associado tarde** (🟠): Condição: tempo_alocacao > 30min. A mesa de operações demorou mais de 30 minutos para alocar um motoboy à OS. Isso é problema NOSSO (operação interna). O motoboy pode até ter sido rápido, mas o atraso na alocação comprometeu o SLA.
+4. **Coleta lenta** (🟡): Condição: tempo_residual > 45min, ou seja: (sla_total - tempo_alocacao - tempo_execucao) > 45. Esse tempo residual é o tempo que sobrou — na prática, é o tempo que o motoboy ficou esperando no ponto de coleta (loja do cliente). Se ultrapassa 45min, significa que a loja do CLIENTE demorou para separar/liberar a mercadoria. É problema do CLIENTE, não do motoboy nem da Tutts.
+5. **Atraso do motoboy** (🟠): Condição: nenhuma das anteriores. O atraso é do deslocamento/entrega em si — pode ser trânsito pesado, rota ruim, distância longa, ou o motoboy foi lento. É o "fallback" quando nenhuma causa específica é identificada.
+
+### Importante:
+- "Associado tarde" é problema INTERNO (da Tutts — nossa mesa de operações demorou)
+- "Coleta lenta" é problema do CLIENTE (a loja demorou para liberar)
+- "Atraso do motoboy" pode ser trânsito, rota, ou performance individual do motoboy
+- "Falha sistêmica" e "OS não encerrada" são anomalias operacionais (geralmente não refletem atraso real)
+
+## 3. RETORNOS E OCORRÊNCIAS
+
+### O que é um retorno:
+Uma entrega onde o motoboy NÃO conseguiu entregar. Identificado pelo campo ocorrencia da bi_entregas.
+
+### Tipos de retorno reconhecidos:
+- **Cliente Fechado**: Estabelecimento estava fechado quando o motoboy chegou
+- **Cliente Ausente / ClienteAus**: Ninguém no local para receber
+- **Loja Fechada**: O ponto de coleta estava fechado
+- **Produto Incorreto**: Produto errado, motoboy devolveu
+- **Retorno** (genérico): Outros motivos de retorno
+
+### Referências de taxa de retorno:
+- Até **2%**: 🟢 SAUDÁVEL — operação normal
+- **2% a 5%**: 🟡 ATENÇÃO — monitorar causas
+- Acima de **5%**: 🔴 PREOCUPANTE — ação imediata necessária
+
+### Como é calculado:
+- Total de retornos = entregas cujo campo ocorrencia contém os termos acima
+- Taxa = (total retornos / total entregas) × 100
+- Somente entregas (ponto ≥ 2), exclui coletas (ponto 1)
+
+## 4. FINANCEIRO
+
+### Conceitos:
+- **Receita bruta** = SUM(valor) — total cobrado do cliente
+- **Custo profissionais** = SUM(valor_prof) — total pago aos motoboys
+- **Faturamento líquido** = receita bruta - custo profissionais
+- **Ticket médio** = receita bruta / total de entregas
+- **Custo por entrega** = custo profissionais / total de entregas
+
+### Mínimo Garantido:
+- Acordo diário com motoboy: se ele produzir menos que o valor negociado, a Tutts paga a diferença
+- **Valor negociado**: quanto foi acordado por dia
+- **Valor produzido**: quanto o motoboy realmente faturou naquele dia (soma de valor_prof das OS)
+- **Complemento**: MAX(0, valor_negociado - valor_produzido) — é o CUSTO do garantido
+- **Status**: "acima" (produziu mais), "abaixo" (Tutts pagou diferença), "nao_rodou" (não trabalhou, Tutts paga tudo)
+- Dados ficam na tabela bi_garantido_cache (sincronizada da planilha)
+
+## 5. FROTA E DIMENSIONAMENTO
+
+- **Motos por dia** = COUNT(DISTINCT cod_prof) — motoboys únicos que operaram no dia
+- **Entregas por moto** = total entregas / motos por dia
+- Média ideal: **10 entregas/moto/dia**
+- Abaixo de 8: sub-utilização (mais motos que o necessário)
+- Acima de 15: sobre-utilização (risco de atraso)
+
+## 6. FILTROS E DADOS
+
+### Estrutura de dados:
+- Tabela principal: bi_entregas. Cada linha = um PONTO de uma OS.
+- **Ponto 1** = COLETA (onde o motoboy pega o pacote). **Ponto ≥ 2** = ENTREGAS.
+- SEMPRE filtramos ponto ≥ 2 para métricas de entrega. Coletas são excluídas.
+- OS pode ter vários pontos (uma coleta e múltiplas entregas)
+
+### Filtros aplicados:
+- **cod_cliente**: filtra por cliente específico
+- **centro_custo**: filtra por filial/unidade do cliente  
+- **data_solicitado**: período das entregas
+- O campo data_solicitado é a data da OS (quando foi criada/solicitada)
+
+## 7. DETRATORES
+
+- **Detrator de prazo**: Profissional com 3 ou mais OS atrasadas no período
+- São os motoboys que mais impactam negativamente a taxa de prazo
+- Ação: treinar, acompanhar rotas, ou avaliar continuidade
+
+## 8. SAQUES (withdrawal_requests)
+
+- Motoboys solicitam saques que passam por aprovação
+- Status: aguardando_aprovacao → aprovado/rejeitado
+- Status aprovado_gratuidade = saque de gratuidade (bonificação do Score)
+- NÃO confundir com mínimo garantido (que é bi_garantido_cache)`;
+
+  // ==================== PROMPT METODOLOGIA ====================
+  function getPromptMetodologia(prompt, contextoFiltros, historico) {
+    let contextoAnterior = '';
+    if (historico?.length > 0) {
+      const lastN = historico.slice(-3); // últimas 3 interações
+      contextoAnterior = '\n## CONVERSA ANTERIOR (para contexto):\n';
+      for (const h of lastN) {
+        if (h.prompt) contextoAnterior += `👤 Usuário: "${h.prompt.substring(0, 200)}"\n`;
+        if (h.resposta) contextoAnterior += `🤖 Chat: "${h.resposta.substring(0, 400)}"\n\n`;
+      }
+    }
+
+    return `Você é o assistente de dados do BI da Tutts (logística de entregas com motoboys).
+O usuário está perguntando sobre COMO o sistema calcula, metrifica ou classifica algo.
+
+Responda a pergunta EXPLICANDO A REGRA DE NEGÓCIO exata que o sistema usa.
+${contextoAnterior}
+## PERGUNTA ATUAL: "${prompt}"
+${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
+
+${KNOWLEDGE_BASE}
+
+## REGRAS DE RESPOSTA:
+- Responda COM DETALHES TÉCNICOS — o usuário quer saber EXATAMENTE como funciona
+- Se a pergunta é "como chegou a essa conclusão?", olhe o CONTEXTO da conversa anterior e explique a regra que gerou aquele resultado
+- Se a pergunta é "qual prazo usou?", explique o sistema de faixas de KM e qual se aplica
+- Se a pergunta é "quais motivos considera?", liste TODOS os motivos com os critérios exatos (minutos, thresholds)
+- Use exemplos concretos: "Se a distância é 12km, o prazo é 75 minutos (faixa 10-15km)"
+- Formato: bullets com **negrito** nos valores. Use emojis.
+- Fale como funcionário da Tutts: "nós", "nosso sistema"
+- ⛔ NUNCA sugira aumentar contato com cliente`;
+  }
+
   // ==================== PROMPT CONCEITUAL ====================
-  function getPromptConceitual(prompt, contextoFiltros) {
+  function getPromptConceitual(prompt, contextoFiltros, historico) {
+    let contextoAnterior = '';
+    if (historico?.length > 0) {
+      const last = historico[historico.length - 1];
+      if (last.prompt) contextoAnterior = `\nConversa anterior - Pergunta: "${last.prompt.substring(0, 200)}"\nResposta: "${last.resposta?.substring(0, 300) || ''}"`;
+    }
+
     return `Você é um profissional sênior do time operacional da Tutts (logística de entregas com motoboys).
 
 Responda a pergunta do usuário:
 "${prompt}"
 ${contextoFiltros ? `\nContexto: ${contextoFiltros}` : ''}
+${contextoAnterior}
 
-## GLOSSÁRIO TUTTS:
-### MOTIVOS DE ATRASO:
-1. **Falha sistêmica**: SLA > 10h e alocação > 5h. OS "perdida" no sistema.
-2. **OS não encerrada**: SLA > 10h, alocação normal. Motoboy não fechou a OS no app.
-3. **Associado tarde**: Alocação > 30min. Mesa de operações demorou. Problema NOSSO.
-4. **Direcionamento lento**: Motoboy demorou > 30min para ir à coleta após ser alocado.
-5. **Coleta lenta**: Tempo no P1 > 45min. Loja do CLIENTE demorou. Problema do CLIENTE.
-6. **Atraso do motoboy**: Deslocamento/entrega longo — trânsito, rota, ou motoboy lento.
-
-### MÉTRICAS:
-- **Taxa de prazo**: % dentro do SLA. Meta ≥85%, Comollati exige ≥95%.
-- **Taxa de retorno**: Até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE.
-- **Faturamento líquido**: Receita (valor cobrado) MENOS custo com profissionais (valor_prof).
-- **Ticket médio**: Valor médio por entrega.
-- **Motos por dia**: Motoboys distintos operando.
-- **Mínimo garantido**: Valor diário acordado. Se produziu menos, Tutts paga a diferença (complemento).
-- **Cliente 767 (Comollati)**: SLA fixo 120min, mínimo 95% no prazo.
-- **Detrator**: Profissional com 3+ OS atrasadas.
+${KNOWLEDGE_BASE}
 
 ## REGRAS:
 - Fale como funcionário da Tutts: "nós", "nossa operação"
@@ -640,7 +809,7 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
       }
 
       // ========== ETAPA 0: Classificar ==========
-      const categoria = await classificarIntencao(prompt, GEMINI_API_KEY);
+      const categoria = await classificarIntencao(prompt, GEMINI_API_KEY, historico);
 
       // ========== SAUDAÇÃO ==========
       if (categoria === 'SAUDACAO') {
@@ -651,13 +820,26 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
       if (categoria === 'CONCEITUAL') {
         console.log('📚 [Chat IA] Conceitual — sem SQL');
         try {
-          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros, historico), { temperature: 0.5, maxTokens: 3000 });
           if (resp) {
             const r = { success: true, resposta: resp, sql: null, dados: null };
             queryResponseCache.set(cacheKey, { response: r, timestamp: Date.now() });
             return res.json(r);
           }
         } catch (e) { console.error('❌ [Chat IA] Erro conceitual:', e.message); }
+      }
+
+      // ========== METODOLOGIA (regras de negócio, como calcula, como metrifica) ==========
+      if (categoria === 'METODOLOGIA') {
+        console.log('📖 [Chat IA] Metodologia — explicando regra de negócio');
+        try {
+          const resp = await chamarGemini(GEMINI_API_KEY, getPromptMetodologia(prompt, contextoFiltros, historico), { temperature: 0.5, maxTokens: 4000 });
+          if (resp) {
+            const r = { success: true, resposta: resp, sql: null, dados: null };
+            queryResponseCache.set(cacheKey, { response: r, timestamp: Date.now() });
+            return res.json(r);
+          }
+        } catch (e) { console.error('❌ [Chat IA] Erro metodologia:', e.message); }
       }
 
       // ========== ETAPA 1: Tentar query direta (template) ==========
@@ -755,7 +937,7 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
       if (queriesParaExecutar.length === 0) {
         // Último fallback: conceitual
         try {
-          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros), { temperature: 0.5, maxTokens: 3000 });
+          const resp = await chamarGemini(GEMINI_API_KEY, getPromptConceitual(prompt, contextoFiltros, historico), { temperature: 0.5, maxTokens: 3000 });
           if (resp) return res.json({ success: true, resposta: resp, sql: null, dados: null });
         } catch (e) {}
         return res.json({
