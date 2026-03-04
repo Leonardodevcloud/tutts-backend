@@ -270,6 +270,7 @@ function createHistoricoRoutes(pool, verificarAdmin) {
         totaisRes,
         porMesRes,
         porSemanaRes,
+        porDiaRes,
         topProfissionaisRes,
         topValidadoresRes,
         redFlagsRes,
@@ -304,6 +305,18 @@ function createHistoricoRoutes(pool, verificarAdmin) {
           WHERE criado_em >= NOW() - INTERVAL '8 weeks'
           GROUP BY DATE_TRUNC('week', criado_em)
           ORDER BY DATE_TRUNC('week', criado_em) DESC
+        `),
+        pool.query(`
+          SELECT
+            TO_CHAR(criado_em::date, 'DD/MM') AS dia,
+            criado_em::date AS dia_ordem,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
+            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+          FROM ajustes_automaticos
+          WHERE criado_em >= NOW() - INTERVAL '7 days'
+          GROUP BY criado_em::date
+          ORDER BY dia_ordem ASC
         `),
         pool.query(`
           SELECT
@@ -348,6 +361,7 @@ function createHistoricoRoutes(pool, verificarAdmin) {
         totais: totaisRes.rows[0],
         por_mes: porMesRes.rows,
         por_semana: porSemanaRes.rows,
+        por_dia: porDiaRes.rows,
         top_profissionais: topProfissionaisRes.rows,
         top_validadores: topValidadoresRes.rows,
         red_flags: redFlagsRes.rows,
