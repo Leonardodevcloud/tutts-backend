@@ -997,7 +997,15 @@ RULES: Keep same logic. Fix only the error. Use NULLIF for divisions. Use COALES
   // ==================== ENDPOINT: Filtros ====================
   router.get('/bi/chat-ia/filtros', async (req, res) => {
     try {
-      const clientes = await pool.query(`SELECT DISTINCT cod_cliente, nome_fantasia FROM bi_entregas WHERE cod_cliente IS NOT NULL AND nome_fantasia IS NOT NULL AND nome_fantasia != '' ORDER BY nome_fantasia`);
+      // Buscar clientes com máscara aplicada
+      const clientes = await pool.query(`
+        SELECT DISTINCT e.cod_cliente, 
+          COALESCE(m.mascara, e.nome_fantasia) as nome_fantasia
+        FROM bi_entregas e
+        LEFT JOIN bi_mascaras m ON m.cod_cliente = e.cod_cliente::text
+        WHERE e.cod_cliente IS NOT NULL AND e.nome_fantasia IS NOT NULL AND e.nome_fantasia != ''
+        ORDER BY nome_fantasia
+      `);
       const centrosCusto = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`);
       const codCliente = req.query.cod_cliente;
       let centrosDoCliente = [];
