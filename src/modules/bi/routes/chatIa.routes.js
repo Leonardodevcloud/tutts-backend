@@ -297,15 +297,17 @@ function createChatIaRoutes(pool) {
     const classificadorPrompt = `Classifique a pergunta abaixo em EXATAMENTE UMA categoria. Responda APENAS com o nome da categoria, nada mais.
 
 CATEGORIAS:
-- SQL_ENTREGAS: perguntas sobre entregas, prazos, clientes, profissionais, rankings, volumes, top motoboys, cidades, bairros, evolução diária, horário de pico
+- SQL_ENTREGAS: perguntas sobre entregas, prazos, profissionais, rankings, volumes, top motoboys, cidades, bairros, evolução diária, horário de pico, resumo de performance de UM cliente, visão geral, panorama
 - SQL_FINANCEIRO: perguntas sobre faturamento, ticket médio, valores, garantido, custos, saques, receita, margem, lucro, variação de demanda
 - SQL_RETORNO: perguntas sobre retornos, devoluções, ocorrências de retorno, cliente fechado, cliente ausente, taxa de retorno
 - SQL_ATRASO: perguntas sobre atrasos, motivos de atraso, detratores, SLA, coleta lenta, associado tarde, direcionamento lento, atraso do motoboy, fora do prazo, taxa de prazo
 - SQL_FROTA: perguntas sobre motos por dia, quantidade de profissionais, dimensionamento, escala, frota, quantos motoboys
-- SQL_COMPARATIVO: perguntas que COMPARAM clientes entre si, períodos entre si, comparar com mercado, ranking, versus, comparar
+- SQL_COMPARATIVO: perguntas que COMPARAM MÚLTIPLOS clientes entre si, períodos entre si, comparar com mercado/média geral, ranking de vários clientes, versus
 - SQL_CS: perguntas sobre customer success, health score, interações CS, ocorrências CS, NPS
 - CONCEITUAL: perguntas sobre o que significa algo, como funciona, explicações de conceitos, definições, o que é, o que considera, me explique
 - SAUDACAO: cumprimentos ("oi", "olá", "bom dia", "tudo bem", "obrigado")
+
+REGRA: Se a pergunta é sobre UM cliente específico (resumo, performance, como está), use SQL_ENTREGAS. SQL_COMPARATIVO é só quando compara MÚLTIPLOS clientes ou com média geral.
 
 PERGUNTA: "${prompt}"
 
@@ -380,7 +382,20 @@ RECEITAS SQL:
 SELECT EXTRACT(HOUR FROM data_hora) AS hora, COUNT(*) AS total FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY total DESC
 
 -- Evolução diária (SEMPRE inclua motos):
-SELECT data_solicitado, COUNT(*) AS entregas, COUNT(DISTINCT cod_prof) as motos, ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY data_solicitado ORDER BY data_solicitado`,
+SELECT data_solicitado, COUNT(*) AS entregas, COUNT(DISTINCT cod_prof) as motos, ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) AS taxa_prazo FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 GROUP BY data_solicitado ORDER BY data_solicitado
+
+-- Resumo de performance (quando pedirem "resumo", "performance", "como está", "panorama"):
+SELECT COUNT(*) as total_entregas,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+  ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio_min,
+  COUNT(DISTINCT cod_prof) as total_motos,
+  ROUND(SUM(valor)::numeric, 2) as receita_bruta,
+  ROUND(SUM(valor_prof)::numeric, 2) as custo_profissionais,
+  ROUND((SUM(valor) - SUM(valor_prof))::numeric, 2) as faturamento_liquido,
+  ROUND(SUM(valor)::numeric / NULLIF(COUNT(*), 0), 2) as ticket_medio,
+  COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') as retornos,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%') / NULLIF(COUNT(*), 0), 2) as taxa_retorno
+FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 LIMIT 1`,
 
     FINANCEIRO: `${DICIONARIO_BASE}
 
@@ -673,9 +688,12 @@ Comparar com MÉDIA GERAL de TODOS os clientes (não só da região — pode ter
     const dicionarioKey = CATEGORIAS[categoria]?.dicionario || 'ENTREGAS_COMPLETO';
     const dicionario = DICIONARIOS_ESPECIFICOS[dicionarioKey] || DICIONARIOS_ESPECIFICOS.ENTREGAS_COMPLETO;
 
-    return `Você é um analista SQL expert da Tutts (logística de motoboys). Gere queries PostgreSQL.
+    return `You are a PostgreSQL SQL expert. Generate ONLY valid PostgreSQL queries.
 
-⚠️ REGRA ABSOLUTA: Sua resposta INTEIRA deve ser APENAS um bloco \`\`\`sql ... \`\`\`. Nada antes, nada depois.
+⚠️ ABSOLUTE RULE: Your ENTIRE response must be ONLY a \`\`\`sql ... \`\`\` block. Nothing before, nothing after.
+⚠️ SQL MUST be in ENGLISH keywords (SELECT, FROM, WHERE, WITH, AS, COUNT, ROUND, AVG, SUM, etc). NEVER use Portuguese SQL keywords.
+⚠️ When a RECEITA SQL (ready-made query) exists in the dictionary below, USE IT as base. Adapt the filters but keep the structure.
+⚠️ ONLY use tables that exist in the SCHEMA below. NEVER invent table names.
 
 📊 SCHEMA:
 ${schemaTexto}
@@ -694,6 +712,8 @@ ${dicionario}
 3. Sempre use COALESCE(ponto, 1) >= 2 (ponto pode ser NULL).
 4. Para múltiplas partes, gere blocos SQL separados.
 5. Inclua SEMPRE motos por dia (COUNT(DISTINCT cod_prof)) em evolução por dia.
+6. NUNCA invente nomes de tabela. Use APENAS as tabelas listadas no SCHEMA acima.
+7. NUNCA traduza palavras-chave SQL para português. Use SELECT, WITH, AS, FROM, WHERE, etc.
 
 REGRAS:
 1. SEMPRE gere SQL executável. NUNCA responda sem SQL.
@@ -706,6 +726,8 @@ REGRAS:
 8. Em evolução por dia, SEMPRE inclua COUNT(DISTINCT cod_prof) as motos
 9. Para retornos, use: LOWER(ocorrencia) LIKE '%cliente fechado%' OR LIKE '%clienteaus%' OR LIKE '%cliente ausente%' OR LIKE '%loja fechada%' OR LIKE '%produto incorreto%' OR LIKE '%retorno%'
 10. Para comparativo com mercado, compare com TODOS os clientes (não só região)
+11. Se o DICIONÁRIO acima contém RECEITA SQL pronta, USE-A como base adaptando os filtros.
+12. Para "resumo de performance", inclua: total entregas, taxa prazo, tempo médio, taxa retorno, motos por dia, ticket médio.
 ${contextoFiltros ? `
 ═══════════════════════════════════════
 ⚡ FILTROS ATIVOS (OBRIGATÓRIOS)
