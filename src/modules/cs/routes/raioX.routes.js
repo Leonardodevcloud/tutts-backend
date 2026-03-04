@@ -1100,9 +1100,6 @@ function initMap(){
   var td=document.createElement('div');td.style.cssText='margin:10px;display:flex;gap:6px';
   td.innerHTML='<button id="btnHeat" class="toggle-btn active" onclick="toggleHeat()">🔥 Calor</button><button id="btnMarkers" class="toggle-btn active" onclick="toggleMarkers()">📍 Marcadores</button>';
   map.controls[google.maps.ControlPosition.TOP_RIGHT].push(td);
-  var ip=document.createElement('div');ip.className='info-panel';ip.style.margin='10px';
-  ip.innerHTML='<h3>✅ '+pontos.length+' endereços mapeados</h3><p style="font-size:11px;color:#94a3b8">Use 🔥 e 📍 para alternar camadas</p>';
-  map.controls[google.maps.ControlPosition.LEFT_BOTTOM].push(ip);
   var bounds=new google.maps.LatLngBounds();
   var heatData=[];
   pontos.forEach(function(p){
@@ -1118,7 +1115,12 @@ function initMap(){
   });
   if(heatData.length>0){
     heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:40,opacity:.6,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
+  }
+  if(!bounds.isEmpty()){
     map.fitBounds(bounds);
+    google.maps.event.addListenerOnce(map,'bounds_changed',function(){
+      if(map.getZoom()>16) map.setZoom(16);
+    });
   }
 }
 function toggleHeat(){showHeat=!showHeat;heatmap&&heatmap.setMap(showHeat?map:null);document.getElementById('btnHeat').classList.toggle('active',showHeat)}
