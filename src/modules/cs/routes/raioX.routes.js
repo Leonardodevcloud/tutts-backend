@@ -645,165 +645,212 @@ ${grid}${bars}
       };
 
       // 14. PROMPT GEMINI
-      const slaInfo767 = isCliente767 ? `\n\n⚠️ REGRA ESPECIAL DESTE CLIENTE: O Grupo Comollati (cliente 767) possui prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km. Os dados de "dentro do prazo" já foram recalculados com base nessa regra. O SLA MÍNIMO exigido pelo Comollati é de **95% no prazo** — qualquer taxa abaixo disso é considerada CRÍTICA e requer plano de ação urgente.\n` : '';
-      const prompt = `Você é um profissional sênior da equipe de Sucesso do Cliente (CS) da Tutts, empresa de logística de entregas com motoboys. Você faz parte do time e conhece profundamente a operação. Gere um RELATÓRIO OPERACIONAL para o cliente ${nomeRelatorio}.${temCC ? ` Este relatório é específico para o centro de custo "${centro_custo}".` : ''}${slaInfo767}
+      const slaInfo767 = isCliente767
+        ? `\n\n⚠️ REGRA ESPECIAL DESTE CLIENTE — COMOLLATI (cliente 767):\n- Prazo FIXO de 120 minutos (2 horas) para QUALQUER faixa de km.\n- Os dados de "dentro do prazo" já foram recalculados com base nessa regra.\n- O SLA MÍNIMO CONTRATUAL é de **95% no prazo**. Se a taxa atual estiver abaixo de 95%, é uma violação de SLA — trate como CRÍTICO e inclua no plano de ação com prioridade máxima.\n- Se estiver entre 95% e 97%, destaque como "atenção — margem estreita". Acima de 97% = excelente.\n`
+        : '';
 
-## IDENTIDADE E TOM (OBRIGATÓRIO)
-- Você É um funcionário da Tutts. Fale em primeira pessoa do plural: "nós", "nossa equipe", "nosso time", "identificamos", "vamos trabalhar".
-- ⛔ NUNCA fale como consultor externo. NUNCA use "a Tutts deveria", "recomendo que a Tutts". Você É a Tutts.
-- ⛔ NUNCA sugira aumentar frequência de contato com o cliente — isso pode nos prejudicar comercialmente. Foque na qualidade do atendimento, não na quantidade.
-- ⛔ NUNCA sugira ações que possam incomodar ou pressionar o cliente (ex: "visitas mais frequentes", "reuniões semanais" a menos que o cliente tenha solicitado).
-- Sugestões devem ser sobre melhorias INTERNAS da operação (roteirização, alocação, treinamento de motoboys, otimização de rotas).
+      // Resumo de ocorrências e interações para injetar no prompt
+      const resumoOcorrencias = ocorrenciasCliente.rows.length > 0
+        ? ocorrenciasCliente.rows.map(o =>
+            `• [${(o.severidade || 'media').toUpperCase()}] ${o.titulo} (${o.status}) — ${o.descricao || ''} | Resolução: ${o.resolucao || 'pendente'} | Impacto: ${o.impacto_operacional || 'não informado'}`
+          ).join('\n')
+        : 'Nenhuma ocorrência no período.';
 
-## REGRAS DE FORMATO (OBRIGATÓRIO — SIGA À RISCA)
-- Siga EXATAMENTE a estrutura de seções abaixo. NÃO adicione, remova ou reordene seções.
-- Cada seção usa o título EXATO indicado com ## (h2) e o emoji correspondente.
-- ⛔ PROIBIDO usar tabelas markdown (com | --- |). Use listas com bullet points (- item) para dados tabulares.
+      const resumoInteracoes = interacoesCliente.rows.length > 0
+        ? interacoesCliente.rows.map(i =>
+            `• [${i.data_fmt}] ${i.tipo} (por ${i.criado_por_nome || 'equipe'}): ${i.descricao || ''} | Resultado: ${i.resultado || 'não registrado'} | Próxima ação: ${i.proxima_acao || 'nenhuma'}`
+          ).join('\n')
+        : 'Nenhuma interação no período.';
+
+      const prompt = `Você é um analista sênior da equipe de Sucesso do Cliente (CS) da Tutts, empresa de logística de entregas com motoboys. Você FAZ PARTE DO TIME — não é consultor externo, não é terceiro, não é "alguém de fora". Você usa "nós", "nossa equipe", "vamos", "identificamos". Gere o RELATÓRIO OPERACIONAL do cliente ${nomeRelatorio}.${temCC ? ` Relatório específico do centro de custo "${centro_custo}".` : ''}${slaInfo767}
+
+═══════════════════════════════════
+BLOCO 1 — IDENTIDADE E TOM (REGRAS ABSOLUTAS)
+═══════════════════════════════════
+✅ Fale SEMPRE em primeira pessoa do plural: "nós", "nossa equipe", "nosso time", "identificamos", "vamos garantir", "já estamos atuando".
+✅ Tom: parceiro interno que conhece a operação de dentro, não consultor que analisa de fora.
+
+⛔ NUNCA use: "a Tutts deveria", "recomendo que a empresa", "a empresa precisa melhorar", "seria interessante que a Tutts". Você É a Tutts.
+⛔ NUNCA sugira aumentar frequência de contato com o cliente (ligações, visitas, reuniões mais frequentes). Isso nos prejudica comercialmente — o cliente pode interpretar como monitoramento excessivo. Qualidade > quantidade no relacionamento.
+⛔ NUNCA sugira ao cliente que ele mude seus processos internos. Nossas sugestões são sobre o que NÓS controlaremos e melhoraremos.
+⛔ NUNCA defina prazos ou datas ("em 2 semanas", "até o dia X"). Trabalhamos com melhoria contínua.
+⛔ NUNCA mencione valores financeiros, faturamento, custos ou receitas.
+⛔ NUNCA cite métricas individuais de outros clientes pelo nome.
+⛔ NUNCA liste bairros, ruas ou endereços específicos.
+
+═══════════════════════════════════
+BLOCO 2 — REGRAS DE FORMATO
+═══════════════════════════════════
+- Siga EXATAMENTE a estrutura de seções abaixo, com títulos ## e emojis EXATOS.
+- ⛔ PROIBIDO tabelas markdown (| --- |). Use listas com bullet points (- item).
 - Destaque números com **negrito**.
-- Português brasileiro, tom profissional, consultivo e de parceria interna.
-- Quando apresentar dados por faixa (km, horário), use SEMPRE o formato de lista padronizado mostrado em cada seção.
+- Português brasileiro, tom consultivo e de parceria interna.
 
-## REGRAS DE CONTEÚDO (OBRIGATÓRIO)
-- Use APENAS os dados fornecidos. NÃO invente métricas.
-- ⛔ NUNCA liste bairros, cidades, ruas ou endereços.
-- ⛔ NUNCA mencione valores financeiros, faturamento ou custos.
-- ⛔ NUNCA cite métricas individuais de outros clientes (médias, taxas de terceiros).
-- ⛔ NUNCA defina prazos, datas ou cronogramas. Trabalhamos com melhoria contínua full time.
-- ⛔ NUNCA sugira que o cliente mude processos internos dele. Sugestões são sobre o que NÓS faremos.
-- Horário operacional: 08:00 às 18:00. Fora disso = exceção.
+═══════════════════════════════════
+BLOCO 3 — REGRAS DE RETORNO (CRÍTICO — LER COM ATENÇÃO)
+═══════════════════════════════════
+A taxa de retorno no setor de autopeças funciona assim:
+- Até **2%** → SAUDÁVEL e NORMAL. NÃO é um problema. Não escreva "plano de ação" se estiver nessa faixa.
+- Entre **2% e 5%** → Atenção pontual, mas não crítico.
+- Acima de **5%** → Preocupante, requer ação.
 
-## REGRAS DE RETORNO (IMPORTANTE)
-- Taxa de retorno até **2%** é considerada SAUDÁVEL e normal para operações logísticas de autopeças. Não trate como problema.
-- Taxa de retorno entre **2% e 5%** merece atenção mas não é crítica.
-- Taxa de retorno acima de **5%** é preocupante e requer ação.
-- Ao analisar retornos, sempre informe a taxa percentual e contextualize se está dentro do aceitável.
+A taxa de retorno atual deste cliente é **${taxaRetorno}%**.
+${parseFloat(taxaRetorno) <= 2
+  ? '✅ Está DENTRO do padrão saudável. Contextualize positivamente — NÃO trate como problema.'
+  : parseFloat(taxaRetorno) <= 5
+    ? '⚠️ Merece atenção mas não é crítico. Mencione com tom de acompanhamento, não de alarme.'
+    : '🔴 Acima do limite. Inclua no plano de ação com prioridade alta.'}
 
-## DADOS DA OPERAÇÃO
+═══════════════════════════════════
+BLOCO 4 — REGRAS DO BENCHMARK (COMPARATIVO COM O MERCADO)
+═══════════════════════════════════
+O campo "benchmark_geral_tutts" contém médias calculadas com TODOS os clientes ativos da Tutts no mesmo período — independente de região ou porte. Os campos "ranking_geral" mostram a posição percentil deste cliente entre todos.
+
+- Use esses dados para posicionar o cliente de forma RELATIVA E PERCENTUAL (ex: "está acima de X% dos clientes da nossa base").
+- ⛔ NÃO cite regiões específicas, NÃO compare com "clientes da mesma região".
+- ⛔ NÃO invente médias nem use dados que não estejam nos campos fornecidos.
+
+═══════════════════════════════════
+BLOCO 5 — OCORRÊNCIAS E INTERAÇÕES (INSUMO OBRIGATÓRIO PARA O PLANO DE AÇÃO)
+═══════════════════════════════════
+OCORRÊNCIAS DO PERÍODO (${ocorrenciasCliente.rows.length} registros):
+${resumoOcorrencias}
+
+INTERAÇÕES DO PERÍODO (${interacoesCliente.rows.length} registros):
+${resumoInteracoes}
+
+⚠️ REGRA CRÍTICA: Se existirem ocorrências ou interações acima, o PLANO DE AÇÃO deve OBRIGATORIAMENTE endereçar os pontos levantados neles. Não é opcional. Se o cliente reportou um problema em uma interação, o plano de ação deve ter uma ação correspondente. Se houve ocorrência em aberto, deve estar no plano.
+
+═══════════════════════════════════
+DADOS COMPLETOS DA OPERAÇÃO
+═══════════════════════════════════
 ${JSON.stringify(dadosParaGemini, null, 2)}
 
-## ESTRUTURA FIXA DO RELATÓRIO
+═══════════════════════════════════
+ESTRUTURA FIXA DO RELATÓRIO — SIGA EXATAMENTE
+═══════════════════════════════════
 
 ## 📊 VISÃO GERAL DA OPERAÇÃO
 
-Escreva um parágrafo de 3-4 linhas com síntese executiva: total de entregas, dias operados, profissionais envolvidos.
+Parágrafo 1 (3-4 linhas): síntese executiva com total de entregas, dias operados, profissionais envolvidos e média de motos por dia (${mediaMotosdia} motos/dia).
 
-Escreva outro parágrafo explicando o Health Score de **${healthScore}/100**. Use a classificação: ${healthScore >= 80 ? '🟢 **Excelente**' : healthScore >= 50 ? '🟡 **Boa com pontos de atenção**' : '🔴 **Requer ação imediata**'}. Explique de forma simples o que significa.
+Parágrafo 2: Health Score de **${healthScore}/100** — classificação ${healthScore >= 80 ? '🟢 **Excelente**' : healthScore >= 50 ? '🟡 **Boa com pontos de atenção**' : '🔴 **Requer ação imediata**'}. Explique de forma clara o que esse score representa para a operação.
 
 ## 🚀 ENTREGAS E DESEMPENHO
 
-Escreva um parágrafo sobre volume de entregas no período vs período anterior (use ↑↓% para variação). Se a variação for menor que 3%, diga que o volume se manteve estável e NÃO elabore sobre análise de fatores.
+Parágrafo sobre volume (entregas atual vs anterior, variação ↑↓%). Variação < 3% = "volume estável", sem análise de fatores.
 
-Escreva um parágrafo sobre taxa de prazo (vs anterior com ↑↓%). Se a variação for menor que 3%, diga que se manteve estável.${isCliente767 ? ' LEMBRE-SE: Para o Comollati, o mínimo aceitável é 95% no prazo. Se estiver abaixo, destaque como CRÍTICO.' : ''}
+Parágrafo sobre taxa de prazo (atual vs anterior ↑↓%).${isCliente767 ? ' ⚠️ COMOLLATI: mínimo é 95%. Abaixo disso = CRÍTICO, acima de 97% = excelente.' : ''} Variação < 3% = "manteve-se estável".
 
-Escreva um parágrafo sobre tempo médio de entrega. Se a variação for menor que 3%, diga que se manteve estável.
+Parágrafo sobre tempo médio de entrega. Variação < 3% = "manteve-se estável".
 
-Escreva um parágrafo sobre retornos: informe a quantidade total, a **taxa de retorno (${taxaRetorno}%)**, os principais motivos e contextualize (até 2% = saudável). Se estiver acima de 2%, apresente plano de ação. Se não houver retornos, celebre.
+Parágrafo sobre retornos: informe quantidade total, **taxa de ${taxaRetorno}%**, principais motivos.${parseFloat(taxaRetorno) <= 2 ? ' Esta taxa está dentro do padrão saudável para operações de autopeças (até 2%). Contextualize positivamente.' : parseFloat(taxaRetorno) <= 5 ? ' Está na faixa de atenção (2-5%). Mencione sem alarmar.' : ' Está acima do limite de 5%. Inclua plano de ação.'}
 
 ## 🏍️ FROTA DIÁRIA (Motos por Dia)
 
-Os dados de "motos_por_dia" mostram quantos profissionais distintos operaram por dia. A média foi de **${mediaMotosdia} motos/dia**.
+Informe que a média foi de **${mediaMotosdia} motos/dia** no período.
 
-Apresente uma análise da distribuição diária de motos usando os dados. Destaque:
-- Dias com pico e dias com menos motos
-- Relação entre quantidade de motos e entregas por moto
-- Se houve dias com excesso ou falta de profissionais alocados
+Analise a distribuição diária com base nos dados de "motos_por_dia": dias de pico, dias de menor cobertura, relação entregas/moto por dia, e se houve desequilíbrio na alocação.
 
 ## 📍 COBERTURA GEOGRÁFICA E DISTÂNCIAS
 
-Apresente os dados de faixas de KM usando EXATAMENTE este formato de lista (uma linha por faixa):
+Liste CADA FAIXA de KM disponível nos dados exatamente assim (uma linha por faixa, sem pular):
 
-- **0-5 km:** X entregas · taxa de prazo Y% · tempo médio Z min
-- **5-10 km:** X entregas · taxa de prazo Y% · tempo médio Z min
-(e assim por diante para cada faixa presente nos dados)
+- **[FAIXA] km:** [X] entregas · prazo [Y]% · tempo médio [Z] min
 
-Após a lista, escreva um parágrafo analítico sobre concentração de volume e comportamento do SLA por distância.
+Parágrafo analítico sobre concentração de volume e comportamento do SLA por distância.
 
-Encerre SEMPRE com: "Para uma visualização detalhada da cobertura geográfica, disponibilizamos um **mapa de calor interativo** com cada ponto de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
+Encerre com: "Para uma visualização completa da cobertura, disponibilizamos um **mapa de calor interativo** com todos os pontos de entrega, taxa de prazo por região e tempo médio. Acesse: ${linkMapaCalor}"
 
 ## 🏍️ ANÁLISE DOS ROTEIROS E PROFISSIONAIS
 
-Os dados de "corridas_por_motoboy" mostram ROTEIROS: OS do mesmo motoboy criadas em janela de 10 min = uma "saída".
+Liste cada profissional dos dados "corridas_por_motoboy" exatamente assim:
 
-Apresente cada motoboy usando EXATAMENTE este formato de lista:
+- **[NOME]:** [X] entregas · [Y] saídas · prazo [Z]% · [W] entregas/saída · [V] saídas/dia
 
-- **NOME:** X entregas · Y saídas · taxa prazo Z% · média de W entregas/saída · V saídas/dia
-(uma linha por motoboy)
-
-Após a lista, escreva um parágrafo analítico: destaque os profissionais com melhor e pior taxa de prazo, identifique padrões (ex: motoboys com muitas entregas mas taxa baixa = possível sobrecarga).
+Parágrafo analítico: melhores e piores taxas de prazo, padrões de sobrecarga, destaques positivos.
 
 ## ⏰ JANELA OPERACIONAL (08h às 18h)
 
-Apresente as faixas horárias usando EXATAMENTE este formato de lista:
+Liste cada faixa horária dos dados "padroes_horario" exatamente assim:
 
-- **08-10h:** X entregas · taxa de prazo Y% · tempo médio Z min
-- **10-12h:** X entregas · taxa de prazo Y% · tempo médio Z min
-- **12-14h:** X entregas · taxa de prazo Y% · tempo médio Z min
-- **14-16h:** X entregas · taxa de prazo Y% · tempo médio Z min
-- **16-18h:** X entregas · taxa de prazo Y% · tempo médio Z min
-(se houver "Fora do horário", adicione como última linha)
+- **[FAIXA]:** [X] entregas · prazo [Y]% · tempo médio [Z] min
 
-Após a lista, escreva um parágrafo sobre picos de demanda e comparação de SLA entre faixas.
+(Se houver "Fora do horário", liste como última linha.)
+
+Parágrafo sobre picos de demanda e variação de SLA entre faixas.
 
 ## 📈 COMPARATIVO COM O MERCADO (Todos os Clientes Tutts)
 
-O benchmark foi calculado com TODOS os clientes ativos da Tutts (não apenas da região). Os dados de "benchmark_geral_tutts" e "ranking_geral" mostram a posição deste cliente entre todos.
-
-Escreva um parágrafo posicionando o cliente de forma GENÉRICA e PERCENTUAL em relação a todos os clientes Tutts. Use APENAS os dados de percentil e ranking fornecidos. NÃO cite números de outros clientes individualmente.
+⚠️ INSTRUÇÕES ESPECÍFICAS DESTA SEÇÃO:
+- Use os dados de "benchmark_geral_tutts" (médias de TODOS os clientes da Tutts, não só da região).
+- Use "ranking_geral" para percentil (percentil_prazo e percentil_volume).
+- Posicione o cliente de forma percentual: "está entre os X% melhores da nossa base em [métrica]".
+- Compare taxa de prazo atual com a média geral da Tutts e com a mediana.
+- Compare taxa de retorno atual (${taxaRetorno}%) com a média geral da base.
+- ⛔ NÃO compare com região específica. ⛔ NÃO use nome de outros clientes.
 
 ## 📉 TENDÊNCIAS E PROJEÇÕES
 
-Escreva um parágrafo sobre evolução semanal: volume crescendo, estável ou caindo? Compare atual vs anterior.
+Parágrafo sobre evolução semanal baseado em "evolucao_semanal": volume crescendo, estável ou caindo?
 
-Escreva outro parágrafo sobre riscos identificados: [🔴 Alto | 🟠 Médio | 🟡 Baixo].
+Parágrafo sobre riscos identificados com classificação: 🔴 Alto · 🟠 Médio · 🟡 Baixo.
 
 ## ⚠️ PONTOS DE ATENÇÃO
 
-Para cada problema REAL dos dados, use EXATAMENTE este formato:
+Para cada problema REAL identificado nos dados, use:
 
-- **Situação:** descreva o problema · **Ação:** o que nós (Tutts) faremos · **Prioridade:** 🔴 Urgente / 🟠 Importante / 🟡 Melhoria contínua
+- **Situação:** [descrição] · **Ação:** [o que vamos fazer] · **Prioridade:** 🔴 Urgente / 🟠 Importante / 🟡 Melhoria contínua
 
-⛔ Apenas problemas reais, não genéricos. ⛔ Sem prazos ou datas.
+⛔ Apenas problemas reais. ⛔ Sem prazos ou datas. ⛔ Ações são sobre o que NÓS faremos.
 
 ## 🎯 PLANO DE AÇÃO
 
-${ocorrenciasCliente.rows.length > 0 || interacoesCliente.rows.length > 0 ? `⚠️ IMPORTANTE: As ocorrências e interações registradas no período DEVEM ser consideradas como insumo para este plano de ação. Se houve reclamações, problemas reportados ou compromissos assumidos nas interações, as ações devem ENDEREÇAR esses pontos diretamente.` : ''}
+⚠️ OBRIGATÓRIO: Se existirem ocorrências ou interações no período (ver Bloco 5 acima), as ações devem ENDEREÇAR diretamente os pontos levantados. As 5 ações devem refletir os dados operacionais E os problemas reportados nas ocorrências/interações.
 
-Liste exatamente 5 ações usando EXATAMENTE este formato:
+Liste exatamente 5 ações:
 
-- **Ação 1 — Título:** Descrição. **Meta:** resultado esperado.
-- **Ação 2 — Título:** Descrição. **Meta:** resultado esperado.
-(até Ação 5)
-
-As ações devem ser sobre o que NÓS (Tutts) controlamos e faremos. Inclua ações relacionadas às ocorrências e interações quando existirem.
+- **Ação 1 — [Título]:** [Descrição do que vamos fazer]. **Meta:** [resultado esperado].
+- **Ação 2 — [Título]:** [Descrição]. **Meta:** [resultado].
+- **Ação 3 — [Título]:** [Descrição]. **Meta:** [resultado].
+- **Ação 4 — [Título]:** [Descrição]. **Meta:** [resultado].
+- **Ação 5 — [Título]:** [Descrição]. **Meta:** [resultado].
 
 ## 💡 OPORTUNIDADES
 
-Escreva 2-3 parágrafos curtos com sugestões de otimização baseadas nos dados. Quick wins operacionais INTERNOS.
+2-3 parágrafos com oportunidades de melhoria baseadas nos dados. Quick wins operacionais INTERNOS — roteirização, alocação, treinamento, otimização de rotas.
 
 ## 📋 OCORRÊNCIAS REGISTRADAS
 
-${ocorrenciasCliente.rows.length > 0 ? `No período foram registradas **${ocorrenciasCliente.rows.length}** ocorrência(s). Os dados estão no campo "ocorrencias_periodo" dos DADOS DA OPERAÇÃO acima. Analise CADA UMA usando EXATAMENTE este formato:
+${ocorrenciasCliente.rows.length > 0
+  ? `Foram registradas **${ocorrenciasCliente.rows.length}** ocorrência(s) no período. Analise CADA UMA dos dados em "ocorrencias_periodo" usando:
 
-- **[SEVERIDADE] Título** (status) — Descrição do problema. ${ocorrenciasCliente.rows.some(o => o.resolucao) ? 'Resolução aplicada quando houver.' : ''} Impacto operacional quando informado.
+- **[🔴🟠🟡🟢] [TÍTULO]** ([✅ Resolvida / 🔄 Em andamento / 🕐 Aberta]) — [descrição]. [Resolução quando houver]. [Impacto quando informado].
 
-Use emojis de severidade: 🔴 Crítica · 🟠 Alta · 🟡 Média · 🟢 Baixa
-Use status: ✅ Resolvida · 🔄 Em andamento · 🕐 Aberta
-
-Após listar, escreva um parágrafo analítico: quantas foram resolvidas vs abertas, padrões identificados, e impacto na operação. VINCULE as ocorrências ao plano de ação acima.` : `Não houve ocorrências registradas no período. Escreva um parágrafo positivo sobre a estabilidade operacional do cliente.`}
+Parágrafo final: quantas resolvidas vs abertas, padrões identificados, conexão com o plano de ação.`
+  : `Não houve ocorrências registradas no período. Escreva um parágrafo positivo sobre a estabilidade operacional.`}
 
 ## 🤝 RELACIONAMENTO E ACOMPANHAMENTO
 
-${interacoesCliente.rows.length > 0 ? `No período foram registradas **${interacoesCliente.rows.length}** interação(ões) com o cliente. Os dados estão no campo "interacoes_periodo" dos DADOS DA OPERAÇÃO acima. Apresente CADA UMA usando EXATAMENTE este formato:
+${interacoesCliente.rows.length > 0
+  ? `Foram registradas **${interacoesCliente.rows.length}** interação(ões) no período. Apresente CADA UMA dos dados em "interacoes_periodo" usando:
 
-- **Data — Tipo** (por Nome): Resumo do que foi tratado. Resultado obtido. Próxima ação definida.
+- **[DATA] — [TIPO]** (por [NOME]): [o que foi tratado]. [Resultado]. [Próxima ação definida].
 
-Após listar, escreva um parágrafo avaliando o que foi tratado e se os compromissos assumidos estão refletidos no plano de ação. NÃO sugira aumentar frequência de contato.` : `Não houve interações registradas no período. Escreva um parágrafo breve informando que vamos manter o acompanhamento operacional de rotina.`}
+Parágrafo final: avalie se os compromissos assumidos estão refletidos no plano de ação. ⛔ NÃO sugira aumentar frequência de contato.`
+  : `Não houve interações formais registradas no período. Escreva um parágrafo curto informando que o acompanhamento operacional segue em andamento de forma contínua.`}
 
 ---
 
-Encerre com um parágrafo de tom parceria INTERNA: "Estamos à disposição para apresentar este relatório em detalhes."
+Encerre com um parágrafo de parceria interna: "Estamos à disposição para apresentar e detalhar este relatório diretamente."
 
-⛔ LEMBRETE: Siga os formatos de lista EXATOS indicados acima. NÃO use tabelas markdown. Mantenha o padrão consistente em todas as seções. Fale como FUNCIONÁRIO da Tutts.`;
+⛔ CHECKLIST FINAL ANTES DE RESPONDER:
+[ ] Usei "nós", "nossa equipe" em todo o texto?
+[ ] Evitei sugerir aumento de frequência de contato?
+[ ] O plano de ação endereça as ocorrências/interações?
+[ ] Contextualizei a taxa de retorno de ${taxaRetorno}% corretamente (até 2% = saudável)?
+[ ] O benchmark usa todos os clientes Tutts, não só da região?
+[ ] Incluí a seção de motos por dia?`;
 
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
@@ -1078,12 +1125,13 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
       res.setHeader('Content-Type', 'text/html');
       res.setHeader('Content-Security-Policy', [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com",
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://maps.googleapis.com https://maps.gstatic.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://maps.googleapis.com https://maps.gstatic.com",
         "img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.ggpht.com",
         "font-src 'self' https://fonts.gstatic.com",
-        "connect-src 'self' https://maps.googleapis.com https://*.googleapis.com",
+        "connect-src 'self' https://maps.googleapis.com https://*.googleapis.com https://*.gstatic.com",
         "frame-src https://maps.googleapis.com https://*.google.com",
+        "worker-src blob: 'self'",
       ].join('; '));
       res.send(html);
     } catch (error) {
