@@ -9,6 +9,9 @@ const express = require('express');
 function createDisponibilidadeRouter(pool, verificarToken) {
   const router = express.Router();
 
+  // Helper: extrair wsId do header para não enviar de volta ao remetente
+  const getSenderWsId = (req) => req.headers['x-ws-id'] || null;
+
   // Aplicar verificarToken apenas a rotas de disponibilidade (não bloquear rotas de outros módulos)
   router.use((req, res, next) => {
     if (req.path.startsWith('/disponibilidade')) {
@@ -46,6 +49,10 @@ router.post('/disponibilidade/regioes', async (req, res) => {
       [nome.toUpperCase().trim()]
     );
     console.log('✅ Região criada:', result.rows[0]);
+    // Broadcast: reload estrutural
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'regiao-criada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     if (err.code === '23505') {
@@ -72,6 +79,9 @@ router.put('/disponibilidade/regioes/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Região não encontrada' });
     }
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'regiao-atualizada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar região:', err);
@@ -89,6 +99,9 @@ router.delete('/disponibilidade/regioes/:id', async (req, res) => {
       return res.status(404).json({ error: 'Região não encontrada' });
     }
     console.log('🗑️ Região deletada:', result.rows[0]);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'regiao-deletada' }, getSenderWsId(req));
+    }
     res.json({ success: true, deleted: result.rows[0] });
   } catch (err) {
     console.error('❌ Erro ao deletar região:', err);
@@ -143,6 +156,9 @@ router.post('/disponibilidade/lojas', async (req, res) => {
     }
     
     console.log('✅ Loja criada:', loja.nome, 'com', titulares, 'titulares e', excedentes, 'excedentes');
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'loja-criada' }, getSenderWsId(req));
+    }
     res.json({ loja, linhas });
   } catch (err) {
     console.error('❌ Erro ao criar loja:', err);
@@ -172,6 +188,9 @@ router.put('/disponibilidade/lojas/:id', async (req, res) => {
       return res.status(404).json({ error: 'Loja não encontrada' });
     }
     console.log('✅ Loja atualizada:', result.rows[0]);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'loja-atualizada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar loja:', err);
@@ -189,6 +208,9 @@ router.delete('/disponibilidade/lojas/:id', async (req, res) => {
       return res.status(404).json({ error: 'Loja não encontrada' });
     }
     console.log('🗑️ Loja deletada:', result.rows[0]);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'loja-deletada' }, getSenderWsId(req));
+    }
     res.json({ success: true, deleted: result.rows[0] });
   } catch (err) {
     console.error('❌ Erro ao deletar loja:', err);
@@ -224,6 +246,10 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     }
     
     console.log('✅', qtd, excedente ? 'excedente(s)' : 'titular(es)', 'adicionado(s) à loja', loja_id);
+    // Broadcast: novas linhas adicionadas
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_LINHAS_ADD', { loja_id, linhas }, getSenderWsId(req));
+    }
     res.json(linhas);
   } catch (err) {
     console.error('❌ Erro ao criar linhas:', err);
@@ -291,6 +317,10 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Linha não encontrada' });
     }
+    // Broadcast atualização granular da linha para outros clientes
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_LINHA_UPDATE', result.rows[0], getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar linha:', err);
@@ -307,6 +337,10 @@ router.delete('/disponibilidade/linhas/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Linha não encontrada' });
     }
+    // Broadcast: linha removida
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_LINHA_DELETE', { id: parseInt(id), loja_id: result.rows[0].loja_id }, getSenderWsId(req));
+    }
     res.json({ success: true, deleted: result.rows[0] });
   } catch (err) {
     console.error('❌ Erro ao deletar linha:', err);
@@ -322,6 +356,10 @@ router.delete('/disponibilidade/limpar-linhas', async (req, res) => {
        SET cod_profissional = NULL, nome_profissional = NULL, status = 'A CONFIRMAR', observacao = NULL, updated_at = CURRENT_TIMESTAMP`
     );
     console.log('🧹 Todas as linhas de disponibilidade foram resetadas');
+    // Broadcast: reload completo necessário
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'limpar-linhas' }, getSenderWsId(req));
+    }
     res.json({ success: true, message: 'Todas as linhas foram resetadas' });
   } catch (err) {
     console.error('❌ Erro ao limpar linhas:', err);
@@ -352,6 +390,10 @@ router.post('/disponibilidade/faltosos', async (req, res) => {
     );
     
     console.log('⚠️ Faltoso registrado:', result.rows[0]);
+    // Broadcast: faltoso registrado (pode afetar o painel se status foi alterado)
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'faltoso-registrado' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao registrar faltoso:', err);
@@ -425,6 +467,10 @@ router.post('/disponibilidade/linha-reposicao', async (req, res) => {
     );
     
     console.log('🔄 Linha de reposição criada:', result.rows[0]);
+    // Broadcast: nova linha de reposição
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_LINHAS_ADD', { loja_id, linhas: [result.rows[0]] }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao criar linha de reposição:', err);
@@ -1149,6 +1195,10 @@ router.post('/disponibilidade/resetar', async (req, res) => {
     );
     
     console.log('🔄 Status resetado com sucesso (códigos e nomes mantidos)');
+    // Broadcast: reload completo após reset
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'resetar' }, getSenderWsId(req));
+    }
     res.json({ 
       success: true, 
       espelho_data: dataEspelho, 
