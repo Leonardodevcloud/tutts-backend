@@ -12,6 +12,32 @@ const wsClients = {
   users: new Map(),
 };
 
+// ============================================
+// DISPONIBILIDADE - WebSocket em tempo real
+// ============================================
+const wsDispClients = new Set(); // Todos os admins conectados ao módulo disponibilidade
+
+/**
+ * Broadcast para todos os clientes conectados ao módulo disponibilidade.
+ * Envia o evento para todos EXCETO o remetente (identificado por senderWsId).
+ * @param {string} event - Nome do evento (DISP_LINHA_UPDATE, DISP_RELOAD, etc.)
+ * @param {object} data - Dados do evento
+ * @param {string|null} senderWsId - ID do WS que originou a mudança (para não receber de volta)
+ */
+function broadcastDisponibilidade(event, data, senderWsId = null) {
+  const message = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+  let count = 0;
+  wsDispClients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN && ws._dispWsId !== senderWsId) {
+      ws.send(message);
+      count++;
+    }
+  });
+  if (count > 0) {
+    console.log(`📡 [WS-Disp] Broadcast ${event} para ${count} cliente(s)`);
+  }
+}
+
 function broadcastToAdmins(event, data) {
   const message = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
   wsClients.admins.forEach(ws => {
@@ -63,6 +89,7 @@ function notifyWithdrawalUpdate(withdrawal, action) {
 }
 
 function setupWebSocket(server) {
+  // ─── WS Financeiro (existente) ───
   const wss = new WebSocket.Server({ server, path: '/ws/financeiro' });
 
   wss.on('connection', (ws) => {
@@ -143,6 +170,73 @@ function setupWebSocket(server) {
     ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts - Envie AUTH com token' }));
   });
 
+  // ─── WS Disponibilidade (novo) ───
+  const wssDisp = new WebSocket.Server({ server, path: '/ws/disponibilidade' });
+  let dispWsIdCounter = 0;
+
+  wssDisp.on('connection', (ws) => {
+    console.log('🔌 [WS-Disp] Nova conexão');
+    let authenticated = false;
+
+    // Gerar ID único para esta conexão
+    ws._dispWsId = `disp_${++dispWsIdCounter}_${Date.now()}`;
+
+    const authTimeout = setTimeout(() => {
+      if (!authenticated) {
+        console.log('⚠️ [WS-Disp] Conexão fechada por falta de autenticação');
+        ws.close(4001, 'Autenticação necessária');
+      }
+    }, 30000);
+
+    ws.on('message', (message) => {
+      try {
+        const data = JSON.parse(message);
+
+        if (data.type === 'AUTH') {
+          const { token } = data;
+          if (!token) {
+            ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
+            return;
+          }
+
+          try {
+            const decoded = jwt.verify(token, env.JWT_SECRET);
+            authenticated = true;
+            clearTimeout(authTimeout);
+
+            // Apenas admins podem se conectar ao módulo disponibilidade
+            if (['admin', 'admin_master', 'admin_financeiro'].includes(decoded.role)) {
+              wsDispClients.add(ws);
+              ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', wsId: ws._dispWsId, user: decoded.fullName }));
+              console.log(`✅ [WS-Disp] ${decoded.fullName} autenticado (${ws._dispWsId}). Total: ${wsDispClients.size}`);
+            } else {
+              ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Acesso restrito a admins' }));
+              ws.close(4003, 'Acesso restrito');
+            }
+          } catch (jwtError) {
+            console.log(`❌ [WS-Disp] Token inválido: ${jwtError.message}`);
+            ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido ou expirado' }));
+            ws.close(4003, 'Token inválido');
+          }
+        }
+
+        if (data.type === 'PING' && authenticated) {
+          ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
+        }
+      } catch (e) {
+        console.error('❌ [WS-Disp] Erro:', e.message);
+      }
+    });
+
+    ws.on('close', () => {
+      clearTimeout(authTimeout);
+      wsDispClients.delete(ws);
+      console.log(`🔌 [WS-Disp] Desconectado (${ws._dispWsId}). Restam: ${wsDispClients.size}`);
+    });
+
+    ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Tutts Disponibilidade - Envie AUTH com token' }));
+  });
+
   return wss;
 }
 
@@ -151,6 +245,7 @@ function registerGlobals() {
   global.notifyNewWithdrawal = notifyNewWithdrawal;
   global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
   global.broadcastToAdmins = broadcastToAdmins;
+  global.broadcastDisponibilidade = broadcastDisponibilidade;
 }
 
-module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate };
+module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate, broadcastDisponibilidade };
