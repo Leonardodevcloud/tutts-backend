@@ -44,6 +44,8 @@ async function initAgentTables(pool) {
     { nome: 'ponto1_lat',        tipo: 'DECIMAL(10, 8)' },
     { nome: 'ponto1_lng',        tipo: 'DECIMAL(11, 8)' },
     { nome: 'ponto1_endereco',   tipo: 'TEXT' },
+    { nome: 'endereco_antigo_lat', tipo: 'DECIMAL(10, 8)' },
+    { nome: 'endereco_antigo_lng', tipo: 'DECIMAL(11, 8)' },
   ];
 
   for (const col of colunas) {
