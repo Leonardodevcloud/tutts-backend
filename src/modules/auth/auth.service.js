@@ -9,7 +9,7 @@ const bcrypt = require('bcrypt');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const REFRESH_SECRET = process.env.REFRESH_SECRET || (JWT_SECRET + '_refresh');
-const JWT_EXPIRES_IN = '1h';
+const JWT_EXPIRES_IN = '8h';
 const REFRESH_TOKEN_EXPIRES_IN = '7d';
 const BCRYPT_ROUNDS = 10;
 
