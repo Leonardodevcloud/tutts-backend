@@ -118,7 +118,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                   usuario_id, usuario_nome, endereco_antigo, endereco_corrigido,
                   cod_profissional, frete_recalculado,
                   latitude, longitude, motoboy_lat, motoboy_lng,
-                  ponto1_lat, ponto1_lng, ponto1_endereco
+                  ponto1_lat, ponto1_lng, ponto1_endereco,
+                  endereco_antigo_lat, endereco_antigo_lng
            FROM ajustes_automaticos ${where}
            ORDER BY criado_em DESC
            LIMIT $${p} OFFSET $${p + 1}`,
@@ -158,7 +159,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                 validado_por, validado_em,
                 usuario_nome, cod_profissional,
                 frete_recalculado,
-                ponto1_lat, ponto1_lng, ponto1_endereco
+                ponto1_lat, ponto1_lng, ponto1_endereco,
+                endereco_antigo_lat, endereco_antigo_lng
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
@@ -427,6 +429,53 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     } catch (err) {
       console.error('[agent/historico/ponto1]', err.message);
       return res.status(500).json({ erro: 'Erro ao buscar ponto 1.' });
+    }
+  });
+
+  // POST /agent/geocodificar-antigos — Geocodifica endereços antigos sem coordenadas (retroativo, admin)
+  router.post('/geocodificar-antigos', verificarAdmin, async (req, res) => {
+    try {
+      const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+      if (!GOOGLE_API_KEY) return res.status(400).json({ erro: 'GOOGLE_GEOCODING_API_KEY não configurada.' });
+
+      const { rows } = await pool.query(
+        `SELECT id, endereco_antigo FROM ajustes_automaticos
+         WHERE endereco_antigo IS NOT NULL AND endereco_antigo != ''
+         AND (endereco_antigo_lat IS NULL OR endereco_antigo_lat = 0)
+         ORDER BY id DESC LIMIT 50`
+      );
+
+      if (rows.length === 0) return res.json({ processados: 0, mensagem: 'Nenhum registro pendente.' });
+
+      let processados = 0;
+      let erros = 0;
+
+      for (const row of rows) {
+        try {
+          const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(row.endereco_antigo)}&key=${GOOGLE_API_KEY}&language=pt-BR&components=country:BR`;
+          const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(8000) });
+          const geoData = await geoRes.json();
+          if (geoData.status === 'OK' && geoData.results && geoData.results[0]) {
+            const loc = geoData.results[0].geometry.location;
+            await pool.query(
+              `UPDATE ajustes_automaticos SET endereco_antigo_lat = $1, endereco_antigo_lng = $2 WHERE id = $3`,
+              [loc.lat, loc.lng, row.id]
+            );
+            processados++;
+          } else {
+            erros++;
+          }
+          // Pequeno delay para não estourar rate limit da API
+          await new Promise(r => setTimeout(r, 200));
+        } catch {
+          erros++;
+        }
+      }
+
+      return res.json({ total: rows.length, processados, erros });
+    } catch (err) {
+      console.error('[agent/geocodificar-antigos]', err.message);
+      return res.status(500).json({ erro: 'Erro ao processar.' });
     }
   });
 
