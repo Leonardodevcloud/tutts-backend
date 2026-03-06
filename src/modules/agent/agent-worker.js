@@ -129,7 +129,30 @@ async function processarProximoPendente(pool) {
          WHERE id = $1`,
         [registro.id, endCorrigido, endAntigo, resultado.frete_recalculado || false]
       );
-            // Salvar coordenadas do Ponto 1 se capturadas pelo playwright
+
+      // Geocodificar endereço antigo para obter coordenadas (usado no mapa)
+      if (endAntigo) {
+        try {
+          const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+          if (GOOGLE_API_KEY) {
+            const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endAntigo)}&key=${GOOGLE_API_KEY}&language=pt-BR&components=country:BR`;
+            const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(8000) });
+            const geoData = await geoRes.json();
+            if (geoData.status === 'OK' && geoData.results && geoData.results[0]) {
+              const loc = geoData.results[0].geometry.location;
+              await pool.query(
+                `UPDATE ajustes_automaticos SET endereco_antigo_lat = $1, endereco_antigo_lng = $2 WHERE id = $3`,
+                [loc.lat, loc.lng, registro.id]
+              );
+              log(`📍 Endereço antigo geocodificado: ${loc.lat}, ${loc.lng}`);
+            }
+          }
+        } catch (geoErr) {
+          log(`⚠️ Geocode endereço antigo falhou: ${geoErr.message}`);
+        }
+      }
+
+      // Salvar coordenadas do Ponto 1 se capturadas pelo playwright
       if (resultado.ponto1 && resultado.ponto1.lat) {
         await pool.query(
           `UPDATE ajustes_automaticos SET ponto1_lat = $1, ponto1_lng = $2, ponto1_endereco = $3 WHERE id = $4`,
