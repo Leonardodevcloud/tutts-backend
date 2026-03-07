@@ -149,6 +149,7 @@ function createAntiFraudeRouter(pool, verificarAdmin) {
   router.post('/varredura', verificarAdmin, async (req, res) => {
     try {
       const nomeAdmin = req.user?.fullName || req.user?.nome || 'Admin';
+      const { data_inicio, data_fim } = req.body || {};
 
       // Verificar se já tem uma varredura executando
       const emExecucao = await pool.query(
@@ -161,11 +162,11 @@ function createAntiFraudeRouter(pool, verificarAdmin) {
         });
       }
 
-      // Disparar em background (não bloquear a resposta HTTP)
+      // Responder imediatamente (análise é rápida mas não bloqueia)
       res.json({ message: 'Varredura iniciada', status: 'executando' });
 
-      // Executar de forma assíncrona
-      executarVarreduraCompleta(pool, 'manual', nomeAdmin).catch(err => {
+      // Executar de forma assíncrona com período opcional
+      executarVarreduraCompleta(pool, 'manual', nomeAdmin, data_inicio || null, data_fim || null).catch(err => {
         console.error('[antifraude/varredura] Erro:', err.message);
       });
     } catch (err) {

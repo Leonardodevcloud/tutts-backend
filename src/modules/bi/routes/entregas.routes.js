@@ -462,6 +462,24 @@ router.post('/bi/entregas/upload', async (req, res) => {
     }).catch(err => {
       console.error('❌ Erro ao atualizar resumos:', err);
     });
+
+    // ============================================
+    // PASSO 8: Disparar análise anti-fraude automática
+    // ============================================
+    try {
+      const { executarVarreduraCompleta } = require('../antifraude/antifraude-worker');
+      const usuario = req.user?.fullName || req.user?.nome || 'Upload BI';
+      // Analisar nas datas do upload
+      const dataMin = datasAfetadas.length > 0 ? datasAfetadas.sort()[0] : null;
+      const dataMax = datasAfetadas.length > 0 ? datasAfetadas.sort().reverse()[0] : null;
+      executarVarreduraCompleta(pool, 'auto_upload', usuario, dataMin, dataMax).then(r => {
+        console.log(`🛡️ Anti-fraude automático: ${r.alertasGerados} alerta(s) em ${r.osAnalisadas} OS(s)`);
+      }).catch(err => {
+        console.error('⚠️ Anti-fraude automático falhou:', err.message);
+      });
+    } catch (err) {
+      console.error('⚠️ Anti-fraude trigger não disponível:', err.message);
+    }
     
     res.json({
       success: true,
