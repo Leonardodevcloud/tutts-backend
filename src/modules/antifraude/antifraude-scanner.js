@@ -237,6 +237,8 @@ async function extrairNfDoModal(page, osCodigo) {
 
 /**
  * Executa a varredura completa: login, varre execução + concluídos, extrai NFs.
+ * OTIMIZAÇÃO: só abre modal de OSs NOVAS (não conhecidas no banco).
+ * OSs antigas: atualiza dados básicos (status, profissional) sem abrir modal.
  * @param {object} pool - Pool do PostgreSQL
  * @param {number} varreduraId - ID do registro em antifraude_varreduras
  * @param {object} config - { janela_dias, max_paginas_concluidos }
@@ -246,6 +248,16 @@ async function executarVarredura(pool, varreduraId, config = {}) {
 
   if (!process.env.SISTEMA_EXTERNO_URL) {
     throw new Error('SISTEMA_EXTERNO_URL não configurada.');
+  }
+
+  // Carregar OSs já conhecidas no banco para pular o modal (operação lenta)
+  let osConhecidas = new Set();
+  try {
+    const { rows } = await pool.query('SELECT DISTINCT os_codigo FROM antifraude_os_dados');
+    rows.forEach(r => osConhecidas.add(r.os_codigo));
+    log(`📋 ${osConhecidas.size} OS(s) já conhecidas no banco — modal será pulado para estas`);
+  } catch (err) {
+    log(`⚠️ Erro ao carregar OSs conhecidas: ${err.message}`);
   }
 
   log('🚀 Iniciando varredura anti-fraude...');
@@ -302,11 +314,13 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     log(`📊 Em execução: ${osExec.length} OS(s) encontrada(s)`);
     todasOs.push(...osExec);
 
-    // Extrair NFs dos modais (amostra: pegar detalhes de cada OS)
-    for (const os of osExec) {
+    // Extrair NFs dos modais APENAS para OSs NOVAS
+    const osExecNovas = osExec.filter(os => !osConhecidas.has(os.os_codigo));
+    log(`🆕 Em execução — ${osExecNovas.length} OS(s) NOVAS (modal será aberto)`);
+
+    for (const os of osExecNovas) {
       const pontos = await extrairNfDoModal(page, os.os_codigo);
       os.pontos_dados = pontos;
-      // Se encontrou NF no modal e não tinha da tabela
       if (!os.numero_pedido_nf && pontos.length > 0) {
         const primeiraNf = pontos.find(p => p.nf);
         if (primeiraNf) os.numero_pedido_nf = primeiraNf.nf;
@@ -328,9 +342,11 @@ async function executarVarredura(pool, varreduraId, config = {}) {
       const osConcl = await extrairOsDaTabela(page, 'concluido');
       log(`  → ${osConcl.length} OS(s) nesta página`);
 
-      // Extrair NFs dos modais (amostra das primeiras 10 por página para não demorar demais)
-      const amostra = osConcl.slice(0, 10);
-      for (const os of amostra) {
+      // Modal APENAS para OSs NOVAS nesta página
+      const osConclNovas = osConcl.filter(os => !osConhecidas.has(os.os_codigo));
+      log(`  🆕 ${osConclNovas.length} OS(s) NOVAS nesta página`);
+
+      for (const os of osConclNovas) {
         const pontos = await extrairNfDoModal(page, os.os_codigo);
         os.pontos_dados = pontos;
         if (!os.numero_pedido_nf && pontos.length > 0) {
@@ -356,9 +372,10 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     }
 
     totalOs = todasOs.length;
-    log(`📊 Total: ${totalOs} OS(s) extraídas`);
+    log(`📊 Total: ${totalOs} OS(s) extraídas (${todasOs.filter(os => !osConhecidas.has(os.os_codigo)).length} novas)`);
 
     // ── Salvar no banco ──
+    // OSs NOVAS: INSERT | OSs ANTIGAS: UPDATE dados básicos (status, profissional)
     let inseridos = 0;
     for (const os of todasOs) {
       try {
