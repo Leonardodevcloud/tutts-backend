@@ -41,17 +41,18 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
   // ══════════════════════════════════════════════
   // REGRA 1: NFs duplicadas AGRUPADAS POR MOTOBOY
   // Um único alerta por motoboy com TODAS as NFs suspeitas
+  // NORMALIZAÇÃO: LTRIM(num_pedido, '0') — detecta 24399, 024399, 0024399 como mesma NF
   // ══════════════════════════════════════════════
   try {
-    // Primeiro: encontrar motoboys com NFs duplicadas
+    // Primeiro: encontrar motoboys com NFs duplicadas (normalizadas)
     const { rows: motoboys } = await pool.query(`
       SELECT cod_prof, nome_prof
       FROM (
-        SELECT num_pedido, cod_prof, nome_prof, COUNT(DISTINCT os) as qtd
+        SELECT LTRIM(num_pedido, '0') as nf_norm, cod_prof, nome_prof, COUNT(DISTINCT os) as qtd
         FROM bi_entregas
         WHERE num_pedido IS NOT NULL AND num_pedido != ''
           AND cod_prof IS NOT NULL ${filtroData}
-        GROUP BY num_pedido, cod_prof, nome_prof
+        GROUP BY LTRIM(num_pedido, '0'), cod_prof, nome_prof
         HAVING COUNT(DISTINCT os) > 1
       ) sub
       GROUP BY cod_prof, nome_prof
@@ -68,9 +69,10 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
       );
       if (existe.rows.length > 0) continue;
 
-      // Buscar TODAS as NFs duplicadas desse motoboy
+      // Buscar TODAS as NFs duplicadas desse motoboy (agrupadas por NF normalizada)
       const { rows: nfsDup } = await pool.query(`
-        SELECT num_pedido,
+        SELECT LTRIM(num_pedido, '0') as nf_norm,
+               array_agg(DISTINCT num_pedido ORDER BY num_pedido) as variantes_nf,
                array_agg(DISTINCT os::TEXT ORDER BY os::TEXT) as os_list,
                COUNT(DISTINCT os) as qtd_os,
                TO_CHAR(MIN(data_solicitado), 'DD/MM/YYYY') as primeira,
@@ -79,7 +81,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
         FROM bi_entregas
         WHERE num_pedido IS NOT NULL AND num_pedido != ''
           AND cod_prof = ${dataInicio ? '$3' : '$2'} ${filtroData}
-        GROUP BY num_pedido
+        GROUP BY LTRIM(num_pedido, '0')
         HAVING COUNT(DISTINCT os) > 1
         ORDER BY COUNT(DISTINCT os) DESC
       `, dataInicio ? [dataInicio, dataFim, mb.cod_prof] : [janelaDias, mb.cod_prof]);
@@ -88,7 +90,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
 
       // Montar descrição rica
       const todasOs = [...new Set(nfsDup.flatMap(n => n.os_list))];
-      const todasNfs = nfsDup.map(n => n.num_pedido);
+      const todasNfs = [...new Set(nfsDup.flatMap(n => n.variantes_nf))];
       const todosClientes = [...new Set(nfsDup.flatMap(n => n.clientes).filter(Boolean))];
       const totalDups = nfsDup.reduce((s, n) => s + parseInt(n.qtd_os), 0);
 
@@ -97,7 +99,8 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
       desc += `📅 Período: ${periodo}\n\n`;
 
       nfsDup.forEach((nf, i) => {
-        desc += `${i + 1}. NF ${nf.num_pedido} → ${nf.qtd_os}x (OSs: ${nf.os_list.join(', ')})\n`;
+        const variantes = nf.variantes_nf.length > 1 ? ` (variantes: ${nf.variantes_nf.join(', ')})` : '';
+        desc += `${i + 1}. NF ${nf.nf_norm}${variantes} → ${nf.qtd_os}x (OSs: ${nf.os_list.join(', ')})\n`;
         desc += `   Clientes: ${nf.clientes.filter(Boolean).join(', ')}\n`;
         desc += `   Período: ${nf.primeira} a ${nf.ultima}\n`;
       });
@@ -126,16 +129,17 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
   // ══════════════════════════════════════════════
   // REGRA 2: NFs duplicadas AGRUPADAS POR CLIENTE
   // Um único alerta por cliente com TODAS as NFs suspeitas
+  // NORMALIZAÇÃO: LTRIM(num_pedido, '0') — detecta zeros à esquerda
   // ══════════════════════════════════════════════
   try {
     const { rows: clientes } = await pool.query(`
       SELECT cod_cliente, nome_cliente
       FROM (
-        SELECT num_pedido, cod_cliente, nome_cliente, COUNT(DISTINCT os) as qtd
+        SELECT LTRIM(num_pedido, '0') as nf_norm, cod_cliente, nome_cliente, COUNT(DISTINCT os) as qtd
         FROM bi_entregas
         WHERE num_pedido IS NOT NULL AND num_pedido != ''
           AND cod_cliente IS NOT NULL ${filtroData}
-        GROUP BY num_pedido, cod_cliente, nome_cliente
+        GROUP BY LTRIM(num_pedido, '0'), cod_cliente, nome_cliente
         HAVING COUNT(DISTINCT os) > 1
       ) sub
       GROUP BY cod_cliente, nome_cliente
@@ -152,7 +156,8 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
       if (existe.rows.length > 0) continue;
 
       const { rows: nfsDup } = await pool.query(`
-        SELECT num_pedido,
+        SELECT LTRIM(num_pedido, '0') as nf_norm,
+               array_agg(DISTINCT num_pedido ORDER BY num_pedido) as variantes_nf,
                array_agg(DISTINCT os::TEXT ORDER BY os::TEXT) as os_list,
                COUNT(DISTINCT os) as qtd_os,
                TO_CHAR(MIN(data_solicitado), 'DD/MM/YYYY') as primeira,
@@ -161,7 +166,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
         FROM bi_entregas
         WHERE num_pedido IS NOT NULL AND num_pedido != ''
           AND cod_cliente = ${dataInicio ? '$3' : '$2'} ${filtroData}
-        GROUP BY num_pedido
+        GROUP BY LTRIM(num_pedido, '0')
         HAVING COUNT(DISTINCT os) > 1
         ORDER BY COUNT(DISTINCT os) DESC
       `, dataInicio ? [dataInicio, dataFim, cl.cod_cliente] : [janelaDias, cl.cod_cliente]);
@@ -169,7 +174,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
       if (nfsDup.length === 0) continue;
 
       const todasOs = [...new Set(nfsDup.flatMap(n => n.os_list))];
-      const todasNfs = nfsDup.map(n => n.num_pedido);
+      const todasNfs = [...new Set(nfsDup.flatMap(n => n.variantes_nf))];
       const todosMotoboys = [...new Set(nfsDup.flatMap(n => n.motoboys).filter(Boolean))];
 
       let desc = `🏢 *Cliente:* ${cl.nome_cliente || '—'} (Cód: ${cl.cod_cliente})\n`;
@@ -177,7 +182,8 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
       desc += `📅 Período: ${periodo}\n\n`;
 
       nfsDup.forEach((nf, i) => {
-        desc += `${i + 1}. NF ${nf.num_pedido} → ${nf.qtd_os}x (OSs: ${nf.os_list.join(', ')})\n`;
+        const variantes = nf.variantes_nf.length > 1 ? ` (variantes: ${nf.variantes_nf.join(', ')})` : '';
+        desc += `${i + 1}. NF ${nf.nf_norm}${variantes} → ${nf.qtd_os}x (OSs: ${nf.os_list.join(', ')})\n`;
         desc += `   Motoboys: ${nf.motoboys.filter(Boolean).join(', ')}\n`;
         desc += `   Período: ${nf.primeira} a ${nf.ultima}\n`;
       });
