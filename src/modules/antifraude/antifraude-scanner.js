@@ -349,11 +349,19 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     // ── Aba "Em execução" ──
     log('📌 Varrendo aba "Em execução"...');
     await atualizarProgresso('Abrindo aba Em Execução...');
-    const abaExec = page.locator('a#pills-em-execucao-tab, #pills-em-execucao-tab').first();
-    if (await abaExec.isVisible().catch(() => false)) {
-      await abaExec.click();
-      await page.waitForTimeout(1500);
-    }
+    // Fechar qualquer modal aberto antes de navegar
+    await page.evaluate(() => {
+      const modal = document.querySelector('#modalPadrao');
+      if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
+      document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+      document.body.classList.remove('modal-open');
+      document.body.style.overflow = '';
+    }).catch(() => {});
+    await page.evaluate(() => {
+      const tab = document.querySelector('#pills-em-execucao-tab');
+      if (tab) tab.click();
+    }).catch(() => {});
+    await page.waitForTimeout(1500);
     await screenshot(page, 'exec_aba');
 
     const osExec = await extrairOsDaTabela(page, 'em_execucao');
@@ -379,11 +387,20 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     // ── Aba "Concluídos" ──
     log('📌 Varrendo aba "Concluídos"...');
     await atualizarProgresso('Abrindo aba Concluídos...');
-    const abaConcl = page.locator('a#pills-concluidos-tab, #pills-concluidos-tab').first();
-    if (await abaConcl.isVisible().catch(() => false)) {
-      await abaConcl.click();
-      await page.waitForTimeout(2000);
-    }
+    // Forçar fechamento de qualquer modal aberto
+    await page.evaluate(() => {
+      const modal = document.querySelector('#modalPadrao');
+      if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
+      document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+      document.body.classList.remove('modal-open');
+      document.body.style.overflow = '';
+    }).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.evaluate(() => {
+      const tab = document.querySelector('#pills-concluidos-tab');
+      if (tab) tab.click();
+    }).catch(() => {});
+    await page.waitForTimeout(2000);
     await screenshot(page, 'concluidos_aba');
 
     // Paginar concluídos
