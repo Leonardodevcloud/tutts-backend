@@ -66,70 +66,86 @@ async function fazerLogin(page) {
  */
 async function extrairOsDaTabela(page, statusOs) {
   return await page.evaluate((statusOs) => {
-    const rows = document.querySelectorAll('table tbody tr, .table tbody tr');
+    // As rows da tabela têm classe osEmExecucao ou osConcluidaHoje e atributo data-order-id
+    const rows = document.querySelectorAll('tr.osEmExecucao, tr.osConcluidaHoje, tr[data-order-id]');
     const resultados = [];
 
     rows.forEach(row => {
       const cells = row.querySelectorAll('td');
       if (cells.length < 6) return;
 
-      // Coluna CÓDIGO — o botão dentro contém o código da OS
-      const btnCodigo = cells[0]?.querySelector('button, a');
-      const osCodigo = btnCodigo ? (btnCodigo.textContent || '').trim().replace(/[^\d]/g, '') : '';
+      const orderId = row.getAttribute('data-order-id') || '';
+
+      // ── CÓDIGO DA OS ──
+      // Link <a> com classe btn-outline-primary, title contém "Número do pedido =XXXXX"
+      const linkCodigo = row.querySelector('a.btn-outline-primary, a.btn.btn-sm');
+      let osCodigo = orderId;
+      if (!osCodigo && linkCodigo) {
+        osCodigo = (linkCodigo.textContent || '').trim().replace(/[^\d]/g, '');
+      }
       if (!osCodigo) return;
 
-      // Tooltip do código contém "Número do pedido =XXXXX"
-      // Extrair do title ou data-original-title
-      const tooltip = btnCodigo?.getAttribute('title') ||
-                      btnCodigo?.getAttribute('data-original-title') || '';
+      // ── NÚMERO DO PEDIDO / NF ──
+      // No title do link: "Clique para editar - Número do pedido =563873873 8."
       let numeroPedidoNf = '';
-      const matchPedido = tooltip.match(/[Nn]úmero\s+do\s+pedido\s*[=:]\s*(\S+)/);
+      const titleCodigo = linkCodigo?.getAttribute('title') || '';
+      const matchPedido = titleCodigo.match(/[Nn]úmero\s+do\s+pedido\s*[=:]\s*(\d+)/);
       if (matchPedido) numeroPedidoNf = matchPedido[1].trim();
 
-      // Se não tem no tooltip, tentar extrair via texto da célula (fallback)
-      if (!numeroPedidoNf) {
-        const cellText = (cells[0]?.textContent || '').trim();
-        const matchAlt = cellText.match(/pedido[:\s=]+(\S+)/i);
-        if (matchAlt) numeroPedidoNf = matchAlt[1].trim();
-      }
-
-      // Coluna SOLICITANTE
-      const solicitanteBtn = cells[1]?.querySelector('button, a');
-      const solicitanteTexto = (solicitanteBtn?.textContent || cells[1]?.textContent || '').trim();
+      // ── SOLICITANTE (CLIENTE) ──
+      // button com data-action="popAlterarSolicitanteServico"
+      const btnSolic = row.querySelector('button[data-action="popAlterarSolicitanteServico"]');
+      const solicitanteTexto = (btnSolic?.textContent || '').trim();
       const solicitanteCod = solicitanteTexto.match(/^(\d+)/)?.[1] || '';
       const solicitanteNome = solicitanteTexto.replace(/^\d+\s*-\s*/, '').trim();
+      // data-balloon tem info completa: "União,FeiraAtacarejoCliente: UNIAO 1541..."
+      const solicitanteBalloon = btnSolic?.getAttribute('data-balloon') || '';
 
-      // Coluna C.CUSTO
-      const centroCusto = (cells[2]?.textContent || '').trim();
+      // ── PROFISSIONAL (MOTOBOY) ──
+      // button com data-action="trocaMotoboyServicoNovo" e atributo data-motoboy
+      const btnProf = row.querySelector('button[data-action="trocaMotoboyServicoNovo"]');
+      const profCod = btnProf?.getAttribute('data-motoboy') || '';
+      // data-text-title tem: "Dados profissional: 110-Edmilson luz de carvalho(71) 98747-5348..."
+      const profDataTitle = btnProf?.getAttribute('data-text-title') || btnProf?.getAttribute('data-text') || '';
+      let profNome = (btnProf?.textContent || '').trim().replace(/^\d+-?/, '').trim();
+      // Fallback: extrair nome do data-text-title
+      if (!profNome && profDataTitle) {
+        const matchNome = profDataTitle.match(/profissional:\s*\d+-?([\w\s]+?)(?:\(|$)/i);
+        if (matchNome) profNome = matchNome[1].trim();
+      }
 
-      // Coluna CATEGORIA
-      const categoriaBtn = cells[4]?.querySelector('button, a');
-      const categoria = (categoriaBtn?.textContent || cells[4]?.textContent || '').trim();
-
-      // Coluna PROFISSIONAL
-      const profBtn = cells[5]?.querySelector('button, a');
-      const profTexto = (profBtn?.textContent || cells[5]?.textContent || '').trim();
-      const profCod = profTexto.match(/^(\d+)/)?.[1] || '';
-      const profNome = profTexto.replace(/^\d+\s*-?\s*/, '').trim();
-
-      // Coluna SOLICIT/AGENDAMENTO (data)
-      const dataCell = cells[6]?.textContent || '';
-      const dataMatch = dataCell.match(/(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})/);
+      // ── DATA / HORA ──
+      // link <a> com classe linkPoint e atributo data-date-hour
+      const linkData = row.querySelector('a.linkPoint[data-date-hour]');
+      const dataHora = linkData?.getAttribute('data-date-hour') || '';
       let dataSolicitacao = null;
-      if (dataMatch) {
-        const parts = dataMatch[1].split(/[\s-:]/);
-        if (parts.length >= 5) {
-          dataSolicitacao = `${parts[2]}-${parts[1]}-${parts[0]}T${parts[3]}:${parts[4]}:${parts[5] || '00'}`;
+      if (dataHora) {
+        // Formato: "2026-03-07 08:47:07"
+        dataSolicitacao = dataHora.replace(' ', 'T');
+      }
+
+      // ── VALORES ──
+      // Texto "R$ XX.XX | R$XX.XX" em alguma célula
+      let valorServico = null, valorProfissional = null;
+      for (const cell of cells) {
+        const txt = (cell.textContent || '').trim();
+        const valMatch = txt.match(/R\$\s*([\d.,]+)\s*\|?\s*R?\$?\s*([\d.,]+)?/);
+        if (valMatch) {
+          valorServico = parseFloat(valMatch[1].replace('.', '').replace(',', '.'));
+          if (valMatch[2]) valorProfissional = parseFloat(valMatch[2].replace('.', '').replace(',', '.'));
+          break;
         }
       }
 
-      // Coluna VALORES
-      const valoresTexto = (cells[7]?.textContent || '').trim();
-      const valoresMatch = valoresTexto.match(/R\$\s*([\d.,]+)\s*\|\s*R\$\s*([\d.,]+)/);
-      let valorServico = null, valorProfissional = null;
-      if (valoresMatch) {
-        valorServico = parseFloat(valoresMatch[1].replace('.', '').replace(',', '.'));
-        valorProfissional = parseFloat(valoresMatch[2].replace('.', '').replace(',', '.'));
+      // ── CATEGORIA ──
+      const btnCat = row.querySelector('button[data-action="alterarCategoriaServico"], button:not([data-action])');
+      let categoria = '';
+      for (const cell of cells) {
+        const txt = (cell.textContent || '').trim();
+        if (txt.includes('Motofrete') || txt.includes('Expresso') || txt.includes('Moto')) {
+          categoria = txt;
+          break;
+        }
       }
 
       resultados.push({
@@ -140,7 +156,7 @@ async function extrairOsDaTabela(page, statusOs) {
         profissional_cod: profCod || null,
         profissional_nome: profNome || null,
         categoria: categoria || null,
-        centro_custo: centroCusto || null,
+        centro_custo: null,
         status_os: statusOs,
         data_solicitacao: dataSolicitacao,
         valor_servico: valorServico,
@@ -158,16 +174,23 @@ async function extrairOsDaTabela(page, statusOs) {
  */
 async function extrairNfDoModal(page, osCodigo) {
   try {
-    const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${osCodigo}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${osCodigo}"]`;
-    const btn = page.locator(btnSelector).first();
-    const btnCount = await btn.count();
+    // Seletor do botão END. — classe btn-mudarclss, data-action funcaoEnderecoServico
+    const btnSelector = `button.btn-mudarclss[data-action="funcaoEnderecoServico"][data-id="${osCodigo}"], button[data-action="funcaoEnderecoServico"][data-id="${osCodigo}"], button[data-action="funcaoEnderecoServico"][data-text-id="${osCodigo}"]`;
+    const btnCount = await page.locator(btnSelector).count();
     if (btnCount === 0) return [];
 
-    // Scroll até o botão para torná-lo visível (resolve "Element is not visible")
-    await btn.scrollIntoViewIfNeeded().catch(() => {});
-    await page.waitForTimeout(300);
-    await btn.click({ force: true });
-    await page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show', {
+    // Clicar via JS (ignora visibilidade — botões podem estar ocultos na tabela paginada)
+    const clicked = await page.evaluate((osCod) => {
+      // Tentar múltiplos seletores
+      const btn = document.querySelector(`button[data-action="funcaoEnderecoServico"][data-id="${osCod}"]`)
+                || document.querySelector(`button[data-action="funcaoEnderecoServico"][data-text-id="${osCod}"]`);
+      if (btn) { btn.click(); return true; }
+      return false;
+    }, osCodigo);
+
+    if (!clicked) return [];
+
+    await page.waitForSelector('#modalPadrao.show, #modalPadrao[style*="block"], .modal.show, .modal.in', {
       state: 'visible', timeout: 10000,
     }).catch(() => null);
     await page.waitForTimeout(800);
@@ -175,23 +198,22 @@ async function extrairNfDoModal(page, osCodigo) {
     // Extrair dados de cada ponto no modal
     const pontos = await page.evaluate(() => {
       const result = [];
-      const modalBody = document.querySelector('.modal.show .modal-body, .modal.in .modal-body, #modalPadrao .modal-body');
+      // O modal é #modalPadrao
+      const modalBody = document.querySelector('#modalPadrao .modal-body, .modal.show .modal-body, .modal.in .modal-body');
       if (!modalBody) return result;
 
       const texto = modalBody.innerText || '';
-      // Buscar padrões: "Nº nota: XXXXX", "PEC Nº nota: XXXXX", "NF: XXXXX"
-      const nfMatches = texto.match(/[Nn][\u00ba°]?\s*nota[:\s]+(\d+)/g) || [];
-      const pecMatches = texto.match(/PEC\s+[^\n]*?[Nn][\u00ba°]?\s*nota[:\s]+(\d+)/g) || [];
 
-      // Extrair todos os números de nota encontrados
+      // Buscar padrões: "Nº nota: XXXXX" — formato real do HTML
+      const nfMatches = texto.match(/[Nn][º°]?\s*nota[:\s]+(\d+)/g) || [];
       const notas = new Set();
-      [...nfMatches, ...pecMatches].forEach(m => {
+      nfMatches.forEach(m => {
         const num = m.match(/(\d+)\s*$/);
         if (num) notas.add(num[1]);
       });
 
       // Buscar botões de corrigir endereço para extrair dados dos pontos
-      const btns = modalBody.querySelectorAll('.btn-corrigir-endereco');
+      const btns = modalBody.querySelectorAll('.btn-corrigir-endereco, button[class*="btn-corrigir-endereco"]');
       btns.forEach(btn => {
         const ponto = btn.getAttribute('data-ponto');
         const idEnd = btn.getAttribute('data-id-endereco');
@@ -202,12 +224,15 @@ async function extrairNfDoModal(page, osCodigo) {
         }
 
         // Extrair NF do texto próximo ao ponto
+        // Formato real: "Avenida... BA - 40370-006 Nº nota: 28224"
         let nfPonto = '';
-        const container = btn.closest('div') || btn.parentElement;
-        if (container) {
+        // Subir no DOM até encontrar o bloco do ponto
+        let container = btn.parentElement;
+        for (let i = 0; i < 5 && container; i++) {
           const ctxTexto = container.textContent || '';
-          const nfMatch = ctxTexto.match(/[Nn][\u00ba°]?\s*nota[:\s]+(\d+)/);
-          if (nfMatch) nfPonto = nfMatch[1];
+          const nfMatch = ctxTexto.match(/[Nn][º°]?\s*nota[:\s]+(\d+)/);
+          if (nfMatch) { nfPonto = nfMatch[1]; break; }
+          container = container.parentElement;
         }
 
         result.push({
@@ -225,15 +250,21 @@ async function extrairNfDoModal(page, osCodigo) {
       return result;
     });
 
-    // Fechar modal
-    await page.locator('.modal.show .close, .modal.in .close, button[data-dismiss="modal"]').first().click().catch(() => {});
+    // Fechar modal — botão X ou tecla Escape
+    await page.evaluate(() => {
+      const closeBtn = document.querySelector('#modalPadrao .close, .modal.show .close, button[data-dismiss="modal"]');
+      if (closeBtn) closeBtn.click();
+    });
     await page.waitForTimeout(500);
 
     return pontos;
   } catch (err) {
     log(`⚠️ Erro ao extrair modal OS ${osCodigo}: ${err.message}`);
     // Tentar fechar modal caso aberto
-    await page.locator('.modal.show .close, button[data-dismiss="modal"]').first().click().catch(() => {});
+    await page.evaluate(() => {
+      const closeBtn = document.querySelector('#modalPadrao .close, .modal.show .close, button[data-dismiss="modal"]');
+      if (closeBtn) closeBtn.click();
+    }).catch(() => {});
     await page.waitForTimeout(300);
     return [];
   }
@@ -318,7 +349,7 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     // ── Aba "Em execução" ──
     log('📌 Varrendo aba "Em execução"...');
     await atualizarProgresso('Abrindo aba Em Execução...');
-    const abaExec = page.locator('#pills-em-execucao-tab, button:has-text("Em execução"), a:has-text("Em execução")').first();
+    const abaExec = page.locator('a#pills-em-execucao-tab, #pills-em-execucao-tab').first();
     if (await abaExec.isVisible().catch(() => false)) {
       await abaExec.click();
       await page.waitForTimeout(1500);
@@ -348,7 +379,7 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     // ── Aba "Concluídos" ──
     log('📌 Varrendo aba "Concluídos"...');
     await atualizarProgresso('Abrindo aba Concluídos...');
-    const abaConcl = page.locator('text=Concluídos').first();
+    const abaConcl = page.locator('a#pills-concluidos-tab, #pills-concluidos-tab').first();
     if (await abaConcl.isVisible().catch(() => false)) {
       await abaConcl.click();
       await page.waitForTimeout(2000);
@@ -381,7 +412,7 @@ async function executarVarredura(pool, varreduraId, config = {}) {
 
       // Navegar para próxima página se não é a última
       if (pag < maxPaginasConcluidos) {
-        const btnProx = page.locator('a:has-text("Próx."), a:has-text("Prox"), .pagination .next a, .pagination a:has-text("›")').first();
+        const btnProx = page.locator('ul#concluido.pagination a.page-link:has-text("›"), ul#concluido a.page-link:has-text("Próx"), .pagination a.page-link:has-text("›")').first();
         const proxVisivel = await btnProx.isVisible().catch(() => false);
         if (proxVisivel) {
           await btnProx.click();
