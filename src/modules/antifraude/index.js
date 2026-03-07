@@ -1,6 +1,7 @@
 /**
  * MÓDULO ANTI-FRAUDE
- * Detecção automática de NFs/pedidos duplicados e padrões de fraude.
+ * Detecção de NFs/pedidos duplicados via consulta direta na bi_entregas.
+ * Sem Playwright — 100% SQL.
  */
 
 const { initAntiFraudeTables } = require('./antifraude.migration');

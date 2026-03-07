@@ -1,13 +1,14 @@
 /**
  * antifraude-detector.js
- * Analisa dados extraídos e detecta padrões de fraude/duplicação.
+ * Analisa dados da bi_entregas diretamente (sem Playwright).
+ * Detecta NFs/pedidos duplicados e padrões de fraude.
  *
  * Regras:
- * 1. Mesma NF/pedido para o MESMO motoboy em janela de tempo → fraude alta
- * 2. Mesma NF/pedido para o MESMO cliente em janela de tempo → fraude média
- * 3. Mesma NF/pedido repetida no mesmo dia (qualquer combinação) → fraude média
- * 4. Motoboy reincidente (>= threshold duplicatas) → fraude alta
- * 5. Cliente reincidente (>= threshold duplicatas) → fraude alta
+ * 1. Mesma NF/pedido para o MESMO motoboy em janela de tempo → severidade alta
+ * 2. Mesma NF/pedido para o MESMO cliente em janela de tempo → severidade média
+ * 3. Mesma NF/pedido repetida no mesmo dia → severidade média
+ * 4. Motoboy reincidente (>= threshold duplicatas) → severidade alta
+ * 5. Cliente reincidente (>= threshold duplicatas) → severidade alta
  */
 
 'use strict';
@@ -19,47 +20,61 @@ function log(msg) {
 }
 
 /**
- * Executa análise de fraude nos dados extraídos.
+ * Executa análise de fraude consultando bi_entregas diretamente.
  * @param {object} pool - PostgreSQL pool
  * @param {number} varreduraId - ID da varredura
  * @param {object} config - { janela_dias, threshold_reincidente }
- * @returns {{ alertasGerados: number }}
+ * @returns {{ alertasGerados: number, osAnalisadas: number }}
  */
 async function analisarFraudes(pool, varreduraId, config = {}) {
   const janelaDias = parseInt(config.janela_dias) || 7;
   const thresholdReincidente = parseInt(config.threshold_reincidente) || 3;
 
-  log(`🔍 Analisando fraudes — janela: ${janelaDias} dias, threshold reincidente: ${thresholdReincidente}`);
+  log(`🔍 Analisando fraudes na bi_entregas — janela: ${janelaDias} dias, threshold: ${thresholdReincidente}`);
 
   let alertasGerados = 0;
+  let osAnalisadas = 0;
+
+  // Contar total de OSs no período
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT os) as total FROM bi_entregas
+       WHERE data_solicitado >= CURRENT_DATE - $1::int
+       AND num_pedido IS NOT NULL AND num_pedido != ''`,
+      [janelaDias]
+    );
+    osAnalisadas = parseInt(rows[0]?.total) || 0;
+    log(`📊 ${osAnalisadas} OS(s) com NF/pedido nos últimos ${janelaDias} dias`);
+  } catch (err) {
+    log(`❌ Erro ao contar OSs: ${err.message}`);
+  }
 
   // ── Regra 1: Mesma NF + mesmo motoboy na janela ──
   try {
     const { rows: dupMotoboyNf } = await pool.query(`
-      SELECT numero_pedido_nf, profissional_cod, profissional_nome,
-             array_agg(DISTINCT os_codigo) as os_codigos,
-             COUNT(DISTINCT os_codigo) as qtd,
-             MIN(data_solicitacao) as primeira_data,
-             MAX(data_solicitacao) as ultima_data
-      FROM antifraude_os_dados
-      WHERE numero_pedido_nf IS NOT NULL
-        AND numero_pedido_nf != ''
-        AND profissional_cod IS NOT NULL
-        AND extraido_em >= NOW() - ($1 || ' days')::INTERVAL
-      GROUP BY numero_pedido_nf, profissional_cod, profissional_nome
-      HAVING COUNT(DISTINCT os_codigo) > 1
+      SELECT num_pedido, cod_prof, nome_prof,
+             array_agg(DISTINCT os::TEXT) as os_codigos,
+             COUNT(DISTINCT os) as qtd,
+             MIN(data_solicitado) as primeira_data,
+             MAX(data_solicitado) as ultima_data,
+             array_agg(DISTINCT nome_cliente) as clientes
+      FROM bi_entregas
+      WHERE num_pedido IS NOT NULL AND num_pedido != ''
+        AND cod_prof IS NOT NULL
+        AND data_solicitado >= CURRENT_DATE - $1::int
+      GROUP BY num_pedido, cod_prof, nome_prof
+      HAVING COUNT(DISTINCT os) > 1
       ORDER BY qtd DESC
     `, [janelaDias]);
 
     for (const dup of dupMotoboyNf) {
-      // Verificar se já existe alerta para essa combinação
       const existe = await pool.query(
         `SELECT id FROM antifraude_alertas
          WHERE tipo = 'nf_duplicada_motoboy'
            AND profissional_cod = $1
            AND numeros_nf @> ARRAY[$2]::TEXT[]
            AND created_at >= NOW() - ($3 || ' days')::INTERVAL`,
-        [dup.profissional_cod, dup.numero_pedido_nf, janelaDias]
+        [String(dup.cod_prof), dup.num_pedido, janelaDias]
       );
       if (existe.rows.length > 0) continue;
 
@@ -71,18 +86,18 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
         [
           'nf_duplicada_motoboy',
           'alta',
-          `NF ${dup.numero_pedido_nf} duplicada — Motoboy ${dup.profissional_nome || dup.profissional_cod}`,
-          `A NF/pedido ${dup.numero_pedido_nf} aparece em ${dup.qtd} OS(s) diferentes para o mesmo motoboy (${dup.profissional_nome || dup.profissional_cod}) nos últimos ${janelaDias} dias.`,
+          `NF ${dup.num_pedido} duplicada — Motoboy ${dup.nome_prof || dup.cod_prof}`,
+          `A NF/pedido ${dup.num_pedido} aparece em ${dup.qtd} OS(s) diferentes para o mesmo motoboy (${dup.nome_prof || dup.cod_prof}) nos últimos ${janelaDias} dias. Clientes: ${(dup.clientes || []).filter(Boolean).join(', ')}.`,
           dup.os_codigos,
-          [dup.numero_pedido_nf],
-          dup.profissional_cod,
-          dup.profissional_nome,
-          JSON.stringify({ qtd: dup.qtd, primeira_data: dup.primeira_data, ultima_data: dup.ultima_data }),
+          [dup.num_pedido],
+          String(dup.cod_prof),
+          dup.nome_prof,
+          JSON.stringify({ qtd: dup.qtd, primeira_data: dup.primeira_data, ultima_data: dup.ultima_data, clientes: dup.clientes }),
           varreduraId,
         ]
       );
       alertasGerados++;
-      log(`🚨 Alerta: NF ${dup.numero_pedido_nf} duplicada para motoboy ${dup.profissional_cod} (${dup.qtd}x)`);
+      log(`🚨 NF ${dup.num_pedido} duplicada para motoboy ${dup.cod_prof} (${dup.qtd}x)`);
     }
   } catch (err) {
     log(`❌ Erro regra 1: ${err.message}`);
@@ -91,17 +106,16 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
   // ── Regra 2: Mesma NF + mesmo cliente na janela ──
   try {
     const { rows: dupClienteNf } = await pool.query(`
-      SELECT numero_pedido_nf, solicitante_cod, solicitante_nome,
-             array_agg(DISTINCT os_codigo) as os_codigos,
-             array_agg(DISTINCT profissional_nome) as motoboys,
-             COUNT(DISTINCT os_codigo) as qtd
-      FROM antifraude_os_dados
-      WHERE numero_pedido_nf IS NOT NULL
-        AND numero_pedido_nf != ''
-        AND solicitante_cod IS NOT NULL
-        AND extraido_em >= NOW() - ($1 || ' days')::INTERVAL
-      GROUP BY numero_pedido_nf, solicitante_cod, solicitante_nome
-      HAVING COUNT(DISTINCT os_codigo) > 1
+      SELECT num_pedido, cod_cliente, nome_cliente,
+             array_agg(DISTINCT os::TEXT) as os_codigos,
+             array_agg(DISTINCT nome_prof) as motoboys,
+             COUNT(DISTINCT os) as qtd
+      FROM bi_entregas
+      WHERE num_pedido IS NOT NULL AND num_pedido != ''
+        AND cod_cliente IS NOT NULL
+        AND data_solicitado >= CURRENT_DATE - $1::int
+      GROUP BY num_pedido, cod_cliente, nome_cliente
+      HAVING COUNT(DISTINCT os) > 1
       ORDER BY qtd DESC
     `, [janelaDias]);
 
@@ -112,7 +126,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
            AND solicitante_cod = $1
            AND numeros_nf @> ARRAY[$2]::TEXT[]
            AND created_at >= NOW() - ($3 || ' days')::INTERVAL`,
-        [dup.solicitante_cod, dup.numero_pedido_nf, janelaDias]
+        [String(dup.cod_cliente), dup.num_pedido, janelaDias]
       );
       if (existe.rows.length > 0) continue;
 
@@ -124,12 +138,13 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
         [
           'nf_duplicada_cliente',
           'media',
-          `NF ${dup.numero_pedido_nf} duplicada — Cliente ${dup.solicitante_nome || dup.solicitante_cod}`,
-          `A NF/pedido ${dup.numero_pedido_nf} aparece em ${dup.qtd} OS(s) diferentes para o mesmo cliente (${dup.solicitante_nome}) com motoboys: ${dup.motoboys.filter(Boolean).join(', ')}.`,
+          `NF ${dup.num_pedido} duplicada — Cliente ${dup.nome_cliente || dup.cod_cliente}`,
+          `A NF/pedido ${dup.num_pedido} aparece em ${dup.qtd} OS(s) diferentes para o mesmo cliente (${dup.nome_cliente}) com motoboys: ${(dup.motoboys || []).filter(Boolean).join(', ')}.`,
           dup.os_codigos,
-          [dup.numero_pedido_nf],
-          null, null,
-          JSON.stringify({ solicitante_cod: dup.solicitante_cod, qtd: dup.qtd, motoboys: dup.motoboys }),
+          [dup.num_pedido],
+          String(dup.cod_cliente),
+          dup.nome_cliente,
+          JSON.stringify({ qtd: dup.qtd, motoboys: dup.motoboys }),
           varreduraId,
         ]
       );
@@ -139,32 +154,31 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
     log(`❌ Erro regra 2: ${err.message}`);
   }
 
-  // ── Regra 3: Mesma NF no mesmo dia (qualquer combinação) ──
+  // ── Regra 3: Mesma NF no mesmo dia ──
   try {
     const { rows: dupDia } = await pool.query(`
-      SELECT numero_pedido_nf, DATE(data_solicitacao) as dia,
-             array_agg(DISTINCT os_codigo) as os_codigos,
-             array_agg(DISTINCT profissional_nome) as motoboys,
-             array_agg(DISTINCT solicitante_nome) as clientes,
-             COUNT(DISTINCT os_codigo) as qtd
-      FROM antifraude_os_dados
-      WHERE numero_pedido_nf IS NOT NULL
-        AND numero_pedido_nf != ''
-        AND data_solicitacao IS NOT NULL
-        AND extraido_em >= NOW() - ($1 || ' days')::INTERVAL
-      GROUP BY numero_pedido_nf, DATE(data_solicitacao)
-      HAVING COUNT(DISTINCT os_codigo) > 1
+      SELECT num_pedido, data_solicitado as dia,
+             array_agg(DISTINCT os::TEXT) as os_codigos,
+             array_agg(DISTINCT nome_prof) as motoboys,
+             array_agg(DISTINCT nome_cliente) as clientes,
+             COUNT(DISTINCT os) as qtd
+      FROM bi_entregas
+      WHERE num_pedido IS NOT NULL AND num_pedido != ''
+        AND data_solicitado >= CURRENT_DATE - $1::int
+      GROUP BY num_pedido, data_solicitado
+      HAVING COUNT(DISTINCT os) > 1
       ORDER BY qtd DESC
     `, [janelaDias]);
 
     for (const dup of dupDia) {
+      const diaStr = dup.dia ? new Date(dup.dia).toISOString().split('T')[0] : '';
       const existe = await pool.query(
         `SELECT id FROM antifraude_alertas
          WHERE tipo = 'nf_mesmo_dia'
            AND numeros_nf @> ARRAY[$1]::TEXT[]
            AND dados_evidencia->>'dia' = $2
            AND created_at >= NOW() - ($3 || ' days')::INTERVAL`,
-        [dup.numero_pedido_nf, dup.dia, janelaDias]
+        [dup.num_pedido, diaStr, janelaDias]
       );
       if (existe.rows.length > 0) continue;
 
@@ -176,11 +190,11 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
         [
           'nf_mesmo_dia',
           'media',
-          `NF ${dup.numero_pedido_nf} — ${dup.qtd}x no mesmo dia (${dup.dia})`,
-          `A NF/pedido ${dup.numero_pedido_nf} aparece ${dup.qtd} vezes no dia ${dup.dia}. Motoboys: ${dup.motoboys.filter(Boolean).join(', ')}. Clientes: ${dup.clientes.filter(Boolean).join(', ')}.`,
+          `NF ${dup.num_pedido} — ${dup.qtd}x no mesmo dia (${diaStr})`,
+          `A NF/pedido ${dup.num_pedido} aparece ${dup.qtd} vezes no dia ${diaStr}. Motoboys: ${(dup.motoboys || []).filter(Boolean).join(', ')}. Clientes: ${(dup.clientes || []).filter(Boolean).join(', ')}.`,
           dup.os_codigos,
-          [dup.numero_pedido_nf],
-          JSON.stringify({ dia: dup.dia, motoboys: dup.motoboys, clientes: dup.clientes }),
+          [dup.num_pedido],
+          JSON.stringify({ dia: diaStr, motoboys: dup.motoboys, clientes: dup.clientes }),
           varreduraId,
         ]
       );
@@ -190,7 +204,7 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
     log(`❌ Erro regra 3: ${err.message}`);
   }
 
-  // ── Regra 4: Motoboy reincidente (muitas duplicatas) ──
+  // ── Regra 4: Motoboy reincidente ──
   try {
     const { rows: reincidentes } = await pool.query(`
       SELECT profissional_cod, profissional_nome, COUNT(*) as total_alertas
@@ -218,18 +232,15 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
           dados_evidencia, varredura_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
-          'motoboy_reincidente',
-          'alta',
+          'motoboy_reincidente', 'alta',
           `⚠️ Motoboy reincidente: ${r.profissional_nome || r.profissional_cod}`,
-          `O motoboy ${r.profissional_nome} (cód: ${r.profissional_cod}) tem ${r.total_alertas} alertas de NF duplicada nos últimos ${janelaDias} dias. Padrão reincidente detectado.`,
-          r.profissional_cod,
-          r.profissional_nome,
+          `O motoboy ${r.profissional_nome} (cód: ${r.profissional_cod}) tem ${r.total_alertas} alertas de NF duplicada nos últimos ${janelaDias} dias.`,
+          r.profissional_cod, r.profissional_nome,
           JSON.stringify({ total_alertas: r.total_alertas }),
           varreduraId,
         ]
       );
       alertasGerados++;
-      log(`🚨 Motoboy reincidente: ${r.profissional_cod} (${r.total_alertas} alertas)`);
     }
   } catch (err) {
     log(`❌ Erro regra 4: ${err.message}`);
@@ -263,12 +274,10 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
           dados_evidencia, varredura_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
-          'cliente_reincidente',
-          'alta',
+          'cliente_reincidente', 'alta',
           `⚠️ Cliente reincidente: ${r.solicitante_nome || r.solicitante_cod}`,
           `O cliente ${r.solicitante_nome} (cód: ${r.solicitante_cod}) tem ${r.total_alertas} alertas de NF duplicada nos últimos ${janelaDias} dias.`,
-          r.solicitante_cod,
-          r.solicitante_nome,
+          r.solicitante_cod, r.solicitante_nome,
           JSON.stringify({ total_alertas: r.total_alertas }),
           varreduraId,
         ]
@@ -279,8 +288,8 @@ async function analisarFraudes(pool, varreduraId, config = {}) {
     log(`❌ Erro regra 5: ${err.message}`);
   }
 
-  log(`✅ Análise concluída: ${alertasGerados} alerta(s) gerado(s)`);
-  return { alertasGerados };
+  log(`✅ Análise concluída: ${alertasGerados} alerta(s) gerado(s), ${osAnalisadas} OS(s) analisadas`);
+  return { alertasGerados, osAnalisadas };
 }
 
 module.exports = { analisarFraudes };

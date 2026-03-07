@@ -22,7 +22,7 @@ async function initAntiFraudeTables(pool) {
     { chave: 'janela_dias', valor: '7', descricao: 'Janela de tempo em dias para considerar duplicata' },
     { chave: 'cron_ativo', valor: 'true', descricao: 'Se o cron automático está ativo' },
     { chave: 'cron_intervalo_min', valor: '60', descricao: 'Intervalo do cron em minutos' },
-    { chave: 'max_paginas_concluidos', valor: '3', descricao: 'Quantas páginas de concluídos varrer por execução' },
+    { chave: 'max_paginas_concluidos', valor: '20', descricao: 'Quantas páginas de concluídos varrer por execução' },
     { chave: 'threshold_reincidente', valor: '3', descricao: 'Quantidade de duplicatas para marcar como reincidente' },
   ];
 
