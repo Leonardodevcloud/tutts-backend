@@ -69,6 +69,8 @@ function verificarCsrf(req, res, next) {
     '/api/webhook',
     '/api/solicitacao/webhook',
     '/api/solicitacao/login',
+    '/api/indicacao-link/cadastrar',
+    '/api/indicacao-link/validar',
   ];
 
   if (rotasExcluidas.some(rota => req.path.startsWith(rota))) {
