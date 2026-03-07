@@ -346,17 +346,27 @@ async function executarVarredura(pool, varreduraId, config = {}) {
       } catch {}
     };
 
+    // Helper: fechar qualquer modal aberto (segurança)
+    const fecharModal = async () => {
+      await page.evaluate(() => {
+        const modal = document.querySelector('#modalPadrao');
+        if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
+        document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = '';
+      }).catch(() => {});
+    };
+
+    // ══════════════════════════════════════════════════
+    // ESTRATÉGIA OTIMIZADA: ZERO MODAIS
+    // NF/pedido é extraída direto do tooltip do link da OS na tabela
+    // (~2s por página vs ~2s por modal = 100x mais rápido)
+    // ══════════════════════════════════════════════════
+
     // ── Aba "Em execução" ──
     log('📌 Varrendo aba "Em execução"...');
     await atualizarProgresso('Abrindo aba Em Execução...');
-    // Fechar qualquer modal aberto antes de navegar
-    await page.evaluate(() => {
-      const modal = document.querySelector('#modalPadrao');
-      if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
-      document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
-      document.body.classList.remove('modal-open');
-      document.body.style.overflow = '';
-    }).catch(() => {});
+    await fecharModal();
     await page.evaluate(() => {
       const tab = document.querySelector('#pills-em-execucao-tab');
       if (tab) tab.click();
@@ -365,37 +375,15 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     await screenshot(page, 'exec_aba');
 
     const osExec = await extrairOsDaTabela(page, 'em_execucao');
-    log(`📊 Em execução: ${osExec.length} OS(s) encontrada(s)`);
+    log(`📊 Em execução: ${osExec.length} OS(s) extraídas (sem modal)`);
     todasOs.push(...osExec);
-    await atualizarProgresso(`Em Execução: ${osExec.length} OS(s) encontradas`);
-
-    // Extrair NFs dos modais APENAS para OSs NOVAS
-    const osExecNovas = osExec.filter(os => !osConhecidas.has(os.os_codigo));
-    log(`🆕 Em execução — ${osExecNovas.length} OS(s) NOVAS (modal será aberto)`);
-
-    for (let i = 0; i < osExecNovas.length; i++) {
-      const os = osExecNovas[i];
-      await atualizarProgresso(`Em Execução: abrindo modal OS ${os.os_codigo} (${i + 1}/${osExecNovas.length})`);
-      const pontos = await extrairNfDoModal(page, os.os_codigo);
-      os.pontos_dados = pontos;
-      if (!os.numero_pedido_nf && pontos.length > 0) {
-        const primeiraNf = pontos.find(p => p.nf);
-        if (primeiraNf) os.numero_pedido_nf = primeiraNf.nf;
-      }
-    }
+    await atualizarProgresso(`Em Execução: ${osExec.length} OS(s) extraídas`);
 
     // ── Aba "Concluídos" ──
     log('📌 Varrendo aba "Concluídos"...');
     await atualizarProgresso('Abrindo aba Concluídos...');
-    // Forçar fechamento de qualquer modal aberto
-    await page.evaluate(() => {
-      const modal = document.querySelector('#modalPadrao');
-      if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
-      document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
-      document.body.classList.remove('modal-open');
-      document.body.style.overflow = '';
-    }).catch(() => {});
-    await page.waitForTimeout(500);
+    await fecharModal();
+    await page.waitForTimeout(300);
     await page.evaluate(() => {
       const tab = document.querySelector('#pills-concluidos-tab');
       if (tab) tab.click();
@@ -403,37 +391,33 @@ async function executarVarredura(pool, varreduraId, config = {}) {
     await page.waitForTimeout(2000);
     await screenshot(page, 'concluidos_aba');
 
-    // Paginar concluídos
+    // Paginar concluídos — TODAS as páginas (rápido, sem modal)
     for (let pag = 1; pag <= maxPaginasConcluidos; pag++) {
       log(`📄 Concluídos — página ${pag}/${maxPaginasConcluidos}`);
-      await atualizarProgresso(`Concluídos: varrendo página ${pag}/${maxPaginasConcluidos}...`);
+      await atualizarProgresso(`Concluídos: extraindo página ${pag}/${maxPaginasConcluidos} (${todasOs.length} OSs até agora)...`);
       const osConcl = await extrairOsDaTabela(page, 'concluido');
       log(`  → ${osConcl.length} OS(s) nesta página`);
-
-      // Modal APENAS para OSs NOVAS nesta página
-      const osConclNovas = osConcl.filter(os => !osConhecidas.has(os.os_codigo));
-      log(`  🆕 ${osConclNovas.length} OS(s) NOVAS nesta página`);
-
-      for (let i = 0; i < osConclNovas.length; i++) {
-        const os = osConclNovas[i];
-        await atualizarProgresso(`Concluídos pág ${pag}: modal OS ${os.os_codigo} (${i + 1}/${osConclNovas.length})`);
-        const pontos = await extrairNfDoModal(page, os.os_codigo);
-        os.pontos_dados = pontos;
-        if (!os.numero_pedido_nf && pontos.length > 0) {
-          const primeiraNf = pontos.find(p => p.nf);
-          if (primeiraNf) os.numero_pedido_nf = primeiraNf.nf;
-        }
-      }
 
       todasOs.push(...osConcl);
 
       // Navegar para próxima página se não é a última
       if (pag < maxPaginasConcluidos) {
-        const btnProx = page.locator('ul#concluido.pagination a.page-link:has-text("›"), ul#concluido a.page-link:has-text("Próx"), .pagination a.page-link:has-text("›")').first();
-        const proxVisivel = await btnProx.isVisible().catch(() => false);
-        if (proxVisivel) {
-          await btnProx.click();
+        const temProx = await page.evaluate((pagAtual) => {
+          // Buscar link da próxima página na paginação
+          const proxPage = pagAtual + 1;
+          const link = document.querySelector(`ul#concluido a.page-link[data-page="${proxPage}"]`)
+                    || document.querySelector(`.pagination a.page-link[data-page="${proxPage}"]`);
+          if (link) { link.click(); return true; }
+          // Fallback: botão "Próx." ou "›"
+          const allLinks = document.querySelectorAll('.pagination a.page-link');
+          for (const l of allLinks) {
+            if (l.textContent.includes('›') || l.textContent.includes('Próx')) { l.click(); return true; }
+          }
+          return false;
+        }, pag);
+        if (temProx) {
           await page.waitForTimeout(2000);
+          await atualizarProgresso(`Concluídos: navegando para página ${pag + 1}...`);
         } else {
           log('📄 Sem mais páginas de concluídos');
           break;
