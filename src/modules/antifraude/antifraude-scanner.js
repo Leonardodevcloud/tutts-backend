@@ -392,7 +392,16 @@ async function executarVarredura(pool, varreduraId, config = {}) {
       const tab = document.querySelector('#pills-concluidos-tab');
       if (tab) tab.click();
     }).catch(() => {});
-    await page.waitForTimeout(2000);
+
+    // Esperar AJAX carregar a tabela de concluídos (aguardar rows aparecerem)
+    for (let tentativa = 0; tentativa < 15; tentativa++) {
+      await page.waitForTimeout(1000);
+      const rowCount = await page.evaluate(() =>
+        document.querySelectorAll('#pills-concluidos tr[data-order-id]').length
+      ).catch(() => 0);
+      if (rowCount > 20) { log(`✅ Concluídos carregados: ${rowCount} rows`); break; }
+      if (tentativa === 14) log('⚠️ Timeout aguardando concluídos carregar');
+    }
     await screenshot(page, 'concluidos_aba');
 
     // Paginar concluídos — TODAS as páginas (rápido, sem modal)
@@ -420,8 +429,16 @@ async function executarVarredura(pool, varreduraId, config = {}) {
           return false;
         }, pag);
         if (temProx) {
-          await page.waitForTimeout(2000);
-          await atualizarProgresso(`Concluídos: navegando para página ${pag + 1}...`);
+          // Esperar AJAX recarregar a tabela com novos dados
+          await page.waitForTimeout(1000);
+          for (let tentativa = 0; tentativa < 10; tentativa++) {
+            await page.waitForTimeout(1000);
+            const rowCount = await page.evaluate(() =>
+              document.querySelectorAll('#pills-concluidos tr[data-order-id]').length
+            ).catch(() => 0);
+            if (rowCount > 20) break;
+          }
+          await atualizarProgresso(`Concluídos: página ${pag + 1} carregada`);
         } else {
           log('📄 Sem mais páginas de concluídos');
           break;
