@@ -66,8 +66,12 @@ async function fazerLogin(page) {
  */
 async function extrairOsDaTabela(page, statusOs) {
   return await page.evaluate((statusOs) => {
-    // As rows da tabela têm classe osEmExecucao ou osConcluidaHoje e atributo data-order-id
-    const rows = document.querySelectorAll('tr.osEmExecucao, tr.osConcluidaHoje, tr[data-order-id]');
+    // Selecionar rows do container correto baseado no status
+    const containerId = statusOs === 'em_execucao' ? '#pills-em-execucao' : '#pills-concluidos';
+    const container = document.querySelector(containerId);
+    const rows = container
+      ? container.querySelectorAll('tr[data-order-id]')
+      : document.querySelectorAll('tr[data-order-id]');
     const resultados = [];
 
     rows.forEach(row => {
