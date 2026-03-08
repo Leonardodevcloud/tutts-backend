@@ -38,7 +38,7 @@ function createChatIaRoutes(pool) {
     if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY não configurada');
 
     const body = {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: maxTokens,
       temperature,
       system: systemPrompt,
