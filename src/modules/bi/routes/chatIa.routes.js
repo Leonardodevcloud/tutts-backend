@@ -279,9 +279,11 @@ O gestor está olhando dados filtrados. TODA query SQL que você gerar DEVE incl
 ${contextoFiltros}
 Se você gerar uma query sem estes filtros, os dados vão estar errados.` : 'Sem filtros ativos — todos os dados.'}
 
-Schema (interno):
+Schema e dados de referência (interno — nunca mencione pro gestor):
 ${schemaTexto}
 ${samplesTexto}
+
+IMPORTANTE: Acima você tem uma AMOSTRA REAL dos dados com o filtro ativo. USE ela pra entender os nomes exatos das colunas, os formatos dos valores, e como os dados se parecem. Quando gerar SQL, use APENAS colunas que você VÊ nessa amostra ou no schema.
 
 Regras de negócio que você precisa saber:
 ${KNOWLEDGE_BASE}
@@ -291,6 +293,55 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
 [CHART]
 {"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}
 [/CHART]`;
+  }
+
+  // ==================== AMOSTRA REAL DOS DADOS ====================
+  async function getAmostraReal(filtros) {
+    try {
+      const conditions = ['COALESCE(ponto, 1) >= 2'];
+      const params = [];
+      let idx = 1;
+
+      const codClientes = filtros?.cod_cliente
+        ? (Array.isArray(filtros.cod_cliente) ? filtros.cod_cliente : [filtros.cod_cliente]).map(c => parseInt(c)).filter(c => !isNaN(c))
+        : [];
+      const centrosCusto = filtros?.centro_custo
+        ? (Array.isArray(filtros.centro_custo) ? filtros.centro_custo : [filtros.centro_custo]).filter(c => c && c.trim())
+        : [];
+
+      if (codClientes.length > 0) {
+        conditions.push(`cod_cliente IN (${codClientes.map(() => `$${idx++}`).join(',')})`);
+        params.push(...codClientes);
+      }
+      if (centrosCusto.length > 0) {
+        conditions.push(`centro_custo IN (${centrosCusto.map(() => `$${idx++}`).join(',')})`);
+        params.push(...centrosCusto);
+      }
+      if (filtros?.data_inicio && filtros?.data_fim) {
+        conditions.push(`data_solicitado BETWEEN $${idx++} AND $${idx++}`);
+        params.push(filtros.data_inicio, filtros.data_fim);
+      }
+
+      const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+      const result = await pool.query(`
+        SELECT os, ponto, cod_cliente, nome_fantasia, centro_custo, cod_prof, nome_prof,
+          data_hora, data_hora_alocado, data_solicitado, hora_solicitado,
+          finalizado, categoria, valor, valor_prof, distancia,
+          status, motivo, ocorrencia, dentro_prazo, prazo_minutos, tempo_execucao_minutos,
+          bairro, cidade, tipo_pagamento, tempo_espera_minutos, agendado
+        FROM bi_entregas ${where}
+        ORDER BY data_solicitado DESC, os DESC
+        LIMIT 15
+      `, params);
+
+      if (result.rows.length === 0) return '';
+
+      return `\n# AMOSTRA REAL DOS DADOS (${result.rows.length} registros recentes do filtro ativo — use como referência dos nomes de colunas e valores reais):\n\`\`\`json\n${JSON.stringify(result.rows, null, 2)}\n\`\`\`\n`;
+    } catch (e) {
+      console.error('⚠️ [Chat IA] Erro amostra:', e.message);
+      return '';
+    }
   }
 
   // ==================== MONTAR FILTROS ====================
@@ -355,15 +406,15 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
 
       const contextoFiltros = montarContextoFiltros(filtros);
 
-      let schema, samples;
+      let schema, samples, amostra;
       try {
-        [schema, samples] = await Promise.all([getSchema(), getSamples()]);
+        [schema, samples, amostra] = await Promise.all([getSchema(), getSamples(), getAmostraReal(filtros)]);
       } catch (dbErr) {
         console.error('❌ [Chat IA] Erro schema/samples:', dbErr.message);
         return res.status(500).json({ error: 'Erro banco: ' + dbErr.message });
       }
 
-      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples), contextoFiltros);
+      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples) + amostra, contextoFiltros);
       const messages = [];
       if (historico?.length > 0) {
         for (const h of historico) {
