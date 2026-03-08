@@ -272,7 +272,10 @@ Regras técnicas do SQL (interno, nunca exponha):
 - Clientes: nome_fantasia. Profissionais: nome_prof
 - Só tabelas do schema abaixo
 
-${contextoFiltros ? `Filtros ativos (inclua em TODAS as queries):\n${contextoFiltros}` : 'Sem filtros ativos — todos os dados.'}
+${contextoFiltros ? `ATENÇÃO — FILTROS OBRIGATÓRIOS:
+O gestor está olhando dados filtrados. TODA query SQL que você gerar DEVE incluir estes filtros no WHERE, sem exceção:
+${contextoFiltros}
+Se você gerar uma query sem estes filtros, os dados vão estar errados.` : 'Sem filtros ativos — todos os dados.'}
 
 Schema (interno):
 ${schemaTexto}
@@ -366,12 +369,16 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
           if (h.resposta) messages.push({ role: 'assistant', content: h.resposta });
         }
       }
-      messages.push({ role: 'user', content: prompt });
+      // Injetar filtros no prompt do usuário para reforçar
+      const promptComFiltros = contextoFiltros 
+        ? `[Contexto: ${contextoFiltros.split('\n').filter(l => !l.startsWith('SQL')).join(', ').trim()}]\n\n${prompt}`
+        : prompt;
+      messages.push({ role: 'user', content: promptComFiltros });
 
       // ETAPA 1
       let resposta1;
       try {
-        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 0.6, maxTokens: 4096 });
+        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 1, maxTokens: 4096 });
       } catch (claudeErr) {
         console.error('❌ [Chat IA] Erro Claude:', claudeErr.message);
         return res.status(500).json({ error: 'Erro IA: ' + claudeErr.message });
@@ -438,7 +445,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       let respostaFinal;
       try {
         const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 150 ? ', mostrando 150' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 30000)}\n\`\`\`\n\nAnalise e responda. NÃO inclua SQL.` }];
-        respostaFinal = await chamarClaude(analiseMsgs, systemPrompt, { temperature: 0.7, maxTokens: 4096 });
+        respostaFinal = await chamarClaude(analiseMsgs, systemPrompt, { temperature: 1, maxTokens: 4096 });
       } catch (e) {
         respostaFinal = `Dados encontrados (${todosResultados.length} registros), mas houve erro na análise.`;
       }
