@@ -1,14 +1,6 @@
 /**
  * BI Sub-Router: Chat IA — Analista de Dados Conversacional
- * v4.0 — Arquitetura Conversacional com Claude (Anthropic):
- *
- *  Features:
- *   - Conversa fluida com contexto acumulativo (como falar com um analista)
- *   - SQL dinâmico gerado pelo Claude a partir do schema real do banco
- *   - Validação de segurança (só SELECT, whitelist tabelas, timeout)
- *   - Persistência de conversas no banco (salvar, listar, retomar, deletar)
- *   - Exportação de relatório DOCX da conversa
- *   - Gráficos via [CHART]...[/CHART]
+ * v4.0 — Claude API (Anthropic)
  */
 const express = require('express');
 
@@ -39,37 +31,51 @@ function createChatIaRoutes(pool) {
     'bi_garantido_cache', 'garantido_status'
   ];
 
-  // ==================== HELPER: Chamar Claude ====================
+  // ==================== CHAMAR CLAUDE ====================
   async function chamarClaude(messages, systemPrompt, opts = {}) {
     const { temperature = 0.4, maxTokens = 4096 } = opts;
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
     if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY não configurada');
 
     const body = {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-5-20250514',
       max_tokens: maxTokens,
       temperature,
       system: systemPrompt,
       messages
     };
 
+    console.log(`📡 [Chat IA] Chamando Claude (${messages.length} msgs, temp=${temperature})...`);
+
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2024-01-01'
+        'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify(body)
     });
 
-    const data = await resp.json();
-    if (data.error) throw new Error(`Claude API: ${data.error.message}`);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`❌ [Chat IA] Claude HTTP ${resp.status}:`, errText);
+      throw new Error(`Claude API HTTP ${resp.status}: ${errText.substring(0, 200)}`);
+    }
 
-    return data.content
+    const data = await resp.json();
+    if (data.error) {
+      console.error(`❌ [Chat IA] Claude error:`, data.error);
+      throw new Error(`Claude API: ${data.error.message}`);
+    }
+
+    const text = data.content
       ?.filter(b => b.type === 'text')
       ?.map(b => b.text)
       ?.join('\n') || '';
+
+    console.log(`✅ [Chat IA] Claude respondeu (${text.length} chars, stop=${data.stop_reason})`);
+    return text;
   }
 
   // ==================== SCHEMA + SAMPLES ====================
@@ -138,11 +144,11 @@ function createChatIaRoutes(pool) {
 
   function formatarSamples(samples) {
     if (!samples) return '';
-    let texto = '\n# VALORES REAIS NO BANCO (use estes valores exatos em filtros):\n';
-    if (samples.ocorrencias?.length) texto += `\nOcorrências possíveis: ${samples.ocorrencias.map(o => `"${o.ocorrencia}" (${o.qtd}x)`).join(', ')}\n`;
-    if (samples.status?.length) texto += `Status possíveis: ${samples.status.map(s => `"${s.status}" (${s.qtd}x)`).join(', ')}\n`;
+    let texto = '\n# VALORES REAIS NO BANCO:\n';
+    if (samples.ocorrencias?.length) texto += `\nOcorrências: ${samples.ocorrencias.map(o => `"${o.ocorrencia}" (${o.qtd}x)`).join(', ')}\n`;
+    if (samples.status?.length) texto += `Status: ${samples.status.map(s => `"${s.status}" (${s.qtd}x)`).join(', ')}\n`;
     if (samples.categorias?.length) texto += `Categorias: ${samples.categorias.map(c => `"${c.categoria}" (${c.qtd}x)`).join(', ')}\n`;
-    if (samples.periodo) texto += `Período disponível: ${samples.periodo.min_data} até ${samples.periodo.max_data} (${samples.periodo.dias} dias)\n`;
+    if (samples.periodo) texto += `Período: ${samples.periodo.min_data} até ${samples.periodo.max_data} (${samples.periodo.dias} dias)\n`;
     if (samples.clientes?.length) texto += `\nClientes (top 30): ${samples.clientes.map(c => `${c.nome_fantasia} (cod:${c.cod_cliente}, ${c.qtd})`).join(', ')}\n`;
     if (samples.profissionais?.length) texto += `\nProfissionais (top 30): ${samples.profissionais.map(p => `${p.nome_prof} (cod:${p.cod_prof}, ${p.qtd})`).join(', ')}\n`;
     return texto;
@@ -176,26 +182,17 @@ function createChatIaRoutes(pool) {
     }
 
     if (!sqlLimpo.toUpperCase().includes('LIMIT')) sqlLimpo += ' LIMIT 500';
-
     return { valido: true, sql: sqlLimpo };
   }
 
-  // ==================== EXECUÇÃO SQL ====================
   async function executarSQL(sql) {
     const validacao = validarSQL(sql);
     if (!validacao.valido) return { success: false, erro: validacao.erro, sql };
-
     try {
       await pool.query('SET statement_timeout = 15000');
       const result = await pool.query(validacao.sql);
       await pool.query('SET statement_timeout = 0');
-      return {
-        success: true,
-        rows: result.rows,
-        fields: result.fields?.map(f => f.name) || [],
-        rowCount: result.rowCount,
-        sql: validacao.sql
-      };
+      return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: validacao.sql };
     } catch (sqlError) {
       await pool.query('SET statement_timeout = 0').catch(() => {});
       return { success: false, erro: sqlError.message, sql: validacao.sql };
@@ -204,22 +201,20 @@ function createChatIaRoutes(pool) {
 
   // ==================== KNOWLEDGE BASE ====================
   const KNOWLEDGE_BASE = `
-## 1. SISTEMA DE PRAZOS (SLA)
-- Prazo definido pela DISTÂNCIA (km): faixas por cliente > centro de custo > padrão
-- Exceção Cliente 767 (Comollati): SLA fixo 120min, meta ≥95%
-- dentro_prazo = true quando tempo_execucao_minutos ≤ prazo_minutos
-- Taxa de prazo = (dentro prazo / total com prazo calculado) × 100. Meta geral: ≥85%
-- Prazo do profissional: de data_hora_alocado até finalizado (tabelas bi_prazos_prof_*)
+## 1. PRAZOS (SLA)
+- Prazo por DISTÂNCIA (km): faixas por cliente > centro de custo > padrão
+- Cliente 767 (Comollati): SLA fixo 120min, meta >=95%
+- dentro_prazo = true quando tempo_execucao_minutos <= prazo_minutos
+- Taxa prazo = (dentro prazo / total com prazo calculado) x 100. Meta geral: >=85%
 
-## 2. MOTIVOS DE ATRASO (quando dentro_prazo = false)
-Classificação por ordem de prioridade:
-1. Falha sistêmica (🔴): SLA total > 600min E alocação > 300min
-2. OS não encerrada (🔴): SLA total > 600min, alocação normal
-3. Associado tarde (🟠): alocação > 30min — problema NOSSO (operação interna)
-4. Coleta lenta (🟡): tempo residual > 45min — problema do CLIENTE
-5. Atraso do motoboy (🟠): nenhum dos anteriores
+## 2. MOTIVOS DE ATRASO (dentro_prazo = false, ordem de prioridade)
+1. Falha sistêmica: SLA total > 600min E alocação > 300min
+2. OS não encerrada: SLA total > 600min, alocação normal
+3. Associado tarde: alocação > 30min — problema NOSSO
+4. Coleta lenta: tempo residual > 45min — problema do CLIENTE
+5. Atraso do motoboy: nenhum dos anteriores
 
-SQL para classificar:
+SQL:
 CASE
   WHEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 > 600 AND EXTRACT(EPOCH FROM (data_hora_alocado - data_hora))/60 > 300 THEN 'Falha sistêmica'
   WHEN EXTRACT(EPOCH FROM (finalizado - data_hora))/60 > 600 THEN 'OS não encerrada'
@@ -230,7 +225,7 @@ END
 
 ## 3. RETORNOS (campo ocorrencia)
 Tipos: "Cliente Fechado", "ClienteAus"/"Cliente Ausente", "Loja Fechada", "Produto Incorreto", "Retorno"
-Taxa: até 2% 🟢 | 2-5% 🟡 | >5% 🔴
+Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
 
 ## 4. FINANCEIRO
 - Receita bruta = SUM(valor)
@@ -241,49 +236,44 @@ Taxa: até 2% 🟢 | 2-5% 🟡 | >5% 🔴
 
 ## 5. FROTA
 - Motos/dia = COUNT(DISTINCT cod_prof). Ideal: 10 entregas/moto/dia
-- <8 sub-utilização | >15 sobre-utilização
 
-## 6. ESTRUTURA DE DADOS
+## 6. ESTRUTURA
 - bi_entregas: cada linha = um PONTO de uma OS
-- Ponto 1 = COLETA, Ponto ≥ 2 = ENTREGAS
-- SEMPRE filtrar: WHERE COALESCE(ponto, 1) >= 2
-- OS pode ter vários pontos
+- Ponto 1 = COLETA, Ponto >= 2 = ENTREGAS. SEMPRE: WHERE COALESCE(ponto, 1) >= 2
 
 ## 7. DETRATORES
 - Profissional com 3+ OS atrasadas = detrator de prazo`;
 
   // ==================== SYSTEM PROMPT ====================
   function buildSystemPrompt(schemaTexto, samplesTexto, contextoFiltros) {
-    return `Você é o analista de dados sênior da Tutts, uma empresa de logística de entregas com motoboys em Salvador/BA.
-
-Você tem acesso DIRETO ao banco PostgreSQL. O usuário conversa com você naturalmente — você mantém contexto completo da conversa.
+    return `Você é o analista de dados sênior da Tutts, empresa de logística de entregas com motoboys em Salvador/BA.
+Você tem acesso DIRETO ao banco PostgreSQL. O usuário conversa naturalmente — mantenha contexto completo.
 
 # IDENTIDADE
 - Você É funcionário da Tutts. Use "nós", "nossa operação".
 - Português brasileiro, profissional e amigável.
-- ⛔ NUNCA fale como consultor externo. NUNCA sugira "aumentar contato com cliente".
+- NUNCA fale como consultor externo. NUNCA sugira "aumentar contato com cliente".
 
 # COMO FUNCIONA
-
 1. Pergunta CONCEITUAL → responda direto usando o Knowledge Base
 2. Precisa de DADOS → gere SQL dentro de um bloco \`\`\`sql ... \`\`\`
-   O sistema detecta, valida, executa e te devolve o resultado pra analisar.
+   O sistema detecta, valida, executa e te devolve o resultado.
 3. Refinamento → ajuste o SQL mantendo contexto da conversa
 
 # REGRAS SQL
-1. SEMPRE: WHERE COALESCE(ponto, 1) >= 2 (exclui coletas)
+1. SEMPRE: WHERE COALESCE(ponto, 1) >= 2
 2. SEMPRE: LIMIT (máx 500)
 3. SEMPRE: NULLIF(x, 0) em divisões
 4. Taxa prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
 5. Faturamento líquido = SUM(valor) - COALESCE(SUM(valor_prof), 0)
-6. Retornos: LOWER(ocorrencia) LIKE '%cliente fechado%' OR '%clienteaus%' OR '%cliente ausente%' OR '%loja fechada%' OR '%retorno%'
-7. Exibir clientes: nome_fantasia. Profissionais: nome_prof
+6. Retornos: LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%clienteaus%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%' OR LOWER(ocorrencia) LIKE '%retorno%'
+7. Use nome_fantasia para clientes, nome_prof para profissionais
 8. Prefira COUNT(*) FILTER (WHERE ...) em vez de SUM(CASE WHEN)
 9. Só tabelas do schema abaixo
 
 # FILTROS ATIVOS
-${contextoFiltros || 'Nenhum filtro — todos os dados disponíveis.'}
-${contextoFiltros ? 'TODAS as queries DEVEM incluir estes filtros no WHERE.' : ''}
+${contextoFiltros || 'Nenhum filtro — todos os dados.'}
+${contextoFiltros ? 'TODAS as queries DEVEM incluir estes filtros.' : ''}
 
 # SCHEMA
 ${schemaTexto}
@@ -294,11 +284,11 @@ ${KNOWLEDGE_BASE}
 
 # FORMATO DE RESPOSTA
 - Markdown: **negrito** para números, emojis para classificação
-- 🟢 Bom (≥80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
+- 🟢 Bom (>=80%) · 🟡 Atenção (50-79%) · 🔴 Crítico (<50%)
 - Valores: R$ 1.234,56 | Tempos >60min: Xh XXmin | Taxas: 1 decimal
-- ⛔ NUNCA blocos SQL na resposta final
-- ⛔ NUNCA invente dados
-- ⛔ NUNCA termine com sugestões de perguntas
+- NUNCA blocos SQL na resposta final ao usuário
+- NUNCA invente dados
+- NUNCA termine com sugestões de perguntas
 - Gráficos quando fizer sentido:
 
 [CHART]
@@ -356,25 +346,29 @@ Tipos: "bar", "horizontalBar", "line", "pie", "doughnut". Máx 2 por resposta.`;
   }
 
   // ========================================================================
-  //  ENDPOINT PRINCIPAL: POST /bi/chat-ia
+  //  ENDPOINT PRINCIPAL
   // ========================================================================
   router.post('/bi/chat-ia', async (req, res) => {
     try {
       const { prompt, historico, filtros, conversa_id } = req.body;
-      if (!prompt || prompt.trim().length < 3) {
-        return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
-      }
-      if (!process.env.ANTHROPIC_API_KEY) {
-        return res.status(400).json({ error: 'ANTHROPIC_API_KEY não configurada.' });
-      }
+      if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
+      if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'ANTHROPIC_API_KEY não configurada. Adicione nas variáveis de ambiente do Railway.' });
 
-      console.log(`🤖 [Chat IA v4] Prompt: "${prompt.substring(0, 100)}..."`);
+      console.log(`\n🤖 [Chat IA v4] Prompt: "${prompt.substring(0, 100)}"`);
+      console.log(`   Filtros: ${JSON.stringify(filtros || {}).substring(0, 200)}`);
+      console.log(`   Histórico: ${historico?.length || 0} msgs`);
 
       const contextoFiltros = montarContextoFiltros(filtros);
-      const [schema, samples] = await Promise.all([getSchema(), getSamples()]);
-      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples), contextoFiltros);
 
-      // Montar mensagens com histórico completo
+      let schema, samples;
+      try {
+        [schema, samples] = await Promise.all([getSchema(), getSamples()]);
+      } catch (dbErr) {
+        console.error('❌ [Chat IA] Erro schema/samples:', dbErr.message);
+        return res.status(500).json({ error: 'Erro banco: ' + dbErr.message });
+      }
+
+      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples), contextoFiltros);
       const messages = [];
       if (historico?.length > 0) {
         for (const h of historico) {
@@ -384,231 +378,148 @@ Tipos: "bar", "horizontalBar", "line", "pie", "doughnut". Máx 2 por resposta.`;
       }
       messages.push({ role: 'user', content: prompt });
 
-      // ===== ETAPA 1: Claude entende e decide =====
-      console.log('🧠 [Chat IA v4] Etapa 1 — entendimento...');
-      const resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 0.4, maxTokens: 4096 });
+      // ETAPA 1
+      let resposta1;
+      try {
+        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 0.4, maxTokens: 4096 });
+      } catch (claudeErr) {
+        console.error('❌ [Chat IA] Erro Claude:', claudeErr.message);
+        return res.status(500).json({ error: 'Erro IA: ' + claudeErr.message });
+      }
 
-      // Extrair blocos SQL
       const sqlBlocks = [];
       const sqlRegex = /```sql\n?([\s\S]*?)\n?```/g;
       let match;
       while ((match = sqlRegex.exec(resposta1)) !== null) sqlBlocks.push(match[1].trim());
 
-      // Sem SQL = resposta direta
       if (sqlBlocks.length === 0) {
-        console.log('✅ [Chat IA v4] Resposta direta (sem SQL)');
-
-        // Salvar na conversa se existir
-        if (conversa_id) {
-          await salvarMensagem(conversa_id, prompt, resposta1, null, null);
-        }
-
+        console.log('✅ [Chat IA v4] Resposta direta');
+        if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
         return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
       }
 
-      // ===== ETAPA 2: Executar SQL(s) =====
-      console.log(`🔄 [Chat IA v4] ${sqlBlocks.length} SQL(s), executando...`);
-
+      // ETAPA 2
+      console.log(`🔄 [Chat IA v4] ${sqlBlocks.length} SQL(s)...`);
       const todosResultados = [];
       const todasColunas = new Set();
       const sqlsExecutadas = [];
       const erros = [];
 
       for (const bloco of sqlBlocks) {
-        const queries = bloco.split(/;\s*/).filter(q => {
-          const t = q.trim().toUpperCase();
-          return t.startsWith('SELECT') || t.startsWith('WITH');
-        });
+        const queries = bloco.split(/;\s*/).filter(q => { const t = q.trim().toUpperCase(); return t.startsWith('SELECT') || t.startsWith('WITH'); });
         for (const sql of queries) {
           const resultado = await executarSQL(sql.trim());
           if (resultado.success) {
             resultado.rows.forEach(row => todosResultados.push(row));
             resultado.fields.forEach(f => todasColunas.add(f));
             sqlsExecutadas.push(resultado.sql);
+            console.log(`  ✅ ${resultado.rowCount} rows`);
           } else {
             erros.push(resultado.erro);
-            console.error(`  ❌ Query erro: ${resultado.erro}`);
+            console.error(`  ❌ ${resultado.erro}`);
           }
         }
       }
 
-      // Retry se todas falharam
+      // Retry
       if (todosResultados.length === 0 && erros.length > 0) {
-        console.log('🔄 [Chat IA v4] Retry — corrigindo SQL...');
-        const mensagensRetry = [
-          ...messages,
-          { role: 'assistant', content: resposta1 },
-          { role: 'user', content: `As queries falharam:\n${erros.join('\n')}\n\nCorrija e gere novas queries usando apenas tabelas e colunas do schema.` }
-        ];
+        console.log('🔄 [Chat IA v4] Retry...');
         try {
-          const resposta2 = await chamarClaude(mensagensRetry, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
-          const regexRetry = /```sql\n?([\s\S]*?)\n?```/g;
+          const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Queries falharam:\n${erros.join('\n')}\n\nCorrija usando o schema fornecido.` }];
+          const resp2 = await chamarClaude(retryMsgs, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
+          const r2 = /```sql\n?([\s\S]*?)\n?```/g;
           let m2;
-          while ((m2 = regexRetry.exec(resposta2)) !== null) {
-            const resultado = await executarSQL(m2[1].trim());
-            if (resultado.success) {
-              resultado.rows.forEach(row => todosResultados.push(row));
-              resultado.fields.forEach(f => todasColunas.add(f));
-              sqlsExecutadas.push(resultado.sql);
-            }
+          while ((m2 = r2.exec(resp2)) !== null) {
+            const res2 = await executarSQL(m2[1].trim());
+            if (res2.success) { res2.rows.forEach(r => todosResultados.push(r)); res2.fields.forEach(f => todasColunas.add(f)); sqlsExecutadas.push(res2.sql); }
           }
           if (todosResultados.length === 0) {
-            const textoLimpo = resposta2.replace(/```sql[\s\S]*?```/g, '').trim();
-            return res.json({ success: true, resposta: textoLimpo || '⚠️ Não consegui executar a consulta. Tente reformular.', sql: null, dados: null });
+            return res.json({ success: true, resposta: resp2.replace(/```sql[\s\S]*?```/g, '').trim() || '⚠️ Não consegui. Reformule.', sql: null, dados: null });
           }
         } catch (e) {
-          return res.json({ success: true, resposta: '⚠️ Erro ao consultar os dados. Tente reformular.', sql: null, dados: null });
+          return res.json({ success: true, resposta: '⚠️ Erro na consulta. Reformule.', sql: null, dados: null });
         }
       }
 
-      // ===== ETAPA 3: Claude analisa resultados =====
-      console.log(`🧠 [Chat IA v4] Etapa 2 — análise de ${todosResultados.length} registros...`);
-
+      // ETAPA 3
       const dadosParaAnalise = todosResultados.slice(0, 150);
-      const mensagensAnalise = [
-        ...messages,
-        { role: 'assistant', content: resposta1 },
-        {
-          role: 'user',
-          content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 150 ? ', mostrando 150' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 30000)}\n\`\`\`\n\nAnalise e responda a pergunta original. NÃO inclua SQL na resposta.`
-        }
-      ];
+      console.log(`🧠 [Chat IA v4] Analisando ${todosResultados.length} registros...`);
 
       let respostaFinal;
       try {
-        respostaFinal = await chamarClaude(mensagensAnalise, systemPrompt, { temperature: 0.5, maxTokens: 4096 });
+        const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 150 ? ', mostrando 150' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 30000)}\n\`\`\`\n\nAnalise e responda. NÃO inclua SQL.` }];
+        respostaFinal = await chamarClaude(analiseMsgs, systemPrompt, { temperature: 0.5, maxTokens: 4096 });
       } catch (e) {
         respostaFinal = `Dados encontrados (${todosResultados.length} registros), mas houve erro na análise.`;
       }
 
       const sqlFinal = sqlsExecutadas.join(';\n\n');
+      if (conversa_id) await salvarMensagem(conversa_id, prompt, respostaFinal, sqlFinal, { total: todosResultados.length });
 
-      // Salvar na conversa
-      if (conversa_id) {
-        await salvarMensagem(conversa_id, prompt, respostaFinal, sqlFinal, { total: todosResultados.length });
-      }
-
-      console.log('✅ [Chat IA v4] Resposta completa');
-      return res.json({
-        success: true,
-        resposta: respostaFinal,
-        sql: sqlFinal,
-        dados: { colunas: [...todasColunas], linhas: dadosParaAnalise, total: todosResultados.length }
-      });
-
+      console.log('✅ [Chat IA v4] OK');
+      return res.json({ success: true, resposta: respostaFinal, sql: sqlFinal, dados: { colunas: [...todasColunas], linhas: dadosParaAnalise, total: todosResultados.length } });
     } catch (err) {
-      console.error('❌ [Chat IA v4] Erro geral:', err);
-      res.status(500).json({ error: 'Erro interno no Chat IA: ' + err.message });
+      console.error('❌ [Chat IA v4] ERRO:', err);
+      res.status(500).json({ error: 'Erro interno: ' + err.message });
     }
   });
 
   // ========================================================================
   //  PERSISTÊNCIA DE CONVERSAS
   // ========================================================================
-
   async function salvarMensagem(conversaId, prompt, resposta, sql, dados) {
     try {
-      await pool.query(
-        `INSERT INTO bi_chat_mensagens (conversa_id, role, content, sql_executado, dados_resumo)
-         VALUES ($1, 'user', $2, NULL, NULL), ($1, 'assistant', $3, $4, $5)`,
-        [conversaId, prompt, resposta, sql, dados ? JSON.stringify(dados) : null]
-      );
-      // Atualizar updated_at da conversa
+      await pool.query(`INSERT INTO bi_chat_mensagens (conversa_id, role, content, sql_executado, dados_resumo) VALUES ($1, 'user', $2, NULL, NULL), ($1, 'assistant', $3, $4, $5)`, [conversaId, prompt, resposta, sql, dados ? JSON.stringify(dados) : null]);
       await pool.query(`UPDATE bi_chat_conversas SET updated_at = NOW() WHERE id = $1`, [conversaId]);
-    } catch (e) { console.error('⚠️ [Chat IA] Erro ao salvar mensagem:', e.message); }
+    } catch (e) { console.error('⚠️ Erro salvar msg:', e.message); }
   }
 
-  // Criar nova conversa
   router.post('/bi/chat-ia/conversas', async (req, res) => {
     try {
       const { titulo, filtros } = req.body;
       const userId = req.user?.id || req.user?.userId || 'anonymous';
-      const result = await pool.query(
-        `INSERT INTO bi_chat_conversas (user_id, titulo, filtros) VALUES ($1, $2, $3) RETURNING *`,
-        [userId, titulo || 'Nova conversa', filtros ? JSON.stringify(filtros) : null]
-      );
+      const result = await pool.query(`INSERT INTO bi_chat_conversas (user_id, titulo, filtros) VALUES ($1, $2, $3) RETURNING *`, [userId, titulo || 'Nova conversa', filtros ? JSON.stringify(filtros) : null]);
       res.json({ success: true, conversa: result.rows[0] });
-    } catch (err) {
-      console.error('❌ Erro criar conversa:', err);
-      res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // Listar conversas do usuário
   router.get('/bi/chat-ia/conversas', async (req, res) => {
     try {
       const userId = req.user?.id || req.user?.userId || 'anonymous';
-      const result = await pool.query(
-        `SELECT c.*, 
-          (SELECT COUNT(*)::int FROM bi_chat_mensagens m WHERE m.conversa_id = c.id AND m.role = 'user') as total_mensagens
-         FROM bi_chat_conversas c 
-         WHERE c.user_id = $1 
-         ORDER BY c.updated_at DESC 
-         LIMIT 50`,
-        [userId]
-      );
+      const result = await pool.query(`SELECT c.*, (SELECT COUNT(*)::int FROM bi_chat_mensagens m WHERE m.conversa_id = c.id AND m.role = 'user') as total_mensagens FROM bi_chat_conversas c WHERE c.user_id = $1 ORDER BY c.updated_at DESC LIMIT 50`, [userId]);
       res.json({ success: true, conversas: result.rows });
-    } catch (err) {
-      console.error('❌ Erro listar conversas:', err);
-      res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // Carregar mensagens de uma conversa
   router.get('/bi/chat-ia/conversas/:id', async (req, res) => {
     try {
-      const { id } = req.params;
-      const conversa = await pool.query(`SELECT * FROM bi_chat_conversas WHERE id = $1`, [id]);
-      if (conversa.rows.length === 0) return res.status(404).json({ error: 'Conversa não encontrada' });
-
-      const mensagens = await pool.query(
-        `SELECT * FROM bi_chat_mensagens WHERE conversa_id = $1 ORDER BY created_at ASC`,
-        [id]
-      );
-
-      // Montar no formato { prompt, resposta } para compatibilidade
+      const conversa = await pool.query(`SELECT * FROM bi_chat_conversas WHERE id = $1`, [req.params.id]);
+      if (conversa.rows.length === 0) return res.status(404).json({ error: 'Não encontrada' });
+      const mensagens = await pool.query(`SELECT * FROM bi_chat_mensagens WHERE conversa_id = $1 ORDER BY created_at ASC`, [req.params.id]);
       const historico = [];
       const msgs = mensagens.rows;
       for (let i = 0; i < msgs.length; i++) {
         if (msgs[i].role === 'user') {
-          const assistantMsg = msgs[i + 1]?.role === 'assistant' ? msgs[i + 1] : null;
-          historico.push({
-            prompt: msgs[i].content,
-            resposta: assistantMsg?.content || null,
-            sql: assistantMsg?.sql_executado || null,
-            dados: assistantMsg?.dados_resumo ? JSON.parse(assistantMsg.dados_resumo) : null
-          });
-          if (assistantMsg) i++; // pular a assistant
+          const a = msgs[i + 1]?.role === 'assistant' ? msgs[i + 1] : null;
+          historico.push({ prompt: msgs[i].content, resposta: a?.content || null, sql: a?.sql_executado || null, dados: a?.dados_resumo ? JSON.parse(a.dados_resumo) : null });
+          if (a) i++;
         }
       }
-
-      res.json({
-        success: true,
-        conversa: conversa.rows[0],
-        historico
-      });
-    } catch (err) {
-      console.error('❌ Erro carregar conversa:', err);
-      res.status(500).json({ error: err.message });
-    }
+      res.json({ success: true, conversa: conversa.rows[0], historico });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // Renomear conversa
   router.patch('/bi/chat-ia/conversas/:id', async (req, res) => {
     try {
-      const { id } = req.params;
-      const { titulo } = req.body;
-      await pool.query(`UPDATE bi_chat_conversas SET titulo = $1, updated_at = NOW() WHERE id = $2`, [titulo, id]);
+      await pool.query(`UPDATE bi_chat_conversas SET titulo = $1, updated_at = NOW() WHERE id = $2`, [req.body.titulo, req.params.id]);
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // Deletar conversa
   router.delete('/bi/chat-ia/conversas/:id', async (req, res) => {
     try {
-      const { id } = req.params;
-      await pool.query(`DELETE FROM bi_chat_mensagens WHERE conversa_id = $1`, [id]);
-      await pool.query(`DELETE FROM bi_chat_conversas WHERE id = $1`, [id]);
+      await pool.query(`DELETE FROM bi_chat_mensagens WHERE conversa_id = $1`, [req.params.id]);
+      await pool.query(`DELETE FROM bi_chat_conversas WHERE id = $1`, [req.params.id]);
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
@@ -619,249 +530,101 @@ Tipos: "bar", "horizontalBar", "line", "pie", "doughnut". Máx 2 por resposta.`;
   router.post('/bi/chat-ia/exportar', async (req, res) => {
     try {
       const { mensagens, filtros } = req.body;
-      if (!mensagens || mensagens.length === 0) {
-        return res.status(400).json({ error: 'Nenhuma mensagem para exportar.' });
-      }
+      if (!mensagens || mensagens.length === 0) return res.status(400).json({ error: 'Nenhuma mensagem.' });
 
-      const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-              Header, Footer, AlignmentType, BorderStyle, WidthType,
-              ShadingType, PageNumber, HeadingLevel } = require('docx');
-      const https = require('https');
+      const { Document, Packer, Paragraph, TextRun, Header, Footer, AlignmentType, BorderStyle, ShadingType, PageNumber } = require('docx');
 
-      // Baixar logo
-      let logoBuffer = null;
-      try {
-        logoBuffer = await new Promise((resolve, reject) => {
-          https.get('https://raw.githubusercontent.com/Leonardodevcloud/tutts-frontend/main/Gemini_Generated_Image_s64zrms64zrms64z.png', (response) => {
-            const chunks = [];
-            response.on('data', chunk => chunks.push(chunk));
-            response.on('end', () => resolve(Buffer.concat(chunks)));
-            response.on('error', reject);
-          }).on('error', reject);
-        });
-      } catch (e) { console.log('⚠️ Logo não disponível'); }
-
-      // Montar informação de filtros
       let filtroTexto = 'Todos os dados';
       if (filtros) {
-        const partes = [];
-        if (filtros.nomes_clientes?.length) partes.push(`Clientes: ${filtros.nomes_clientes.join(', ')}`);
-        if (filtros.centro_custo?.length) partes.push(`Centros: ${filtros.centro_custo.join(', ')}`);
-        if (filtros.data_inicio && filtros.data_fim) partes.push(`Período: ${filtros.data_inicio} a ${filtros.data_fim}`);
-        if (partes.length > 0) filtroTexto = partes.join(' · ');
+        const p = [];
+        if (filtros.nomes_clientes?.length) p.push(`Clientes: ${filtros.nomes_clientes.join(', ')}`);
+        if (filtros.centro_custo?.length) p.push(`Centros: ${filtros.centro_custo.join(', ')}`);
+        if (filtros.data_inicio && filtros.data_fim) p.push(`Período: ${filtros.data_inicio} a ${filtros.data_fim}`);
+        if (p.length > 0) filtroTexto = p.join(' · ');
       }
 
       const dataHoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
-      // Helper: converter markdown simples em TextRuns
       function mdToRuns(text) {
         const runs = [];
-        // Remover blocos [CHART]...[/CHART]
-        const limpo = text.replace(/\[CHART\][\s\S]*?\[\/CHART\]/g, '[Gráfico — disponível na versão interativa]');
-
+        const limpo = text.replace(/\[CHART\][\s\S]*?\[\/CHART\]/g, '[Gráfico]');
         const partes = limpo.split(/(\*\*.*?\*\*)/g);
         for (const parte of partes) {
-          if (parte.startsWith('**') && parte.endsWith('**')) {
-            runs.push(new TextRun({ text: parte.slice(2, -2), bold: true, size: 22 }));
-          } else {
-            runs.push(new TextRun({ text: parte, size: 22 }));
-          }
+          if (parte.startsWith('**') && parte.endsWith('**')) runs.push(new TextRun({ text: parte.slice(2, -2), bold: true, size: 22 }));
+          else runs.push(new TextRun({ text: parte, size: 22 }));
         }
         return runs;
       }
 
-      // Montar seções do documento
-      const sections = [];
-      const children = [];
+      const children = [
+        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 100 }, children: [new TextRun({ text: 'CENTRAL TUTTS', bold: true, size: 36, color: '7C3AED' })] }),
+        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 100 }, children: [new TextRun({ text: 'Relatório — Chat IA', bold: true, size: 28, color: '374151' })] }),
+        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 50 }, children: [new TextRun({ text: dataHoje, size: 20, color: '6B7280' })] }),
+        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 300 }, children: [new TextRun({ text: filtroTexto, size: 20, color: '6B7280', italics: true })] }),
+        new Paragraph({ border: { bottom: { style: BorderStyle.SINGLE, size: 2, color: '7C3AED' } }, spacing: { after: 300 } })
+      ];
 
-      // Cabeçalho
-      children.push(
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 100 },
-          children: [new TextRun({ text: 'CENTRAL TUTTS', bold: true, size: 36, color: '7C3AED' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 100 },
-          children: [new TextRun({ text: 'Relatório — Chat IA', bold: true, size: 28, color: '374151' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 50 },
-          children: [new TextRun({ text: dataHoje, size: 20, color: '6B7280' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 300 },
-          children: [new TextRun({ text: filtroTexto, size: 20, color: '6B7280', italics: true })]
-        }),
-        // Linha separadora
-        new Paragraph({
-          border: { bottom: { style: BorderStyle.SINGLE, size: 2, color: '7C3AED' } },
-          spacing: { after: 300 }
-        })
-      );
-
-      // Mensagens
       for (let i = 0; i < mensagens.length; i++) {
         const msg = mensagens[i];
-
-        // Pergunta do usuário
-        children.push(
-          new Paragraph({
-            spacing: { before: 200, after: 100 },
-            shading: { fill: 'EDE9FE', type: ShadingType.CLEAR },
-            children: [
-              new TextRun({ text: '👤 Pergunta: ', bold: true, size: 22, color: '7C3AED' }),
-              new TextRun({ text: msg.prompt, size: 22, color: '374151' })
-            ]
-          })
-        );
-
-        // Resposta da IA
+        children.push(new Paragraph({ spacing: { before: 200, after: 100 }, shading: { fill: 'EDE9FE', type: ShadingType.CLEAR }, children: [new TextRun({ text: '👤 Pergunta: ', bold: true, size: 22, color: '7C3AED' }), new TextRun({ text: msg.prompt || '', size: 22, color: '374151' })] }));
         if (msg.resposta) {
-          const linhas = msg.resposta.split('\n').filter(l => l.trim());
-          for (const linha of linhas) {
-            // Detectar headers markdown
-            if (linha.startsWith('## ')) {
-              children.push(new Paragraph({
-                spacing: { before: 200, after: 80 },
-                children: [new TextRun({ text: linha.replace(/^#+\s/, ''), bold: true, size: 24, color: '1F2937' })]
-              }));
-            } else if (linha.startsWith('- ') || linha.startsWith('• ')) {
-              children.push(new Paragraph({
-                spacing: { before: 40, after: 40 },
-                indent: { left: 400 },
-                children: mdToRuns('• ' + linha.replace(/^[-•]\s/, ''))
-              }));
-            } else {
-              children.push(new Paragraph({
-                spacing: { before: 40, after: 40 },
-                children: mdToRuns(linha)
-              }));
-            }
+          for (const linha of msg.resposta.split('\n').filter(l => l.trim())) {
+            if (linha.startsWith('## ')) children.push(new Paragraph({ spacing: { before: 200, after: 80 }, children: [new TextRun({ text: linha.replace(/^#+\s/, ''), bold: true, size: 24, color: '1F2937' })] }));
+            else if (linha.startsWith('- ') || linha.startsWith('• ')) children.push(new Paragraph({ spacing: { before: 40, after: 40 }, indent: { left: 400 }, children: mdToRuns('• ' + linha.replace(/^[-•]\s/, '')) }));
+            else children.push(new Paragraph({ spacing: { before: 40, after: 40 }, children: mdToRuns(linha) }));
           }
         }
-
-        // Separador entre interações
-        if (i < mensagens.length - 1) {
-          children.push(new Paragraph({
-            border: { bottom: { style: BorderStyle.SINGLE, size: 1, color: 'E5E7EB' } },
-            spacing: { before: 200, after: 200 }
-          }));
-        }
+        if (i < mensagens.length - 1) children.push(new Paragraph({ border: { bottom: { style: BorderStyle.SINGLE, size: 1, color: 'E5E7EB' } }, spacing: { before: 200, after: 200 } }));
       }
 
-      // Footer
-      children.push(
-        new Paragraph({
-          border: { top: { style: BorderStyle.SINGLE, size: 2, color: '7C3AED' } },
-          spacing: { before: 400, after: 100 }
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          children: [new TextRun({ text: 'Relatório gerado automaticamente pela Central Tutts — Chat IA', size: 18, color: '9CA3AF', italics: true })]
-        })
-      );
+      children.push(new Paragraph({ border: { top: { style: BorderStyle.SINGLE, size: 2, color: '7C3AED' } }, spacing: { before: 400 } }));
+      children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Relatório gerado pela Central Tutts — Chat IA', size: 18, color: '9CA3AF', italics: true })] }));
 
       const doc = new Document({
         sections: [{
-          properties: {
-            page: {
-              margin: { top: 1000, bottom: 1000, left: 1200, right: 1200 }
-            }
-          },
-          headers: {
-            default: new Header({
-              children: [new Paragraph({
-                alignment: AlignmentType.RIGHT,
-                children: [new TextRun({ text: 'Central Tutts · Chat IA', size: 16, color: '9CA3AF', italics: true })]
-              })]
-            })
-          },
-          footers: {
-            default: new Footer({
-              children: [new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({ text: 'Página ', size: 16, color: '9CA3AF' }),
-                  new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '9CA3AF' })
-                ]
-              })]
-            })
-          },
+          properties: { page: { margin: { top: 1000, bottom: 1000, left: 1200, right: 1200 } } },
+          headers: { default: new Header({ children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: 'Central Tutts · Chat IA', size: 16, color: '9CA3AF', italics: true })] })] }) },
+          footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Página ', size: 16, color: '9CA3AF' }), new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '9CA3AF' })] })] }) },
           children
         }]
       });
 
       const buffer = await Packer.toBuffer(doc);
-      const nomeArquivo = `chat-ia-relatorio-${new Date().toISOString().slice(0, 10)}.docx`;
-
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.setHeader('Content-Disposition', `attachment; filename=${nomeArquivo}`);
+      res.setHeader('Content-Disposition', `attachment; filename=chat-ia-relatorio-${new Date().toISOString().slice(0, 10)}.docx`);
       res.send(buffer);
-
     } catch (err) {
-      console.error('❌ Erro exportar DOCX:', err);
-      res.status(500).json({ error: 'Erro ao gerar documento: ' + err.message });
-    }
-  });
-
-  // ========================================================================
-  //  ENDPOINT: Filtros
-  // ========================================================================
-  router.get('/bi/chat-ia/filtros', async (req, res) => {
-    try {
-      const clientes = await pool.query(`
-        SELECT DISTINCT e.cod_cliente, 
-          COALESCE(m.mascara, e.nome_fantasia) as nome_fantasia
-        FROM bi_entregas e
-        LEFT JOIN bi_mascaras m ON m.cod_cliente = e.cod_cliente::text
-        WHERE e.cod_cliente IS NOT NULL AND e.nome_fantasia IS NOT NULL AND e.nome_fantasia != ''
-        ORDER BY nome_fantasia
-      `);
-      const centrosCusto = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`);
-
-      let rawCodCliente = req.query.cod_cliente;
-      let codClientes = [];
-      if (rawCodCliente) {
-        if (Array.isArray(rawCodCliente)) {
-          codClientes = rawCodCliente.map(c => parseInt(c)).filter(c => !isNaN(c));
-        } else {
-          codClientes = String(rawCodCliente).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
-        }
-      }
-
-      let centrosDoCliente = [];
-      if (codClientes.length > 0) {
-        const placeholders = codClientes.map((_, i) => `$${i + 1}`).join(', ');
-        const r = await pool.query(
-          `SELECT DISTINCT centro_custo FROM bi_entregas WHERE cod_cliente IN (${placeholders}) AND centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`,
-          codClientes
-        );
-        centrosDoCliente = r.rows.map(r => r.centro_custo);
-      }
-
-      res.json({
-        clientes: clientes.rows,
-        centros_custo: centrosCusto.rows.map(r => r.centro_custo),
-        centros_do_cliente: centrosDoCliente
-      });
-    } catch (err) {
-      console.error('❌ Erro filtros:', err);
+      console.error('❌ Exportar:', err);
       res.status(500).json({ error: err.message });
     }
   });
 
   // ========================================================================
-  //  ENDPOINT: Schema (debug)
+  //  FILTROS + SCHEMA
   // ========================================================================
-  router.get('/bi/chat-ia/schema', async (req, res) => {
+  router.get('/bi/chat-ia/filtros', async (req, res) => {
     try {
-      const schema = await getSchema();
-      res.json({ tabelas: Object.keys(schema).length, schema });
+      const clientes = await pool.query(`SELECT DISTINCT e.cod_cliente, COALESCE(m.mascara, e.nome_fantasia) as nome_fantasia FROM bi_entregas e LEFT JOIN bi_mascaras m ON m.cod_cliente = e.cod_cliente::text WHERE e.cod_cliente IS NOT NULL AND e.nome_fantasia IS NOT NULL AND e.nome_fantasia != '' ORDER BY nome_fantasia`);
+      const centrosCusto = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`);
+      let rawCodCliente = req.query.cod_cliente;
+      let codClientes = [];
+      if (rawCodCliente) {
+        if (Array.isArray(rawCodCliente)) codClientes = rawCodCliente.map(c => parseInt(c)).filter(c => !isNaN(c));
+        else codClientes = String(rawCodCliente).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
+      }
+      let centrosDoCliente = [];
+      if (codClientes.length > 0) {
+        const ph = codClientes.map((_, i) => `$${i + 1}`).join(', ');
+        const r = await pool.query(`SELECT DISTINCT centro_custo FROM bi_entregas WHERE cod_cliente IN (${ph}) AND centro_custo IS NOT NULL AND centro_custo != '' ORDER BY centro_custo`, codClientes);
+        centrosDoCliente = r.rows.map(r => r.centro_custo);
+      }
+      res.json({ clientes: clientes.rows, centros_custo: centrosCusto.rows.map(r => r.centro_custo), centros_do_cliente: centrosDoCliente });
     } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.get('/bi/chat-ia/schema', async (req, res) => {
+    try { res.json({ tabelas: Object.keys(await getSchema()).length, schema: await getSchema() }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   return router;
