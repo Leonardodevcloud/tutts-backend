@@ -246,10 +246,94 @@ Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
 ## 7. DETRATORES
 - Profissional com 3+ OS atrasadas = detrator de prazo`;
 
-  // ==================== SYSTEM PROMPT ====================
-  function buildSystemPrompt(schemaTexto, samplesTexto, contextoFiltros) {
-    return `Você é um analista de dados que trabalha na Tutts, uma empresa de logística de entregas com motoboys em Salvador/BA. Você faz parte do time. O cara que está conversando com você é o gestor da operação — seu colega.
+  // ==================== SISTEMA DE MEMÓRIAS ====================
+  async function getMemoriasUsuario(userId) {
+    try {
+      const result = await pool.query(
+        `SELECT conteudo FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true ORDER BY created_at ASC LIMIT 50`,
+        [userId]
+      );
+      return result.rows.map(r => r.conteudo);
+    } catch (e) {
+      console.error('⚠️ [Chat IA] Erro buscar memórias:', e.message);
+      return [];
+    }
+  }
 
+  async function detectarESalvarMemorias(userId, prompt, resposta) {
+    try {
+      // Detectar se o prompt contém instrução/preferência
+      const promptLower = prompt.toLowerCase();
+      const indicadores = [
+        'sempre que', 'quando eu pedir', 'prefiro', 'quero que', 'lembra que',
+        'a partir de agora', 'não precisa', 'pode parar de', 'inclui sempre',
+        'mostra sempre', 'separa por', 'formato que eu gosto', 'do jeito que',
+        'chamo de', 'aqui a gente chama', 'na tutts a gente', 'nossa regra',
+        'minha preferência', 'me mostra como', 'padrão que eu uso'
+      ];
+
+      const temInstrucao = indicadores.some(i => promptLower.includes(i));
+      if (!temInstrucao) return;
+
+      // Verificar se já existe memória similar
+      const existentes = await pool.query(
+        `SELECT conteudo FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true`,
+        [userId]
+      );
+
+      // Usar Claude pra extrair a memória de forma inteligente
+      const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+      if (!ANTHROPIC_API_KEY) return;
+
+      const memoriasAtuais = existentes.rows.map(r => r.conteudo).join('\n');
+
+      const extractResp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 300,
+          temperature: 0,
+          system: `Você extrai preferências e instruções de conversas. Responda APENAS com a memória a ser salva, em uma frase curta e direta. Se não houver preferência/instrução clara, responda exatamente "NENHUMA".
+
+Memórias já salvas deste usuário:
+${memoriasAtuais || '(nenhuma)'}
+
+Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHUMA" para evitar duplicatas.`,
+          messages: [{
+            role: 'user',
+            content: `O gestor disse: "${prompt}"\n\nExtraia a preferência/instrução em uma frase curta (máx 100 chars). Ex: "Prefere faturamento separado por centro de custo" ou "Chama motoboys de motos".`
+          }]
+        })
+      });
+
+      const extractData = await extractResp.json();
+      const memoria = extractData.content?.[0]?.text?.trim();
+
+      if (memoria && memoria !== 'NENHUMA' && memoria.length > 5 && memoria.length < 200) {
+        await pool.query(
+          `INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2)`,
+          [userId, memoria]
+        );
+        console.log(`🧠 [Chat IA] Nova memória salva: "${memoria}"`);
+      }
+    } catch (e) {
+      console.error('⚠️ [Chat IA] Erro detectar memória:', e.message);
+    }
+  }
+
+  // ==================== SYSTEM PROMPT ====================
+  function buildSystemPrompt(schemaTexto, samplesTexto, contextoFiltros, memorias) {
+    const memoriasTexto = memorias && memorias.length > 0
+      ? `\nVocê já conhece esse gestor. Coisas que ele já te disse em conversas anteriores:\n${memorias.map(m => `- ${m}`).join('\n')}\nLeve isso em conta nas suas respostas.\n`
+      : '';
+
+    return `Você é um analista de dados que trabalha na Tutts, uma empresa de logística de entregas com motoboys em Salvador/BA. Você faz parte do time. O cara que está conversando com você é o gestor da operação — seu colega.
+${memoriasTexto}
 Conversa com ele do jeito mais natural possível. Como se vocês estivessem lado a lado olhando os dados juntos. Se ele perguntar "quanto a gente faturou?", responde "Faturamos R$ 45 mil líquido no período" — direto assim. Se ele disser "tira o cliente X dessa conta", você ajusta. Se algo não ficou claro, pergunta. Se ele te corrigir, aprende.
 
 Você tem acesso ao banco de dados da empresa. Quando precisar de dados, gere um SQL dentro de \`\`\`sql ... \`\`\` — o sistema executa e te devolve o resultado pra você analisar e responder.
@@ -405,16 +489,21 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       console.log(`   Histórico: ${historico?.length || 0} msgs`);
 
       const contextoFiltros = montarContextoFiltros(filtros);
+      const userId = req.user?.id || req.user?.userId || 'anonymous';
 
-      let schema, samples, amostra;
+      let schema, samples, amostra, memorias;
       try {
-        [schema, samples, amostra] = await Promise.all([getSchema(), getSamples(), getAmostraReal(filtros)]);
+        [schema, samples, amostra, memorias] = await Promise.all([
+          getSchema(), getSamples(), getAmostraReal(filtros), getMemoriasUsuario(userId)
+        ]);
       } catch (dbErr) {
         console.error('❌ [Chat IA] Erro schema/samples:', dbErr.message);
         return res.status(500).json({ error: 'Erro banco: ' + dbErr.message });
       }
 
-      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples) + amostra, contextoFiltros);
+      if (memorias.length > 0) console.log(`🧠 [Chat IA] ${memorias.length} memória(s) do usuário carregadas`);
+
+      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples) + amostra, contextoFiltros, memorias);
       const messages = [];
       if (historico?.length > 0) {
         for (const h of historico) {
@@ -445,6 +534,8 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       if (sqlBlocks.length === 0) {
         console.log('✅ [Chat IA v4] Resposta direta');
         if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
+        // Detectar memórias em background (não bloqueia a resposta)
+        detectarESalvarMemorias(userId, prompt, resposta1).catch(() => {});
         return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
       }
 
@@ -505,6 +596,8 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
 
       const sqlFinal = sqlsExecutadas.join(';\n\n');
       if (conversa_id) await salvarMensagem(conversa_id, prompt, respostaFinal, sqlFinal, { total: todosResultados.length });
+      // Detectar memórias em background
+      detectarESalvarMemorias(userId, prompt, respostaFinal).catch(() => {});
 
       console.log('✅ [Chat IA v4] OK');
       return res.json({ success: true, resposta: respostaFinal, sql: sqlFinal, dados: { colunas: [...todasColunas], linhas: dadosParaAnalise, total: todosResultados.length } });
@@ -647,6 +740,40 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       console.error('❌ Exportar:', err);
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ========================================================================
+  //  MEMÓRIAS DO USUÁRIO
+  // ========================================================================
+  router.get('/bi/chat-ia/memorias', async (req, res) => {
+    try {
+      const userId = req.user?.id || req.user?.userId || 'anonymous';
+      const result = await pool.query(
+        `SELECT id, conteudo, created_at FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true ORDER BY created_at ASC`,
+        [userId]
+      );
+      res.json({ success: true, memorias: result.rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.post('/bi/chat-ia/memorias', async (req, res) => {
+    try {
+      const userId = req.user?.id || req.user?.userId || 'anonymous';
+      const { conteudo } = req.body;
+      if (!conteudo || conteudo.trim().length < 3) return res.status(400).json({ error: 'Conteúdo muito curto' });
+      const result = await pool.query(
+        `INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2) RETURNING *`,
+        [userId, conteudo.trim()]
+      );
+      res.json({ success: true, memoria: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.delete('/bi/chat-ia/memorias/:id', async (req, res) => {
+    try {
+      await pool.query(`UPDATE bi_chat_memorias SET ativo = false WHERE id = $1`, [req.params.id]);
+      res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // ========================================================================
