@@ -174,7 +174,9 @@ function createChatIaRoutes(pool) {
       if (queries.length > 0) sqlLimpo = queries[0].trim();
     }
 
-    const tabelasUsadas = sqlLimpo.toUpperCase().match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
+    // Extrair tabelas usadas — ignorar FROM dentro de EXTRACT(), DATE_PART(), etc
+    const sqlSemExtract = sqlLimpo.replace(/EXTRACT\s*\([^)]*\)/gi, '').replace(/DATE_PART\s*\([^)]*\)/gi, '').replace(/DATE_TRUNC\s*\([^)]*\)/gi, '');
+    const tabelasUsadas = sqlSemExtract.toUpperCase().match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
       const tabela = match.replace(/^(FROM|JOIN)\s+/i, '').trim().toLowerCase();
       if (tabela && !TABELAS_PERMITIDAS.includes(tabela) && !tabela.startsWith('(') && tabela !== 'generate_series')
@@ -378,7 +380,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       // ETAPA 1
       let resposta1;
       try {
-        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 1, maxTokens: 4096 });
+        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 0.8, maxTokens: 4096 });
       } catch (claudeErr) {
         console.error('❌ [Chat IA] Erro Claude:', claudeErr.message);
         return res.status(500).json({ error: 'Erro IA: ' + claudeErr.message });
@@ -422,7 +424,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       if (todosResultados.length === 0 && erros.length > 0) {
         console.log('🔄 [Chat IA v4] Retry...');
         try {
-          const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Queries falharam:\n${erros.join('\n')}\n\nCorrija usando o schema fornecido.` }];
+          const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nProvavelmente você usou colunas que não existem. Consulte o schema fornecido no system prompt e gere queries usando APENAS as colunas que existem. A tabela principal é bi_entregas.` }];
           const resp2 = await chamarClaude(retryMsgs, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
           const r2 = /```sql\n?([\s\S]*?)\n?```/g;
           let m2;
