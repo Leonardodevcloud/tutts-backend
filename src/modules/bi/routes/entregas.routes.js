@@ -393,6 +393,23 @@ router.post('/bi/entregas/upload', async (req, res) => {
             data_upload: data_referencia || new Date().toISOString().split('T')[0],
             latitude: parseNum(e.latitude || e.Latitude || e.lat || e.Lat || e.LAT || e.LATITUDE),
             longitude: parseNum(e.longitude || e.Longitude || e.lng || e.Lng || e.LNG || e.LONGITUDE || e.long || e.Long),
+            cpf_cnpj: truncar(e.cpf_cnpj || e['CPF/CNPJ'], 30),
+            solicitante: truncar(e.solicitante || e.Solicitante, 255),
+            filial: truncar(e.filial || e.Filial, 255),
+            obs_endereco: e.obs_endereco || e['Obs endereço'] || e['Obs Endereço'] || null,
+            num_nota: truncar(e.num_nota || e['Nº nota'] || e['Nº Nota'] || e['N nota'], 100),
+            valor_nota: parseNum(e.valor_nota || e['Valor nota'] || e['Valor Nota']),
+            agendado: truncar(e.agendado || e.Agendado, 100),
+            info: e.info || e.Info || null,
+            obs_os: e.obs_os || e['Obs O.S'] || e['Obs OS'] || null,
+            assinatura_nome: truncar(e.assinatura_nome || e['Assinatura - Nome'], 255),
+            assinatura_rg: truncar(e.assinatura_rg || e['Assinatura - RG'], 50),
+            valor_liquido: parseNum(e.valor_liquido || e['Valor liquido'] || e['Valor Liquido']),
+            tempo_espera_minutos: parseNum(e.tempo_espera_minutos || e['Tempo de espera (minutos)'] || e['Tempo espera']),
+            valor_espera: parseNum(e.valor_espera || e['Valor da espera'] || e['Valor espera']),
+            execucao_espera_p1: truncar(e.execucao_espera_p1 || e['Execução - Espera P1'], 50),
+            nota: truncar(e.nota || e.Nota, 50),
+            tipo_pagamento: truncar(e.tipo_pagamento || e['Tipo de Pagamento'] || e['Tipo Pagamento'], 100),
             upload_id: uploadId
           });
         } catch (err) {
@@ -415,8 +432,12 @@ router.post('/bi/entregas/upload', async (req, res) => {
                 execucao_comp, execucao_espera, status, motivo, ocorrencia, velocidade_media,
                 dentro_prazo, prazo_minutos, tempo_execucao_minutos, 
                 tempo_entrega_prof_minutos, dentro_prazo_prof,
-                data_upload, latitude, longitude, upload_id
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+                data_upload, latitude, longitude,
+                cpf_cnpj, solicitante, filial, obs_endereco, num_nota, valor_nota,
+                agendado, info, obs_os, assinatura_nome, assinatura_rg,
+                valor_liquido, tempo_espera_minutos, valor_espera,
+                execucao_espera_p1, nota, tipo_pagamento, upload_id
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
@@ -427,7 +448,11 @@ router.post('/bi/entregas/upload', async (req, res) => {
               d.execucao_comp, d.execucao_espera, d.status, d.motivo, d.ocorrencia, d.velocidade_media,
               d.dentro_prazo, d.prazo_minutos, d.tempo_execucao_minutos,
               d.tempo_entrega_prof_minutos, d.dentro_prazo_prof,
-              d.data_upload, d.latitude, d.longitude, d.upload_id
+              d.data_upload, d.latitude, d.longitude,
+              d.cpf_cnpj, d.solicitante, d.filial, d.obs_endereco, d.num_nota, d.valor_nota,
+              d.agendado, d.info, d.obs_os, d.assinatura_nome, d.assinatura_rg,
+              d.valor_liquido, d.tempo_espera_minutos, d.valor_espera,
+              d.execucao_espera_p1, d.nota, d.tipo_pagamento, d.upload_id
             ]);
             inseridos++;
           } catch (singleErr) {
