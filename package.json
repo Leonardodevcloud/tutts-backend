@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "postinstall": "npx playwright install --with-deps chromium",
+    "preinstall": "rm -rf node_modules/bcrypt"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
@@ -22,8 +23,8 @@
     "node-cron": "^3.0.3",
     "pg": "^8.11.3",
     "playwright": "^1.41.0",
-    "starkbank": "^2.38.0",
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "starkbank": "^2.26.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
