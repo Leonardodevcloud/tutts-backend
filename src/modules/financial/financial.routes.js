@@ -9,6 +9,11 @@ const rateLimit = require('express-rate-limit');
 function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP) {
   const router = express.Router();
 
+  // ==================== SUB-ROUTER: STARK BANK ====================
+  const { createStarkRoutes } = require('./routes/stark.routes');
+  const starkRouter = createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES);
+  router.use('/', starkRouter);
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
