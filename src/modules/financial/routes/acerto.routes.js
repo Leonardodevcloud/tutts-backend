@@ -157,6 +157,12 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       }
       
       console.log(`🔍 [Acerto] Mapa final: ${Object.keys(mapaCadastro).length} profissionais encontrados. Chaves Pix: ${Object.values(mapaCadastro).filter(m => m.pix_key).length}`);
+      
+      // Debug: mostrar o que encontrou para cada código
+      for (const p of profissionais) {
+        const found = mapaCadastro[p.cod_prof];
+        console.log(`  📋 Cod ${p.cod_prof}: ${found ? 'ENCONTRADO (pix: ' + (found.pix_key || 'NENHUMA') + ')' : 'NÃO ENCONTRADO'}`);
+      }
 
       // Enriquecer profissionais com dados do cadastro
       let encontrados = 0;
