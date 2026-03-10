@@ -47,6 +47,42 @@ function validarFormatoPix(chave) {
   return { valido: false, tipo: null };
 }
 
+// ==================== NORMALIZAÇÃO DE CHAVE PIX ====================
+function normalizarChavePix(chave, tipo) {
+  if (!chave || typeof chave !== 'string') return chave;
+  const ch = chave.trim();
+
+  switch (tipo) {
+    case 'cpf':
+      // Remover pontos e traços → só dígitos
+      return ch.replace(/[\.\-\s]/g, '');
+    case 'cnpj':
+      // Remover pontos, traços e barras → só dígitos
+      return ch.replace(/[\.\-\/\s]/g, '');
+    case 'telefone':
+      // Remover espaços, parênteses, traços. Garantir +55 no início
+      var telLimpo = ch.replace(/[\s\-\(\)\.]/g, '');
+      if (!telLimpo.startsWith('+')) {
+        // Se começa com 55 e tem 12-13 dígitos, adicionar +
+        if (telLimpo.startsWith('55') && telLimpo.length >= 12) {
+          telLimpo = '+' + telLimpo;
+        } else {
+          // Assumir que é DDD+número brasileiro, adicionar +55
+          telLimpo = '+55' + telLimpo;
+        }
+      }
+      return telLimpo;
+    case 'email':
+      // Lowercase e trim
+      return ch.toLowerCase().trim();
+    case 'aleatoria':
+      // UUID — lowercase
+      return ch.toLowerCase().trim();
+    default:
+      return ch.trim();
+  }
+}
+
 function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
 
@@ -351,7 +387,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       }
 
       // Enriquecer profissionais com dados do cadastro
-      // PRIORIDADE: 1) Mapp (planilha) com formato validado → 2) Sistema → 3) Mapp sem validação → 4) sem_pix
+      // PRIORIDADE: 1) Mapp (planilha) com formato validado + normalizado → 2) Sistema → 3) Mapp sem validação → 4) sem_pix
       let encontradosMapp = 0;
       let encontradosSistema = 0;
       let naoEncontrados = 0;
@@ -359,20 +395,23 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         const cadastro = mapaCadastro[p.cod_prof];
         const nomeSistema = cadastro ? cadastro.full_name : null;
         const cpfSistema = cadastro ? cadastro.cpf : null;
-        const pixMapp = p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3 ? p.pix_planilha.trim() : null;
+        const pixMappRaw = p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3 ? p.pix_planilha.trim() : null;
         const pixSistema = cadastro && cadastro.pix_key ? cadastro.pix_key : null;
 
         // Validar formato da chave Pix do Mapp
-        const validacaoMapp = pixMapp ? validarFormatoPix(pixMapp) : { valido: false, tipo: null };
+        const validacaoMapp = pixMappRaw ? validarFormatoPix(pixMappRaw) : { valido: false, tipo: null };
+        // Normalizar a chave se formato válido
+        const pixMappNorm = validacaoMapp.valido ? normalizarChavePix(pixMappRaw, validacaoMapp.tipo) : pixMappRaw;
 
-        // Prioridade 1: Chave Pix do Mapp com formato válido
-        if (pixMapp && validacaoMapp.valido) {
+        // Prioridade 1: Chave Pix do Mapp com formato válido (normalizada)
+        if (pixMappRaw && validacaoMapp.valido) {
           encontradosMapp++;
           return {
             ...p,
             nome_sistema: nomeSistema,
             cpf_sistema: cpfSistema || p.cpf_planilha,
-            pix_key: pixMapp,
+            pix_key: pixMappNorm,
+            pix_key_original: pixMappRaw,
             pix_tipo: validacaoMapp.tipo,
             pix_origem: 'mapp',
             pix_formato_valido: true,
@@ -388,22 +427,24 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
             nome_sistema: nomeSistema,
             cpf_sistema: cpfSistema,
             pix_key: pixSistema,
+            pix_key_original: pixMappRaw,
             pix_tipo: cadastro.pix_tipo,
             pix_origem: 'sistema',
             pix_formato_valido: true,
-            pix_mapp_rejeitado: pixMapp ? 'formato_invalido' : null,
+            pix_mapp_rejeitado: pixMappRaw ? 'formato_invalido' : null,
             status: 'pronto'
           };
         }
 
         // Prioridade 3: Mapp com formato inválido (melhor que nada — aviso ao admin)
-        if (pixMapp) {
+        if (pixMappRaw) {
           encontradosMapp++;
           return {
             ...p,
             nome_sistema: nomeSistema,
             cpf_sistema: cpfSistema || p.cpf_planilha,
-            pix_key: pixMapp,
+            pix_key: pixMappRaw,
+            pix_key_original: pixMappRaw,
             pix_tipo: null,
             pix_origem: 'mapp',
             pix_formato_valido: false,
@@ -453,6 +494,65 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
     } catch (error) {
       console.error('❌ [Acerto] Erro ao processar planilha:', error.message);
       res.status(500).json({ error: 'Erro ao processar planilha', details: error.message });
+    }
+  });
+
+  // ==================== VALIDAR CHAVE PIX VIA DICT (Stark Bank) ====================
+  router.post('/stark/acerto/validar-pix', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const { pix_key, cod_prof } = req.body;
+
+      if (!pix_key) {
+        return res.status(400).json({ error: 'Chave Pix não informada' });
+      }
+
+      // Validar formato primeiro
+      const validacao = validarFormatoPix(pix_key);
+      const chaveNormalizada = validacao.valido ? normalizarChavePix(pix_key, validacao.tipo) : pix_key.trim();
+
+      let starkbank;
+      try {
+        starkbank = require('starkbank');
+      } catch (e) {
+        return res.status(503).json({ error: 'SDK Stark Bank não disponível' });
+      }
+
+      // Consultar DICT
+      try {
+        const dictKeys = await starkbank.dictKey.get(chaveNormalizada);
+
+        res.json({
+          success: true,
+          cod_prof: cod_prof,
+          pix_key: chaveNormalizada,
+          pix_key_original: pix_key,
+          formato: validacao,
+          dict: {
+            nome: dictKeys.name || null,
+            cpf_cnpj: dictKeys.taxId || null,
+            banco: dictKeys.bankName || null,
+            tipo_conta: dictKeys.accountType || null,
+            status: dictKeys.status || 'active',
+            criada_em: dictKeys.created || null
+          }
+        });
+      } catch (dictErr) {
+        // Chave não encontrada no DICT
+        const erroMsg = dictErr.errors ? dictErr.errors.map(function(e) { return e.message; }).join(', ') : dictErr.message;
+        res.json({
+          success: false,
+          cod_prof: cod_prof,
+          pix_key: chaveNormalizada,
+          pix_key_original: pix_key,
+          formato: validacao,
+          erro: erroMsg,
+          dict: null
+        });
+      }
+
+    } catch (error) {
+      console.error('❌ [Acerto] Erro ao validar Pix via DICT:', error.message);
+      res.status(500).json({ error: 'Erro ao validar chave Pix', details: error.message });
     }
   });
 
