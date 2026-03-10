@@ -342,6 +342,23 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
       console.log('🔍 [Acerto] Cruzamento: ' + codProfs.length + ' códigos | users: ' + usuarios.rows.length + ' | saques: ' + saques.rows.length + ' | financial: ' + cadastros.rows.length);
 
+      // Fonte 4: Validações DICT salvas (cache)
+      const validacoesSalvas = await pool.query(`
+        SELECT DISTINCT ON (cod_prof, pix_key) cod_prof, pix_key, pix_key_normalizada, pix_tipo,
+          dict_valido, dict_nome, dict_cpf_cnpj, dict_banco, dict_erro, validado_em
+        FROM pix_validacoes
+        WHERE cod_prof = ANY($1)
+        ORDER BY cod_prof, pix_key, validado_em DESC
+      `, [codProfs]);
+
+      // Mapa de validações: { "cod_prof|pix_key": { dict_valido, dict_nome, ... } }
+      const mapaValidacoes = {};
+      for (const v of validacoesSalvas.rows) {
+        mapaValidacoes[v.cod_prof + '|' + v.pix_key] = v;
+      }
+
+      console.log('🔍 [Acerto] Validações DICT salvas: ' + validacoesSalvas.rows.length);
+
       // Criar mapa consolidado (prioridade: financial_data > withdrawal > users)
       const mapaCadastro = {};
 
@@ -403,6 +420,25 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         // Normalizar a chave se formato válido
         const pixMappNorm = validacaoMapp.valido ? normalizarChavePix(pixMappRaw, validacaoMapp.tipo) : pixMappRaw;
 
+        // Buscar validação DICT salva (cache) para a chave que será usada
+        var dictCache = null;
+        if (pixMappRaw) {
+          dictCache = mapaValidacoes[p.cod_prof + '|' + pixMappRaw] || mapaValidacoes[p.cod_prof + '|' + pixMappNorm] || null;
+        }
+        if (!dictCache && pixSistema) {
+          dictCache = mapaValidacoes[p.cod_prof + '|' + pixSistema] || null;
+        }
+
+        // Montar objeto de validação DICT (null se nunca validou)
+        var dictValidacao = dictCache ? {
+          valido: dictCache.dict_valido,
+          nome: dictCache.dict_nome,
+          cpf_cnpj: dictCache.dict_cpf_cnpj,
+          banco: dictCache.dict_banco,
+          erro: dictCache.dict_erro,
+          validado_em: dictCache.validado_em
+        } : null;
+
         // Prioridade 1: Chave Pix do Mapp com formato válido (normalizada)
         if (pixMappRaw && validacaoMapp.valido) {
           encontradosMapp++;
@@ -415,6 +451,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
             pix_tipo: validacaoMapp.tipo,
             pix_origem: 'mapp',
             pix_formato_valido: true,
+            dict_validacao: dictValidacao,
             status: 'pronto'
           };
         }
@@ -432,6 +469,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
             pix_origem: 'sistema',
             pix_formato_valido: true,
             pix_mapp_rejeitado: pixMappRaw ? 'formato_invalido' : null,
+            dict_validacao: dictValidacao,
             status: 'pronto'
           };
         }
@@ -448,6 +486,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
             pix_tipo: null,
             pix_origem: 'mapp',
             pix_formato_valido: false,
+            dict_validacao: dictValidacao,
             status: 'pronto'
           };
         }
@@ -462,6 +501,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
           pix_tipo: null,
           pix_origem: null,
           pix_formato_valido: false,
+          dict_validacao: null,
           status: 'sem_pix'
         };
       });
@@ -498,6 +538,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
   });
 
   // ==================== VALIDAR CHAVE PIX VIA DICT (Stark Bank) ====================
+  // Consulta o DICT e salva resultado em pix_validacoes para cache
   router.post('/stark/acerto/validar-pix', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
       const { pix_key, cod_prof } = req.body;
@@ -521,24 +562,49 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       try {
         const dictKeys = await starkbank.dictKey.get(chaveNormalizada);
 
+        const dictData = {
+          nome: dictKeys.name || null,
+          cpf_cnpj: dictKeys.taxId || null,
+          banco: dictKeys.bankName || null,
+          tipo_conta: dictKeys.accountType || null,
+          status: dictKeys.status || 'active',
+          criada_em: dictKeys.created || null
+        };
+
+        // Salvar resultado no banco (UPSERT)
+        await pool.query(`
+          INSERT INTO pix_validacoes (cod_prof, pix_key, pix_key_normalizada, pix_tipo, dict_valido, dict_nome, dict_cpf_cnpj, dict_banco, dict_tipo_conta, dict_erro, validado_em, validado_por_id, validado_por_nome)
+          VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, NULL, NOW(), $9, $10)
+          ON CONFLICT (cod_prof, pix_key) DO UPDATE SET
+            pix_key_normalizada = $3, pix_tipo = $4, dict_valido = true, dict_nome = $5, dict_cpf_cnpj = $6,
+            dict_banco = $7, dict_tipo_conta = $8, dict_erro = NULL, validado_em = NOW(), validado_por_id = $9, validado_por_nome = $10
+        `, [cod_prof, pix_key, chaveNormalizada, validacao.tipo, dictData.nome, dictData.cpf_cnpj, dictData.banco, dictData.tipo_conta, req.user.id, req.user.nome || req.user.username]);
+
+        console.log('✅ [DICT] Cod ' + cod_prof + ': chave válida — ' + (dictData.nome || 'OK'));
+
         res.json({
           success: true,
           cod_prof: cod_prof,
           pix_key: chaveNormalizada,
           pix_key_original: pix_key,
           formato: validacao,
-          dict: {
-            nome: dictKeys.name || null,
-            cpf_cnpj: dictKeys.taxId || null,
-            banco: dictKeys.bankName || null,
-            tipo_conta: dictKeys.accountType || null,
-            status: dictKeys.status || 'active',
-            criada_em: dictKeys.created || null
-          }
+          dict: dictData
         });
       } catch (dictErr) {
         // Chave não encontrada no DICT
         const erroMsg = dictErr.errors ? dictErr.errors.map(function(e) { return e.message; }).join(', ') : dictErr.message;
+
+        // Salvar resultado negativo no banco (UPSERT)
+        await pool.query(`
+          INSERT INTO pix_validacoes (cod_prof, pix_key, pix_key_normalizada, pix_tipo, dict_valido, dict_nome, dict_cpf_cnpj, dict_banco, dict_tipo_conta, dict_erro, validado_em, validado_por_id, validado_por_nome)
+          VALUES ($1, $2, $3, $4, false, NULL, NULL, NULL, NULL, $5, NOW(), $6, $7)
+          ON CONFLICT (cod_prof, pix_key) DO UPDATE SET
+            pix_key_normalizada = $3, pix_tipo = $4, dict_valido = false, dict_nome = NULL, dict_cpf_cnpj = NULL,
+            dict_banco = NULL, dict_tipo_conta = NULL, dict_erro = $5, validado_em = NOW(), validado_por_id = $6, validado_por_nome = $7
+        `, [cod_prof, pix_key, chaveNormalizada, validacao.tipo, erroMsg, req.user.id, req.user.nome || req.user.username]);
+
+        console.log('❌ [DICT] Cod ' + cod_prof + ': chave inválida — ' + erroMsg);
+
         res.json({
           success: false,
           cod_prof: cod_prof,
