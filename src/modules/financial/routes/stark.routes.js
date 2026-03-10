@@ -106,31 +106,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     }
   });
 
-  // ==================== [DEBUG] VER RAW BALANCE ====================
-  // REMOVER DEPOIS DE RESOLVER
-  router.get('/stark/debug/saldo', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
-    try {
-      const raw = await starkbank.balance.get();
-
-      res.json({
-        tipo: typeof raw,
-        eh_array: Array.isArray(raw),
-        raw_stringify: JSON.stringify(raw),
-        tem_amount: raw ? (raw.amount !== undefined ? raw.amount : 'SEM AMOUNT') : 'NULL',
-        tem_length: raw ? (raw.length !== undefined ? raw.length : 'SEM LENGTH') : 'NULL',
-        keys: raw ? Object.keys(raw) : [],
-        project_id: process.env.STARK_PROJECT_ID ? process.env.STARK_PROJECT_ID.substring(0, 8) + '...' : 'NÃO CONFIGURADO',
-        environment: process.env.STARK_ENVIRONMENT || 'não definido'
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: error.message,
-        errors: error.errors || null,
-        stack: error.stack ? error.stack.split('\n').slice(0, 5) : null
-      });
-    }
-  });
-
   // ==================== MARCAR SAQUES PARA LOTE (chamado pela aba Solicitações) ====================
   router.post('/stark/lote/marcar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
@@ -781,78 +756,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
       res.status(500).json({ error: 'Erro ao verificar status' });
-    }
-  });
-
-  // ==================== [TEMPORÁRIO] CARREGAR SALDO SANDBOX ====================
-  // REMOVER ANTES DE IR PARA PRODUÇÃO!
-  router.get('/stark/sandbox/carregar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
-    try {
-      const ambiente = process.env.STARK_ENVIRONMENT || 'sandbox';
-      if (ambiente !== 'sandbox') {
-        return res.status(403).json({ error: '⛔ Esta rota só funciona em ambiente sandbox!' });
-      }
-
-      if (!inicializarStark() || !starkbank) {
-        return res.status(503).json({ error: 'Stark Bank não inicializado' });
-      }
-
-      const valor = parseInt(req.query.valor) || 5000000; // Default R$ 50.000 (em centavos)
-
-      // Consultar saldo antes
-      let saldoAntes = 0;
-      try {
-        saldoAntes = await obterSaldoReais();
-      } catch (e) { /* ignore */ }
-
-      // Tentar via Invoice (método padrão sandbox)
-      const invoices = await starkbank.invoice.create([{
-        amount: valor,
-        name: 'Carga Sandbox Tutts',
-        taxId: '20.018.183/0001-80',
-        descriptions: [{ key: 'Tipo', value: 'Carga sandbox' }],
-        tags: ['sandbox', 'carga-saldo']
-      }]);
-
-      const invoice = invoices[0];
-
-      console.log('💰 [Sandbox] Invoice criada: #' + invoice.id + ' — R$ ' + (invoice.amount / 100).toFixed(2));
-
-      // Aguardar 5s e checar saldo
-      await new Promise(function(resolve) { setTimeout(resolve, 5000); });
-
-      let saldoDepois = 0;
-      try {
-        saldoDepois = await obterSaldoReais();
-      } catch (e) { /* ignore */ }
-
-      // Checar status da invoice
-      let invoiceStatus = null;
-      try {
-        const inv = await starkbank.invoice.get(invoice.id);
-        invoiceStatus = inv.status;
-      } catch (e) { /* ignore */ }
-
-      res.json({
-        success: true,
-        mensagem: saldoDepois > saldoAntes
-          ? '✅ Saldo carregado com sucesso!'
-          : '⏳ Invoice criada mas saldo ainda não atualizou. Aguarde 1-2 minutos e atualize.',
-        invoice: {
-          id: invoice.id,
-          valor: invoice.amount / 100,
-          status_criacao: invoice.status,
-          status_atual: invoiceStatus
-        },
-        saldo_antes: saldoAntes,
-        saldo_depois: saldoDepois,
-        diferenca: saldoDepois - saldoAntes
-      });
-
-    } catch (error) {
-      console.error('❌ [Sandbox] Erro ao carregar saldo:', error.message);
-      const detalhes = error.errors ? JSON.stringify(error.errors) : error.message;
-      res.status(500).json({ error: 'Erro ao criar invoice sandbox', details: detalhes });
     }
   });
 
