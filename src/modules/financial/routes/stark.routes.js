@@ -761,6 +761,60 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     }
   });
 
+  // ==================== [TEMPORÁRIO] CARREGAR SALDO SANDBOX ====================
+  // REMOVER ANTES DE IR PARA PRODUÇÃO!
+  router.get('/stark/sandbox/carregar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const ambiente = process.env.STARK_ENVIRONMENT || 'sandbox';
+      if (ambiente !== 'sandbox') {
+        return res.status(403).json({ error: '⛔ Esta rota só funciona em ambiente sandbox!' });
+      }
+
+      if (!inicializarStark() || !starkbank) {
+        return res.status(503).json({ error: 'Stark Bank não inicializado' });
+      }
+
+      const valor = parseInt(req.query.valor) || 5000000; // Default R$ 50.000 (em centavos)
+
+      // Criar invoice — sandbox paga automaticamente em ~10s
+      const invoices = await starkbank.invoice.create([{
+        amount: valor,
+        name: 'Carga Sandbox - Central Tutts',
+        taxId: '20.018.183/0001-80',
+        due: new Date(Date.now() + 86400000).toISOString(),
+        descriptions: [{ key: 'Tipo', value: 'Carga de saldo sandbox' }],
+        tags: ['sandbox', 'carga-saldo', 'tutts']
+      }]);
+
+      const invoice = invoices[0];
+
+      console.log('💰 [Sandbox] Invoice criada: #' + invoice.id + ' — R$ ' + (invoice.amount / 100).toFixed(2));
+
+      // Consultar saldo atual
+      let saldoAtual = null;
+      try {
+        const balances = await starkbank.balance.get();
+        saldoAtual = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+      } catch (e) { /* ignore */ }
+
+      res.json({
+        success: true,
+        mensagem: '💰 Invoice criada! O sandbox paga automaticamente em ~10-30 segundos. Atualize o saldo depois.',
+        invoice: {
+          id: invoice.id,
+          valor: invoice.amount / 100,
+          status: invoice.status
+        },
+        saldo_antes: saldoAtual,
+        dica: 'Acesse /api/stark/saldo após ~30s para ver o saldo atualizado'
+      });
+
+    } catch (error) {
+      console.error('❌ [Sandbox] Erro ao carregar saldo:', error.message);
+      res.status(500).json({ error: 'Erro ao criar invoice sandbox', details: error.message });
+    }
+  });
+
   return router;
 }
 
