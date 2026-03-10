@@ -1,702 +1,767 @@
 /**
- * ACERTO PROFISSIONAL - Routes
- * Upload de planilha de faturamento + pagamento automático via Stark Bank
+ * STARK BANK - Routes
+ * Integração com Stark Bank para pagamentos automáticos via Pix
  * 
  * Endpoints:
- *   POST /stark/acerto/upload          - Upload e processamento da planilha
- *   POST /stark/acerto/criar-lote      - Criar lote a partir dos selecionados (só marca, não paga)
- *   GET  /stark/acerto/em-aprovacao    - Listar lotes aguardando aprovação
- *   GET  /stark/acerto/historico       - Histórico de acertos (executados/concluídos)
- *   GET  /stark/acerto/:id             - Detalhe de um acerto (lote + itens)
- *   POST /stark/acerto/:id/executar    - Executar pagamento do acerto (com 2FA)
- *   POST /stark/token/solicitar        - Solicitar token 2FA por email
- *   POST /stark/token/validar          - Validar token 2FA digitado
+ *   GET  /stark/saldo           - Consultar saldo da conta Stark Bank
+ *   GET  /stark/lote/pendente   - Listar saques aprovados aguardando pagamento
+ *   POST /stark/lote/executar   - Executar pagamento do lote
+ *   GET  /stark/lote/historico  - Histórico de lotes executados
+ *   GET  /stark/lote/:id        - Detalhe de um lote específico
+ *   POST /stark/lote/:id/retentar - Retentar pagamentos com erro de um lote
+ *   POST /stark/validar-chave   - Validar chave Pix via DICT
+ *   POST /stark/webhook         - Webhook de confirmação da Stark Bank (público)
+ *   GET  /stark/status          - Status da integração
  */
 
 const express = require('express');
-const XLSX = require('xlsx');
-const crypto = require('crypto');
 
-function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
+function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
 
-  // ==================== CACHE DE TOKENS 2FA (em memória) ====================
-  const tokensCache = new Map();
+  // ==================== CONFIGURAÇÃO STARK BANK ====================
 
-  // Limpar tokens expirados a cada 5 minutos
-  setInterval(function() {
-    const agora = Date.now();
-    for (const [chave, dados] of tokensCache.entries()) {
-      if (agora > dados.expira_em) {
-        tokensCache.delete(chave);
-      }
+  let starkbank = null;
+  let starkIniciado = false;
+  let starkErroInit = null;
+
+  function inicializarStark() {
+    if (starkIniciado) return !!starkbank;
+
+    const projectId = process.env.STARK_PROJECT_ID;
+    const privateKey = process.env.STARK_PRIVATE_KEY;
+    const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
+
+    if (!projectId || !privateKey) {
+      starkErroInit = 'Variáveis STARK_PROJECT_ID e/ou STARK_PRIVATE_KEY não configuradas';
+      console.warn(`⚠️ [Stark Bank] ${starkErroInit}`);
+      starkIniciado = true;
+      return false;
     }
-  }, 5 * 60 * 1000);
 
-  // ==================== SOLICITAR TOKEN 2FA POR EMAIL ====================
-  router.post('/stark/token/solicitar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      const { saque_ids, valor_total, quantidade } = req.body;
-      const emailUser = process.env.STARK_EMAIL_USER;
-      const emailPass = process.env.STARK_EMAIL_PASS;
-      const emailDestino = process.env.STARK_TOKEN_EMAIL_DESTINO;
+      starkbank = require('starkbank');
 
-      if (!emailUser || !emailPass || !emailDestino) {
-        return res.status(503).json({ error: 'Configuração de email para 2FA não encontrada. Verifique STARK_EMAIL_USER, STARK_EMAIL_PASS e STARK_TOKEN_EMAIL_DESTINO.' });
+      // A chave privada vem como string com \n escapados — converter para quebras reais
+      const privateKeyFormatada = privateKey.replace(/\\n/g, '\n');
+
+      const project = new starkbank.Project({
+        environment: environment,
+        id: projectId,
+        privateKey: privateKeyFormatada
+      });
+
+      starkbank.setUser(project);
+      starkIniciado = true;
+      console.log(`✅ [Stark Bank] Inicializado com sucesso (ambiente: ${environment})`);
+      return true;
+    } catch (err) {
+      starkErroInit = err.message;
+      console.error(`❌ [Stark Bank] Erro ao inicializar:`, err.message);
+      starkIniciado = true;
+      return false;
+    }
+  }
+
+  // Middleware que verifica se Stark Bank está disponível
+  function verificarStark(req, res, next) {
+    if (!inicializarStark() || !starkbank) {
+      return res.status(503).json({
+        error: 'Stark Bank não disponível',
+        details: starkErroInit || 'SDK não inicializado',
+        configurado: false
+      });
+    }
+    next();
+  }
+
+  // ==================== CONSULTAR SALDO ====================
+  router.get('/stark/saldo', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const balances = await starkbank.balance.get();
+
+      // balances retorna um array, pegar o primeiro (conta principal)
+      const saldo = balances && balances.length > 0 ? balances[0] : null;
+
+      if (!saldo) {
+        return res.json({ saldo: 0, moeda: 'BRL', atualizado_em: new Date().toISOString() });
       }
 
-      // Gerar token de 6 dígitos e chave única
-      const token = String(Math.floor(100000 + Math.random() * 900000));
-      const chaveToken = crypto.randomBytes(32).toString('hex');
+      // Stark Bank retorna amount em centavos
+      const saldoReais = saldo.amount / 100;
 
-      // Armazenar no cache (expira em 10 minutos)
-      tokensCache.set(chaveToken, {
-        token: token,
-        saque_ids: saque_ids || [],
-        valor_total: valor_total || 0,
-        quantidade: quantidade || 0,
-        usuario_id: req.user.id,
-        usuario_nome: req.user.nome || req.user.username,
-        criado_em: Date.now(),
-        expira_em: Date.now() + 10 * 60 * 1000,
-        tentativas: 0
+      await registrarAuditoria(req, 'STARK_CONSULTA_SALDO', AUDIT_CATEGORIES.FINANCIAL, 'stark_bank', null, {
+        saldo: saldoReais
       });
-
-      // Mascarar email para exibir no frontend
-      const partes = emailDestino.split('@');
-      const emailMascarado = partes[0].substring(0, 3) + '***@' + partes[1];
-
-      // Enviar email com nodemailer
-      let nodemailer;
-      try {
-        nodemailer = require('nodemailer');
-      } catch (e) {
-        return res.status(503).json({ error: 'Nodemailer não instalado no servidor.' });
-      }
-
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: emailUser, pass: emailPass }
-      });
-
-      const valorFormatado = (valor_total || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
-      await transporter.sendMail({
-        from: '"Central Tutts - 2FA" <' + emailUser + '>',
-        to: emailDestino,
-        subject: '🔐 Código de Segurança — Acerto Profissional',
-        html: '<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">' +
-          '<div style="background:linear-gradient(135deg,#059669,#0d9488);border-radius:12px;padding:30px;text-align:center;color:white;">' +
-          '<h2 style="margin:0 0 10px;">🔐 Código de Segurança</h2>' +
-          '<p style="margin:0;opacity:0.9;font-size:14px;">Acerto Profissional — Central Tutts</p>' +
-          '</div>' +
-          '<div style="background:#f9fafb;border-radius:12px;padding:24px;margin-top:16px;text-align:center;">' +
-          '<p style="color:#6b7280;margin:0 0 12px;">Seu código de verificação:</p>' +
-          '<div style="background:white;border:2px solid #059669;border-radius:12px;padding:16px;display:inline-block;">' +
-          '<span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#059669;">' + token + '</span>' +
-          '</div>' +
-          '<p style="color:#9ca3af;font-size:12px;margin-top:16px;">Válido por 10 minutos</p>' +
-          '</div>' +
-          '<div style="background:#f0fdf4;border-radius:12px;padding:16px;margin-top:16px;">' +
-          '<p style="margin:0;font-size:14px;color:#374151;"><strong>Operação:</strong> Pagamento de acerto</p>' +
-          '<p style="margin:4px 0 0;font-size:14px;color:#374151;"><strong>Quantidade:</strong> ' + (quantidade || 0) + ' profissionais</p>' +
-          '<p style="margin:4px 0 0;font-size:14px;color:#374151;"><strong>Valor total:</strong> ' + valorFormatado + '</p>' +
-          '<p style="margin:4px 0 0;font-size:14px;color:#374151;"><strong>Solicitado por:</strong> ' + (req.user.nome || req.user.username) + '</p>' +
-          '</div>' +
-          '<p style="color:#9ca3af;font-size:11px;text-align:center;margin-top:16px;">Se você não solicitou este código, ignore este email.</p>' +
-          '</div>'
-      });
-
-      console.log('📧 [Acerto 2FA] Token enviado para ' + emailMascarado + ' por ' + (req.user.nome || req.user.username));
 
       res.json({
-        success: true,
-        chave_token: chaveToken,
-        email_mascarado: emailMascarado,
-        expira_em: 10
+        saldo: saldoReais,
+        moeda: saldo.currency || 'BRL',
+        atualizado_em: new Date().toISOString()
       });
-
     } catch (error) {
-      console.error('❌ [Acerto 2FA] Erro ao solicitar token:', error.message);
-      res.status(500).json({ error: 'Erro ao enviar código de segurança', details: error.message });
+      console.error('❌ [Stark Bank] Erro ao consultar saldo:', error.message);
+      res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
     }
   });
 
-  // ==================== VALIDAR TOKEN 2FA ====================
-  router.post('/stark/token/validar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  // ==================== MARCAR SAQUES PARA LOTE (chamado pela aba Solicitações) ====================
+  router.post('/stark/lote/marcar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      const { chave_token, token } = req.body;
+      const { saque_ids } = req.body;
 
-      if (!chave_token || !token) {
-        return res.status(400).json({ error: 'Chave e token são obrigatórios' });
+      if (!saque_ids || !Array.isArray(saque_ids) || saque_ids.length === 0) {
+        return res.status(400).json({ error: 'Nenhum saque selecionado' });
       }
 
-      const dados = tokensCache.get(chave_token);
+      // Marcar os saques como 'em_lote' — só os que são aprovados e ainda não foram marcados
+      const result = await pool.query(`
+        UPDATE withdrawal_requests 
+        SET stark_status = 'em_lote', updated_at = NOW()
+        WHERE id = ANY($1)
+          AND status IN ('aprovado', 'aprovado_gratuidade')
+          AND (stark_status IS NULL OR stark_status = 'erro')
+        RETURNING id
+      `, [saque_ids]);
 
-      if (!dados) {
-        return res.status(401).json({ error: 'Token expirado ou inválido. Solicite um novo código.' });
-      }
+      const marcados = result.rows.length;
 
-      // Verificar expiração
-      if (Date.now() > dados.expira_em) {
-        tokensCache.delete(chave_token);
-        return res.status(401).json({ error: 'Token expirado. Solicite um novo código.' });
-      }
+      console.log('🏦 [Stark Bank] ' + marcados + ' saques marcados para lote por ' + (req.user.nome || req.user.username));
 
-      // Verificar tentativas (máx 5)
-      if (dados.tentativas >= 5) {
-        tokensCache.delete(chave_token);
-        return res.status(429).json({ error: 'Muitas tentativas incorretas. Solicite um novo código.' });
-      }
-
-      // Verificar token
-      if (dados.token !== token.trim()) {
-        dados.tentativas++;
-        return res.status(401).json({ error: 'Código incorreto. Tentativa ' + dados.tentativas + '/5.' });
-      }
-
-      // Token válido! Marcar como usado (não deletar ainda — será usado no executar)
-      dados.validado = true;
-
-      console.log('✅ [Acerto 2FA] Token validado por ' + (req.user.nome || req.user.username));
+      await registrarAuditoria(req, 'STARK_LOTE_MARCADO', AUDIT_CATEGORIES.FINANCIAL, 'withdrawal_requests', null, {
+        saque_ids: saque_ids,
+        marcados: marcados,
+        solicitados: saque_ids.length
+      });
 
       res.json({
         success: true,
-        saque_ids: dados.saque_ids,
-        mensagem: 'Token validado com sucesso'
+        marcados: marcados,
+        mensagem: marcados + ' saques marcados para pagamento'
       });
 
     } catch (error) {
-      console.error('❌ [Acerto 2FA] Erro ao validar token:', error.message);
-      res.status(500).json({ error: 'Erro ao validar token' });
+      console.error('❌ [Stark Bank] Erro ao marcar lote:', error.message);
+      res.status(500).json({ error: 'Erro ao marcar saques para lote' });
     }
   });
 
-  // ==================== UPLOAD E PROCESSAMENTO DA PLANILHA ====================
-  router.post('/stark/acerto/upload', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  // ==================== LISTAR SAQUES AGUARDANDO PAGAMENTO ====================
+  // Mostra apenas saques que foram explicitamente marcados como 'em_lote' pelo admin
+  router.get('/stark/lote/pendente', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      const { planilha_base64, nome_arquivo } = req.body;
+      const { data_inicio, data_fim } = req.query;
 
-      if (!planilha_base64) {
-        return res.status(400).json({ error: 'Nenhuma planilha enviada' });
+      let whereExtra = '';
+      const params = [];
+
+      if (data_inicio) {
+        params.push(data_inicio);
+        whereExtra += ' AND w.approved_at >= $' + params.length + '::date';
+      }
+      if (data_fim) {
+        params.push(data_fim);
+        whereExtra += ' AND w.approved_at < ($' + params.length + '::date + interval \'1 day\')';
       }
 
-      // Decodificar base64 e ler com SheetJS
-      const buffer = Buffer.from(planilha_base64, 'base64');
-      const wb = XLSX.read(buffer, { type: 'buffer' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const dados = XLSX.utils.sheet_to_json(ws, { header: 1 });
+      // Buscar APENAS saques marcados como 'em_lote' (marcados via /stark/lote/marcar)
+      // OU saques com stark_status = 'erro' (para retry)
+      const result = await pool.query(`
+        SELECT 
+          w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, 
+          w.requested_amount, w.fee_amount, w.final_amount,
+          w.has_gratuity, w.status, w.approved_at, w.created_at,
+          w.stark_status, w.stark_transfer_id, w.stark_erro,
+          ufd.pix_tipo
+        FROM withdrawal_requests w
+        LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+        WHERE w.status IN ('aprovado', 'aprovado_gratuidade')
+          AND w.stark_status IN ('em_lote', 'erro')
+        ${whereExtra}
+        ORDER BY w.approved_at ASC
+      `, params);
 
-      if (dados.length < 2) {
-        return res.status(400).json({ error: 'Planilha vazia ou sem dados' });
-      }
-
-      // Processar linhas (pular header na linha 0)
-      const profissionais = [];
-      const erros = [];
-
-      for (let i = 1; i < dados.length; i++) {
-        const linha = dados[i];
-        if (!linha || !linha[5]) continue; // Coluna F vazia
-
-        const profStr = String(linha[5] || '').trim();
-        const saldoRaw = linha[16]; // Coluna Q (índice 16)
-        const cpfRaw = String(linha[6] || '').trim(); // Coluna G
-        const pixPlanilha = String(linha[12] || '').trim(); // Coluna M
-
-        // Ignorar linha de fechamento de caixa
-        if (profStr.toLowerCase().includes('fechamento') || profStr.toLowerCase().includes('caixa')) continue;
-
-        // Extrair código e nome da coluna F: " 14416 - Cleyson Alves de Almeida "
-        const match = profStr.match(/^\s*(\d+)\s*-\s*(.+)\s*$/);
-        if (!match) {
-          erros.push({ linha: i + 1, prof: profStr, erro: 'Formato inválido na coluna Prof.' });
-          continue;
-        }
-
-        const codProf = match[1].trim();
-        const nomeProf = match[2].trim();
-
-        // Parsear saldo
-        let saldo = 0;
-        if (typeof saldoRaw === 'number') {
-          saldo = saldoRaw;
-        } else if (typeof saldoRaw === 'string') {
-          saldo = parseFloat(saldoRaw.replace(/\./g, '').replace(',', '.')) || 0;
-        }
-
-        // Ignorar saldo zero
-        if (saldo <= 0) continue;
-
-        profissionais.push({
-          linha: i + 1,
-          cod_prof: codProf,
-          nome_planilha: nomeProf,
-          cpf_planilha: cpfRaw,
-          pix_planilha: pixPlanilha,
-          saldo: Math.round(saldo * 100) / 100
-        });
-      }
-
-      if (profissionais.length === 0) {
-        return res.json({
-          success: true,
-          profissionais: [],
-          total: 0,
-          valor_total: 0,
-          erros,
-          mensagem: 'Nenhum profissional com saldo positivo encontrado'
-        });
-      }
-
-      // Cruzar com banco de dados — buscar chave Pix cadastrada
-      const codProfs = profissionais.map(function(p) { return p.cod_prof.trim(); });
-
-      // Fonte 1: Dados financeiros cadastrados (principal)
-      const cadastros = await pool.query(`
-        SELECT TRIM(user_cod) as user_cod, full_name, cpf, pix_key, pix_tipo
-        FROM user_financial_data
-        WHERE TRIM(user_cod) = ANY($1)
-      `, [codProfs]);
-
-      // Fonte 2: Saques anteriores (fallback para chave Pix e CPF)
-      const saques = await pool.query(`
-        SELECT DISTINCT ON (TRIM(user_cod)) TRIM(user_cod) as user_cod, user_name, cpf, pix_key
-        FROM withdrawal_requests
-        WHERE TRIM(user_cod) = ANY($1)
-        ORDER BY TRIM(user_cod), created_at DESC
-      `, [codProfs]);
-
-      // Fonte 3: Tabela de usuários (para nome)
-      const usuarios = await pool.query(`
-        SELECT TRIM(cod_profissional) as user_cod, full_name
-        FROM users
-        WHERE TRIM(cod_profissional) = ANY($1)
-      `, [codProfs]);
-
-      console.log('🔍 [Acerto] Cruzamento: ' + codProfs.length + ' códigos | users: ' + usuarios.rows.length + ' | saques: ' + saques.rows.length + ' | financial: ' + cadastros.rows.length);
-
-      // Criar mapa consolidado (prioridade: financial_data > withdrawal > users)
-      const mapaCadastro = {};
-
-      // Primeiro popular com dados de usuários
-      for (const u of usuarios.rows) {
-        mapaCadastro[u.user_cod] = {
-          user_cod: u.user_cod,
-          full_name: u.full_name,
-          cpf: null, pix_key: null, pix_tipo: null
-        };
-      }
-
-      // Sobrescrever com dados de saques (tem chave Pix e CPF)
-      for (const s of saques.rows) {
-        const existing = mapaCadastro[s.user_cod] || {};
-        mapaCadastro[s.user_cod] = {
-          user_cod: s.user_cod,
-          full_name: s.user_name || existing.full_name,
-          cpf: s.cpf || existing.cpf,
-          pix_key: s.pix_key || existing.pix_key,
-          pix_tipo: existing.pix_tipo
-        };
-      }
-
-      // Sobrescrever com dados financeiros (mais confiáveis)
-      for (const c of cadastros.rows) {
-        const existing = mapaCadastro[c.user_cod] || {};
-        mapaCadastro[c.user_cod] = {
-          user_cod: c.user_cod,
-          full_name: c.full_name || existing.full_name,
-          cpf: c.cpf || existing.cpf,
-          pix_key: c.pix_key || existing.pix_key,
-          pix_tipo: c.pix_tipo || existing.pix_tipo
-        };
-      }
-
-      console.log('🔍 [Acerto] Mapa final: ' + Object.keys(mapaCadastro).length + ' profissionais encontrados. Chaves Pix: ' + Object.values(mapaCadastro).filter(function(m) { return m.pix_key; }).length);
-
-      // Debug: mostrar o que encontrou para cada código
-      for (const p of profissionais) {
-        const found = mapaCadastro[p.cod_prof];
-        console.log('  📋 Cod ' + p.cod_prof + ': ' + (found ? 'ENCONTRADO (pix: ' + (found.pix_key || 'NENHUMA') + ')' : 'NÃO ENCONTRADO'));
-      }
-
-      // Enriquecer profissionais com dados do cadastro
-      let encontradosSistema = 0;
-      let encontradosPlanilha = 0;
-      let naoEncontrados = 0;
-      const resultado = profissionais.map(function(p) {
-        const cadastro = mapaCadastro[p.cod_prof];
-        const nomeSistema = cadastro ? cadastro.full_name : null;
-        const cpfSistema = cadastro ? cadastro.cpf : null;
-
-        // Prioridade 1: Chave Pix do cadastro no sistema
-        if (cadastro && cadastro.pix_key) {
-          encontradosSistema++;
-          return {
-            ...p,
-            nome_sistema: nomeSistema,
-            cpf_sistema: cpfSistema,
-            pix_key: cadastro.pix_key,
-            pix_tipo: cadastro.pix_tipo,
-            pix_origem: 'sistema',
-            status: 'pronto'
-          };
-        }
-
-        // Prioridade 2: Chave Pix da planilha (coluna M) como fallback
-        if (p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3) {
-          encontradosPlanilha++;
-          return {
-            ...p,
-            nome_sistema: nomeSistema,
-            cpf_sistema: cpfSistema || p.cpf_planilha,
-            pix_key: p.pix_planilha,
-            pix_tipo: null,
-            pix_origem: 'planilha',
-            status: 'pronto'
-          };
-        }
-
-        // Sem Pix em nenhuma fonte
-        naoEncontrados++;
-        return {
-          ...p,
-          nome_sistema: nomeSistema,
-          cpf_sistema: cpfSistema || p.cpf_planilha,
-          pix_key: null,
-          pix_tipo: null,
-          pix_origem: null,
-          status: 'sem_pix'
-        };
-      });
-
-      const valorTotal = resultado.filter(function(r) { return r.status === 'pronto'; }).reduce(function(a, r) { return a + r.saldo; }, 0);
-
-      console.log('📋 [Acerto] Planilha processada: ' + resultado.length + ' profissionais | Pix sistema: ' + encontradosSistema + ' | Pix planilha: ' + encontradosPlanilha + ' | Sem Pix: ' + naoEncontrados + ' | R$ ' + valorTotal.toFixed(2));
-
-      await registrarAuditoria(req, 'ACERTO_UPLOAD', AUDIT_CATEGORIES.FINANCIAL, 'stark_acerto', null, {
-        arquivo: nome_arquivo,
-        total: resultado.length,
-        pix_sistema: encontradosSistema,
-        pix_planilha: encontradosPlanilha,
-        nao_encontrados: naoEncontrados,
-        valor_total: valorTotal
-      });
+      const saques = result.rows;
+      const valorTotal = saques.reduce((acc, s) => acc + parseFloat(s.final_amount || 0), 0);
 
       res.json({
-        success: true,
-        profissionais: resultado,
-        total: resultado.length,
-        prontos: encontradosSistema + encontradosPlanilha,
-        pix_sistema: encontradosSistema,
-        pix_planilha: encontradosPlanilha,
-        sem_pix: naoEncontrados,
-        valor_total: Math.round(valorTotal * 100) / 100,
-        erros
-      });
-
-    } catch (error) {
-      console.error('❌ [Acerto] Erro ao processar planilha:', error.message);
-      res.status(500).json({ error: 'Erro ao processar planilha', details: error.message });
-    }
-  });
-
-  // ==================== CRIAR LOTE DE ACERTO ====================
-  // Recebe array de profissionais selecionados via checkbox — só cria o lote (não paga)
-  router.post('/stark/acerto/criar-lote', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
-    const client = await pool.connect();
-    try {
-      const { profissionais } = req.body; // Array de { cod_prof, nome_planilha, nome_sistema, saldo, pix_key, cpf_sistema, cpf_planilha, pix_origem }
-
-      if (!profissionais || profissionais.length === 0) {
-        return res.status(400).json({ error: 'Nenhum profissional para o lote' });
-      }
-
-      // Filtrar apenas os que têm Pix e saldo > 0
-      const validos = profissionais.filter(function(p) { return p.pix_key && p.saldo > 0; });
-      if (validos.length === 0) {
-        return res.status(400).json({ error: 'Nenhum profissional com chave Pix válida' });
-      }
-
-      const valorTotal = validos.reduce(function(a, p) { return a + parseFloat(p.saldo || 0); }, 0);
-
-      await client.query('BEGIN');
-
-      // Criar lote com tipo 'acerto' e status 'aguardando'
-      const loteResult = await client.query(`
-        INSERT INTO stark_lotes (quantidade, valor_total, status, executado_por_id, executado_por_nome, tipo)
-        VALUES ($1, $2, 'aguardando', $3, $4, 'acerto')
-        RETURNING *
-      `, [validos.length, valorTotal, req.user.id, req.user.nome || req.user.username]);
-
-      const loteId = loteResult.rows[0].id;
-
-      // Criar itens do lote
-      for (const prof of validos) {
-        const nomeFinal = prof.nome_sistema || prof.nome_planilha || 'Profissional ' + prof.cod_prof;
-        const cpfFinal = prof.cpf_sistema || prof.cpf_planilha || '';
-        await client.query(`
-          INSERT INTO stark_lote_itens (lote_id, cod_prof, nome_prof, valor, pix_key, cpf, status)
-          VALUES ($1, $2, $3, $4, $5, $6, 'em_lote')
-        `, [loteId, prof.cod_prof, nomeFinal, prof.saldo, prof.pix_key, cpfFinal]);
-      }
-
-      await client.query('COMMIT');
-
-      console.log('🏦 [Acerto] Lote #' + loteId + ' criado: ' + validos.length + ' profissionais, R$ ' + valorTotal.toFixed(2));
-
-      await registrarAuditoria(req, 'ACERTO_LOTE_CRIADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', loteId, {
-        quantidade: validos.length,
-        valor_total: valorTotal,
-        tipo: 'acerto'
-      });
-
-      res.json({
-        success: true,
-        lote_id: loteId,
-        quantidade: validos.length,
+        saques,
+        quantidade: saques.length,
         valor_total: Math.round(valorTotal * 100) / 100
       });
-
     } catch (error) {
-      try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
-      console.error('❌ [Acerto] Erro ao criar lote:', error.message);
-      res.status(500).json({ error: 'Erro ao criar lote de acerto' });
-    } finally {
-      client.release();
+      console.error('❌ [Stark Bank] Erro ao listar pendentes:', error.message);
+      res.status(500).json({ error: 'Erro ao listar saques pendentes' });
     }
   });
 
-  // ==================== LOTES EM APROVAÇÃO ====================
-  router.get('/stark/acerto/em-aprovacao', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
-    try {
-      const result = await pool.query(`
-        SELECT l.*,
-          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id) as total_itens,
-          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'em_lote') as itens_pendentes
-        FROM stark_lotes l
-        WHERE l.tipo = 'acerto' AND l.status = 'aguardando'
-        ORDER BY l.created_at DESC
-        LIMIT 50
-      `);
-
-      res.json({ lotes: result.rows });
-    } catch (error) {
-      console.error('❌ [Acerto] Erro em-aprovação:', error.message);
-      res.status(500).json({ error: 'Erro ao listar lotes em aprovação' });
-    }
-  });
-
-  // ==================== EXECUTAR PAGAMENTO DO ACERTO (com 2FA) ====================
-  router.post('/stark/acerto/:id/executar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  // ==================== EXECUTAR PAGAMENTO DO LOTE ====================
+  router.post('/stark/lote/executar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     const client = await pool.connect();
+
     try {
-      const { id } = req.params;
-      const { chave_token } = req.body;
+      const { saque_ids } = req.body; // Array opcional — se não enviado, paga todos os pendentes
 
-      // Validar 2FA
-      if (!chave_token) {
-        return res.status(403).json({ error: 'Token de segurança obrigatório.' });
-      }
-
-      const dadosToken = tokensCache.get(chave_token);
-      if (!dadosToken || !dadosToken.validado) {
-        return res.status(403).json({ error: 'Token não validado. Solicite e valide um novo código.' });
-      }
-
-      // Consumir o token (uso único)
-      tokensCache.delete(chave_token);
-
-      // Buscar lote
       await client.query('BEGIN');
 
-      const lote = await client.query('SELECT * FROM stark_lotes WHERE id = $1 AND tipo = $2', [id, 'acerto']);
-      if (lote.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Lote de acerto não encontrado' });
+      // 1. Buscar saques elegíveis com LOCK
+      let queryPendentes;
+      let paramsPendentes;
+
+      if (saque_ids && Array.isArray(saque_ids) && saque_ids.length > 0) {
+        // Pagamento parcial — IDs selecionados
+        queryPendentes = `
+          SELECT w.*, ufd.pix_tipo
+          FROM withdrawal_requests w
+          LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+          WHERE w.id = ANY($1)
+            AND w.status IN ('aprovado', 'aprovado_gratuidade')
+            AND w.stark_status IN ('em_lote', 'erro')
+          FOR UPDATE OF w
+        `;
+        paramsPendentes = [saque_ids];
+      } else {
+        // Pagamento de todos os marcados em lote
+        queryPendentes = `
+          SELECT w.*, ufd.pix_tipo
+          FROM withdrawal_requests w
+          LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+          WHERE w.status IN ('aprovado', 'aprovado_gratuidade')
+            AND w.stark_status IN ('em_lote', 'erro')
+          FOR UPDATE OF w
+        `;
+        paramsPendentes = [];
       }
 
-      if (lote.rows[0].status !== 'aguardando') {
+      const saquesPendentes = await client.query(queryPendentes, paramsPendentes);
+
+      if (saquesPendentes.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Lote já foi executado. Status: ' + lote.rows[0].status });
+        client.release();
+        return res.status(400).json({ error: 'Nenhum saque elegível para pagamento' });
       }
 
-      const itens = await client.query(`
-        SELECT * FROM stark_lote_itens WHERE lote_id = $1 AND status = 'em_lote'
-        FOR UPDATE
-      `, [id]);
+      const saques = saquesPendentes.rows;
+      const valorTotal = saques.reduce((acc, s) => acc + parseFloat(s.final_amount || 0), 0);
 
-      if (itens.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Nenhum item pendente neste lote' });
-      }
-
-      // Verificar saldo Stark Bank
-      let starkbank;
-      try {
-        starkbank = require('starkbank');
-      } catch (e) {
-        await client.query('ROLLBACK');
-        return res.status(503).json({ error: 'SDK Stark Bank não disponível' });
-      }
-
-      const valorTotalLote = itens.rows.reduce(function(a, item) { return a + parseFloat(item.valor || 0); }, 0);
-
+      // 2. Verificar saldo
       let saldoDisponivel;
       try {
         const balances = await starkbank.balance.get();
         saldoDisponivel = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
       } catch (errSaldo) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: errSaldo.message });
+        client.release();
+        return res.status(500).json({ error: 'Não foi possível verificar saldo', details: errSaldo.message });
       }
 
-      if (saldoDisponivel < valorTotalLote) {
+      if (saldoDisponivel < valorTotal) {
         await client.query('ROLLBACK');
+        client.release();
         return res.status(400).json({
-          error: 'Saldo insuficiente na conta Stark Bank',
+          error: 'Saldo insuficiente',
           saldo_disponivel: saldoDisponivel,
-          valor_lote: valorTotalLote,
-          diferenca: Math.round((valorTotalLote - saldoDisponivel) * 100) / 100
+          valor_lote: valorTotal,
+          diferenca: Math.round((valorTotal - saldoDisponivel) * 100) / 100
         });
       }
 
-      // Registrar saldo antes no lote
-      await client.query('UPDATE stark_lotes SET saldo_antes = $1 WHERE id = $2', [saldoDisponivel, id]);
+      // 3. Criar registro do lote
+      const loteResult = await client.query(`
+        INSERT INTO stark_lotes (
+          quantidade, valor_total, saldo_antes, status, 
+          executado_por_id, executado_por_nome
+        ) VALUES ($1, $2, $3, 'processando', $4, $5)
+        RETURNING *
+      `, [saques.length, valorTotal, saldoDisponivel, req.user.id, req.user.nome || req.user.username]);
 
-      // Enviar pagamentos um por um
-      const resultados = { sucesso: [], erro: [] };
+      const loteId = loteResult.rows[0].id;
 
-      for (const item of itens.rows) {
-        const cpf = (item.cpf || '').replace(/\D/g, '');
-        const pixKey = (item.pix_key || '').trim();
-        let accountNumber = pixKey.replace(/\D/g, '');
-        if (!accountNumber || accountNumber.length === 0) accountNumber = cpf;
-        if (accountNumber.length > 20) accountNumber = accountNumber.substring(0, 20);
+      // 4. Montar transfers para Stark Bank
+      const transfers = saques.map(saque => {
+        // Determinar tipo de chave Pix para taxId
+        const pixKey = saque.pix_key;
+        const cpf = (saque.cpf || '').replace(/\D/g, '');
 
-        if (!cpf || cpf.length < 11) {
-          await client.query(`
-            UPDATE stark_lote_itens SET status = 'rejeitado', erro = 'CPF inválido', atualizado_em = NOW() WHERE id = $1
-          `, [item.id]);
-          resultados.erro.push({ id: item.id, nome: item.nome_prof, cod_prof: item.cod_prof, valor: item.valor, erro: 'CPF inválido' });
-          continue;
-        }
+        return new starkbank.Transfer({
+          amount: Math.round(parseFloat(saque.final_amount) * 100), // Em centavos
+          name: saque.user_name,
+          taxId: cpf, // CPF do destinatário
+          bankCode: '20018183', // Código do SPI (Pix)
+          branchCode: '0001',
+          accountNumber: pixKey, // Chave Pix como conta
+          accountType: 'payment', // Tipo pagamento (Pix)
+          externalId: `tutts-saque-${saque.id}`, // Idempotência!
+          tags: [`lote:${loteId}`, `saque:${saque.id}`]
+        });
+      });
 
-        try {
-          const transferData = {
-            amount: Math.round(parseFloat(item.valor) * 100),
-            name: item.nome_prof,
-            taxId: cpf,
-            bankCode: '20018183',
-            branchCode: '0001',
-            accountNumber: accountNumber,
-            accountType: 'checking',
-            externalId: 'tutts-acerto-' + id + '-' + item.id,
-            tags: ['acerto:' + id, 'prof:' + item.cod_prof]
-          };
+      // 5. Disparar transfers na Stark Bank
+      let transfersCriadas;
+      try {
+        transfersCriadas = await starkbank.transfer.create(transfers);
+      } catch (errStark) {
+        // Marcar lote como erro
+        await client.query(`
+          UPDATE stark_lotes SET status = 'erro', erro = $1, finalizado_em = NOW() WHERE id = $2
+        `, [errStark.message, loteId]);
+        await client.query('COMMIT');
+        client.release();
 
-          const resultado = await starkbank.transfer.create([transferData]);
-          const transfer = resultado[0];
-
-          await client.query(`
-            UPDATE stark_lote_itens 
-            SET status = 'processando', stark_transfer_id = $1, atualizado_em = NOW()
-            WHERE id = $2
-          `, [transfer.id, item.id]);
-
-          resultados.sucesso.push({ id: item.id, nome: item.nome_prof, cod_prof: item.cod_prof, valor: item.valor, transfer_id: transfer.id });
-          console.log('  ✅ Acerto prof ' + item.cod_prof + ' (' + item.nome_prof + ') — Transfer ' + transfer.id);
-
-        } catch (errItem) {
-          const erroMsg = errItem.errors ? JSON.stringify(errItem.errors) : errItem.message;
-
-          await client.query(`
-            UPDATE stark_lote_itens SET status = 'rejeitado', erro = $1, atualizado_em = NOW() WHERE id = $2
-          `, [erroMsg, item.id]);
-
-          resultados.erro.push({ id: item.id, nome: item.nome_prof, cod_prof: item.cod_prof, valor: item.valor, erro: erroMsg });
-          console.log('  ❌ Acerto prof ' + item.cod_prof + ' (' + item.nome_prof + ') — ' + erroMsg);
-        }
+        console.error('❌ [Stark Bank] Erro ao criar transfers:', errStark.message);
+        return res.status(500).json({
+          error: 'Erro ao disparar pagamentos na Stark Bank',
+          details: errStark.message,
+          lote_id: loteId
+        });
       }
 
-      // Atualizar status do lote
-      const qtdSucesso = resultados.sucesso.length;
-      const qtdErro = resultados.erro.length;
-      const valorSucesso = resultados.sucesso.reduce(function(a, s) { return a + parseFloat(s.valor || 0); }, 0);
-      let statusLote = qtdSucesso === 0 ? 'erro' : qtdErro === 0 ? 'processando' : 'parcial';
+      // 6. Atualizar cada saque com o ID da transfer
+      for (let i = 0; i < saques.length; i++) {
+        const saque = saques[i];
+        const transfer = transfersCriadas[i];
 
+        await client.query(`
+          UPDATE withdrawal_requests 
+          SET stark_status = 'processando',
+              stark_transfer_id = $1,
+              stark_lote_id = $2,
+              stark_enviado_em = NOW(),
+              updated_at = NOW()
+          WHERE id = $3
+        `, [transfer.id, loteId, saque.id]);
+
+        // Registrar item no lote
+        await client.query(`
+          INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
+          VALUES ($1, $2, $3, $4, 'processando')
+        `, [loteId, saque.id, transfer.id, saque.final_amount]);
+      }
+
+      // 7. Atualizar lote
       await client.query(`
-        UPDATE stark_lotes SET status = $1, finalizado_em = NOW() WHERE id = $2
-      `, [statusLote, id]);
+        UPDATE stark_lotes SET status = 'processando' WHERE id = $1
+      `, [loteId]);
 
       await client.query('COMMIT');
 
-      console.log('🏦 [Acerto] Lote #' + id + ': ' + qtdSucesso + ' enviados, ' + qtdErro + ' rejeitados');
-
-      await registrarAuditoria(req, 'ACERTO_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', id, {
-        sucesso: qtdSucesso,
-        rejeitados: qtdErro,
-        valor_enviado: valorSucesso,
-        saldo_antes: saldoDisponivel
+      // Auditoria
+      await registrarAuditoria(req, 'STARK_LOTE_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', loteId, {
+        quantidade: saques.length,
+        valor_total: valorTotal,
+        saldo_antes: saldoDisponivel,
+        saque_ids: saques.map(s => s.id)
       });
+
+      console.log(`✅ [Stark Bank] Lote #${loteId} executado: ${saques.length} pagamentos, R$ ${valorTotal.toFixed(2)}`);
 
       res.json({
         success: true,
-        lote_id: parseInt(id),
-        enviados: qtdSucesso,
-        rejeitados: qtdErro,
-        valor_enviado: Math.round(valorSucesso * 100) / 100,
+        lote_id: loteId,
+        quantidade: saques.length,
+        valor_total: valorTotal,
         saldo_antes: saldoDisponivel,
-        detalhes_rejeitados: resultados.erro
+        saldo_apos_estimado: Math.round((saldoDisponivel - valorTotal) * 100) / 100,
+        transfers: transfersCriadas.map(t => ({ id: t.id, status: t.status, amount: t.amount / 100 }))
       });
 
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
-      console.error('❌ [Acerto] Erro ao executar:', error.message);
-      res.status(500).json({ error: 'Erro ao executar acerto', details: error.message });
+      console.error('❌ [Stark Bank] Erro ao executar lote:', error.message);
+      res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: error.message });
     } finally {
       client.release();
     }
   });
 
-  // ==================== HISTÓRICO DE ACERTOS ====================
-  router.get('/stark/acerto/historico', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  // ==================== HISTÓRICO DE LOTES ====================
+  router.get('/stark/lote/historico', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
+      const { page = 1, limit = 20 } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
       const result = await pool.query(`
         SELECT l.*,
-          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'processando') as itens_processando,
           (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'pago') as itens_pagos,
-          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'rejeitado') as itens_rejeitados,
-          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id) as total_itens
+          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'erro') as itens_erro,
+          (SELECT COUNT(*) FROM stark_lote_itens WHERE lote_id = l.id AND status = 'processando') as itens_processando
         FROM stark_lotes l
-        WHERE l.tipo = 'acerto' AND l.status != 'aguardando'
         ORDER BY l.created_at DESC
-        LIMIT 50
-      `);
+        LIMIT $1 OFFSET $2
+      `, [parseInt(limit), offset]);
 
-      res.json({ lotes: result.rows });
+      const countResult = await pool.query('SELECT COUNT(*) as total FROM stark_lotes');
+
+      res.json({
+        lotes: result.rows,
+        total: parseInt(countResult.rows[0].total),
+        page: parseInt(page),
+        limit: parseInt(limit)
+      });
     } catch (error) {
-      console.error('❌ [Acerto] Erro histórico:', error.message);
-      res.status(500).json({ error: 'Erro ao listar histórico' });
+      console.error('❌ [Stark Bank] Erro ao listar histórico:', error.message);
+      res.status(500).json({ error: 'Erro ao listar histórico de lotes' });
     }
   });
 
-  // ==================== DETALHE DE UM ACERTO ====================
-  router.get('/stark/acerto/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  // ==================== DETALHE DE UM LOTE ====================
+  router.get('/stark/lote/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
       const { id } = req.params;
+
       const lote = await pool.query('SELECT * FROM stark_lotes WHERE id = $1', [id]);
-      if (lote.rows.length === 0) return res.status(404).json({ error: 'Lote não encontrado' });
+      if (lote.rows.length === 0) {
+        return res.status(404).json({ error: 'Lote não encontrado' });
+      }
 
-      const itens = await pool.query('SELECT * FROM stark_lote_itens WHERE lote_id = $1 ORDER BY valor DESC', [id]);
+      const itens = await pool.query(`
+        SELECT li.*, w.user_name, w.user_cod, w.pix_key, w.cpf
+        FROM stark_lote_itens li
+        JOIN withdrawal_requests w ON w.id = li.withdrawal_id
+        WHERE li.lote_id = $1
+        ORDER BY li.id ASC
+      `, [id]);
 
-      res.json({ lote: lote.rows[0], itens: itens.rows });
+      res.json({
+        lote: lote.rows[0],
+        itens: itens.rows
+      });
     } catch (error) {
-      res.status(500).json({ error: 'Erro ao buscar detalhe' });
+      console.error('❌ [Stark Bank] Erro ao buscar detalhe do lote:', error.message);
+      res.status(500).json({ error: 'Erro ao buscar detalhe do lote' });
+    }
+  });
+
+  // ==================== RETENTAR PAGAMENTOS COM ERRO ====================
+  router.post('/stark/lote/:id/retentar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { id } = req.params;
+
+      await client.query('BEGIN');
+
+      // Buscar itens com erro neste lote
+      const itensErro = await client.query(`
+        SELECT li.*, w.user_name, w.cpf, w.pix_key, w.final_amount, w.user_cod
+        FROM stark_lote_itens li
+        JOIN withdrawal_requests w ON w.id = li.withdrawal_id
+        WHERE li.lote_id = $1 AND li.status = 'erro'
+        FOR UPDATE OF li
+      `, [id]);
+
+      if (itensErro.rows.length === 0) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(400).json({ error: 'Nenhum item com erro para retentar' });
+      }
+
+      const itens = itensErro.rows;
+      const valorTotal = itens.reduce((acc, i) => acc + parseFloat(i.final_amount || i.valor || 0), 0);
+
+      // Verificar saldo
+      const balances = await starkbank.balance.get();
+      const saldoDisponivel = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+
+      if (saldoDisponivel < valorTotal) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(400).json({
+          error: 'Saldo insuficiente para retentativa',
+          saldo_disponivel: saldoDisponivel,
+          valor_necessario: valorTotal
+        });
+      }
+
+      // Recriar transfers
+      const transfers = itens.map(item => {
+        const cpf = (item.cpf || '').replace(/\D/g, '');
+        return new starkbank.Transfer({
+          amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
+          name: item.user_name,
+          taxId: cpf,
+          bankCode: '20018183',
+          branchCode: '0001',
+          accountNumber: item.pix_key,
+          accountType: 'payment',
+          externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
+          tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
+        });
+      });
+
+      const transfersCriadas = await starkbank.transfer.create(transfers);
+
+      // Atualizar itens e saques
+      for (let i = 0; i < itens.length; i++) {
+        const item = itens[i];
+        const transfer = transfersCriadas[i];
+
+        await client.query(`
+          UPDATE stark_lote_itens 
+          SET stark_transfer_id = $1, status = 'processando', erro = NULL, atualizado_em = NOW()
+          WHERE id = $2
+        `, [transfer.id, item.id]);
+
+        await client.query(`
+          UPDATE withdrawal_requests 
+          SET stark_status = 'processando', stark_transfer_id = $1, stark_erro = NULL, updated_at = NOW()
+          WHERE id = $2
+        `, [transfer.id, item.withdrawal_id]);
+      }
+
+      // Atualizar status do lote
+      await client.query(`
+        UPDATE stark_lotes SET status = 'processando', erro = NULL WHERE id = $1
+      `, [id]);
+
+      await client.query('COMMIT');
+
+      await registrarAuditoria(req, 'STARK_LOTE_RETENTATIVA', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', id, {
+        itens_retentados: itens.length,
+        valor: valorTotal
+      });
+
+      console.log(`🔄 [Stark Bank] Retentativa do lote #${id}: ${itens.length} pagamentos`);
+
+      res.json({
+        success: true,
+        lote_id: parseInt(id),
+        itens_retentados: itens.length,
+        valor_total: valorTotal
+      });
+
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
+      console.error('❌ [Stark Bank] Erro na retentativa:', error.message);
+      res.status(500).json({ error: 'Erro ao retentar pagamentos', details: error.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==================== VALIDAR CHAVE PIX ====================
+  router.post('/stark/validar-chave', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const { chave_pix } = req.body;
+
+      if (!chave_pix) {
+        return res.status(400).json({ error: 'Chave Pix obrigatória' });
+      }
+
+      const dictKey = await starkbank.dictKey.get(chave_pix);
+
+      res.json({
+        valida: true,
+        tipo: dictKey.type,
+        nome: dictKey.name,
+        banco: dictKey.ispb,
+        conta_tipo: dictKey.accountType,
+        status: dictKey.status
+      });
+    } catch (error) {
+      console.error('⚠️ [Stark Bank] Chave Pix inválida:', error.message);
+      res.json({
+        valida: false,
+        erro: error.message
+      });
+    }
+  });
+
+  // ==================== WEBHOOK STARK BANK (PÚBLICO - sem JWT) ====================
+  router.post('/stark/webhook', async (req, res) => {
+    try {
+      // Validar assinatura do webhook da Stark Bank
+      const signature = req.headers['digital-signature'];
+      const content = JSON.stringify(req.body);
+
+      if (!starkbank) {
+        inicializarStark();
+      }
+
+      if (!starkbank) {
+        console.error('❌ [Stark Webhook] SDK não inicializado');
+        return res.status(200).send('OK'); // Retorna 200 para não causar retry
+      }
+
+      // Validar assinatura (se disponível)
+      if (signature) {
+        try {
+          const event = await starkbank.event.parse({
+            content: content,
+            signature: signature
+          });
+
+          await processarEventoStark(event);
+        } catch (errValidacao) {
+          console.warn('⚠️ [Stark Webhook] Erro validação assinatura:', errValidacao.message);
+          // Mesmo com erro de assinatura, retorna 200 para não causar retry infinito
+          return res.status(200).send('OK');
+        }
+      } else {
+        // Sem assinatura — processar em modo permissivo (sandbox)
+        const body = req.body;
+        if (body.event) {
+          await processarEventoStark(body.event);
+        }
+      }
+
+      res.status(200).send('OK');
+    } catch (error) {
+      console.error('❌ [Stark Webhook] Erro geral:', error.message);
+      res.status(200).send('OK'); // Sempre 200 para webhooks
+    }
+  });
+
+  // Função para processar eventos do Stark Bank
+  async function processarEventoStark(event) {
+    const subscription = event.subscription || event.log?.type || '';
+
+    console.log(`📨 [Stark Webhook] Evento recebido: ${subscription}`);
+
+    if (subscription === 'transfer') {
+      const transfer = event.log?.transfer || event.transfer || null;
+      if (!transfer) {
+        console.warn('⚠️ [Stark Webhook] Transfer não encontrada no evento');
+        return;
+      }
+
+      const transferId = transfer.id;
+      const status = transfer.status;
+
+      console.log(`📨 [Stark Webhook] Transfer ${transferId}: status=${status}`);
+
+      if (status === 'success') {
+        // Pagamento confirmado!
+        await atualizarStatusPagamento(transferId, 'pago', null);
+      } else if (status === 'failed' || status === 'canceled') {
+        const erro = transfer.errors?.[0]?.message || transfer.reason || `Status: ${status}`;
+        await atualizarStatusPagamento(transferId, 'erro', erro);
+      }
+      // 'processing' e 'created' não precisam de ação — já estão como 'processando'
+    }
+  }
+
+  // Atualizar status do pagamento no banco
+  async function atualizarStatusPagamento(starkTransferId, novoStatus, erro) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Atualizar o saque
+      const updateResult = await client.query(`
+        UPDATE withdrawal_requests 
+        SET stark_status = $1,
+            stark_erro = $2,
+            stark_pago_em = CASE WHEN $1 = 'pago' THEN NOW() ELSE stark_pago_em END,
+            updated_at = NOW()
+        WHERE stark_transfer_id = $3
+        RETURNING *
+      `, [novoStatus, erro, starkTransferId]);
+
+      if (updateResult.rows.length === 0) {
+        console.warn(`⚠️ [Stark Webhook] Saque não encontrado para transfer ${starkTransferId}`);
+        await client.query('ROLLBACK');
+        client.release();
+        return;
+      }
+
+      const saque = updateResult.rows[0];
+
+      // Atualizar o item do lote
+      await client.query(`
+        UPDATE stark_lote_itens 
+        SET status = $1, erro = $2, atualizado_em = NOW()
+        WHERE stark_transfer_id = $3
+      `, [novoStatus, erro, starkTransferId]);
+
+      // Verificar se todos os itens do lote já foram processados
+      if (saque.stark_lote_id) {
+        const pendentes = await client.query(`
+          SELECT COUNT(*) as total FROM stark_lote_itens 
+          WHERE lote_id = $1 AND status = 'processando'
+        `, [saque.stark_lote_id]);
+
+        if (parseInt(pendentes.rows[0].total) === 0) {
+          // Todos processados — verificar se teve erros
+          const erros = await client.query(`
+            SELECT COUNT(*) as total FROM stark_lote_itens 
+            WHERE lote_id = $1 AND status = 'erro'
+          `, [saque.stark_lote_id]);
+
+          const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
+
+          await client.query(`
+            UPDATE stark_lotes 
+            SET status = $1, finalizado_em = NOW()
+            WHERE id = $2
+          `, [statusLote, saque.stark_lote_id]);
+
+          console.log(`✅ [Stark Webhook] Lote #${saque.stark_lote_id} finalizado: ${statusLote}`);
+        }
+      }
+
+      await client.query('COMMIT');
+
+      // Notificar via WebSocket se disponível
+      if (global.notifyStarkPayment) {
+        global.notifyStarkPayment(saque, novoStatus);
+      }
+
+      console.log(`✅ [Stark Webhook] Saque #${saque.id} atualizado: ${novoStatus}${erro ? ` (${erro})` : ''}`);
+
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
+      console.error('❌ [Stark Webhook] Erro ao atualizar status:', error.message);
+    } finally {
+      client.release();
+    }
+  }
+
+  // ==================== STATUS DA INTEGRAÇÃO ====================
+  router.get('/stark/status', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const configurado = !!process.env.STARK_PROJECT_ID && !!process.env.STARK_PRIVATE_KEY;
+      const ambiente = process.env.STARK_ENVIRONMENT || 'sandbox';
+
+      let sdkOk = false;
+      let saldo = null;
+
+      if (configurado && inicializarStark() && starkbank) {
+        try {
+          const balances = await starkbank.balance.get();
+          saldo = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+          sdkOk = true;
+        } catch (e) {
+          sdkOk = false;
+        }
+      }
+
+      // Estatísticas
+      const stats = await pool.query(`
+        SELECT 
+          COUNT(*) FILTER (WHERE stark_status = 'processando') as processando,
+          COUNT(*) FILTER (WHERE stark_status = 'pago') as pagos,
+          COUNT(*) FILTER (WHERE stark_status = 'erro') as erros,
+          COALESCE(SUM(final_amount) FILTER (WHERE stark_status = 'pago'), 0) as valor_total_pago
+        FROM withdrawal_requests
+        WHERE stark_status IS NOT NULL
+      `);
+
+      res.json({
+        configurado,
+        sdk_operacional: sdkOk,
+        ambiente,
+        saldo,
+        erro_init: starkErroInit,
+        estatisticas: stats.rows[0]
+      });
+    } catch (error) {
+      console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
+      res.status(500).json({ error: 'Erro ao verificar status' });
     }
   });
 
   return router;
 }
 
-module.exports = { createAcertoRoutes };
+module.exports = { createStarkRoutes };
