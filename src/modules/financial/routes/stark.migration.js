@@ -100,6 +100,33 @@ async function initStarkTables(pool) {
 
   console.log('✅ [Stark Bank] Colunas de acerto profissional verificadas');
 
+  // ==================== TABELA DE VALIDAÇÕES PIX (CACHE DICT) ====================
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pix_validacoes (
+      id SERIAL PRIMARY KEY,
+      cod_prof VARCHAR(50) NOT NULL,
+      pix_key VARCHAR(255) NOT NULL,
+      pix_key_normalizada VARCHAR(255),
+      pix_tipo VARCHAR(30),
+      dict_valido BOOLEAN NOT NULL DEFAULT false,
+      dict_nome VARCHAR(255),
+      dict_cpf_cnpj VARCHAR(20),
+      dict_banco VARCHAR(255),
+      dict_tipo_conta VARCHAR(50),
+      dict_erro TEXT,
+      validado_em TIMESTAMP DEFAULT NOW(),
+      validado_por_id INTEGER,
+      validado_por_nome VARCHAR(255)
+    )
+  `);
+
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pix_validacoes_cod_key ON pix_validacoes(cod_prof, pix_key)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pix_validacoes_cod ON pix_validacoes(cod_prof)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pix_validacoes_key ON pix_validacoes(pix_key)`).catch(() => {});
+
+  console.log('✅ [Stark Bank] Tabela pix_validacoes verificada');
+
   console.log('🏦 [Stark Bank] Migrations concluídas');
 }
 
