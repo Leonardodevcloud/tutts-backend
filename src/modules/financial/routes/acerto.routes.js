@@ -165,43 +165,64 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       }
 
       // Enriquecer profissionais com dados do cadastro
-      let encontrados = 0;
+      let encontradosSistema = 0;
+      let encontradosPlanilha = 0;
       let naoEncontrados = 0;
       const resultado = profissionais.map(p => {
         const cadastro = mapaCadastro[p.cod_prof];
+        const nomeSistema = cadastro ? cadastro.full_name : null;
+        const cpfSistema = cadastro ? cadastro.cpf : null;
+        
+        // Prioridade 1: Chave Pix do cadastro no sistema
         if (cadastro && cadastro.pix_key) {
-          encontrados++;
+          encontradosSistema++;
           return {
             ...p,
-            nome_sistema: cadastro.full_name,
-            cpf_sistema: cadastro.cpf,
+            nome_sistema: nomeSistema,
+            cpf_sistema: cpfSistema,
             pix_key: cadastro.pix_key,
             pix_tipo: cadastro.pix_tipo,
-            pix_origem: 'cadastro',
+            pix_origem: 'sistema',
             status: 'pronto'
           };
-        } else {
-          naoEncontrados++;
+        }
+        
+        // Prioridade 2: Chave Pix da planilha (coluna M) como fallback
+        if (p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3) {
+          encontradosPlanilha++;
           return {
             ...p,
-            nome_sistema: cadastro ? cadastro.full_name : null,
-            cpf_sistema: cadastro ? cadastro.cpf : null,
-            pix_key: null,
+            nome_sistema: nomeSistema,
+            cpf_sistema: cpfSistema || p.cpf_planilha,
+            pix_key: p.pix_planilha,
             pix_tipo: null,
-            pix_origem: null,
-            status: 'sem_pix'
+            pix_origem: 'planilha',
+            status: 'pronto'
           };
         }
+        
+        // Sem Pix em nenhuma fonte
+        naoEncontrados++;
+        return {
+          ...p,
+          nome_sistema: nomeSistema,
+          cpf_sistema: cpfSistema || p.cpf_planilha,
+          pix_key: null,
+          pix_tipo: null,
+          pix_origem: null,
+          status: 'sem_pix'
+        };
       });
 
       const valorTotal = resultado.filter(r => r.status === 'pronto').reduce((a, r) => a + r.saldo, 0);
 
-      console.log(`📋 [Acerto] Planilha processada: ${resultado.length} profissionais, ${encontrados} com Pix, ${naoEncontrados} sem Pix, R$ ${valorTotal.toFixed(2)}`);
+      console.log(`📋 [Acerto] Planilha processada: ${resultado.length} profissionais | Pix sistema: ${encontradosSistema} | Pix planilha: ${encontradosPlanilha} | Sem Pix: ${naoEncontrados} | R$ ${valorTotal.toFixed(2)}`);
 
       await registrarAuditoria(req, 'ACERTO_UPLOAD', AUDIT_CATEGORIES.FINANCIAL, 'stark_acerto', null, {
         arquivo: nome_arquivo,
         total: resultado.length,
-        encontrados,
+        pix_sistema: encontradosSistema,
+        pix_planilha: encontradosPlanilha,
         nao_encontrados: naoEncontrados,
         valor_total: valorTotal
       });
@@ -210,7 +231,9 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         success: true,
         profissionais: resultado,
         total: resultado.length,
-        prontos: encontrados,
+        prontos: encontradosSistema + encontradosPlanilha,
+        pix_sistema: encontradosSistema,
+        pix_planilha: encontradosPlanilha,
         sem_pix: naoEncontrados,
         valor_total: Math.round(valorTotal * 100) / 100,
         erros
