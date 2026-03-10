@@ -17,6 +17,36 @@ const express = require('express');
 const XLSX = require('xlsx');
 const crypto = require('crypto');
 
+// ==================== VALIDAÇÃO DE FORMATO PIX ====================
+function validarFormatoPix(chave) {
+  if (!chave || typeof chave !== 'string') return { valido: false, tipo: null };
+  const ch = chave.trim();
+  if (ch.length === 0) return { valido: false, tipo: null };
+
+  // CPF: 11 dígitos (com ou sem formatação)
+  const cpfLimpo = ch.replace(/[\.\-]/g, '');
+  if (/^\d{11}$/.test(cpfLimpo)) return { valido: true, tipo: 'cpf' };
+
+  // CNPJ: 14 dígitos (com ou sem formatação)
+  const cnpjLimpo = ch.replace(/[\.\-\/]/g, '');
+  if (/^\d{14}$/.test(cnpjLimpo)) return { valido: true, tipo: 'cnpj' };
+
+  // Telefone: +55 seguido de DDD + número (11-13 dígitos com +55)
+  const telLimpo = ch.replace(/[\s\-\(\)]/g, '');
+  if (/^\+55\d{10,11}$/.test(telLimpo)) return { valido: true, tipo: 'telefone' };
+  // Telefone sem +55 mas com formato (XX) XXXXX-XXXX
+  if (/^\d{10,11}$/.test(telLimpo)) return { valido: true, tipo: 'telefone' };
+
+  // Email
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ch)) return { valido: true, tipo: 'email' };
+
+  // Chave aleatória (UUID): xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ch)) return { valido: true, tipo: 'aleatoria' };
+
+  // Formato não reconhecido — pode ser inválido
+  return { valido: false, tipo: null };
+}
+
 function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
 
@@ -321,38 +351,62 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       }
 
       // Enriquecer profissionais com dados do cadastro
+      // PRIORIDADE: 1) Mapp (planilha) com formato validado → 2) Sistema → 3) Mapp sem validação → 4) sem_pix
+      let encontradosMapp = 0;
       let encontradosSistema = 0;
-      let encontradosPlanilha = 0;
       let naoEncontrados = 0;
       const resultado = profissionais.map(function(p) {
         const cadastro = mapaCadastro[p.cod_prof];
         const nomeSistema = cadastro ? cadastro.full_name : null;
         const cpfSistema = cadastro ? cadastro.cpf : null;
+        const pixMapp = p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3 ? p.pix_planilha.trim() : null;
+        const pixSistema = cadastro && cadastro.pix_key ? cadastro.pix_key : null;
 
-        // Prioridade 1: Chave Pix do cadastro no sistema
-        if (cadastro && cadastro.pix_key) {
+        // Validar formato da chave Pix do Mapp
+        const validacaoMapp = pixMapp ? validarFormatoPix(pixMapp) : { valido: false, tipo: null };
+
+        // Prioridade 1: Chave Pix do Mapp com formato válido
+        if (pixMapp && validacaoMapp.valido) {
+          encontradosMapp++;
+          return {
+            ...p,
+            nome_sistema: nomeSistema,
+            cpf_sistema: cpfSistema || p.cpf_planilha,
+            pix_key: pixMapp,
+            pix_tipo: validacaoMapp.tipo,
+            pix_origem: 'mapp',
+            pix_formato_valido: true,
+            status: 'pronto'
+          };
+        }
+
+        // Prioridade 2: Chave Pix do Sistema (fallback)
+        if (pixSistema) {
           encontradosSistema++;
           return {
             ...p,
             nome_sistema: nomeSistema,
             cpf_sistema: cpfSistema,
-            pix_key: cadastro.pix_key,
+            pix_key: pixSistema,
             pix_tipo: cadastro.pix_tipo,
             pix_origem: 'sistema',
+            pix_formato_valido: true,
+            pix_mapp_rejeitado: pixMapp ? 'formato_invalido' : null,
             status: 'pronto'
           };
         }
 
-        // Prioridade 2: Chave Pix da planilha (coluna M) como fallback
-        if (p.pix_planilha && p.pix_planilha !== '-' && p.pix_planilha.length > 3) {
-          encontradosPlanilha++;
+        // Prioridade 3: Mapp com formato inválido (melhor que nada — aviso ao admin)
+        if (pixMapp) {
+          encontradosMapp++;
           return {
             ...p,
             nome_sistema: nomeSistema,
             cpf_sistema: cpfSistema || p.cpf_planilha,
-            pix_key: p.pix_planilha,
+            pix_key: pixMapp,
             pix_tipo: null,
-            pix_origem: 'planilha',
+            pix_origem: 'mapp',
+            pix_formato_valido: false,
             status: 'pronto'
           };
         }
@@ -366,19 +420,20 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
           pix_key: null,
           pix_tipo: null,
           pix_origem: null,
+          pix_formato_valido: false,
           status: 'sem_pix'
         };
       });
 
       const valorTotal = resultado.filter(function(r) { return r.status === 'pronto'; }).reduce(function(a, r) { return a + r.saldo; }, 0);
 
-      console.log('📋 [Acerto] Planilha processada: ' + resultado.length + ' profissionais | Pix sistema: ' + encontradosSistema + ' | Pix planilha: ' + encontradosPlanilha + ' | Sem Pix: ' + naoEncontrados + ' | R$ ' + valorTotal.toFixed(2));
+      console.log('📋 [Acerto] Planilha processada: ' + resultado.length + ' profissionais | Pix Mapp: ' + encontradosMapp + ' | Pix Sistema: ' + encontradosSistema + ' | Sem Pix: ' + naoEncontrados + ' | R$ ' + valorTotal.toFixed(2));
 
       await registrarAuditoria(req, 'ACERTO_UPLOAD', AUDIT_CATEGORIES.FINANCIAL, 'stark_acerto', null, {
         arquivo: nome_arquivo,
         total: resultado.length,
+        pix_mapp: encontradosMapp,
         pix_sistema: encontradosSistema,
-        pix_planilha: encontradosPlanilha,
         nao_encontrados: naoEncontrados,
         valor_total: valorTotal
       });
@@ -387,9 +442,9 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         success: true,
         profissionais: resultado,
         total: resultado.length,
-        prontos: encontradosSistema + encontradosPlanilha,
+        prontos: encontradosMapp + encontradosSistema,
+        pix_mapp: encontradosMapp,
         pix_sistema: encontradosSistema,
-        pix_planilha: encontradosPlanilha,
         sem_pix: naoEncontrados,
         valor_total: Math.round(valorTotal * 100) / 100,
         erros
