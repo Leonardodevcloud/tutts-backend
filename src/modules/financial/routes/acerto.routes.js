@@ -113,7 +113,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
       // Fonte 3: Tabela de usuários (para nome)
       const usuarios = await pool.query(`
-        SELECT cod_profissional as user_cod, full_name, username
+        SELECT cod_profissional as user_cod, full_name
         FROM users
         WHERE cod_profissional = ANY($1)
       `, [codProfs]);
@@ -125,7 +125,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       for (const u of usuarios.rows) {
         mapaCadastro[u.user_cod] = { 
           user_cod: u.user_cod, 
-          full_name: u.full_name || u.username, 
+          full_name: u.full_name, 
           cpf: null, pix_key: null, pix_tipo: null 
         };
       }
