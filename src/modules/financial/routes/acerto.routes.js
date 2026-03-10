@@ -93,31 +93,33 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       }
 
       // Cruzar com banco de dados — buscar chave Pix cadastrada
-      // Buscar em múltiplas fontes: user_financial_data, withdrawal_requests (saques anteriores), users
-      const codProfs = profissionais.map(p => p.cod_prof);
+      // Normalizar códigos (remover espaços, #, zeros à esquerda)
+      const codProfs = profissionais.map(p => p.cod_prof.trim());
       
       // Fonte 1: Dados financeiros cadastrados (principal)
       const cadastros = await pool.query(`
-        SELECT user_cod, full_name, cpf, pix_key, pix_tipo
+        SELECT TRIM(user_cod) as user_cod, full_name, cpf, pix_key, pix_tipo
         FROM user_financial_data
-        WHERE user_cod = ANY($1)
+        WHERE TRIM(user_cod) = ANY($1)
       `, [codProfs]);
 
       // Fonte 2: Saques anteriores (fallback para chave Pix e CPF)
       const saques = await pool.query(`
-        SELECT DISTINCT ON (user_cod) user_cod, user_name, cpf, pix_key
+        SELECT DISTINCT ON (TRIM(user_cod)) TRIM(user_cod) as user_cod, user_name, cpf, pix_key
         FROM withdrawal_requests
-        WHERE user_cod = ANY($1)
-        ORDER BY user_cod, created_at DESC
+        WHERE TRIM(user_cod) = ANY($1)
+        ORDER BY TRIM(user_cod), created_at DESC
       `, [codProfs]);
 
       // Fonte 3: Tabela de usuários (para nome)
       const usuarios = await pool.query(`
-        SELECT cod_profissional as user_cod, full_name
+        SELECT TRIM(cod_profissional) as user_cod, full_name
         FROM users
-        WHERE cod_profissional = ANY($1)
+        WHERE TRIM(cod_profissional) = ANY($1)
       `, [codProfs]);
 
+      console.log(`🔍 [Acerto] Cruzamento: ${codProfs.length} códigos | users: ${usuarios.rows.length} | saques: ${saques.rows.length} | financial: ${cadastros.rows.length}`);
+      
       // Criar mapa consolidado (prioridade: financial_data > withdrawal > users)
       const mapaCadastro = {};
       
@@ -130,7 +132,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         };
       }
       
-      // Sobrescrever com dados de saques
+      // Sobrescrever com dados de saques (tem chave Pix e CPF)
       for (const s of saques.rows) {
         const existing = mapaCadastro[s.user_cod] || {};
         mapaCadastro[s.user_cod] = {
@@ -153,6 +155,8 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
           pix_tipo: c.pix_tipo || existing.pix_tipo
         };
       }
+      
+      console.log(`🔍 [Acerto] Mapa final: ${Object.keys(mapaCadastro).length} profissionais encontrados. Chaves Pix: ${Object.values(mapaCadastro).filter(m => m.pix_key).length}`);
 
       // Enriquecer profissionais com dados do cadastro
       let encontrados = 0;
