@@ -765,8 +765,14 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
       let saldoDisponivel;
       try {
-        const balances = await starkbank.balance.get();
-        saldoDisponivel = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+        const balanceResult = await starkbank.balance.get();
+        if (Array.isArray(balanceResult)) {
+          saldoDisponivel = balanceResult.length > 0 ? balanceResult[0].amount / 100 : 0;
+        } else if (balanceResult && balanceResult.amount !== undefined) {
+          saldoDisponivel = balanceResult.amount / 100;
+        } else {
+          saldoDisponivel = 0;
+        }
       } catch (errSaldo) {
         await client.query('ROLLBACK');
         return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: errSaldo.message });
