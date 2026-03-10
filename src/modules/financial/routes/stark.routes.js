@@ -776,7 +776,14 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       const valor = parseInt(req.query.valor) || 5000000; // Default R$ 50.000 (em centavos)
 
-      // Criar invoice — sandbox paga automaticamente em ~10s
+      // Consultar saldo antes
+      let saldoAntes = 0;
+      try {
+        const bal = await starkbank.balance.get();
+        saldoAntes = bal && bal.length > 0 ? bal[0].amount / 100 : 0;
+      } catch (e) { /* ignore */ }
+
+      // Tentar via Invoice (método padrão sandbox)
       const invoices = await starkbank.invoice.create([{
         amount: valor,
         name: 'Carga Sandbox Tutts',
@@ -789,28 +796,42 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       console.log('💰 [Sandbox] Invoice criada: #' + invoice.id + ' — R$ ' + (invoice.amount / 100).toFixed(2));
 
-      // Consultar saldo atual
-      let saldoAtual = null;
+      // Aguardar 5s e checar saldo
+      await new Promise(function(resolve) { setTimeout(resolve, 5000); });
+
+      let saldoDepois = 0;
       try {
-        const balances = await starkbank.balance.get();
-        saldoAtual = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+        const bal2 = await starkbank.balance.get();
+        saldoDepois = bal2 && bal2.length > 0 ? bal2[0].amount / 100 : 0;
+      } catch (e) { /* ignore */ }
+
+      // Checar status da invoice
+      let invoiceStatus = null;
+      try {
+        const inv = await starkbank.invoice.get(invoice.id);
+        invoiceStatus = inv.status;
       } catch (e) { /* ignore */ }
 
       res.json({
         success: true,
-        mensagem: '💰 Invoice criada! O sandbox paga automaticamente em ~10-30 segundos. Atualize o saldo depois.',
+        mensagem: saldoDepois > saldoAntes
+          ? '✅ Saldo carregado com sucesso!'
+          : '⏳ Invoice criada mas saldo ainda não atualizou. Aguarde 1-2 minutos e atualize.',
         invoice: {
           id: invoice.id,
           valor: invoice.amount / 100,
-          status: invoice.status
+          status_criacao: invoice.status,
+          status_atual: invoiceStatus
         },
-        saldo_antes: saldoAtual,
-        dica: 'Acesse /api/stark/saldo após ~30s para ver o saldo atualizado'
+        saldo_antes: saldoAntes,
+        saldo_depois: saldoDepois,
+        diferenca: saldoDepois - saldoAntes
       });
 
     } catch (error) {
       console.error('❌ [Sandbox] Erro ao carregar saldo:', error.message);
-      res.status(500).json({ error: 'Erro ao criar invoice sandbox', details: error.message });
+      const detalhes = error.errors ? JSON.stringify(error.errors) : error.message;
+      res.status(500).json({ error: 'Erro ao criar invoice sandbox', details: detalhes });
     }
   });
 
