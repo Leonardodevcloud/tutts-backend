@@ -75,20 +75,21 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     next();
   }
 
+  // Helper: obter saldo em reais (compatível com SDK retornando array ou objeto)
+  async function obterSaldoReais() {
+    const result = await starkbank.balance.get();
+    if (Array.isArray(result)) {
+      return result.length > 0 ? result[0].amount / 100 : 0;
+    } else if (result && result.amount !== undefined) {
+      return result.amount / 100;
+    }
+    return 0;
+  }
+
   // ==================== CONSULTAR SALDO ====================
   router.get('/stark/saldo', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     try {
-      const balances = await starkbank.balance.get();
-
-      // balances retorna um array, pegar o primeiro (conta principal)
-      const saldo = balances && balances.length > 0 ? balances[0] : null;
-
-      if (!saldo) {
-        return res.json({ saldo: 0, moeda: 'BRL', atualizado_em: new Date().toISOString() });
-      }
-
-      // Stark Bank retorna amount em centavos
-      const saldoReais = saldo.amount / 100;
+      const saldoReais = await obterSaldoReais();
 
       await registrarAuditoria(req, 'STARK_CONSULTA_SALDO', AUDIT_CATEGORIES.FINANCIAL, 'stark_bank', null, {
         saldo: saldoReais
@@ -96,12 +97,37 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       res.json({
         saldo: saldoReais,
-        moeda: saldo.currency || 'BRL',
+        moeda: 'BRL',
         atualizado_em: new Date().toISOString()
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao consultar saldo:', error.message);
       res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
+    }
+  });
+
+  // ==================== [DEBUG] VER RAW BALANCE ====================
+  // REMOVER DEPOIS DE RESOLVER
+  router.get('/stark/debug/saldo', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const raw = await starkbank.balance.get();
+
+      res.json({
+        tipo: typeof raw,
+        eh_array: Array.isArray(raw),
+        raw_stringify: JSON.stringify(raw),
+        tem_amount: raw ? (raw.amount !== undefined ? raw.amount : 'SEM AMOUNT') : 'NULL',
+        tem_length: raw ? (raw.length !== undefined ? raw.length : 'SEM LENGTH') : 'NULL',
+        keys: raw ? Object.keys(raw) : [],
+        project_id: process.env.STARK_PROJECT_ID ? process.env.STARK_PROJECT_ID.substring(0, 8) + '...' : 'NÃO CONFIGURADO',
+        environment: process.env.STARK_ENVIRONMENT || 'não definido'
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error.message,
+        errors: error.errors || null,
+        stack: error.stack ? error.stack.split('\n').slice(0, 5) : null
+      });
     }
   });
 
@@ -247,8 +273,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       // 2. Verificar saldo
       let saldoDisponivel;
       try {
-        const balances = await starkbank.balance.get();
-        saldoDisponivel = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+        saldoDisponivel = await obterSaldoReais();
       } catch (errSaldo) {
         await client.query('ROLLBACK');
         client.release();
@@ -460,8 +485,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       const valorTotal = itens.reduce((acc, i) => acc + parseFloat(i.final_amount || i.valor || 0), 0);
 
       // Verificar saldo
-      const balances = await starkbank.balance.get();
-      const saldoDisponivel = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+      const saldoDisponivel = await obterSaldoReais();
 
       if (saldoDisponivel < valorTotal) {
         await client.query('ROLLBACK');
@@ -728,8 +752,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (configurado && inicializarStark() && starkbank) {
         try {
-          const balances = await starkbank.balance.get();
-          saldo = balances && balances.length > 0 ? balances[0].amount / 100 : 0;
+          saldo = await obterSaldoReais();
           sdkOk = true;
         } catch (e) {
           sdkOk = false;
@@ -779,8 +802,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       // Consultar saldo antes
       let saldoAntes = 0;
       try {
-        const bal = await starkbank.balance.get();
-        saldoAntes = bal && bal.length > 0 ? bal[0].amount / 100 : 0;
+        saldoAntes = await obterSaldoReais();
       } catch (e) { /* ignore */ }
 
       // Tentar via Invoice (método padrão sandbox)
@@ -801,8 +823,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       let saldoDepois = 0;
       try {
-        const bal2 = await starkbank.balance.get();
-        saldoDepois = bal2 && bal2.length > 0 ? bal2[0].amount / 100 : 0;
+        saldoDepois = await obterSaldoReais();
       } catch (e) { /* ignore */ }
 
       // Checar status da invoice
