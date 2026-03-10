@@ -923,6 +923,89 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
     }
   });
 
+  // ==================== CONCILIAÇÃO DE ACERTOS ====================
+  // Lista todos os profissionais pagos via acerto com filtro por data e lote
+  router.get('/stark/acerto/conciliacao/listar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const { data_inicio, data_fim, lote_id, status } = req.query;
+
+      let where = "l.tipo = 'acerto'";
+      const params = [];
+
+      // Filtro por status do lote (default: todos exceto aguardando)
+      if (status) {
+        params.push(status);
+        where += ' AND l.status = $' + params.length;
+      } else {
+        where += " AND l.status != 'aguardando'";
+      }
+
+      // Filtro por data
+      if (data_inicio) {
+        params.push(data_inicio);
+        where += ' AND l.created_at >= $' + params.length + '::date';
+      }
+      if (data_fim) {
+        params.push(data_fim);
+        where += ' AND l.created_at < ($' + params.length + "::date + interval '1 day')";
+      }
+
+      // Filtro por lote específico
+      if (lote_id) {
+        params.push(lote_id);
+        where += ' AND l.id = $' + params.length;
+      }
+
+      const result = await pool.query(`
+        SELECT 
+          i.id, i.lote_id, i.cod_prof, i.nome_prof, i.pix_key, i.cpf,
+          i.valor, i.status as item_status, i.stark_transfer_id, i.erro,
+          i.created_at as item_criado_em, i.atualizado_em,
+          l.status as lote_status, l.created_at as lote_criado_em,
+          l.finalizado_em, l.executado_por_nome, l.valor_total as lote_valor_total
+        FROM stark_lote_itens i
+        JOIN stark_lotes l ON l.id = i.lote_id
+        WHERE ${where}
+        ORDER BY l.created_at DESC, i.valor DESC
+      `, params);
+
+      // Estatísticas
+      const itens = result.rows;
+      const totalPagos = itens.filter(function(i) { return i.item_status === 'pago'; }).length;
+      const totalProcessando = itens.filter(function(i) { return i.item_status === 'processando'; }).length;
+      const totalRejeitados = itens.filter(function(i) { return i.item_status === 'rejeitado' || i.item_status === 'erro'; }).length;
+      const valorTotalPago = itens.filter(function(i) { return i.item_status === 'pago'; }).reduce(function(a, i) { return a + parseFloat(i.valor || 0); }, 0);
+      const valorTotalProcessando = itens.filter(function(i) { return i.item_status === 'processando'; }).reduce(function(a, i) { return a + parseFloat(i.valor || 0); }, 0);
+      const valorTotal = itens.reduce(function(a, i) { return a + parseFloat(i.valor || 0); }, 0);
+
+      // Listar lotes distintos para filtro
+      const lotesDistintos = await pool.query(`
+        SELECT id, quantidade, valor_total, status, created_at, executado_por_nome
+        FROM stark_lotes
+        WHERE tipo = 'acerto' AND status != 'aguardando'
+        ORDER BY created_at DESC
+        LIMIT 50
+      `);
+
+      res.json({
+        itens: itens,
+        total: itens.length,
+        estatisticas: {
+          pagos: totalPagos,
+          processando: totalProcessando,
+          rejeitados: totalRejeitados,
+          valor_pago: Math.round(valorTotalPago * 100) / 100,
+          valor_processando: Math.round(valorTotalProcessando * 100) / 100,
+          valor_total: Math.round(valorTotal * 100) / 100
+        },
+        lotes: lotesDistintos.rows
+      });
+    } catch (error) {
+      console.error('❌ [Acerto] Erro conciliação:', error.message);
+      res.status(500).json({ error: 'Erro ao listar conciliação de acertos' });
+    }
+  });
+
   return router;
 }
 
