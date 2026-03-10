@@ -85,6 +85,21 @@ async function initStarkTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_stark_lote_itens_transfer ON stark_lote_itens(stark_transfer_id)`).catch(() => {});
 
   console.log('✅ [Stark Bank] Índices verificados');
+
+  // ==================== MIGRATIONS ACERTO PROFISSIONAL ====================
+
+  // Coluna tipo no lote (saque ou acerto)
+  await pool.query(`ALTER TABLE stark_lotes ADD COLUMN IF NOT EXISTS tipo VARCHAR(30) DEFAULT 'saque'`).catch(() => {});
+
+  // Colunas extras em stark_lote_itens para acerto (sem withdrawal_id)
+  await pool.query(`ALTER TABLE stark_lote_itens ALTER COLUMN withdrawal_id DROP NOT NULL`).catch(() => {});
+  await pool.query(`ALTER TABLE stark_lote_itens ADD COLUMN IF NOT EXISTS cod_prof VARCHAR(50)`).catch(() => {});
+  await pool.query(`ALTER TABLE stark_lote_itens ADD COLUMN IF NOT EXISTS nome_prof VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE stark_lote_itens ADD COLUMN IF NOT EXISTS pix_key VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE stark_lote_itens ADD COLUMN IF NOT EXISTS cpf VARCHAR(20)`).catch(() => {});
+
+  console.log('✅ [Stark Bank] Colunas de acerto profissional verificadas');
+
   console.log('🏦 [Stark Bank] Migrations concluídas');
 }
 
