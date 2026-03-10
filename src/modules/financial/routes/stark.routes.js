@@ -779,11 +779,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       // Criar invoice — sandbox paga automaticamente em ~10s
       const invoices = await starkbank.invoice.create([{
         amount: valor,
-        name: 'Carga Sandbox - Central Tutts',
+        name: 'Carga Sandbox Tutts',
         taxId: '20.018.183/0001-80',
-        due: new Date(Date.now() + 86400000).toISOString(),
-        descriptions: [{ key: 'Tipo', value: 'Carga de saldo sandbox' }],
-        tags: ['sandbox', 'carga-saldo', 'tutts']
+        descriptions: [{ key: 'Tipo', value: 'Carga sandbox' }],
+        tags: ['sandbox', 'carga-saldo']
       }]);
 
       const invoice = invoices[0];
