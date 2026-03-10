@@ -105,11 +105,67 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     }
   });
 
+  // ==================== MARCAR SAQUES PARA LOTE (chamado pela aba Solicitações) ====================
+  router.post('/stark/lote/marcar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const { saque_ids } = req.body;
+
+      if (!saque_ids || !Array.isArray(saque_ids) || saque_ids.length === 0) {
+        return res.status(400).json({ error: 'Nenhum saque selecionado' });
+      }
+
+      // Marcar os saques como 'em_lote' — só os que são aprovados e ainda não foram marcados
+      const result = await pool.query(`
+        UPDATE withdrawal_requests 
+        SET stark_status = 'em_lote', updated_at = NOW()
+        WHERE id = ANY($1)
+          AND status IN ('aprovado', 'aprovado_gratuidade')
+          AND (stark_status IS NULL OR stark_status = 'erro')
+        RETURNING id
+      `, [saque_ids]);
+
+      const marcados = result.rows.length;
+
+      console.log('🏦 [Stark Bank] ' + marcados + ' saques marcados para lote por ' + (req.user.nome || req.user.username));
+
+      await registrarAuditoria(req, 'STARK_LOTE_MARCADO', AUDIT_CATEGORIES.FINANCIAL, 'withdrawal_requests', null, {
+        saque_ids: saque_ids,
+        marcados: marcados,
+        solicitados: saque_ids.length
+      });
+
+      res.json({
+        success: true,
+        marcados: marcados,
+        mensagem: marcados + ' saques marcados para pagamento'
+      });
+
+    } catch (error) {
+      console.error('❌ [Stark Bank] Erro ao marcar lote:', error.message);
+      res.status(500).json({ error: 'Erro ao marcar saques para lote' });
+    }
+  });
+
   // ==================== LISTAR SAQUES AGUARDANDO PAGAMENTO ====================
+  // Mostra apenas saques que foram explicitamente marcados como 'em_lote' pelo admin
   router.get('/stark/lote/pendente', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      // Buscar saques aprovados que ainda não foram pagos via Stark
-      // Status válidos: aprovado, aprovado_gratuidade — que NÃO têm stark_status ou têm stark_status = 'erro'
+      const { data_inicio, data_fim } = req.query;
+
+      let whereExtra = '';
+      const params = [];
+
+      if (data_inicio) {
+        params.push(data_inicio);
+        whereExtra += ' AND w.approved_at >= $' + params.length + '::date';
+      }
+      if (data_fim) {
+        params.push(data_fim);
+        whereExtra += ' AND w.approved_at < ($' + params.length + '::date + interval \'1 day\')';
+      }
+
+      // Buscar APENAS saques marcados como 'em_lote' (marcados via /stark/lote/marcar)
+      // OU saques com stark_status = 'erro' (para retry)
       const result = await pool.query(`
         SELECT 
           w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, 
@@ -120,9 +176,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         FROM withdrawal_requests w
         LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
         WHERE w.status IN ('aprovado', 'aprovado_gratuidade')
-          AND (w.stark_status IS NULL OR w.stark_status = 'erro')
+          AND w.stark_status IN ('em_lote', 'erro')
+        ${whereExtra}
         ORDER BY w.approved_at ASC
-      `);
+      `, params);
 
       const saques = result.rows;
       const valorTotal = saques.reduce((acc, s) => acc + parseFloat(s.final_amount || 0), 0);
@@ -159,18 +216,18 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
           WHERE w.id = ANY($1)
             AND w.status IN ('aprovado', 'aprovado_gratuidade')
-            AND (w.stark_status IS NULL OR w.stark_status = 'erro')
+            AND w.stark_status IN ('em_lote', 'erro')
           FOR UPDATE OF w
         `;
         paramsPendentes = [saque_ids];
       } else {
-        // Pagamento de todos os pendentes
+        // Pagamento de todos os marcados em lote
         queryPendentes = `
           SELECT w.*, ufd.pix_tipo
           FROM withdrawal_requests w
           LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
           WHERE w.status IN ('aprovado', 'aprovado_gratuidade')
-            AND (w.stark_status IS NULL OR w.stark_status = 'erro')
+            AND w.stark_status IN ('em_lote', 'erro')
           FOR UPDATE OF w
         `;
         paramsPendentes = [];
