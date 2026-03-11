@@ -364,33 +364,55 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       const loteId = loteResult.rows[0].id;
 
-      // 5. Consultar DICT para cada chave Pix e montar transfers com dados bancários reais
-      // A Stark Bank Transfer exige dados bancários (bankCode, branchCode, accountNumber)
-      // Para Pix via chave, precisamos primeiro resolver a chave no DICT
-      const transfers = [];
-      const errosDICT = [];
+      // 5. Consultar DICT e montar transfers
+      // Cada saque é processado individualmente — se um falhar no DICT, marca erro mas continua os outros
+      const transfersValidas = []; // { transfer, saque }
+      const saquesRejeitados = []; // saques que falharam na validação/DICT
 
       for (const saque of saques) {
-        const pixKey = (saque.pix_key || '').trim();
+        const pixKeyRaw = (saque.pix_key || '').trim();
         const cpf = (saque.cpf || '').replace(/\D/g, '');
         const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+        const pixTipo = (saque.pix_tipo || '').toLowerCase();
 
-        // Normalizar chave Pix para consulta DICT
-        let chaveDict = pixKey;
-        // CPF: só dígitos
-        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/[^\d]/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
-          chaveDict = pixKey.replace(/\D/g, '');
-        }
-        // Telefone: garantir +55
-        if (/^\d{10,11}$/.test(pixKey.replace(/\D/g, '')) && !pixKey.startsWith('+')) {
-          chaveDict = '+55' + pixKey.replace(/\D/g, '');
-        }
+        // ── Normalizar chave Pix para formato DICT ──
+        let chaveDict = pixKeyRaw;
 
+        // Detectar tipo da chave e normalizar
+        const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+
+        if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
+          // CPF: só dígitos, sem formatação
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'cnpj' || (!pixTipo && pixSoDigitos.length === 14)) {
+          // CNPJ: só dígitos
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'telefone' || pixTipo === 'phone' || pixKeyRaw.startsWith('+55')) {
+          // Telefone: garantir formato +55XXXXXXXXXXX
+          let tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) {
+            chaveDict = '+' + tel;
+          } else if (tel.length === 10 || tel.length === 11) {
+            chaveDict = '+55' + tel;
+          } else {
+            chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+          }
+        } else if (pixTipo === 'email' || pixKeyRaw.includes('@')) {
+          // Email: lowercase, trim
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+          // Chave aleatória (EVP/UUID)
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        }
+        // Se nenhum padrão bateu, usa como está
+
+        console.log(`📋 [Stark Bank] Saque #${saque.id} (${saque.user_name}): pixRaw="${pixKeyRaw}", pixTipo="${pixTipo}", chaveDict="${chaveDict}", cpf="${cpfFormatado}"`);
+
+        // ── Consultar DICT ──
         try {
-          // Consultar DICT para obter dados bancários do destinatário
           const dictKey = await starkbank.dictKey.get(chaveDict);
 
-          console.log(`🔍 [Stark Bank] DICT saque #${saque.id}: chave="${chaveDict}" → banco=${dictKey.ispb}, agencia=${dictKey.branchCode}, conta=${dictKey.accountNumber}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
+          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
 
           const transferData = {
             amount: Math.round(parseFloat(saque.final_amount) * 100),
@@ -404,42 +426,52 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
             tags: [`lote:${loteId}`, `saque:${saque.id}`]
           };
 
-          transfers.push(new starkbank.Transfer(transferData));
+          transfersValidas.push({ transfer: new starkbank.Transfer(transferData), saque });
 
         } catch (errDict) {
-          console.warn(`⚠️ [Stark Bank] DICT falhou para saque #${saque.id} (chave="${chaveDict}"): ${errDict.message}`);
-          // Fallback: tentar com bankCode Pix genérico (pode funcionar para chaves simples)
-          const transferData = {
-            amount: Math.round(parseFloat(saque.final_amount) * 100),
-            name: saque.user_name,
-            taxId: cpfFormatado,
-            bankCode: '20018183',
-            branchCode: '0001',
-            accountNumber: chaveDict,
-            accountType: 'payment',
-            externalId: `tutts-saque-${saque.id}`,
-            tags: [`lote:${loteId}`, `saque:${saque.id}`, 'dict-fallback']
-          };
+          const erroMsg = errDict.errors ? JSON.stringify(errDict.errors) : errDict.message;
+          console.warn(`⚠️ [Stark Bank] DICT FALHOU saque #${saque.id} (chave="${chaveDict}"): ${erroMsg}`);
 
-          console.log(`📋 [Stark Bank] Transfer saque #${saque.id} (fallback sem DICT): amount=${transferData.amount}, taxId="${cpfFormatado}", accountNumber="${chaveDict}"`);
+          // Marcar este saque como erro individual (não trava o lote inteiro)
+          await client.query(`
+            UPDATE withdrawal_requests
+            SET stark_status = 'erro', stark_erro = $1, updated_at = NOW()
+            WHERE id = $2
+          `, [`Chave Pix inválida ou não encontrada: ${erroMsg}`, saque.id]);
 
-          transfers.push(new starkbank.Transfer(transferData));
+          saquesRejeitados.push({
+            id: saque.id,
+            nome: saque.user_name,
+            chave: chaveDict,
+            erro: erroMsg
+          });
         }
       }
 
-      if (transfers.length === 0) {
+      // Se nenhuma transfer válida sobrou
+      if (transfersValidas.length === 0) {
+        const erroLote = 'Todas as chaves Pix falharam na validação DICT';
         await client.query(`
-          UPDATE stark_lotes SET status = 'erro', erro = 'Nenhuma transfer válida montada', finalizado_em = NOW() WHERE id = $1
-        `, [loteId]);
+          UPDATE stark_lotes SET status = 'erro', erro = $1, finalizado_em = NOW() WHERE id = $2
+        `, [erroLote, loteId]);
         await client.query('COMMIT');
         releaseClient();
-        return res.status(400).json({ error: 'Nenhuma transfer válida para enviar', erros_dict: errosDICT });
+        return res.status(400).json({
+          error: erroLote,
+          rejeitados: saquesRejeitados
+        });
       }
+
+      // Atualizar quantidade real do lote (pode ter diminuído por rejeições)
+      const valorTotalReal = transfersValidas.reduce((a, t) => a + parseFloat(t.saque.final_amount || 0), 0);
+      await client.query(`
+        UPDATE stark_lotes SET quantidade = $1, valor_total = $2 WHERE id = $3
+      `, [transfersValidas.length, valorTotalReal, loteId]);
 
       // 6. Disparar transfers na Stark Bank
       let transfersCriadas;
       try {
-        transfersCriadas = await starkbank.transfer.create(transfers);
+        transfersCriadas = await starkbank.transfer.create(transfersValidas.map(t => t.transfer));
       } catch (errStark) {
         const erroDetalhado = errStark.errors
           ? JSON.stringify(errStark.errors)
@@ -454,21 +486,22 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         console.error('❌ [Stark Bank] Erro ao criar transfers:', erroDetalhado);
         if (errStark.errors) {
           errStark.errors.forEach((e, i) => {
-            const saque = saques[i];
-            console.error(`  ❌ Transfer[${i}] saque #${saque ? saque.id : '?'} (${saque ? saque.user_name : '?'}):`, JSON.stringify(e));
+            const item = transfersValidas[i];
+            console.error(`  ❌ Transfer[${i}] saque #${item ? item.saque.id : '?'} (${item ? item.saque.user_name : '?'}):`, JSON.stringify(e));
           });
         }
 
         return res.status(500).json({
           error: 'Erro ao disparar pagamentos na Stark Bank',
           details: erroDetalhado,
-          lote_id: loteId
+          lote_id: loteId,
+          rejeitados_dict: saquesRejeitados
         });
       }
 
       // 7. Atualizar cada saque com o ID da transfer
-      for (let i = 0; i < saques.length; i++) {
-        const saque = saques[i];
+      for (let i = 0; i < transfersValidas.length; i++) {
+        const { saque } = transfersValidas[i];
         const transfer = transfersCriadas[i];
 
         await client.query(`
@@ -497,26 +530,26 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       // Auditoria (fora da transação)
       await registrarAuditoria(req, 'STARK_LOTE_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', loteId, {
-        quantidade: saques.length,
-        valor_total: valorTotal,
+        quantidade: transfersValidas.length,
+        valor_total: valorTotalReal,
         saldo_antes: saldoDisponivel,
-        saque_ids: saques.map(s => s.id)
+        saque_ids: transfersValidas.map(t => t.saque.id),
+        rejeitados_dict: saquesRejeitados.length
       });
 
-      console.log(`✅ [Stark Bank] Lote #${loteId} executado: ${saques.length} pagamentos, R$ ${valorTotal.toFixed(2)}`);
+      console.log(`✅ [Stark Bank] Lote #${loteId} executado: ${transfersValidas.length} pagamentos (${saquesRejeitados.length} rejeitados), R$ ${valorTotalReal.toFixed(2)}`);
 
       res.json({
         success: true,
         lote_id: loteId,
-        quantidade: saques.length,
-        valor_total: valorTotal,
-        // Campos que o frontend espera para o modal de resultado
-        enviados: saques.length,
-        rejeitados: 0,
-        valor_enviado: valorTotal,
-        detalhes_rejeitados: [],
+        quantidade: transfersValidas.length,
+        valor_total: valorTotalReal,
+        enviados: transfersValidas.length,
+        rejeitados: saquesRejeitados.length,
+        valor_enviado: valorTotalReal,
+        detalhes_rejeitados: saquesRejeitados,
         saldo_antes: saldoDisponivel,
-        saldo_apos_estimado: Math.round((saldoDisponivel - valorTotal) * 100) / 100,
+        saldo_apos_estimado: Math.round((saldoDisponivel - valorTotalReal) * 100) / 100,
         transfers: transfersCriadas.map(t => ({ id: t.id, status: t.status, amount: t.amount / 100 }))
       });
 
