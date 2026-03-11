@@ -553,7 +553,12 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
       let starkbank;
       try {
-        starkbank = require('starkbank');
+        starkbank = global.__starkbank || require('starkbank');
+        if (!starkbank.getUser || !starkbank.getUser()) {
+          // SDK carregado mas sem projeto configurado — tentar via global
+          if (global.__starkbank) starkbank = global.__starkbank;
+          else return res.status(503).json({ error: 'SDK Stark Bank não configurado. Acesse a aba Stark Bank primeiro ou verifique as variáveis de ambiente.' });
+        }
       } catch (e) {
         return res.status(503).json({ error: 'SDK Stark Bank não disponível' });
       }
@@ -755,7 +760,14 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       // Verificar saldo Stark Bank
       let starkbank;
       try {
-        starkbank = require('starkbank');
+        starkbank = global.__starkbank || require('starkbank');
+        if (!starkbank.getUser || !starkbank.getUser()) {
+          if (global.__starkbank) starkbank = global.__starkbank;
+          else {
+            await client.query('ROLLBACK');
+            return res.status(503).json({ error: 'SDK Stark Bank não configurado. Verifique as variáveis de ambiente.' });
+          }
+        }
       } catch (e) {
         await client.query('ROLLBACK');
         return res.status(503).json({ error: 'SDK Stark Bank não disponível' });
