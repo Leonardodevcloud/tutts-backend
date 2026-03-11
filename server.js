@@ -80,7 +80,16 @@ app.use('/api/', apiLimiter);
 app.use(requestLogger);
 
 // Body parsing
-app.use(express.json({ limit: '50mb' }));
+// verify: preserva o rawBody para validação de assinatura de webhooks (Stark Bank)
+app.use(express.json({
+  limit: '50mb',
+  verify: (req, res, buf) => {
+    // Preservar raw body apenas para rotas de webhook (performance)
+    if (req.originalUrl && req.originalUrl.includes('/stark/webhook')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  }
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
