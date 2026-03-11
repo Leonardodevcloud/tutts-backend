@@ -809,9 +809,19 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       for (const item of itens.rows) {
         const cpf = (item.cpf || '').replace(/\D/g, '');
         const pixKey = (item.pix_key || '').trim();
-        let accountNumber = pixKey.replace(/\D/g, '');
-        if (!accountNumber || accountNumber.length === 0) accountNumber = cpf;
-        if (accountNumber.length > 20) accountNumber = accountNumber.substring(0, 20);
+        // accountNumber: para Pix via bankCode 20018183, usar a chave Pix
+        // NÃO remover tudo que não é dígito — chaves Pix podem ser email, UUID, telefone
+        let accountNumber = pixKey;
+        // Se parece ser CPF formatado, limpar
+        if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(pixKey)) {
+          accountNumber = pixKey.replace(/\D/g, '');
+        }
+        // Se parece ser telefone, limpar espaços
+        if (pixKey.startsWith('+')) {
+          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+        }
+        // Fallback: se ficou vazio, usar CPF
+        if (!accountNumber || accountNumber.trim().length === 0) accountNumber = cpf;
 
         if (!cpf || cpf.length < 11) {
           await client.query(`
