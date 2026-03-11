@@ -832,6 +832,15 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   // ==================== SYNC MANUAL — CONSULTAR STATUS NA STARK BANK ====================
   router.post('/stark/sync', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     try {
+      // Limpar transfers antigas do sandbox que nunca vão resolver
+      await pool.query(`
+        UPDATE withdrawal_requests 
+        SET stark_status = 'erro', stark_erro = 'Transfer de ambiente anterior', updated_at = NOW()
+        WHERE stark_status = 'processando'
+          AND stark_transfer_id IS NOT NULL
+          AND stark_enviado_em < '2026-03-11T14:00:00Z'
+      `);
+
       const pendentes = await pool.query(`
         SELECT id, stark_transfer_id, user_name
         FROM withdrawal_requests
@@ -942,16 +951,16 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     try {
       await client.query('BEGIN');
 
-      // Atualizar o saque
+      // Atualizar o saque — cast explícito para evitar "inconsistent types deduced"
       const updateResult = await client.query(`
         UPDATE withdrawal_requests 
-        SET stark_status = $1,
-            stark_erro = $2,
-            stark_pago_em = CASE WHEN $1 = 'pago' THEN NOW() ELSE stark_pago_em END,
+        SET stark_status = $1::text,
+            stark_erro = $2::text,
+            stark_pago_em = CASE WHEN $1::text = 'pago' THEN NOW() ELSE stark_pago_em END,
             updated_at = NOW()
-        WHERE stark_transfer_id = $3
+        WHERE stark_transfer_id = $3::text
         RETURNING *
-      `, [novoStatus, erro, starkTransferId]);
+      `, [novoStatus, erro, String(starkTransferId)]); 
 
       if (updateResult.rows.length === 0) {
         console.warn(`⚠️ [Stark Webhook] Saque não encontrado para transfer ${starkTransferId}`);
@@ -965,9 +974,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       // Atualizar o item do lote
       await client.query(`
         UPDATE stark_lote_itens 
-        SET status = $1, erro = $2, atualizado_em = NOW()
-        WHERE stark_transfer_id = $3
-      `, [novoStatus, erro, starkTransferId]);
+        SET status = $1::text, erro = $2::text, atualizado_em = NOW()
+        WHERE stark_transfer_id = $3::text
+      `, [novoStatus, erro, String(starkTransferId)]);
 
       // Verificar se todos os itens do lote já foram processados
       if (saque.stark_lote_id) {
