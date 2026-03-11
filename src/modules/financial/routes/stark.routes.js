@@ -333,21 +333,37 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       // 4. Montar transfers para Stark Bank
       const transfers = saques.map(saque => {
-        // Determinar tipo de chave Pix para taxId
-        const pixKey = saque.pix_key;
+        const pixKey = (saque.pix_key || '').trim();
         const cpf = (saque.cpf || '').replace(/\D/g, '');
 
-        return new starkbank.Transfer({
+        // accountNumber precisa ser limpo — sem caracteres especiais além de dígitos e hífen
+        // Para Pix via bankCode 20018183, o accountNumber recebe a chave Pix
+        let accountNumber = pixKey;
+
+        // Se a chave Pix é CPF, limpar formatação
+        if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(pixKey)) {
+          accountNumber = pixKey.replace(/\D/g, '');
+        }
+        // Se é telefone, garantir formato limpo
+        if (pixKey.startsWith('+')) {
+          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+        }
+
+        const transferData = {
           amount: Math.round(parseFloat(saque.final_amount) * 100), // Em centavos
           name: saque.user_name,
           taxId: cpf, // CPF do destinatário
           bankCode: '20018183', // Código do SPI (Pix)
           branchCode: '0001',
-          accountNumber: pixKey, // Chave Pix como conta
-          accountType: 'payment', // Tipo pagamento (Pix)
-          externalId: `tutts-saque-${saque.id}`, // Idempotência!
+          accountNumber: accountNumber,
+          accountType: 'checking', // Produção exige checking ou salary (não 'payment')
+          externalId: `tutts-saque-${saque.id}`, // Idempotência
           tags: [`lote:${loteId}`, `saque:${saque.id}`]
-        });
+        };
+
+        console.log(`📋 [Stark Bank] Transfer saque #${saque.id}: amount=${transferData.amount}, name=${transferData.name}, taxId=${cpf ? cpf.substring(0,3) + '***' : 'VAZIO'}, accountNumber=${accountNumber ? accountNumber.substring(0, 5) + '***' : 'VAZIO'}`);
+
+        return new starkbank.Transfer(transferData);
       });
 
       // 5. Disparar transfers na Stark Bank
@@ -355,17 +371,26 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       try {
         transfersCriadas = await starkbank.transfer.create(transfers);
       } catch (errStark) {
+        // Log detalhado do erro da Stark Bank (inclui errors array com detalhes por transfer)
+        const erroDetalhado = errStark.errors
+          ? JSON.stringify(errStark.errors)
+          : errStark.message;
+
         // Marcar lote como erro
         await client.query(`
           UPDATE stark_lotes SET status = 'erro', erro = $1, finalizado_em = NOW() WHERE id = $2
-        `, [errStark.message, loteId]);
+        `, [erroDetalhado, loteId]);
         await client.query('COMMIT');
         client.release();
 
-        console.error('❌ [Stark Bank] Erro ao criar transfers:', errStark.message);
+        console.error('❌ [Stark Bank] Erro ao criar transfers:', erroDetalhado);
+        if (errStark.errors) {
+          errStark.errors.forEach((e, i) => console.error(`  ❌ Transfer[${i}]:`, JSON.stringify(e)));
+        }
+
         return res.status(500).json({
           error: 'Erro ao disparar pagamentos na Stark Bank',
-          details: errStark.message,
+          details: erroDetalhado,
           lote_id: loteId
         });
       }
