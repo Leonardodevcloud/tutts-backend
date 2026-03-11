@@ -50,6 +50,11 @@ function sanitizeValue(value, depth = 0) {
  */
 function sanitizeInput(req, res, next) {
   try {
+    // Não sanitizar webhooks — o body precisa ficar intacto para validação de assinatura
+    if (req.path && (req.path.includes('/webhook') || req.path.includes('/stark/webhook'))) {
+      return next();
+    }
+
     if (req.body && typeof req.body === 'object') {
       req.body = sanitizeValue(req.body);
     }
