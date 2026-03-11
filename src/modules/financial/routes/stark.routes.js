@@ -25,6 +25,45 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   let starkIniciado = false;
   let starkErroInit = null;
 
+  /**
+   * Formata a chave privada PEM que vem de variável de ambiente.
+   * Trata os cenários comuns:
+   *  1. \\n literais (Railway/Docker) → \n reais
+   *  2. Espaços no lugar de quebras (copiar/colar) → \n reais
+   *  3. Já vem formatada corretamente
+   */
+  function formatarPrivateKey(raw) {
+    if (!raw) return raw;
+
+    let key = raw;
+
+    // Se contém \\n literal (string escapada), converter para newline real
+    if (key.includes('\\n')) {
+      key = key.replace(/\\n/g, '\n');
+    }
+
+    // Se não tem newlines mas tem os marcadores PEM em uma linha só, reformatar
+    if (!key.includes('\n') && key.includes('-----BEGIN')) {
+      key = key
+        .replace('-----BEGIN EC PRIVATE KEY-----', '-----BEGIN EC PRIVATE KEY-----\n')
+        .replace('-----END EC PRIVATE KEY-----', '\n-----END EC PRIVATE KEY-----')
+        .replace('-----BEGIN EC PARAMETERS-----', '\n-----BEGIN EC PARAMETERS-----\n')
+        .replace('-----END EC PARAMETERS-----', '\n-----END EC PARAMETERS-----\n');
+      // Também tratar RSA caso mude no futuro
+      key = key
+        .replace('-----BEGIN RSA PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----\n')
+        .replace('-----END RSA PRIVATE KEY-----', '\n-----END RSA PRIVATE KEY-----');
+    }
+
+    // Remover espaços em branco no início/fim de cada linha
+    key = key.split('\n').map(l => l.trim()).join('\n');
+
+    // Remover linhas vazias extras
+    key = key.replace(/\n{3,}/g, '\n\n');
+
+    return key;
+  }
+
   function inicializarStark() {
     if (starkIniciado) return !!starkbank;
 
@@ -42,8 +81,12 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     try {
       starkbank = require('starkbank');
 
-      // A chave privada vem como string com \n escapados — converter para quebras reais
-      const privateKeyFormatada = privateKey.replace(/\\n/g, '\n');
+      const privateKeyFormatada = formatarPrivateKey(privateKey);
+
+      // Diagnóstico: logar se a chave tem formato PEM válido
+      if (!privateKeyFormatada.includes('-----BEGIN')) {
+        console.warn('⚠️ [Stark Bank] STARK_PRIVATE_KEY não contém header PEM (-----BEGIN ...). Verifique a variável de ambiente.');
+      }
 
       const project = new starkbank.Project({
         environment: environment,
@@ -53,11 +96,22 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       starkbank.setUser(project);
       starkIniciado = true;
-      console.log(`✅ [Stark Bank] Inicializado com sucesso (ambiente: ${environment})`);
+
+      // Exportar globalmente para acerto.routes.js e outros módulos reutilizarem
+      global.__starkbank = starkbank;
+
+      console.log(`✅ [Stark Bank] Inicializado com sucesso (ambiente: ${environment}, project: ${projectId})`);
       return true;
     } catch (err) {
       starkErroInit = err.message;
       console.error(`❌ [Stark Bank] Erro ao inicializar:`, err.message);
+
+      // Diagnóstico extra para erros comuns
+      if (err.message.includes('privateKey')) {
+        console.error('💡 [Stark Bank] Dica: no Railway, coloque a chave PEM inteira em uma linha só com \\n no lugar das quebras de linha.');
+        console.error('💡 [Stark Bank] Exemplo: -----BEGIN EC PRIVATE KEY-----\\nMHQ...base64...\\n-----END EC PRIVATE KEY-----');
+      }
+
       starkIniciado = true;
       return false;
     }
@@ -569,9 +623,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   // ==================== WEBHOOK STARK BANK (PÚBLICO - sem JWT) ====================
   router.post('/stark/webhook', async (req, res) => {
     try {
-      // Validar assinatura do webhook da Stark Bank
       const signature = req.headers['digital-signature'];
-      const content = JSON.stringify(req.body);
+      // Usar rawBody se disponível (preservado pelo express.json verify), senão fallback para JSON.stringify
+      const content = req.rawBody || JSON.stringify(req.body);
+      const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
 
       if (!starkbank) {
         inicializarStark();
@@ -579,11 +634,16 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (!starkbank) {
         console.error('❌ [Stark Webhook] SDK não inicializado');
-        return res.status(200).send('OK'); // Retorna 200 para não causar retry
+        return res.status(200).send('OK');
       }
 
-      // Validar assinatura (se disponível)
-      if (signature) {
+      // Em produção: assinatura é OBRIGATÓRIA
+      if (environment === 'production') {
+        if (!signature) {
+          console.warn('⚠️ [Stark Webhook] REJEITADO — request sem assinatura em produção');
+          return res.status(200).send('OK');
+        }
+
         try {
           const event = await starkbank.event.parse({
             content: content,
@@ -593,21 +653,36 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           await processarEventoStark(event);
         } catch (errValidacao) {
           console.warn('⚠️ [Stark Webhook] Erro validação assinatura:', errValidacao.message);
-          // Mesmo com erro de assinatura, retorna 200 para não causar retry infinito
           return res.status(200).send('OK');
         }
       } else {
-        // Sem assinatura — processar em modo permissivo (sandbox)
-        const body = req.body;
-        if (body.event) {
-          await processarEventoStark(body.event);
+        // Sandbox: aceitar com ou sem assinatura
+        if (signature) {
+          try {
+            const event = await starkbank.event.parse({
+              content: content,
+              signature: signature
+            });
+            await processarEventoStark(event);
+          } catch (errValidacao) {
+            console.warn('⚠️ [Stark Webhook] Erro validação assinatura (sandbox):', errValidacao.message);
+            // Em sandbox, tentar processar mesmo sem assinatura válida
+            if (req.body && req.body.event) {
+              await processarEventoStark(req.body.event);
+            }
+          }
+        } else {
+          // Sem assinatura — modo permissivo sandbox
+          if (req.body && req.body.event) {
+            await processarEventoStark(req.body.event);
+          }
         }
       }
 
       res.status(200).send('OK');
     } catch (error) {
       console.error('❌ [Stark Webhook] Erro geral:', error.message);
-      res.status(200).send('OK'); // Sempre 200 para webhooks
+      res.status(200).send('OK');
     }
   });
 
@@ -724,6 +799,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       let sdkOk = false;
       let saldo = null;
+      let erroSaldo = null;
 
       if (configurado && inicializarStark() && starkbank) {
         try {
@@ -731,8 +807,19 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           sdkOk = true;
         } catch (e) {
           sdkOk = false;
+          erroSaldo = e.message;
         }
       }
+
+      // Diagnóstico de configuração
+      const diagnostico = {
+        project_id_presente: !!process.env.STARK_PROJECT_ID,
+        private_key_presente: !!process.env.STARK_PRIVATE_KEY,
+        private_key_tem_header_pem: !!(process.env.STARK_PRIVATE_KEY && (process.env.STARK_PRIVATE_KEY.includes('-----BEGIN') || process.env.STARK_PRIVATE_KEY.includes('-----BEGIN'))),
+        private_key_tamanho: process.env.STARK_PRIVATE_KEY ? process.env.STARK_PRIVATE_KEY.length : 0,
+        sdk_carregado: !!starkbank,
+        inicializado: starkIniciado,
+      };
 
       // Estatísticas
       const stats = await pool.query(`
@@ -751,11 +838,13 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         ambiente,
         saldo,
         erro_init: starkErroInit,
+        erro_saldo: erroSaldo,
+        diagnostico,
         estatisticas: stats.rows[0]
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
-      res.status(500).json({ error: 'Erro ao verificar status' });
+      res.status(500).json({ error: 'Erro ao verificar status', details: error.message });
     }
   });
 
