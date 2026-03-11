@@ -510,6 +510,11 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         lote_id: loteId,
         quantidade: saques.length,
         valor_total: valorTotal,
+        // Campos que o frontend espera para o modal de resultado
+        enviados: saques.length,
+        rejeitados: 0,
+        valor_enviado: valorTotal,
+        detalhes_rejeitados: [],
         saldo_antes: saldoDisponivel,
         saldo_apos_estimado: Math.round((saldoDisponivel - valorTotal) * 100) / 100,
         transfers: transfersCriadas.map(t => ({ id: t.id, status: t.status, amount: t.amount / 100 }))
@@ -730,23 +735,20 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   router.post('/stark/webhook', async (req, res) => {
     try {
       const signature = req.headers['digital-signature'];
-      // Usar rawBody se disponível (preservado pelo express.json verify), senão fallback para JSON.stringify
       const content = req.rawBody || JSON.stringify(req.body);
       const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
 
-      if (!starkbank) {
-        inicializarStark();
-      }
+      console.log(`📨 [Stark Webhook] Recebido! signature=${signature ? 'SIM(' + signature.substring(0, 20) + '...)' : 'NÃO'}, bodySize=${content.length}, rawBody=${req.rawBody ? 'SIM' : 'NÃO'}`);
 
+      if (!starkbank) { inicializarStark(); }
       if (!starkbank) {
         console.error('❌ [Stark Webhook] SDK não inicializado');
         return res.status(200).send('OK');
       }
 
-      // Em produção: assinatura é OBRIGATÓRIA
       if (environment === 'production') {
         if (!signature) {
-          console.warn('⚠️ [Stark Webhook] REJEITADO — request sem assinatura em produção');
+          console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital');
           return res.status(200).send('OK');
         }
 
@@ -755,33 +757,35 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
             content: content,
             signature: signature
           });
-
+          console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
           await processarEventoStark(event);
         } catch (errValidacao) {
-          console.warn('⚠️ [Stark Webhook] Erro validação assinatura:', errValidacao.message);
+          console.warn('⚠️ [Stark Webhook] Assinatura inválida:', errValidacao.message);
+          console.warn('⚠️ [Stark Webhook] rawBody presente:', !!req.rawBody, '| content length:', content.length);
+
+          // FALLBACK: processar pelo body parseado para não perder eventos
+          try {
+            const body = req.body;
+            if (body && body.event) {
+              console.log('🔄 [Stark Webhook] Fallback: processando pelo body parseado...');
+              await processarEventoStark(body.event);
+            }
+          } catch (errFallback) {
+            console.error('❌ [Stark Webhook] Fallback falhou:', errFallback.message);
+          }
           return res.status(200).send('OK');
         }
       } else {
-        // Sandbox: aceitar com ou sem assinatura
+        // Sandbox
         if (signature) {
           try {
-            const event = await starkbank.event.parse({
-              content: content,
-              signature: signature
-            });
+            const event = await starkbank.event.parse({ content, signature });
             await processarEventoStark(event);
-          } catch (errValidacao) {
-            console.warn('⚠️ [Stark Webhook] Erro validação assinatura (sandbox):', errValidacao.message);
-            // Em sandbox, tentar processar mesmo sem assinatura válida
-            if (req.body && req.body.event) {
-              await processarEventoStark(req.body.event);
-            }
+          } catch (e) {
+            if (req.body && req.body.event) await processarEventoStark(req.body.event);
           }
-        } else {
-          // Sem assinatura — modo permissivo sandbox
-          if (req.body && req.body.event) {
-            await processarEventoStark(req.body.event);
-          }
+        } else if (req.body && req.body.event) {
+          await processarEventoStark(req.body.event);
         }
       }
 
@@ -789,6 +793,60 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       console.error('❌ [Stark Webhook] Erro geral:', error.message);
       res.status(200).send('OK');
+    }
+  });
+
+  // ==================== SYNC MANUAL — CONSULTAR STATUS NA STARK BANK ====================
+  // Fallback quando webhook falha: consulta diretamente a API e atualiza o banco
+  router.post('/stark/sync', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const pendentes = await pool.query(`
+        SELECT id, stark_transfer_id, user_name
+        FROM withdrawal_requests
+        WHERE stark_status = 'processando'
+          AND stark_transfer_id IS NOT NULL
+          AND stark_enviado_em < NOW() - INTERVAL '1 minute'
+        ORDER BY stark_enviado_em ASC
+        LIMIT 50
+      `);
+
+      if (pendentes.rows.length === 0) {
+        return res.json({ message: 'Nenhuma transfer pendente', atualizados: 0 });
+      }
+
+      console.log(`🔄 [Stark Sync] Verificando ${pendentes.rows.length} transfers pendentes...`);
+
+      let atualizados = 0;
+      const resultados = [];
+
+      for (const saque of pendentes.rows) {
+        try {
+          const transfer = await starkbank.transfer.get(saque.stark_transfer_id);
+          console.log(`🔄 [Stark Sync] Transfer ${saque.stark_transfer_id} (saque #${saque.id}): status=${transfer.status}`);
+
+          if (transfer.status === 'success') {
+            await atualizarStatusPagamento(saque.stark_transfer_id, 'pago', null);
+            atualizados++;
+            resultados.push({ id: saque.id, nome: saque.user_name, status: 'pago' });
+          } else if (transfer.status === 'failed' || transfer.status === 'canceled') {
+            const erro = transfer.errors?.[0]?.message || transfer.reason || `Status: ${transfer.status}`;
+            await atualizarStatusPagamento(saque.stark_transfer_id, 'erro', erro);
+            atualizados++;
+            resultados.push({ id: saque.id, nome: saque.user_name, status: 'erro', erro });
+          } else {
+            resultados.push({ id: saque.id, nome: saque.user_name, status: transfer.status });
+          }
+        } catch (errTransfer) {
+          console.error(`❌ [Stark Sync] Erro transfer ${saque.stark_transfer_id}:`, errTransfer.message);
+          resultados.push({ id: saque.id, nome: saque.user_name, status: 'erro_consulta', erro: errTransfer.message });
+        }
+      }
+
+      console.log(`✅ [Stark Sync] ${atualizados}/${pendentes.rows.length} atualizadas`);
+      res.json({ consultadas: pendentes.rows.length, atualizados, resultados });
+    } catch (error) {
+      console.error('❌ [Stark Sync] Erro:', error.message);
+      res.status(500).json({ error: 'Erro ao sincronizar', details: error.message });
     }
   });
 
