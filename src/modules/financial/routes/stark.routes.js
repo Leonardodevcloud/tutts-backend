@@ -253,9 +253,17 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   // ==================== EXECUTAR PAGAMENTO DO LOTE ====================
   router.post('/stark/lote/executar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     const client = await pool.connect();
+    let clientReleased = false;
+
+    const releaseClient = () => {
+      if (!clientReleased) {
+        clientReleased = true;
+        client.release();
+      }
+    };
 
     try {
-      const { saque_ids } = req.body; // Array opcional — se não enviado, paga todos os pendentes
+      const { saque_ids } = req.body;
 
       await client.query('BEGIN');
 
@@ -264,7 +272,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       let paramsPendentes;
 
       if (saque_ids && Array.isArray(saque_ids) && saque_ids.length > 0) {
-        // Pagamento parcial — IDs selecionados
         queryPendentes = `
           SELECT w.*, ufd.pix_tipo
           FROM withdrawal_requests w
@@ -276,7 +283,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         `;
         paramsPendentes = [saque_ids];
       } else {
-        // Pagamento de todos os marcados em lote
         queryPendentes = `
           SELECT w.*, ufd.pix_tipo
           FROM withdrawal_requests w
@@ -292,7 +298,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (saquesPendentes.rows.length === 0) {
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
         return res.status(400).json({ error: 'Nenhum saque elegível para pagamento' });
       }
 
@@ -305,13 +311,13 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         saldoDisponivel = await obterSaldoReais();
       } catch (errSaldo) {
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
         return res.status(500).json({ error: 'Não foi possível verificar saldo', details: errSaldo.message });
       }
 
       if (saldoDisponivel < valorTotal) {
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
         return res.status(400).json({
           error: 'Saldo insuficiente',
           saldo_disponivel: saldoDisponivel,
@@ -320,7 +326,34 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      // 3. Criar registro do lote
+      // 3. Validar dados ANTES de enviar para a Stark Bank
+      const errosValidacao = [];
+      for (const saque of saques) {
+        const cpf = (saque.cpf || '').replace(/\D/g, '');
+        const pixKey = (saque.pix_key || '').trim();
+
+        if (!cpf || cpf.length !== 11) {
+          errosValidacao.push(`Saque #${saque.id} (${saque.user_name}): CPF inválido — "${saque.cpf || 'vazio'}" (${cpf.length} dígitos, esperado 11)`);
+        }
+        if (!pixKey) {
+          errosValidacao.push(`Saque #${saque.id} (${saque.user_name}): Chave Pix vazia`);
+        }
+        if (parseFloat(saque.final_amount) <= 0) {
+          errosValidacao.push(`Saque #${saque.id} (${saque.user_name}): Valor inválido — R$ ${saque.final_amount}`);
+        }
+      }
+
+      if (errosValidacao.length > 0) {
+        await client.query('ROLLBACK');
+        releaseClient();
+        console.warn('⚠️ [Stark Bank] Validação falhou antes de enviar:', errosValidacao);
+        return res.status(400).json({
+          error: 'Dados inválidos em um ou mais saques',
+          detalhes: errosValidacao
+        });
+      }
+
+      // 4. Criar registro do lote
       const loteResult = await client.query(`
         INSERT INTO stark_lotes (
           quantidade, valor_total, saldo_antes, status, 
@@ -331,61 +364,63 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       const loteId = loteResult.rows[0].id;
 
-      // 4. Montar transfers para Stark Bank
+      // 5. Montar transfers para Stark Bank
       const transfers = saques.map(saque => {
         const pixKey = (saque.pix_key || '').trim();
         const cpf = (saque.cpf || '').replace(/\D/g, '');
 
-        // accountNumber precisa ser limpo — sem caracteres especiais além de dígitos e hífen
-        // Para Pix via bankCode 20018183, o accountNumber recebe a chave Pix
-        let accountNumber = pixKey;
+        // Formatar CPF com pontuação: XXX.XXX.XXX-XX (Stark Bank exige formato com pontuação)
+        const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
 
-        // Se a chave Pix é CPF, limpar formatação
-        if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(pixKey)) {
+        // accountNumber: usar a chave Pix limpa
+        let accountNumber = pixKey;
+        // Se chave Pix é CPF formatado, limpar para só dígitos
+        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/\D/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
           accountNumber = pixKey.replace(/\D/g, '');
         }
-        // Se é telefone, garantir formato limpo
+        // Se é telefone, limpar espaços/parênteses
         if (pixKey.startsWith('+')) {
           accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
         }
 
         const transferData = {
-          amount: Math.round(parseFloat(saque.final_amount) * 100), // Em centavos
+          amount: Math.round(parseFloat(saque.final_amount) * 100),
           name: saque.user_name,
-          taxId: cpf, // CPF do destinatário
-          bankCode: '20018183', // Código do SPI (Pix)
+          taxId: cpfFormatado,
+          bankCode: '20018183',
           branchCode: '0001',
           accountNumber: accountNumber,
-          accountType: 'checking', // Produção exige checking ou salary (não 'payment')
-          externalId: `tutts-saque-${saque.id}`, // Idempotência
+          accountType: 'checking',
+          externalId: `tutts-saque-${saque.id}`,
           tags: [`lote:${loteId}`, `saque:${saque.id}`]
         };
 
-        console.log(`📋 [Stark Bank] Transfer saque #${saque.id}: amount=${transferData.amount}, name=${transferData.name}, taxId=${cpf ? cpf.substring(0,3) + '***' : 'VAZIO'}, accountNumber=${accountNumber ? accountNumber.substring(0, 5) + '***' : 'VAZIO'}`);
+        console.log(`📋 [Stark Bank] Transfer saque #${saque.id}: amount=${transferData.amount}, name="${transferData.name}", taxId="${cpfFormatado}", pixKey="${accountNumber}", pixTipo="${saque.pix_tipo || 'desconhecido'}"`);
 
         return new starkbank.Transfer(transferData);
       });
 
-      // 5. Disparar transfers na Stark Bank
+      // 6. Disparar transfers na Stark Bank
       let transfersCriadas;
       try {
         transfersCriadas = await starkbank.transfer.create(transfers);
       } catch (errStark) {
-        // Log detalhado do erro da Stark Bank (inclui errors array com detalhes por transfer)
         const erroDetalhado = errStark.errors
           ? JSON.stringify(errStark.errors)
           : errStark.message;
 
-        // Marcar lote como erro
         await client.query(`
           UPDATE stark_lotes SET status = 'erro', erro = $1, finalizado_em = NOW() WHERE id = $2
         `, [erroDetalhado, loteId]);
         await client.query('COMMIT');
-        client.release();
+        releaseClient();
 
         console.error('❌ [Stark Bank] Erro ao criar transfers:', erroDetalhado);
         if (errStark.errors) {
-          errStark.errors.forEach((e, i) => console.error(`  ❌ Transfer[${i}]:`, JSON.stringify(e)));
+          errStark.errors.forEach((e, i) => {
+            const saque = saques[i];
+            console.error(`  ❌ Transfer[${i}] saque #${saque ? saque.id : '?'} (${saque ? saque.user_name : '?'}):`, JSON.stringify(e));
+          });
         }
 
         return res.status(500).json({
@@ -395,7 +430,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      // 6. Atualizar cada saque com o ID da transfer
+      // 7. Atualizar cada saque com o ID da transfer
       for (let i = 0; i < saques.length; i++) {
         const saque = saques[i];
         const transfer = transfersCriadas[i];
@@ -410,21 +445,21 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           WHERE id = $3
         `, [transfer.id, loteId, saque.id]);
 
-        // Registrar item no lote
         await client.query(`
           INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
           VALUES ($1, $2, $3, $4, 'processando')
         `, [loteId, saque.id, transfer.id, saque.final_amount]);
       }
 
-      // 7. Atualizar lote
+      // 8. Atualizar lote
       await client.query(`
         UPDATE stark_lotes SET status = 'processando' WHERE id = $1
       `, [loteId]);
 
       await client.query('COMMIT');
+      releaseClient();
 
-      // Auditoria
+      // Auditoria (fora da transação)
       await registrarAuditoria(req, 'STARK_LOTE_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', loteId, {
         quantidade: saques.length,
         valor_total: valorTotal,
@@ -449,7 +484,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       console.error('❌ [Stark Bank] Erro ao executar lote:', error.message);
       res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: error.message });
     } finally {
-      client.release();
+      releaseClient();
     }
   });
 
@@ -514,13 +549,14 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   // ==================== RETENTAR PAGAMENTOS COM ERRO ====================
   router.post('/stark/lote/:id/retentar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     const client = await pool.connect();
+    let clientReleased = false;
+    const releaseClient = () => { if (!clientReleased) { clientReleased = true; client.release(); } };
 
     try {
       const { id } = req.params;
 
       await client.query('BEGIN');
 
-      // Buscar itens com erro neste lote
       const itensErro = await client.query(`
         SELECT li.*, w.user_name, w.cpf, w.pix_key, w.final_amount, w.user_cod
         FROM stark_lote_itens li
@@ -531,19 +567,18 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (itensErro.rows.length === 0) {
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
         return res.status(400).json({ error: 'Nenhum item com erro para retentar' });
       }
 
       const itens = itensErro.rows;
       const valorTotal = itens.reduce((acc, i) => acc + parseFloat(i.final_amount || i.valor || 0), 0);
 
-      // Verificar saldo
       const saldoDisponivel = await obterSaldoReais();
 
       if (saldoDisponivel < valorTotal) {
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
         return res.status(400).json({
           error: 'Saldo insuficiente para retentativa',
           saldo_disponivel: saldoDisponivel,
@@ -551,17 +586,27 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      // Recriar transfers
       const transfers = itens.map(item => {
         const cpf = (item.cpf || '').replace(/\D/g, '');
+        const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+        const pixKey = (item.pix_key || '').trim();
+
+        let accountNumber = pixKey;
+        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/\D/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
+          accountNumber = pixKey.replace(/\D/g, '');
+        }
+        if (pixKey.startsWith('+')) {
+          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+        }
+
         return new starkbank.Transfer({
           amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
           name: item.user_name,
-          taxId: cpf,
+          taxId: cpfFormatado,
           bankCode: '20018183',
           branchCode: '0001',
-          accountNumber: item.pix_key,
-          accountType: 'payment',
+          accountNumber: accountNumber,
+          accountType: 'checking',
           externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
           tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
         });
@@ -613,7 +658,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       console.error('❌ [Stark Bank] Erro na retentativa:', error.message);
       res.status(500).json({ error: 'Erro ao retentar pagamentos', details: error.message });
     } finally {
-      client.release();
+      releaseClient();
     }
   });
 
