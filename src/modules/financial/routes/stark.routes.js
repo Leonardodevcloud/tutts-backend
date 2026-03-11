@@ -364,41 +364,77 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       const loteId = loteResult.rows[0].id;
 
-      // 5. Montar transfers para Stark Bank
-      const transfers = saques.map(saque => {
+      // 5. Consultar DICT para cada chave Pix e montar transfers com dados bancários reais
+      // A Stark Bank Transfer exige dados bancários (bankCode, branchCode, accountNumber)
+      // Para Pix via chave, precisamos primeiro resolver a chave no DICT
+      const transfers = [];
+      const errosDICT = [];
+
+      for (const saque of saques) {
         const pixKey = (saque.pix_key || '').trim();
         const cpf = (saque.cpf || '').replace(/\D/g, '');
-
-        // Formatar CPF com pontuação: XXX.XXX.XXX-XX (Stark Bank exige formato com pontuação)
         const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
 
-        // accountNumber: usar a chave Pix limpa
-        let accountNumber = pixKey;
-        // Se chave Pix é CPF formatado, limpar para só dígitos
-        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/\D/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
-          accountNumber = pixKey.replace(/\D/g, '');
+        // Normalizar chave Pix para consulta DICT
+        let chaveDict = pixKey;
+        // CPF: só dígitos
+        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/[^\d]/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
+          chaveDict = pixKey.replace(/\D/g, '');
         }
-        // Se é telefone, limpar espaços/parênteses
-        if (pixKey.startsWith('+')) {
-          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+        // Telefone: garantir +55
+        if (/^\d{10,11}$/.test(pixKey.replace(/\D/g, '')) && !pixKey.startsWith('+')) {
+          chaveDict = '+55' + pixKey.replace(/\D/g, '');
         }
 
-        const transferData = {
-          amount: Math.round(parseFloat(saque.final_amount) * 100),
-          name: saque.user_name,
-          taxId: cpfFormatado,
-          bankCode: '20018183',
-          branchCode: '0001',
-          accountNumber: accountNumber,
-          accountType: 'checking',
-          externalId: `tutts-saque-${saque.id}`,
-          tags: [`lote:${loteId}`, `saque:${saque.id}`]
-        };
+        try {
+          // Consultar DICT para obter dados bancários do destinatário
+          const dictKey = await starkbank.dictKey.get(chaveDict);
 
-        console.log(`📋 [Stark Bank] Transfer saque #${saque.id}: amount=${transferData.amount}, name="${transferData.name}", taxId="${cpfFormatado}", pixKey="${accountNumber}", pixTipo="${saque.pix_tipo || 'desconhecido'}"`);
+          console.log(`🔍 [Stark Bank] DICT saque #${saque.id}: chave="${chaveDict}" → banco=${dictKey.ispb}, agencia=${dictKey.branchCode}, conta=${dictKey.accountNumber}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
 
-        return new starkbank.Transfer(transferData);
-      });
+          const transferData = {
+            amount: Math.round(parseFloat(saque.final_amount) * 100),
+            name: saque.user_name,
+            taxId: cpfFormatado,
+            bankCode: dictKey.ispb || '20018183',
+            branchCode: dictKey.branchCode || '0001',
+            accountNumber: dictKey.accountNumber || chaveDict,
+            accountType: dictKey.accountType || 'checking',
+            externalId: `tutts-saque-${saque.id}`,
+            tags: [`lote:${loteId}`, `saque:${saque.id}`]
+          };
+
+          transfers.push(new starkbank.Transfer(transferData));
+
+        } catch (errDict) {
+          console.warn(`⚠️ [Stark Bank] DICT falhou para saque #${saque.id} (chave="${chaveDict}"): ${errDict.message}`);
+          // Fallback: tentar com bankCode Pix genérico (pode funcionar para chaves simples)
+          const transferData = {
+            amount: Math.round(parseFloat(saque.final_amount) * 100),
+            name: saque.user_name,
+            taxId: cpfFormatado,
+            bankCode: '20018183',
+            branchCode: '0001',
+            accountNumber: chaveDict,
+            accountType: 'payment',
+            externalId: `tutts-saque-${saque.id}`,
+            tags: [`lote:${loteId}`, `saque:${saque.id}`, 'dict-fallback']
+          };
+
+          console.log(`📋 [Stark Bank] Transfer saque #${saque.id} (fallback sem DICT): amount=${transferData.amount}, taxId="${cpfFormatado}", accountNumber="${chaveDict}"`);
+
+          transfers.push(new starkbank.Transfer(transferData));
+        }
+      }
+
+      if (transfers.length === 0) {
+        await client.query(`
+          UPDATE stark_lotes SET status = 'erro', erro = 'Nenhuma transfer válida montada', finalizado_em = NOW() WHERE id = $1
+        `, [loteId]);
+        await client.query('COMMIT');
+        releaseClient();
+        return res.status(400).json({ error: 'Nenhuma transfer válida para enviar', erros_dict: errosDICT });
+      }
 
       // 6. Disparar transfers na Stark Bank
       let transfersCriadas;
