@@ -830,7 +830,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   });
 
   // ==================== SYNC MANUAL — CONSULTAR STATUS NA STARK BANK ====================
-  // Fallback quando webhook falha: consulta diretamente a API e atualiza o banco
   router.post('/stark/sync', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     try {
       const pendentes = await pool.query(`
@@ -838,7 +837,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         FROM withdrawal_requests
         WHERE stark_status = 'processando'
           AND stark_transfer_id IS NOT NULL
-          AND stark_enviado_em < NOW() - INTERVAL '1 minute'
+          AND stark_enviado_em < NOW() - INTERVAL '30 seconds'
         ORDER BY stark_enviado_em ASC
         LIMIT 50
       `);
@@ -854,7 +853,32 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       for (const saque of pendentes.rows) {
         try {
-          const transfer = await starkbank.transfer.get(saque.stark_transfer_id);
+          // Tentar transfer.get() primeiro
+          let transfer;
+          try {
+            transfer = await starkbank.transfer.get(saque.stark_transfer_id);
+          } catch (getErr) {
+            // Se transfer.get falhar, tentar via query com o id
+            console.warn(`⚠️ [Stark Sync] transfer.get falhou para ${saque.stark_transfer_id}: ${getErr.message}`);
+            console.log(`🔄 [Stark Sync] Tentando via transfer.log.query...`);
+
+            // Consultar os logs da transfer
+            let found = false;
+            const logs = await starkbank.transfer.log.query({ transferIds: [saque.stark_transfer_id], limit: 5 });
+            for await (const log of logs) {
+              console.log(`🔄 [Stark Sync] Log: type=${log.type}, transfer.status=${log.transfer?.status}`);
+              if (log.transfer && (log.transfer.status === 'success' || log.transfer.status === 'failed' || log.transfer.status === 'canceled')) {
+                transfer = log.transfer;
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              resultados.push({ id: saque.id, nome: saque.user_name, status: 'sem_info', erro: 'Não foi possível consultar status' });
+              continue;
+            }
+          }
+
           console.log(`🔄 [Stark Sync] Transfer ${saque.stark_transfer_id} (saque #${saque.id}): status=${transfer.status}`);
 
           if (transfer.status === 'success') {
