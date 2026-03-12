@@ -412,12 +412,21 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         try {
           const dictKey = await starkbank.dictKey.get(chaveDict);
 
-          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
+          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}", taxId="${dictKey.taxId}"`);
+
+          // Usar o taxId do DICT (titular real da chave Pix) — evita taxIdMismatch
+          // Se o DICT retornar taxId, usar ele. Senão fallback para o CPF do cadastro.
+          const taxIdFinal = dictKey.taxId || cpfFormatado;
+
+          // Log se o CPF diverge (para o admin saber que o cadastro está desatualizado)
+          if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
+            console.warn(`⚠️ [Stark Bank] CPF divergente saque #${saque.id}: cadastro=${cpf}, DICT=${dictKey.taxId.replace(/\D/g, '')} (${dictKey.name})`);
+          }
 
           const transferData = {
             amount: Math.round(parseFloat(saque.final_amount) * 100),
             name: saque.user_name,
-            taxId: cpfFormatado,
+            taxId: taxIdFinal,
             bankCode: dictKey.ispb || '20018183',
             branchCode: dictKey.branchCode || '0001',
             accountNumber: dictKey.accountNumber || chaveDict,
