@@ -56,6 +56,7 @@ const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 const { initCsRoutes, initCsTables } = require('./src/modules/cs');
 const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
+const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -392,6 +393,7 @@ app.get('/api/rpa-screenshots/:filename', (req, res) => {
 
 app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
+app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
@@ -419,6 +421,7 @@ async function initDatabase() {
     try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
     try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
     try { await initAntiFraudeTables(pool); } catch (e) { console.error('⚠️ Anti-Fraude tables error:', e.message); }
+    try { await initPerformanceTables(pool); } catch (e) { console.error('⚠️ Performance tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -446,6 +449,7 @@ initDatabase().then(() => {
     initTodoCron(pool);
     startAgentWorker(pool);
     startAntiFraudeWorker(pool);
+    startPerformanceWorker(pool);
     // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
     if (process.env.WORKER_ENABLED === 'true') {
       console.log('⏰ Crons desativados no server (rodando no worker separado)');
