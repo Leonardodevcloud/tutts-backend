@@ -79,6 +79,12 @@ async function initConfigTables(pool) {
     await pool.query(`ALTER TABLE indicacoes ADD COLUMN IF NOT EXISTS link_token VARCHAR(100)`);
   } catch (e) {}
 
+  // Fix: remover FK restritiva de indicacoes.promocao_id (impedia INSERT quando promoção era deletada)
+  try {
+    await pool.query(`ALTER TABLE indicacoes DROP CONSTRAINT IF EXISTS indicacoes_promocao_id_fkey`);
+    console.log('✅ FK restritiva de indicacoes.promocao_id removida');
+  } catch (e) {}
+
   // ==================== PROMOÇÕES NOVATOS ====================
 
   await pool.query(`
