@@ -1409,6 +1409,8 @@ router.post('/indicacao-link/cadastrar', async (req, res) => {
   try {
     const { token, nome, telefone } = req.body;
     
+    console.log('👥 [Indicação] Tentativa de cadastro via link:', { token: token ? token.substring(0, 8) + '...' : 'VAZIO', nome, telefone });
+    
     if (!token || !nome || !telefone) {
       return res.status(400).json({ error: 'Token, nome e telefone são obrigatórios' });
     }
@@ -1420,32 +1422,72 @@ router.post('/indicacao-link/cadastrar', async (req, res) => {
     );
     
     if (linkResult.rows.length === 0) {
+      console.warn('⚠️ [Indicação] Link inválido ou inativo:', token);
       return res.status(404).json({ error: 'Link inválido ou expirado' });
     }
     
     const link = linkResult.rows[0];
+    console.log('👥 [Indicação] Link válido. Indicador:', link.user_cod, link.user_name, '| Promoção ID:', link.promocao_id);
+    
+    // Limpar telefone para comparação
+    const telefoneLimpo = telefone.replace(/\D/g, '');
     
     // Verificar se este telefone já foi indicado por este usuário
     const jaIndicado = await pool.query(
-      `SELECT id FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) AND indicado_contato = $2`,
-      [link.user_cod, telefone]
+      `SELECT id FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) AND REPLACE(indicado_contato, ' ', '') LIKE '%' || $2 || '%'`,
+      [link.user_cod, telefoneLimpo.slice(-8)]
     );
     
     if (jaIndicado.rows.length > 0) {
+      console.warn('⚠️ [Indicação] Telefone já indicado:', telefoneLimpo, 'por', link.user_cod);
       return res.status(400).json({ error: 'Este telefone já foi indicado anteriormente' });
     }
     
-    // Criar indicação com dados da promoção
+    // Verificar se a promoção ainda existe (evitar FK violation)
+    let promocaoIdFinal = link.promocao_id;
+    if (promocaoIdFinal) {
+      const promoExiste = await pool.query('SELECT id FROM promocoes_indicacao WHERE id = $1', [promocaoIdFinal]);
+      if (promoExiste.rows.length === 0) {
+        console.warn('⚠️ [Indicação] Promoção ID', promocaoIdFinal, 'não existe mais. Salvando sem promoção.');
+        promocaoIdFinal = null;
+      }
+    }
+    
+    // Criar indicação
     const result = await pool.query(
       `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, promocao_id, regiao, valor_bonus, status, created_at) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pendente', NOW()) RETURNING *`,
-      [link.user_cod, link.user_name, nome, telefone, token, link.promocao_id, link.regiao, link.valor_bonus]
+      [link.user_cod, link.user_name, nome.trim(), telefone, token, promocaoIdFinal, link.regiao, link.valor_bonus]
     );
     
-    console.log('✅ Indicação via link cadastrada:', result.rows[0]);
+    console.log('✅ [Indicação] Cadastrada com sucesso! ID:', result.rows[0].id, '| Indicador:', link.user_cod, '| Indicado:', nome, telefone);
     res.json({ success: true, indicacao: result.rows[0] });
   } catch (error) {
-    console.error('❌ Erro ao cadastrar indicado:', error);
+    console.error('❌ [Indicação] Erro ao cadastrar indicado:', error.message);
+    console.error('❌ [Indicação] Detalhes:', error.detail || error.constraint || 'sem detalhe');
+    
+    // Tratar FK violation especificamente
+    if (error.code === '23503') {
+      console.error('❌ [Indicação] Foreign key violation — promoção provavelmente deletada');
+      // Tentar inserir sem promocao_id
+      try {
+        const { token, nome, telefone } = req.body;
+        const linkResult = await pool.query('SELECT * FROM indicacao_links WHERE token = $1 AND active = TRUE', [token]);
+        if (linkResult.rows.length > 0) {
+          const link = linkResult.rows[0];
+          const result = await pool.query(
+            `INSERT INTO indicacoes (user_cod, user_name, indicado_nome, indicado_contato, link_token, promocao_id, regiao, valor_bonus, status, created_at) 
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, 'pendente', NOW()) RETURNING *`,
+            [link.user_cod, link.user_name, nome.trim(), telefone, token, link.regiao, link.valor_bonus]
+          );
+          console.log('✅ [Indicação] Cadastrada com fallback (sem promoção)! ID:', result.rows[0].id);
+          return res.json({ success: true, indicacao: result.rows[0] });
+        }
+      } catch (retryError) {
+        console.error('❌ [Indicação] Retry também falhou:', retryError.message);
+      }
+    }
+    
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
