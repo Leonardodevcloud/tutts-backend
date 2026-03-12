@@ -5,6 +5,7 @@
  * GET  /performance/historico         histórico por período
  * POST /performance/executar          dispara job manual
  * GET  /performance/jobs              lista jobs recentes
+ * GET  /performance/jobs/:id          detalhe de um job
  * GET  /performance/clientes          lista clientes disponíveis nos snapshots
  */
 
@@ -14,7 +15,11 @@ const express = require('express');
 
 function createPerformanceRouter(pool, verificarToken) {
   const router = express.Router();
-  router.use(verificarToken);
+
+  // ⚠️  NÃO aplicar router.use(verificarToken) aqui!
+  // O server.js já aplica verificarToken como middleware antes de montar este router:
+  //   app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
+  // Duplicar causava double-auth e inconsistências.
 
   // ── GET /performance/snapshot ──────────────────────────────────────────────
   // Retorna o snapshot mais recente (opcionalmente filtrado)
@@ -68,7 +73,8 @@ function createPerformanceRouter(pool, verificarToken) {
         if (!porCliente[key]) {
           porCliente[key] = {
             cod_cliente:  r.cod_cliente,
-            nome_cliente: (r.cliente || '').replace(/^\s*\d+\s*[-–]\s*/, '').trim(),
+            // FIX: campo correto é nome_cliente (ou cliente_txt), não "cliente"
+            nome_cliente: r.nome_cliente || (r.cliente_txt || '').replace(/^\s*\d+\s*[-–]\s*/, '').trim(),
             total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0,
           };
         }
@@ -78,12 +84,23 @@ function createPerformanceRouter(pool, verificarToken) {
         else                     porCliente[key].fora_prazo++;
       });
 
+      // Calcula pct_no_prazo por cliente
+      const clientesArray = Object.values(porCliente).map(c => {
+        const analisados = c.total - c.sem_dados;
+        return {
+          ...c,
+          pct_no_prazo: analisados > 0
+            ? parseFloat(((c.no_prazo / analisados) * 100).toFixed(2))
+            : 0,
+        };
+      }).sort((a, b) => b.total - a.total);
+
       res.json({
         snapshot: {
           ...snap,
           registros: undefined,   // não envia o array completo no resumo
         },
-        por_cliente: Object.values(porCliente).sort((a, b) => b.total - a.total),
+        por_cliente: clientesArray,
         registros:   snap.registros,  // envia separado para quem precisar
       });
     } catch (err) {
@@ -214,6 +231,7 @@ function createPerformanceRouter(pool, verificarToken) {
     }
   });
 
+  console.log('✅ Módulo Performance Diária — rotas montadas (6 endpoints)');
   return router;
 }
 
