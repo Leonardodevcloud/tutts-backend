@@ -54,8 +54,6 @@ const { initBiRoutes, initBiTables } = require('./src/modules/bi');
 const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 const { initCsRoutes, initCsTables } = require('./src/modules/cs');
-const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
-const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -80,16 +78,7 @@ app.use('/api/', apiLimiter);
 app.use(requestLogger);
 
 // Body parsing
-// verify: preserva o rawBody para validação de assinatura de webhooks (Stark Bank)
-app.use(express.json({
-  limit: '50mb',
-  verify: (req, res, buf) => {
-    // Preservar raw body apenas para rotas de webhook (performance)
-    if (req.originalUrl && req.originalUrl.includes('/stark/webhook')) {
-      req.rawBody = buf.toString('utf8');
-    }
-  }
-}));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
@@ -362,36 +351,7 @@ app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
 
 // Sucesso do Cliente (CS) — acesso admin/gestores
-// (mapa-calor é público via PUBLIC_PATHS em auth.js)
 app.use('/api', verificarToken, initCsRoutes(pool, verificarToken, verificarAdmin));
-// ── Screenshots RPA (público com chave, temporário) ──────────────────
-const SCREENSHOT_DIR_TMP = '/tmp/screenshots';
-const SCREENSHOT_KEY = process.env.SCREENSHOT_KEY || 'tutts-debug-2025';
-
-app.get('/api/rpa-screenshots', (req, res) => {
-  if (req.query.key !== SCREENSHOT_KEY) return res.status(403).json({ erro: 'Use ?key=CHAVE' });
-  try {
-    const fss = require('fs');
-    const pathh = require('path');
-    if (!fss.existsSync(SCREENSHOT_DIR_TMP)) return res.type('html').send('<h1>Nenhum screenshot</h1>');
-    const files = fss.readdirSync(SCREENSHOT_DIR_TMP).filter(f => f.endsWith('.png')).sort((a, b) => b.localeCompare(a));
-    const k = SCREENSHOT_KEY;
-    const cards = files.map(f => '<div style="background:#1a1a2e;padding:12px;border-radius:8px;margin:12px 0"><p style="color:#a78bfa;font-size:13px;margin:0 0 8px">' + f + '</p><img src="/api/rpa-screenshots/' + encodeURIComponent(f) + '?key=' + k + '" style="max-width:100%;border-radius:6px" loading="lazy"></div>').join('');
-    res.type('html').send('<html><body style="font-family:sans-serif;padding:20px;background:#111;color:#eee"><h1>Screenshots RPA (' + files.length + ')</h1>' + cards + '</body></html>');
-  } catch(e) { res.status(500).json({erro:e.message}); }
-});
-
-app.get('/api/rpa-screenshots/:filename', (req, res) => {
-  if (req.query.key !== SCREENSHOT_KEY) return res.status(403).json({ erro: 'Acesso negado' });
-  const fss = require('fs');
-  const pathh = require('path');
-  const file = pathh.join(SCREENSHOT_DIR_TMP, req.params.filename);
-  if (!fss.existsSync(file)) return res.status(404).json({ erro: 'Nao encontrada' });
-  res.type('image/png').sendFile(file);
-});
-
-app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
-app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
@@ -417,8 +377,6 @@ async function initDatabase() {
     try { await initScoreTables(pool); } catch (e) { console.error('⚠️ Score tables error:', e.message); }
     try { await initAuditTables(pool); } catch (e) { console.error('⚠️ Audit tables error:', e.message); }
     try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
-    try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
-    try { await initAntiFraudeTables(pool); } catch (e) { console.error('⚠️ Anti-Fraude tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -444,8 +402,6 @@ initDatabase().then(() => {
 
     // Cron jobs
     initTodoCron(pool);
-    startAgentWorker(pool);
-    startAntiFraudeWorker(pool);
     // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
     if (process.env.WORKER_ENABLED === 'true') {
       console.log('⏰ Crons desativados no server (rodando no worker separado)');
