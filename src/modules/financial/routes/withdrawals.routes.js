@@ -219,12 +219,21 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       return res.status(429).json({ error: 'Aguarde alguns segundos antes de solicitar novamente.' });
     }
 
-    // Verificar se está restrito
+    // Verificar se está restrito — BLOQUEAR SAQUE
     const restricted = await client.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
       [userCod]
     );
-    const isRestricted = restricted.rows.length > 0;
+    
+    if (restricted.rows.length > 0) {
+      await client.query('ROLLBACK');
+      try { client.release(); } catch (e) {}
+      console.log(`🚫 [Saque] Profissional restrito tentou solicitar saque: ${userCod} (${userName})`);
+      return res.status(403).json({ 
+        error: 'Infelizmente o saque emergencial está temporariamente fora do ar! Aguarde a normalização.',
+        restrito: true
+      });
+    }
 
     // Verificar gratuidade ativa
     let gratuityQuery;
@@ -290,7 +299,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
-      restrito: isRestricted
+      restrito: false
     });
 
     // Notificar via WebSocket
@@ -300,7 +309,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
 
     res.status(201).json({ 
       ...result.rows[0], 
-      isRestricted 
+      isRestricted: false 
     });
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
