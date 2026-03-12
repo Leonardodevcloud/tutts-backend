@@ -937,6 +937,39 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       }
 
       console.log(`✅ [Stark Sync] ${atualizados}/${pendentes.rows.length} atualizadas`);
+
+      // Finalizar lotes que ficaram como 'processando' mas todos os itens já foram processados
+      try {
+        const lotesPendentes = await pool.query(`
+          SELECT l.id FROM stark_lotes l
+          WHERE l.status = 'processando'
+            AND NOT EXISTS (
+              SELECT 1 FROM stark_lote_itens li 
+              WHERE li.lote_id = l.id AND li.status IN ('processando', 'em_lote', 'pendente')
+            )
+        `);
+
+        for (const lote of lotesPendentes.rows) {
+          const erros = await pool.query(`
+            SELECT COUNT(*) as total FROM stark_lote_itens 
+            WHERE lote_id = $1 AND status IN ('erro', 'rejeitado')
+          `, [lote.id]);
+
+          const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
+          await pool.query(`
+            UPDATE stark_lotes SET status = $1, finalizado_em = NOW() WHERE id = $2
+          `, [statusLote, lote.id]);
+
+          console.log(`✅ [Stark Sync] Lote #${lote.id} finalizado: ${statusLote}`);
+        }
+
+        if (lotesPendentes.rows.length > 0) {
+          atualizados += lotesPendentes.rows.length;
+        }
+      } catch (errLotes) {
+        console.error('⚠️ [Stark Sync] Erro ao finalizar lotes:', errLotes.message);
+      }
+
       res.json({ consultadas: pendentes.rows.length, atualizados, resultados });
     } catch (error) {
       console.error('❌ [Stark Sync] Erro:', error.message);
@@ -1010,14 +1043,14 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       if (saque.stark_lote_id) {
         const pendentes = await client.query(`
           SELECT COUNT(*) as total FROM stark_lote_itens 
-          WHERE lote_id = $1 AND status = 'processando'
+          WHERE lote_id = $1 AND status IN ('processando', 'em_lote', 'pendente')
         `, [saque.stark_lote_id]);
 
         if (parseInt(pendentes.rows[0].total) === 0) {
-          // Todos processados — verificar se teve erros
+          // Todos processados — verificar se teve erros ou rejeitados
           const erros = await client.query(`
             SELECT COUNT(*) as total FROM stark_lote_itens 
-            WHERE lote_id = $1 AND status = 'erro'
+            WHERE lote_id = $1 AND status IN ('erro', 'rejeitado')
           `, [saque.stark_lote_id]);
 
           const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
@@ -1025,7 +1058,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           await client.query(`
             UPDATE stark_lotes 
             SET status = $1, finalizado_em = NOW()
-            WHERE id = $2
+            WHERE id = $2 AND status != $1
           `, [statusLote, saque.stark_lote_id]);
 
           console.log(`✅ [Stark Webhook] Lote #${saque.stark_lote_id} finalizado: ${statusLote}`);
