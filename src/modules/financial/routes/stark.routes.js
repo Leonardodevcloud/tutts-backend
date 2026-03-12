@@ -468,41 +468,56 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         UPDATE stark_lotes SET quantidade = $1, valor_total = $2 WHERE id = $3
       `, [transfersValidas.length, valorTotalReal, loteId]);
 
-      // 6. Disparar transfers na Stark Bank
-      let transfersCriadas;
-      try {
-        transfersCriadas = await starkbank.transfer.create(transfersValidas.map(t => t.transfer));
-      } catch (errStark) {
-        const erroDetalhado = errStark.errors
-          ? JSON.stringify(errStark.errors)
-          : errStark.message;
+      // 6. Disparar transfers na Stark Bank — INDIVIDUALMENTE para não bloquear lote
+      const transfersCriadas = [];
+      const errosEnvio = [];
 
+      for (let i = 0; i < transfersValidas.length; i++) {
+        const { transfer, saque } = transfersValidas[i];
+        try {
+          const resultado = await starkbank.transfer.create([transfer]);
+          transfersCriadas.push({ saque, transfer: resultado[0] });
+          console.log(`  ✅ Transfer saque #${saque.id} (${saque.user_name}) — ID: ${resultado[0].id}`);
+        } catch (errItem) {
+          const erroMsg = errItem.errors ? JSON.stringify(errItem.errors) : errItem.message;
+          console.error(`  ❌ Transfer saque #${saque.id} (${saque.user_name}): ${erroMsg}`);
+
+          // Marcar este saque como erro (não trava o lote)
+          await client.query(`
+            UPDATE withdrawal_requests
+            SET stark_status = 'erro', stark_erro = $1, stark_lote_id = $2, updated_at = NOW()
+            WHERE id = $3
+          `, [erroMsg, loteId, saque.id]);
+
+          await client.query(`
+            INSERT INTO stark_lote_itens (lote_id, withdrawal_id, valor, status, erro)
+            VALUES ($1, $2, $3, 'rejeitado', $4)
+          `, [loteId, saque.id, saque.final_amount, erroMsg]);
+
+          errosEnvio.push({ id: saque.id, nome: saque.user_name, erro: erroMsg });
+        }
+      }
+
+      // Se nenhuma transfer foi criada com sucesso
+      if (transfersCriadas.length === 0) {
         await client.query(`
-          UPDATE stark_lotes SET status = 'erro', erro = $1, finalizado_em = NOW() WHERE id = $2
-        `, [erroDetalhado, loteId]);
+          UPDATE stark_lotes SET status = 'erro', erro = 'Todos os pagamentos falharam', finalizado_em = NOW() WHERE id = $1
+        `, [loteId]);
         await client.query('COMMIT');
         releaseClient();
 
-        console.error('❌ [Stark Bank] Erro ao criar transfers:', erroDetalhado);
-        if (errStark.errors) {
-          errStark.errors.forEach((e, i) => {
-            const item = transfersValidas[i];
-            console.error(`  ❌ Transfer[${i}] saque #${item ? item.saque.id : '?'} (${item ? item.saque.user_name : '?'}):`, JSON.stringify(e));
-          });
-        }
-
-        return res.status(500).json({
-          error: 'Erro ao disparar pagamentos na Stark Bank',
-          details: erroDetalhado,
+        return res.json({
+          success: false,
           lote_id: loteId,
-          rejeitados_dict: saquesRejeitados
+          enviados: 0,
+          rejeitados: errosEnvio.length + saquesRejeitados.length,
+          detalhes_rejeitados: [...saquesRejeitados, ...errosEnvio],
+          error: 'Todos os pagamentos falharam'
         });
       }
 
       // 7. Atualizar cada saque com o ID da transfer
-      for (let i = 0; i < transfersValidas.length; i++) {
-        const { saque } = transfersValidas[i];
-        const transfer = transfersCriadas[i];
+      for (const { saque, transfer } of transfersCriadas) {
 
         await client.query(`
           UPDATE withdrawal_requests 
@@ -521,36 +536,40 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       }
 
       // 8. Atualizar lote
+      const statusLote = errosEnvio.length > 0 && transfersCriadas.length > 0 ? 'processando' : 'processando';
       await client.query(`
-        UPDATE stark_lotes SET status = 'processando' WHERE id = $1
-      `, [loteId]);
+        UPDATE stark_lotes SET status = $1, quantidade = $2, valor_total = $3 WHERE id = $4
+      `, [statusLote, transfersCriadas.length, transfersCriadas.reduce((a, t) => a + parseFloat(t.saque.final_amount || 0), 0), loteId]);
 
       await client.query('COMMIT');
       releaseClient();
 
-      // Auditoria (fora da transação)
+      const valorEnviado = transfersCriadas.reduce((a, t) => a + parseFloat(t.saque.final_amount || 0), 0);
+      const totalRejeitados = saquesRejeitados.length + errosEnvio.length;
+
+      // Auditoria
       await registrarAuditoria(req, 'STARK_LOTE_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', loteId, {
-        quantidade: transfersValidas.length,
-        valor_total: valorTotalReal,
+        quantidade: transfersCriadas.length,
+        valor_total: valorEnviado,
         saldo_antes: saldoDisponivel,
-        saque_ids: transfersValidas.map(t => t.saque.id),
-        rejeitados_dict: saquesRejeitados.length
+        saque_ids: transfersCriadas.map(t => t.saque.id),
+        rejeitados: totalRejeitados
       });
 
-      console.log(`✅ [Stark Bank] Lote #${loteId} executado: ${transfersValidas.length} pagamentos (${saquesRejeitados.length} rejeitados), R$ ${valorTotalReal.toFixed(2)}`);
+      console.log(`✅ [Stark Bank] Lote #${loteId}: ${transfersCriadas.length} enviados, ${totalRejeitados} rejeitados, R$ ${valorEnviado.toFixed(2)}`);
 
       res.json({
         success: true,
         lote_id: loteId,
-        quantidade: transfersValidas.length,
-        valor_total: valorTotalReal,
-        enviados: transfersValidas.length,
-        rejeitados: saquesRejeitados.length,
-        valor_enviado: valorTotalReal,
-        detalhes_rejeitados: saquesRejeitados,
+        quantidade: transfersCriadas.length,
+        enviados: transfersCriadas.length,
+        rejeitados: totalRejeitados,
+        valor_enviado: valorEnviado,
+        valor_total: valorEnviado,
+        detalhes_rejeitados: [...saquesRejeitados, ...errosEnvio],
         saldo_antes: saldoDisponivel,
-        saldo_apos_estimado: Math.round((saldoDisponivel - valorTotalReal) * 100) / 100,
-        transfers: transfersCriadas.map(t => ({ id: t.id, status: t.status, amount: t.amount / 100 }))
+        saldo_apos_estimado: Math.round((saldoDisponivel - valorEnviado) * 100) / 100,
+        transfers: transfersCriadas.map(t => ({ id: t.transfer.id, status: t.transfer.status, amount: t.transfer.amount / 100 }))
       });
 
     } catch (error) {
