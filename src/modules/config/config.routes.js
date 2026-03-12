@@ -1100,11 +1100,12 @@ router.delete('/promocoes/:id', async (req, res) => {
 // ============================================
 
 // Listar todas as indicações (admin)
-router.get('/indicacoes', async (req, res) => {
+router.get('/indicacoes', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM indicacoes ORDER BY created_at DESC'
     );
+    console.log(`📋 [Indicações] Listando ${result.rows.length} indicações`);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar indicações:', error);
@@ -1113,7 +1114,7 @@ router.get('/indicacoes', async (req, res) => {
 });
 
 // Listar indicações do usuário
-router.get('/indicacoes/usuario/:userCod', async (req, res) => {
+router.get('/indicacoes/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
