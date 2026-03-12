@@ -151,79 +151,138 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
 
 // Criar solicitação de saque
 router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, async (req, res) => {
+  const client = await pool.connect();
+  
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount, selectedGratuityId } = req.body;
+
+    // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 ===============
+    if (!requestedAmount || parseFloat(requestedAmount) < 15) {
+      client.release();
+      return res.status(400).json({ error: 'Valor mínimo para saque é R$ 15,00' });
+    }
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
     if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
       if (req.user.codProfissional !== userCod) {
         console.log(`⚠️ [SEGURANÇA] Tentativa de criar saque para outro usuário: ${req.user.codProfissional} tentou criar para ${userCod}`);
+        client.release();
         return res.status(403).json({ error: 'Você só pode criar saques para sua própria conta' });
       }
     }
 
+    await client.query('BEGIN');
+
+    // =============== PROTEÇÃO DEFINITIVA: LOCK + CHECK DUPLICATA ===============
+    // Advisory lock por user_cod — impede dois requests simultâneos do mesmo motoboy
+    const lockKey = Math.abs(userCod.split('').reduce((a, c) => a * 31 + c.charCodeAt(0), 0)) % 2147483647;
+    await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+
+    // Verificar se já existe saque pendente (aguardando_aprovacao) para este motoboy
+    const pendente = await client.query(
+      `SELECT id, requested_amount, created_at FROM withdrawal_requests 
+       WHERE user_cod = $1 AND status = 'aguardando_aprovacao'
+       ORDER BY created_at DESC LIMIT 1`,
+      [userCod]
+    );
+
+    if (pendente.rows.length > 0) {
+      const saquePendente = pendente.rows[0];
+      const minutosDesdeCriacao = (Date.now() - new Date(saquePendente.created_at).getTime()) / 60000;
+      
+      await client.query('ROLLBACK');
+      client.release();
+      
+      console.log(`⚠️ [DUPLICATA BLOQUEADA] Motoboy ${userCod} (${userName}) tentou criar saque duplicado. Pendente #${saquePendente.id} criado há ${minutosDesdeCriacao.toFixed(1)} min`);
+      
+      return res.status(409).json({ 
+        error: 'Você já possui um saque aguardando aprovação! Aguarde a aprovação ou rejeição antes de solicitar novamente.',
+        saque_pendente_id: saquePendente.id,
+        saque_pendente_valor: saquePendente.requested_amount,
+        criado_em: saquePendente.created_at
+      });
+    }
+
+    // Verificar cooldown — nenhum saque (qualquer status) nos últimos 5 segundos
+    // Protege contra double-click mesmo se o anterior já foi aprovado/rejeitado
+    const recentissimo = await client.query(
+      `SELECT id FROM withdrawal_requests 
+       WHERE user_cod = $1 AND created_at > NOW() - INTERVAL '5 seconds'
+       LIMIT 1`,
+      [userCod]
+    );
+
+    if (recentissimo.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      console.log(`⚠️ [COOLDOWN] Motoboy ${userCod} tentou criar saque muito rápido (< 5s)`);
+      return res.status(429).json({ error: 'Aguarde alguns segundos antes de solicitar novamente.' });
+    }
+
     // Verificar se está restrito
-    const restricted = await pool.query(
+    const restricted = await client.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
       [userCod]
     );
     const isRestricted = restricted.rows.length > 0;
 
-    // Verificar gratuidade ativa — usa a selecionada pelo usuário se fornecida e válida
+    // Verificar gratuidade ativa
     let gratuityQuery;
     if (selectedGratuityId) {
-      // Validar que a gratuidade selecionada pertence ao usuário e está ativa
-      gratuityQuery = await pool.query(
+      gratuityQuery = await client.query(
         "SELECT * FROM gratuities WHERE id = $1 AND user_cod = $2 AND status = 'ativa' AND remaining > 0",
         [selectedGratuityId, userCod]
       );
       if (gratuityQuery.rows.length === 0) {
-        // Gratuidade inválida ou não pertence ao usuário — buscar a padrão
-        gratuityQuery = await pool.query(
+        gratuityQuery = await client.query(
           "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
           [userCod]
         );
       }
     } else {
-      gratuityQuery = await pool.query(
+      gratuityQuery = await client.query(
         "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
         [userCod]
       );
     }
-    const gratuity = gratuityQuery;
     
-    const hasGratuity = gratuity.rows.length > 0;
+    const hasGratuity = gratuityQuery.rows.length > 0;
     let gratuityId = null;
-    let feeAmount = requestedAmount * 0.045; // 4.5%
+    let feeAmount = requestedAmount * 0.045;
     let finalAmount = requestedAmount - feeAmount;
 
     if (hasGratuity) {
-      gratuityId = gratuity.rows[0].id;
+      gratuityId = gratuityQuery.rows[0].id;
       feeAmount = 0;
       finalAmount = requestedAmount;
 
-      // Decrementar gratuidade
-      const newRemaining = gratuity.rows[0].remaining - 1;
+      const newRemaining = gratuityQuery.rows[0].remaining - 1;
       if (newRemaining <= 0) {
-        await pool.query(
+        await client.query(
           "UPDATE gratuities SET remaining = 0, status = 'expirada', expired_at = NOW() WHERE id = $1",
           [gratuityId]
         );
       } else {
-        await pool.query(
+        await client.query(
           'UPDATE gratuities SET remaining = $1 WHERE id = $2',
           [newRemaining, gratuityId]
         );
       }
     }
 
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO withdrawal_requests 
        (user_cod, user_name, cpf, pix_key, requested_amount, fee_amount, final_amount, has_gratuity, gratuity_id, status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aguardando_aprovacao') 
        RETURNING *`,
       [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
+
+    await client.query('COMMIT');
+    client.release();
+
+    // Invalidar cache
+    invalidateCache();
 
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
@@ -234,7 +293,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       restrito: isRestricted
     });
 
-    // ==================== NOTIFICAR VIA WEBSOCKET ====================
+    // Notificar via WebSocket
     if (global.notifyNewWithdrawal) {
       global.notifyNewWithdrawal(result.rows[0]);
     }
@@ -244,6 +303,8 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       isRestricted 
     });
   } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
+    try { client.release(); } catch (e) { /* ignore */ }
     console.error('❌ Erro ao criar saque:', error);
     res.status(500).json({ error: error.message });
   }
