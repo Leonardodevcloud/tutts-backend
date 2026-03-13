@@ -654,7 +654,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       
       if (idempotenciaExistente.rows.length > 0) {
         console.log(`⚠️ Requisição duplicada detectada! Key: ${idempotencyKey}`);
-        client.release();
         // Retornar a resposta anterior (idempotência)
         return res.status(200).json({
           ...idempotenciaExistente.rows[0].response_data,
@@ -676,7 +675,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     
     if (saqueAtual.rows.length === 0) {
       await client.query('ROLLBACK');
-      client.release();
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
     
@@ -690,7 +688,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       if (dadosSaque.status === 'aprovado' || dadosSaque.status === 'aprovado_gratuidade') {
         console.log(`⚠️ Tentativa de aprovar saque já aprovado! ID: ${id}, Status atual: ${dadosSaque.status}`);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(400).json({ 
           error: 'Este saque já foi aprovado anteriormente',
           status_atual: dadosSaque.status,
@@ -702,7 +699,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       if (dadosSaque.debito_plific_at) {
         console.log(`⚠️ Saque já teve débito realizado! ID: ${id}, Débito em: ${dadosSaque.debito_plific_at}`);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(400).json({ 
           error: 'Débito já foi realizado para este saque',
           debito_em: dadosSaque.debito_plific_at
@@ -716,7 +712,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         if (lockAge < 60000) {
           console.log(`⚠️ Saque em processamento! ID: ${id}, Lock há: ${lockAge}ms`);
           await client.query('ROLLBACK');
-          client.release();
           return res.status(409).json({ 
             error: 'Este saque está sendo processado. Aguarde alguns segundos.',
             processing_since: dadosSaque.processing_lock
@@ -771,7 +766,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
           console.error('❌ Erro ao debitar Plific:', respostaDebito);
           // Remover lock e fazer rollback
           await client.query('ROLLBACK');
-          client.release();
           return res.status(400).json({ 
             error: 'Erro ao debitar no Plific', 
             details: respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito'
@@ -788,7 +782,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       } catch (erroDebito) {
         console.error('❌ Exceção ao debitar Plific:', erroDebito);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(500).json({ 
           error: 'Erro ao processar débito', 
           details: erroDebito.message 
