@@ -1,8 +1,9 @@
 /**
- * performance-worker.js
- * Processa a fila performance_jobs.
- * Cron automático (hoje) + jobs manuais do frontend.
- * Um job por vez — nunca abre Playwright em paralelo.
+ * performance-worker.js — v2
+ * Processa APENAS jobs manuais criados pelo frontend.
+ * SEM job automático (cron) — evita travar o servidor.
+ * Verifica a fila a cada 30s (leve, só um SELECT).
+ * Playwright só roda quando tem job pendente.
  */
 
 'use strict';
@@ -10,13 +11,14 @@
 const { logger } = require('../../config/logger');
 const { buscarPerformance } = require('./playwright-performance');
 
-const INTERVALO_MS = 5 * 60 * 1000;  // 5 minutos
+const INTERVALO_MS = 30 * 1000;  // 30s — só checa fila, não abre browser
 let workerAtivo = false;
+let executando  = false;  // trava para não rodar 2 Playwright ao mesmo tempo
 let _pool       = null;
 
 function log(msg) { logger.info(`[perf-worker] ${msg}`); }
 
-// Converte Date ou string ISO "2026-03-12" → "12/03/2026"
+// Converte "2026-03-12" → "12/03/2026"
 function dataToBR(valor) {
   const s = valor instanceof Date
     ? valor.toISOString().slice(0, 10)
@@ -25,29 +27,13 @@ function dataToBR(valor) {
   return `${d}/${m}/${a}`;
 }
 
-// Cria job automático do dia (só se ainda não existe)
-async function criarJobAutomatico() {
-  const hoje = new Date().toISOString().slice(0, 10);  // "2026-03-12"
-  const { rows } = await _pool.query(`
-    SELECT id FROM performance_jobs
-    WHERE data_inicio = $1
-      AND data_fim    = $1
-      AND cod_cliente  IS NULL
-      AND centro_custo IS NULL
-      AND status NOT IN ('erro')
-    LIMIT 1
-  `, [hoje]);
-  if (rows.length) return;
-
-  await _pool.query(`
-    INSERT INTO performance_jobs (data_inicio, data_fim, status, origem)
-    VALUES ($1, $1, 'pendente', 'cron')
-  `, [hoje]);
-  log(`📅 Job automático criado para ${hoje}`);
-}
-
-// Processa próximo job pendente
+// Processa próximo job pendente (só manuais)
 async function processarProximo() {
+  if (executando) {
+    log('⏸️  Já tem job executando, pulando...');
+    return;
+  }
+
   const { rows } = await _pool.query(`
     SELECT * FROM performance_jobs
     WHERE status = 'pendente'
@@ -57,6 +43,7 @@ async function processarProximo() {
   if (!rows.length) return;
 
   const job = rows[0];
+  executando = true;
   log(`📋 Job #${job.id} | ${job.data_inicio} → ${job.data_fim} | cli=${job.cod_cliente} | origem=${job.origem}`);
 
   await _pool.query(`UPDATE performance_jobs SET status = 'executando' WHERE id = $1`, [job.id]);
@@ -102,6 +89,8 @@ async function processarProximo() {
       SET status = 'erro', erro = $1, concluido_em = NOW()
       WHERE id = $2
     `, [err.message, job.id]);
+  } finally {
+    executando = false;
   }
 }
 
@@ -113,7 +102,6 @@ function startPerformanceWorker(pool) {
 
   async function tick() {
     try {
-      await criarJobAutomatico();
       await processarProximo();
     } catch (err) {
       log(`❌ Tick erro: ${err.message}`);
@@ -122,8 +110,9 @@ function startPerformanceWorker(pool) {
     }
   }
 
-  setTimeout(tick, 10_000);  // primeiro tick 10s após boot
-  log('🟢 Worker iniciado (intervalo: 5min)');
+  // Primeiro tick 15s após boot (dar tempo pro servidor estabilizar)
+  setTimeout(tick, 15_000);
+  log('🟢 Worker iniciado (apenas jobs manuais, check a cada 30s)');
 }
 
 module.exports = { startPerformanceWorker };
