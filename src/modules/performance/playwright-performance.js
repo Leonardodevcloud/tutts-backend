@@ -1,27 +1,7 @@
 /**
- * playwright-performance.js — v4
- * Seletores 100% confirmados por Inspect Element (13/03/2026)
- *
- * ════════════════════════════════════════════════════════════
- * MAPA DE SELETORES:
- *
- * DATA INICIAL:   input#data[type=text][readonly] — jQuery UI datepicker
- * DATA FINAL:     input#dataF[type=text][readonly] — jQuery UI datepicker
- * COM ENDEREÇO:   input[name="endereco"][value="CE"] (radio)
- * COM DADOS PROF: input[name="profissional"][value="CDP"] (radio)
- * STATUS:         select#status[multiple] + bootstrap-multiselect
- *                 → checkboxes: input.form-check-input[name="statusOS"]
- * CLIENTE ESPEC:  input#cliente[name="cliente"][value="CE"]
- *                 → onclick="abrirDivLentamente('divCodCliente')"
- *                 → abre div#divCodCliente
- * AUTOCOMPLETE:   input#autocomplet-cliente (jQuery UI autocomplete)
- * COD CLIENTE:    input#codCliente[type=hidden]
- * CENTRO CUSTO:   select#centrocusto-cliente (AJAX via buscarCentroCusto)
- * PAGINAÇÃO:      select#quantLimite → value="10000"
- * BUSCAR:         input[name="buscarDados"][type=button]
- *                 → onclick="buscaServicoExcel(1, 0, '', this)"
- * RESULTADO:      div#divRetornoTable > table > tbody > tr
- * ════════════════════════════════════════════════════════════
+ * playwright-performance.js — v5
+ * Fix: waitForFunction timeout após login — adicionado debug de URL,
+ * networkidle, waitForSelector fallback, screenshot em erro.
  */
 
 'use strict';
@@ -31,11 +11,14 @@ const fs   = require('fs');
 const { logger } = require('../../config/logger');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
+const SCREENSHOT_DIR    = '/tmp/screenshots';
 const TIMEOUT           = 60_000;
 const EXCEL_URL         = 'https://tutts.com.br/expresso/expressoat/entregasExportarExcel';
 const LOGIN_URL         = () => process.env.SISTEMA_EXTERNO_URL;
 
 function log(msg) { logger.info(`[playwright-perf] ${msg}`); }
+
+function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 
 // ── TABELA DE PRAZOS ────────────────────────────────────────
 const TABELA_PRAZOS_KM = [
@@ -79,15 +62,101 @@ async function fazerLogin(page) {
   log('✅ Login OK');
 }
 
-// ══════════════════════════════════════════════════════════════
-// PREENCHER FILTROS — 100% via page.evaluate (zero page.click)
-// ══════════════════════════════════════════════════════════════
+// Tira screenshot de debug
+async function screenshotDebug(page, nome) {
+  try {
+    ensureDir(SCREENSHOT_DIR);
+    const file = `${SCREENSHOT_DIR}/perf-${nome}-${Date.now()}.png`;
+    await page.screenshot({ path: file, fullPage: false });
+    log(`📸 Screenshot: ${file}`);
+  } catch (e) { log(`⚠️ Screenshot falhou: ${e.message}`); }
+}
+
+// ── NAVEGAR ATÉ A PÁGINA DE FILTROS ─────────────────────────
+async function navegarParaFiltros(page, context) {
+  log('🌐 Navegando para entregasExportarExcel...');
+  await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  // Esperar mais um pouco pra scripts AJAX terminarem
+  await page.waitForTimeout(4000);
+
+  let url = page.url();
+  log(`📍 URL atual: ${url}`);
+
+  // Verificar se precisa login
+  if (!(await isLoggedIn(page))) {
+    log('🔒 Não logado, fazendo login...');
+    if (fs.existsSync(SESSION_FILE_PERF)) {
+      fs.unlinkSync(SESSION_FILE_PERF);
+      log('🗑️ Sessão antiga removida');
+    }
+    await fazerLogin(page);
+
+    // Após login, navegar de novo para a página de relatórios
+    log('🌐 Re-navegando após login...');
+    await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.waitForTimeout(4000);
+    url = page.url();
+    log(`📍 URL pós-login: ${url}`);
+
+    await context.storageState({ path: SESSION_FILE_PERF });
+    log('💾 Sessão salva');
+  } else {
+    log('✅ Já logado');
+  }
+
+  // Esperar o campo #data existir — tentar múltiplas estratégias
+  log('⏳ Esperando campo #data...');
+
+  // Estratégia 1: waitForSelector com timeout
+  try {
+    await page.waitForSelector('#data', { state: 'attached', timeout: 20000 });
+    log('✅ #data encontrado (attached)');
+    return;
+  } catch {
+    log('⚠️ #data não encontrado via waitForSelector');
+  }
+
+  // Estratégia 2: waitForSelector no form inteiro
+  try {
+    await page.waitForSelector('#filtroServicos', { state: 'attached', timeout: 10000 });
+    log('✅ #filtroServicos encontrado');
+    return;
+  } catch {
+    log('⚠️ #filtroServicos não encontrado');
+  }
+
+  // Estratégia 3: talvez a URL redirecionou — verificar
+  url = page.url();
+  log(`📍 URL final: ${url}`);
+
+  // Tentar navegar com .php explícito
+  if (!url.includes('entregasExportarExcel')) {
+    log('🔄 URL mudou, tentando com .php...');
+    await page.goto(EXCEL_URL + '.php', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.waitForTimeout(3000);
+    url = page.url();
+    log(`📍 URL após .php: ${url}`);
+  }
+
+  // Estratégia 4: esperar qualquer input de data na página
+  try {
+    await page.waitForSelector('input[name="data"]', { state: 'attached', timeout: 10000 });
+    log('✅ input[name="data"] encontrado');
+    return;
+  } catch {
+    // Último recurso: screenshot e throw
+    await screenshotDebug(page, 'no-data-field');
+    const html = await page.evaluate(() => document.title + ' | ' + document.body?.innerText?.slice(0, 300));
+    throw new Error(`Campo #data não encontrado. URL: ${url} | Page: ${html}`);
+  }
+}
+
+// ── PREENCHER FILTROS ───────────────────────────────────────
 async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto }) {
   log('📋 Preenchendo filtros...');
 
-  // ── PASSO 1: Datas + radios + status + paginação (tudo junto) ──
   await page.evaluate(({ di, df }) => {
-    // DATAS — jQuery UI datepicker, readonly. Setar via jQuery.val()
+    // DATAS
     if (window.jQuery) {
       jQuery('#data').val(di);
       jQuery('#dataF').val(df);
@@ -104,7 +173,7 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
     const radioProf = document.querySelector('input[name="profissional"][value="CDP"]');
     if (radioProf) { radioProf.checked = true; radioProf.click(); }
 
-    // STATUS = CONCLUÍDO (select nativo + checkboxes do plugin)
+    // STATUS = CONCLUÍDO
     const sel = document.getElementById('status');
     if (sel) {
       for (const opt of sel.options) opt.selected = (opt.value === 'F');
@@ -127,36 +196,32 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
 
   log(`  📅 ${dataInicio} → ${dataFim} | End=CE | Prof=CDP | Status=F | Pag=10000`);
 
-  // ── PASSO 2: Cliente específico (se informado) ──
+  // CLIENTE ESPECÍFICO
   if (codCliente) {
-    // 2a. Clicar radio "Cliente específico" — tem onclick que abre divCodCliente
     await page.evaluate(() => {
       const radio = document.querySelector('input[name="cliente"][value="CE"]');
       if (radio) radio.click();
     });
-    // Esperar div#divCodCliente ficar visível
     await page.waitForTimeout(800);
 
-    // 2b. Setar codCliente no hidden + digitar no autocomplete
     await page.evaluate((cod) => {
       document.getElementById('codCliente').value = String(cod);
     }, codCliente);
 
-    // 2c. Digitar no autocomplete para acionar a busca jQuery UI
-    const autocompleteInput = page.locator('#autocomplet-cliente');
-    await autocompleteInput.click();
-    await autocompleteInput.fill('');
-    await autocompleteInput.type(String(codCliente), { delay: 100 });
-    log(`  ⌨️  Digitou "${codCliente}" no autocomplete`);
+    // Digitar no autocomplete
+    const input = page.locator('#autocomplet-cliente');
+    await input.click();
+    await input.fill('');
+    await input.type(String(codCliente), { delay: 100 });
+    log(`  ⌨️ Digitou "${codCliente}" no autocomplete`);
 
-    // 2d. Esperar dropdown do autocomplete aparecer e selecionar
+    // Esperar dropdown e selecionar
     try {
       await page.waitForSelector('ul.ui-autocomplete li.ui-menu-item', { timeout: 10000 });
       await page.click('ul.ui-autocomplete li.ui-menu-item:first-child');
-      log('  ✅ Cliente selecionado do autocomplete');
+      log('  ✅ Cliente selecionado');
     } catch {
-      // Se autocomplete não aparecer, forçar o valor via JS
-      log('  ⚠️  Autocomplete não abriu, forçando valor via JS');
+      log('  ⚠️ Autocomplete não abriu, forçando valor');
       await page.evaluate((cod) => {
         document.getElementById('codCliente').value = String(cod);
         document.getElementById('autocomplet-cliente').value = String(cod);
@@ -165,7 +230,7 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
 
     await page.waitForTimeout(1000);
 
-    // 2e. Centro de custo (carrega via AJAX após selecionar cliente)
+    // Centro de custo
     if (centroCusto) {
       try {
         await page.waitForFunction(
@@ -177,27 +242,22 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
           if (s) { s.value = cc; s.dispatchEvent(new Event('change', { bubbles: true })); }
         }, centroCusto);
         log(`  ✅ Centro de custo: ${centroCusto}`);
-      } catch {
-        log('  ⚠️  Centro de custo não carregou a tempo');
-      }
+      } catch { log('  ⚠️ CC não carregou'); }
     }
 
     log(`  ✅ Cliente: ${codCliente}`);
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// LER TABELA (com paginação)
-// ══════════════════════════════════════════════════════════════
+// ── LER TABELA ──────────────────────────────────────────────
 async function lerTabela(page) {
   const todasLinhas = [];
   let pagina = 1;
 
   while (true) {
-    log(`📄 Lendo página ${pagina}...`);
+    log(`📄 Página ${pagina}...`);
 
     const linhas = await page.evaluate(() => {
-      // Mapear colunas pelo texto do thead
       const ths = Array.from(document.querySelectorAll('#divRetornoTable table thead th'));
       const idx = {};
       ths.forEach((th, i) => {
@@ -216,7 +276,6 @@ async function lerTabela(page) {
         const tds = tr.querySelectorAll('td');
         if (tds.length < 5) return;
         const first = (tds[0]?.textContent || '').trim();
-        // Pular linhas de total/resumo
         if (first.toLowerCase().startsWith('total')) return;
         if (tds[0]?.getAttribute('colspan')) return;
 
@@ -234,53 +293,37 @@ async function lerTabela(page) {
     todasLinhas.push(...linhas);
     log(`  → ${linhas.length} linhas`);
 
-    // Próxima página?
     const temProxima = await page.evaluate(() => {
-      const sels = [
+      for (const s of [
         'a[data-page][aria-label="Próximo"]',
         '.pagination li.next:not(.disabled) a',
-        '.pagination a[rel="next"]',
-        '.paginate_button.next:not(.disabled)',
-      ];
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el && !el.closest('.disabled')) return true;
-      }
+      ]) { const el = document.querySelector(s); if (el && !el.closest('.disabled')) return true; }
       return false;
     });
 
     if (!temProxima || linhas.length < 10) break;
 
-    // Clicar próxima via evaluate
     await page.evaluate(() => {
-      const sels = [
+      for (const s of [
         'a[data-page][aria-label="Próximo"]',
         '.pagination li.next:not(.disabled) a',
-        '.paginate_button.next:not(.disabled)',
-      ];
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el && !el.closest('.disabled')) { el.click(); return; }
-      }
+      ]) { const el = document.querySelector(s); if (el) { el.click(); return; } }
     });
     await page.waitForTimeout(2500);
     pagina++;
-    if (pagina > 20) { log('⚠️  Limite de 20 páginas'); break; }
+    if (pagina > 20) break;
   }
 
   log(`📊 Total: ${todasLinhas.length} linhas`);
   return todasLinhas;
 }
 
-// ══════════════════════════════════════════════════════════════
-// CALCULAR SLA
-// ══════════════════════════════════════════════════════════════
+// ── CALCULAR SLA ────────────────────────────────────────────
 function calcularLinhas(linhas) {
   return linhas.map(linha => {
     const mCli   = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
     const codCli = mCli ? parseInt(mCli[1]) : null;
     const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
-    // Profissional vem na 2ª linha do texto da célula cliente
     const linhasTexto = linha.cliente_txt.split('\n').map(l => l.trim()).filter(Boolean);
     const profissional = linhasTexto.length >= 2 ? linhasTexto[1] : '';
 
@@ -314,7 +357,6 @@ function calcularLinhas(linhas) {
   });
 }
 
-// ── AGRUPAR POR CLIENTE ─────────────────────────────────────
 function agruparPorCliente(registros) {
   const mapa = {};
   for (const r of registros) {
@@ -349,7 +391,7 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
   let contextOptions = {};
   if (fs.existsSync(SESSION_FILE_PERF)) {
     contextOptions = { storageState: SESSION_FILE_PERF };
-    log('♻️  Sessão salva encontrada');
+    log('♻️ Sessão salva encontrada');
   }
 
   const browser = await chromium.launch({
@@ -365,66 +407,50 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
   page.setDefaultTimeout(TIMEOUT);
 
   try {
-    // 1. NAVEGAR
-    log('🌐 Navegando...');
-    await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await page.waitForTimeout(3000);
+    // 1-2-3. Navegar + Login + Esperar formulário
+    await navegarParaFiltros(page, context);
 
-    // 2. LOGIN
-    if (!(await isLoggedIn(page))) {
-      if (fs.existsSync(SESSION_FILE_PERF)) {
-        fs.unlinkSync(SESSION_FILE_PERF);
-        log('🗑️  Sessão inválida removida');
-      }
-      await fazerLogin(page);
-      await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(3000);
-      await context.storageState({ path: SESSION_FILE_PERF });
-      log('💾 Sessão salva');
-    } else {
-      log('✅ Já logado');
-    }
-
-    // 3. ESPERAR FORMULÁRIO
-    await page.waitForFunction(() => !!document.getElementById('data'), { timeout: 15000 });
-    log('✅ Formulário detectado');
-
-    // 4. PREENCHER FILTROS
+    // 4. Preencher filtros
     await preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto });
     await page.waitForTimeout(500);
 
-    // 5. BUSCAR DADOS — chamar a função JS diretamente
-    log('🔍 Executando buscaServicoExcel()...');
+    // 5. Buscar dados
+    log('🔍 Executando busca...');
     await page.evaluate(() => {
-      // Chamar a mesma função que o onclick do botão chama
       if (typeof buscaServicoExcel === 'function') {
         buscaServicoExcel(1, 0, '', null);
       } else {
-        // Fallback: clicar o botão
         const btn = document.querySelector('input[name="buscarDados"]');
         if (btn) btn.click();
       }
     });
 
-    // 6. ESPERAR TABELA (AJAX → #divRetornoTable)
+    // 6. Esperar tabela
     log('⏳ Aguardando resultado...');
-    await page.waitForFunction(
-      () => {
+    try {
+      await page.waitForFunction(
+        () => {
+          const div = document.getElementById('divRetornoTable');
+          if (!div) return false;
+          return div.querySelectorAll('table tbody tr td').length > 0;
+        },
+        { timeout: 120_000 }
+      );
+    } catch {
+      await screenshotDebug(page, 'no-table');
+      const html = await page.evaluate(() => {
         const div = document.getElementById('divRetornoTable');
-        if (!div) return false;
-        // Esperar que tenha pelo menos uma <tr> com <td> na tabela
-        const tds = div.querySelectorAll('table tbody tr td');
-        return tds.length > 0;
-      },
-      { timeout: 120_000 }  // 2 min — pode ter muitos registros com 10000/página
-    );
+        return div ? div.innerHTML.slice(0, 500) : 'divRetornoTable não encontrado';
+      });
+      throw new Error(`Tabela não carregou em 120s. divRetornoTable: ${html.slice(0, 200)}`);
+    }
     await page.waitForTimeout(2000);
     log('✅ Tabela carregada');
 
-    // 7. LER DADOS
+    // 7. Ler
     const linhasBrutas = await lerTabela(page);
 
-    // 8. CALCULAR SLA
+    // 8. Calcular
     const registros  = calcularLinhas(linhasBrutas);
     const total      = registros.length;
     const no_prazo   = registros.filter(r => r.sla_no_prazo === true).length;
@@ -439,6 +465,10 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
     return { total, no_prazo, fora_prazo, sem_dados, pct_no_prazo,
              por_cliente: agruparPorCliente(registros), registros };
 
+  } catch (err) {
+    // Screenshot de debug em qualquer erro
+    await screenshotDebug(page, 'error');
+    throw err;
   } finally {
     await browser.close();
   }
