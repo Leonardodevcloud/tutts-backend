@@ -110,9 +110,66 @@ function startPerformanceWorker(pool) {
     }
   }
 
-  // Primeiro tick 15s após boot (dar tempo pro servidor estabilizar)
+  // ── CRON: execução automática a cada 1h em horário comercial (8h–19h) ──
+  async function cronHorarioComercial() {
+    try {
+      const agora = new Date();
+      // Usar horário de Brasília (UTC-3)
+      const brasilHora = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+      const hora = brasilHora.getHours();
+      const diaSemana = brasilHora.getDay(); // 0=dom, 6=sab
+
+      // Só dias úteis (seg-sáb) entre 8h e 19h
+      if (diaSemana === 0 || hora < 8 || hora >= 19) {
+        return;
+      }
+
+      // Buscar configs ativas
+      const { rows: configs } = await _pool.query(
+        'SELECT * FROM performance_config WHERE ativo = true'
+      ).catch(() => ({ rows: [] }));
+
+      if (configs.length === 0) return;
+
+      const hoje = brasilHora.toISOString().slice(0, 10);
+      log(`🕐 Cron horário comercial (${hora}h) — ${configs.length} clientes configurados`);
+
+      let criados = 0;
+      for (const cfg of configs) {
+        // Verificar se já tem job pendente/executando pra esse cliente hoje
+        const { rows: existente } = await _pool.query(`
+          SELECT id FROM performance_jobs
+          WHERE data_inicio = $1 AND data_fim = $1
+            AND status IN ('pendente', 'executando')
+            AND (cod_cliente = $2 OR ($2 IS NULL AND cod_cliente IS NULL))
+            AND (centro_custo = $3 OR ($3 IS NULL AND centro_custo IS NULL))
+          LIMIT 1
+        `, [hoje, cfg.cod_cliente || null, cfg.centro_custo || null]);
+
+        if (existente.length > 0) continue; // já tem job ativo
+
+        await _pool.query(`
+          INSERT INTO performance_jobs (data_inicio, data_fim, cod_cliente, centro_custo, status, origem)
+          VALUES ($1, $1, $2, $3, 'pendente', 'cron')
+        `, [hoje, cfg.cod_cliente || null, cfg.centro_custo || null]);
+        criados++;
+      }
+
+      if (criados > 0) log(`🕐 Cron: ${criados} jobs criados para ${hoje}`);
+    } catch (err) {
+      log(`❌ Cron erro: ${err.message}`);
+    }
+  }
+
+  // Primeiro tick 15s após boot
   setTimeout(tick, 15_000);
-  log('🟢 Worker iniciado (apenas jobs manuais, check a cada 30s)');
+
+  // Cron: verificar a cada 60 minutos
+  setInterval(cronHorarioComercial, 60 * 60 * 1000);
+  // Primeira verificação 30s após boot
+  setTimeout(cronHorarioComercial, 30_000);
+
+  log('🟢 Worker iniciado (jobs manuais 30s + cron horário comercial 1h)');
 }
 
 module.exports = { startPerformanceWorker };
