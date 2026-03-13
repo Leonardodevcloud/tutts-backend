@@ -1,24 +1,37 @@
 /**
- * playwright-performance.js — v8
- * Fix: após login, usar window.location.href com URL absoluta
- * (menu lateral não funcionava porque sidebar links são relativos
- *  e o clique via evaluate não navega corretamente)
+ * playwright-performance.js — v9
+ * Usa EXATAMENTE o mesmo padrão de navegação do playwright-agent.js
+ * que funciona em produção:
+ *   - waitUntil: 'domcontentloaded' (NÃO networkidle)
+ *   - waitForURL após login (NÃO waitForNavigation)
+ *   - page.goto(URL) após login (NÃO window.location.href)
  */
 
 'use strict';
 
 const { chromium } = require('playwright');
 const fs   = require('fs');
+const path = require('path');
 const { logger } = require('../../config/logger');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
 const SCREENSHOT_DIR    = '/tmp/screenshots';
-const TIMEOUT           = 60_000;
+const TIMEOUT           = 30_000;  // mesmo do agente (25s lá, 30s aqui por margem)
 const EXCEL_URL         = 'https://tutts.com.br/expresso/expressoat/entregasExportarExcel';
 const LOGIN_URL         = () => process.env.SISTEMA_EXTERNO_URL;
 
 function log(msg) { logger.info(`[playwright-perf] ${msg}`); }
+
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
+ensureDir(SCREENSHOT_DIR);
+
+async function screenshotDebug(page, nome) {
+  try {
+    const file = path.join(SCREENSHOT_DIR, `perf-${nome}-${Date.now()}.png`);
+    await page.screenshot({ path: file, fullPage: false });
+    log(`📸 ${path.basename(file)}`);
+  } catch (e) { log(`⚠️ Screenshot falhou: ${e.message}`); }
+}
 
 const TABELA_PRAZOS_KM = [
   [0,10,60],[10,15,75],[15,20,90],[20,25,105],[25,30,120],
@@ -42,20 +55,18 @@ function parseDataBR(texto) {
   return new Date(+a, +mo - 1, +d, +h, +mi, +(s || 0));
 }
 
-async function screenshotDebug(page, nome) {
-  try {
-    ensureDir(SCREENSHOT_DIR);
-    const file = `${SCREENSHOT_DIR}/perf-${nome}-${Date.now()}.png`;
-    await page.screenshot({ path: file, fullPage: false });
-    log(`📸 Screenshot: ${file}`);
-  } catch (e) { log(`⚠️ Screenshot falhou: ${e.message}`); }
+// ══════════════════════════════════════════════════════════════
+// LOGIN — cópia exata do playwright-agent.js
+// ══════════════════════════════════════════════════════════════
+async function isLoggedIn(page) {
+  const url = page.url();
+  return url.includes('/expresso') && !url.includes('loginFuncionarioNovo');
 }
 
-// ── LOGIN ───────────────────────────────────────────────────
 async function fazerLogin(page) {
   log('🔐 Fazendo login...');
-  await page.goto(LOGIN_URL(), { waitUntil: 'networkidle', timeout: TIMEOUT });
-  await page.waitForTimeout(2000);
+  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.waitForTimeout(1500);
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
   if (!temEmail) throw new Error(`Página de login não carregou. URL: ${page.url()}`);
@@ -64,91 +75,56 @@ async function fazerLogin(page) {
   await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
   await page.locator('input[name="logar"]').first().click();
 
-  // Esperar redirect pós-login terminar (vai pra principal.php)
-  await page.waitForNavigation({ waitUntil: 'networkidle', timeout: TIMEOUT }).catch(() => {});
-  await page.waitForTimeout(3000);
-
-  if (page.url().includes('loginFuncionarioNovo')) {
-    throw new Error('Login falhou — ainda na página de login');
-  }
-  log(`✅ Login OK → ${page.url()}`);
+  // Aguardar sair da página de login — EXATO do agente
+  await page.waitForURL(
+    url => !url.toString().includes('loginFuncionarioNovo'),
+    { timeout: TIMEOUT }
+  );
+  log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-// ── NAVEGAR PARA PÁGINA DE FILTROS ──────────────────────────
+// ══════════════════════════════════════════════════════════════
+// NAVEGAÇÃO — mesma lógica do agente: goto → login? → goto
+// ══════════════════════════════════════════════════════════════
 async function navegarParaFiltros(page, context) {
+  log('📌 Passo 1: Navegando para entregasExportarExcel');
 
-  // TENTATIVA 1: goto direto (funciona se sessão salva válida)
-  log('🌐 Tentativa 1: goto direto...');
-  await page.goto(EXCEL_URL, { waitUntil: 'networkidle', timeout: TIMEOUT });
-  await page.waitForTimeout(3000);
-  let url = page.url();
-  log(`📍 URL: ${url}`);
+  // goto direto — domcontentloaded (NÃO networkidle!)
+  await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.waitForTimeout(1000);
 
-  // Se caiu no login
-  if (url.includes('loginFuncionarioNovo') || url.includes('login.php')) {
-    log('🔒 Precisa login');
+  if (!(await isLoggedIn(page))) {
     if (fs.existsSync(SESSION_FILE_PERF)) {
       fs.unlinkSync(SESSION_FILE_PERF);
-      log('🗑️ Sessão removida');
+      log('🗑️ Sessão inválida removida');
     }
     await fazerLogin(page);
+
+    // Após login, goto de novo — EXATO padrão do agente
+    await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.waitForTimeout(1000);
+
     await context.storageState({ path: SESSION_FILE_PERF });
     log('💾 Sessão salva');
-    // Agora estamos em principal.php — vamos navegar
+  } else {
+    log('✅ Já logado');
   }
 
-  // Se não está na página certa, forçar via window.location.href
-  url = page.url();
-  if (!url.includes('entregasExportarExcel')) {
-    log('🔄 Navegando via window.location.href...');
-    await page.evaluate((targetUrl) => {
-      window.location.href = targetUrl;
-    }, EXCEL_URL);
-    // Esperar a navegação completar
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: TIMEOUT }).catch(() => {});
-    await page.waitForTimeout(4000);
-    url = page.url();
-    log(`📍 URL após location.href: ${url}`);
-  }
+  const url = page.url();
+  log(`📍 URL: ${url}`);
 
-  // Se AINDA não está (talvez o site bloqueia navegação direta?)
-  if (!url.includes('entregasExportarExcel')) {
-    log('🔄 Tentativa 3: goto com waitUntil load...');
-    await page.goto(EXCEL_URL, { waitUntil: 'load', timeout: TIMEOUT });
-    await page.waitForTimeout(5000);
-    url = page.url();
-    log(`📍 URL tentativa 3: ${url}`);
-  }
-
-  // Verificar formulário
+  // Verificar se chegou na página certa
   const temData = await page.evaluate(() => !!document.getElementById('data'));
-  if (temData) {
-    log('✅ Formulário detectado!');
-    return;
+  if (!temData) {
+    await screenshotDebug(page, 'no-form');
+    throw new Error(`Formulário não encontrado. URL: ${url}`);
   }
-
-  // Se chegou na URL certa mas não encontrou #data, esperar mais
-  if (url.includes('entregasExportarExcel')) {
-    log('⏳ URL certa mas #data não encontrado, esperando mais...');
-    try {
-      await page.waitForSelector('#data', { state: 'attached', timeout: 15000 });
-      log('✅ #data apareceu');
-      return;
-    } catch {
-      // continua para erro
-    }
-  }
-
-  await screenshotDebug(page, 'no-form');
-  const info = await page.evaluate(() => ({
-    url: window.location.href,
-    title: document.title,
-    body: document.body?.innerText?.slice(0, 200) || '',
-  }));
-  throw new Error(`Formulário não encontrado. URL=${info.url} | Title=${info.title}`);
+  log('✅ Formulário detectado');
 }
 
-// ── PREENCHER FILTROS ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// PREENCHER FILTROS
+// ══════════════════════════════════════════════════════════════
 async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto }) {
   log('📋 Preenchendo filtros...');
 
@@ -229,7 +205,9 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
   }
 }
 
-// ── LER TABELA ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// LER TABELA
+// ══════════════════════════════════════════════════════════════
 async function lerTabela(page) {
   const todasLinhas = [];
   let pagina = 1;
@@ -337,9 +315,20 @@ function agruparPorCliente(registros) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// FUNÇÃO PRINCIPAL
+// ══════════════════════════════════════════════════════════════
 async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto }) {
   if (!process.env.SISTEMA_EXTERNO_URL) throw new Error('SISTEMA_EXTERNO_URL não configurada.');
   log(`🚀 ${dataInicio}→${dataFim} | cli=${codCliente ?? 'todos'} | cc=${centroCusto ?? '—'}`);
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-gpu', '--disable-extensions', '--disable-background-networking',
+      '--disable-default-apps', '--mute-audio', '--no-first-run', '--single-process',
+    ],
+  });
 
   let contextOptions = {};
   if (fs.existsSync(SESSION_FILE_PERF)) {
@@ -347,10 +336,6 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
     log('♻️ Sessão encontrada');
   }
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
   const context = await browser.newContext({
     ...contextOptions,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
