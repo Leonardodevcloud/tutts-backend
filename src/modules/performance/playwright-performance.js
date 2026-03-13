@@ -3,22 +3,33 @@
  * Automação RPA: acessa entregasExportarExcel, aplica filtros,
  * lê a tabela e retorna array de entregas para cálculo de SLA.
  *
- * Seletores 100% mapeados do HTML real (console dump):
- *   Data inicial      : #data                    (type=text, value="12/03/2026")
- *   Data final        : #dataF                   (type=text)
+ * ═══════════════════════════════════════════════════════════════
+ * SELETORES MAPEADOS DO HTML REAL (dump 13/03/2026):
+ *
+ *   Data inicial      : #data          (type=text, readonly, jQuery UI datepicker)
+ *   Data final        : #dataF         (type=text, readonly, jQuery UI datepicker)
  *   Com endereços     : input[name="endereco"][value="CE"]    (radio)
  *   Com dados prof    : input[name="profissional"][value="CDP"] (radio)
- *   Status multiselect: #status (select-multiple) + checkboxes name=statusOS value=F
+ *   Status multiselect: #status (select-multiple) + plugin bootstrap-multiselect
+ *                        checkboxes: input[name="statusOS"][value="F"]
  *   Cliente específico: input[name="cliente"][value="CE"]     (radio)
- *   Input cliente vis : #autocomplet-cliente      (text)
+ *   Input cliente vis : #autocomplet-cliente      (text, jQuery UI autocomplete)
  *   Input cliente hid : #codCliente               (hidden)
  *   Centro de custo   : #centrocusto-cliente      (select-one)
- *   Qtd por página    : #quantLimite → "500"
+ *   Qtd por página    : #quantLimite              (select)
  *   Botão buscar      : input[name="buscarDados"] (type=button)
  *
- *   Colunas tabela:
- *   [0] Serviço  [1] Cliente  [3] Distância  [4] Profissional
- *   [5] Data/Agendado  [11] Finalizado
+ *   COLUNAS DA TABELA (com endereço + com dados prof):
+ *   [0] Serviço  [1] Cliente  [2] Profissional  [3] Endereço
+ *   [4] Distância  [5] Data/Agendado  [6] Categoria
+ *   [7] Info  [8] Valor/V.prof  [9] Tipo Pagamento
+ *   [10] Status  [11] Finalizado
+ *
+ *   COLUNAS DA TABELA (com endereço, SEM dados prof):
+ *   [0] Serviço  [1] Cliente  [2] Endereço  [3] Distância
+ *   [4] Data/Agendado  [5] Categoria  [6] Info
+ *   [7] Valor/V.prof  [8] Tipo Pagamento  [9] Status  [10] Finalizado
+ * ═══════════════════════════════════════════════════════════════
  */
 
 'use strict';
@@ -29,7 +40,7 @@ const path = require('path');
 const { logger } = require('../../config/logger');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
-const TIMEOUT           = 30_000;
+const TIMEOUT           = 45_000;
 const EXCEL_URL         = 'https://tutts.com.br/expresso/expressoat/entregasExportarExcel';
 const LOGIN_URL         = () => process.env.SISTEMA_EXTERNO_URL;
 
@@ -71,7 +82,7 @@ async function isLoggedIn(page) {
 async function fazerLogin(page) {
   log('🔐 Fazendo login...');
   await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2000);
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
   if (!temEmail) throw new Error(`Página de login não carregou. URL: ${page.url()}`);
@@ -87,50 +98,84 @@ async function fazerLogin(page) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PREENCHER FILTROS
+// PREENCHER FILTROS VIA JAVASCRIPT (bypassa datepicker/readonly)
 // ─────────────────────────────────────────────────────────────
 async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto }) {
   log('📋 Preenchendo filtros...');
 
-  // Datas — triple-click para selecionar tudo antes de digitar
-  await page.click('#data', { clickCount: 3 });
-  await page.fill('#data',  dataInicio);   // formato DD/MM/YYYY
-  await page.click('#dataF', { clickCount: 3 });
-  await page.fill('#dataF', dataFim);
+  // ── Datas (campos readonly com jQuery UI datepicker) ──
+  // Não dá pra usar page.fill() em readonly. Setar via JS.
+  await page.evaluate(({ di, df }) => {
+    const dataEl = document.getElementById('data');
+    const dataFEl = document.getElementById('dataF');
+    if (dataEl) {
+      dataEl.removeAttribute('readonly');
+      dataEl.value = di;
+      dataEl.setAttribute('readonly', 'readonly');
+    }
+    if (dataFEl) {
+      dataFEl.removeAttribute('readonly');
+      dataFEl.value = df;
+      dataFEl.setAttribute('readonly', 'readonly');
+    }
+  }, { di: dataInicio, df: dataFim });
   log(`  📅 Datas: ${dataInicio} → ${dataFim}`);
 
-  // Com endereços (radio CE)
-  await page.check('input[name="endereco"][value="CE"]');
+  // ── Com endereços (radio CE) ──
+  await page.evaluate(() => {
+    const radio = document.querySelector('input[name="endereco"][value="CE"]');
+    if (radio) { radio.checked = true; radio.click(); }
+  });
   log('  ✅ Com endereços');
 
-  // Com dados profissional (radio CDP)
-  await page.check('input[name="profissional"][value="CDP"]');
+  // ── Com dados profissional (radio CDP) ──
+  await page.evaluate(() => {
+    const radio = document.querySelector('input[name="profissional"][value="CDP"]');
+    if (radio) { radio.checked = true; radio.click(); }
+  });
   log('  ✅ Com dados profissional');
 
-  // Status = Concluído — select-multiple com plugin multiselect
-  // Estratégia: setar via JS direto no select nativo + checkboxes do plugin
+  // ── Status = Concluído ──
+  // O select usa bootstrap-multiselect plugin.
+  // Estratégia: setar o select nativo + sincronizar checkboxes do plugin.
   await page.evaluate(() => {
+    // 1. Select nativo
     const sel = document.getElementById('status');
-    if (!sel) return;
-    for (const opt of sel.options) opt.selected = (opt.value === 'F');
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    // Sincroniza os checkboxes visuais do plugin multiselect
+    if (sel) {
+      for (const opt of sel.options) opt.selected = (opt.value === 'F');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    // 2. Checkboxes do plugin bootstrap-multiselect
     document.querySelectorAll('input[name="statusOS"]').forEach(cb => {
-      cb.checked = cb.value === 'F';
+      cb.checked = (cb.value === 'F');
       cb.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    // 3. Atualizar texto do botão do multiselect
+    const btn = document.querySelector('#status + .btn-group .multiselect-selected-text');
+    if (btn) btn.textContent = 'Concluídos';
   });
   log('  ✅ Status = Concluído (F)');
 
-  // Qtd por página = 500
-  await page.selectOption('#quantLimite', '500');
+  // ── Qtd por página = 500 ──
+  await page.evaluate(() => {
+    const sel = document.getElementById('quantLimite');
+    if (sel) {
+      sel.value = '500';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
   log('  ✅ Qtd/página: 500');
 
-  // Cliente específico
+  // ── Cliente específico ──
   if (codCliente) {
-    await page.check('input[name="cliente"][value="CE"]');
-    await page.waitForTimeout(400);
+    // Clicar no radio "Cliente específico"
+    await page.evaluate(() => {
+      const radio = document.querySelector('input[name="cliente"][value="CE"]');
+      if (radio) { radio.checked = true; radio.click(); }
+    });
+    await page.waitForTimeout(500);
 
+    // Setar código do cliente via JS (campo hidden + autocomplete visível)
     await page.evaluate((cod) => {
       const hidden = document.getElementById('codCliente');
       if (hidden) hidden.value = String(cod);
@@ -142,16 +187,20 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
     }, codCliente);
     log(`  ✅ Cliente: ${codCliente}`);
 
-    // Centro de custo — aguarda select ser populado pelo cliente
+    // Centro de custo — aguarda select ser populado pelo AJAX do cliente
     if (centroCusto) {
       await page.waitForFunction(
         () => document.querySelectorAll('#centrocusto-cliente option').length > 1,
-        { timeout: 5000 }
+        { timeout: 8000 }
       ).catch(() => log('  ⚠️  CC: select não populado'));
 
-      await page.selectOption('#centrocusto-cliente', centroCusto).catch(() => {
-        log(`  ⚠️  CC "${centroCusto}" não encontrado`);
-      });
+      await page.evaluate((cc) => {
+        const sel = document.getElementById('centrocusto-cliente');
+        if (sel) {
+          sel.value = cc;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, centroCusto);
       log(`  ✅ Centro de custo: ${centroCusto}`);
     }
   }
@@ -167,19 +216,45 @@ async function lerTabela(page) {
   while (true) {
     log(`📄 Lendo página ${pagina}...`);
 
+    // Detectar dinamicamente as colunas pelo thead
     const linhas = await page.evaluate(() => {
+      // Mapear índices das colunas pelo texto do thead
+      const ths = Array.from(document.querySelectorAll('table thead th'));
+      const colMap = {};
+      ths.forEach((th, i) => {
+        const txt = (th.textContent || '').trim().toLowerCase();
+        if (txt.includes('servi'))       colMap.servico = i;
+        if (txt.includes('cliente'))     colMap.cliente = i;
+        if (txt.includes('distân') || txt.includes('distan')) colMap.distancia = i;
+        if (txt.includes('data'))        colMap.data = i;
+        if (txt.includes('finalizado'))  colMap.finalizado = i;
+      });
+
+      // Procurar coluna profissional (pode não existir)
+      const profIdx = ths.findIndex(th => {
+        const t = (th.textContent || '').trim().toLowerCase();
+        return t.includes('profissional') || t.includes('prof.');
+      });
+      if (profIdx >= 0) colMap.profissional = profIdx;
+
       const rows = document.querySelectorAll('table tbody tr');
       const dados = [];
       rows.forEach(tr => {
         const tds = tr.querySelectorAll('td');
-        if (tds.length < 12) return;
+        if (tds.length < 6) return; // pula linhas de total/resumo
+
+        // Ignorar linhas de total (geralmente tem colspan ou "Total" no texto)
+        const firstText = (tds[0]?.textContent || '').trim();
+        if (firstText.toLowerCase().startsWith('total')) return;
+        if (tds[0]?.getAttribute('colspan')) return;
+
         dados.push({
-          os:           tds[0]?.textContent?.trim() || '',
-          cliente_txt:  tds[1]?.textContent?.trim() || '',
-          distancia:    tds[3]?.textContent?.trim() || '',
-          profissional: tds[4]?.textContent?.trim() || '',
-          data_hora:    tds[5]?.textContent?.trim() || '',
-          finalizado:   tds[11]?.textContent?.trim() || '',
+          os:           (tds[colMap.servico]?.textContent || '').trim(),
+          cliente_txt:  (tds[colMap.cliente]?.textContent || '').trim(),
+          distancia:    colMap.distancia != null ? (tds[colMap.distancia]?.textContent || '').trim() : '',
+          profissional: colMap.profissional != null ? (tds[colMap.profissional]?.textContent || '').trim() : '',
+          data_hora:    colMap.data != null ? (tds[colMap.data]?.textContent || '').trim() : '',
+          finalizado:   colMap.finalizado != null ? (tds[colMap.finalizado]?.textContent || '').trim() : '',
         });
       });
       return dados;
@@ -188,7 +263,7 @@ async function lerTabela(page) {
     todasLinhas.push(...linhas);
     log(`  → ${linhas.length} linhas`);
 
-    // Verifica próxima página (Bootstrap pagination padrão)
+    // Verifica próxima página
     const temProxima = await page.evaluate(() => {
       const sels = [
         'a[data-page][aria-label="Próximo"]',
@@ -211,7 +286,7 @@ async function lerTabela(page) {
       '.paginate_button.next:not(.disabled)',
     ].join(', ')).first().click();
 
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
     pagina++;
     if (pagina > 20) { log('⚠️  Limite de 20 páginas'); break; }
   }
@@ -225,10 +300,12 @@ async function lerTabela(page) {
 // ─────────────────────────────────────────────────────────────
 function calcularLinhas(linhas) {
   return linhas.map(linha => {
+    // Extrair cod_cliente do texto "949 - Nome Fantasia\nProfissional..."
     const mCli    = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
     const codCli  = mCli ? parseInt(mCli[1]) : null;
-    const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').trim();
+    const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
 
+    // Extrair KM
     const mKm = linha.distancia.match(/([\d]+[.,][\d]+)/);
     const km  = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
 
@@ -236,8 +313,7 @@ function calcularLinhas(linhas) {
       ? CLIENTES_PRAZO_FIXO[codCli]
       : (km !== null ? getPrazoPorKm(km) : null);
 
-    // col[5] pode vir como "DD/MM/YYYY HH:MM" ou "DD/MM/YYYY HH:MM / DD/MM/YYYY HH:MM" (agendado)
-    // parseDataBR extrai a PRIMEIRA data encontrada
+    // data_hora pode vir como "DD/MM/YYYY HH:MM:SS" ou com agendamento
     const dtCriacao = parseDataBR(linha.data_hora);
     const dtFinal   = parseDataBR(linha.finalizado);
 
@@ -331,27 +407,39 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
   try {
     // 1. Navega + login
     await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(2000);
 
     if (!(await isLoggedIn(page))) {
       if (fs.existsSync(SESSION_FILE_PERF)) { fs.unlinkSync(SESSION_FILE_PERF); log('🗑️  Sessão inválida'); }
       await fazerLogin(page);
       await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(2000);
       await context.storageState({ path: SESSION_FILE_PERF });
       log('💾 Sessão salva');
     } else {
       log('✅ Já logado');
     }
 
+    // Esperar o formulário de filtros estar disponível
+    await page.waitForSelector('#data', { timeout: TIMEOUT });
+    log('✅ Formulário carregado');
+
     // 2. Filtros
     await preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto });
 
-    // 3. Busca
+    // 3. Busca — o botão é input[type=button][name=buscarDados]
     log('🔍 Clicando Buscar dados...');
     await page.click('input[name="buscarDados"]');
-    await page.waitForSelector('table tbody tr td', { timeout: TIMEOUT });
-    await page.waitForTimeout(1500);
+
+    // Aguardar a tabela renderizar (o AJAX preenche #divRetornoTable)
+    await page.waitForFunction(
+      () => {
+        const trs = document.querySelectorAll('#divRetornoTable table tbody tr');
+        return trs.length > 0;
+      },
+      { timeout: 60_000 }
+    );
+    await page.waitForTimeout(2000);
     log('✅ Tabela carregada');
 
     // 4. Lê páginas
