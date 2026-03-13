@@ -1,10 +1,8 @@
 /**
- * playwright-performance.js — v7
- * Navegação via sidebar: hamburger → Serviços → Relatórios
- * Seletores confirmados:
- *   Hamburger:  a.dashboard (no header)
- *   Serviços:   sidebar a com texto "Serviços" → expande ul#sidebar_servicos
- *   Relatórios: a[href="entregasExportarExcel"] dentro de #sidebar_servicos
+ * playwright-performance.js — v8
+ * Fix: após login, usar window.location.href com URL absoluta
+ * (menu lateral não funcionava porque sidebar links são relativos
+ *  e o clique via evaluate não navega corretamente)
  */
 
 'use strict';
@@ -66,7 +64,7 @@ async function fazerLogin(page) {
   await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
   await page.locator('input[name="logar"]').first().click();
 
-  // Esperar redirect pós-login (vai pra principal.php)
+  // Esperar redirect pós-login terminar (vai pra principal.php)
   await page.waitForNavigation({ waitUntil: 'networkidle', timeout: TIMEOUT }).catch(() => {});
   await page.waitForTimeout(3000);
 
@@ -76,60 +74,18 @@ async function fazerLogin(page) {
   log(`✅ Login OK → ${page.url()}`);
 }
 
-// ── NAVEGAR VIA SIDEBAR ─────────────────────────────────────
-async function navegarViaMenu(page) {
-  log('📂 Navegando via menu lateral...');
-
-  // 1. Abrir sidebar — clicar no hamburger (a.dashboard no header)
-  await page.evaluate(() => {
-    const hamburger = document.querySelector('a.dashboard');
-    if (hamburger) hamburger.click();
-  });
-  await page.waitForTimeout(1500);
-  log('  ✅ Sidebar aberto');
-
-  // 2. Clicar em "Serviços" pra expandir submenu
-  await page.evaluate(() => {
-    // Procurar o link "Serviços" na sidebar
-    const links = document.querySelectorAll('.sidebar-menu a');
-    for (const a of links) {
-      if (a.textContent.trim().toLowerCase().includes('serviço')) {
-        a.click();
-        return;
-      }
-    }
-  });
-  await page.waitForTimeout(1000);
-  log('  ✅ Serviços expandido');
-
-  // 3. Clicar em "Relatórios" (href="entregasExportarExcel")
-  const [response] = await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => null),
-    page.evaluate(() => {
-      const link = document.querySelector('a[href="entregasExportarExcel"]')
-                || document.querySelector('#sidebar_servicos a[href*="entregasExportarExcel"]');
-      if (link) { link.click(); return true; }
-      // Fallback: navegar direto
-      window.location.href = 'entregasExportarExcel';
-      return false;
-    }),
-  ]);
-  await page.waitForTimeout(3000);
-  log(`  📍 URL: ${page.url()}`);
-}
-
-// ── CHEGAR NA PÁGINA DE FILTROS ─────────────────────────────
+// ── NAVEGAR PARA PÁGINA DE FILTROS ──────────────────────────
 async function navegarParaFiltros(page, context) {
 
-  // TENTATIVA 1: URL direta (funciona se sessão salva válida)
-  log('🌐 Tentativa 1: URL direta...');
+  // TENTATIVA 1: goto direto (funciona se sessão salva válida)
+  log('🌐 Tentativa 1: goto direto...');
   await page.goto(EXCEL_URL, { waitUntil: 'networkidle', timeout: TIMEOUT });
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(3000);
   let url = page.url();
   log(`📍 URL: ${url}`);
 
   // Se caiu no login
-  if (url.includes('loginFuncionarioNovo') || url.includes('login')) {
+  if (url.includes('loginFuncionarioNovo') || url.includes('login.php')) {
     log('🔒 Precisa login');
     if (fs.existsSync(SESSION_FILE_PERF)) {
       fs.unlinkSync(SESSION_FILE_PERF);
@@ -138,33 +94,49 @@ async function navegarParaFiltros(page, context) {
     await fazerLogin(page);
     await context.storageState({ path: SESSION_FILE_PERF });
     log('💾 Sessão salva');
-
-    // Após login estamos em principal.php — navegar via menu
-    await navegarViaMenu(page);
-    url = page.url();
+    // Agora estamos em principal.php — vamos navegar
   }
 
-  // Se não chegou na página certa (redirecionou pra principal.php)
+  // Se não está na página certa, forçar via window.location.href
+  url = page.url();
   if (!url.includes('entregasExportarExcel')) {
-    log('⚠️ Não na página certa, tentando via menu...');
-    await navegarViaMenu(page);
+    log('🔄 Navegando via window.location.href...');
+    await page.evaluate((targetUrl) => {
+      window.location.href = targetUrl;
+    }, EXCEL_URL);
+    // Esperar a navegação completar
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: TIMEOUT }).catch(() => {});
+    await page.waitForTimeout(4000);
     url = page.url();
+    log(`📍 URL após location.href: ${url}`);
   }
 
-  // TENTATIVA FINAL: goto direto (agora já está logado, pode funcionar)
+  // Se AINDA não está (talvez o site bloqueia navegação direta?)
   if (!url.includes('entregasExportarExcel')) {
-    log('🔄 Última tentativa: goto direto...');
-    await page.goto(EXCEL_URL, { waitUntil: 'networkidle', timeout: TIMEOUT });
-    await page.waitForTimeout(3000);
+    log('🔄 Tentativa 3: goto com waitUntil load...');
+    await page.goto(EXCEL_URL, { waitUntil: 'load', timeout: TIMEOUT });
+    await page.waitForTimeout(5000);
     url = page.url();
-    log(`📍 URL final: ${url}`);
+    log(`📍 URL tentativa 3: ${url}`);
   }
 
   // Verificar formulário
   const temData = await page.evaluate(() => !!document.getElementById('data'));
   if (temData) {
-    log('✅ Formulário detectado');
+    log('✅ Formulário detectado!');
     return;
+  }
+
+  // Se chegou na URL certa mas não encontrou #data, esperar mais
+  if (url.includes('entregasExportarExcel')) {
+    log('⏳ URL certa mas #data não encontrado, esperando mais...');
+    try {
+      await page.waitForSelector('#data', { state: 'attached', timeout: 15000 });
+      log('✅ #data apareceu');
+      return;
+    } catch {
+      // continua para erro
+    }
   }
 
   await screenshotDebug(page, 'no-form');
@@ -173,7 +145,7 @@ async function navegarParaFiltros(page, context) {
     title: document.title,
     body: document.body?.innerText?.slice(0, 200) || '',
   }));
-  throw new Error(`Formulário não encontrado. URL=${info.url} | Title=${info.title} | Body=${info.body.slice(0, 100)}`);
+  throw new Error(`Formulário não encontrado. URL=${info.url} | Title=${info.title}`);
 }
 
 // ── PREENCHER FILTROS ───────────────────────────────────────
