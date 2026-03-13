@@ -231,7 +231,130 @@ function createPerformanceRouter(pool, verificarToken) {
     }
   });
 
-  console.log('✅ Módulo Performance Diária — rotas montadas (6 endpoints)');
+  // ── AUTO-CREATE: performance_config ──────────────────────────────────────────
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS performance_config (
+      id            SERIAL PRIMARY KEY,
+      cod_cliente   INTEGER NOT NULL,
+      nome_display  VARCHAR(255),
+      centro_custo  VARCHAR(255),
+      ativo         BOOLEAN NOT NULL DEFAULT true,
+      created_at    TIMESTAMP DEFAULT NOW()
+    )
+  `).then(() => {
+    pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_perf_config_unico ON performance_config(cod_cliente, COALESCE(centro_custo, '__todos__'))`).catch(() => {});
+  }).catch(err => console.log('⚠️ performance_config:', err.message));
+
+  // ── GET /performance/config ───────────────────────────────────────────────
+  router.get('/performance/config', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT c.*, m.mascara
+        FROM performance_config c
+        LEFT JOIN bi_mascaras m ON m.cod_cliente = c.cod_cliente::text
+        WHERE c.ativo = true
+        ORDER BY c.nome_display, c.centro_custo
+      `);
+      res.json({ configs: rows });
+    } catch (err) {
+      console.error('❌ /performance/config GET:', err);
+      res.status(500).json({ error: 'Erro ao listar configurações' });
+    }
+  });
+
+  // ── POST /performance/config ──────────────────────────────────────────────
+  router.post('/performance/config', async (req, res) => {
+    try {
+      const { cod_cliente, nome_display, centro_custo } = req.body;
+      if (!cod_cliente) return res.status(400).json({ error: 'cod_cliente é obrigatório' });
+
+      const { rows } = await pool.query(`
+        INSERT INTO performance_config (cod_cliente, nome_display, centro_custo)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (cod_cliente, COALESCE(centro_custo, '__todos__')) DO UPDATE SET
+          nome_display = COALESCE(EXCLUDED.nome_display, performance_config.nome_display),
+          ativo = true
+        RETURNING *
+      `, [parseInt(cod_cliente), nome_display || null, centro_custo || null]);
+
+      console.log(`✅ Performance config adicionado: ${cod_cliente} / ${centro_custo || 'Todos'}`);
+      res.json({ success: true, config: rows[0] });
+    } catch (err) {
+      console.error('❌ /performance/config POST:', err);
+      res.status(500).json({ error: 'Erro ao salvar configuração' });
+    }
+  });
+
+  // ── DELETE /performance/config/:id ────────────────────────────────────────
+  router.delete('/performance/config/:id', async (req, res) => {
+    try {
+      await pool.query('DELETE FROM performance_config WHERE id = $1', [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Erro ao excluir configuração' });
+    }
+  });
+
+  // ── GET /performance/dashboard ────────────────────────────────────────────
+  // Retorna todos os configs com o snapshot mais recente de cada um
+  router.get('/performance/dashboard', async (req, res) => {
+    try {
+      const { data_inicio, data_fim } = req.query;
+      const di = data_inicio || new Date().toISOString().slice(0, 10);
+      const df = data_fim || di;
+
+      const { rows: configs } = await pool.query(`
+        SELECT c.*, m.mascara
+        FROM performance_config c
+        LEFT JOIN bi_mascaras m ON m.cod_cliente = c.cod_cliente::text
+        WHERE c.ativo = true
+        ORDER BY c.nome_display, c.centro_custo
+      `);
+
+      // Para cada config, buscar snapshot mais recente
+      const cards = await Promise.all(configs.map(async (cfg) => {
+        const conditions = ['data_inicio >= $1', 'data_fim <= $2', 'cod_cliente = $3'];
+        const params = [di, df, cfg.cod_cliente];
+        if (cfg.centro_custo) {
+          conditions.push('centro_custo = $4');
+          params.push(cfg.centro_custo);
+        }
+
+        const { rows } = await pool.query(`
+          SELECT id, total_os, no_prazo, fora_prazo, sem_dados, pct_no_prazo, criado_em, registros
+          FROM performance_snapshots
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY criado_em DESC
+          LIMIT 1
+        `, params);
+
+        const snap = rows[0] || null;
+        return {
+          config: cfg,
+          nome_display: cfg.mascara || cfg.nome_display || `Cliente ${cfg.cod_cliente}`,
+          cod_cliente: cfg.cod_cliente,
+          centro_custo: cfg.centro_custo,
+          snapshot: snap ? {
+            id: snap.id,
+            total_os: snap.total_os,
+            no_prazo: snap.no_prazo,
+            fora_prazo: snap.fora_prazo,
+            sem_dados: snap.sem_dados,
+            pct_no_prazo: snap.pct_no_prazo,
+            criado_em: snap.criado_em,
+          } : null,
+          registros: snap?.registros || [],
+        };
+      }));
+
+      res.json({ cards, data_inicio: di, data_fim: df });
+    } catch (err) {
+      console.error('❌ /performance/dashboard:', err);
+      res.status(500).json({ error: 'Erro ao carregar dashboard' });
+    }
+  });
+
+  console.log('✅ Módulo Performance Diária — rotas montadas (10 endpoints)');
   return router;
 }
 
