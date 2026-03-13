@@ -194,12 +194,38 @@ async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroC
           () => document.querySelectorAll('#centrocusto-cliente option').length > 1,
           { timeout: 10000 }
         );
-        await page.evaluate((cc) => {
+        // Buscar opção pelo TEXTO (não pelo value) — o value pode ser ID numérico
+        const matched = await page.evaluate((cc) => {
           const s = document.getElementById('centrocusto-cliente');
-          if (s) { s.value = cc; s.dispatchEvent(new Event('change', { bubbles: true })); }
+          if (!s) return { found: false, options: [] };
+          const ccLower = cc.toLowerCase().trim();
+          const allOptions = Array.from(s.options).map(o => ({ value: o.value, text: o.textContent.trim() }));
+          // 1. Match exato pelo value
+          for (const o of s.options) {
+            if (o.value === cc) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'value_exato', selected: o.value }; }
+          }
+          // 2. Match exato pelo texto
+          for (const o of s.options) {
+            if (o.textContent.trim().toLowerCase() === ccLower) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'texto_exato', selected: o.value }; }
+          }
+          // 3. Match parcial — texto contém o CC ou CC contém o texto
+          for (const o of s.options) {
+            const oText = o.textContent.trim().toLowerCase();
+            if (oText.includes(ccLower) || ccLower.includes(oText)) {
+              if (o.value && o.value !== '' && oText !== '') { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'parcial', selected: o.value, texto: o.textContent.trim() }; }
+            }
+          }
+          return { found: false, options: allOptions.slice(0, 15) };
         }, centroCusto);
-        log(`  ✅ CC: ${centroCusto}`);
-      } catch { log('  ⚠️ CC não carregou'); }
+
+        if (matched.found) {
+          log(`  ✅ CC: "${centroCusto}" → match ${matched.match}${matched.texto ? ` (${matched.texto})` : ''} → value="${matched.selected}"`);
+        } else {
+          log(`  ⚠️ CC: "${centroCusto}" NÃO encontrado. Opções disponíveis:`);
+          (matched.options || []).forEach(o => log(`     - value="${o.value}" text="${o.text}"`));
+        }
+      } catch (ccErr) { log(`  ⚠️ CC não carregou: ${ccErr.message}`); }
+      await page.waitForTimeout(1500); // Aguardar sistema externo reagir à mudança de CC
     }
     log(`  ✅ Cliente: ${codCliente}`);
   }
