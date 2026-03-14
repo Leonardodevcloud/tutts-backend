@@ -165,7 +165,16 @@ const prepararLoteStarkAutomatico = async () => {
 
     console.log(`🏦 [CRON Stark] ${saques.length} saque(s) encontrado(s) — R$ ${valorTotal.toFixed(2)}`);
 
-    // Aprovar e marcar como 'em_lote' — admin executa o pagamento manualmente
+    // Criar registro do lote com status 'pendente' (admin executa depois)
+    const loteResult = await pool.query(`
+      INSERT INTO stark_lotes (quantidade, valor_total, saldo_antes, status, executado_por_id, executado_por_nome)
+      VALUES ($1, $2, 0, 'pendente', 0, 'Sistema (Auto-batch)')
+      RETURNING *
+    `, [saques.length, valorTotal]);
+
+    const loteId = loteResult.rows[0].id;
+
+    // Aprovar e marcar como 'em_lote' com o lote_id real
     for (const saque of saques) {
       const novoStatus = saque.has_gratuity ? 'aprovado_gratuidade' : 'aprovado';
       await pool.query(`
@@ -174,13 +183,14 @@ const prepararLoteStarkAutomatico = async () => {
             approved_at = COALESCE(approved_at, NOW()),
             lancamento_at = COALESCE(lancamento_at, NOW()),
             stark_status = 'em_lote',
+            stark_lote_id = $2,
             admin_name = COALESCE(admin_name, 'Sistema (Auto-batch)'),
             updated_at = NOW()
-        WHERE id = $2
-      `, [novoStatus, saque.id]);
+        WHERE id = $3
+      `, [novoStatus, loteId, saque.id]);
     }
 
-    console.log(`✅ [CRON Stark] ${saques.length} saque(s) aprovados e marcados 'em_lote' — aguardando admin executar pagamento`);
+    console.log(`✅ [CRON Stark] Lote #${loteId} criado — ${saques.length} saque(s) aprovados e marcados 'em_lote' — aguardando admin executar pagamento`);
 
   } catch (error) {
     console.error('❌ [CRON Stark] Erro geral:', error.message);
