@@ -27,7 +27,9 @@ const verificarContaBloqueada = async (codProfissional) => {
     return { bloqueada: false };
   } catch (error) {
     console.error('❌ Erro ao verificar bloqueio:', error.message);
-    return { bloqueada: false }; // Em caso de erro, permitir (fail-open)
+    // 🔒 SECURITY FIX: Fail-closed — se não conseguimos verificar, bloqueamos por segurança
+    console.error('❌ Erro ao verificar bloqueio (fail-closed ativado):', error.message);
+    return { bloqueada: true, motivo: 'Erro ao verificar status da conta. Tente novamente.', minutosRestantes: 1 };
   }
 };
 
