@@ -8,6 +8,13 @@ require('dotenv').config();
 const required = ['DATABASE_URL', 'JWT_SECRET'];
 const missing = required.filter(key => !process.env[key]);
 
+// 🔒 SECURITY FIX (HIGH-05): REFRESH_SECRET obrigatório em produção
+const IS_PROD = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+if (IS_PROD && !process.env.REFRESH_SECRET) {
+  console.error('❌ ERRO CRÍTICO: REFRESH_SECRET é obrigatório em produção. Configure como variável de ambiente separada do JWT_SECRET.');
+  missing.push('REFRESH_SECRET');
+}
+
 if (missing.length > 0) {
   console.error(`❌ ERRO CRÍTICO: Variáveis obrigatórias não configuradas: ${missing.join(', ')}`);
   process.exit(1);
