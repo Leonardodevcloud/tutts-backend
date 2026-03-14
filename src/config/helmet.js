@@ -59,6 +59,9 @@ const helmetConfig = helmet({
       childSrc: ["'self'", "blob:"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
+      // 🔒 SECURITY FIX (MED-05): Bloquear manifest de terceiros e plugins
+      manifestSrc: ["'self'"],
+      mediaSrc: ["'self'"],
       upgradeInsecureRequests: [],
     },
     reportOnly: false,
