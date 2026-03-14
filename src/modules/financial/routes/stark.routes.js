@@ -169,7 +169,23 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         return res.status(400).json({ error: 'Nenhum saque selecionado' });
       }
 
-      // Marcar os saques como 'em_lote' — só os que são aprovados e ainda não foram marcados
+      // Marcar os saques como 'em_lote' — só os que são aprovados (ou aguardando pagamento stark) e ainda não foram marcados
+      // Saques aguardando_pagamento_stark são auto-aprovados ao marcar para lote
+      await pool.query(`
+        UPDATE withdrawal_requests 
+        SET status = CASE 
+              WHEN status = 'aguardando_pagamento_stark' AND has_gratuity THEN 'aprovado_gratuidade'
+              WHEN status = 'aguardando_pagamento_stark' THEN 'aprovado'
+              ELSE status
+            END,
+            approved_at = CASE WHEN status = 'aguardando_pagamento_stark' AND approved_at IS NULL THEN NOW() ELSE approved_at END,
+            lancamento_at = CASE WHEN status = 'aguardando_pagamento_stark' AND lancamento_at IS NULL THEN NOW() ELSE lancamento_at END,
+            admin_name = CASE WHEN status = 'aguardando_pagamento_stark' THEN COALESCE(admin_name, 'Sistema (Lote Manual)') ELSE admin_name END
+        WHERE id = ANY($1)
+          AND status IN ('aprovado', 'aprovado_gratuidade', 'aguardando_pagamento_stark')
+          AND (stark_status IS NULL OR stark_status = 'erro')
+      `, [saque_ids]);
+
       const result = await pool.query(`
         UPDATE withdrawal_requests 
         SET stark_status = 'em_lote', updated_at = NOW()
