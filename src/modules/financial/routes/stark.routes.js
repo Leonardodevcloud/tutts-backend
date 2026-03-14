@@ -729,39 +729,80 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      const transfers = itens.map(item => {
+      // 🔒 SECURITY FIX: Retry com validação DICT (igual ao fluxo principal)
+      // Processar individualmente — se um falhar no DICT, marca erro mas continua os outros
+      const transfersCriadas = [];
+      const errosRetry = [];
+
+      for (const item of itens) {
+        const pixKeyRaw = (item.pix_key || '').trim();
         const cpf = (item.cpf || '').replace(/\D/g, '');
         const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
-        const pixKey = (item.pix_key || '').trim();
 
-        let accountNumber = pixKey;
-        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/\D/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
-          accountNumber = pixKey.replace(/\D/g, '');
+        // Normalizar chave Pix
+        let chaveDict = pixKeyRaw;
+        const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+        if (pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+')) {
+          chaveDict = pixSoDigitos;
+        } else if (pixSoDigitos.length === 14) {
+          chaveDict = pixSoDigitos;
+        } else if (pixKeyRaw.startsWith('+55') || (pixSoDigitos.length >= 10 && pixSoDigitos.length <= 13)) {
+          let tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
+          else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
+          else chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+        } else if (pixKeyRaw.includes('@')) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
         }
-        if (pixKey.startsWith('+')) {
-          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+
+        try {
+          const dictKey = await starkbank.dictKey.get(chaveDict);
+          const taxIdFinal = dictKey.taxId || cpfFormatado;
+
+          console.log(`🔍 [Stark Retry] DICT OK item #${item.id}: banco=${dictKey.ispb}, nome="${dictKey.name}"`);
+
+          const transferData = {
+            amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
+            name: item.user_name,
+            taxId: taxIdFinal,
+            bankCode: dictKey.ispb || '20018183',
+            branchCode: dictKey.branchCode || '0001',
+            accountNumber: dictKey.accountNumber || chaveDict,
+            accountType: dictKey.accountType || 'checking',
+            externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
+            tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
+          };
+
+          const resultado = await starkbank.transfer.create([new starkbank.Transfer(transferData)]);
+          transfersCriadas.push({ item, transfer: resultado[0] });
+          console.log(`  ✅ Retry transfer item #${item.id} — ID: ${resultado[0].id}`);
+        } catch (errRetry) {
+          const erroMsg = errRetry.errors ? JSON.stringify(errRetry.errors) : errRetry.message;
+          console.warn(`  ❌ Retry falhou item #${item.id}: ${erroMsg}`);
+
+          await client.query(`
+            UPDATE stark_lote_itens SET status = 'erro', erro = $1, atualizado_em = NOW() WHERE id = $2
+          `, [`Retry falhou: ${erroMsg}`, item.id]);
+
+          await client.query(`
+            UPDATE withdrawal_requests SET stark_status = 'erro', stark_erro = $1, updated_at = NOW() WHERE id = $2
+          `, [`Retry falhou: ${erroMsg}`, item.withdrawal_id]);
+
+          errosRetry.push({ id: item.id, nome: item.user_name, erro: erroMsg });
         }
+      }
 
-        return new starkbank.Transfer({
-          amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
-          name: item.user_name,
-          taxId: cpfFormatado,
-          bankCode: '20018183',
-          branchCode: '0001',
-          accountNumber: accountNumber,
-          accountType: 'checking',
-          externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
-          tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
-        });
-      });
-
-      const transfersCriadas = await starkbank.transfer.create(transfers);
+      if (transfersCriadas.length === 0) {
+        await client.query(`UPDATE stark_lotes SET status = 'erro', erro = 'Todas as retentativas falharam' WHERE id = $1`, [id]);
+        await client.query('COMMIT');
+        releaseClient();
+        return res.json({ success: false, lote_id: parseInt(id), retentados: 0, erros: errosRetry });
+      }
 
       // Atualizar itens e saques
-      for (let i = 0; i < itens.length; i++) {
-        const item = itens[i];
-        const transfer = transfersCriadas[i];
-
+      for (const { item, transfer } of transfersCriadas) {
         await client.query(`
           UPDATE stark_lote_itens 
           SET stark_transfer_id = $1, status = 'processando', erro = NULL, atualizado_em = NOW()
@@ -783,17 +824,20 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       await client.query('COMMIT');
 
       await registrarAuditoria(req, 'STARK_LOTE_RETENTATIVA', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', id, {
-        itens_retentados: itens.length,
-        valor: valorTotal
+        itens_retentados: transfersCriadas.length,
+        itens_falharam: errosRetry.length,
+        valor: transfersCriadas.reduce((a, t) => a + parseFloat(t.item.final_amount || t.item.valor || 0), 0)
       });
 
-      console.log(`🔄 [Stark Bank] Retentativa do lote #${id}: ${itens.length} pagamentos`);
+      console.log(`🔄 [Stark Bank] Retentativa do lote #${id}: ${transfersCriadas.length} enviados, ${errosRetry.length} falharam`);
 
       res.json({
         success: true,
         lote_id: parseInt(id),
-        itens_retentados: itens.length,
-        valor_total: valorTotal
+        itens_retentados: transfersCriadas.length,
+        itens_falharam: errosRetry.length,
+        erros: errosRetry,
+        valor_total: transfersCriadas.reduce((a, t) => a + parseFloat(t.item.final_amount || t.item.valor || 0), 0)
       });
 
     } catch (error) {
@@ -941,7 +985,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (environment === 'production') {
         if (!signature) {
-          console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital');
+          console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital de', req.ip);
           return res.status(200).send('OK');
         }
 
@@ -953,19 +997,11 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
           await processarEventoStark(event);
         } catch (errValidacao) {
-          console.warn('⚠️ [Stark Webhook] Assinatura inválida:', errValidacao.message);
-          console.warn('⚠️ [Stark Webhook] rawBody presente:', !!req.rawBody, '| content length:', content.length);
-
-          // FALLBACK: processar pelo body parseado para não perder eventos
-          try {
-            const body = req.body;
-            if (body && body.event) {
-              console.log('🔄 [Stark Webhook] Fallback: processando pelo body parseado...');
-              await processarEventoStark(body.event);
-            }
-          } catch (errFallback) {
-            console.error('❌ [Stark Webhook] Fallback falhou:', errFallback.message);
-          }
+          // 🔒 SECURITY FIX: NÃO processar evento com assinatura inválida em produção
+          // Fallback removido — eventos não validados são logados para investigação manual
+          console.error('❌ [Stark Webhook] REJEITADO — assinatura inválida:', errValidacao.message);
+          console.error('❌ [Stark Webhook] IP:', req.ip, '| rawBody presente:', !!req.rawBody, '| content length:', content.length);
+          // NÃO processar: possível tentativa de forjar webhook
           return res.status(200).send('OK');
         }
       } else {
@@ -1235,12 +1271,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         }
       }
 
-      // Diagnóstico de configuração
+      // Diagnóstico de configuração (🔒 sem info sensível de chave)
       const diagnostico = {
         project_id_presente: !!process.env.STARK_PROJECT_ID,
         private_key_presente: !!process.env.STARK_PRIVATE_KEY,
-        private_key_tem_header_pem: !!(process.env.STARK_PRIVATE_KEY && (process.env.STARK_PRIVATE_KEY.includes('-----BEGIN') || process.env.STARK_PRIVATE_KEY.includes('-----BEGIN'))),
-        private_key_tamanho: process.env.STARK_PRIVATE_KEY ? process.env.STARK_PRIVATE_KEY.length : 0,
         sdk_carregado: !!starkbank,
         inicializado: starkIniciado,
       };
