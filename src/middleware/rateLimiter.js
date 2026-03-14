@@ -49,4 +49,12 @@ const createAccountLimiter = rateLimit({
   keyGenerator: (req) => getClientIP(req),
 });
 
-module.exports = { getClientIP, loginLimiter, apiLimiter, createAccountLimiter };
+// 🔒 SECURITY FIX (MED-07): Rate limiter dedicado para recuperação de senha
+const passwordRecoveryLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 5,
+  message: { error: 'Muitas tentativas de recuperação. Aguarde 15 minutos.' },
+  keyGenerator: (req) => getClientIP(req),
+});
+
+module.exports = { getClientIP, loginLimiter, apiLimiter, createAccountLimiter, passwordRecoveryLimiter };
