@@ -46,6 +46,18 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   const PLIFIC_BASE_URL = PLIFIC_AMBIENTE === 'producao' ? PLIFIC_CONFIG.BASE_URL_PRODUCAO : PLIFIC_CONFIG.BASE_URL_TESTE;
   const PLIFIC_TOKEN = process.env.PLIFIC_TOKEN;
 
+  // 🔒 SECURITY FIX (HIGH-09): Fetch com timeout para evitar conexões penduradas
+  async function plificFetch(url, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      return response;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   const plificSaldoCache = new Map();
 
   const limparCachePlific = () => {
@@ -153,7 +165,26 @@ router.get('/financial/data/:userCod', verificarToken, async (req, res) => {
       return res.json({ data: null });
     }
 
-    res.json({ data: result.rows[0] });
+    // 🔒 SECURITY FIX (CRIT-04): Mascarar dados sensíveis na resposta
+    // Admin recebe dados completos para operações, profissional recebe mascarado
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    const row = result.rows[0];
+    
+    if (!isAdmin) {
+      // Mascarar CPF: ***456**89
+      if (row.cpf) row.cpf = '***' + row.cpf.slice(3, 6) + '**' + row.cpf.slice(-2);
+      // Mascarar chave Pix
+      if (row.pix_key) {
+        if (row.pix_tipo === 'email' && row.pix_key.includes('@')) {
+          const parts = row.pix_key.split('@');
+          row.pix_key = parts[0].slice(0, 3) + '***@' + parts[1];
+        } else {
+          row.pix_key = row.pix_key.slice(0, 4) + '***' + row.pix_key.slice(-3);
+        }
+      }
+    }
+
+    res.json({ data: row });
   } catch (error) {
     console.error('❌ Erro ao obter dados financeiros:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
@@ -279,16 +310,20 @@ router.post('/financial/data', verificarToken, async (req, res) => {
         );
       }
       if (oldData.pix_key !== pixKeyLimpo) {
+        // 🔒 SECURITY FIX (CRIT-07): Mascarar chave Pix nos logs
+        const pixOldMask = oldData.pix_key ? oldData.pix_key.slice(0, 4) + '***' + oldData.pix_key.slice(-3) : '***';
+        const pixNewMask = pixKeyLimpo ? pixKeyLimpo.slice(0, 4) + '***' + pixKeyLimpo.slice(-3) : '***';
         await pool.query(
           'INSERT INTO financial_logs (user_cod, action, old_value, new_value) VALUES ($1, $2, $3, $4)',
-          [userCod, 'ALTERACAO_PIX', oldData.pix_key, pixKey]
+          [userCod, 'ALTERACAO_PIX', pixOldMask, pixNewMask]
         );
       }
     } else {
+      // 🔒 SECURITY FIX (CRIT-05): Usar dados sanitizados no INSERT (nomeSeguro, cpfLimpo, pixKeyLimpo)
       await pool.query(
         `INSERT INTO user_financial_data (user_cod, full_name, cpf, pix_key, pix_tipo, terms_accepted) 
          VALUES ($1, $2, $3, $4, $5, true)`,
-        [userCod, fullName, cpf, pixKey, pixTipo || 'cpf']
+        [userCod, nomeSeguro, cpfLimpo, pixKeyLimpo, tipoPixSeguro]
       );
 
       await pool.query(
@@ -566,7 +601,7 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
 
       console.log(`💳 [Auto-Débito] Iniciando para saque #${novoSaque.id} - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
 
-      const responseDebito = await fetch(`${PLIFIC_BASE_URL}/lancarDebitoProfissional`, {
+      const responseDebito = await plificFetch(`${PLIFIC_BASE_URL}/lancarDebitoProfissional`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${PLIFIC_TOKEN}`,
@@ -894,7 +929,7 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
         
         const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
-        const responseDebito = await fetch(urlDebito, {
+        const responseDebito = await plificFetch(urlDebito, {
           method: 'POST',
           headers: { 
             'Authorization': `Bearer ${PLIFIC_TOKEN}`, 
@@ -932,7 +967,7 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         await client.query('ROLLBACK');
         return res.status(500).json({ 
           error: 'Erro ao processar débito', 
-          details: erroDebito.message 
+          details: process.env.NODE_ENV === 'production' ? 'Erro interno' : erroDebito.message 
         });
       }
     } else if (isAprovado && dadosSaque.debito) {
@@ -1231,23 +1266,34 @@ router.post('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (re
   }
 });
 
-// Deletar gratuidade
+// Deletar gratuidade — 🔒 SECURITY FIX (HIGH-06): Soft delete para preservar trilha de auditoria
 router.delete('/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
-      'DELETE FROM gratuities WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    // Verificar se existe
+    const existing = await pool.query('SELECT * FROM gratuities WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
       return res.status(404).json({ error: 'Gratuidade não encontrada' });
     }
 
+    // 🔒 Soft delete: marca como removida ao invés de deletar
+    const result = await pool.query(
+      `UPDATE gratuities SET status = 'removida', expired_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    // Registrar auditoria
+    await registrarAuditoria(req, 'GRATUIDADE_REMOVIDA', AUDIT_CATEGORIES.FINANCIAL, 'gratuities', id, {
+      user_cod: existing.rows[0].user_cod,
+      quantidade_original: existing.rows[0].quantity,
+      restante: existing.rows[0].remaining,
+      removido_por: req.user.nome || req.user.username
+    });
+
     res.json({ success: true });
   } catch (error) {
-    console.error('❌ Erro ao deletar gratuidade:', error);
+    console.error('❌ Erro ao remover gratuidade:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
@@ -1374,7 +1420,8 @@ router.patch('/restricted/:id/remove', verificarToken, verificarAdminOuFinanceir
 
   // ==================== PLIFIC ENDPOINTS ====================
 
-router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/saldo/:idProf', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { idProf } = req.params;
         const forceRefresh = req.query.refresh === 'true';
@@ -1395,7 +1442,7 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
         const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
         console.log(`🔍 Plific: Consultando saldo do profissional ${idProf}...`);
         
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
         });
@@ -1440,7 +1487,8 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
 });
 
 // Buscar Saldos em Lote
-router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.post('/plific/saldos-lote', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { ids } = req.body;
         
@@ -1471,7 +1519,7 @@ router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
 
                 try {
                     const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
-                    const response = await fetch(url, {
+                    const response = await plificFetch(url, {
                         method: 'GET',
                         headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
                     });
@@ -1511,7 +1559,8 @@ router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
 });
 
 // Lançar Débito
-router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro — CRÍTICO: débito financeiro
+router.post('/plific/lancar-debito', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { idProf, valor, descricao } = req.body;
         
@@ -1528,7 +1577,7 @@ router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
         const url = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
         console.log(`💳 Plific: Lançando débito de R$ ${valor} para profissional ${idProf}...`);
 
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ idProf: parseInt(idProf), valor: parseFloat(valor), descricao: descricao.trim() })
@@ -1560,7 +1609,8 @@ router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
 });
 
 // Buscar Profissionais para Consulta
-router.get('/plific/profissionais', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/profissionais', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { regiao, limite } = req.query;
         
@@ -1589,7 +1639,8 @@ router.get('/plific/profissionais', verificarToken, async (req, res) => {
 });
 
 // Listar todos os profissionais com saldo (do banco local + API Plific)
-router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { pagina = 1, porPagina = 20 } = req.query;
         const paginaNum = parseInt(pagina);
@@ -1642,7 +1693,7 @@ router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
                 
                 // Buscar da API
                 const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${prof.codigo}`;
-                const response = await fetch(url, {
+                const response = await plificFetch(url, {
                     method: 'GET',
                     headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
                 });
@@ -1705,13 +1756,14 @@ router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
 });
 
 // Status da Integração
-router.get('/plific/status', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/status', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const testId = PLIFIC_AMBIENTE === 'teste' ? '8888' : '1';
         const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${testId}`;
         
         const startTime = Date.now();
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
         });
