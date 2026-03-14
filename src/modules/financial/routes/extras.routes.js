@@ -119,7 +119,7 @@ router.get('/restricted', verificarToken, verificarAdminOuFinanceiro, async (req
 });
 
 // Verificar se usuário está restrito
-router.get('/restricted/check/:userCod', async (req, res) => {
+router.get('/restricted/check/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     
