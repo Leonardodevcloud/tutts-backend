@@ -457,17 +457,16 @@ initDatabase().then(() => {
       initScoreCron(cron, pool);
 
       // ════════════════════════════════════════════════════════════
-      // CRON: Lote automático Stark Bank (a cada 1 hora)
-      // Envia saques com status 'aguardando_pagamento_stark' para Pix Stark
-      // Usa global.__starkbank inicializado pelo stark.routes.js
+      // CRON: Preparar lote Stark Bank (a cada 1 hora)
+      // Aprova saques com débito OK e marca 'em_lote' para o admin revisar e executar
+      // NÃO executa pagamento — apenas prepara o lote
       // ════════════════════════════════════════════════════════════
-      const processarLoteStarkAutomatico = async () => {
+      const prepararLoteStarkAutomatico = async () => {
         console.log('🏦 [CRON Stark] Verificando saques aguardando pagamento Stark...');
         try {
           const saquesProntos = await pool.query(`
-            SELECT w.*, ufd.pix_tipo
+            SELECT w.*
             FROM withdrawal_requests w
-            LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
             WHERE w.status = 'aguardando_pagamento_stark'
               AND w.debito = true
               AND (w.stark_status IS NULL OR w.stark_status = 'erro')
@@ -475,47 +474,16 @@ initDatabase().then(() => {
           `);
 
           if (saquesProntos.rows.length === 0) {
-            console.log('🏦 [CRON Stark] Nenhum saque pendente para envio');
+            console.log('🏦 [CRON Stark] Nenhum saque pendente');
             return;
           }
 
-          console.log(`🏦 [CRON Stark] ${saquesProntos.rows.length} saque(s) encontrado(s)`);
-
-          // Usar SDK já inicializado pelo stark.routes.js, ou inicializar sob demanda
-          let starkbank = global.__starkbank;
-          if (!starkbank) {
-            console.log('🏦 [CRON Stark] SDK não inicializado ainda, tentando inicializar...');
-            try {
-              starkbank = require('starkbank');
-              const projectId = process.env.STARK_PROJECT_ID;
-              const privateKey = process.env.STARK_PRIVATE_KEY;
-              const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
-              if (!projectId || !privateKey) {
-                console.error('❌ [CRON Stark] STARK_PROJECT_ID ou STARK_PRIVATE_KEY não configuradas');
-                return;
-              }
-              let key = privateKey;
-              if (key.includes('\\n')) key = key.replace(/\\n/g, '\n');
-              if (!key.includes('\n') && key.includes('-----BEGIN')) {
-                key = key.replace('-----BEGIN EC PRIVATE KEY-----', '-----BEGIN EC PRIVATE KEY-----\n')
-                  .replace('-----END EC PRIVATE KEY-----', '\n-----END EC PRIVATE KEY-----')
-                  .replace('-----BEGIN EC PARAMETERS-----', '\n-----BEGIN EC PARAMETERS-----\n')
-                  .replace('-----END EC PARAMETERS-----', '\n-----END EC PARAMETERS-----\n');
-              }
-              key = key.split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n');
-              const project = new starkbank.Project({ environment, id: projectId, privateKey: key });
-              starkbank.setUser(project);
-              global.__starkbank = starkbank;
-              console.log(`✅ [CRON Stark] SDK inicializado com sucesso (${environment})`);
-            } catch (errInit) {
-              console.error('❌ [CRON Stark] Falha ao inicializar SDK:', errInit.message);
-              return;
-            }
-          }
-
           const saques = saquesProntos.rows;
+          const valorTotal = saques.reduce((acc, s) => acc + parseFloat(s.final_amount || 0), 0);
 
-          // Aprovar os saques (mudar status para aprovado/aprovado_gratuidade)
+          console.log(`🏦 [CRON Stark] ${saques.length} saque(s) encontrado(s) — R$ ${valorTotal.toFixed(2)}`);
+
+          // Aprovar e marcar como 'em_lote' — admin executa o pagamento manualmente
           for (const saque of saques) {
             const novoStatus = saque.has_gratuity ? 'aprovado_gratuidade' : 'aprovado';
             await pool.query(`
@@ -530,125 +498,17 @@ initDatabase().then(() => {
             `, [novoStatus, saque.id]);
           }
 
-          console.log(`🏦 [CRON Stark] ${saques.length} saque(s) aprovados e marcados 'em_lote'`);
+          console.log(`✅ [CRON Stark] ${saques.length} saque(s) aprovados e marcados 'em_lote' — aguardando admin executar pagamento`);
 
-          // Verificar saldo
-          let saldoDisponivel;
-          try {
-            const result = await starkbank.balance.get();
-            saldoDisponivel = Array.isArray(result) ? (result.length > 0 ? result[0].amount / 100 : 0) : (result && result.amount !== undefined ? result.amount / 100 : 0);
-          } catch (errSaldo) {
-            console.error('❌ [CRON Stark] Erro ao verificar saldo:', errSaldo.message);
-            return;
-          }
-
-          const valorTotal = saques.reduce((acc, s) => acc + parseFloat(s.final_amount || 0), 0);
-
-          if (saldoDisponivel < valorTotal) {
-            console.error(`❌ [CRON Stark] Saldo insuficiente: R$ ${saldoDisponivel.toFixed(2)} < R$ ${valorTotal.toFixed(2)}`);
-            return;
-          }
-
-          // Criar lote
-          const loteResult = await pool.query(`
-            INSERT INTO stark_lotes (quantidade, valor_total, saldo_antes, status, executado_por_id, executado_por_nome)
-            VALUES ($1, $2, $3, 'processando', 0, 'Sistema (Auto-batch)')
-            RETURNING *
-          `, [saques.length, valorTotal, saldoDisponivel]);
-
-          const loteId = loteResult.rows[0].id;
-          console.log(`🏦 [CRON Stark] Lote #${loteId} criado — ${saques.length} saques, R$ ${valorTotal.toFixed(2)}`);
-
-          let enviados = 0, erros = 0;
-
-          for (const saque of saques) {
-            const pixKeyRaw = (saque.pix_key || '').trim();
-            const cpf = (saque.cpf || '').replace(/\D/g, '');
-            const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
-            const pixTipo = (saque.pix_tipo || '').toLowerCase();
-
-            // Normalizar chave Pix
-            let chaveDict = pixKeyRaw;
-            const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
-            if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
-              chaveDict = pixSoDigitos;
-            } else if (pixTipo === 'cnpj' || (!pixTipo && pixSoDigitos.length === 14)) {
-              chaveDict = pixSoDigitos;
-            } else if (pixTipo === 'telefone' || pixTipo === 'phone' || pixKeyRaw.startsWith('+55')) {
-              let tel = pixSoDigitos;
-              if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
-              else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
-              else chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
-            } else if (pixTipo === 'email' || pixKeyRaw.includes('@')) {
-              chaveDict = pixKeyRaw.toLowerCase().trim();
-            } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
-              chaveDict = pixKeyRaw.toLowerCase().trim();
-            }
-
-            try {
-              const dictKey = await starkbank.dictKey.get(chaveDict);
-              const taxIdFinal = dictKey.taxId || cpfFormatado;
-
-              const transferData = {
-                amount: Math.round(parseFloat(saque.final_amount) * 100),
-                name: saque.user_name,
-                taxId: taxIdFinal,
-                bankCode: dictKey.ispb || '20018183',
-                branchCode: dictKey.branchCode || '0001',
-                accountNumber: dictKey.accountNumber || chaveDict,
-                accountType: dictKey.accountType || 'checking',
-                externalId: `tutts-saque-${saque.id}`,
-                tags: [`lote:${loteId}`, `saque:${saque.id}`, 'auto-batch']
-              };
-
-              const resultado = await starkbank.transfer.create([new starkbank.Transfer(transferData)]);
-              const transferId = resultado[0].id;
-
-              await pool.query(`
-                UPDATE withdrawal_requests
-                SET stark_status = 'processando', stark_transfer_id = $1, stark_lote_id = $2, stark_enviado_em = NOW(), updated_at = NOW()
-                WHERE id = $3
-              `, [transferId, loteId, saque.id]);
-
-              await pool.query(`
-                INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
-                VALUES ($1, $2, $3, $4, 'processando')
-              `, [loteId, saque.id, transferId, saque.final_amount]);
-
-              enviados++;
-              console.log(`  ✅ Saque #${saque.id} (${saque.user_name}) → Transfer ${transferId}`);
-            } catch (errTransfer) {
-              const erroMsg = errTransfer.errors ? JSON.stringify(errTransfer.errors) : errTransfer.message;
-              console.error(`  ❌ Saque #${saque.id} (${saque.user_name}): ${erroMsg}`);
-
-              await pool.query(`
-                UPDATE withdrawal_requests SET stark_status = 'erro', stark_erro = $1, stark_lote_id = $2, updated_at = NOW() WHERE id = $3
-              `, [erroMsg.substring(0, 500), loteId, saque.id]);
-
-              await pool.query(`
-                INSERT INTO stark_lote_itens (lote_id, withdrawal_id, valor, status, erro) VALUES ($1, $2, $3, 'rejeitado', $4)
-              `, [loteId, saque.id, saque.final_amount, erroMsg.substring(0, 500)]);
-
-              erros++;
-            }
-          }
-
-          // Atualizar lote
-          const valorEnviado = saques.filter((_, i) => i < enviados).reduce((a, s) => a + parseFloat(s.final_amount || 0), 0);
-          await pool.query(`
-            UPDATE stark_lotes SET status = $1, quantidade = $2, valor_total = $3 WHERE id = $4
-          `, [enviados === 0 ? 'erro' : 'processando', enviados, valorEnviado, loteId]);
-
-          console.log(`✅ [CRON Stark] Lote #${loteId} finalizado: ${enviados} enviados, ${erros} erros`);
         } catch (error) {
           console.error('❌ [CRON Stark] Erro geral:', error.message);
         }
       };
 
       // Rodar a cada 1 hora
-      setInterval(processarLoteStarkAutomatico, 60 * 60 * 1000);
-      // Primeira execução após 60s (dar tempo para Stark SDK inicializar via routes)
-      setTimeout(processarLoteStarkAutomatico, 60000);
+      setInterval(prepararLoteStarkAutomatico, 60 * 60 * 1000);
+      // Primeira execução após 60s
+      setTimeout(prepararLoteStarkAutomatico, 60000);
 
       console.log('⏰ Crons rodando no server (defina WORKER_ENABLED=true para separar)');
     }
