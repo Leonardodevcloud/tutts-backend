@@ -14,19 +14,19 @@ function createChatIaRoutes(pool) {
   const SAMPLES_CACHE_TTL = 30 * 60 * 1000;
 
   // ==================== TABELAS PERMITIDAS ====================
+  // 🔒 SECURITY FIX (CRIT-03): Tabelas financeiras sensíveis REMOVIDAS (CPF, Pix, valores de saque)
+  // Removidos: withdrawal_requests, gratuities, restricted_professionals, indicacoes, indicacao_links
   const TABELAS_PERMITIDAS = [
     'bi_entregas', 'bi_upload_historico', 'bi_relatorios_ia',
     'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_prazo_padrao',
     'bi_prazos_prof_cliente', 'bi_faixas_prazo_prof', 'bi_prazo_prof_padrao',
     'bi_regioes', 'bi_regras_contagem', 'bi_mascaras',
     'bi_resumo_cliente', 'bi_resumo_diario', 'bi_resumo_geral', 'bi_resumo_profissional',
-    'withdrawal_requests', 'gratuities', 'restricted_professionals',
     'cs_clientes', 'cs_interacoes', 'cs_ocorrencias',
     'solicitacoes_corrida', 'solicitacoes_pontos',
     'operacoes', 'operacoes_faixas_km',
     'disponibilidade_linhas', 'disponibilidade_lojas', 'disponibilidade_regioes',
     'score_totais', 'score_historico',
-    'indicacoes', 'indicacao_links',
     'loja_produtos', 'loja_pedidos', 'loja_estoque',
     'bi_garantido_cache', 'garantido_status'
   ];
@@ -174,7 +174,7 @@ function createChatIaRoutes(pool) {
       if (queries.length > 0) sqlLimpo = queries[0].trim();
     }
 
-    // Extrair tabelas usadas — ignorar FROM dentro de EXTRACT(), DATE_PART(), etc
+    // 🔒 SECURITY FIX (CRIT-03): Validar subqueries — extrair TODAS as tabelas incluindo subselects
     const sqlSemExtract = sqlLimpo.replace(/EXTRACT\s*\([^)]*\)/gi, '').replace(/DATE_PART\s*\([^)]*\)/gi, '').replace(/DATE_TRUNC\s*\([^)]*\)/gi, '');
     const tabelasUsadas = sqlSemExtract.toUpperCase().match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
@@ -183,21 +183,41 @@ function createChatIaRoutes(pool) {
         return { valido: false, erro: `Tabela "${tabela}" não autorizada.` };
     }
 
+    // 🔒 SECURITY FIX (CRIT-03): Bloquear tabelas sensíveis mesmo em subqueries
+    const tabelasSensiveis = ['users', 'user_financial_data', 'financial_logs', 'withdrawal_requests', 
+      'withdrawal_idempotency', 'gratuities', 'restricted_professionals', 'indicacoes', 'indicacao_links',
+      'login_attempts', 'user_sessions', 'stark_lotes', 'stark_lote_itens'];
+    const sqlLower = sqlLimpo.toLowerCase();
+    for (const ts of tabelasSensiveis) {
+      if (sqlLower.includes(ts)) {
+        return { valido: false, erro: `Acesso à tabela "${ts}" não permitido no Chat IA.` };
+      }
+    }
+
+    // 🔒 SECURITY FIX: Bloquear pg_catalog, information_schema, pg_*
+    if (/\bpg_\w+/i.test(sqlLimpo) || /\binformation_schema\b/i.test(sqlLimpo)) {
+      return { valido: false, erro: 'Acesso a tabelas do sistema não permitido.' };
+    }
+
     if (!sqlLimpo.toUpperCase().includes('LIMIT')) sqlLimpo += ' LIMIT 500';
     return { valido: true, sql: sqlLimpo };
   }
 
+  // 🔒 SECURITY FIX (CRIT-03): Usar client dedicado para isolar statement_timeout
   async function executarSQL(sql) {
     const validacao = validarSQL(sql);
     if (!validacao.valido) return { success: false, erro: validacao.erro, sql };
+    const client = await pool.connect();
     try {
-      await pool.query('SET statement_timeout = 15000');
-      const result = await pool.query(validacao.sql);
-      await pool.query('SET statement_timeout = 0');
+      await client.query('SET statement_timeout = 15000');
+      const result = await client.query(validacao.sql);
+      await client.query('SET statement_timeout = 0');
       return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: validacao.sql };
     } catch (sqlError) {
-      await pool.query('SET statement_timeout = 0').catch(() => {});
+      await client.query('SET statement_timeout = 0').catch(() => {});
       return { success: false, erro: sqlError.message, sql: validacao.sql };
+    } finally {
+      client.release();
     }
   }
 
