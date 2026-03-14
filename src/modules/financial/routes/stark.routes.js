@@ -69,7 +69,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
     const projectId = process.env.STARK_PROJECT_ID;
     const privateKey = process.env.STARK_PRIVATE_KEY;
-    const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
+    const environment = process.env.STARK_ENVIRONMENT || 'production';
 
     if (!projectId || !privateKey) {
       starkErroInit = 'Variáveis STARK_PROJECT_ID e/ou STARK_PRIVATE_KEY não configuradas';
@@ -156,7 +156,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao consultar saldo:', error.message);
-      res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
+      res.status(500).json({ error: 'Erro ao consultar saldo', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -328,7 +328,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       } catch (errSaldo) {
         await client.query('ROLLBACK');
         releaseClient();
-        return res.status(500).json({ error: 'Não foi possível verificar saldo', details: errSaldo.message });
+        return res.status(500).json({ error: 'Não foi possível verificar saldo', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : errSaldo.message });
       }
 
       if (saldoDisponivel < valorTotal) {
@@ -628,7 +628,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Stark Bank] Erro ao executar lote:', error.message);
-      res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: error.message });
+      res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       releaseClient();
     }
@@ -846,7 +846,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Stark Bank] Erro na retentativa:', error.message);
-      res.status(500).json({ error: 'Erro ao retentar pagamentos', details: error.message });
+      res.status(500).json({ error: 'Erro ao retentar pagamentos', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       releaseClient();
     }
@@ -967,16 +967,16 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
     } catch (error) {
       console.error('❌ [DICT Validação] Erro:', error.message);
-      res.status(500).json({ error: 'Erro ao validar chaves Pix', details: error.message });
+      res.status(500).json({ error: 'Erro ao validar chaves Pix', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
   // ==================== WEBHOOK STARK BANK (PÚBLICO - sem JWT) ====================
+  // 🔒 SECURITY FIX (HIGH-03): Webhook SEMPRE exige assinatura válida — sandbox removido
   router.post('/stark/webhook', async (req, res) => {
     try {
       const signature = req.headers['digital-signature'];
       const content = req.rawBody || JSON.stringify(req.body);
-      const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
 
       console.log(`📨 [Stark Webhook] Recebido! signature=${signature ? 'SIM(' + signature.substring(0, 20) + '...)' : 'NÃO'}, bodySize=${content.length}, rawBody=${req.rawBody ? 'SIM' : 'NÃO'}`);
 
@@ -986,39 +986,23 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         return res.status(200).send('OK');
       }
 
-      if (environment === 'production') {
-        if (!signature) {
-          console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital de', req.ip);
-          return res.status(200).send('OK');
-        }
+      // Sem assinatura = rejeitar sempre
+      if (!signature) {
+        console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital de', req.ip);
+        return res.status(200).send('OK');
+      }
 
-        try {
-          const event = await starkbank.event.parse({
-            content: content,
-            signature: signature
-          });
-          console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
-          await processarEventoStark(event);
-        } catch (errValidacao) {
-          // 🔒 SECURITY FIX: NÃO processar evento com assinatura inválida em produção
-          // Fallback removido — eventos não validados são logados para investigação manual
-          console.error('❌ [Stark Webhook] REJEITADO — assinatura inválida:', errValidacao.message);
-          console.error('❌ [Stark Webhook] IP:', req.ip, '| rawBody presente:', !!req.rawBody, '| content length:', content.length);
-          // NÃO processar: possível tentativa de forjar webhook
-          return res.status(200).send('OK');
-        }
-      } else {
-        // Sandbox
-        if (signature) {
-          try {
-            const event = await starkbank.event.parse({ content, signature });
-            await processarEventoStark(event);
-          } catch (e) {
-            if (req.body && req.body.event) await processarEventoStark(req.body.event);
-          }
-        } else if (req.body && req.body.event) {
-          await processarEventoStark(req.body.event);
-        }
+      try {
+        const event = await starkbank.event.parse({
+          content: content,
+          signature: signature
+        });
+        console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
+        await processarEventoStark(event);
+      } catch (errValidacao) {
+        console.error('❌ [Stark Webhook] REJEITADO — assinatura inválida:', errValidacao.message);
+        console.error('❌ [Stark Webhook] IP:', req.ip, '| rawBody presente:', !!req.rawBody, '| content length:', content.length);
+        return res.status(200).send('OK');
       }
 
       res.status(200).send('OK');
@@ -1144,7 +1128,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       res.json({ consultadas: pendentes.rows.length, atualizados, resultados });
     } catch (error) {
       console.error('❌ [Stark Sync] Erro:', error.message);
-      res.status(500).json({ error: 'Erro ao sincronizar', details: error.message });
+      res.status(500).json({ error: 'Erro ao sincronizar', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -1305,7 +1289,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
-      res.status(500).json({ error: 'Erro ao verificar status', details: error.message });
+      res.status(500).json({ error: 'Erro ao verificar status', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
