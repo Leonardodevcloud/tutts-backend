@@ -59,6 +59,7 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   }
 
   const plificSaldoCache = new Map();
+  const PLIFIC_CACHE_MAX_SIZE = 500; // 🔒 SECURITY FIX (MED-04): Limite de tamanho do cache
 
   const limparCachePlific = () => {
     const agora = Date.now();
@@ -66,6 +67,12 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
       if (agora - value.timestamp > PLIFIC_CONFIG.CACHE_TTL) {
         plificSaldoCache.delete(key);
       }
+    }
+    // 🔒 Se ainda passou do limite, remover os mais antigos
+    if (plificSaldoCache.size > PLIFIC_CACHE_MAX_SIZE) {
+      const entries = [...plificSaldoCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+      const toRemove = entries.slice(0, plificSaldoCache.size - PLIFIC_CACHE_MAX_SIZE);
+      for (const [key] of toRemove) plificSaldoCache.delete(key);
     }
   };
 
