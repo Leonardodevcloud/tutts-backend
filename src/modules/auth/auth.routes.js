@@ -541,17 +541,29 @@ router.post('/users/login', loginLimiter, async (req, res) => {
     const user = result.rows[0];
     
     // Verificar senha com bcrypt
-    // Suporte para senhas antigas (texto plano) e novas (hash)
+    // 🔒 SECURITY FIX: Senhas antigas migradas com comparação timing-safe
     let senhaValida = false;
     
     if (user.password.startsWith('$2')) {
       // Senha já está em hash bcrypt
       senhaValida = await verificarSenha(password, user.password);
     } else {
-      // Senha antiga em texto plano - comparar diretamente
-      senhaValida = (user.password === password);
+      // 🔒 SECURITY FIX: Comparação timing-safe para senhas legadas (evita timing attack)
+      const crypto = require('crypto');
+      try {
+        const inputBuf = Buffer.from(password, 'utf8');
+        const storedBuf = Buffer.from(user.password, 'utf8');
+        // timingSafeEqual exige buffers de mesmo tamanho
+        if (inputBuf.length === storedBuf.length) {
+          senhaValida = crypto.timingSafeEqual(inputBuf, storedBuf);
+        } else {
+          senhaValida = false;
+        }
+      } catch (e) {
+        senhaValida = false;
+      }
       
-      // Se senha antiga válida, atualizar para bcrypt
+      // Se senha antiga válida, MIGRAR IMEDIATAMENTE para bcrypt
       if (senhaValida) {
         const hashedPassword = await hashSenha(password);
         await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, user.id]);
@@ -1155,6 +1167,12 @@ router.post('/users/reset-password', verificarToken, verificarAdmin, async (req,
       return res.status(400).json({ error: 'Nova senha deve ter pelo menos 6 caracteres' });
     }
 
+    // 🔒 SECURITY FIX: Aplicar mesma validação de senha forte do registro
+    const validacaoSenha = validarSenhaForte(newPassword);
+    if (!validacaoSenha.valida) {
+      return res.status(400).json({ error: validacaoSenha.mensagem });
+    }
+
     // Hash da nova senha
     const hashedPassword = await hashSenha(newPassword);
 
@@ -1167,7 +1185,9 @@ router.post('/users/reset-password', verificarToken, verificarAdmin, async (req,
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
-    console.log(`🔐 Senha resetada para: ${codProfissional} por ${req.user.codProfissional}`);
+    // 🔒 SECURITY FIX: Invalidar TODAS as sessões do usuário após reset
+    const sessionsRevoked = await revogarTodosTokens(result.rows[0].id);
+    console.log(`🔐 Senha resetada para: ${codProfissional} por ${req.user.codProfissional} (${sessionsRevoked} sessões revogadas)`);
     res.json({ message: 'Senha alterada com sucesso', user: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao resetar senha:', error);
