@@ -1034,6 +1034,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         SET stark_status = $1::text,
             stark_erro = $2::text,
             stark_pago_em = CASE WHEN $1::text = 'pago' THEN NOW() ELSE stark_pago_em END,
+            status = CASE WHEN $1::text = 'pago' THEN 'pago_stark' ELSE status END,
             updated_at = NOW()
         WHERE stark_transfer_id = $3::text
         RETURNING *
