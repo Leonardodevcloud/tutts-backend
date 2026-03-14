@@ -98,6 +98,14 @@ async function initFinancialTables(pool) {
       // Coluna já existe ou outro erro
     }
 
+    // Garantir que a coluna debito_erro existe (mensagem de erro quando auto-débito Plific falha)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS debito_erro VARCHAR(500)`);
+      console.log('✅ Coluna debito_erro verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Garantir que a coluna approved_at existe (migração)
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP`);
@@ -142,6 +150,8 @@ async function initFinancialTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_created_at ON withdrawal_requests(created_at DESC)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_conciliacao ON withdrawal_requests(conciliacao_omie, debito)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_status_created ON withdrawal_requests(status, created_at DESC)`).catch(() => {});
+    // Índice para cron de batch automático Stark Bank
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_aguardando_stark ON withdrawal_requests(status, debito) WHERE status = 'aguardando_pagamento_stark' AND debito = true`).catch(() => {});
     
     // Índices para gratuities
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_gratuities_user_cod ON gratuities(user_cod)`).catch(() => {});
