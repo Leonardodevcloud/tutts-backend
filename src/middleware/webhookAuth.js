@@ -15,9 +15,13 @@ const crypto = require('crypto');
 function verificarWebhookSignature(req, res, next) {
   const secret = process.env.WEBHOOK_SECRET;
 
-  // Sem secret = modo permissivo com logging
+  // 🔒 SECURITY FIX (HIGH-02): Rejeitar em produção se secret não configurado
   if (!secret) {
-    console.log(`📨 [WEBHOOK] ${req.method} ${req.path} from ${req.ip} (sem validação de assinatura)`);
+    if (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production') {
+      console.error(`❌ [WEBHOOK] REJEITADO — WEBHOOK_SECRET não configurado em produção! IP: ${req.ip}`);
+      return res.status(503).json({ error: 'Webhook não configurado' });
+    }
+    console.warn(`⚠️ [WEBHOOK] ${req.method} ${req.path} from ${req.ip} (sem validação — apenas dev)`);
     return next();
   }
 
