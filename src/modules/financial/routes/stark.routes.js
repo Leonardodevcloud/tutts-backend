@@ -809,6 +809,97 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     }
   });
 
+  // ==================== VALIDAR CHAVES PIX DO LOTE (DICT) ====================
+  router.post('/stark/lote/validar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const { saque_ids } = req.body;
+      if (!saque_ids || !Array.isArray(saque_ids) || saque_ids.length === 0) {
+        return res.status(400).json({ error: 'Nenhum saque para validar' });
+      }
+
+      // Buscar saques
+      const result = await pool.query(`
+        SELECT w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, w.final_amount, ufd.pix_tipo
+        FROM withdrawal_requests w
+        LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+        WHERE w.id = ANY($1)
+      `, [saque_ids]);
+
+      const validacoes = [];
+      let comAlerta = 0;
+
+      for (const saque of result.rows) {
+        const pixKeyRaw = (saque.pix_key || '').trim();
+        const cpf = (saque.cpf || '').replace(/\D/g, '');
+        const pixTipo = (saque.pix_tipo || '').toLowerCase();
+        const alertas = [];
+        let dictStatus = 'erro';
+        let dictNome = null;
+        let dictBanco = null;
+        let cpfDivergente = false;
+
+        // Normalizar chave Pix
+        let chaveDict = pixKeyRaw;
+        const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+        if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'cnpj' || (!pixTipo && pixSoDigitos.length === 14)) {
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'telefone' || pixTipo === 'phone' || pixKeyRaw.startsWith('+55')) {
+          let tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
+          else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
+          else chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+        } else if (pixTipo === 'email' || pixKeyRaw.includes('@')) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        }
+
+        try {
+          const dictKey = await starkbank.dictKey.get(chaveDict);
+          dictStatus = 'ok';
+          dictNome = dictKey.name || null;
+          dictBanco = dictKey.ispb || null;
+
+          // Verificar CPF divergente
+          if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
+            cpfDivergente = true;
+            alertas.push(`CPF divergente: cadastro=${cpf.substring(0,3)}...${cpf.substring(9)}, DICT=${dictKey.taxId.replace(/\D/g, '').substring(0,3)}...${dictKey.taxId.replace(/\D/g, '').substring(9)} (${dictKey.name})`);
+          }
+
+          console.log(`🔍 [DICT Validação] Saque #${saque.id}: OK — ${dictKey.name} (banco ${dictKey.ispb})`);
+        } catch (errDict) {
+          const erroMsg = errDict.errors ? JSON.stringify(errDict.errors) : errDict.message;
+          alertas.push('Chave Pix inválida ou não encontrada: ' + erroMsg);
+          console.warn(`⚠️ [DICT Validação] Saque #${saque.id}: FALHA — ${erroMsg}`);
+        }
+
+        if (alertas.length > 0) comAlerta++;
+
+        validacoes.push({
+          id: saque.id,
+          dict_status: dictStatus,
+          dict_nome: dictNome,
+          dict_banco: dictBanco,
+          cpf_divergente: cpfDivergente,
+          alertas: alertas
+        });
+      }
+
+      res.json({
+        total: validacoes.length,
+        validados: validacoes.filter(v => v.dict_status === 'ok').length,
+        com_alerta: comAlerta,
+        validacoes: validacoes
+      });
+
+    } catch (error) {
+      console.error('❌ [DICT Validação] Erro:', error.message);
+      res.status(500).json({ error: 'Erro ao validar chaves Pix', details: error.message });
+    }
+  });
+
   // ==================== WEBHOOK STARK BANK (PÚBLICO - sem JWT) ====================
   router.post('/stark/webhook', async (req, res) => {
     try {
