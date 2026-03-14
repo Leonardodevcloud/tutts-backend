@@ -73,12 +73,13 @@ router.post('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (re
 });
 
 // Deletar gratuidade
+// 🔒 SECURITY FIX (HIGH-06): Soft delete para preservar auditoria
 router.delete('/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
     const result = await pool.query(
-      'DELETE FROM gratuities WHERE id = $1 RETURNING *',
+      `UPDATE gratuities SET status = 'removida', expired_at = NOW() WHERE id = $1 RETURNING *`,
       [id]
     );
 
@@ -88,8 +89,8 @@ router.delete('/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, asy
 
     res.json({ success: true });
   } catch (error) {
-    console.error('❌ Erro ao deletar gratuidade:', error);
-    res.status(500).json({ error: error.message });
+    console.error('❌ Erro ao remover gratuidade:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -215,7 +216,8 @@ router.patch('/restricted/:id/remove', verificarToken, verificarAdminOuFinanceir
 
   // ==================== PLIFIC ENDPOINTS ====================
 
-router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01)
+router.get('/plific/saldo/:idProf', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { idProf } = req.params;
         const forceRefresh = req.query.refresh === 'true';
@@ -281,7 +283,8 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
 });
 
 // Buscar Saldos em Lote
-router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01)
+router.post('/plific/saldos-lote', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { ids } = req.body;
         
@@ -352,7 +355,8 @@ router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
 });
 
 // Lançar Débito
-router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01) — CRÍTICO: débito financeiro
+router.post('/plific/lancar-debito', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { idProf, valor, descricao } = req.body;
         
@@ -401,7 +405,8 @@ router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
 });
 
 // Buscar Profissionais para Consulta
-router.get('/plific/profissionais', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01)
+router.get('/plific/profissionais', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { regiao, limite } = req.query;
         
@@ -430,7 +435,8 @@ router.get('/plific/profissionais', verificarToken, async (req, res) => {
 });
 
 // Listar todos os profissionais com saldo (do banco local + API Plific)
-router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01)
+router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { pagina = 1, porPagina = 20 } = req.query;
         const paginaNum = parseInt(pagina);
@@ -546,7 +552,8 @@ router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
 });
 
 // Status da Integração
-router.get('/plific/status', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01)
+router.get('/plific/status', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const testId = helpers.PLIFIC_AMBIENTE === 'teste' ? '8888' : '1';
         const url = `${helpers.PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${testId}`;
