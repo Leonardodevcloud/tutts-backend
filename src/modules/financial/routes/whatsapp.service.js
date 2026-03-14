@@ -2,7 +2,7 @@
  * WhatsApp Notification Service — Evolution API
  * 
  * Envia notificações automáticas para grupo do WhatsApp
- * quando lotes de pagamento são gerados/finalizados.
+ * quando lotes de pagamento são gerados/finalizados..
  * 
  * ENV VARS necessárias:
  *   EVOLUTION_API_URL      = https://sua-instancia.evolution-api.com
