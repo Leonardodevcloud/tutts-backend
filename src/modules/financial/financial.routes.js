@@ -342,7 +342,7 @@ router.get('/withdrawals/pendentes', verificarToken, verificarAdminOuFinanceiro,
         EXTRACT(EPOCH FROM (NOW() - w.created_at))/3600 as horas_aguardando
       FROM withdrawal_requests w
       LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      WHERE w.status IN ('pending', 'aguardando_aprovacao')
+      WHERE w.status IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')
       ORDER BY w.created_at ASC
     `);
     
@@ -364,7 +364,7 @@ router.get('/withdrawals/contadores', verificarToken, verificarAdminOuFinanceiro
   try {
     const result = await pool.query(`
       SELECT 
-        COUNT(*) FILTER (WHERE status IN ('pending', 'aguardando_aprovacao')) as pendentes,
+        COUNT(*) FILTER (WHERE status IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')) as pendentes,
         COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')) as aprovados,
         COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
         COUNT(*) as total
@@ -389,7 +389,7 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
       params.push(status);
       whereConditions.push(`w.status = $${params.length}`);
     } else {
-      whereConditions.push(`w.status NOT IN ('pending', 'aguardando_aprovacao')`);
+      whereConditions.push(`w.status NOT IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')`);
     }
     
     if (user_cod) {
@@ -493,22 +493,110 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
 
+    const novoSaque = result.rows[0];
+
+    // ==================== AUTO DÉBITO PLIFIC (ao receber solicitação) ====================
+    // Tenta debitar automaticamente na Plific. Se OK → aguardando_pagamento_stark.
+    // Se falhar → mantém aguardando_aprovacao para admin resolver manualmente.
+    try {
+      const valorDebito = parseFloat(requestedAmount);
+      const idProf = userCod;
+      const descricaoDebito = hasGratuity
+        ? 'Saque Emergencial - Gratuito'
+        : 'Saque emergencial - Prestação de Serviços';
+      const dataDebitoFormatada = new Date().toISOString().split('T')[0];
+
+      console.log(`💳 [Auto-Débito] Iniciando para saque #${novoSaque.id} - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+
+      const responseDebito = await fetch(`${PLIFIC_BASE_URL}/lancarDebitoProfissional`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${PLIFIC_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          idProf: parseInt(idProf),
+          valor: valorDebito,
+          descricao: descricaoDebito,
+          data: dataDebitoFormatada
+        })
+      });
+
+      const respostaDebito = await responseDebito.json();
+
+      if (respostaDebito.status === '200' || respostaDebito.status === 200) {
+        // ✅ Débito OK → status aguardando_pagamento_stark
+        await pool.query(
+          `UPDATE withdrawal_requests 
+           SET status = 'aguardando_pagamento_stark', 
+               debito = true, 
+               debito_plific_at = NOW(),
+               debito_erro = NULL,
+               updated_at = NOW() 
+           WHERE id = $1`,
+          [novoSaque.id]
+        );
+        novoSaque.status = 'aguardando_pagamento_stark';
+        novoSaque.debito = true;
+        novoSaque.debito_plific_at = new Date().toISOString();
+
+        // Limpar cache de saldo do profissional
+        const cacheKey = `saldo_${idProf}`;
+        plificSaldoCache.delete(cacheKey);
+
+        console.log(`✅ [Auto-Débito] OK para saque #${novoSaque.id} (Prof: ${idProf}) → aguardando_pagamento_stark`);
+      } else {
+        // ❌ Débito FALHOU → sinalizar na coluna debito + debito_erro
+        const erroMsg = respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito Plific';
+        await pool.query(
+          `UPDATE withdrawal_requests 
+           SET debito = false, 
+               debito_erro = $1, 
+               updated_at = NOW() 
+           WHERE id = $2`,
+          [erroMsg.substring(0, 500), novoSaque.id]
+        );
+        novoSaque.debito = false;
+        novoSaque.debito_erro = erroMsg;
+
+        console.error(`❌ [Auto-Débito] FALHOU saque #${novoSaque.id} (Prof: ${idProf}): ${erroMsg}`);
+      }
+    } catch (erroDebito) {
+      // ❌ Exceção (timeout, rede, etc) → sinalizar falha
+      const erroMsg = (erroDebito.message || 'Erro de conexão com Plific').substring(0, 500);
+      await pool.query(
+        `UPDATE withdrawal_requests 
+         SET debito = false, 
+             debito_erro = $1, 
+             updated_at = NOW() 
+         WHERE id = $2`,
+        [erroMsg, novoSaque.id]
+      ).catch(e => console.error('❌ Erro ao registrar falha do auto-débito:', e.message));
+      novoSaque.debito = false;
+      novoSaque.debito_erro = erroMsg;
+
+      console.error(`❌ [Auto-Débito] Exceção saque #${novoSaque.id}: ${erroMsg}`);
+    }
+    // ==================== FIM AUTO DÉBITO PLIFIC ====================
+
     // Registrar auditoria
-    await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
+    await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', novoSaque.id, {
       valor: requestedAmount,
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
-      restrito: isRestricted
+      restrito: isRestricted,
+      auto_debito: novoSaque.debito === true ? 'ok' : 'falha',
+      status_final: novoSaque.status
     });
 
     // ==================== NOTIFICAR VIA WEBSOCKET ====================
     if (global.notifyNewWithdrawal) {
-      global.notifyNewWithdrawal(result.rows[0]);
+      global.notifyNewWithdrawal(novoSaque);
     }
 
     res.status(201).json({ 
-      ...result.rows[0], 
+      ...novoSaque, 
       isRestricted 
     });
   } catch (error) {
@@ -543,7 +631,7 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
       
       return {
         ...w,
-        isDelayed: w.status === 'aguardando_aprovacao' && diffHours > 1
+        isDelayed: (w.status === 'aguardando_aprovacao' || w.status === 'aguardando_pagamento_stark') && diffHours > 1
       };
     });
 
@@ -682,7 +770,7 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
 
     // =============== PROTEÇÃO 3: VERIFICAR STATUS ANTERIOR ===============
-    // Só permitir aprovar se estiver aguardando
+    // Só permitir aprovar se estiver aguardando ou aguardando_pagamento_stark
     if (isAprovado) {
       // Verificar se já está aprovado
       if (dadosSaque.status === 'aprovado' || dadosSaque.status === 'aprovado_gratuidade') {
@@ -695,8 +783,8 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         });
       }
       
-      // Verificar se já tem débito registrado
-      if (dadosSaque.debito_plific_at) {
+      // Verificar se já tem débito registrado — MAS permitir se veio do auto-débito (status aguardando_pagamento_stark)
+      if (dadosSaque.debito_plific_at && dadosSaque.status !== 'aguardando_pagamento_stark') {
         console.log(`⚠️ Saque já teve débito realizado! ID: ${id}, Débito em: ${dadosSaque.debito_plific_at}`);
         await client.query('ROLLBACK');
         return res.status(400).json({ 
@@ -731,8 +819,9 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     }
 
     // Se for aprovação, fazer débito automático na API Plific
+    // PULAR se o débito já foi realizado automaticamente na criação do saque
     let debitoRealizado = false;
-    if (isAprovado) {
+    if (isAprovado && !dadosSaque.debito) {
       try {
         const valorDebito = parseFloat(dadosSaque.requested_amount);
         const idProf = dadosSaque.user_cod;
@@ -787,11 +876,17 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
           details: erroDebito.message 
         });
       }
+    } else if (isAprovado && dadosSaque.debito) {
+      // Débito já foi realizado automaticamente na criação — pular Plific
+      debitoRealizado = true;
+      console.log(`✅ [Aprovação] Débito já realizado automaticamente para saque #${id}, pulando Plific`);
     }
     
     // =============== ATUALIZAR REGISTRO NO BANCO ===============
-    // Definir a data do débito na Plific (a que foi enviada ou NOW())
-    const debitoPlificAt = isAprovado ? (dataDebito || new Date().toISOString()) : null;
+    // Se o débito já foi feito no auto-débito, preservar a data original. Senão usar a nova.
+    const debitoPlificAt = isAprovado 
+      ? (dadosSaque.debito_plific_at || dataDebito || new Date().toISOString()) 
+      : null;
     
     const result = await client.query(
       `UPDATE withdrawal_requests 
@@ -802,6 +897,8 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
            approved_at = CASE WHEN $5 THEN NOW() ELSE approved_at END,
            lancamento_at = CASE WHEN $5 THEN NOW() ELSE lancamento_at END,
            debito_plific_at = CASE WHEN $5 THEN $7::timestamp ELSE debito_plific_at END,
+           debito = CASE WHEN $5 THEN true ELSE debito END,
+           debito_erro = CASE WHEN $5 THEN NULL ELSE debito_erro END,
            processing_lock = NULL,
            updated_at = NOW() 
        WHERE id = $6 
