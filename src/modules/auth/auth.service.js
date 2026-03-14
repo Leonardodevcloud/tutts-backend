@@ -13,6 +13,14 @@ const JWT_EXPIRES_IN = '8h';
 const REFRESH_TOKEN_EXPIRES_IN = '7d';
 const BCRYPT_ROUNDS = 10;
 
+// 🔒 SECURITY: Alertar se secrets estão derivados do JWT_SECRET
+if (!process.env.REFRESH_SECRET) {
+  console.warn('⚠️ [SEGURANÇA] REFRESH_SECRET derivado do JWT_SECRET. Configure uma variável independente no Railway.');
+}
+if (!process.env.ENCRYPTION_KEY) {
+  console.warn('⚠️ [SEGURANÇA] ENCRYPTION_KEY derivada do JWT_SECRET. Os secrets 2FA ficam vulneráveis se JWT_SECRET for comprometido.');
+}
+
 const LOGIN_CONFIG = {
   MAX_ATTEMPTS: 5,
   BLOCK_DURATION_MINUTES: 15,
