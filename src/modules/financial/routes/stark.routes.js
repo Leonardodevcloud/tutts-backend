@@ -369,16 +369,40 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      // 4. Criar registro do lote
-      const loteResult = await client.query(`
-        INSERT INTO stark_lotes (
-          quantidade, valor_total, saldo_antes, status, 
-          executado_por_id, executado_por_nome
-        ) VALUES ($1, $2, $3, 'processando', $4, $5)
-        RETURNING *
-      `, [saques.length, valorTotal, saldoDisponivel, req.user.id, req.user.nome || req.user.username]);
+      // 4. Reusar lote 'pendente' existente ou criar novo
+      let loteId;
+      
+      // Verificar se os saques já pertencem a um lote pendente (criado pelo cron)
+      const lotesExistentes = [...new Set(saques.map(s => s.stark_lote_id).filter(Boolean))];
+      if (lotesExistentes.length === 1) {
+        // Todos do mesmo lote — reusar
+        const loteExistente = await client.query(
+          `SELECT * FROM stark_lotes WHERE id = $1 AND status = 'pendente'`,
+          [lotesExistentes[0]]
+        );
+        if (loteExistente.rows.length > 0) {
+          loteId = loteExistente.rows[0].id;
+          await client.query(`
+            UPDATE stark_lotes 
+            SET status = 'processando', saldo_antes = $1, quantidade = $2, valor_total = $3,
+                executado_por_id = $4, executado_por_nome = $5
+            WHERE id = $6
+          `, [saldoDisponivel, saques.length, valorTotal, req.user.id, req.user.nome || req.user.username, loteId]);
+          console.log(`🏦 [Stark Bank] Reusando lote pendente #${loteId}`);
+        }
+      }
 
-      const loteId = loteResult.rows[0].id;
+      // Se não reusou, criar novo
+      if (!loteId) {
+        const loteResult = await client.query(`
+          INSERT INTO stark_lotes (
+            quantidade, valor_total, saldo_antes, status, 
+            executado_por_id, executado_por_nome
+          ) VALUES ($1, $2, $3, 'processando', $4, $5)
+          RETURNING *
+        `, [saques.length, valorTotal, saldoDisponivel, req.user.id, req.user.nome || req.user.username]);
+        loteId = loteResult.rows[0].id;
+      }
 
       // 5. Consultar DICT e montar transfers
       // Cada saque é processado individualmente — se um falhar no DICT, marca erro mas continua os outros
