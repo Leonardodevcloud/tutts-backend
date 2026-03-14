@@ -431,7 +431,7 @@ router.post('/users/register', createAccountLimiter, async (req, res) => {
       return res.status(400).json({ error: validacaoSenha.erro });
     }
 
-    console.log('📝 Tentando registrar:', { codProfissional, fullName, role });
+    console.log('📝 Tentando registrar:', { codProfissional, fullName, role: 'user (forçado)' });
 
     const existingUser = await pool.query(
       'SELECT * FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
@@ -443,9 +443,14 @@ router.post('/users/register', createAccountLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Código profissional já cadastrado' });
     }
 
-    // role pode ser 'user', 'admin' ou 'admin_financeiro'
-    const validRoles = ['user', 'admin', 'admin_financeiro'];
-    const userRole = validRoles.includes(role) ? role : 'user';
+    // 🔒 SECURITY FIX: Self-registration SEMPRE cria role 'user'
+    // Roles privilegiados (admin, admin_master, admin_financeiro) só podem ser 
+    // atribuídos por admin_master via endpoint administrativo
+    const userRole = 'user';
+    
+    if (role && role !== 'user') {
+      console.warn(`⚠️ [SEGURANÇA] Tentativa de registro com role privilegiado bloqueada: ${role} (cod: ${codProfissional})`);
+    }
     
     // Hash da senha
     const hashedPassword = await hashSenha(password);
