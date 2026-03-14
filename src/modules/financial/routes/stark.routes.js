@@ -550,9 +550,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
               stark_transfer_id = $1,
               stark_lote_id = $2,
               stark_enviado_em = NOW(),
+              admin_name = $4,
               updated_at = NOW()
           WHERE id = $3
-        `, [transfer.id, loteId, saque.id]);
+        `, [transfer.id, loteId, saque.id, req.user.nome || req.user.username || 'Admin']);
 
         await client.query(`
           INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
@@ -745,9 +746,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
         await client.query(`
           UPDATE withdrawal_requests 
-          SET stark_status = 'processando', stark_transfer_id = $1, stark_erro = NULL, updated_at = NOW()
+          SET stark_status = 'processando', stark_transfer_id = $1, stark_erro = NULL, admin_name = $3, updated_at = NOW()
           WHERE id = $2
-        `, [transfer.id, item.withdrawal_id]);
+        `, [transfer.id, item.withdrawal_id, req.user.nome || req.user.username || 'Admin']);
       }
 
       // Atualizar status do lote
