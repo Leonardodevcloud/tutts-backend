@@ -158,7 +158,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
 
     // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 E MÁXIMO R$ 5.000,00 ===============
     const LIMITE_MIN_SAQUE = 15;
-    const LIMITE_MAX_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '5000');
+    const LIMITE_MAX_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '1000');
     
     const valorSolicitado = parseFloat(requestedAmount);
     
@@ -233,6 +233,60 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       client.release();
       console.log(`⚠️ [COOLDOWN] Motoboy ${userCod} tentou criar saque muito rápido (< 5s)`);
       return res.status(429).json({ error: 'Aguarde alguns segundos antes de solicitar novamente.' });
+    }
+
+    // =============== LIMITES DIÁRIO E SEMANAL ===============
+    const LIMITE_DIARIO = parseFloat(process.env.LIMITE_DIARIO_SAQUE || '1000');
+    const LIMITE_SEMANAL = parseFloat(process.env.LIMITE_SEMANAL_SAQUE || '1500');
+
+    // Total sacado hoje (saques que não foram rejeitados/excluídos)
+    const sacadoHoje = await client.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= CURRENT_DATE
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+    const totalHoje = parseFloat(sacadoHoje.rows[0].total);
+
+    if (totalHoje + valorSolicitado > LIMITE_DIARIO) {
+      const disponivel = Math.max(0, LIMITE_DIARIO - totalHoje);
+      await client.query('ROLLBACK');
+      client.release();
+      console.log(`⚠️ [LIMITE DIÁRIO] ${userCod} (${userName}): já sacou R$ ${totalHoje.toFixed(2)} hoje, tentou +R$ ${valorSolicitado.toFixed(2)} (limite: R$ ${LIMITE_DIARIO.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite diário de R$ ${LIMITE_DIARIO.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalHoje.toFixed(2).replace('.', ',')} hoje.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Tente novamente amanhã.'}`,
+        tipo_limite: 'diario',
+        limite: LIMITE_DIARIO,
+        utilizado: totalHoje,
+        disponivel: disponivel
+      });
+    }
+
+    // Total sacado na semana (segunda a domingo)
+    const sacadoSemana = await client.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= date_trunc('week', CURRENT_DATE)
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+    const totalSemana = parseFloat(sacadoSemana.rows[0].total);
+
+    if (totalSemana + valorSolicitado > LIMITE_SEMANAL) {
+      const disponivel = Math.max(0, LIMITE_SEMANAL - totalSemana);
+      await client.query('ROLLBACK');
+      client.release();
+      console.log(`⚠️ [LIMITE SEMANAL] ${userCod} (${userName}): já sacou R$ ${totalSemana.toFixed(2)} na semana, tentou +R$ ${valorSolicitado.toFixed(2)} (limite: R$ ${LIMITE_SEMANAL.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite semanal de R$ ${LIMITE_SEMANAL.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalSemana.toFixed(2).replace('.', ',')} esta semana.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Tente novamente na próxima semana.'}`,
+        tipo_limite: 'semanal',
+        limite: LIMITE_SEMANAL,
+        utilizado: totalSemana,
+        disponivel: disponivel
+      });
     }
 
     // Verificar se está restrito — BLOQUEAR SAQUE
@@ -368,6 +422,58 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
     res.json(withdrawals);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== LIMITES DO USUÁRIO (para exibir no frontend) ====================
+router.get('/withdrawals/limites/:userCod', verificarToken, async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    
+    // Usuário só pode ver seus próprios limites (exceto admin)
+    if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+    }
+    
+    const LIMITE_POR_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '1000');
+    const LIMITE_DIARIO = parseFloat(process.env.LIMITE_DIARIO_SAQUE || '1000');
+    const LIMITE_SEMANAL = parseFloat(process.env.LIMITE_SEMANAL_SAQUE || '1500');
+
+    // Total sacado hoje
+    const sacadoHoje = await pool.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= CURRENT_DATE
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+
+    // Total sacado na semana
+    const sacadoSemana = await pool.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= date_trunc('week', CURRENT_DATE)
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+
+    const totalHoje = parseFloat(sacadoHoje.rows[0].total);
+    const totalSemana = parseFloat(sacadoSemana.rows[0].total);
+
+    res.json({
+      por_saque: { limite: LIMITE_POR_SAQUE },
+      diario: { limite: LIMITE_DIARIO, utilizado: totalHoje, disponivel: Math.max(0, LIMITE_DIARIO - totalHoje) },
+      semanal: { limite: LIMITE_SEMANAL, utilizado: totalSemana, disponivel: Math.max(0, LIMITE_SEMANAL - totalSemana) },
+      // O menor disponível entre diário e semanal é o máximo que pode sacar agora
+      max_disponivel: Math.min(LIMITE_POR_SAQUE, Math.max(0, LIMITE_DIARIO - totalHoje), Math.max(0, LIMITE_SEMANAL - totalSemana))
+    });
+  } catch (error) {
+    console.error('❌ Erro ao buscar limites:', error);
     res.status(500).json({ error: error.message });
   }
 });
