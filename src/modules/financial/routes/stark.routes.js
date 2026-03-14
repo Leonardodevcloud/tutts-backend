@@ -242,7 +242,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, 
           w.requested_amount, w.fee_amount, w.final_amount,
           w.has_gratuity, w.status, w.approved_at, w.created_at,
-          w.stark_status, w.stark_transfer_id, w.stark_erro,
+          w.stark_status, w.stark_transfer_id, w.stark_erro, w.stark_lote_id,
           ufd.pix_tipo
         FROM withdrawal_requests w
         LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
