@@ -1,3 +1,23 @@
 node_modules/
 package-lock.json
 .env
+
+# 🔒 SECURITY: Chaves criptográficas NUNCA devem estar no repositório
+privateKey.pem
+publicKey.pem
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
