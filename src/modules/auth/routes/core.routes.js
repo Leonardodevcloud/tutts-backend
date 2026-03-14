@@ -163,17 +163,28 @@ router.post('/users/login', loginLimiter, async (req, res) => {
     const user = result.rows[0];
     
     // Verificar senha com bcrypt
-    // Suporte para senhas antigas (texto plano) e novas (hash)
+    // 🔒 SECURITY FIX: Senhas antigas migradas com comparação timing-safe
     let senhaValida = false;
     
     if (user.password.startsWith('$2')) {
       // Senha já está em hash bcrypt
       senhaValida = await verificarSenha(password, user.password);
     } else {
-      // Senha antiga em texto plano - comparar diretamente
-      senhaValida = (user.password === password);
+      // 🔒 SECURITY FIX: Comparação timing-safe para senhas legadas
+      const crypto = require('crypto');
+      try {
+        const inputBuf = Buffer.from(password, 'utf8');
+        const storedBuf = Buffer.from(user.password, 'utf8');
+        if (inputBuf.length === storedBuf.length) {
+          senhaValida = crypto.timingSafeEqual(inputBuf, storedBuf);
+        } else {
+          senhaValida = false;
+        }
+      } catch (e) {
+        senhaValida = false;
+      }
       
-      // Se senha antiga válida, atualizar para bcrypt
+      // Se senha antiga válida, MIGRAR IMEDIATAMENTE para bcrypt
       if (senhaValida) {
         const hashedPassword = await hashSenha(password);
         await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, user.id]);
