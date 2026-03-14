@@ -18,10 +18,19 @@ function sanitizeValue(value, depth = 0) {
 
   if (typeof value === 'string') {
     return value
-      .replace(/\0/g, '')
-      .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '')
-      .replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, '')
-      .replace(/javascript\s*:/gi, '')
+      .replace(/\0/g, '')                                          // Null bytes
+      .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '')        // <script>
+      .replace(/<\/script>/gi, '')                                  // </script> orphan
+      .replace(/<iframe\b[^>]*>([\s\S]*?)<\/iframe>/gi, '')        // <iframe>
+      .replace(/<object\b[^>]*>([\s\S]*?)<\/object>/gi, '')        // <object>
+      .replace(/<embed\b[^>]*\/?>/gi, '')                          // <embed>
+      .replace(/<svg\b[^>]*>([\s\S]*?)<\/svg>/gi, '')              // <svg> (onload vector)
+      .replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, '')              // on*="..." handlers
+      .replace(/\bon\w+\s*=\s*[^\s>]+/gi, '')                     // on*=alert(1) sem aspas
+      .replace(/javascript\s*:/gi, '')                             // javascript:
+      .replace(/vbscript\s*:/gi, '')                               // vbscript:
+      .replace(/data\s*:\s*text\/html/gi, '')                      // data:text/html
+      .replace(/expression\s*\(/gi, '')                            // CSS expression()
       .trim();
   }
 
