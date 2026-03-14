@@ -505,10 +505,12 @@ initDatabase().then(() => {
         }
       };
 
-      // Rodar a cada 1 hora
-      setInterval(prepararLoteStarkAutomatico, 60 * 60 * 1000);
-      // Primeira execução após 60s
-      setTimeout(prepararLoteStarkAutomatico, 60000);
+      // Seg-Sex: a cada hora das 8h às 18h
+      cron.schedule('0 8-18 * * 1-5', prepararLoteStarkAutomatico, { timezone: 'America/Bahia' });
+      // Sábado: a cada hora das 8h às 12h
+      cron.schedule('0 8-12 * * 6', prepararLoteStarkAutomatico, { timezone: 'America/Bahia' });
+
+      console.log('⏰ Cron Stark Bank: Seg-Sex 8h-18h | Sáb 8h-12h (America/Bahia)');
 
       console.log('⏰ Crons rodando no server (defina WORKER_ENABLED=true para separar)');
     }
