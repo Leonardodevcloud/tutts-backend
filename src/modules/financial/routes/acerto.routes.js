@@ -102,7 +102,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
   // ==================== SOLICITAR TOKEN 2FA POR EMAIL ====================
   router.post('/stark/token/solicitar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      const { saque_ids, valor_total, quantidade } = req.body;
+      const { saque_ids, valor_total, quantidade, lote_id } = req.body;
       const emailUser = process.env.STARK_EMAIL_USER;
       const emailPass = process.env.STARK_EMAIL_PASS;
       const emailDestino = process.env.STARK_TOKEN_EMAIL_DESTINO;
@@ -111,14 +111,16 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         return res.status(503).json({ error: 'Configuração de email para 2FA não encontrada. Verifique STARK_EMAIL_USER, STARK_EMAIL_PASS e STARK_TOKEN_EMAIL_DESTINO.' });
       }
 
-      // Gerar token de 6 dígitos e chave única
-      const token = String(Math.floor(100000 + Math.random() * 900000));
+      // 🔒 SECURITY FIX: Gerar token com crypto (criptograficamente seguro)
+      const token = String(crypto.randomInt(100000, 999999));
       const chaveToken = crypto.randomBytes(32).toString('hex');
 
       // Armazenar no cache (expira em 10 minutos)
+      // 🔒 SECURITY FIX: Vincular token ao lote_id + valor_total para impedir reuso
       tokensCache.set(chaveToken, {
         token: token,
         saque_ids: saque_ids || [],
+        lote_id: lote_id || null,
         valor_total: valor_total || 0,
         quantidade: quantidade || 0,
         usuario_id: req.user.id,
@@ -728,6 +730,20 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       const dadosToken = tokensCache.get(chave_token);
       if (!dadosToken || !dadosToken.validado) {
         return res.status(403).json({ error: 'Token não validado. Solicite e valide um novo código.' });
+      }
+
+      // 🔒 SECURITY FIX: Verificar se o token foi gerado para ESTE lote específico
+      if (dadosToken.lote_id && dadosToken.lote_id !== parseInt(id)) {
+        console.warn(`⚠️ [SEGURANÇA] Tentativa de usar token 2FA do lote #${dadosToken.lote_id} para executar lote #${id} por ${req.user.nome || req.user.username}`);
+        tokensCache.delete(chave_token); // Consumir token inválido
+        return res.status(403).json({ error: 'Token de segurança foi gerado para outro lote. Solicite um novo código.' });
+      }
+
+      // 🔒 SECURITY FIX: Verificar se o usuário que validou é o mesmo que está executando
+      if (dadosToken.usuario_id !== req.user.id) {
+        console.warn(`⚠️ [SEGURANÇA] Usuário ${req.user.id} tentou usar token 2FA gerado por usuário ${dadosToken.usuario_id}`);
+        tokensCache.delete(chave_token);
+        return res.status(403).json({ error: 'Token de segurança pertence a outro operador.' });
       }
 
       // Consumir o token (uso único)
