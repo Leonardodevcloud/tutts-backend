@@ -446,13 +446,16 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         }
         // Se nenhum padrão bateu, usa como está
 
-        console.log(`📋 [Stark Bank] Saque #${saque.id} (${saque.user_name}): pixRaw="${pixKeyRaw}", pixTipo="${pixTipo}", chaveDict="${chaveDict}", cpf="${cpfFormatado}"`);
+        // 🔒 SECURITY FIX: Mascarar dados sensíveis nos logs
+        const cpfMask = cpf ? cpf.slice(0, 3) + '***' + cpf.slice(-2) : 'vazio';
+        const pixMask = pixKeyRaw.length > 6 ? pixKeyRaw.slice(0, 3) + '***' + pixKeyRaw.slice(-3) : '***';
+        console.log(`📋 [Stark Bank] Saque #${saque.id} (${saque.user_name}): pixTipo="${pixTipo}", cpf="${cpfMask}"`);
 
         // ── Consultar DICT ──
         try {
           const dictKey = await starkbank.dictKey.get(chaveDict);
 
-          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}", taxId="${dictKey.taxId}"`);
+          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
 
           // Usar o taxId do DICT (titular real da chave Pix) — evita taxIdMismatch
           // Se o DICT retornar taxId, usar ele. Senão fallback para o CPF do cadastro.
@@ -460,7 +463,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
           // Log se o CPF diverge (para o admin saber que o cadastro está desatualizado)
           if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
-            console.warn(`⚠️ [Stark Bank] CPF divergente saque #${saque.id}: cadastro=${cpf}, DICT=${dictKey.taxId.replace(/\D/g, '')} (${dictKey.name})`);
+            console.warn(`⚠️ [Stark Bank] CPF divergente saque #${saque.id}: cadastro=${cpf.slice(0,3)}***${cpf.slice(-2)}, DICT=${dictKey.taxId.replace(/\D/g, '').slice(0,3)}***${dictKey.taxId.replace(/\D/g, '').slice(-2)} (${dictKey.name})`);
           }
 
           const transferData = {
