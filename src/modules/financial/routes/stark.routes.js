@@ -15,7 +15,24 @@
  */
 
 const express = require('express');
-const { notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, LIMIAR_SAQUE_DESTAQUE } = require('./whatsapp.service');
+
+// 📱 WhatsApp — import seguro (não derruba o backend se falhar)
+let notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, LIMIAR_SAQUE_DESTAQUE;
+try {
+  const whatsapp = require('./whatsapp.service');
+  notificarLoteGerado = whatsapp.notificarLoteGerado;
+  notificarLoteFinalizado = whatsapp.notificarLoteFinalizado;
+  enviarMensagemWhatsApp = whatsapp.enviarMensagemWhatsApp;
+  LIMIAR_SAQUE_DESTAQUE = whatsapp.LIMIAR_SAQUE_DESTAQUE;
+  console.log('✅ [WhatsApp] Módulo carregado com sucesso');
+} catch (errWhatsApp) {
+  console.error('⚠️ [WhatsApp] Módulo não carregou:', errWhatsApp.message);
+  // Funções stub para não quebrar nada
+  notificarLoteGerado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  notificarLoteFinalizado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  enviarMensagemWhatsApp = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  LIMIAR_SAQUE_DESTAQUE = 200;
+}
 
 function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
