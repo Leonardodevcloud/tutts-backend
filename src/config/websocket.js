@@ -109,6 +109,7 @@ function handleFinanceiroConnection(ws) {
   let clientType = null;
   let userCod = null;
   let authenticated = false;
+  let lastToken = null;
 
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
@@ -116,6 +117,22 @@ function handleFinanceiroConnection(ws) {
       ws.close(4001, 'Autenticação necessária');
     }
   }, 30000);
+
+  // 🔒 SECURITY FIX (MED-03): Re-validar JWT a cada 5 minutos
+  let reAuthInterval = null;
+  function startReAuth() {
+    if (reAuthInterval) clearInterval(reAuthInterval);
+    reAuthInterval = setInterval(() => {
+      if (!lastToken || !authenticated) return;
+      try {
+        jwt.verify(lastToken, env.JWT_SECRET);
+      } catch (err) {
+        console.log(`⚠️ [WS] Token expirado para ${userCod || 'admin'}, fechando conexão`);
+        ws.send(JSON.stringify({ event: 'AUTH_EXPIRED', error: 'Token expirado, reconecte com novo token' }));
+        ws.close(4003, 'Token expirado');
+      }
+    }, 5 * 60 * 1000); // 5 minutos
+  }
 
   ws.on('message', (message) => {
     try {
@@ -131,7 +148,9 @@ function handleFinanceiroConnection(ws) {
         try {
           const decoded = jwt.verify(token, env.JWT_SECRET);
           authenticated = true;
+          lastToken = token;
           clearTimeout(authTimeout);
+          startReAuth();
 
           if (decoded.role !== role) {
             console.log(`⚠️ [WS] Role mismatch: token=${decoded.role}, informado=${role}`);
@@ -157,6 +176,19 @@ function handleFinanceiroConnection(ws) {
         }
       }
 
+      // 🔒 SECURITY FIX: Permitir re-auth com novo token (após refresh no frontend)
+      if (data.type === 'REAUTH' && authenticated) {
+        try {
+          const decoded = jwt.verify(data.token, env.JWT_SECRET);
+          lastToken = data.token;
+          ws.send(JSON.stringify({ event: 'REAUTH_SUCCESS' }));
+          console.log(`🔄 [WS] Token renovado para ${userCod || 'admin'}`);
+        } catch (err) {
+          ws.send(JSON.stringify({ event: 'AUTH_EXPIRED', error: 'Novo token inválido' }));
+          ws.close(4003, 'Token inválido');
+        }
+      }
+
       if (data.type === 'PING' && authenticated) {
         ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
       }
@@ -167,6 +199,7 @@ function handleFinanceiroConnection(ws) {
 
   ws.on('close', () => {
     clearTimeout(authTimeout);
+    if (reAuthInterval) clearInterval(reAuthInterval);
     if (clientType === 'admin') {
       wsClients.admins.delete(ws);
       console.log(`🔌 [WS] Admin desconectado. Restam: ${wsClients.admins.size}`);
