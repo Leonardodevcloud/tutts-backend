@@ -186,7 +186,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto 2FA] Erro ao solicitar token:', error.message);
-      res.status(500).json({ error: 'Erro ao enviar código de segurança', details: error.message });
+      res.status(500).json({ error: 'Erro ao enviar código de segurança', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -217,8 +217,12 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         return res.status(429).json({ error: 'Muitas tentativas incorretas. Solicite um novo código.' });
       }
 
-      // Verificar token
-      if (dados.token !== token.trim()) {
+      // Verificar token — 🔒 SECURITY FIX (HIGH-04): comparação timing-safe
+      const tokenBuf = Buffer.from(dados.token, 'utf8');
+      const inputBuf = Buffer.from(token.trim(), 'utf8');
+      const tokenValido = tokenBuf.length === inputBuf.length && crypto.timingSafeEqual(tokenBuf, inputBuf);
+      
+      if (!tokenValido) {
         dados.tentativas++;
         return res.status(401).json({ error: 'Código incorreto. Tentativa ' + dados.tentativas + '/5.' });
       }
@@ -535,7 +539,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto] Erro ao processar planilha:', error.message);
-      res.status(500).json({ error: 'Erro ao processar planilha', details: error.message });
+      res.status(500).json({ error: 'Erro ao processar planilha', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -625,7 +629,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto] Erro ao validar Pix via DICT:', error.message);
-      res.status(500).json({ error: 'Erro ao validar chave Pix', details: error.message });
+      res.status(500).json({ error: 'Erro ao validar chave Pix', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -803,7 +807,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         }
       } catch (errSaldo) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: errSaldo.message });
+        return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : errSaldo.message });
       }
 
       if (saldoDisponivel < valorTotalLote) {
@@ -918,7 +922,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Acerto] Erro ao executar:', error.message);
-      res.status(500).json({ error: 'Erro ao executar acerto', details: error.message });
+      res.status(500).json({ error: 'Erro ao executar acerto', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       client.release();
     }
