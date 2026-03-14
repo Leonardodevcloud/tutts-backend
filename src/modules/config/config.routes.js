@@ -6,10 +6,20 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { gerarTokenIndicacao } = require('./config.service');
 
 function createConfigRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
+
+  // 🔒 SECURITY FIX (CRIT-06): Rate limiter para endpoint público de indicação
+  const indicacaoCadastroLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 5,
+    message: { error: 'Muitas tentativas. Aguarde 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   // ==================== PERMISSÕES DE ADMIN ====================
 
@@ -692,7 +702,7 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
 
   // ==================== HORÁRIOS + AVISOS ====================
 
-router.get('/horarios', async (req, res) => {
+router.get('/horarios', verificarToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM horarios_atendimento ORDER BY dia_semana');
     res.json(result.rows);
@@ -703,7 +713,7 @@ router.get('/horarios', async (req, res) => {
 });
 
 // PUT /api/horarios/:id - Atualizar horário de um dia
-router.put('/horarios/:id', async (req, res) => {
+router.put('/horarios/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { hora_inicio, hora_fim, ativo } = req.body;
@@ -723,7 +733,7 @@ router.put('/horarios/:id', async (req, res) => {
 });
 
 // GET /api/horarios/especiais - Listar horários especiais
-router.get('/horarios/especiais', async (req, res) => {
+router.get('/horarios/especiais', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM horarios_especiais WHERE data >= CURRENT_DATE ORDER BY data'
@@ -736,7 +746,7 @@ router.get('/horarios/especiais', async (req, res) => {
 });
 
 // POST /api/horarios/especiais - Criar horário especial
-router.post('/horarios/especiais', async (req, res) => {
+router.post('/horarios/especiais', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { data, descricao, hora_inicio, hora_fim, fechado } = req.body;
     
@@ -757,7 +767,7 @@ router.post('/horarios/especiais', async (req, res) => {
 });
 
 // DELETE /api/horarios/especiais/:id - Remover horário especial
-router.delete('/horarios/especiais/:id', async (req, res) => {
+router.delete('/horarios/especiais/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM horarios_especiais WHERE id = $1', [id]);
@@ -769,7 +779,7 @@ router.delete('/horarios/especiais/:id', async (req, res) => {
 });
 
 // GET /api/horarios/verificar - Verificar se está dentro do horário de atendimento
-router.get('/horarios/verificar', async (req, res) => {
+router.get('/horarios/verificar', verificarToken, async (req, res) => {
   try {
     const agora = new Date();
     // Ajustar para horário de Brasília (GMT-3)
@@ -889,7 +899,7 @@ router.get('/horarios/verificar', async (req, res) => {
 });
 
 // GET /api/avisos - Listar avisos do financeiro
-router.get('/avisos', async (req, res) => {
+router.get('/avisos', verificarToken, async (req, res) => {
   try {
     const { ativos } = req.query;
     let query = 'SELECT * FROM avisos_financeiro';
@@ -907,7 +917,7 @@ router.get('/avisos', async (req, res) => {
 });
 
 // POST /api/avisos - Criar aviso
-router.post('/avisos', async (req, res) => {
+router.post('/avisos', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { titulo, mensagem, tipo, exibir_fora_horario } = req.body;
     
@@ -925,7 +935,7 @@ router.post('/avisos', async (req, res) => {
 });
 
 // PUT /api/avisos/:id - Atualizar aviso
-router.put('/avisos/:id', async (req, res) => {
+router.put('/avisos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { titulo, mensagem, tipo, ativo, exibir_fora_horario } = req.body;
@@ -945,7 +955,7 @@ router.put('/avisos/:id', async (req, res) => {
 });
 
 // DELETE /api/avisos/:id - Remover aviso
-router.delete('/avisos/:id', async (req, res) => {
+router.delete('/avisos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM avisos_financeiro WHERE id = $1', [id]);
@@ -958,7 +968,7 @@ router.delete('/avisos/:id', async (req, res) => {
 
   // ==================== NOTIFICAÇÕES ====================
 
-router.post('/notifications', async (req, res) => {
+router.post('/notifications', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { message, type, forUser } = req.body;
 
@@ -976,7 +986,7 @@ router.post('/notifications', async (req, res) => {
   }
 });
 
-router.get('/notifications/:userCod', async (req, res) => {
+router.get('/notifications/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
 
@@ -994,7 +1004,7 @@ router.get('/notifications/:userCod', async (req, res) => {
 
   // ==================== PROMOÇÕES + INDICAÇÕES + NOVATOS + QUIZ ====================
 
-router.get('/promocoes', async (req, res) => {
+router.get('/promocoes', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM promocoes_indicacao ORDER BY created_at DESC'
@@ -1007,7 +1017,7 @@ router.get('/promocoes', async (req, res) => {
 });
 
 // Listar promoções ativas (para usuário)
-router.get('/promocoes/ativas', async (req, res) => {
+router.get('/promocoes/ativas', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM promocoes_indicacao WHERE status = 'ativa' ORDER BY created_at DESC"
@@ -1020,7 +1030,7 @@ router.get('/promocoes/ativas', async (req, res) => {
 });
 
 // Criar promoção
-router.post('/promocoes', async (req, res) => {
+router.post('/promocoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { regiao, valor_bonus, detalhes, created_by } = req.body;
 
@@ -1042,7 +1052,7 @@ router.post('/promocoes', async (req, res) => {
 });
 
 // Atualizar promoção (status ou dados completos)
-router.patch('/promocoes/:id', async (req, res) => {
+router.patch('/promocoes/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, regiao, valor_bonus, detalhes } = req.body;
@@ -1075,7 +1085,7 @@ router.patch('/promocoes/:id', async (req, res) => {
 });
 
 // Excluir promoção
-router.delete('/promocoes/:id', async (req, res) => {
+router.delete('/promocoes/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1129,7 +1139,7 @@ router.get('/indicacoes/usuario/:userCod', verificarToken, async (req, res) => {
 });
 
 // Criar indicação
-router.post('/indicacoes', async (req, res) => {
+router.post('/indicacoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { promocao_id, user_cod, user_name, indicado_nome, indicado_cpf, indicado_contato, valor_bonus, regiao } = req.body;
 
@@ -1155,7 +1165,7 @@ router.post('/indicacoes', async (req, res) => {
 });
 
 // Aprovar indicação
-router.patch('/indicacoes/:id/aprovar', async (req, res) => {
+router.patch('/indicacoes/:id/aprovar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { resolved_by } = req.body;
@@ -1181,7 +1191,7 @@ router.patch('/indicacoes/:id/aprovar', async (req, res) => {
 });
 
 // Rejeitar indicação
-router.patch('/indicacoes/:id/rejeitar', async (req, res) => {
+router.patch('/indicacoes/:id/rejeitar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { motivo_rejeicao, resolved_by } = req.body;
@@ -1207,7 +1217,7 @@ router.patch('/indicacoes/:id/rejeitar', async (req, res) => {
 });
 
 // Atualizar crédito lançado
-router.patch('/indicacoes/:id/credito', async (req, res) => {
+router.patch('/indicacoes/:id/credito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { credito_lancado, lancado_por } = req.body;
@@ -1235,7 +1245,7 @@ router.patch('/indicacoes/:id/credito', async (req, res) => {
 });
 
 // Verificar e expirar indicações antigas (pode ser chamado periodicamente)
-router.post('/indicacoes/verificar-expiradas', async (req, res) => {
+router.post('/indicacoes/verificar-expiradas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE indicacoes 
@@ -1253,7 +1263,7 @@ router.post('/indicacoes/verificar-expiradas', async (req, res) => {
 });
 
 // Verificar cadastro de indicados via API Tutts (prof-status)
-router.post('/indicacoes/verificar-cadastros', async (req, res) => {
+router.post('/indicacoes/verificar-cadastros', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { celulares } = req.body;
     if (!celulares || !Array.isArray(celulares) || celulares.length === 0) {
@@ -1364,7 +1374,7 @@ router.delete('/indicacoes/:id', verificarToken, async (req, res) => {
 });
 
 // Gerar ou obter link de indicação do usuário
-router.post('/indicacao-link/gerar', async (req, res) => {
+router.post('/indicacao-link/gerar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { user_cod, user_name, promocao_id, regiao, valor_bonus } = req.body;
     
@@ -1398,7 +1408,7 @@ router.post('/indicacao-link/gerar', async (req, res) => {
 });
 
 // Obter link existente do usuário
-router.get('/indicacao-link/usuario/:userCod', async (req, res) => {
+router.get('/indicacao-link/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1433,7 +1443,8 @@ router.get('/indicacao-link/validar/:token', async (req, res) => {
 });
 
 // Cadastrar indicado via link (público)
-router.post('/indicacao-link/cadastrar', async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-06): Rate limiter no endpoint público
+router.post('/indicacao-link/cadastrar', indicacaoCadastroLimiter, async (req, res) => {
   try {
     const { token, nome, telefone } = req.body;
     
@@ -1521,7 +1532,7 @@ router.post('/indicacao-link/cadastrar', async (req, res) => {
 });
 
 // Listar indicações recebidas via link (para admin)
-router.get('/indicacao-link/indicacoes', async (req, res) => {
+router.get('/indicacao-link/indicacoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT * FROM indicacoes WHERE link_token IS NOT NULL ORDER BY created_at DESC`
@@ -1534,7 +1545,7 @@ router.get('/indicacao-link/indicacoes', async (req, res) => {
 });
 
 // Estatísticas de indicações por usuário
-router.get('/indicacao-link/estatisticas/:userCod', async (req, res) => {
+router.get('/indicacao-link/estatisticas/:userCod', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1559,7 +1570,7 @@ router.get('/indicacao-link/estatisticas/:userCod', async (req, res) => {
 // ============================================
 
 // Listar regiões disponíveis da planilha (para criar promoções)
-router.get('/promocoes-novatos/regioes', async (req, res) => {
+router.get('/promocoes-novatos/regioes', verificarToken, async (req, res) => {
   try {
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
     const response = await fetch(sheetUrl);
@@ -1586,7 +1597,7 @@ router.get('/promocoes-novatos/regioes', async (req, res) => {
 // Regras: 
 // 1. Deve haver promoção ativa para a região do usuário (região vem da planilha)
 // 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 10 dias
-router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
+router.get('/promocoes-novatos/elegibilidade/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     
@@ -1712,7 +1723,7 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
 });
 
 // Listar todas as promoções de novatos
-router.get('/promocoes-novatos', async (req, res) => {
+router.get('/promocoes-novatos', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM promocoes_novatos ORDER BY created_at DESC'
@@ -1738,7 +1749,7 @@ router.get('/promocoes-novatos', async (req, res) => {
 });
 
 // Listar promoções ativas (para usuários)
-router.get('/promocoes-novatos/ativas', async (req, res) => {
+router.get('/promocoes-novatos/ativas', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM promocoes_novatos WHERE status = 'ativa' ORDER BY created_at DESC"
@@ -1764,7 +1775,7 @@ router.get('/promocoes-novatos/ativas', async (req, res) => {
 });
 
 // Criar nova promoção novatos
-router.post('/promocoes-novatos', async (req, res) => {
+router.post('/promocoes-novatos', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas, created_by } = req.body;
     
@@ -1808,7 +1819,7 @@ router.post('/promocoes-novatos', async (req, res) => {
 });
 
 // Atualizar promoção novatos (status ou dados)
-router.patch('/promocoes-novatos/:id', async (req, res) => {
+router.patch('/promocoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas } = req.body;
@@ -1867,7 +1878,7 @@ router.patch('/promocoes-novatos/:id', async (req, res) => {
 });
 
 // Deletar promoção novatos
-router.delete('/promocoes-novatos/:id', async (req, res) => {
+router.delete('/promocoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -1899,7 +1910,7 @@ router.delete('/promocoes-novatos/:id', async (req, res) => {
 // ============================================
 
 // Listar todas as inscrições (admin)
-router.get('/inscricoes-novatos', async (req, res) => {
+router.get('/inscricoes-novatos', verificarToken, async (req, res) => {
   try {
     // Buscar inscrições com dados da promoção
     const result = await pool.query(`
@@ -1965,7 +1976,7 @@ router.get('/inscricoes-novatos', async (req, res) => {
 });
 
 // Listar inscrições de um usuário
-router.get('/inscricoes-novatos/usuario/:userCod', async (req, res) => {
+router.get('/inscricoes-novatos/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1980,7 +1991,7 @@ router.get('/inscricoes-novatos/usuario/:userCod', async (req, res) => {
 });
 
 // Criar inscrição novatos (usuário se inscreve)
-router.post('/inscricoes-novatos', async (req, res) => {
+router.post('/inscricoes-novatos', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { promocao_id, user_cod, user_name, valor_bonus, regiao, cliente } = req.body;
 
@@ -2011,7 +2022,7 @@ router.post('/inscricoes-novatos', async (req, res) => {
 });
 
 // Aprovar inscrição novatos
-router.patch('/inscricoes-novatos/:id/aprovar', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/aprovar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { resolved_by } = req.body;
@@ -2033,7 +2044,7 @@ router.patch('/inscricoes-novatos/:id/aprovar', async (req, res) => {
 });
 
 // Rejeitar inscrição novatos
-router.patch('/inscricoes-novatos/:id/rejeitar', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/rejeitar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { motivo_rejeicao, resolved_by } = req.body;
@@ -2055,7 +2066,7 @@ router.patch('/inscricoes-novatos/:id/rejeitar', async (req, res) => {
 });
 
 // Atualizar crédito lançado para inscrição novatos
-router.patch('/inscricoes-novatos/:id/credito', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/credito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { credito_lancado, lancado_por } = req.body;
@@ -2077,7 +2088,7 @@ router.patch('/inscricoes-novatos/:id/credito', async (req, res) => {
 });
 
 // Deletar inscrição novatos
-router.delete('/inscricoes-novatos/:id', async (req, res) => {
+router.delete('/inscricoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2099,7 +2110,7 @@ router.delete('/inscricoes-novatos/:id', async (req, res) => {
 });
 
 // Verificar e expirar inscrições novatos antigas (chamado periodicamente)
-router.post('/inscricoes-novatos/verificar-expiradas', async (req, res) => {
+router.post('/inscricoes-novatos/verificar-expiradas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE inscricoes_novatos 
@@ -2117,7 +2128,7 @@ router.post('/inscricoes-novatos/verificar-expiradas', async (req, res) => {
 });
 
 // Atualizar débito para inscrição novatos
-router.patch('/inscricoes-novatos/:id/debito', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/debito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { debito, debitado_por } = req.body;
@@ -2139,7 +2150,7 @@ router.patch('/inscricoes-novatos/:id/debito', async (req, res) => {
 });
 
 // Buscar entregas do profissional no período da inscrição (integração com BI)
-router.get('/inscricoes-novatos/:id/entregas', async (req, res) => {
+router.get('/inscricoes-novatos/:id/entregas', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2228,7 +2239,7 @@ router.get('/inscricoes-novatos/:id/entregas', async (req, res) => {
 });
 
 // Buscar progresso de todas as inscrições de um usuário
-router.get('/inscricoes-novatos/progresso/:userCod', async (req, res) => {
+router.get('/inscricoes-novatos/progresso/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const userCodNumerico = parseInt(userCod.toString().replace(/\D/g, ''), 10);
@@ -2306,7 +2317,7 @@ router.get('/inscricoes-novatos/progresso/:userCod', async (req, res) => {
 // ============================================
 
 // Obter configuração do quiz
-router.get('/quiz-procedimentos/config', async (req, res) => {
+router.get('/quiz-procedimentos/config', verificarToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1');
     if (result.rows.length === 0) {
@@ -2347,7 +2358,7 @@ router.get('/quiz-procedimentos/config', async (req, res) => {
 });
 
 // Salvar configuração do quiz
-router.post('/quiz-procedimentos/config', async (req, res) => {
+router.post('/quiz-procedimentos/config', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { titulo, imagens, perguntas, valor_gratuidade, ativo } = req.body;
     
@@ -2409,7 +2420,7 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
 });
 
 // Verificar se usuário já respondeu o quiz
-router.get('/quiz-procedimentos/verificar/:userCod', async (req, res) => {
+router.get('/quiz-procedimentos/verificar/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -2427,7 +2438,7 @@ router.get('/quiz-procedimentos/verificar/:userCod', async (req, res) => {
 });
 
 // Responder o quiz
-router.post('/quiz-procedimentos/responder', async (req, res) => {
+router.post('/quiz-procedimentos/responder', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { user_cod, user_name, respostas } = req.body;
     
@@ -2490,7 +2501,7 @@ router.post('/quiz-procedimentos/responder', async (req, res) => {
 });
 
 // Listar quem respondeu o quiz (admin)
-router.get('/quiz-procedimentos/respostas', async (req, res) => {
+router.get('/quiz-procedimentos/respostas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM quiz_procedimentos_respostas ORDER BY created_at DESC'
@@ -2505,7 +2516,7 @@ router.get('/quiz-procedimentos/respostas', async (req, res) => {
   // ==================== RECRUTAMENTO ====================
 
 // GET /api/recrutamento - Listar todas as necessidades
-router.get('/recrutamento', async (req, res) => {
+router.get('/recrutamento', verificarToken, async (req, res) => {
   try {
     const { status } = req.query;
     
@@ -2553,7 +2564,7 @@ router.get('/recrutamento', async (req, res) => {
 });
 
 // POST /api/recrutamento - Criar nova necessidade
-router.post('/recrutamento', async (req, res) => {
+router.post('/recrutamento', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, criado_por } = req.body;
     
@@ -2577,7 +2588,7 @@ router.post('/recrutamento', async (req, res) => {
 });
 
 // PUT /api/recrutamento/:id - Atualizar necessidade
-router.put('/recrutamento/:id', async (req, res) => {
+router.put('/recrutamento/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, status } = req.body;
@@ -2608,7 +2619,7 @@ router.put('/recrutamento/:id', async (req, res) => {
 });
 
 // DELETE /api/recrutamento/:id - Deletar necessidade
-router.delete('/recrutamento/:id', async (req, res) => {
+router.delete('/recrutamento/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2629,7 +2640,7 @@ router.delete('/recrutamento/:id', async (req, res) => {
 });
 
 // POST /api/recrutamento/:id/atribuir - Atribuir moto a uma necessidade
-router.post('/recrutamento/:id/atribuir', async (req, res) => {
+router.post('/recrutamento/:id/atribuir', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { cod_profissional, tipo, atribuido_por } = req.body;
@@ -2731,7 +2742,7 @@ router.post('/recrutamento/:id/atribuir', async (req, res) => {
 });
 
 // DELETE /api/recrutamento/atribuicao/:id - Remover atribuição
-router.delete('/recrutamento/atribuicao/:id', async (req, res) => {
+router.delete('/recrutamento/atribuicao/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2766,7 +2777,7 @@ router.delete('/recrutamento/atribuicao/:id', async (req, res) => {
 });
 
 // GET /api/recrutamento/buscar-profissional/:cod - Buscar profissional por código
-router.get('/recrutamento/buscar-profissional/:cod', async (req, res) => {
+router.get('/recrutamento/buscar-profissional/:cod', verificarToken, async (req, res) => {
   try {
     const { cod } = req.params;
     
@@ -2825,7 +2836,7 @@ router.get('/recrutamento/buscar-profissional/:cod', async (req, res) => {
 });
 
 // GET /api/recrutamento/estatisticas - Estatísticas gerais de recrutamento
-router.get('/recrutamento/estatisticas', async (req, res) => {
+router.get('/recrutamento/estatisticas', verificarToken, async (req, res) => {
   try {
     const stats = await pool.query(`
       SELECT 
