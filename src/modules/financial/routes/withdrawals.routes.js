@@ -156,10 +156,26 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount, selectedGratuityId } = req.body;
 
-    // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 ===============
-    if (!requestedAmount || parseFloat(requestedAmount) < 15) {
+    // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 E MÁXIMO R$ 5.000,00 ===============
+    const LIMITE_MIN_SAQUE = 15;
+    const LIMITE_MAX_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '5000');
+    
+    const valorSolicitado = parseFloat(requestedAmount);
+    
+    if (!requestedAmount || isNaN(valorSolicitado) || !isFinite(valorSolicitado)) {
       client.release();
-      return res.status(400).json({ error: 'Valor mínimo para saque é R$ 15,00' });
+      return res.status(400).json({ error: 'Valor inválido para saque' });
+    }
+    
+    if (valorSolicitado < LIMITE_MIN_SAQUE) {
+      client.release();
+      return res.status(400).json({ error: `Valor mínimo para saque é R$ ${LIMITE_MIN_SAQUE.toFixed(2)}` });
+    }
+    
+    if (valorSolicitado > LIMITE_MAX_SAQUE) {
+      client.release();
+      console.warn(`⚠️ [SEGURANÇA] Saque acima do limite: ${userCod} tentou R$ ${valorSolicitado.toFixed(2)} (max: R$ ${LIMITE_MAX_SAQUE.toFixed(2)})`);
+      return res.status(400).json({ error: `Valor máximo para saque é R$ ${LIMITE_MAX_SAQUE.toFixed(2)}` });
     }
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
@@ -257,13 +273,13 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
     
     const hasGratuity = gratuityQuery.rows.length > 0;
     let gratuityId = null;
-    let feeAmount = requestedAmount * 0.045;
-    let finalAmount = requestedAmount - feeAmount;
+    let feeAmount = valorSolicitado * 0.045;
+    let finalAmount = valorSolicitado - feeAmount;
 
     if (hasGratuity) {
       gratuityId = gratuityQuery.rows[0].id;
       feeAmount = 0;
-      finalAmount = requestedAmount;
+      finalAmount = valorSolicitado;
 
       const newRemaining = gratuityQuery.rows[0].remaining - 1;
       if (newRemaining <= 0) {
@@ -284,7 +300,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
        (user_cod, user_name, cpf, pix_key, requested_amount, fee_amount, final_amount, has_gratuity, gratuity_id, status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aguardando_aprovacao') 
        RETURNING *`,
-      [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
+      [userCod, userName, cpf, pixKey, valorSolicitado, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
 
     await client.query('COMMIT');
@@ -295,7 +311,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
 
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
-      valor: requestedAmount,
+      valor: valorSolicitado,
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
@@ -416,7 +432,9 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     
     // Filtro por data customizada (validação)
     if (dataInicio && dataFim) {
-      const coluna = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
+      // 🔒 SECURITY: Whitelist explícita de colunas permitidas (anti SQL injection)
+      const COLUNAS_FILTRO = { 'lancamento': 'lancamento_at', 'debito': 'debito_plific_at' };
+      const coluna = COLUNAS_FILTRO[tipoFiltro] || 'created_at';
       conditions.push(`${coluna} >= $${paramIdx}::date AND ${coluna} < ($${paramIdx + 1}::date + INTERVAL '1 day')`);
       params.push(dataInicio, dataFim);
       paramIdx += 2;
@@ -691,31 +709,51 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
   }
 });
 
-// Excluir saque
+// Excluir saque (soft-delete — marca como excluído, não remove do banco)
 router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
     // Buscar dados antes de excluir para auditoria
     const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
-
-    const result = await pool.query(
-      'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    
+    if (saqueAntes.rows.length === 0) {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
+    
+    const saque = saqueAntes.rows[0];
+    
+    // 🔒 SECURITY: Bloquear exclusão de saques já processados financeiramente
+    const statusProtegidos = ['aprovado', 'aprovado_gratuidade', 'pago_stark', 'processando'];
+    if (statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago') {
+      console.warn(`⚠️ [SEGURANÇA] Tentativa de excluir saque protegido #${id} (status: ${saque.status}, stark: ${saque.stark_status}) por ${req.user.nome || req.user.username}`);
+      return res.status(403).json({ 
+        error: 'Não é possível excluir saques aprovados, pagos ou em processamento',
+        status_atual: saque.status,
+        stark_status: saque.stark_status
+      });
+    }
+    
+    // 🔒 SECURITY: Soft-delete em vez de DELETE permanente
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET status = 'excluido', 
+           admin_name = $2,
+           updated_at = NOW() 
+       WHERE id = $1 
+       RETURNING *`,
+      [id, req.user.nome || req.user.username || 'Admin']
+    );
 
     // Registrar auditoria
-    await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
-      user_cod: result.rows[0].user_cod,
-      valor: result.rows[0].requested_amount,
-      status_anterior: result.rows[0].status
+    await registrarAuditoria(req, 'WITHDRAWAL_SOFT_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+      user_cod: saque.user_cod,
+      valor: saque.requested_amount,
+      status_anterior: saque.status,
+      admin: req.user.nome || req.user.username
     });
 
-    console.log('🗑️ Saque excluído:', id);
+    console.log('🗑️ Saque soft-deleted:', id, '| status anterior:', saque.status);
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao excluir saque:', error);
