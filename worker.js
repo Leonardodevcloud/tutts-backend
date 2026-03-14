@@ -187,10 +187,10 @@ const prepararLoteStarkAutomatico = async () => {
   }
 };
 
-// Rodar a cada 1 hora
-setInterval(prepararLoteStarkAutomatico, 60 * 60 * 1000);
-// Primeira execução após 30s
-setTimeout(prepararLoteStarkAutomatico, 30000);
+// Seg-Sex: a cada hora das 8h às 18h
+cron.schedule('0 8-18 * * 1-5', prepararLoteStarkAutomatico, { timezone: 'America/Bahia' });
+// Sábado: a cada hora das 8h às 12h
+cron.schedule('0 8-12 * * 6', prepararLoteStarkAutomatico, { timezone: 'America/Bahia' });
 
 // ════════════════════════════════════════════════════════════
 // STARTUP
@@ -206,7 +206,7 @@ setTimeout(prepararLoteStarkAutomatico, 30000);
     console.log('     ⏰ TODO recorrências — a cada 1h');
     console.log('     ⏰ Auth bloqueios    — a cada 5min');
     console.log('     ⏰ Auth tokens       — a cada 1h');
-    console.log('     ⏰ Stark auto-batch  — a cada 1h');
+    console.log('     ⏰ Stark auto-batch  — Seg-Sex 8h-18h | Sáb 8h-12h');
     console.log('══════════════════════════════════════════');
     console.log('');
   } catch (error) {
