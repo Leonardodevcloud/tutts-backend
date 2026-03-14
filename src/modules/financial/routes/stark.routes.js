@@ -15,6 +15,7 @@
  */
 
 const express = require('express');
+const { notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, LIMIAR_SAQUE_DESTAQUE } = require('./whatsapp.service');
 
 function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
@@ -611,6 +612,14 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       console.log(`✅ [Stark Bank] Lote #${loteId}: ${transfersCriadas.length} enviados, ${totalRejeitados} rejeitados, R$ ${valorEnviado.toFixed(2)}`);
 
+      // 📱 Notificar grupo WhatsApp (background — não bloqueia resposta)
+      notificarLoteGerado({
+        loteId,
+        quantidade: transfersCriadas.length,
+        valorTotal: valorEnviado,
+        saques: transfersCriadas.map(t => t.saque)
+      }).catch(err => console.error('❌ [WhatsApp] Falha na notificação:', err.message));
+
       res.json({
         success: true,
         lote_id: loteId,
@@ -1116,6 +1125,29 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           `, [statusLote, lote.id]);
 
           console.log(`✅ [Stark Sync] Lote #${lote.id} finalizado: ${statusLote}`);
+
+          // 📱 Notificar grupo WhatsApp (background)
+          (async () => {
+            try {
+              const statsLote = await pool.query(`
+                SELECT 
+                  COUNT(*) FILTER (WHERE status = 'pago') as pagos,
+                  COUNT(*) FILTER (WHERE status IN ('erro', 'rejeitado')) as erros,
+                  COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) as valor_pago
+                FROM stark_lote_itens WHERE lote_id = $1
+              `, [lote.id]);
+              const st = statsLote.rows[0];
+              await notificarLoteFinalizado({
+                loteId: lote.id,
+                status: statusLote,
+                pagos: parseInt(st.pagos),
+                erros: parseInt(st.erros),
+                valorPago: parseFloat(st.valor_pago)
+              });
+            } catch (errNotif) {
+              console.error('❌ [WhatsApp] Falha notificação sync:', errNotif.message);
+            }
+          })();
         }
 
         if (lotesPendentes.rows.length > 0) {
@@ -1218,6 +1250,29 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           `, [statusLote, saque.stark_lote_id]);
 
           console.log(`✅ [Stark Webhook] Lote #${saque.stark_lote_id} finalizado: ${statusLote}`);
+
+          // 📱 Notificar grupo WhatsApp sobre lote finalizado (background)
+          (async () => {
+            try {
+              const statsLote = await pool.query(`
+                SELECT 
+                  COUNT(*) FILTER (WHERE status = 'pago') as pagos,
+                  COUNT(*) FILTER (WHERE status IN ('erro', 'rejeitado')) as erros,
+                  COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) as valor_pago
+                FROM stark_lote_itens WHERE lote_id = $1
+              `, [saque.stark_lote_id]);
+              const st = statsLote.rows[0];
+              await notificarLoteFinalizado({
+                loteId: saque.stark_lote_id,
+                status: statusLote,
+                pagos: parseInt(st.pagos),
+                erros: parseInt(st.erros),
+                valorPago: parseFloat(st.valor_pago)
+              });
+            } catch (errNotif) {
+              console.error('❌ [WhatsApp] Falha notificação lote finalizado:', errNotif.message);
+            }
+          })();
         }
       }
 
@@ -1290,6 +1345,82 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
       res.status(500).json({ error: 'Erro ao verificar status', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
+    }
+  });
+
+  // ==================== WHATSAPP — TESTE E STATUS ====================
+
+  // Testar envio de mensagem WhatsApp (sem executar lote real)
+  router.post('/stark/whatsapp/testar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      // Montar mensagem de teste simulando um lote
+      const resultado = await notificarLoteGerado({
+        loteId: 0,
+        quantidade: 3,
+        valorTotal: 1250.00,
+        saques: [
+          { user_cod: '99999', user_name: 'Teste Silva', final_amount: 350 },
+          { user_cod: '88888', user_name: 'Teste Santos', final_amount: 500 },
+          { user_cod: '77777', user_name: 'Teste Oliveira', final_amount: 400 }
+        ]
+      });
+
+      await registrarAuditoria(req, 'WHATSAPP_TESTE', AUDIT_CATEGORIES.FINANCIAL, 'whatsapp', null, {
+        resultado: resultado.enviado ? 'ok' : resultado.motivo
+      });
+
+      res.json({
+        success: resultado.enviado,
+        resultado,
+        config: {
+          ativo: (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true',
+          url_configurada: !!process.env.EVOLUTION_API_URL,
+          api_key_configurada: !!process.env.EVOLUTION_API_KEY,
+          instancia_configurada: !!process.env.EVOLUTION_INSTANCE,
+          grupo_configurado: !!process.env.EVOLUTION_GROUP_ID
+        }
+      });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro no teste:', error.message);
+      res.status(500).json({ error: 'Erro ao testar WhatsApp', details: error.message });
+    }
+  });
+
+  // Status da integração WhatsApp
+  router.get('/stark/whatsapp/status', verificarToken, verificarAdminOuFinanceiro, (req, res) => {
+    const ativo = (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true';
+    res.json({
+      ativo,
+      evolution_url: process.env.EVOLUTION_API_URL ? process.env.EVOLUTION_API_URL.replace(/\/+$/, '') : null,
+      instancia: process.env.EVOLUTION_INSTANCE || null,
+      grupo_id: process.env.EVOLUTION_GROUP_ID ? process.env.EVOLUTION_GROUP_ID.substring(0, 15) + '...' : null,
+      api_key_presente: !!process.env.EVOLUTION_API_KEY,
+      limiar_destaque: `R$ ${LIMIAR_SAQUE_DESTAQUE}`
+    });
+  });
+
+  // Enviar mensagem customizada para o grupo (admin)
+  router.post('/stark/whatsapp/enviar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const { mensagem } = req.body;
+      if (!mensagem || mensagem.trim().length === 0) {
+        return res.status(400).json({ error: 'Mensagem obrigatória' });
+      }
+      if (mensagem.length > 2000) {
+        return res.status(400).json({ error: 'Mensagem muito longa (máx 2000 caracteres)' });
+      }
+
+      const resultado = await enviarMensagemWhatsApp(mensagem.trim());
+
+      await registrarAuditoria(req, 'WHATSAPP_ENVIO_MANUAL', AUDIT_CATEGORIES.FINANCIAL, 'whatsapp', null, {
+        enviado: resultado.enviado,
+        tamanho: mensagem.length
+      });
+
+      res.json({ success: resultado.enviado, resultado });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro ao enviar:', error.message);
+      res.status(500).json({ error: 'Erro ao enviar mensagem', details: error.message });
     }
   });
 
