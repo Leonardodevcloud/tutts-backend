@@ -436,62 +436,120 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
 
 // Criar solicitação de saque
 router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req, res) => {
+  const client = await pool.connect(); // 🔒 SECURITY FIX: Transação atômica para gratuidade
+  
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount } = req.body;
+
+    // ==================== 🔒 SECURITY FIX: VALIDAÇÃO DE VALOR ====================
+    const valorSaque = parseFloat(requestedAmount);
+    if (!requestedAmount || isNaN(valorSaque) || !isFinite(valorSaque)) {
+      client.release();
+      return res.status(400).json({ error: 'Valor de saque inválido. Informe um número válido.' });
+    }
+    if (valorSaque <= 0) {
+      client.release();
+      return res.status(400).json({ error: 'Valor de saque deve ser positivo.' });
+    }
+    if (valorSaque < 10) {
+      client.release();
+      return res.status(400).json({ error: 'Valor mínimo de saque é R$ 10,00.' });
+    }
+    if (valorSaque > 1000) {
+      client.release();
+      return res.status(400).json({ error: 'Valor máximo de saque é R$ 1.000,00. Para valores maiores, entre em contato com o financeiro.' });
+    }
+    // Arredondar para 2 casas decimais para evitar problemas de float
+    const valorArredondado = Math.round(valorSaque * 100) / 100;
+    // ==================== FIM VALIDAÇÃO DE VALOR ====================
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
     if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
       if (req.user.codProfissional !== userCod) {
         console.log(`⚠️ [SEGURANÇA] Tentativa de criar saque para outro usuário: ${req.user.codProfissional} tentou criar para ${userCod}`);
+        client.release();
         return res.status(403).json({ error: 'Você só pode criar saques para sua própria conta' });
       }
     }
 
+    // 🔒 SECURITY FIX: Validar campos obrigatórios
+    if (!userCod || !userName || !cpf || !pixKey) {
+      client.release();
+      return res.status(400).json({ error: 'Campos obrigatórios: userCod, userName, cpf, pixKey' });
+    }
+
+    // ==================== INÍCIO DA TRANSAÇÃO ====================
+    await client.query('BEGIN');
+
     // Verificar se está restrito
-    const restricted = await pool.query(
+    const restricted = await client.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
       [userCod]
     );
     const isRestricted = restricted.rows.length > 0;
 
-    // Verificar gratuidade ativa
-    const gratuity = await pool.query(
-      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
+    // 🔒 SECURITY FIX: Verificar gratuidade COM LOCK (FOR UPDATE) para evitar race condition
+    const gratuity = await client.query(
+      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
       [userCod]
     );
     
     const hasGratuity = gratuity.rows.length > 0;
     let gratuityId = null;
-    let feeAmount = requestedAmount * 0.045; // 4.5%
-    let finalAmount = requestedAmount - feeAmount;
+    let feeAmount = valorArredondado * 0.045; // 4.5%
+    let finalAmount = valorArredondado - feeAmount;
+    // Arredondar valores calculados
+    feeAmount = Math.round(feeAmount * 100) / 100;
+    finalAmount = Math.round(finalAmount * 100) / 100;
 
     if (hasGratuity) {
       gratuityId = gratuity.rows[0].id;
       feeAmount = 0;
-      finalAmount = requestedAmount;
+      finalAmount = valorArredondado;
 
-      // Decrementar gratuidade
+      // 🔒 SECURITY FIX: Decrementar gratuidade DENTRO da transação
       const newRemaining = gratuity.rows[0].remaining - 1;
       if (newRemaining <= 0) {
-        await pool.query(
+        await client.query(
           "UPDATE gratuities SET remaining = 0, status = 'expirada', expired_at = NOW() WHERE id = $1",
           [gratuityId]
         );
       } else {
-        await pool.query(
+        await client.query(
           'UPDATE gratuities SET remaining = $1 WHERE id = $2',
           [newRemaining, gratuityId]
         );
       }
     }
 
-    const result = await pool.query(
+    // 🔒 SECURITY FIX: Verificar saque duplicado recente (mesmo profissional, mesmo valor, últimos 5 minutos)
+    const saqueDuplicado = await client.query(
+      `SELECT id FROM withdrawal_requests 
+       WHERE user_cod = $1 AND requested_amount = $2 
+       AND created_at > NOW() - INTERVAL '5 minutes'
+       AND status NOT IN ('rejeitado', 'cancelado')`,
+      [userCod, valorArredondado]
+    );
+    if (saqueDuplicado.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({ 
+        error: 'Saque duplicado detectado. Você já solicitou este valor nos últimos 5 minutos.',
+        saque_existente_id: saqueDuplicado.rows[0].id
+      });
+    }
+
+    const result = await client.query(
       `INSERT INTO withdrawal_requests 
        (user_cod, user_name, cpf, pix_key, requested_amount, fee_amount, final_amount, has_gratuity, gratuity_id, status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aguardando_aprovacao') 
        RETURNING *`,
-      [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
+      [userCod, userName, cpf, pixKey, valorArredondado, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
+
+    // COMMIT da transação (gratuidade + saque atômicos)
+    await client.query('COMMIT');
+    client.release();
 
     const novoSaque = result.rows[0];
 
@@ -499,7 +557,7 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
     // Tenta debitar automaticamente na Plific. Se OK → aguardando_pagamento_stark.
     // Se falhar → mantém aguardando_aprovacao para admin resolver manualmente.
     try {
-      const valorDebito = parseFloat(requestedAmount);
+      const valorDebito = valorArredondado; // 🔒 Já validado acima
       const idProf = userCod;
       const descricaoDebito = hasGratuity
         ? 'Saque Emergencial - Gratuito'
@@ -581,7 +639,7 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
 
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', novoSaque.id, {
-      valor: requestedAmount,
+      valor: valorArredondado,
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
@@ -600,12 +658,13 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       isRestricted 
     });
   } catch (error) {
+    // 🔒 SECURITY FIX: Rollback da transação se ainda estiver ativa
+    try { await client.query('ROLLBACK'); } catch (e) { /* ignore - pode já ter sido committed */ }
+    try { client.release(); } catch (e) { /* ignore - pode já ter sido released */ }
     console.error('❌ Erro ao criar saque:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
-
-// Listar saques do usuário
 router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
@@ -955,31 +1014,50 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
   }
 });
 
-// Excluir saque
+// Excluir saque (🔒 SECURITY FIX: Soft delete + proteção de status)
 router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Buscar dados antes de excluir para auditoria
+    // Buscar dados antes para auditoria e validação
     const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
 
-    const result = await pool.query(
-      'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    if (saqueAntes.rows.length === 0) {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
 
+    const saque = saqueAntes.rows[0];
+
+    // 🔒 SECURITY FIX: Não permitir exclusão de saques já pagos ou em processamento
+    const statusProtegidos = ['pago_stark', 'processando', 'aguardando_pagamento_stark'];
+    if (statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago') {
+      return res.status(400).json({ 
+        error: 'Não é possível excluir um saque com status: ' + (saque.status || saque.stark_status),
+        motivo: 'Saques pagos ou em processamento não podem ser removidos por integridade financeira.'
+      });
+    }
+
+    // 🔒 SECURITY FIX: Soft delete ao invés de hard delete
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET status = 'cancelado', 
+           admin_name = COALESCE(admin_name, $2),
+           reject_reason = COALESCE(reject_reason, 'Excluído pelo admin'),
+           updated_at = NOW() 
+       WHERE id = $1 
+       RETURNING *`,
+      [id, req.user.nome || req.user.username || 'Admin']
+    );
+
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
-      user_cod: result.rows[0].user_cod,
-      valor: result.rows[0].requested_amount,
-      status_anterior: result.rows[0].status
+      user_cod: saque.user_cod,
+      valor: saque.requested_amount,
+      status_anterior: saque.status,
+      acao: 'soft_delete_cancelado'
     });
 
-    console.log('🗑️ Saque excluído:', id);
+    console.log('🗑️ Saque cancelado (soft delete):', id, 'por', req.user.nome || req.user.username);
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao excluir saque:', error);
@@ -1199,8 +1277,8 @@ router.get('/restricted', verificarToken, verificarAdminOuFinanceiro, async (req
   }
 });
 
-// Verificar se usuário está restrito
-router.get('/restricted/check/:userCod', async (req, res) => {
+// Verificar se usuário está restrito (🔒 SECURITY FIX: adicionado verificarToken)
+router.get('/restricted/check/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     
@@ -1350,7 +1428,7 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
         };
 
         plificSaldoCache.set(cacheKey, { data: resultado, timestamp: Date.now() });
-        console.log(`✅ Plific: Saldo do profissional ${idProf} = R$ ${resultado.profissional?.saldo || 0}`);
+        console.log(`✅ Plific: Saldo do profissional ${idProf} consultado com sucesso`);
         
         await registrarAuditoria(req, 'CONSULTA_SALDO_PLIFIC', AUDIT_CATEGORIES.FINANCIAL, 'plific_saldo', idProf, { saldo: resultado.profissional?.saldo, ambiente: PLIFIC_AMBIENTE });
 
