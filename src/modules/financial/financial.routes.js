@@ -1427,10 +1427,18 @@ router.patch('/restricted/:id/remove', verificarToken, verificarAdminOuFinanceir
 
   // ==================== PLIFIC ENDPOINTS ====================
 
-// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
-router.get('/plific/saldo/:idProf', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Permite próprio profissional OU admin/financeiro
+router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
     try {
         const { idProf } = req.params;
+
+        // Verificar permissão: admin/financeiro consulta qualquer um, profissional só o próprio
+        const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+        const isProprio = String(req.user.codProfissional) === String(idProf);
+        if (!isAdmin && !isProprio) {
+            return res.status(403).json({ error: 'Acesso negado. Você só pode consultar seu próprio saldo.' });
+        }
+
         const forceRefresh = req.query.refresh === 'true';
         
         if (!idProf || isNaN(parseInt(idProf))) {
