@@ -217,12 +217,10 @@ function createGerencialRouter(pool, verificarToken) {
         var sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
         var sheetRes = await fetch(sheetUrl);
         var sheetText = await sheetRes.text();
-        var sheetLines = sheetText.split('\n').slice(1); // pular header
+        var sheetLines = sheetText.split('\n').slice(1);
 
-        // Parsear planilha e agrupar por cod_cliente
-        var garPorCliente = {};
-        var garProfs = []; // lista de cod_prof+data pra buscar produção
-
+        // Parsear planilha: cada linha = 1 profissional/dia com garantido
+        var garEntries = [];
         for (var li = 0; li < sheetLines.length; li++) {
           var line = sheetLines[li].trim();
           if (!line) continue;
@@ -230,81 +228,98 @@ function createGerencialRouter(pool, verificarToken) {
           var codCl = cols[0], dataStr = cols[1], profNome = cols[2] || '', codProf = cols[3] || '';
           var valNeg = parseFloat((cols[4] || '').replace(',', '.')) || 0;
           if (!dataStr || valNeg <= 0) continue;
-
-          // Converter DD/MM/YYYY → YYYY-MM-DD
           var dp = dataStr.split('/');
           if (dp.length !== 3) continue;
           var dataFmt = dp[2] + '-' + dp[1].padStart(2, '0') + '-' + dp[0].padStart(2, '0');
           if (dataFmt < di || dataFmt > df) continue;
-
-          if (!garPorCliente[codCl]) garPorCliente[codCl] = { negociado: 0, profs: [] };
-          garPorCliente[codCl].negociado += valNeg;
-          if (codProf) garPorCliente[codCl].profs.push({ cod: parseInt(codProf), data: dataFmt });
+          garEntries.push({ codCl: codCl, data: dataFmt, codProf: codProf ? parseInt(codProf) : null, valNeg: valNeg });
         }
 
-        // Buscar produção total por cod_prof+data no período (batch)
-        var allProfs = [];
-        Object.keys(garPorCliente).forEach(function(codCl) {
-          garPorCliente[codCl].profs.forEach(function(p) { allProfs.push(p); });
-        });
-
-        // Query batch: produção de TODOS os profs que aparecem na planilha no período
-        var prodMap = {}; // cod_prof+data → valor_produzido
-        if (allProfs.length > 0) {
+        // Buscar produção por prof+dia+cliente+CC (saber ONDE rodou)
+        var profCods = garEntries.filter(function(e) { return e.codProf; }).map(function(e) { return e.codProf; });
+        var uniqueProfs = Array.from(new Set(profCods));
+        var prodDetalhes = []; // { cod_prof, data, cod_cliente, centro_custo, valor }
+        if (uniqueProfs.length > 0) {
           var prodResult = await pool.query(
-            "SELECT cod_prof, data_solicitado::date as data, " +
+            "SELECT cod_prof, data_solicitado::date as data, cod_cliente, COALESCE(centro_custo, '') as centro_custo, " +
             "COALESCE(SUM(DISTINCT valor_prof), 0) as valor_produzido " +
             "FROM bi_entregas WHERE data_solicitado >= $1 AND data_solicitado <= $2 " +
             "AND cod_prof = ANY($3) AND " + ENTREGA_FILTER + " " +
-            "GROUP BY cod_prof, data_solicitado::date",
-            [di, df, allProfs.map(function(p) { return p.cod; })]
+            "GROUP BY cod_prof, data_solicitado::date, cod_cliente, centro_custo",
+            [di, df, uniqueProfs]
           ).catch(function() { return { rows: [] }; });
-
-          prodResult.rows.forEach(function(r) {
-            var key = r.cod_prof + '_' + toDateStr(r.data);
-            prodMap[key] = parseFloat(r.valor_produzido) || 0;
-          });
+          prodDetalhes = prodResult.rows;
         }
 
-        // Buscar nomes e máscaras dos clientes
+        // Mapear produção: cod_prof+data → total produzido + onde rodou
+        var prodMap = {}; // cod_prof_data → { total, locais: [{cod_cliente, cc, val}] }
+        prodDetalhes.forEach(function(r) {
+          var key = r.cod_prof + '_' + toDateStr(r.data);
+          if (!prodMap[key]) prodMap[key] = { total: 0, locais: [] };
+          var val = parseFloat(r.valor_produzido) || 0;
+          prodMap[key].total += val;
+          prodMap[key].locais.push({ cod: r.cod_cliente, cc: r.centro_custo, val: val });
+        });
+
+        // Buscar nomes e máscaras
         var mascaras = {};
-        try {
-          var mr = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
-          mr.rows.forEach(function(m) { mascaras[String(m.cod_cliente)] = m.mascara; });
-        } catch(e) {}
-
+        try { var mr = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras'); mr.rows.forEach(function(m) { mascaras[String(m.cod_cliente)] = m.mascara; }); } catch(e) {}
         var nomesCl = {};
-        try {
-          var nr = await pool.query("SELECT DISTINCT cod_cliente, COALESCE(nome_fantasia, nome_cliente) as nome FROM bi_entregas WHERE cod_cliente IS NOT NULL");
-          nr.rows.forEach(function(r) { nomesCl[String(r.cod_cliente)] = r.nome; });
-        } catch(e) {}
+        try { var nr = await pool.query("SELECT DISTINCT cod_cliente, centro_custo, COALESCE(nome_fantasia, nome_cliente) as nome FROM bi_entregas WHERE cod_cliente IS NOT NULL"); nr.rows.forEach(function(r) { var k = r.cod_cliente + '|' + (r.centro_custo || ''); nomesCl[k] = r.nome; nomesCl[String(r.cod_cliente)] = nomesCl[String(r.cod_cliente)] || r.nome; }); } catch(e) {}
 
-        // Calcular produzido por cliente
-        Object.keys(garPorCliente).forEach(function(codCl) {
-          var g = garPorCliente[codCl];
-          var prodTotal = 0;
-          g.profs.forEach(function(p) {
-            var key = p.cod + '_' + p.data;
-            prodTotal += prodMap[key] || 0;
-          });
-          var comp = Math.max(0, r2(g.negociado - prodTotal));
-          var fl = fatMap[codCl] || 0;
-          var nomeDisplay = mascaras[codCl] || nomesCl[codCl] || ('Cliente ' + codCl);
+        // Agrupar garantido por cod_cliente + centro_custo (onde o prof trabalhou)
+        var garGrupo = {}; // chave: "cod|cc"
+        garEntries.forEach(function(entry) {
+          var prodKey = entry.codProf ? (entry.codProf + '_' + entry.data) : null;
+          var prod = prodKey ? prodMap[prodKey] : null;
+          var prodTotal = prod ? prod.total : 0;
+
+          if (prod && prod.locais.length > 0) {
+            // Distribuir negociado proporcionalmente pelas filiais onde rodou
+            prod.locais.forEach(function(loc) {
+              if (String(loc.cod) !== String(entry.codCl)) return; // Só do mesmo cliente do contrato
+              var gKey = loc.cod + '|' + loc.cc;
+              if (!garGrupo[gKey]) garGrupo[gKey] = { cod: loc.cod, cc: loc.cc, negociado: 0, produzido: 0 };
+              // Proporção deste CC no total produzido
+              var proporcao = prodTotal > 0 ? loc.val / prodTotal : 0;
+              garGrupo[gKey].negociado += entry.valNeg * (prodTotal > 0 ? proporcao : 1);
+              garGrupo[gKey].produzido += loc.val;
+            });
+            // Se nenhum local bateu com o cod_cliente do contrato, agrupar sem CC
+            var temMatch = prod.locais.some(function(l) { return String(l.cod) === String(entry.codCl); });
+            if (!temMatch) {
+              var gKey = entry.codCl + '|';
+              if (!garGrupo[gKey]) garGrupo[gKey] = { cod: parseInt(entry.codCl), cc: '', negociado: 0, produzido: 0 };
+              garGrupo[gKey].negociado += entry.valNeg;
+              garGrupo[gKey].produzido += prodTotal;
+            }
+          } else {
+            // Sem produção - agrupar sem CC
+            var gKey = entry.codCl + '|';
+            if (!garGrupo[gKey]) garGrupo[gKey] = { cod: parseInt(entry.codCl), cc: '', negociado: 0, produzido: 0 };
+            garGrupo[gKey].negociado += entry.valNeg;
+          }
+        });
+
+        // Montar resultado final
+        Object.keys(garGrupo).forEach(function(gKey) {
+          var g = garGrupo[gKey];
+          var neg = r2(g.negociado), prod = r2(g.produzido);
+          var comp = Math.max(0, r2(neg - prod));
+          var fl = fatMap[String(g.cod)] || 0;
+          var nomeCl = mascaras[String(g.cod)] || nomesCl[g.cod + '|' + g.cc] || nomesCl[String(g.cod)] || ('Cliente ' + g.cod);
+          var nomeDisplay = g.cc ? nomeCl + ' - ' + g.cc : nomeCl;
           garantido.push({
-            cod_cliente: codCl,
-            nome: nomeDisplay,
-            negociado: r2(g.negociado),
-            produzido: r2(prodTotal),
-            complemento: comp,
-            fat_liquido: r2(fl),
-            saldo: r2(fl - comp),
+            cod_cliente: g.cod, centro_custo: g.cc, nome: nomeDisplay,
+            negociado: neg, produzido: prod, complemento: comp,
+            fat_liquido: r2(fl), saldo: r2(fl - comp),
           });
         });
 
         garantido.sort(function(a, b) { return b.negociado - a.negociado; });
-        console.log('📊 Gerencial garantido: ' + garantido.length + ' clientes da planilha');
+        console.log('📊 Gerencial garantido: ' + garantido.length + ' grupos (cliente+CC)');
       } catch(e) {
-        console.warn('⚠️ Gerencial garantido sheet error:', e.message);
+        console.warn('⚠️ Gerencial garantido error:', e.message);
       }
 
       // ── KPIs ──
