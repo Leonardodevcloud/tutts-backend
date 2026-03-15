@@ -57,7 +57,7 @@ const { initCsRoutes, initCsTables } = require('./src/modules/cs');
 const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
-const { initGerencialRoutes } = require('./src/modules/gerencial');
+const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gerencial');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -424,6 +424,7 @@ async function initDatabase() {
     try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
     try { await initAntiFraudeTables(pool); } catch (e) { console.error('⚠️ Anti-Fraude tables error:', e.message); }
     try { await initPerformanceTables(pool); } catch (e) { console.error('⚠️ Performance tables error:', e.message); }
+    try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
