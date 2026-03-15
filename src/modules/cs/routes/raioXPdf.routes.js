@@ -109,9 +109,14 @@ function createRaioXPdfRoutes(pool) {
           list.forEach(function(item, idx) {
             var x = leftPad + idx * (barW + 8) + 4 + barW / 2;
             var v2 = parseFloat(item[val2Key]) || 0;
-            var y = bottomY - (v2 / 100) * chartH;
-            svg += '<circle cx="' + x + '" cy="' + y + '" r="4" fill="' + corLinha + '" stroke="#1a1a2e" stroke-width="1.5"/>';
-            if (barW >= 16) svg += '<text x="' + x + '" y="' + (y - 10) + '" text-anchor="middle" font-size="10" font-weight="700" fill="' + corLinha + '" font-family="Segoe UI,sans-serif">' + v2.toFixed(0) + '%</text>';
+            var ly = bottomY - (v2 / 100) * chartH;
+            svg += '<circle cx="' + x + '" cy="' + ly + '" r="4" fill="' + corLinha + '" stroke="#1a1a2e" stroke-width="1.5"/>';
+            if (barW >= 16) {
+              var labelY = ly - 18;
+              if (labelY < 8) labelY = ly + 18;
+              svg += '<rect x="' + (x - 18) + '" y="' + (labelY - 9) + '" width="36" height="13" rx="3" fill="rgba(26,26,46,0.85)"/>';
+              svg += '<text x="' + x + '" y="' + (labelY + 1) + '" text-anchor="middle" font-size="10" font-weight="700" fill="' + corLinha + '" font-family="Segoe UI,sans-serif">' + v2.toFixed(0) + '%</text>';
+            }
           });
         }
 
@@ -160,7 +165,7 @@ function createRaioXPdfRoutes(pool) {
       // Retornos: filtrar "Entregue" — não é motivo de retorno
       var retItems = retornos.filter(function(r) {
         var oc = (r.ocorrencia || '').toLowerCase();
-        return oc !== 'entregue' && oc !== 'entregue com sucesso' && !oc.startsWith('entreg');
+        return oc !== 'entregue' && oc !== 'entregue com sucesso' && !oc.startsWith('entreg') && oc !== 'coletado' && !oc.startsWith('coletad');
       }).slice(0, 5).map(function(r) { return { label: (r.ocorrencia || '').substring(0, 20), valor: parseInt(r.quantidade) || 0, display: r.quantidade + ' (' + (r.percentual || 0) + '%)', cor: '#ef4444' }; });
 
       var svgEvol = barraV(evolItems, 1060, 320, { val2Key: 'taxa_prazo' });
