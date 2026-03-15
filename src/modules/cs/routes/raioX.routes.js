@@ -1078,15 +1078,13 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:#0f172a}
 .toggle-btn{background:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.1);display:flex;align-items:center;gap:6px;color:#334155}
 .toggle-btn:hover{background:#f1f5f9}
 .toggle-btn.active{background:#6366f1;color:#fff}
-.info-panel{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.15);padding:16px 20px;font-size:13px;line-height:1.7;min-width:200px}
-.info-panel h3{font-size:14px;font-weight:700;color:#1e293b;margin-bottom:4px}
 </style></head><body>
 <div id="header"><div class="left"><h1>🗺️ Mapa de Calor — ${nomeCliente}</h1><p>Período: ${inicio} a ${fim}</p></div>
 <div class="right"><div class="stat">${totalEntregas.toLocaleString('pt-BR')}</div><div class="stat-label">entregas mapeadas</div></div></div>
 <div id="map"></div>
 <script>
 var pontos=${JSON.stringify(pontosGeo)};
-var map,heatmap,markers=[];
+var map,heatmap,markers=[],infoWin;
 var showHeat=true,showMarkers=true;
 function initMap(){
   map=new google.maps.Map(document.getElementById('map'),{
@@ -1094,6 +1092,7 @@ function initMap(){
     styles:[{featureType:'poi',stylers:[{visibility:'off'}]},{featureType:'transit',stylers:[{visibility:'simplified'}]}],
     mapTypeControl:true,mapTypeControlOptions:{position:google.maps.ControlPosition.TOP_LEFT},fullscreenControl:true
   });
+  infoWin=new google.maps.InfoWindow();
   var ld=document.createElement('div');ld.className='legend';ld.style.margin='10px';
   ld.innerHTML='<h4>📊 Legenda SLA</h4><div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Prazo ≥ 95%</div><div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Prazo 85-95%</div><div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> Prazo &lt; 85%</div><div style="border-top:1px solid #e2e8f0;margin:8px 0;padding-top:8px"><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.5);width:8px;height:8px"></div> Menor volume</div><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.8);width:16px;height:16px"></div> Maior volume</div></div>';
   map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(ld);
@@ -1106,21 +1105,27 @@ function initMap(){
     var pos=new google.maps.LatLng(p.lat,p.lng);
     heatData.push({location:pos,weight:Math.min(p.quantidade,30)});
     bounds.extend(pos);
+  });
+  // Marcadores: só top 150 por volume para performance
+  var sorted=pontos.slice().sort(function(a,b){return b.quantidade-a.quantidade}).slice(0,150);
+  sorted.forEach(function(p){
     var color=p.taxa_prazo>=95?'#10b981':p.taxa_prazo>=85?'#f59e0b':'#ef4444';
-    var sz=Math.max(6,Math.min(p.quantidade*1.5,22));
-    var mk=new google.maps.Marker({position:pos,map:map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:sz,fillColor:color,fillOpacity:.7,strokeColor:'#fff',strokeWeight:2}});
-    var iw=new google.maps.InfoWindow({content:'<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:180px"><b style="font-size:14px;color:#1e293b">'+(p.bairro||p.endereco)+'</b><div style="color:#64748b;font-size:12px;margin-bottom:8px">'+p.cidade+'</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px"><span>📦 Entregas</span><b>'+p.quantidade+'</b><span>⏱️ Prazo</span><b style="color:'+color+'">'+p.taxa_prazo+'%</b><span>📏 KM</span><b>'+(p.km_medio||'-')+'</b><span>🕐 Tempo</span><b>'+(p.tempo_medio||'-')+' min</b></div></div>'});
-    mk.addListener('click',function(){iw.open(map,mk)});
+    var sz=Math.max(5,Math.min(p.quantidade*1.2,18));
+    var mk=new google.maps.Marker({position:{lat:p.lat,lng:p.lng},map:map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:sz,fillColor:color,fillOpacity:.7,strokeColor:'#fff',strokeWeight:1.5}});
+    mk._data=p;mk._color=color;
+    mk.addListener('click',function(){
+      var d=mk._data;
+      infoWin.setContent('<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:170px"><b style="font-size:13px;color:#1e293b">'+(d.bairro||d.endereco)+'</b><div style="color:#64748b;font-size:11px;margin-bottom:6px">'+d.cidade+'</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;font-size:12px"><span>📦</span><b>'+d.quantidade+'</b><span>⏱️</span><b style="color:'+mk._color+'">'+d.taxa_prazo+'%</b><span>📏</span><b>'+(d.km_medio||'-')+' km</b><span>🕐</span><b>'+(d.tempo_medio||'-')+' min</b></div></div>');
+      infoWin.open(map,mk);
+    });
     markers.push(mk);
   });
   if(heatData.length>0){
-    heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:40,opacity:.6,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
+    heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:35,opacity:.55,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
   }
   if(!bounds.isEmpty()){
     map.fitBounds(bounds);
-    google.maps.event.addListenerOnce(map,'bounds_changed',function(){
-      if(map.getZoom()>16) map.setZoom(16);
-    });
+    google.maps.event.addListenerOnce(map,'bounds_changed',function(){if(map.getZoom()>16)map.setZoom(16)});
   }
 }
 function toggleHeat(){showHeat=!showHeat;heatmap&&heatmap.setMap(showHeat?map:null);document.getElementById('btnHeat').classList.toggle('active',showHeat)}
