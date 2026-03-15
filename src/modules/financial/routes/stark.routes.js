@@ -1358,6 +1358,18 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     try {
       const dataAlvo = req.query.data || new Date().toISOString().split('T')[0];
 
+      // Debug: contar total de registros e ver datas
+      const debug = await pool.query(`
+        SELECT 
+          COUNT(*) as total_geral,
+          MIN(created_at) as primeiro,
+          MAX(created_at) as ultimo,
+          COUNT(*) FILTER (WHERE created_at >= $1::date AND created_at < ($1::date + INTERVAL '1 day')) as total_utc,
+          COUNT(*) FILTER (WHERE created_at >= ($1::date - INTERVAL '3 hours') AND created_at < ($1::date + INTERVAL '1 day' - INTERVAL '3 hours')) as total_br
+        FROM withdrawal_requests
+      `, [dataAlvo]);
+
+      // Usar range com offset Brasil (UTC-3)
       const resumo = await pool.query(`
         SELECT 
           COUNT(*) as total_recebidas,
@@ -1368,7 +1380,8 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
         FROM withdrawal_requests
-        WHERE (created_at AT TIME ZONE 'America/Bahia')::date = $1::date
+        WHERE created_at >= ($1::date + INTERVAL '3 hours')
+          AND created_at < ($1::date + INTERVAL '1 day' + INTERVAL '3 hours')
       `, [dataAlvo]);
 
       const r = resumo.rows[0];
@@ -1402,6 +1415,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       res.json({
         success: resultado.enviado,
         data_consultada: dataAlvo,
+        debug: debug.rows[0],
         dados,
         resultado
       });
