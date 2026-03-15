@@ -72,6 +72,7 @@ function createLiderancaRouter(pool) {
       const { userCod } = req.params;
       
       // Processar recorrências pendentes antes de buscar
+      // NÃO deleta visualizações — apenas atualiza ultima_recorrencia e proxima_exibicao
       const agora = new Date();
       const recorrentes = await pool.query(`
         SELECT * FROM lideranca_mensagens
@@ -79,9 +80,6 @@ function createLiderancaRouter(pool) {
       `, [agora]);
       
       for (const msg of recorrentes.rows) {
-        // Limpar visualizações para reexibir
-        await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
-        
         // Calcular próxima exibição
         let proxima = new Date(agora);
         switch (msg.tipo_recorrencia) {
@@ -96,16 +94,27 @@ function createLiderancaRouter(pool) {
             break;
         }
         
-        await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
+        // Atualizar proxima_exibicao e marcar ultima_recorrencia
+        await pool.query(
+          'UPDATE lideranca_mensagens SET proxima_exibicao = $1, ultima_recorrencia = $2 WHERE id = $3', 
+          [proxima, agora, msg.id]
+        );
         console.log(`🔄 Recorrência processada: "${msg.titulo}" - próxima: ${proxima.toISOString()}`);
       }
       
-      // Agora buscar pendentes normalmente
+      // Buscar pendentes: mensagens que o usuário NÃO visualizou neste ciclo
+      // - Não-recorrentes: nunca visualizadas pelo usuário
+      // - Recorrentes: não visualizadas DESDE a última recorrência (ou desde a criação se nunca recorreu)
       const result = await pool.query(`
         SELECT m.* FROM lideranca_mensagens m
+        LEFT JOIN lideranca_visualizacoes v ON m.id = v.mensagem_id AND v.user_cod = $1
         WHERE m.ativo = true
-          AND m.id NOT IN (
-            SELECT mensagem_id FROM lideranca_visualizacoes WHERE user_cod = $1
+          AND (
+            -- Não-recorrente: nunca visualizada
+            (m.recorrente = false AND v.id IS NULL)
+            OR
+            -- Recorrente: nunca visualizada OU visualizada antes da última recorrência
+            (m.recorrente = true AND (v.id IS NULL OR v.visualizado_em < COALESCE(m.ultima_recorrencia, m.created_at)))
           )
         ORDER BY m.created_at DESC
       `, [userCod]);
@@ -222,9 +231,6 @@ function createLiderancaRouter(pool) {
       `, [agora]);
 
       for (const msg of mensagens.rows) {
-        // Limpar visualizações antigas para reexibir
-        await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
-
         // Calcular próxima exibição
         let proxima = new Date(agora);
         switch (msg.tipo_recorrencia) {
@@ -239,7 +245,11 @@ function createLiderancaRouter(pool) {
             break;
         }
 
-        await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
+        // Atualizar proxima_exibicao e marcar ultima_recorrencia (NÃO deleta visualizações)
+        await pool.query(
+          'UPDATE lideranca_mensagens SET proxima_exibicao = $1, ultima_recorrencia = $2 WHERE id = $3', 
+          [proxima, agora, msg.id]
+        );
       }
 
       res.json({ processadas: mensagens.rows.length });
