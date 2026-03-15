@@ -465,9 +465,9 @@ function createClientesRoutes(pool) {
       if (diasSemEntrega > 15) alertas.push({ tipo: 'alto', icone: '🟠', msg: `${diasSemEntrega} dias sem entregas — risco de churn` });
       else if (diasSemEntrega > 7) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `${diasSemEntrega} dias sem entregas` });
 
-      // Atualizar health score no banco — SÓ se não está filtrando por CC
-      // (filtro por CC gera score específico que não deve sobrescrever o geral)
-      if (!temCC) {
+      // Atualizar health score no banco — SÓ se NÃO está filtrando por CC nem por período
+      // (filtros geram score parcial que não deve sobrescrever o score geral/histórico)
+      if (!temCC && !temFiltro) {
         await pool.query(
           'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
           [healthScore, cod]
