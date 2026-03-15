@@ -89,13 +89,16 @@ function createRaioXPdfRoutes(pool) {
           svg += '<text x="' + (leftPad - 8) + '" y="' + (gy + 4) + '" text-anchor="end" font-size="10" fill="rgba(255,255,255,0.4)" font-family="Segoe UI,sans-serif">' + gv + '</text>';
         }
 
+        // Guardar posição do topo de cada barra para evitar colisão com labels da linha
+        var barTops = [];
         list.forEach(function(item, idx) {
           var x = leftPad + idx * (barW + 8) + 4;
           var val = parseFloat(item[valKey]) || 0;
           var bh = Math.max(3, (val / maxVal) * chartH);
           var y = bottomY - bh;
+          barTops.push(y);
           svg += '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + bh + '" rx="3" fill="' + corBarra + '" opacity="0.85"/>';
-          if (barW >= 18) svg += '<text x="' + (x + barW/2) + '" y="' + (y - 4) + '" text-anchor="middle" font-size="10" font-weight="700" fill="white" font-family="Segoe UI,sans-serif">' + Math.round(val) + '</text>';
+          if (barW >= 18) svg += '<text x="' + (x + barW/2) + '" y="' + (y - 6) + '" text-anchor="middle" font-size="10" font-weight="700" fill="white" font-family="Segoe UI,sans-serif">' + Math.round(val) + '</text>';
           svg += '<text x="' + (x + barW/2) + '" y="' + (bottomY + 14) + '" text-anchor="middle" font-size="' + (barW >= 22 ? 10 : 8) + '" fill="rgba(255,255,255,0.5)" font-family="Segoe UI,sans-serif">' + (item[labelKey] || '').substring(0, 8) + '</text>';
         });
 
@@ -112,10 +115,15 @@ function createRaioXPdfRoutes(pool) {
             var ly = bottomY - (v2 / 100) * chartH;
             svg += '<circle cx="' + x + '" cy="' + ly + '" r="4" fill="' + corLinha + '" stroke="#1a1a2e" stroke-width="1.5"/>';
             if (barW >= 16) {
-              var labelY = ly - 18;
-              if (labelY < 8) labelY = ly + 18;
-              svg += '<rect x="' + (x - 18) + '" y="' + (labelY - 9) + '" width="36" height="13" rx="3" fill="rgba(26,26,46,0.85)"/>';
-              svg += '<text x="' + x + '" y="' + (labelY + 1) + '" text-anchor="middle" font-size="10" font-weight="700" fill="' + corLinha + '" font-family="Segoe UI,sans-serif">' + v2.toFixed(0) + '%</text>';
+              var barTopY = barTops[idx] || 0;
+              var barLabelY = barTopY - 16;
+              var labelY = ly - 22;
+              if (labelY > barLabelY - 14 && labelY < barLabelY + 14) {
+                labelY = barLabelY - 18;
+              }
+              if (labelY < 4) labelY = ly + 16;
+              svg += '<rect x="' + (x - 20) + '" y="' + (labelY - 8) + '" width="40" height="14" rx="3" fill="rgba(26,26,46,0.9)"/>';
+              svg += '<text x="' + x + '" y="' + (labelY + 3) + '" text-anchor="middle" font-size="10" font-weight="700" fill="' + corLinha + '" font-family="Segoe UI,sans-serif">' + v2.toFixed(0) + '%</text>';
             }
           });
         }
@@ -232,9 +240,6 @@ function createRaioXPdfRoutes(pool) {
         + '<div style="flex:1;background:rgba(124,58,237,.06);border-radius:10px;padding:12px;border:1px solid rgba(124,58,237,.12)">'
         + '<div style="font-size:10px;color:rgba(255,255,255,.35);margin-bottom:5px">vs. Per\u00edodo Anterior</div>'
         + '<div style="display:flex;gap:14px;font-size:11px;color:rgba(255,255,255,.6)"><span>Entregas ' + delta(ma.total_entregas, mp.total_entregas) + '</span><span>Prazo ' + delta(ma.taxa_prazo, mp.taxa_prazo) + '</span><span>Tempo ' + delta(ma.tempo_medio_entrega || ma.tempo_medio, mp.tempo_medio_entrega || mp.tempo_medio, true) + '</span></div></div>'
-        + '<div style="flex:1;background:rgba(16,185,129,.06);border-radius:10px;padding:12px;border:1px solid rgba(16,185,129,.12)">'
-        + '<div style="font-size:10px;color:rgba(255,255,255,.35);margin-bottom:5px">Ranking Tutts</div>'
-        + '<div style="font-size:11px;color:rgba(255,255,255,.6)">Prazo: <strong style="color:#10b981">Top ' + (ranking.percentil_prazo || '\u2014') + '%</strong> \u00A0\u00A0 Volume: <strong style="color:#3b82f6">Top ' + (ranking.percentil_volume || '\u2014') + '%</strong></div></div>'
         + '</div>'
         + '<div class="bb"><span>Central Tutts</span><span>02</span></div></div>'
 
