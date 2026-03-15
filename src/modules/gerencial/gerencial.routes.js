@@ -152,7 +152,7 @@ function createGerencialRouter(pool, verificarToken) {
       });
 
       // ── Queries em paralelo ──
-      var [qKpi, qKpiAnt, q767, q767Ant, qSlaAll, qSlaAntAll, qTicket4sem, qGarantido, qGarFat] = await Promise.all([
+      var [qKpi, qKpiAnt, q767, q767Ant, qSlaAll, qSlaAntAll, qTicket4sem, qGarFat] = await Promise.all([
         // 1. KPIs semana
         pool.query(
           "SELECT COUNT(*) as entregas, COUNT(DISTINCT os) as os_count, COUNT(DISTINCT cod_prof) as entregadores, " +
@@ -202,17 +202,110 @@ function createGerencialRouter(pool, verificarToken) {
           "FROM bi_entregas WHERE data_solicitado >= $1 AND data_solicitado <= $2 AND " + CAT_FILTER + " AND " + ENTREGA_FILTER + " " +
           "GROUP BY cod_cliente, centro_custo, nome_fantasia, DATE_TRUNC('week', data_solicitado) ORDER BY cod_cliente, semana",
           [sem4Inicio, df]),
-        // 8. Garantido
-        pool.query(
-          "SELECT cod_cliente, SUM(COALESCE(valor_negociado, 0)) as negociado, " +
-          "SUM(COALESCE(valor_produzido, 0)) as produzido, SUM(COALESCE(complemento, 0)) as complemento " +
-          "FROM bi_garantido_cache WHERE data >= $1 AND data <= $2 GROUP BY cod_cliente ORDER BY SUM(COALESCE(valor_negociado, 0)) DESC",
-          [di, df]).catch(function() { return { rows: [] }; }),
-        // 9. Fat líquido por cliente
+        // 8. Fat líquido por cliente (para cruzar com garantido)
         pool.query(
           "SELECT cod_cliente::text as cod, COALESCE(SUM(valor), 0) - COALESCE(SUM(valor_prof), 0) as fat_liquido " +
           "FROM bi_entregas WHERE " + BASE + " GROUP BY cod_cliente", [di, df]).catch(function() { return { rows: [] }; }),
       ]);
+
+      // Fat líquido por cliente (pra cruzar com garantido)
+      var fatMap = {}; qGarFat.rows.forEach(function(r) { fatMap[r.cod] = parseFloat(r.fat_liquido)||0; });
+
+      // ── Garantido: ler da Google Sheet (mesma fonte do /bi/garantido) ──
+      var garantido = [];
+      try {
+        var sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
+        var sheetRes = await fetch(sheetUrl);
+        var sheetText = await sheetRes.text();
+        var sheetLines = sheetText.split('\n').slice(1); // pular header
+
+        // Parsear planilha e agrupar por cod_cliente
+        var garPorCliente = {};
+        var garProfs = []; // lista de cod_prof+data pra buscar produção
+
+        for (var li = 0; li < sheetLines.length; li++) {
+          var line = sheetLines[li].trim();
+          if (!line) continue;
+          var cols = line.split(',').map(function(c) { return c.replace(/^"|"$/g, '').trim(); });
+          var codCl = cols[0], dataStr = cols[1], profNome = cols[2] || '', codProf = cols[3] || '';
+          var valNeg = parseFloat((cols[4] || '').replace(',', '.')) || 0;
+          if (!dataStr || valNeg <= 0) continue;
+
+          // Converter DD/MM/YYYY → YYYY-MM-DD
+          var dp = dataStr.split('/');
+          if (dp.length !== 3) continue;
+          var dataFmt = dp[2] + '-' + dp[1].padStart(2, '0') + '-' + dp[0].padStart(2, '0');
+          if (dataFmt < di || dataFmt > df) continue;
+
+          if (!garPorCliente[codCl]) garPorCliente[codCl] = { negociado: 0, profs: [] };
+          garPorCliente[codCl].negociado += valNeg;
+          if (codProf) garPorCliente[codCl].profs.push({ cod: parseInt(codProf), data: dataFmt });
+        }
+
+        // Buscar produção total por cod_prof+data no período (batch)
+        var allProfs = [];
+        Object.keys(garPorCliente).forEach(function(codCl) {
+          garPorCliente[codCl].profs.forEach(function(p) { allProfs.push(p); });
+        });
+
+        // Query batch: produção de TODOS os profs que aparecem na planilha no período
+        var prodMap = {}; // cod_prof+data → valor_produzido
+        if (allProfs.length > 0) {
+          var prodResult = await pool.query(
+            "SELECT cod_prof, data_solicitado::date as data, " +
+            "COALESCE(SUM(DISTINCT valor_prof), 0) as valor_produzido " +
+            "FROM bi_entregas WHERE data_solicitado >= $1 AND data_solicitado <= $2 " +
+            "AND cod_prof = ANY($3) AND " + ENTREGA_FILTER + " " +
+            "GROUP BY cod_prof, data_solicitado::date",
+            [di, df, allProfs.map(function(p) { return p.cod; })]
+          ).catch(function() { return { rows: [] }; });
+
+          prodResult.rows.forEach(function(r) {
+            var key = r.cod_prof + '_' + toDateStr(r.data);
+            prodMap[key] = parseFloat(r.valor_produzido) || 0;
+          });
+        }
+
+        // Buscar nomes e máscaras dos clientes
+        var mascaras = {};
+        try {
+          var mr = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+          mr.rows.forEach(function(m) { mascaras[String(m.cod_cliente)] = m.mascara; });
+        } catch(e) {}
+
+        var nomesCl = {};
+        try {
+          var nr = await pool.query("SELECT DISTINCT cod_cliente, COALESCE(nome_fantasia, nome_cliente) as nome FROM bi_entregas WHERE cod_cliente IS NOT NULL");
+          nr.rows.forEach(function(r) { nomesCl[String(r.cod_cliente)] = r.nome; });
+        } catch(e) {}
+
+        // Calcular produzido por cliente
+        Object.keys(garPorCliente).forEach(function(codCl) {
+          var g = garPorCliente[codCl];
+          var prodTotal = 0;
+          g.profs.forEach(function(p) {
+            var key = p.cod + '_' + p.data;
+            prodTotal += prodMap[key] || 0;
+          });
+          var comp = Math.max(0, r2(g.negociado - prodTotal));
+          var fl = fatMap[codCl] || 0;
+          var nomeDisplay = mascaras[codCl] || nomesCl[codCl] || ('Cliente ' + codCl);
+          garantido.push({
+            cod_cliente: codCl,
+            nome: nomeDisplay,
+            negociado: r2(g.negociado),
+            produzido: r2(prodTotal),
+            complemento: comp,
+            fat_liquido: r2(fl),
+            saldo: r2(fl - comp),
+          });
+        });
+
+        garantido.sort(function(a, b) { return b.negociado - a.negociado; });
+        console.log('📊 Gerencial garantido: ' + garantido.length + ' clientes da planilha');
+      } catch(e) {
+        console.warn('⚠️ Gerencial garantido sheet error:', e.message);
+      }
 
       // ── KPIs ──
       var k = qKpi.rows[0] || {}, ka = qKpiAnt.rows[0] || {};
@@ -291,14 +384,6 @@ function createGerencialRouter(pool, verificarToken) {
       });
       ticketCl.sort(function(a,b) { return (b.semanas[b.semanas.length-1]||0) - (a.semanas[a.semanas.length-1]||0); });
       demandaCl.sort(function(a,b) { return (b.semanas[b.semanas.length-1]||0) - (a.semanas[a.semanas.length-1]||0); });
-
-      // ── Garantido ──
-      var fatMap = {}; qGarFat.rows.forEach(function(r) { fatMap[r.cod] = parseFloat(r.fat_liquido)||0; });
-      var garantido = qGarantido.rows.map(function(r) {
-        var neg = parseFloat(r.negociado)||0, prod = parseFloat(r.produzido)||0, comp = parseFloat(r.complemento)||0;
-        var fl = fatMap[r.cod_cliente] || 0;
-        return { cod_cliente: r.cod_cliente, negociado: r2(neg), produzido: r2(prod), complemento: r2(comp), fat_liquido: r2(fl), saldo: r2(fl - comp) };
-      });
 
       res.json({
         success: true,
