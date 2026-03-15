@@ -93,6 +93,9 @@ async function initSocialTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_msg ON lideranca_visualizacoes(mensagem_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lideranca_viz_user ON lideranca_visualizacoes(user_cod)`).catch(() => {});
 
+    // Coluna ultima_recorrencia para controle de ciclos (não deleta mais viz)
+    await pool.query(`ALTER TABLE lideranca_mensagens ADD COLUMN IF NOT EXISTS ultima_recorrencia TIMESTAMP`).catch(() => {});
+
     // Tabela de reações às mensagens
     await pool.query(`
       CREATE TABLE IF NOT EXISTS lideranca_reacoes (
