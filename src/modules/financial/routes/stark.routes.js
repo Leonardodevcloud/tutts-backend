@@ -1360,20 +1360,29 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       const resumo = await pool.query(`
         SELECT 
-          COUNT(*) FILTER (WHERE stark_status = 'pago') as total_saques,
-          COALESCE(SUM(final_amount) FILTER (WHERE stark_status = 'pago'), 0) as valor_total_pago,
-          COALESCE(SUM(fee_amount) FILTER (WHERE stark_status = 'pago'), 0) as lucro_total,
-          COUNT(*) FILTER (WHERE stark_status = 'pago' AND has_gratuity = true) as total_gratuidades
+          COUNT(*) as total_recebidas,
+          COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark')) as total_aprovadas,
+          COUNT(*) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)) as sem_gratuidade,
+          COUNT(*) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)) as com_gratuidade,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas,
+          COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
+          COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
         FROM withdrawal_requests
-        WHERE stark_pago_em >= $1::date
-          AND stark_pago_em < $1::date + INTERVAL '1 day'
+        WHERE created_at >= $1::date
+          AND created_at < $1::date + INTERVAL '1 day'
       `, [dataAlvo]);
 
       const r = resumo.rows[0];
-      const totalSaques = parseInt(r.total_saques) || 0;
-      const valorTotalPago = parseFloat(r.valor_total_pago) || 0;
-      const lucroTotal = parseFloat(r.lucro_total) || 0;
-      const totalGratuidades = parseInt(r.total_gratuidades) || 0;
+      const totalRecebidas = parseInt(r.total_recebidas) || 0;
+      const totalAprovadas = parseInt(r.total_aprovadas) || 0;
+      const semGratuidade = parseInt(r.sem_gratuidade) || 0;
+      const comGratuidade = parseInt(r.com_gratuidade) || 0;
+      const rejeitadas = parseInt(r.rejeitadas) || 0;
+      const valorSemGratuidade = parseFloat(r.valor_sem_gratuidade) || 0;
+      const valorComGratuidade = parseFloat(r.valor_com_gratuidade) || 0;
+      const valorTotalAprovado = valorSemGratuidade + valorComGratuidade;
+      const lucro = valorSemGratuidade * 0.045;
+      const deixouArrecadar = valorComGratuidade * 0.045;
 
       // Saldo Stark Bank atual
       let saldoStark = 0;
@@ -1388,12 +1397,13 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         }
       } catch (e) { console.warn('⚠️ Saldo indisponível:', e.message); }
 
-      const resultado = await notificarResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark });
+      const dados = { totalRecebidas, totalAprovadas, semGratuidade, comGratuidade, rejeitadas, valorTotalAprovado, lucro, deixouArrecadar, saldoStark };
+      const resultado = await notificarResumoDiario(dados);
 
       res.json({
         success: resultado.enviado,
         data_consultada: dataAlvo,
-        dados: { totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark },
+        dados,
         resultado
       });
     } catch (error) {
