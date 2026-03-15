@@ -269,7 +269,8 @@ const enviarResumoDiario = async () => {
         COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
         COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
       FROM withdrawal_requests
-      WHERE (created_at AT TIME ZONE 'America/Bahia')::date = (NOW() AT TIME ZONE 'America/Bahia')::date
+      WHERE created_at >= CURRENT_DATE
+        AND created_at < (CURRENT_DATE + INTERVAL '1 day')
     `);
 
     const r = resumo.rows[0];
