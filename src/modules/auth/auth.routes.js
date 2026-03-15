@@ -1169,8 +1169,8 @@ router.post('/users/reset-password', verificarToken, verificarAdmin, async (req,
 
     // 🔒 SECURITY FIX: Aplicar mesma validação de senha forte do registro
     const validacaoSenha = validarSenhaForte(newPassword);
-    if (!validacaoSenha.valida) {
-      return res.status(400).json({ error: validacaoSenha.mensagem });
+    if (!validacaoSenha.valido) {
+      return res.status(400).json({ error: validacaoSenha.erro });
     }
 
     // Hash da nova senha
