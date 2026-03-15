@@ -288,7 +288,8 @@ function createClientesRoutes(pool) {
         metricasParams.push(data_inicio, data_fim);
         paramIdx += 2;
       }
-      if (temCC && csCcExists) {
+      // Filtro de CC aplicado direto no bi_entregas (não depende de cs_clientes ter a coluna)
+      if (temCC) {
         filtroSQL += ` AND centro_custo = $${paramIdx}`;
         metricasParams.push(centro_custo);
         paramIdx++;
@@ -405,6 +406,9 @@ function createClientesRoutes(pool) {
       `, metricasParams);
 
       // Evolução por semana (últimos 180 dias — visão mais ampla)
+      // Aplica filtro de CC se selecionado
+      const evolucaoParams = temCC ? [cod, centro_custo] : [cod];
+      const evolucaoCcSQL = temCC ? ' AND centro_custo = $2' : '';
       const evolucaoSemanal = await pool.query(`
         SELECT 
           DATE_TRUNC('week', data_solicitado)::date as semana,
@@ -413,10 +417,10 @@ function createClientesRoutes(pool) {
                 NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
           COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 180
+        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 180${evolucaoCcSQL}
         GROUP BY DATE_TRUNC('week', data_solicitado)
         ORDER BY semana
-      `, [cod]);
+      `, evolucaoParams);
 
       // Últimas interações
       const interacoes = await pool.query(
@@ -461,11 +465,14 @@ function createClientesRoutes(pool) {
       if (diasSemEntrega > 15) alertas.push({ tipo: 'alto', icone: '🟠', msg: `${diasSemEntrega} dias sem entregas — risco de churn` });
       else if (diasSemEntrega > 7) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `${diasSemEntrega} dias sem entregas` });
 
-      // Atualizar health score no banco
-      await pool.query(
-        'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
-        [healthScore, cod]
-      ).catch(() => {});
+      // Atualizar health score no banco — SÓ se não está filtrando por CC
+      // (filtro por CC gera score específico que não deve sobrescrever o geral)
+      if (!temCC) {
+        await pool.query(
+          'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
+          [healthScore, cod]
+        ).catch(() => {});
+      }
 
       // Enriquecer métricas com taxa calculada
       metricas.taxa_retorno = taxaRetorno;
