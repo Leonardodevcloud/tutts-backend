@@ -177,17 +177,21 @@ async function notificarLoteFinalizado({ loteId, status, pagos, erros, valorPago
 }
 
 /**
- * Monta mensagem de resumo diário (cron 19h)
+ * Monta mensagem de resumo diário (cron 19h) — espelha a aba Validação
  */
-function montarMensagemResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark }) {
+function montarMensagemResumoDiario({ totalRecebidas, totalAprovadas, semGratuidade, comGratuidade, rejeitadas, valorTotalAprovado, lucro, deixouArrecadar, saldoStark }) {
   const dataHora = formatarDataHoraBR();
 
   let msg = `📊 *Resumo do dia*\n`;
   msg += `📅 ${dataHora}\n\n`;
-  msg += `💸 Saques realizados: *${totalSaques}*\n`;
-  msg += `💵 Valor total pago: *R$ ${formatarReais(valorTotalPago)}*\n`;
-  msg += `📈 Lucro total (taxas): *R$ ${formatarReais(lucroTotal)}*\n`;
-  msg += `🎁 Gratuidades utilizadas: *${totalGratuidades}*\n`;
+  msg += `📥 Total recebidas: *${totalRecebidas}*\n`;
+  msg += `✅ Total aprovadas: *${totalAprovadas}*\n`;
+  msg += `📋 Sem gratuidade: *${semGratuidade}*\n`;
+  msg += `🎁 Com gratuidade: *${comGratuidade}*\n`;
+  msg += `❌ Rejeitadas: *${rejeitadas}*\n\n`;
+  msg += `💵 Valor total aprovado: *R$ ${formatarReais(valorTotalAprovado)}*\n`;
+  msg += `💰 Lucro com saque (4,5%): *R$ ${formatarReais(lucro)}*\n`;
+  msg += `📉 Deixou de arrecadar: *R$ ${formatarReais(deixouArrecadar)}*\n`;
   msg += `🏦 Saldo Stark Bank: *R$ ${formatarReais(saldoStark)}*\n`;
   msg += `\n_*Argos, seu sentinela operacional!*_`;
 
@@ -197,9 +201,9 @@ function montarMensagemResumoDiario({ totalSaques, valorTotalPago, lucroTotal, t
 /**
  * Envia resumo diário para o grupo (chamado pelo cron às 19h)
  */
-async function notificarResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark }) {
+async function notificarResumoDiario(dados) {
   try {
-    const mensagem = montarMensagemResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark });
+    const mensagem = montarMensagemResumoDiario(dados);
     const resultado = await enviarMensagemWhatsApp(mensagem);
     return resultado;
   } catch (error) {
