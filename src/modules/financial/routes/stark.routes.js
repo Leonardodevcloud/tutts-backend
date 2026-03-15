@@ -629,14 +629,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       console.log(`✅ [Stark Bank] Lote #${loteId}: ${transfersCriadas.length} enviados, ${totalRejeitados} rejeitados, R$ ${valorEnviado.toFixed(2)}`);
 
-      // 📱 Notificar grupo WhatsApp (background — não bloqueia resposta)
-      notificarLoteGerado({
-        loteId,
-        quantidade: transfersCriadas.length,
-        valorTotal: valorEnviado,
-        saques: transfersCriadas.map(t => t.saque)
-      }).catch(err => console.error('❌ [WhatsApp] Falha na notificação:', err.message));
-
       res.json({
         success: true,
         lote_id: loteId,
@@ -1143,28 +1135,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
           console.log(`✅ [Stark Sync] Lote #${lote.id} finalizado: ${statusLote}`);
 
-          // 📱 Notificar grupo WhatsApp (background)
-          (async () => {
-            try {
-              const statsLote = await pool.query(`
-                SELECT 
-                  COUNT(*) FILTER (WHERE status = 'pago') as pagos,
-                  COUNT(*) FILTER (WHERE status IN ('erro', 'rejeitado')) as erros,
-                  COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) as valor_pago
-                FROM stark_lote_itens WHERE lote_id = $1
-              `, [lote.id]);
-              const st = statsLote.rows[0];
-              await notificarLoteFinalizado({
-                loteId: lote.id,
-                status: statusLote,
-                pagos: parseInt(st.pagos),
-                erros: parseInt(st.erros),
-                valorPago: parseFloat(st.valor_pago)
-              });
-            } catch (errNotif) {
-              console.error('❌ [WhatsApp] Falha notificação sync:', errNotif.message);
-            }
-          })();
         }
 
         if (lotesPendentes.rows.length > 0) {
@@ -1268,28 +1238,6 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
           console.log(`✅ [Stark Webhook] Lote #${saque.stark_lote_id} finalizado: ${statusLote}`);
 
-          // 📱 Notificar grupo WhatsApp sobre lote finalizado (background)
-          (async () => {
-            try {
-              const statsLote = await pool.query(`
-                SELECT 
-                  COUNT(*) FILTER (WHERE status = 'pago') as pagos,
-                  COUNT(*) FILTER (WHERE status IN ('erro', 'rejeitado')) as erros,
-                  COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) as valor_pago
-                FROM stark_lote_itens WHERE lote_id = $1
-              `, [saque.stark_lote_id]);
-              const st = statsLote.rows[0];
-              await notificarLoteFinalizado({
-                loteId: saque.stark_lote_id,
-                status: statusLote,
-                pagos: parseInt(st.pagos),
-                erros: parseInt(st.erros),
-                valorPago: parseFloat(st.valor_pago)
-              });
-            } catch (errNotif) {
-              console.error('❌ [WhatsApp] Falha notificação lote finalizado:', errNotif.message);
-            }
-          })();
         }
       }
 
