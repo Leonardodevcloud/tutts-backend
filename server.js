@@ -57,6 +57,7 @@ const { initCsRoutes, initCsTables } = require('./src/modules/cs');
 const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
+const { initGerencialRoutes } = require('./src/modules/gerencial');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -359,6 +360,7 @@ app.use('/api', initDisponibilidadeRoutes(pool, verificarToken));
 app.use('/api', initFinancialRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP));
 app.use('/api', initSolicitacaoRoutes(pool, verificarToken));
 app.use('/api', initBiRoutes(pool, verificarToken));
+app.use('/api', initGerencialRoutes(pool, verificarToken));
 app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
 
