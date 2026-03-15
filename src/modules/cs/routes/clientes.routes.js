@@ -11,7 +11,7 @@ function createClientesRoutes(pool) {
   // ==================== GET /cs/clientes ====================
   router.get('/cs/clientes', async (req, res) => {
     try {
-      const { status, search, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
+      const { status, search, cod_cliente, centro_custo, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
       const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
 
       // Verificar se coluna centro_custo existe
@@ -36,11 +36,26 @@ function createClientesRoutes(pool) {
         paramIndex++;
       }
 
+      // Filtro por cliente específico
+      if (cod_cliente) {
+        whereClause += ` AND c.cod_cliente = $${paramIndex}`;
+        params.push(parseInt(cod_cliente));
+        paramIndex++;
+      }
+
       // Agrupar por cod_cliente para mostrar visão única do cliente
-      // Métricas vêm do bi_entregas agregando TODOS os centros de custo
+      // Métricas vêm do bi_entregas agregando TODOS os centros de custo (ou filtrado se CC selecionado)
       const distinctSQL = ccExists
         ? `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente, centro_custo NULLS FIRST`
         : `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente`;
+
+      // Filtro de centro_custo para as LATERAL JOINs do bi_entregas
+      let ccFilterSQL = '';
+      if (centro_custo) {
+        ccFilterSQL = ` AND bi_e.centro_custo = $${paramIndex}`;
+        params.push(centro_custo);
+        paramIndex++;
+      }
 
       const query = `
         SELECT 
@@ -85,7 +100,7 @@ function createClientesRoutes(pool) {
           FROM bi_entregas bi_e
           WHERE bi_e.cod_cliente = c.cod_cliente
             AND bi_e.data_solicitado >= CURRENT_DATE - 30
-            AND COALESCE(bi_e.ponto, 1) >= 2
+            AND COALESCE(bi_e.ponto, 1) >= 2${ccFilterSQL}
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -177,6 +192,73 @@ function createClientesRoutes(pool) {
       });
     } catch (e) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== GET /cs/clientes/filtros ====================
+  // Retorna clientes + máscaras + mapa de centros de custo (padrão BI)
+  // Rota ANTES de :cod para não conflitar com Express params
+  router.get('/cs/clientes/filtros', async (req, res) => {
+    try {
+      const t0 = Date.now();
+
+      const [clientesR, mascarasR, clienteCentrosR, csStatusR] = await Promise.all([
+        // Clientes distintos do bi_entregas (últimos 120 dias — pega ativos recentes)
+        pool.query(`
+          SELECT DISTINCT cod_cliente, 
+            MAX(nome_fantasia) as nome_fantasia,
+            MAX(nome_cliente) as nome_cliente,
+            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
+          FROM bi_entregas
+          WHERE cod_cliente IS NOT NULL AND data_solicitado >= CURRENT_DATE - 120
+          GROUP BY cod_cliente
+          ORDER BY MAX(nome_fantasia)
+        `),
+        // Máscaras
+        pool.query('SELECT cod_cliente, mascara FROM bi_mascaras ORDER BY cod_cliente').catch(() => ({ rows: [] })),
+        // Mapa cliente → centros de custo
+        pool.query(`
+          SELECT cod_cliente, centro_custo, COUNT(*) as total
+          FROM bi_entregas
+          WHERE cod_cliente IS NOT NULL 
+            AND centro_custo IS NOT NULL AND centro_custo != ''
+            AND data_solicitado >= CURRENT_DATE - 120
+          GROUP BY cod_cliente, centro_custo
+          ORDER BY cod_cliente, COUNT(*) DESC
+        `).catch(() => ({ rows: [] })),
+        // Status dos clientes no CS (para badge na lista)
+        pool.query('SELECT cod_cliente, health_score, status FROM cs_clientes').catch(() => ({ rows: [] }))
+      ]);
+
+      // Montar mapa de máscaras { cod: mascara }
+      const mascaras = {};
+      mascarasR.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
+
+      // Montar mapa de centros { cod: [cc1, cc2, ...] }
+      const clienteCentros = {};
+      clienteCentrosR.rows.forEach(r => {
+        const cod = String(r.cod_cliente);
+        if (!clienteCentros[cod]) clienteCentros[cod] = [];
+        clienteCentros[cod].push(r.centro_custo);
+      });
+
+      // Montar mapa de status CS { cod: { health_score, status } }
+      const csStatus = {};
+      csStatusR.rows.forEach(r => { csStatus[String(r.cod_cliente)] = { health_score: r.health_score, status: r.status }; });
+
+      const elapsed = Date.now() - t0;
+      console.log(`📊 /cs/clientes/filtros: ${elapsed}ms (4 queries paralelas, ${clientesR.rows.length} clientes)`);
+
+      res.json({
+        success: true,
+        clientes: clientesR.rows,
+        mascaras,
+        cliente_centros: clienteCentros,
+        cs_status: csStatus,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao carregar filtros CS:', error);
+      res.status(500).json({ error: 'Erro ao carregar filtros' });
     }
   });
 
