@@ -18,6 +18,17 @@ const { aplicarGratuidadeProfissional } = require('./src/modules/score/score.ser
 const bcrypt = require('bcrypt');
 const { REFRESH_SECRET } = require('./src/modules/auth/auth.service');
 
+// ─── WhatsApp Notifications ──────────────────────────────
+let notificarLoteGerado;
+try {
+  const whatsapp = require('./src/modules/financial/routes/whatsapp.service');
+  notificarLoteGerado = whatsapp.notificarLoteGerado;
+  console.log('✅ [Worker] WhatsApp module carregado');
+} catch (err) {
+  console.warn('⚠️ [Worker] WhatsApp module não carregou:', err.message);
+  notificarLoteGerado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+}
+
 console.log('🔧 Tutts Worker iniciando...');
 console.log(`📅 ${new Date().toISOString()}`);
 console.log(`🌍 NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
@@ -191,6 +202,14 @@ const prepararLoteStarkAutomatico = async () => {
     }
 
     console.log(`✅ [CRON Stark] Lote #${loteId} criado — ${saques.length} saque(s) aprovados e marcados 'em_lote' — aguardando admin executar pagamento`);
+
+    // 📱 Notificar grupo WhatsApp sobre lote criado
+    notificarLoteGerado({
+      loteId,
+      quantidade: saques.length,
+      valorTotal,
+      saques
+    }).catch(err => console.error('❌ [WhatsApp] Falha na notificação lote criado:', err.message));
 
   } catch (error) {
     console.error('❌ [CRON Stark] Erro geral:', error.message);
