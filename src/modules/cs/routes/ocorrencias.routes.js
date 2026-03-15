@@ -74,7 +74,7 @@ function createOcorrenciasRoutes(pool) {
     try {
       const {
         cod_cliente, titulo, descricao, tipo, severidade,
-        responsavel_cod, responsavel_nome, impacto_operacional, tags,
+        responsavel_cod, responsavel_nome, impacto_operacional, tags, centro_custo,
       } = req.body;
 
       if (!cod_cliente || !titulo || !tipo) {
@@ -85,8 +85,8 @@ function createOcorrenciasRoutes(pool) {
         INSERT INTO cs_ocorrencias (
           cod_cliente, titulo, descricao, tipo, severidade,
           responsavel_cod, responsavel_nome, impacto_operacional, tags,
-          criado_por, criado_por_nome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          criado_por, criado_por_nome, centro_custo
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING *
       `, [
         parseInt(cod_cliente), titulo, descricao, tipo,
@@ -95,6 +95,7 @@ function createOcorrenciasRoutes(pool) {
         impacto_operacional || null,
         JSON.stringify(tags || []),
         req.user?.codProfissional, req.user?.nome,
+        centro_custo || null,
       ]);
 
       console.log(`🚨 CS Ocorrência criada: [${severidade}] ${titulo} (cliente ${cod_cliente})`);
