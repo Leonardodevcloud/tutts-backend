@@ -17,12 +17,13 @@
 const express = require('express');
 
 // 📱 WhatsApp — import seguro (não derruba o backend se falhar)
-let notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, LIMIAR_SAQUE_DESTAQUE;
+let notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, notificarResumoDiario, LIMIAR_SAQUE_DESTAQUE;
 try {
   const whatsapp = require('./whatsapp.service');
   notificarLoteGerado = whatsapp.notificarLoteGerado;
   notificarLoteFinalizado = whatsapp.notificarLoteFinalizado;
   enviarMensagemWhatsApp = whatsapp.enviarMensagemWhatsApp;
+  notificarResumoDiario = whatsapp.notificarResumoDiario;
   LIMIAR_SAQUE_DESTAQUE = whatsapp.LIMIAR_SAQUE_DESTAQUE;
   console.log('✅ [WhatsApp] Módulo carregado com sucesso');
 } catch (errWhatsApp) {
@@ -31,6 +32,7 @@ try {
   notificarLoteGerado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
   notificarLoteFinalizado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
   enviarMensagemWhatsApp = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  notificarResumoDiario = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
   LIMIAR_SAQUE_DESTAQUE = 200;
 }
 
@@ -1348,6 +1350,55 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       console.error('❌ [WhatsApp] Erro no teste:', error.message);
       res.status(500).json({ error: 'Erro ao testar WhatsApp', details: error.message });
+    }
+  });
+
+  // Testar resumo diário com dados reais (aceita ?data=2026-03-14)
+  router.post('/stark/whatsapp/testar-resumo', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const dataAlvo = req.query.data || new Date().toISOString().split('T')[0];
+
+      const resumo = await pool.query(`
+        SELECT 
+          COUNT(*) FILTER (WHERE stark_status = 'pago') as total_saques,
+          COALESCE(SUM(final_amount) FILTER (WHERE stark_status = 'pago'), 0) as valor_total_pago,
+          COALESCE(SUM(fee_amount) FILTER (WHERE stark_status = 'pago'), 0) as lucro_total,
+          COUNT(*) FILTER (WHERE stark_status = 'pago' AND has_gratuity = true) as total_gratuidades
+        FROM withdrawal_requests
+        WHERE stark_pago_em >= $1::date
+          AND stark_pago_em < $1::date + INTERVAL '1 day'
+      `, [dataAlvo]);
+
+      const r = resumo.rows[0];
+      const totalSaques = parseInt(r.total_saques) || 0;
+      const valorTotalPago = parseFloat(r.valor_total_pago) || 0;
+      const lucroTotal = parseFloat(r.lucro_total) || 0;
+      const totalGratuidades = parseInt(r.total_gratuidades) || 0;
+
+      // Saldo Stark Bank atual
+      let saldoStark = 0;
+      try {
+        if (inicializarStark()) {
+          const result = await starkbank.balance.get();
+          if (Array.isArray(result)) {
+            saldoStark = result.length > 0 ? result[0].amount / 100 : 0;
+          } else if (result && result.amount !== undefined) {
+            saldoStark = result.amount / 100;
+          }
+        }
+      } catch (e) { console.warn('⚠️ Saldo indisponível:', e.message); }
+
+      const resultado = await notificarResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark });
+
+      res.json({
+        success: resultado.enviado,
+        data_consultada: dataAlvo,
+        dados: { totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark },
+        resultado
+      });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro no teste resumo:', error.message);
+      res.status(500).json({ error: 'Erro ao testar resumo', details: error.message });
     }
   });
 
