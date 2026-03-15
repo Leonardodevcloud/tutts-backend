@@ -146,22 +146,31 @@ function createRaioXPdfRoutes(pool) {
       }
 
       // ═══ DADOS DOS GRÁFICOS ═══
-      var evolItems = evolucao.slice(-12).map(function(s) { var d = new Date(s.semana); return { label: d.getDate() + '/' + (d.getMonth()+1), valor: parseInt(s.entregas) || 0, taxa_prazo: parseFloat(s.taxa_prazo || 0) || 0 }; });
+      var evolItems = evolucao.slice(-12).map(function(s) {
+        var d = new Date(s.semana);
+        var ent = parseInt(s.entregas) || 0;
+        var np = parseInt(s.no_prazo) || 0;
+        var tp = s.taxa_prazo ? parseFloat(s.taxa_prazo) : (ent > 0 ? Math.round((np / ent) * 1000) / 10 : 0);
+        return { label: d.getDate() + '/' + (d.getMonth()+1), valor: ent, taxa_prazo: tp };
+      });
       var faixasItems = faixasKm.slice(0, 7).map(function(f) { return { label: f.faixa, valor: parseInt(f.quantidade) || 0, display: (parseInt(f.quantidade) || 0) + ' \u00B7 ' + (f.taxa_prazo_faixa || 0) + '%', cor: parseFloat(f.taxa_prazo_faixa) >= 90 ? '#10b981' : parseFloat(f.taxa_prazo_faixa) >= 75 ? '#f59e0b' : '#ef4444' }; });
       var profItems = profissionais.slice(0, 6).map(function(p) { return { label: (p.nome_prof || '').split(' ').slice(0, 2).join(' '), valor: parseInt(p.total_entregas) || 0, display: p.total_entregas + ' \u00B7 ' + (p.taxa_prazo || 0) + '%', cor: parseFloat(p.taxa_prazo) >= 90 ? '#10b981' : parseFloat(p.taxa_prazo) >= 75 ? '#f59e0b' : '#ef4444' }; });
       var horItems = horarios.slice(0, 8).map(function(h) { return { label: h.faixa_horaria, valor: parseInt(h.entregas) || 0, taxa_prazo: parseFloat(h.taxa_prazo) || 0 }; });
       var motosItems = motosDia.slice(-14).map(function(m) { var d = new Date(m.dia); return { label: d.getDate() + '/' + (d.getMonth()+1), valor: parseInt(m.motos) || 0 }; });
-      var bairroItems = bairros.slice(0, 6).map(function(b) { return { label: (b.bairro || 'N/I').substring(0, 20), valor: parseInt(b.entregas) || 0, display: b.entregas + ' \u00B7 ' + (b.taxa_prazo || 0) + '%', cor: parseFloat(b.taxa_prazo) >= 90 ? '#10b981' : parseFloat(b.taxa_prazo) >= 75 ? '#f59e0b' : '#ef4444' }; });
-      var retItems = retornos.slice(0, 5).map(function(r) { return { label: (r.ocorrencia || '').substring(0, 20), valor: parseInt(r.quantidade) || 0, display: r.quantidade + ' (' + (r.percentual || 0) + '%)', cor: '#ef4444' }; });
+      // Retornos: filtrar "Entregue" — não é motivo de retorno
+      var retItems = retornos.filter(function(r) {
+        var oc = (r.ocorrencia || '').toLowerCase();
+        return oc !== 'entregue' && oc !== 'entregue com sucesso' && !oc.startsWith('entreg');
+      }).slice(0, 5).map(function(r) { return { label: (r.ocorrencia || '').substring(0, 20), valor: parseInt(r.quantidade) || 0, display: r.quantidade + ' (' + (r.percentual || 0) + '%)', cor: '#ef4444' }; });
 
       var svgEvol = barraV(evolItems, 1060, 320, { val2Key: 'taxa_prazo' });
-      var svgFaixas = barraH(faixasItems, 500);
-      var svgBairros = barraH(bairroItems, 500, 6);
+      var svgFaixas = barraH(faixasItems, 520);
       var svgProf = barraH(profItems, 520, 6);
       var svgHor = barraV(horItems, 500, 260, { val2Key: 'taxa_prazo', corBarra: '#8b5cf6' });
       var svgMotos = barraV(motosItems, 480, 200, { corBarra: '#8b5cf6', maxItems: 14 });
       var svgRet = barraH(retItems, 480, 5);
       var taxaRet = parseFloat(ma.taxa_retorno || 0);
+      var linkMapa = dados.link_mapa_calor || '';
 
 
       // ═══ HTML — slides com alturas FIXAS, sem flex-grow em charts ═══
@@ -229,10 +238,14 @@ function createRaioXPdfRoutes(pool) {
         + '<div class="ca" style="max-height:480px">' + svgEvol + '<div class="cl">\u25A0 Entregas \u00A0\u00A0 \u25CF Taxa de Prazo (%)</div></div>'
         + '<div class="bb"><span>Central Tutts</span><span>03</span></div></div>'
 
-        // SLIDE 4: COBERTURA
-        + '<div class="s"><div class="st"><span class="sa"></span>Cobertura Geogr\u00e1fica</div><div class="ss">Distribui\u00e7\u00e3o por faixa de dist\u00e2ncia e regi\u00f5es</div>'
-        + '<div class="g2"><div class="ca"><div class="ct">Faixas de Dist\u00e2ncia</div>' + svgFaixas + '</div>'
-        + '<div class="ca"><div class="ct">Top Bairros/Regi\u00f5es</div>' + svgBairros + '</div></div>'
+        // SLIDE 4: COBERTURA — faixas de km + link mapa de calor
+        + '<div class="s"><div class="st"><span class="sa"></span>Cobertura Geogr\u00e1fica</div><div class="ss">Distribui\u00e7\u00e3o por faixa de dist\u00e2ncia</div>'
+        + '<div class="ca" style="margin-bottom:16px"><div class="ct">Entregas por Faixa de Dist\u00e2ncia</div>' + svgFaixas + '</div>'
+        + (linkMapa ? '<div style="background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.12);border-radius:10px;padding:16px;display:flex;align-items:center;gap:14px">'
+        + '<div style="font-size:28px">\uD83D\uDDFA\uFE0F</div>'
+        + '<div><div style="font-size:14px;font-weight:700;color:#10b981">Mapa de Calor Interativo</div>'
+        + '<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">Visualize todos os pontos de entrega, taxa de prazo por regi\u00e3o e tempo m\u00e9dio</div>'
+        + '<div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:6px;word-break:break-all">' + linkMapa + '</div></div></div>' : '')
         + '<div class="bb"><span>Central Tutts</span><span>04</span></div></div>'
 
         // SLIDE 5: PROFISSIONAIS
@@ -253,27 +266,7 @@ function createRaioXPdfRoutes(pool) {
         + '</div></div>'
         + '<div class="bb"><span>Central Tutts</span><span>06</span></div></div>'
 
-        // SLIDE 7: BENCHMARK
-        + '<div class="s"><div class="st"><span class="sa"></span>Comparativo com o Mercado</div><div class="ss">Posicionamento na base Tutts</div>'
-        + '<div class="g2"><div>'
-        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">'
-        + '<div class="kpi" style="padding:12px"><div style="font-size:10px;color:rgba(255,255,255,.35);margin-bottom:4px">ESTE CLIENTE</div>' + gaugeSVG(parseFloat(ma.taxa_prazo) || 0, 100, 'Taxa de Prazo', parseFloat(ma.taxa_prazo) >= 85 ? '#10b981' : '#f59e0b') + '</div>'
-        + '<div class="kpi" style="padding:12px"><div style="font-size:10px;color:rgba(255,255,255,.35);margin-bottom:4px">M\u00c9DIA TUTTS</div>' + gaugeSVG(parseFloat(benchGeral.media_taxa_prazo) || 0, 100, 'Base', '#64748b') + '</div></div>'
-        + '<div style="font-size:12px">'
-        + '<div style="display:grid;grid-template-columns:90px 1fr 60px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04)"><span style="color:rgba(255,255,255,.6);font-weight:600">Prazo</span><div><div style="height:14px;border-radius:3px;background:#7c3aed;width:' + Math.min(parseFloat(ma.taxa_prazo) || 0, 100) + '%;padding-left:5px;font-size:10px;font-weight:700;color:#fff;margin-bottom:2px">' + (ma.taxa_prazo || 0) + '%</div><div style="height:14px;border-radius:3px;background:rgba(255,255,255,.12);width:' + Math.min(parseFloat(benchGeral.media_taxa_prazo) || 0, 100) + '%;padding-left:5px;font-size:10px;font-weight:700;color:rgba(255,255,255,.5)">' + (benchGeral.media_taxa_prazo || 0) + '%</div></div><div style="text-align:right">' + delta(ma.taxa_prazo, benchGeral.media_taxa_prazo) + '</div></div>'
-        + '<div style="display:grid;grid-template-columns:90px 1fr 60px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04)"><span style="color:rgba(255,255,255,.6);font-weight:600">Tempo</span><span style="font-weight:700">' + (ma.tempo_medio_entrega || ma.tempo_medio || 0) + 'min <span style="font-weight:400;color:rgba(255,255,255,.35)">vs ' + (benchGeral.media_tempo_entrega || 0) + 'min</span></span><div style="text-align:right">' + delta(ma.tempo_medio_entrega || ma.tempo_medio, benchGeral.media_tempo_entrega, true) + '</div></div>'
-        + '<div style="display:grid;grid-template-columns:90px 1fr;align-items:center;padding:7px 0"><span style="color:rgba(255,255,255,.6);font-weight:600">KM</span><span style="font-weight:700">' + (ma.km_medio || 0) + 'km <span style="font-weight:400;color:rgba(255,255,255,.35)">vs ' + (benchGeral.media_km || 0) + 'km</span></span></div>'
-        + '</div></div>'
-        + '<div class="kpi" style="display:flex;flex-direction:column;align-items:center;justify-content:center">'
-        + '<div style="font-size:10px;color:rgba(255,255,255,.35);margin-bottom:14px;text-transform:uppercase;letter-spacing:1px">Ranking Geral</div>'
-        + '<div style="font-size:42px;font-weight:900;color:#7c3aed">Top ' + (ranking.percentil_prazo || '\u2014') + '%</div>'
-        + '<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:3px">em Prazo entre ' + (benchGeral.total_clientes || '\u2014') + ' clientes</div>'
-        + '<div style="margin-top:18px;font-size:30px;font-weight:800;color:#3b82f6">Top ' + (ranking.percentil_volume || '\u2014') + '%</div>'
-        + '<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:3px">em Volume</div>'
-        + '</div></div>'
-        + '<div class="bb"><span>Central Tutts</span><span>07</span></div></div>'
-
-        // SLIDE 8: ENCERRAMENTO
+        // SLIDE 7: ENCERRAMENTO
         + '<div class="s"><div style="display:flex;align-items:center;justify-content:center;height:100%"><div style="text-align:center">'
         + '<div style="font-size:11px;font-weight:700;color:#7c3aed;letter-spacing:3px;text-transform:uppercase;margin-bottom:24px">CENTRAL TUTTS</div>'
         + '<div style="font-size:46px;font-weight:900;margin-bottom:12px">Obrigado</div>'
@@ -285,7 +278,7 @@ function createRaioXPdfRoutes(pool) {
         + '<div style="width:1px;background:rgba(255,255,255,.08)"></div>'
         + '<div><div style="font-size:34px;font-weight:900;color:#10b981">' + (ma.taxa_prazo || 0) + '%</div><div style="font-size:10px;color:rgba(255,255,255,.3)">Taxa de Prazo</div></div></div>'
         + '<div style="margin-top:28px;font-size:11px;color:rgba(255,255,255,.18)">' + nomeCliente + ' \u00B7 ' + dtInicio + ' a ' + dtFim + '</div>'
-        + '</div></div><div class="bb"><span>Central Tutts</span><span>08</span></div></div>'
+        + '</div></div><div class="bb"><span>Central Tutts</span><span>07</span></div></div>'
 
         + '</body></html>';
 
