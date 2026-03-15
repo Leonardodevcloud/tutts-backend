@@ -176,11 +176,45 @@ async function notificarLoteFinalizado({ loteId, status, pagos, erros, valorPago
   }
 }
 
+/**
+ * Monta mensagem de resumo diário (cron 19h)
+ */
+function montarMensagemResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark }) {
+  const dataHora = formatarDataHoraBR();
+
+  let msg = `📊 *Resumo do dia*\n`;
+  msg += `📅 ${dataHora}\n\n`;
+  msg += `💸 Saques realizados: *${totalSaques}*\n`;
+  msg += `💵 Valor total pago: *R$ ${formatarReais(valorTotalPago)}*\n`;
+  msg += `📈 Lucro total (taxas): *R$ ${formatarReais(lucroTotal)}*\n`;
+  msg += `🎁 Gratuidades utilizadas: *${totalGratuidades}*\n`;
+  msg += `🏦 Saldo Stark Bank: *R$ ${formatarReais(saldoStark)}*\n`;
+  msg += `\n_*Argos, seu sentinela operacional!*_`;
+
+  return msg;
+}
+
+/**
+ * Envia resumo diário para o grupo (chamado pelo cron às 19h)
+ */
+async function notificarResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark }) {
+  try {
+    const mensagem = montarMensagemResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark });
+    const resultado = await enviarMensagemWhatsApp(mensagem);
+    return resultado;
+  } catch (error) {
+    console.error('❌ [WhatsApp] Erro ao enviar resumo diário:', error.message);
+    return { enviado: false, motivo: 'excecao', erro: error.message };
+  }
+}
+
 module.exports = {
   notificarLoteGerado,
   notificarLoteFinalizado,
   enviarMensagemWhatsApp,
+  notificarResumoDiario,
   montarMensagemLoteGerado,
   montarMensagemLoteFinalizado,
+  montarMensagemResumoDiario,
   LIMIAR_SAQUE_DESTAQUE
 };
