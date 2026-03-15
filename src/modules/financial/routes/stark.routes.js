@@ -1368,8 +1368,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
         FROM withdrawal_requests
-        WHERE created_at >= $1::date
-          AND created_at < $1::date + INTERVAL '1 day'
+        WHERE (created_at AT TIME ZONE 'America/Bahia')::date = $1::date
       `, [dataAlvo]);
 
       const r = resumo.rows[0];
