@@ -19,14 +19,45 @@ const bcrypt = require('bcrypt');
 const { REFRESH_SECRET } = require('./src/modules/auth/auth.service');
 
 // ─── WhatsApp Notifications ──────────────────────────────
-let notificarLoteGerado;
+let notificarLoteGerado, notificarResumoDiario;
 try {
   const whatsapp = require('./src/modules/financial/routes/whatsapp.service');
   notificarLoteGerado = whatsapp.notificarLoteGerado;
+  notificarResumoDiario = whatsapp.notificarResumoDiario;
   console.log('✅ [Worker] WhatsApp module carregado');
 } catch (err) {
   console.warn('⚠️ [Worker] WhatsApp module não carregou:', err.message);
   notificarLoteGerado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  notificarResumoDiario = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+}
+
+// ─── Stark Bank SDK (para saldo no resumo diário) ────────
+let starkbank = null;
+try {
+  starkbank = require('starkbank');
+  const projectId = process.env.STARK_PROJECT_ID;
+  const privateKey = process.env.STARK_PRIVATE_KEY;
+  const environment = process.env.STARK_ENVIRONMENT || 'production';
+
+  if (projectId && privateKey) {
+    let key = privateKey.replace(/\\n/g, '\n');
+    if (!key.includes('\n')) {
+      key = key
+        .replace('-----BEGIN EC PRIVATE KEY-----', '-----BEGIN EC PRIVATE KEY-----\n')
+        .replace('-----END EC PRIVATE KEY-----', '\n-----END EC PRIVATE KEY-----');
+    }
+    key = key.split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n');
+
+    const project = new starkbank.Project({ environment, id: projectId, privateKey: key });
+    starkbank.setUser(project);
+    console.log('✅ [Worker] Stark Bank SDK inicializado');
+  } else {
+    console.warn('⚠️ [Worker] Stark Bank: variáveis não configuradas — saldo não disponível no resumo');
+    starkbank = null;
+  }
+} catch (err) {
+  console.warn('⚠️ [Worker] Stark Bank SDK não carregou:', err.message);
+  starkbank = null;
 }
 
 console.log('🔧 Tutts Worker iniciando...');
@@ -222,6 +253,59 @@ cron.schedule('0 8-18 * * 1-5', prepararLoteStarkAutomatico, { timezone: 'Americ
 cron.schedule('0 8-12 * * 6', prepararLoteStarkAutomatico, { timezone: 'America/Bahia' });
 
 // ════════════════════════════════════════════════════════════
+// RESUMO DIÁRIO — 19h (Seg-Sáb)
+// ════════════════════════════════════════════════════════════
+const enviarResumoDiario = async () => {
+  console.log('📊 [CRON Resumo] Gerando resumo diário...');
+  try {
+    // Saques pagos hoje (stark_status = 'pago' e stark_pago_em = hoje)
+    const resumo = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE stark_status = 'pago') as total_saques,
+        COALESCE(SUM(final_amount) FILTER (WHERE stark_status = 'pago'), 0) as valor_total_pago,
+        COALESCE(SUM(fee_amount) FILTER (WHERE stark_status = 'pago'), 0) as lucro_total,
+        COUNT(*) FILTER (WHERE stark_status = 'pago' AND has_gratuity = true) as total_gratuidades
+      FROM withdrawal_requests
+      WHERE stark_pago_em >= CURRENT_DATE
+        AND stark_pago_em < CURRENT_DATE + INTERVAL '1 day'
+    `);
+
+    const r = resumo.rows[0];
+    const totalSaques = parseInt(r.total_saques) || 0;
+    const valorTotalPago = parseFloat(r.valor_total_pago) || 0;
+    const lucroTotal = parseFloat(r.lucro_total) || 0;
+    const totalGratuidades = parseInt(r.total_gratuidades) || 0;
+
+    // Consultar saldo Stark Bank
+    let saldoStark = 0;
+    if (starkbank) {
+      try {
+        const result = await starkbank.balance.get();
+        if (Array.isArray(result)) {
+          saldoStark = result.length > 0 ? result[0].amount / 100 : 0;
+        } else if (result && result.amount !== undefined) {
+          saldoStark = result.amount / 100;
+        }
+      } catch (errSaldo) {
+        console.error('⚠️ [CRON Resumo] Erro ao consultar saldo Stark:', errSaldo.message);
+      }
+    }
+
+    console.log(`📊 [CRON Resumo] Saques: ${totalSaques} | Pago: R$ ${valorTotalPago.toFixed(2)} | Lucro: R$ ${lucroTotal.toFixed(2)} | Gratuidades: ${totalGratuidades} | Saldo: R$ ${saldoStark.toFixed(2)}`);
+
+    await notificarResumoDiario({ totalSaques, valorTotalPago, lucroTotal, totalGratuidades, saldoStark });
+
+  } catch (error) {
+    console.error('❌ [CRON Resumo] Erro geral:', error.message);
+  }
+};
+
+// Seg-Sex às 19h
+cron.schedule('0 19 * * 1-5', enviarResumoDiario, { timezone: 'America/Bahia' });
+// Sábado às 13h
+cron.schedule('0 13 * * 6', enviarResumoDiario, { timezone: 'America/Bahia' });
+
+// ════════════════════════════════════════════════════════════
 // STARTUP
 // ════════════════════════════════════════════════════════════
 (async () => {
@@ -236,6 +320,7 @@ cron.schedule('0 8-12 * * 6', prepararLoteStarkAutomatico, { timezone: 'America/
     console.log('     ⏰ Auth bloqueios    — a cada 5min');
     console.log('     ⏰ Auth tokens       — a cada 1h');
     console.log('     ⏰ Stark auto-batch  — Seg-Sex 8h-18h | Sáb 8h-12h');
+    console.log('     ⏰ Resumo diário     — Seg-Sex 19h | Sáb 13h');
     console.log('══════════════════════════════════════════');
     console.log('');
   } catch (error) {
