@@ -315,6 +315,69 @@ cron.schedule('0 19 * * 1-5', enviarResumoDiario, { timezone: 'America/Bahia' })
 cron.schedule('0 13 * * 6', enviarResumoDiario, { timezone: 'America/Bahia' });
 
 // ════════════════════════════════════════════════════════════
+// JOB 6: Filas - Reset diário às 19h (Seg-Sáb)
+// Remove TODOS da fila (aguardando + em_rota) e registra no histórico
+// ════════════════════════════════════════════════════════════
+const resetarFilasDiario = async () => {
+  console.log('🔄 [CRON Filas] Iniciando reset diário das filas...');
+  try {
+    // Buscar todos que estão na fila antes de limpar (para histórico)
+    const posicoes = await pool.query(`
+      SELECT p.*, c.nome as central_nome
+      FROM filas_posicoes p
+      LEFT JOIN filas_centrais c ON c.id = p.central_id
+    `);
+
+    if (posicoes.rows.length === 0) {
+      console.log('🔄 [CRON Filas] Nenhum profissional na fila — nada a resetar');
+      return;
+    }
+
+    // Registrar cada remoção no histórico
+    for (const pos of posicoes.rows) {
+      const tempoEspera = pos.entrada_fila_at 
+        ? Math.round((Date.now() - new Date(pos.entrada_fila_at).getTime()) / 60000)
+        : null;
+      const tempoRota = pos.saida_rota_at
+        ? Math.round((Date.now() - new Date(pos.saida_rota_at).getTime()) / 60000)
+        : null;
+
+      await pool.query(`
+        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_espera_minutos, tempo_rota_minutos, observacao, admin_cod, admin_nome)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [
+        pos.central_id,
+        pos.central_nome || 'Central',
+        pos.cod_profissional,
+        pos.nome_profissional,
+        'reset_diario',
+        tempoEspera,
+        pos.status === 'em_rota' ? tempoRota : null,
+        'Reset automático das 19h (status: ' + pos.status + ')',
+        'sistema',
+        'CRON Reset 19h'
+      ]);
+    }
+
+    // Limpar todas as posições
+    const deleted = await pool.query('DELETE FROM filas_posicoes RETURNING *');
+
+    // Limpar notificações do dia
+    await pool.query('DELETE FROM filas_notificacoes').catch(() => {});
+
+    const aguardando = posicoes.rows.filter(p => p.status === 'aguardando').length;
+    const emRota = posicoes.rows.filter(p => p.status === 'em_rota').length;
+
+    console.log(`✅ [CRON Filas] Reset concluído — ${deleted.rowCount} removido(s) (${aguardando} aguardando, ${emRota} em rota)`);
+  } catch (error) {
+    console.error('❌ [CRON Filas] Erro no reset diário:', error.message);
+  }
+};
+
+// Todos os dias às 19h (Seg-Sáb)
+cron.schedule('0 19 * * 1-6', resetarFilasDiario, { timezone: 'America/Bahia' });
+
+// ════════════════════════════════════════════════════════════
 // STARTUP
 // ════════════════════════════════════════════════════════════
 (async () => {
@@ -330,6 +393,7 @@ cron.schedule('0 13 * * 6', enviarResumoDiario, { timezone: 'America/Bahia' });
     console.log('     ⏰ Auth tokens       — a cada 1h');
     console.log('     ⏰ Stark auto-batch  — Seg-Sex 8h-18h | Sáb 8h-12h');
     console.log('     ⏰ Resumo diário     — Seg-Sex 19h | Sáb 13h');
+    console.log('     ⏰ Filas reset       — Seg-Sáb 19h');
     console.log('══════════════════════════════════════════');
     console.log('');
   } catch (error) {
