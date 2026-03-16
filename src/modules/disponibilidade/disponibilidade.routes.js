@@ -444,6 +444,9 @@ router.delete('/disponibilidade/faltosos/:id', async (req, res) => {
     const { id } = req.params;
     await pool.query('DELETE FROM disponibilidade_faltosos WHERE id = $1', [id]);
     console.log('🗑️ Falta excluída:', id);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'faltoso-removido' }, getSenderWsId(req));
+    }
     res.json({ success: true });
   } catch (err) {
     console.error('❌ Erro ao excluir falta:', err);
@@ -807,6 +810,9 @@ router.post('/disponibilidade/restricoes', async (req, res) => {
     ]);
     
     console.log(`🚫 Nova restrição criada: ${cod_profissional} - ${nome_profissional}`);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-criada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao criar restrição:', err);
@@ -837,6 +843,9 @@ router.put('/disponibilidade/restricoes/:id', async (req, res) => {
       return res.status(404).json({ error: 'Restrição não encontrada' });
     }
     
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-atualizada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar restrição:', err);
@@ -862,6 +871,9 @@ router.delete('/disponibilidade/restricoes/:id', async (req, res) => {
     }
     
     console.log(`✅ Restrição ${id} desativada`);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-removida' }, getSenderWsId(req));
+    }
     res.json({ success: true, message: 'Restrição removida' });
   } catch (err) {
     console.error('❌ Erro ao remover restrição:', err);
