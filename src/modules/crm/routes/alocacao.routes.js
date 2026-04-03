@@ -284,24 +284,58 @@ function createAlocacaoRoutes(pool) {
       const linhas = csv.split('\n');
       if (linhas.length < 2) return res.json({ success: true, importados: 0, message: 'Planilha vazia' });
 
-      // Parsear header
-      const headers = linhas[0].split(',').map(h => h.replace(/"/g, '').trim().toLowerCase());
+      // Parser CSV robusto (lida com vírgulas dentro de aspas)
+      function parseCSVLine(line) {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') { inQuotes = !inQuotes; }
+          else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+          else if (ch !== '\r') { current += ch; }
+        }
+        result.push(current.trim());
+        return result;
+      }
+
+      // Parsear header para encontrar índices por nome
+      const headerLine = parseCSVLine(linhas[0]);
+      const headers = headerLine.map(h => h.replace(/"/g, '').trim().toUpperCase());
       console.log('[Alocação] Headers:', headers);
+
+      // Mapear índices (flexível por nome)
+      const iCod    = headers.findIndex(h => h === 'COD' || h === 'CÓDIGO' || h === 'CODIGO');
+      const iEmpresa = headers.findIndex(h => h === 'EMPRESA' || h === 'CLIENTE');
+      const iEntregador = headers.findIndex(h => h === 'ENTREGADOR' || h.includes('ENTREGADOR'));
+      const iCodProf = headers.findIndex(h => h === 'COD DO PROF' || h.includes('COD') && h.includes('PROF'));
+      const iQuem   = headers.findIndex(h => h.includes('QUEM') || h.includes('ALOCOU'));
+      const iData   = headers.findIndex(h => h.includes('DATA') && h.includes('RODAR'));
+      const iDias   = headers.findIndex(h => h.includes('DIAS') || h.includes('RODADOS'));
+      const iObs    = headers.findIndex(h => h === 'OBS' || h === 'OBS:' || h.includes('OBSERV'));
+
+      console.log('[Alocação] Índices: cod=' + iCod + ' empresa=' + iEmpresa + ' entregador=' + iEntregador + ' codProf=' + iCodProf + ' quem=' + iQuem + ' data=' + iData + ' dias=' + iDias + ' obs=' + iObs);
+
+      // Log primeiras linhas pra debug
+      for (let d = 1; d <= Math.min(3, linhas.length - 1); d++) {
+        const cols = parseCSVLine(linhas[d]);
+        console.log(`[Alocação] Linha ${d}: [${cols.map((c, i) => i + '="' + c + '"').join(', ')}]`);
+      }
 
       let importados = 0, duplicados = 0;
 
       for (let i = 1; i < linhas.length; i++) {
         if (!linhas[i].trim()) continue;
-        const cols = linhas[i].split(',').map(c => c.replace(/"/g, '').trim());
+        const cols = parseCSVLine(linhas[i]);
 
-        const codCliente  = cols[0] || '';
-        const nomeCliente = cols[1] || '';
-        const nomeProf    = cols[2] || '';
-        const codProf     = cols[3] || '';
-        const quemAlocou  = cols[4] || '';
-        const dataRaw     = cols[5] || '';
-        const diasRaw     = cols[6] || '';
-        const obs         = cols[7] || '';
+        const codCliente  = (iCod >= 0 ? cols[iCod] : cols[0] || '').trim();
+        const nomeCliente = (iEmpresa >= 0 ? cols[iEmpresa] : cols[1] || '').trim();
+        const nomeProf    = (iEntregador >= 0 ? cols[iEntregador] : cols[2] || '').trim();
+        const codProf     = (iCodProf >= 0 ? cols[iCodProf] : cols[3] || '').trim();
+        const quemAlocou  = (iQuem >= 0 ? cols[iQuem] : cols[4] || '').trim();
+        const dataRaw     = (iData >= 0 ? cols[iData] : cols[5] || '').trim();
+        const diasRaw     = (iDias >= 0 ? cols[iDias] : cols[6] || '').trim();
+        const obs         = (iObs >= 0 ? cols[iObs] : cols[7] || '').trim();
 
         if (!codProf) continue;
 
