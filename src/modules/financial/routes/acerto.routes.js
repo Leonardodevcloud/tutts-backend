@@ -102,7 +102,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
   // ==================== SOLICITAR TOKEN 2FA POR EMAIL ====================
   router.post('/stark/token/solicitar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      const { saque_ids, valor_total, quantidade } = req.body;
+      const { saque_ids, valor_total, quantidade, lote_id } = req.body;
       const emailUser = process.env.STARK_EMAIL_USER;
       const emailPass = process.env.STARK_EMAIL_PASS;
       const emailDestino = process.env.STARK_TOKEN_EMAIL_DESTINO;
@@ -111,14 +111,16 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         return res.status(503).json({ error: 'Configuração de email para 2FA não encontrada. Verifique STARK_EMAIL_USER, STARK_EMAIL_PASS e STARK_TOKEN_EMAIL_DESTINO.' });
       }
 
-      // Gerar token de 6 dígitos e chave única
-      const token = String(Math.floor(100000 + Math.random() * 900000));
+      // 🔒 SECURITY FIX: Gerar token com crypto (criptograficamente seguro)
+      const token = String(crypto.randomInt(100000, 999999));
       const chaveToken = crypto.randomBytes(32).toString('hex');
 
       // Armazenar no cache (expira em 10 minutos)
+      // 🔒 SECURITY FIX: Vincular token ao lote_id + valor_total para impedir reuso
       tokensCache.set(chaveToken, {
         token: token,
         saque_ids: saque_ids || [],
+        lote_id: lote_id || null,
         valor_total: valor_total || 0,
         quantidade: quantidade || 0,
         usuario_id: req.user.id,
@@ -184,7 +186,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto 2FA] Erro ao solicitar token:', error.message);
-      res.status(500).json({ error: 'Erro ao enviar código de segurança', details: error.message });
+      res.status(500).json({ error: 'Erro ao enviar código de segurança', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -215,8 +217,12 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         return res.status(429).json({ error: 'Muitas tentativas incorretas. Solicite um novo código.' });
       }
 
-      // Verificar token
-      if (dados.token !== token.trim()) {
+      // Verificar token — 🔒 SECURITY FIX (HIGH-04): comparação timing-safe
+      const tokenBuf = Buffer.from(dados.token, 'utf8');
+      const inputBuf = Buffer.from(token.trim(), 'utf8');
+      const tokenValido = tokenBuf.length === inputBuf.length && crypto.timingSafeEqual(tokenBuf, inputBuf);
+      
+      if (!tokenValido) {
         dados.tentativas++;
         return res.status(401).json({ error: 'Código incorreto. Tentativa ' + dados.tentativas + '/5.' });
       }
@@ -533,7 +539,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto] Erro ao processar planilha:', error.message);
-      res.status(500).json({ error: 'Erro ao processar planilha', details: error.message });
+      res.status(500).json({ error: 'Erro ao processar planilha', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -623,7 +629,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
 
     } catch (error) {
       console.error('❌ [Acerto] Erro ao validar Pix via DICT:', error.message);
-      res.status(500).json({ error: 'Erro ao validar chave Pix', details: error.message });
+      res.status(500).json({ error: 'Erro ao validar chave Pix', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -730,6 +736,20 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         return res.status(403).json({ error: 'Token não validado. Solicite e valide um novo código.' });
       }
 
+      // 🔒 SECURITY FIX: Verificar se o token foi gerado para ESTE lote específico
+      if (dadosToken.lote_id && dadosToken.lote_id !== parseInt(id)) {
+        console.warn(`⚠️ [SEGURANÇA] Tentativa de usar token 2FA do lote #${dadosToken.lote_id} para executar lote #${id} por ${req.user.nome || req.user.username}`);
+        tokensCache.delete(chave_token); // Consumir token inválido
+        return res.status(403).json({ error: 'Token de segurança foi gerado para outro lote. Solicite um novo código.' });
+      }
+
+      // 🔒 SECURITY FIX: Verificar se o usuário que validou é o mesmo que está executando
+      if (dadosToken.usuario_id !== req.user.id) {
+        console.warn(`⚠️ [SEGURANÇA] Usuário ${req.user.id} tentou usar token 2FA gerado por usuário ${dadosToken.usuario_id}`);
+        tokensCache.delete(chave_token);
+        return res.status(403).json({ error: 'Token de segurança pertence a outro operador.' });
+      }
+
       // Consumir o token (uso único)
       tokensCache.delete(chave_token);
 
@@ -745,6 +765,34 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       if (lote.rows[0].status !== 'aguardando') {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Lote já foi executado. Status: ' + lote.rows[0].status });
+      }
+
+      // 🔒 SECURITY FIX (HIGH-05): Janela temporal — lote expira em 24h
+      const MAX_LOTE_AGE_HOURS = 24;
+      const loteCreatedAt = new Date(lote.rows[0].created_at);
+      const horasDesdeCreacao = (Date.now() - loteCreatedAt.getTime()) / (1000 * 60 * 60);
+      if (horasDesdeCreacao > MAX_LOTE_AGE_HOURS) {
+        await client.query(
+          "UPDATE stark_lotes SET status = 'expirado', finalizado_em = NOW() WHERE id = $1",
+          [id]
+        );
+        await client.query('COMMIT');
+        console.warn('⚠️ [Acerto] Lote #' + id + ' expirado (' + Math.round(horasDesdeCreacao) + 'h). Recrie o lote.');
+        return res.status(400).json({ 
+          error: 'Lote expirado. Criado há ' + Math.round(horasDesdeCreacao) + ' horas (limite: ' + MAX_LOTE_AGE_HOURS + 'h). Recrie o lote com dados atualizados.',
+          expired: true
+        });
+      }
+
+      // 🔒 SECURITY FIX (HIGH-05b): Verificar integridade — quantidade de itens não mudou
+      const itensCount = await client.query(
+        "SELECT COUNT(*)::int as total FROM stark_lote_itens WHERE lote_id = $1",
+        [id]
+      );
+      if (itensCount.rows[0].total !== lote.rows[0].quantidade) {
+        await client.query('ROLLBACK');
+        console.warn('⚠️ [Acerto] Lote #' + id + ' — itens divergem: lote.quantidade=' + lote.rows[0].quantidade + ', itens reais=' + itensCount.rows[0].total);
+        return res.status(400).json({ error: 'Integridade do lote comprometida: quantidade de itens diverge. Recrie o lote.' });
       }
 
       const itens = await client.query(`
@@ -787,7 +835,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         }
       } catch (errSaldo) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: errSaldo.message });
+        return res.status(500).json({ error: 'Não foi possível verificar saldo Stark Bank', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : errSaldo.message });
       }
 
       if (saldoDisponivel < valorTotalLote) {
@@ -803,25 +851,12 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
       // Registrar saldo antes no lote
       await client.query('UPDATE stark_lotes SET saldo_antes = $1 WHERE id = $2', [saldoDisponivel, id]);
 
-      // Enviar pagamentos um por um
+      // Enviar pagamentos um por um — COM validação DICT (igual fluxo de saques)
       const resultados = { sucesso: [], erro: [] };
 
       for (const item of itens.rows) {
         const cpf = (item.cpf || '').replace(/\D/g, '');
         const pixKey = (item.pix_key || '').trim();
-        // accountNumber: para Pix via bankCode 20018183, usar a chave Pix
-        // NÃO remover tudo que não é dígito — chaves Pix podem ser email, UUID, telefone
-        let accountNumber = pixKey;
-        // Se parece ser CPF formatado, limpar
-        if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(pixKey)) {
-          accountNumber = pixKey.replace(/\D/g, '');
-        }
-        // Se parece ser telefone, limpar espaços
-        if (pixKey.startsWith('+')) {
-          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
-        }
-        // Fallback: se ficou vazio, usar CPF
-        if (!accountNumber || accountNumber.trim().length === 0) accountNumber = cpf;
 
         if (!cpf || cpf.length < 11) {
           await client.query(`
@@ -831,21 +866,72 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
           continue;
         }
 
+        if (!pixKey) {
+          await client.query(`
+            UPDATE stark_lote_itens SET status = 'rejeitado', erro = 'Chave Pix vazia', atualizado_em = NOW() WHERE id = $1
+          `, [item.id]);
+          resultados.erro.push({ id: item.id, nome: item.nome_prof, cod_prof: item.cod_prof, valor: item.valor, erro: 'Chave Pix vazia' });
+          continue;
+        }
+
+        // ── Normalizar chave Pix para formato DICT ──
+        let chaveDict = pixKey;
+        const pixSoDigitos = pixKey.replace(/\D/g, '');
+
+        if (pixSoDigitos.length === 11 && !pixKey.includes('@') && !pixKey.startsWith('+')) {
+          // CPF
+          chaveDict = pixSoDigitos;
+        } else if (pixSoDigitos.length === 14) {
+          // CNPJ
+          chaveDict = pixSoDigitos;
+        } else if (pixKey.startsWith('+55') || pixKey.startsWith('+')) {
+          // Telefone
+          var tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
+          else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
+          else chaveDict = pixKey.startsWith('+') ? pixKey : '+55' + tel;
+        } else if (pixKey.includes('@')) {
+          // Email
+          chaveDict = pixKey.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKey)) {
+          // Chave aleatória (UUID)
+          chaveDict = pixKey.toLowerCase().trim();
+        } else if (pixSoDigitos.length >= 10 && pixSoDigitos.length <= 13) {
+          // Possível telefone sem +55
+          var tel2 = pixSoDigitos;
+          if (tel2.startsWith('55') && tel2.length >= 12) chaveDict = '+' + tel2;
+          else chaveDict = '+55' + tel2;
+        }
+
         try {
-          const transferData = {
+          // ── Consultar DICT ──
+          var dictKey = await starkbank.dictKey.get(chaveDict);
+
+          // Usar o taxId do DICT (titular real da chave Pix) — evita taxIdMismatch
+          var cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+          var taxIdFinal = dictKey.taxId || cpfFormatado;
+
+          // Log se CPF diverge
+          if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
+            console.warn('⚠️ [Acerto] CPF divergente prof #' + item.cod_prof + ': cadastro=' + cpf.slice(0,3) + '***' + cpf.slice(-2) + ', DICT=' + dictKey.taxId.replace(/\D/g, '').slice(0,3) + '***' + dictKey.taxId.replace(/\D/g, '').slice(-2) + ' (' + dictKey.name + ')');
+          }
+
+          console.log('🔍 [Acerto] DICT OK prof #' + item.cod_prof + ': banco=' + dictKey.ispb + ', tipo=' + dictKey.accountType + ', nome="' + dictKey.name + '"');
+
+          var transferData = {
             amount: Math.round(parseFloat(item.valor) * 100),
             name: item.nome_prof,
-            taxId: cpf,
-            bankCode: '20018183',
-            branchCode: '0001',
-            accountNumber: accountNumber,
-            accountType: 'checking',
+            taxId: taxIdFinal,
+            bankCode: dictKey.ispb || '20018183',
+            branchCode: dictKey.branchCode || '0001',
+            accountNumber: dictKey.accountNumber || chaveDict,
+            accountType: dictKey.accountType || 'checking',
             externalId: 'tutts-acerto-' + id + '-' + item.id,
             tags: ['acerto:' + id, 'prof:' + item.cod_prof]
           };
 
-          const resultado = await starkbank.transfer.create([transferData]);
-          const transfer = resultado[0];
+          var resultado = await starkbank.transfer.create([transferData]);
+          var transfer = resultado[0];
 
           await client.query(`
             UPDATE stark_lote_itens 
@@ -857,7 +943,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
           console.log('  ✅ Acerto prof ' + item.cod_prof + ' (' + item.nome_prof + ') — Transfer ' + transfer.id);
 
         } catch (errItem) {
-          const erroMsg = errItem.errors ? JSON.stringify(errItem.errors) : errItem.message;
+          var erroMsg = errItem.errors ? JSON.stringify(errItem.errors) : errItem.message;
 
           await client.query(`
             UPDATE stark_lote_itens SET status = 'rejeitado', erro = $1, atualizado_em = NOW() WHERE id = $2
@@ -878,16 +964,17 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         UPDATE stark_lotes SET status = $1, finalizado_em = NOW() WHERE id = $2
       `, [statusLote, id]);
 
-      await client.query('COMMIT');
-
-      console.log('🏦 [Acerto] Lote #' + id + ': ' + qtdSucesso + ' enviados, ' + qtdErro + ' rejeitados');
-
+      // 🔒 SECURITY FIX (AUDIT-09): Audit DENTRO da transação — garante atomicidade
       await registrarAuditoria(req, 'ACERTO_EXECUTADO', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', id, {
         sucesso: qtdSucesso,
         rejeitados: qtdErro,
         valor_enviado: valorSucesso,
         saldo_antes: saldoDisponivel
-      });
+      }, 'success', client);
+
+      await client.query('COMMIT');
+
+      console.log('🏦 [Acerto] Lote #' + id + ': ' + qtdSucesso + ' enviados, ' + qtdErro + ' rejeitados');
 
       res.json({
         success: true,
@@ -902,7 +989,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Acerto] Erro ao executar:', error.message);
-      res.status(500).json({ error: 'Erro ao executar acerto', details: error.message });
+      res.status(500).json({ error: 'Erro ao executar acerto', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       client.release();
     }

@@ -1,5 +1,6 @@
 /**
  * Config Sub-Router: Submissions (cadastros)
+ * V2: Contestação, múltiplas fotos, modal rejeição
  */
 const express = require('express');
 
@@ -9,13 +10,10 @@ function createSubmissionsRoutes(pool, verificarToken, verificarAdmin, registrar
 router.post('/submissions', verificarToken, async (req, res) => {
   try {
     const { ordemServico, motivo, imagemComprovante, imagens, coordenadas } = req.body;
-    
-    // SEGURANÇA: Usar dados do token JWT, não do body
     const userId = req.user.id;
     const userCod = req.user.codProfissional;
     const userName = req.user.nome;
     
-    // Validação de entrada
     if (!ordemServico || ordemServico.length < 1 || ordemServico.length > 50) {
       return res.status(400).json({ error: 'Ordem de serviço inválida' });
     }
@@ -46,7 +44,7 @@ router.post('/submissions', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Dashboard stats (LEVE - só contadores, 1 query)
+// GET - Dashboard stats
 router.get('/submissions/dashboard', verificarToken, async (req, res) => {
   try {
     const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
@@ -58,6 +56,7 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'pendente') as pendentes,
         COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados,
         COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
+        COUNT(*) FILTER (WHERE contestacao_status = 'aberta') as contestacoes_abertas,
         COUNT(*) FILTER (WHERE status = 'pendente' 
           AND created_at < NOW() - INTERVAL '24 hours'
           AND EXTRACT(DOW FROM created_at) BETWEEN 1 AND 5
@@ -75,22 +74,14 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
       FROM submissions
     `);
 
-    // Contagem por motivo (para gráfico)
     const motivos = await pool.query(`
-      SELECT motivo, COUNT(*) as total
-      FROM submissions
-      GROUP BY motivo
-      ORDER BY total DESC
+      SELECT motivo, COUNT(*) as total FROM submissions GROUP BY motivo ORDER BY total DESC
     `);
 
-    // OS atrasadas (para alerta) - só IDs
     const atrasadasOS = await pool.query(`
-      SELECT ordem_servico
-      FROM submissions
-      WHERE status = 'pendente'
-        AND created_at < NOW() - INTERVAL '24 hours'
-      ORDER BY created_at ASC
-      LIMIT 10
+      SELECT ordem_servico FROM submissions
+      WHERE status = 'pendente' AND created_at < NOW() - INTERVAL '24 hours'
+      ORDER BY created_at ASC LIMIT 10
     `);
 
     const stats = result.rows[0];
@@ -99,6 +90,7 @@ router.get('/submissions/dashboard', verificarToken, async (req, res) => {
       pendentes: parseInt(stats.pendentes),
       aprovados: parseInt(stats.aprovados),
       rejeitados: parseInt(stats.rejeitados),
+      contestacoes_abertas: parseInt(stats.contestacoes_abertas || 0),
       atrasadas: parseInt(stats.atrasadas),
       hoje_total: parseInt(stats.hoje_total),
       hoje_processadas: parseInt(stats.hoje_processadas),
@@ -135,23 +127,21 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
     }
 
     if (status) {
-      conditions.push(`status = $${paramIdx++}`);
-      params.push(status);
+      if (status === 'contestado') {
+        conditions.push(`contestacao_status = 'aberta'`);
+      } else {
+        conditions.push(`status = $${paramIdx++}`);
+        params.push(status);
+      }
     }
 
-    if (periodo === 'today') {
-      conditions.push(`created_at >= CURRENT_DATE`);
-    } else if (periodo === 'week') {
-      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '7 days'`);
-    } else if (periodo === 'month') {
-      conditions.push(`created_at >= CURRENT_DATE - INTERVAL '30 days'`);
-    }
+    if (periodo === 'today') conditions.push(`created_at >= CURRENT_DATE`);
+    else if (periodo === 'week') conditions.push(`created_at >= CURRENT_DATE - INTERVAL '7 days'`);
+    else if (periodo === 'month') conditions.push(`created_at >= CURRENT_DATE - INTERVAL '30 days'`);
 
     const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM submissions ${where}`, params
-    );
+    const countResult = await pool.query(`SELECT COUNT(*) FROM submissions ${where}`, params);
 
     const dataResult = await pool.query(`
       SELECT 
@@ -159,9 +149,12 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
         user_id, user_cod, user_name,
         CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
         observacao, validated_by, validated_by_name,
+        contestacao_status, motivo_rejeicao,
         created_at, updated_at
       FROM submissions ${where}
-      ORDER BY created_at DESC
+      ORDER BY 
+        CASE WHEN contestacao_status = 'aberta' THEN 0 ELSE 1 END,
+        created_at DESC
       LIMIT $${paramIdx++} OFFSET $${paramIdx}
     `, [...params, parseInt(limit), offset]);
 
@@ -177,7 +170,7 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Listar submissões (REQUER AUTENTICAÇÃO)
+// GET - Listar submissões
 router.get('/submissions', verificarToken, async (req, res) => {
   try {
     const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
@@ -193,9 +186,12 @@ router.get('/submissions', verificarToken, async (req, res) => {
           CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
           coordenadas, observacao,
           validated_by, validated_by_name,
+          contestacao_status, motivo_rejeicao,
           created_at, updated_at
         FROM submissions 
-        ORDER BY created_at DESC
+        ORDER BY 
+          CASE WHEN contestacao_status = 'aberta' THEN 0 ELSE 1 END,
+          created_at DESC
         LIMIT 500
       `;
       params = [];
@@ -207,6 +203,7 @@ router.get('/submissions', verificarToken, async (req, res) => {
           CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
           coordenadas, observacao,
           validated_by, validated_by_name,
+          contestacao_status, motivo_rejeicao, contestacao_lida,
           created_at, updated_at
         FROM submissions 
         WHERE user_cod = $1 
@@ -224,35 +221,28 @@ router.get('/submissions', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Buscar imagem de submissão (REQUER AUTENTICAÇÃO)
+// GET - Buscar imagem de submissão
 router.get('/submissions/:id/imagem', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
     const submissionId = parseInt(id);
-    if (isNaN(submissionId) || submissionId < 1) {
-      return res.status(400).json({ error: 'ID inválido' });
-    }
+    if (isNaN(submissionId) || submissionId < 1) return res.status(400).json({ error: 'ID inválido' });
     
     const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
     
-    let query;
-    let params;
-    
+    let query, params;
     if (isAdmin) {
-      query = 'SELECT imagem_comprovante FROM submissions WHERE id = $1';
+      query = 'SELECT imagem_comprovante, imagens FROM submissions WHERE id = $1';
       params = [submissionId];
     } else {
-      query = 'SELECT imagem_comprovante FROM submissions WHERE id = $1 AND user_cod = $2';
+      query = 'SELECT imagem_comprovante, imagens FROM submissions WHERE id = $1 AND user_cod = $2';
       params = [submissionId, req.user.codProfissional];
     }
     
     const result = await pool.query(query, params);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Submissão não encontrada' });
-    }
-
-    res.json({ imagem: result.rows[0].imagem_comprovante });
+    res.json({ imagem: result.rows[0].imagem_comprovante, imagens: result.rows[0].imagens });
   } catch (error) {
     console.error('❌ Erro ao buscar imagem:', error);
     res.status(500).json({ error: 'Erro interno ao buscar imagem' });
@@ -266,17 +256,21 @@ router.patch('/submissions/:id', verificarToken, verificarAdmin, async (req, res
     const { status, observacao } = req.body;
     
     const submissionId = parseInt(id);
-    if (isNaN(submissionId) || submissionId < 1) {
-      return res.status(400).json({ error: 'ID inválido' });
-    }
+    if (isNaN(submissionId) || submissionId < 1) return res.status(400).json({ error: 'ID inválido' });
     
     const validStatuses = ['pendente', 'aprovado', 'rejeitado', 'em_analise'];
-    if (status && !validStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Status inválido' });
-    }
+    if (status && !validStatuses.includes(status)) return res.status(400).json({ error: 'Status inválido' });
     
     const validatedBy = req.user.id;
     const validatedByName = req.user.nome;
+
+    // Se rejeitando, salvar motivo_rejeicao e marcar como não lida
+    const extraCols = status === 'rejeitado' 
+      ? `, motivo_rejeicao = $6, contestacao_lida = false` 
+      : '';
+    const extraParams = status === 'rejeitado' 
+      ? [(observacao || '').substring(0, 1000)] 
+      : [];
 
     const result = await pool.query(
       `UPDATE submissions 
@@ -284,19 +278,16 @@ router.patch('/submissions/:id', verificarToken, verificarAdmin, async (req, res
            observacao = $2, 
            validated_by = $3, 
            validated_by_name = $4, 
-           updated_at = NOW() 
+           updated_at = NOW()
+           ${extraCols}
        WHERE id = $5 
        RETURNING *`,
-      [status, (observacao || '').substring(0, 1000), validatedBy, validatedByName, submissionId]
+      [status, (observacao || '').substring(0, 1000), validatedBy, validatedByName, submissionId, ...extraParams]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Submissão não encontrada' });
-    }
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
 
-    await registrarAuditoria(req, 'SUBMISSION_UPDATE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, {
-      novo_status: status
-    });
+    await registrarAuditoria(req, 'SUBMISSION_UPDATE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, { novo_status: status });
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -309,32 +300,21 @@ router.patch('/submissions/:id', verificarToken, verificarAdmin, async (req, res
 router.delete('/submissions/:id', verificarToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin_master') {
-      await registrarAuditoria(req, 'SUBMISSION_DELETE_DENIED', AUDIT_CATEGORIES.DATA, 'submissions', req.params.id, {
-        motivo: 'Permissão negada'
-      }, 'denied');
+      await registrarAuditoria(req, 'SUBMISSION_DELETE_DENIED', AUDIT_CATEGORIES.DATA, 'submissions', req.params.id, { motivo: 'Permissão negada' }, 'denied');
       return res.status(403).json({ error: 'Apenas admin master pode excluir submissões' });
     }
     
     const { id } = req.params;
     const submissionId = parseInt(id);
-    if (isNaN(submissionId) || submissionId < 1) {
-      return res.status(400).json({ error: 'ID inválido' });
-    }
+    if (isNaN(submissionId) || submissionId < 1) return res.status(400).json({ error: 'ID inválido' });
 
     const existing = await pool.query('SELECT ordem_servico, user_cod FROM submissions WHERE id = $1', [submissionId]);
-    
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: 'Submissão não encontrada' });
-    }
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
 
-    const result = await pool.query(
-      'DELETE FROM submissions WHERE id = $1 RETURNING *',
-      [submissionId]
-    );
+    const result = await pool.query('DELETE FROM submissions WHERE id = $1 RETURNING *', [submissionId]);
 
     await registrarAuditoria(req, 'SUBMISSION_DELETE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, {
-      ordem_servico: existing.rows[0].ordem_servico,
-      user_cod_original: existing.rows[0].user_cod
+      ordem_servico: existing.rows[0].ordem_servico, user_cod_original: existing.rows[0].user_cod
     });
 
     res.json({ message: 'Submissão excluída com sucesso', deleted: result.rows[0] });
@@ -344,7 +324,178 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Ranking de Retorno (aprovações agrupadas por profissional)
+// ==================== CONTESTAÇÃO ====================
+
+// GET - Rejeições não lidas do motoboy (para modal)
+router.get('/submissions/minhas-rejeicoes', verificarToken, async (req, res) => {
+  try {
+    const userCod = req.user.codProfissional;
+    const result = await pool.query(`
+      SELECT id, ordem_servico, motivo, motivo_rejeicao, observacao, contestacao_status, created_at, updated_at
+      FROM submissions
+      WHERE user_cod = $1 AND status = 'rejeitado' AND contestacao_lida = false
+      ORDER BY updated_at DESC
+    `, [userCod]);
+    res.json({ success: true, rejeicoes: result.rows });
+  } catch (error) {
+    console.error('❌ Erro ao buscar rejeições:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// PATCH - Marcar rejeição como lida
+router.patch('/submissions/:id/marcar-lida', verificarToken, async (req, res) => {
+  try {
+    const submissionId = parseInt(req.params.id);
+    await pool.query(
+      'UPDATE submissions SET contestacao_lida = true WHERE id = $1 AND user_cod = $2',
+      [submissionId, req.user.codProfissional]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// POST - Motoboy contesta uma rejeição
+router.post('/submissions/:id/contestar', verificarToken, async (req, res) => {
+  try {
+    const submissionId = parseInt(req.params.id);
+    const { mensagem, imagens } = req.body;
+    const userCod = req.user.codProfissional;
+    const userName = req.user.nome;
+
+    // Verificar que a submission pertence ao motoboy e está rejeitada
+    const sub = await pool.query(
+      'SELECT * FROM submissions WHERE id = $1 AND user_cod = $2',
+      [submissionId, userCod]
+    );
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
+    if (sub.rows[0].status !== 'rejeitado') return res.status(400).json({ error: 'Só é possível contestar solicitações rejeitadas' });
+    if (sub.rows[0].contestacao_status === 'encerrada_rejeitada') return res.status(400).json({ error: 'Esta contestação já foi encerrada definitivamente' });
+
+    // Abrir contestação
+    await pool.query(
+      `UPDATE submissions SET contestacao_status = 'aberta', contestacao_aberta_em = NOW(), contestacao_lida = true, updated_at = NOW() WHERE id = $1`,
+      [submissionId]
+    );
+
+    // Inserir primeira mensagem
+    const imagensArr = Array.isArray(imagens) ? imagens : [];
+    await pool.query(`
+      INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
+      VALUES ($1, 'motoboy', $2, $3, $4, $5)
+    `, [submissionId, userCod, userName, (mensagem || '').substring(0, 2000), JSON.stringify(imagensArr)]);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Erro ao contestar:', error);
+    res.status(500).json({ error: 'Erro ao contestar' });
+  }
+});
+
+// GET - Mensagens da contestação
+router.get('/submissions/:id/contestacao', verificarToken, async (req, res) => {
+  try {
+    const submissionId = parseInt(req.params.id);
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+
+    // Verificar acesso
+    if (!isAdmin) {
+      const sub = await pool.query('SELECT id FROM submissions WHERE id = $1 AND user_cod = $2', [submissionId, req.user.codProfissional]);
+      if (sub.rows.length === 0) return res.status(404).json({ error: 'Não encontrada' });
+    }
+
+    const msgs = await pool.query(
+      'SELECT * FROM submissions_contestacoes WHERE submission_id = $1 ORDER BY created_at ASC',
+      [submissionId]
+    );
+
+    const sub = await pool.query(
+      'SELECT id, ordem_servico, motivo, status, contestacao_status, motivo_rejeicao, observacao, user_cod, user_name FROM submissions WHERE id = $1',
+      [submissionId]
+    );
+
+    res.json({ success: true, mensagens: msgs.rows, submission: sub.rows[0] || null });
+  } catch (error) {
+    console.error('❌ Erro ao buscar contestação:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// POST - Responder contestação (motoboy ou admin)
+router.post('/submissions/:id/contestacao-responder', verificarToken, async (req, res) => {
+  try {
+    const submissionId = parseInt(req.params.id);
+    const { mensagem, imagens } = req.body;
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+
+    // Verificar que a contestação está aberta
+    const sub = await pool.query('SELECT * FROM submissions WHERE id = $1', [submissionId]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Não encontrada' });
+    if (sub.rows[0].contestacao_status !== 'aberta') return res.status(400).json({ error: 'Contestação não está aberta' });
+
+    // Se motoboy, verificar que é dele
+    if (!isAdmin && sub.rows[0].user_cod !== req.user.codProfissional) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
+
+    const autorTipo = isAdmin ? 'admin' : 'motoboy';
+    const autorCod = isAdmin ? req.user.codProfissional || req.user.id : req.user.codProfissional;
+    const autorNome = req.user.nome;
+    const imagensArr = Array.isArray(imagens) ? imagens : [];
+
+    await pool.query(`
+      INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [submissionId, autorTipo, autorCod, autorNome, (mensagem || '').substring(0, 2000), JSON.stringify(imagensArr)]);
+
+    await pool.query('UPDATE submissions SET updated_at = NOW() WHERE id = $1', [submissionId]);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Erro ao responder contestação:', error);
+    res.status(500).json({ error: 'Erro ao responder' });
+  }
+});
+
+// PATCH - Encerrar contestação (ADMIN - aprovar ou rejeitar definitivamente)
+router.patch('/submissions/:id/contestacao-encerrar', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const submissionId = parseInt(req.params.id);
+    const { decisao, observacao } = req.body; // decisao: 'aprovar' ou 'rejeitar'
+
+    if (!['aprovar', 'rejeitar'].includes(decisao)) {
+      return res.status(400).json({ error: 'Decisão deve ser aprovar ou rejeitar' });
+    }
+
+    const novoStatus = decisao === 'aprovar' ? 'aprovado' : 'rejeitado';
+    const contestacaoStatus = decisao === 'aprovar' ? 'encerrada_aprovada' : 'encerrada_rejeitada';
+
+    await pool.query(`
+      UPDATE submissions 
+      SET status = $1, contestacao_status = $2, contestacao_encerrada_em = NOW(),
+          observacao = COALESCE($3, observacao), validated_by = $4, validated_by_name = $5, updated_at = NOW()
+      WHERE id = $6
+    `, [novoStatus, contestacaoStatus, observacao, req.user.id, req.user.nome, submissionId]);
+
+    // Registrar mensagem do encerramento
+    await pool.query(`
+      INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem)
+      VALUES ($1, 'admin', $2, $3, $4)
+    `, [submissionId, req.user.codProfissional || req.user.id, req.user.nome,
+      `📋 Contestação encerrada: ${decisao === 'aprovar' ? '✅ APROVADA' : '❌ REJEITADA DEFINITIVAMENTE'}${observacao ? ' — ' + observacao : ''}`]);
+
+    await registrarAuditoria(req, 'CONTESTACAO_ENCERRADA', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, { decisao, observacao });
+
+    res.json({ success: true, status: novoStatus, contestacao_status: contestacaoStatus });
+  } catch (error) {
+    console.error('❌ Erro ao encerrar contestação:', error);
+    res.status(500).json({ error: 'Erro ao encerrar' });
+  }
+});
+
+// GET - Ranking de Retorno
 router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
   try {
     const { periodo } = req.query;
@@ -374,7 +525,7 @@ router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Relatórios de submissões por mês/ano
+// GET - Relatórios
 router.get('/submissions/relatorios', verificarToken, async (req, res) => {
   try {
     const mes = parseInt(req.query.mes ?? new Date().getMonth());
@@ -382,111 +533,35 @@ router.get('/submissions/relatorios', verificarToken, async (req, res) => {
     const mesSQL = mes + 1;
 
     const [statsRes, motivosRes, profRes, semanasRes, evolucaoRes, totalProfsRes] = await Promise.all([
-      pool.query(`
-        SELECT 
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados,
-          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
-          COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
-        FROM submissions 
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-      `, [mesSQL, ano]),
-      pool.query(`
-        SELECT motivo,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas,
-          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas,
-          COUNT(*) FILTER (WHERE status = 'pendente') as pendentes
-        FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-        GROUP BY motivo ORDER BY total DESC
-      `, [mesSQL, ano]),
-      pool.query(`
-        SELECT user_name as nome, user_cod as cod,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas,
-          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas
-        FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-        GROUP BY user_name, user_cod ORDER BY total DESC LIMIT 10
-      `, [mesSQL, ano]),
-      pool.query(`
-        SELECT 
-          CASE 
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 1 AND 7 THEN 'Semana 1'
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 8 AND 14 THEN 'Semana 2'
-            WHEN EXTRACT(DAY FROM created_at) BETWEEN 15 AND 21 THEN 'Semana 3'
-            ELSE 'Semana 4'
-          END as semana,
-          MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio,
-          MAX(EXTRACT(DAY FROM created_at))::int as dia_fim,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
-        FROM submissions
-        WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2
-        GROUP BY 1 ORDER BY MIN(EXTRACT(DAY FROM created_at))
-      `, [mesSQL, ano]),
-      pool.query(`
-        SELECT 
-          TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label,
-          EXTRACT(MONTH FROM created_at)::int as mes,
-          EXTRACT(YEAR FROM created_at)::int as ano,
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas
-        FROM submissions
-        WHERE created_at >= DATE_TRUNC('month', make_date($2, $1, 1)) - INTERVAL '5 months'
-          AND created_at < DATE_TRUNC('month', make_date($2, $1, 1)) + INTERVAL '1 month'
-        GROUP BY 1, 2, 3
-        ORDER BY ano, mes
-      `, [mesSQL, ano]),
+      pool.query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'aprovado') as aprovados, COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados, COUNT(*) FILTER (WHERE status = 'pendente') as pendentes FROM submissions WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2`, [mesSQL, ano]),
+      pool.query(`SELECT motivo, COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas, COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas, COUNT(*) FILTER (WHERE status = 'pendente') as pendentes FROM submissions WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2 GROUP BY motivo ORDER BY total DESC`, [mesSQL, ano]),
+      pool.query(`SELECT user_name as nome, user_cod as cod, COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas, COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas FROM submissions WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2 GROUP BY user_name, user_cod ORDER BY total DESC LIMIT 10`, [mesSQL, ano]),
+      pool.query(`SELECT CASE WHEN EXTRACT(DAY FROM created_at) BETWEEN 1 AND 7 THEN 'Semana 1' WHEN EXTRACT(DAY FROM created_at) BETWEEN 8 AND 14 THEN 'Semana 2' WHEN EXTRACT(DAY FROM created_at) BETWEEN 15 AND 21 THEN 'Semana 3' ELSE 'Semana 4' END as semana, MIN(EXTRACT(DAY FROM created_at))::int as dia_inicio, MAX(EXTRACT(DAY FROM created_at))::int as dia_fim, COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas FROM submissions WHERE EXTRACT(MONTH FROM created_at) = $1 AND EXTRACT(YEAR FROM created_at) = $2 GROUP BY 1 ORDER BY MIN(EXTRACT(DAY FROM created_at))`, [mesSQL, ano]),
+      pool.query(`SELECT TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') as label, EXTRACT(MONTH FROM created_at)::int as mes, EXTRACT(YEAR FROM created_at)::int as ano, COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'aprovado') as aprovadas FROM submissions WHERE created_at >= DATE_TRUNC('month', make_date($2, $1, 1)) - INTERVAL '5 months' AND created_at < DATE_TRUNC('month', make_date($2, $1, 1)) + INTERVAL '1 month' GROUP BY 1, 2, 3 ORDER BY ano, mes`, [mesSQL, ano]),
       pool.query(`SELECT COUNT(DISTINCT user_cod) as total FROM submissions`)
     ]);
 
     const stats = statsRes.rows[0];
-    const mesAnterior = evolucaoRes.rows.find(r => {
-      const mAnt = mesSQL === 1 ? 12 : mesSQL - 1;
-      const aAnt = mesSQL === 1 ? ano - 1 : ano;
-      return r.mes === mAnt && r.ano === aAnt;
-    });
+    const mesAnterior = evolucaoRes.rows.find(r => { const mAnt = mesSQL === 1 ? 12 : mesSQL - 1; const aAnt = mesSQL === 1 ? ano - 1 : ano; return r.mes === mAnt && r.ano === aAnt; });
 
     res.json({
-      total: parseInt(stats.total),
-      aprovados: parseInt(stats.aprovados),
-      rejeitados: parseInt(stats.rejeitados),
-      pendentes: parseInt(stats.pendentes),
+      total: parseInt(stats.total), aprovados: parseInt(stats.aprovados), rejeitados: parseInt(stats.rejeitados), pendentes: parseInt(stats.pendentes),
       taxaAprovacao: stats.total > 0 ? (stats.aprovados / stats.total * 100).toFixed(1) : '0.0',
       taxaRejeicao: stats.total > 0 ? (stats.rejeitados / stats.total * 100).toFixed(1) : '0.0',
       totalProfissionais: parseInt(totalProfsRes.rows[0].total),
-      mediaPorProfissional: totalProfsRes.rows[0].total > 0 
-        ? (stats.total / totalProfsRes.rows[0].total).toFixed(1) : '0.0',
-      motivos: motivosRes.rows.reduce((acc, r) => { 
-        acc[r.motivo || 'Outros'] = { total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas), pendentes: parseInt(r.pendentes) }; 
-        return acc; 
-      }, {}),
-      topProfissionais: profRes.rows.map(r => ({
-        nome: r.nome, cod: r.cod,
-        total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas),
-        taxa: r.total > 0 ? (r.aprovadas / r.total * 100).toFixed(0) : '0'
-      })),
-      semanas: semanasRes.rows.map(r => ({
-        label: r.semana, dias: [r.dia_inicio, r.dia_fim],
-        total: parseInt(r.total), aprovadas: parseInt(r.aprovadas)
-      })),
-      evolucao: evolucaoRes.rows.map(r => ({
-        label: r.label, total: parseInt(r.total), aprovadas: parseInt(r.aprovadas)
-      })),
+      mediaPorProfissional: totalProfsRes.rows[0].total > 0 ? (stats.total / totalProfsRes.rows[0].total).toFixed(1) : '0.0',
+      motivos: motivosRes.rows.reduce((acc, r) => { acc[r.motivo || 'Outros'] = { total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas), pendentes: parseInt(r.pendentes) }; return acc; }, {}),
+      topProfissionais: profRes.rows.map(r => ({ nome: r.nome, cod: r.cod, total: parseInt(r.total), aprovadas: parseInt(r.aprovadas), rejeitadas: parseInt(r.rejeitadas), taxa: r.total > 0 ? (r.aprovadas / r.total * 100).toFixed(0) : '0' })),
+      semanas: semanasRes.rows.map(r => ({ label: r.semana, dias: [r.dia_inicio, r.dia_fim], total: parseInt(r.total), aprovadas: parseInt(r.aprovadas) })),
+      evolucao: evolucaoRes.rows.map(r => ({ label: r.label, total: parseInt(r.total), aprovadas: parseInt(r.aprovadas) })),
       mesAnteriorTotal: mesAnterior ? parseInt(mesAnterior.total) : 0,
-      variacao: mesAnterior && mesAnterior.total > 0 
-        ? ((stats.total - mesAnterior.total) / mesAnterior.total * 100).toFixed(1) : '0.0'
+      variacao: mesAnterior && mesAnterior.total > 0 ? ((stats.total - mesAnterior.total) / mesAnterior.total * 100).toFixed(1) : '0.0'
     });
   } catch (error) {
     console.error('❌ Erro relatórios submissions:', error);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
-
-  // ==================== HORÁRIOS + AVISOS ====================
-
 
   return router;
 }

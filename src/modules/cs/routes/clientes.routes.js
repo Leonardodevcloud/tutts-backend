@@ -11,7 +11,7 @@ function createClientesRoutes(pool) {
   // ==================== GET /cs/clientes ====================
   router.get('/cs/clientes', async (req, res) => {
     try {
-      const { status, search, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
+      const { status, search, cod_cliente, centro_custo, ordem = 'health', direcao = 'desc', page = 1, limit = 50 } = req.query;
       const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
 
       // Verificar se coluna centro_custo existe
@@ -36,11 +36,26 @@ function createClientesRoutes(pool) {
         paramIndex++;
       }
 
+      // Filtro por cliente específico
+      if (cod_cliente) {
+        whereClause += ` AND c.cod_cliente = $${paramIndex}`;
+        params.push(parseInt(cod_cliente));
+        paramIndex++;
+      }
+
       // Agrupar por cod_cliente para mostrar visão única do cliente
-      // Métricas vêm do bi_entregas agregando TODOS os centros de custo
+      // Métricas vêm do bi_entregas agregando TODOS os centros de custo (ou filtrado se CC selecionado)
       const distinctSQL = ccExists
         ? `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente, centro_custo NULLS FIRST`
         : `SELECT DISTINCT ON (cod_cliente) * FROM cs_clientes ORDER BY cod_cliente`;
+
+      // Filtro de centro_custo para as LATERAL JOINs do bi_entregas
+      let ccFilterSQL = '';
+      if (centro_custo) {
+        ccFilterSQL = ` AND bi_e.centro_custo = $${paramIndex}`;
+        params.push(centro_custo);
+        paramIndex++;
+      }
 
       const query = `
         SELECT 
@@ -85,7 +100,7 @@ function createClientesRoutes(pool) {
           FROM bi_entregas bi_e
           WHERE bi_e.cod_cliente = c.cod_cliente
             AND bi_e.data_solicitado >= CURRENT_DATE - 30
-            AND COALESCE(bi_e.ponto, 1) >= 2
+            AND COALESCE(bi_e.ponto, 1) >= 2${ccFilterSQL}
         ) bi ON true
         LEFT JOIN LATERAL (
           SELECT COUNT(*) as ocorrencias_abertas
@@ -180,6 +195,73 @@ function createClientesRoutes(pool) {
     }
   });
 
+  // ==================== GET /cs/clientes/filtros ====================
+  // Retorna clientes + máscaras + mapa de centros de custo (padrão BI)
+  // Rota ANTES de :cod para não conflitar com Express params
+  router.get('/cs/clientes/filtros', async (req, res) => {
+    try {
+      const t0 = Date.now();
+
+      const [clientesR, mascarasR, clienteCentrosR, csStatusR] = await Promise.all([
+        // Clientes distintos do bi_entregas (últimos 120 dias — pega ativos recentes)
+        pool.query(`
+          SELECT DISTINCT cod_cliente, 
+            MAX(nome_fantasia) as nome_fantasia,
+            MAX(nome_cliente) as nome_cliente,
+            COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas
+          FROM bi_entregas
+          WHERE cod_cliente IS NOT NULL AND data_solicitado >= CURRENT_DATE - 120
+          GROUP BY cod_cliente
+          ORDER BY MAX(nome_fantasia)
+        `),
+        // Máscaras
+        pool.query('SELECT cod_cliente, mascara FROM bi_mascaras ORDER BY cod_cliente').catch(() => ({ rows: [] })),
+        // Mapa cliente → centros de custo
+        pool.query(`
+          SELECT cod_cliente, centro_custo, COUNT(*) as total
+          FROM bi_entregas
+          WHERE cod_cliente IS NOT NULL 
+            AND centro_custo IS NOT NULL AND centro_custo != ''
+            AND data_solicitado >= CURRENT_DATE - 120
+          GROUP BY cod_cliente, centro_custo
+          ORDER BY cod_cliente, COUNT(*) DESC
+        `).catch(() => ({ rows: [] })),
+        // Status dos clientes no CS (para badge na lista)
+        pool.query('SELECT cod_cliente, health_score, status FROM cs_clientes').catch(() => ({ rows: [] }))
+      ]);
+
+      // Montar mapa de máscaras { cod: mascara }
+      const mascaras = {};
+      mascarasR.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
+
+      // Montar mapa de centros { cod: [cc1, cc2, ...] }
+      const clienteCentros = {};
+      clienteCentrosR.rows.forEach(r => {
+        const cod = String(r.cod_cliente);
+        if (!clienteCentros[cod]) clienteCentros[cod] = [];
+        clienteCentros[cod].push(r.centro_custo);
+      });
+
+      // Montar mapa de status CS { cod: { health_score, status } }
+      const csStatus = {};
+      csStatusR.rows.forEach(r => { csStatus[String(r.cod_cliente)] = { health_score: r.health_score, status: r.status }; });
+
+      const elapsed = Date.now() - t0;
+      console.log(`📊 /cs/clientes/filtros: ${elapsed}ms (4 queries paralelas, ${clientesR.rows.length} clientes)`);
+
+      res.json({
+        success: true,
+        clientes: clientesR.rows,
+        mascaras,
+        cliente_centros: clienteCentros,
+        cs_status: csStatus,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao carregar filtros CS:', error);
+      res.status(500).json({ error: 'Erro ao carregar filtros' });
+    }
+  });
+
   // ==================== GET /cs/clientes/:cod ====================
   router.get('/cs/clientes/:cod', async (req, res) => {
     try {
@@ -187,9 +269,11 @@ function createClientesRoutes(pool) {
       if (!cod || isNaN(cod)) return res.status(400).json({ error: 'Código inválido' });
 
       // Filtro de período e centro de custo
-      const { data_inicio, data_fim, centro_custo } = req.query;
+      const { data_inicio, data_fim, centro_custo, categorias } = req.query;
       const temFiltro = data_inicio && data_fim;
       const temCC = centro_custo && centro_custo !== '';
+      const catArray = categorias ? categorias.split(',').map(c => c.trim()).filter(Boolean) : [];
+      const temCat = catArray.length > 0;
 
       // Verificar se coluna centro_custo existe no cs_clientes
       const csCcExists = await pool.query(`
@@ -206,9 +290,16 @@ function createClientesRoutes(pool) {
         metricasParams.push(data_inicio, data_fim);
         paramIdx += 2;
       }
-      if (temCC && csCcExists) {
+      // Filtro de CC aplicado direto no bi_entregas (não depende de cs_clientes ter a coluna)
+      if (temCC) {
         filtroSQL += ` AND centro_custo = $${paramIdx}`;
         metricasParams.push(centro_custo);
+        paramIdx++;
+      }
+      // Filtro de categorias (multi-select)
+      if (temCat) {
+        filtroSQL += ` AND categoria = ANY($${paramIdx})`;
+        metricasParams.push(catArray);
         paramIdx++;
       }
 
@@ -323,6 +414,9 @@ function createClientesRoutes(pool) {
       `, metricasParams);
 
       // Evolução por semana (últimos 180 dias — visão mais ampla)
+      // Aplica filtro de CC se selecionado
+      const evolucaoParams = temCC ? [cod, centro_custo] : [cod];
+      const evolucaoCcSQL = temCC ? ' AND centro_custo = $2' : '';
       const evolucaoSemanal = await pool.query(`
         SELECT 
           DATE_TRUNC('week', data_solicitado)::date as semana,
@@ -331,10 +425,10 @@ function createClientesRoutes(pool) {
                 NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo IS NOT NULL THEN 1 END), 0) * 100, 1) as taxa_prazo,
           COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 180
+        WHERE cod_cliente = $1 AND data_solicitado >= CURRENT_DATE - 180${evolucaoCcSQL}
         GROUP BY DATE_TRUNC('week', data_solicitado)
         ORDER BY semana
-      `, [cod]);
+      `, evolucaoParams);
 
       // Últimas interações
       const interacoes = await pool.query(
@@ -379,11 +473,14 @@ function createClientesRoutes(pool) {
       if (diasSemEntrega > 15) alertas.push({ tipo: 'alto', icone: '🟠', msg: `${diasSemEntrega} dias sem entregas — risco de churn` });
       else if (diasSemEntrega > 7) alertas.push({ tipo: 'moderado', icone: '🟡', msg: `${diasSemEntrega} dias sem entregas` });
 
-      // Atualizar health score no banco
-      await pool.query(
-        'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
-        [healthScore, cod]
-      ).catch(() => {});
+      // Atualizar health score no banco — SÓ se NÃO está filtrando por CC nem por período
+      // (filtros geram score parcial que não deve sobrescrever o score geral/histórico)
+      if (!temCC && !temFiltro) {
+        await pool.query(
+          'UPDATE cs_clientes SET health_score = $1, updated_at = NOW() WHERE cod_cliente = $2',
+          [healthScore, cod]
+        ).catch(() => {});
+      }
 
       // Enriquecer métricas com taxa calculada
       metricas.taxa_retorno = taxaRetorno;

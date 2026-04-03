@@ -1,0 +1,610 @@
+/**
+ * leads-captura.routes.js
+ * Sub-router: endpoints para captura de leads via Playwright
+ *
+ * Endpoints:
+ *   POST /executar           - Disparar captura manual
+ *   POST /re-verificar       - Re-verificar status API de leads existentes
+ *   GET  /                   - Listar leads capturados (com filtros)
+ *   GET  /jobs               - Listar execuções (jobs)
+ *   GET  /jobs/:id           - Detalhe de um job
+ *   GET  /estatisticas       - KPIs e contadores
+ *   DELETE /:id              - Remover um lead
+ */
+
+'use strict';
+
+const express = require('express');
+
+// ── Lock para evitar execuções simultâneas ──
+let capturaEmAndamento = false;
+
+function createLeadsCapturaRoutes(pool) {
+  const router = express.Router();
+
+  // ═══ HELPER: verificar status via API Tutts ═══
+  async function verificarLeadAPI(celular) {
+    const TUTTS_TOKEN = process.env.TUTTS_TOKEN_PROF_STATUS || process.env.TUTTS_INTEGRACAO_TOKEN || process.env.TUTTS_TOKEN_PROFISSIONAIS;
+    if (!TUTTS_TOKEN) return { status_api: null, erro: 'Token não configurado' };
+
+    try {
+      const numeros = celular.replace(/\D/g, '');
+      let celularFormatado = numeros;
+      if (numeros.length === 11) {
+        celularFormatado = `(${numeros.slice(0, 2)}) ${numeros.slice(2, 7)}-${numeros.slice(7)}`;
+      } else if (numeros.length === 10) {
+        celularFormatado = `(${numeros.slice(0, 2)}) ${numeros.slice(2, 6)}-${numeros.slice(6)}`;
+      }
+
+      const response = await fetch('https://tutts.com.br/integracao', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${TUTTS_TOKEN}`,
+          'identificador': 'prof-status',
+        },
+        body: JSON.stringify({ celular: celularFormatado }),
+      });
+
+      if (!response.ok) return { status_api: 'erro', erro: `HTTP ${response.status}` };
+
+      const data = await response.json();
+
+      if (data.Sucesso && data.Sucesso.length > 0) {
+        return { status_api: data.Sucesso[0].ativo === 'S' ? 'ativo' : 'inativo' };
+      }
+      if (data.Erro && data.Erro.includes('Nenhum profissional')) {
+        return { status_api: 'nao_encontrado' };
+      }
+      return { status_api: 'nao_encontrado' };
+    } catch (err) {
+      return { status_api: 'erro', erro: err.message };
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // POST /executar — Disparar captura manual
+  // ══════════════════════════════════════════════════════════════
+  router.post('/executar', async (req, res) => {
+    if (capturaEmAndamento) {
+      return res.status(409).json({ success: false, error: 'Já existe uma captura em andamento.' });
+    }
+
+    // Importar dinamicamente (evita crash se arquivo não existir)
+    let capturarLeadsCadastrados;
+    try {
+      capturarLeadsCadastrados = require('../playwright-crm-leads').capturarLeadsCadastrados;
+    } catch (e) {
+      return res.status(503).json({ success: false, error: 'Módulo Playwright não disponível: ' + e.message });
+    }
+
+    const { data_inicio, data_fim, tipo = 'manual', iniciado_por = 'admin' } = req.body || {};
+
+    const hoje = new Date();
+    const ontem = new Date(hoje);
+    ontem.setDate(ontem.getDate() - 1);
+
+    const dataInicio = data_inicio || formatDate(ontem);
+    const dataFim    = data_fim    || formatDate(hoje);
+
+    let jobId;
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO crm_captura_jobs (tipo, status, data_inicio, data_fim, iniciado_por)
+         VALUES ($1, 'executando', $2, $3, $4) RETURNING id`,
+        [tipo, dataInicio, dataFim, iniciado_por]
+      );
+      jobId = rows[0].id;
+    } catch (err) {
+      return res.status(500).json({ success: false, error: `Erro ao criar job: ${err.message}` });
+    }
+
+    res.json({ success: true, message: 'Captura iniciada', job_id: jobId, periodo: { data_inicio: dataInicio, data_fim: dataFim } });
+
+    // ── Background ────────────────────────────────────────────
+    capturaEmAndamento = true;
+
+    try {
+      console.log(`[CRM-Captura] Job #${jobId}: ${dataInicio} → ${dataFim}`);
+      const resultado = await capturarLeadsCadastrados({ dataInicio, dataFim });
+
+      let novos = 0, jaExistentes = 0, ativos = 0, inativos = 0;
+
+      for (const lead of resultado.registros) {
+        try {
+          // Verificar status via API Tutts
+          if (lead.celular && !lead.status_api) {
+            const { status_api } = await verificarLeadAPI(lead.celular);
+            if (status_api) {
+              lead.status_api = status_api;
+              lead.api_verificado_em = new Date().toISOString();
+            }
+            await new Promise(r => setTimeout(r, 150)); // delay
+          }
+
+          const { rows: existentes } = await pool.query('SELECT id FROM crm_leads_capturados WHERE cod = $1', [lead.cod]);
+
+          if (existentes.length > 0) {
+            await pool.query(
+              `UPDATE crm_leads_capturados SET
+                nome=COALESCE($2,nome), telefones_raw=COALESCE($3,telefones_raw), celular=COALESCE($4,celular),
+                telefone_fixo=COALESCE($5,telefone_fixo), telefone_normalizado=COALESCE($6,telefone_normalizado),
+                email=COALESCE($7,email), categoria=COALESCE($8,categoria), data_cadastro=COALESCE($9,data_cadastro),
+                cidade=COALESCE($10,cidade), estado=COALESCE($11,estado), regiao=COALESCE($12,regiao),
+                status_sistema=COALESCE($13,status_sistema), status_api=COALESCE($14,status_api),
+                api_verificado_em=COALESCE($15,api_verificado_em), job_id=$16
+              WHERE cod=$1`,
+              [lead.cod, lead.nome, lead.telefones_raw, lead.celular, lead.telefone_fixo,
+               lead.telefone_normalizado, lead.email, lead.categoria, lead.data_cadastro,
+               lead.cidade, lead.estado, lead.regiao, lead.status_sistema, lead.status_api,
+               lead.api_verificado_em, jobId]
+            );
+            jaExistentes++;
+          } else {
+            await pool.query(
+              `INSERT INTO crm_leads_capturados
+                (cod,nome,telefones_raw,celular,telefone_fixo,telefone_normalizado,email,categoria,
+                 data_cadastro,cidade,estado,regiao,status_sistema,status_api,api_verificado_em,job_id)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+              [lead.cod, lead.nome, lead.telefones_raw, lead.celular, lead.telefone_fixo,
+               lead.telefone_normalizado, lead.email, lead.categoria, lead.data_cadastro,
+               lead.cidade, lead.estado, lead.regiao, lead.status_sistema, lead.status_api,
+               lead.api_verificado_em, jobId]
+            );
+            novos++;
+          }
+
+          if (lead.status_api === 'ativo') ativos++;
+          else if (lead.status_api === 'inativo') inativos++;
+        } catch (e) {
+          console.error(`[CRM-Captura] Erro lead cod=${lead.cod}: ${e.message}`);
+        }
+      }
+
+      await pool.query(
+        `UPDATE crm_captura_jobs SET status='concluido', total_capturados=$2, total_novos=$3,
+         total_ja_existentes=$4, total_api_verificados=$5, total_ativos=$6, total_inativos=$7,
+         screenshots=$8, concluido_em=NOW() WHERE id=$1`,
+        [jobId, resultado.total, novos, jaExistentes,
+         resultado.registros.filter(r => r.status_api && r.status_api !== 'erro').length,
+         ativos, inativos, JSON.stringify(resultado.screenshots || [])]
+      );
+
+      console.log(`[CRM-Captura] ✅ Job #${jobId}: ${novos} novos | ${jaExistentes} atualizados | ${ativos} ativos | ${inativos} inativos`);
+    } catch (err) {
+      console.error(`[CRM-Captura] ❌ Job #${jobId}: ${err.message}`);
+      await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',
+        [jobId, 'erro', err.message]).catch(() => {});
+    } finally {
+      capturaEmAndamento = false;
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // POST /re-verificar — Re-verificar status de leads existentes
+  // ══════════════════════════════════════════════════════════════
+  // ── Estado da verificação ──
+  let verificacaoEmAndamento = false;
+  let ultimoResultado = { verificados: 0, ativos: 0, inativos: 0, mudaram: 0, message: '' };
+
+  router.post('/re-verificar', async (req, res) => {
+    const TUTTS_TOKEN = process.env.TUTTS_TOKEN_PROF_STATUS || process.env.TUTTS_INTEGRACAO_TOKEN || process.env.TUTTS_TOKEN_PROFISSIONAIS;
+    if (!TUTTS_TOKEN) {
+      return res.status(503).json({ success: false, error: 'Token API Tutts não configurado no servidor' });
+    }
+
+    if (verificacaoEmAndamento) {
+      return res.json({ success: true, em_andamento: true, message: 'Verificação já em andamento' });
+    }
+
+    // Contar quantos vão ser verificados
+    const { rows: [{ count }] } = await pool.query(
+      `SELECT COUNT(*) as count FROM crm_leads_capturados
+       WHERE celular IS NOT NULL AND celular != '' AND quem_ativou IS NOT NULL AND quem_ativou != ''
+         AND (api_verificado_em IS NULL OR api_verificado_em < CURRENT_DATE)`
+    );
+
+    if (parseInt(count) === 0) {
+      return res.json({ success: true, em_andamento: false, verificados: 0, message: 'Todos os leads já foram verificados hoje' });
+    }
+
+    verificacaoEmAndamento = true;
+    ultimoResultado = { verificados: 0, ativos: 0, inativos: 0, mudaram: 0, message: '' };
+
+    // Responder imediatamente
+    res.json({ success: true, em_andamento: true, total: parseInt(count), message: `Verificação iniciada: ${count} leads com ativador preenchido` });
+
+    // ── Background ──────────────────────────────────────────
+    (async () => {
+      try {
+        const { rows: leads } = await pool.query(
+          `SELECT id, cod, celular, status_api FROM crm_leads_capturados
+           WHERE celular IS NOT NULL AND celular != ''
+             AND quem_ativou IS NOT NULL AND quem_ativou != ''
+             AND (api_verificado_em IS NULL OR api_verificado_em < CURRENT_DATE)
+           ORDER BY api_verificado_em ASC NULLS FIRST`
+        );
+
+        console.log(`[CRM-ReVerificar] Verificando ${leads.length} leads com quem_ativou preenchido...`);
+
+        let ativos = 0, inativos = 0, mudaram = 0;
+
+        for (const lead of leads) {
+          const { status_api } = await verificarLeadAPI(lead.celular);
+
+          if (status_api && status_api !== 'erro') {
+            if (lead.status_api && lead.status_api !== status_api) {
+              mudaram++;
+              console.log(`[CRM-ReVerificar] 🔄 ${lead.cod}: ${lead.status_api} → ${status_api}`);
+            }
+            await pool.query(
+              `UPDATE crm_leads_capturados SET status_api = $1, api_verificado_em = NOW() WHERE id = $2`,
+              [status_api, lead.id]
+            );
+            if (status_api === 'ativo') ativos++;
+            else if (status_api === 'inativo') inativos++;
+          }
+
+          ultimoResultado.verificados++;
+          await new Promise(r => setTimeout(r, 120));
+        }
+
+        ultimoResultado = { verificados: leads.length, ativos, inativos, mudaram, message: `${leads.length} verificados: ${ativos} ativos, ${inativos} inativos${mudaram > 0 ? ` (${mudaram} mudaram!)` : ''}` };
+        console.log(`[CRM-ReVerificar] ✅ ${ultimoResultado.message}`);
+      } catch (err) {
+        console.error('[CRM-ReVerificar] ❌ Erro:', err.message);
+        ultimoResultado.message = 'Erro: ' + err.message;
+      } finally {
+        verificacaoEmAndamento = false;
+      }
+    })();
+  });
+
+  // GET - Status da verificação
+  router.get('/re-verificar/status', async (req, res) => {
+    res.json({ success: true, em_andamento: verificacaoEmAndamento, ...ultimoResultado });
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // GET / — Listar leads capturados
+  // ══════════════════════════════════════════════════════════════
+  router.get('/', async (req, res) => {
+    try {
+      const { regiao, status_api, data_inicio, data_fim, ativacao_inicio, ativacao_fim, search, page = 1, limit = 50, order = 'data_cadastro', dir = 'DESC' } = req.query;
+
+      const where = ['1=1'];
+      const params = [];
+      let paramIdx = 1;
+
+      if (regiao)      { where.push(`regiao = $${paramIdx++}`);      params.push(regiao); }
+      if (status_api)  { where.push(`status_api = $${paramIdx++}`);  params.push(status_api); }
+      if (data_inicio) { where.push(`data_cadastro >= $${paramIdx++}`); params.push(data_inicio); }
+      if (data_fim)    { where.push(`data_cadastro <= $${paramIdx++}`); params.push(data_fim); }
+      if (ativacao_inicio) { where.push(`data_ativacao >= $${paramIdx++}`); params.push(ativacao_inicio); }
+      if (ativacao_fim)    { where.push(`data_ativacao <= $${paramIdx++}`); params.push(ativacao_fim); }
+
+      // Debug: confirmar filtros
+      console.log(`[CRM-Captura] GET / filtros: data_inicio=${data_inicio} data_fim=${data_fim} regiao=${regiao} where=${where.join(' AND ')} params=${JSON.stringify(params)}`);
+      if (search) {
+        where.push(`(nome ILIKE $${paramIdx} OR cod ILIKE $${paramIdx} OR celular ILIKE $${paramIdx})`);
+        params.push(`%${search}%`);
+        paramIdx++;
+      }
+
+      const validOrders = ['data_cadastro', 'cod', 'nome', 'regiao', 'status_api', 'capturado_em'];
+      const orderCol = validOrders.includes(order) ? order : 'data_cadastro';
+      const orderDir = dir.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      const countResult = await pool.query(`SELECT COUNT(*) as total FROM crm_leads_capturados WHERE ${where.join(' AND ')}`, params);
+      const total = parseInt(countResult.rows[0].total);
+
+      const { rows } = await pool.query(
+        `SELECT * FROM crm_leads_capturados WHERE ${where.join(' AND ')} ORDER BY ${orderCol} ${orderDir} NULLS LAST LIMIT $${paramIdx++} OFFSET $${paramIdx++}`,
+        [...params, parseInt(limit), offset]
+      );
+
+      const { rows: regioesRows } = await pool.query(
+        `SELECT DISTINCT regiao FROM crm_leads_capturados WHERE regiao IS NOT NULL AND regiao != '' ORDER BY regiao`
+      );
+
+      // ── KPIs embutidos (MESMOS filtros da query principal) ──
+      const { rows: [kpis] } = await pool.query(
+        `SELECT
+          COUNT(*) as total_geral,
+          COUNT(*) FILTER (WHERE status_api = 'ativo') as ativos,
+          COUNT(*) FILTER (WHERE status_api = 'inativo') as inativos,
+          COUNT(*) FILTER (WHERE status_api = 'nao_encontrado') as nao_encontrados,
+          COUNT(*) FILTER (WHERE status_api IS NULL OR status_api = 'erro') as sem_verificacao,
+          COUNT(DISTINCT regiao) as total_regioes
+        FROM crm_leads_capturados WHERE ${where.join(' AND ')}`,
+        params
+      );
+
+      const { rows: porRegiaoRows } = await pool.query(
+        `SELECT regiao, COUNT(*) as quantidade FROM crm_leads_capturados
+         WHERE ${where.join(' AND ')} AND regiao IS NOT NULL AND regiao != ''
+         GROUP BY regiao ORDER BY quantidade DESC`,
+        params
+      );
+
+      const { rows: [ultimoJob] } = await pool.query(
+        `SELECT * FROM crm_captura_jobs ORDER BY iniciado_em DESC LIMIT 1`
+      );
+
+      res.json({
+        success: true,
+        data: rows,
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit)),
+        regioes: regioesRows.map(r => r.regiao),
+        captura_em_andamento: capturaEmAndamento,
+        stats: {
+          total: parseInt(kpis.total_geral) || 0,
+          ativos: parseInt(kpis.ativos) || 0,
+          inativos: parseInt(kpis.inativos) || 0,
+          nao_encontrados: parseInt(kpis.nao_encontrados) || 0,
+          sem_verificacao: parseInt(kpis.sem_verificacao) || 0,
+          total_regioes: parseInt(kpis.total_regioes) || 0,
+          porRegiao: porRegiaoRows,
+          ultimoJob: ultimoJob || null,
+        },
+      });
+    } catch (err) {
+      console.error('[CRM-Captura] Erro ao listar:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // GET /jobs — Listar execuções
+  // ══════════════════════════════════════════════════════════════
+  router.get('/jobs', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`SELECT * FROM crm_captura_jobs ORDER BY iniciado_em DESC LIMIT 20`);
+      res.json({ success: true, data: rows, em_andamento: capturaEmAndamento });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // GET /jobs/:id
+  // ══════════════════════════════════════════════════════════════
+  router.get('/jobs/:id', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`SELECT * FROM crm_captura_jobs WHERE id = $1`, [req.params.id]);
+      if (rows.length === 0) return res.status(404).json({ success: false, error: 'Job não encontrado' });
+      res.json({ success: true, data: rows[0] });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // GET /estatisticas
+  // ══════════════════════════════════════════════════════════════
+  router.get('/estatisticas', async (req, res) => {
+    try {
+      const { data_inicio, data_fim } = req.query;
+      const where = ['1=1'];
+      const params = [];
+      let idx = 1;
+
+      if (data_inicio) { where.push(`data_cadastro >= $${idx++}`); params.push(data_inicio); }
+      if (data_fim)    { where.push(`data_cadastro <= $${idx++}`); params.push(data_fim); }
+
+      const whereStr = where.join(' AND ');
+
+      const { rows: [stats] } = await pool.query(
+        `SELECT
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status_api = 'ativo') as ativos,
+          COUNT(*) FILTER (WHERE status_api = 'inativo') as inativos,
+          COUNT(*) FILTER (WHERE status_api = 'nao_encontrado') as nao_encontrados,
+          COUNT(*) FILTER (WHERE status_api IS NULL OR status_api = 'erro') as sem_verificacao,
+          COUNT(DISTINCT regiao) as total_regioes
+        FROM crm_leads_capturados WHERE ${whereStr}`,
+        params
+      );
+
+      const { rows: porRegiao } = await pool.query(
+        `SELECT regiao, COUNT(*) as quantidade FROM crm_leads_capturados WHERE ${whereStr} GROUP BY regiao ORDER BY quantidade DESC`,
+        params
+      );
+
+      const { rows: [ultimoJob] } = await pool.query(
+        `SELECT * FROM crm_captura_jobs ORDER BY iniciado_em DESC LIMIT 1`
+      );
+
+      res.json({
+        success: true,
+        data: {
+          total: parseInt(stats.total) || 0,
+          ativos: parseInt(stats.ativos) || 0,
+          inativos: parseInt(stats.inativos) || 0,
+          nao_encontrados: parseInt(stats.nao_encontrados) || 0,
+          sem_verificacao: parseInt(stats.sem_verificacao) || 0,
+          total_regioes: parseInt(stats.total_regioes) || 0,
+          porRegiao,
+          ultimoJob: ultimoJob || null,
+          captura_em_andamento: capturaEmAndamento,
+        },
+      });
+    } catch (err) {
+      console.error('[CRM-Captura] Erro estatisticas:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // GET /ativadores — Lista de nomes para dropdown
+  // ══════════════════════════════════════════════════════════════
+  router.get('/ativadores', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`SELECT nome FROM crm_ativadores ORDER BY nome ASC`);
+      res.json({ success: true, data: rows.map(r => r.nome) });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // PATCH /:id — Atualizar quem_ativou e/ou observacao
+  // ══════════════════════════════════════════════════════════════
+  router.patch('/:id', async (req, res) => {
+    try {
+      const { quem_ativou, observacao, data_ativacao } = req.body;
+      const sets = [];
+      const params = [];
+      let idx = 1;
+
+      if (quem_ativou !== undefined) {
+        const nomeUpper = (quem_ativou || '').toUpperCase().trim();
+        sets.push(`quem_ativou = $${idx++}`);
+        params.push(nomeUpper || null);
+
+        // Auto-preencher data_ativacao = hoje se quem_ativou preenchido e data_ativacao não veio no body
+        if (nomeUpper && data_ativacao === undefined) {
+          const hoje = new Date().toISOString().split('T')[0];
+          sets.push(`data_ativacao = COALESCE(data_ativacao, $${idx++})`);
+          params.push(hoje);
+        }
+
+        // Salvar nome no dropdown (se não vazio)
+        if (nomeUpper) {
+          await pool.query(
+            `INSERT INTO crm_ativadores (nome) VALUES ($1) ON CONFLICT (nome) DO NOTHING`,
+            [nomeUpper]
+          );
+        }
+      }
+
+      if (observacao !== undefined) {
+        sets.push(`observacao = $${idx++}`);
+        params.push(observacao || null);
+      }
+
+      if (data_ativacao !== undefined) {
+        sets.push(`data_ativacao = $${idx++}`);
+        params.push(data_ativacao || null);
+      }
+
+      if (sets.length === 0) {
+        return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar' });
+      }
+
+      params.push(req.params.id);
+      await pool.query(
+        `UPDATE crm_leads_capturados SET ${sets.join(', ')} WHERE id = $${idx}`,
+        params
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // POST /enriquecer — Recebe dados já processados do CRM proxy
+  // Body: { mapaPorCod: {cod: {quem_ativou, data_ativacao}}, mapaPorTel: {...}, observacoes: {cod: texto} }
+  // Planilha é lida pelo CRM (Vercel), backend só faz UPDATE
+  // ══════════════════════════════════════════════════════════════
+  router.post('/enriquecer', async (req, res) => {
+    try {
+      const { mapaPorCod = {}, mapaPorTel = {}, observacoes = {} } = req.body || {};
+
+      console.log('[CRM-Enriquecer] Recebido: ' + Object.keys(mapaPorCod).length + ' por cod | ' + Object.keys(mapaPorTel).length + ' por tel | ' + Object.keys(observacoes).length + ' obs');
+
+      const { rows: leads } = await pool.query(
+        'SELECT id, cod, celular, telefone_normalizado, quem_ativou, observacao, data_ativacao FROM crm_leads_capturados'
+      );
+
+      let atualizados = 0, matchCount = 0, semMatch = 0;
+
+      for (const lead of leads) {
+        let match = mapaPorCod[lead.cod] || null;
+        if (!match && lead.telefone_normalizado) {
+          match = mapaPorTel[lead.telefone_normalizado] || null;
+        }
+
+        const sets = [];
+        const params = [];
+        let idx = 1;
+
+        if (match) {
+          matchCount++;
+          if (match.quem_ativou) {
+            sets.push('quem_ativou = $' + (idx++));
+            params.push(String(match.quem_ativou).toUpperCase());
+          }
+          if (match.data_ativacao) {
+            sets.push('data_ativacao = $' + (idx++));
+            params.push(match.data_ativacao);
+          }
+        }
+
+        const obs = observacoes[lead.cod];
+        if (obs && !lead.observacao) {
+          sets.push('observacao = $' + (idx++));
+          params.push(obs);
+        }
+
+        if (sets.length > 0) {
+          params.push(lead.id);
+          await pool.query(
+            'UPDATE crm_leads_capturados SET ' + sets.join(', ') + ' WHERE id = $' + idx,
+            params
+          );
+          atualizados++;
+
+          if (match && match.quem_ativou) {
+            await pool.query(
+              'INSERT INTO crm_ativadores (nome) VALUES ($1) ON CONFLICT (nome) DO NOTHING',
+              [String(match.quem_ativou).toUpperCase()]
+            ).catch(() => {});
+          }
+        } else {
+          semMatch++;
+        }
+      }
+
+      console.log('[CRM-Enriquecer] Done: ' + atualizados + ' atualizados | ' + matchCount + ' matches | ' + semMatch + ' sem dados');
+
+      res.json({
+        success: true,
+        message: atualizados + ' leads enriquecidos (' + matchCount + ' na planilha)',
+        atualizados,
+        matches: matchCount,
+        total_leads: leads.length,
+      });
+    } catch (err) {
+      console.error('[CRM-Enriquecer] Erro:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+
+  // ══════════════════════════════════════════════════════════════
+  // DELETE /:id
+  // ══════════════════════════════════════════════════════════════
+  router.delete('/:id', async (req, res) => {
+    try {
+      const { rowCount } = await pool.query(`DELETE FROM crm_leads_capturados WHERE id = $1`, [req.params.id]);
+      res.json({ success: true, removido: rowCount > 0 });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  return router;
+}
+
+function formatDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+module.exports = { createLeadsCapturaRoutes };

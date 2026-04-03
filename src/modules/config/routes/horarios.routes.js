@@ -6,6 +6,14 @@ const express = require('express');
 function createHorariosRoutes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
 
+  // Helper: normaliza TIME do PostgreSQL ("HH:MM:SS") e horaAtual ("HH:MM") para "HH:MM"
+  const normalizeTime = (t) => {
+    if (!t) return null;
+    const s = String(t).trim();
+    // Pega apenas HH:MM (primeiros 5 chars)
+    return s.slice(0, 5);
+  };
+
 router.get('/horarios', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM horarios_atendimento ORDER BY dia_semana');
@@ -111,12 +119,14 @@ router.get('/horarios/verificar', async (req, res) => {
         dentroHorario = false;
         horarioInfo = { tipo: 'especial', descricao: esp.descricao, fechado: true };
       } else {
-        dentroHorario = horaAtual >= esp.hora_inicio && horaAtual <= esp.hora_fim;
+        const inicio = normalizeTime(esp.hora_inicio);
+        const fim = normalizeTime(esp.hora_fim);
+        dentroHorario = inicio && fim && horaAtual >= inicio && horaAtual <= fim;
         horarioInfo = { 
           tipo: 'especial', 
           descricao: esp.descricao, 
-          inicio: esp.hora_inicio, 
-          fim: esp.hora_fim 
+          inicio: inicio, 
+          fim: fim 
         };
       }
     } else {
@@ -132,11 +142,13 @@ router.get('/horarios/verificar', async (req, res) => {
           dentroHorario = false;
           horarioInfo = { tipo: 'normal', fechado: true, diaSemana };
         } else {
-          dentroHorario = horaAtual >= hor.hora_inicio && horaAtual <= hor.hora_fim;
+          const inicio = normalizeTime(hor.hora_inicio);
+          const fim = normalizeTime(hor.hora_fim);
+          dentroHorario = inicio && fim && horaAtual >= inicio && horaAtual <= fim;
           horarioInfo = { 
             tipo: 'normal', 
-            inicio: hor.hora_inicio, 
-            fim: hor.hora_fim, 
+            inicio: inicio, 
+            fim: fim, 
             diaSemana 
           };
         }
@@ -161,11 +173,12 @@ router.get('/horarios/verificar', async (req, res) => {
         
         if (espProx.rows.length > 0) {
           const esp = espProx.rows[0];
-          if (i === 0 && horaAtual < esp.hora_inicio) {
-            proximoHorario = { data: proximaDataStr, inicio: esp.hora_inicio, descricao: esp.descricao };
+          const espInicio = normalizeTime(esp.hora_inicio);
+          if (i === 0 && espInicio && horaAtual < espInicio) {
+            proximoHorario = { data: proximaDataStr, inicio: espInicio, descricao: esp.descricao };
             break;
-          } else if (i > 0) {
-            proximoHorario = { data: proximaDataStr, inicio: esp.hora_inicio, descricao: esp.descricao };
+          } else if (i > 0 && espInicio) {
+            proximoHorario = { data: proximaDataStr, inicio: espInicio, descricao: esp.descricao };
             break;
           }
         } else {
@@ -177,11 +190,12 @@ router.get('/horarios/verificar', async (req, res) => {
           
           if (norProx.rows.length > 0 && norProx.rows[0].hora_inicio) {
             const nor = norProx.rows[0];
-            if (i === 0 && horaAtual < nor.hora_inicio) {
-              proximoHorario = { data: proximaDataStr, inicio: nor.hora_inicio };
+            const norInicio = normalizeTime(nor.hora_inicio);
+            if (i === 0 && norInicio && horaAtual < norInicio) {
+              proximoHorario = { data: proximaDataStr, inicio: norInicio };
               break;
-            } else if (i > 0) {
-              proximoHorario = { data: proximaDataStr, inicio: nor.hora_inicio };
+            } else if (i > 0 && norInicio) {
+              proximoHorario = { data: proximaDataStr, inicio: norInicio };
               break;
             }
           }
@@ -189,12 +203,15 @@ router.get('/horarios/verificar', async (req, res) => {
       }
     }
     
+    console.log(`🕐 Verificação horário: ${horaAtual} (${dataHoje}, dia=${diaSemana}) -> dentroHorario=${dentroHorario}`, horarioInfo);
+    
     res.json({
       dentroHorario,
       horarioInfo,
       proximoHorario,
       horaAtual,
-      dataHoje
+      dataHoje,
+      diaSemana
     });
   } catch (err) {
     console.error('❌ Erro ao verificar horário:', err);

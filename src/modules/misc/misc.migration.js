@@ -28,11 +28,7 @@ async function initMiscTables(pool) {
     await pool.query(`ALTER TABLE relatorios_diarios ADD COLUMN IF NOT EXISTS para_todos BOOLEAN DEFAULT true`).catch(() => {});
     console.log('✅ Colunas setores_destino e para_todos adicionadas à tabela relatorios_diarios');
 
-    // ==================== MÓDULO SOCIAL (EXTRAÍDO) ====================
-    await initSocialTables(pool);
-
-    // ==================== MÓDULO OPERACIONAL (EXTRAÍDO) ====================
-    await initOperacionalTables(pool);
+    // NOTA: Social e Operacional são inicializados separadamente em server.js
 }
 
 module.exports = { initMiscTables };

@@ -101,6 +101,37 @@ function notifyWithdrawalUpdate(withdrawal, action) {
 }
 
 // ============================================
+// STARK BANK - notificação em tempo real
+// ============================================
+function notifyStarkPayment(saque, novoStatus) {
+  // Broadcast para todos os admins — atualiza Pix Stark, Acerto, Conciliação
+  broadcastToAdmins('STARK_PAYMENT_UPDATE', {
+    id: saque.id,
+    user_cod: saque.user_cod,
+    user_name: saque.user_name,
+    stark_transfer_id: saque.stark_transfer_id,
+    stark_status: novoStatus,
+    stark_erro: saque.stark_erro,
+    stark_lote_id: saque.stark_lote_id,
+    status: saque.status,
+    final_amount: saque.final_amount,
+    // Para acertos (stark_lote_itens)
+    lote_id: saque.lote_id,
+    cod_prof: saque.cod_prof,
+    nome_prof: saque.nome_prof,
+  });
+
+  // Notificar o motoboy que recebeu o pagamento
+  if (novoStatus === 'pago' && saque.user_cod) {
+    sendToUser(saque.user_cod, 'MY_WITHDRAWAL_UPDATE', {
+      id: saque.id,
+      status: 'pago_stark',
+      action: 'pago_stark',
+    });
+  }
+}
+
+// ============================================
 // HANDLERS DE CONEXÃO
 // ============================================
 
@@ -109,6 +140,7 @@ function handleFinanceiroConnection(ws) {
   let clientType = null;
   let userCod = null;
   let authenticated = false;
+  let lastToken = null;
 
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
@@ -116,6 +148,22 @@ function handleFinanceiroConnection(ws) {
       ws.close(4001, 'Autenticação necessária');
     }
   }, 30000);
+
+  // 🔒 SECURITY FIX (MED-03): Re-validar JWT a cada 5 minutos
+  let reAuthInterval = null;
+  function startReAuth() {
+    if (reAuthInterval) clearInterval(reAuthInterval);
+    reAuthInterval = setInterval(() => {
+      if (!lastToken || !authenticated) return;
+      try {
+        jwt.verify(lastToken, env.JWT_SECRET);
+      } catch (err) {
+        console.log(`⚠️ [WS] Token expirado para ${userCod || 'admin'}, fechando conexão`);
+        ws.send(JSON.stringify({ event: 'AUTH_EXPIRED', error: 'Token expirado, reconecte com novo token' }));
+        ws.close(4003, 'Token expirado');
+      }
+    }, 5 * 60 * 1000); // 5 minutos
+  }
 
   ws.on('message', (message) => {
     try {
@@ -131,7 +179,9 @@ function handleFinanceiroConnection(ws) {
         try {
           const decoded = jwt.verify(token, env.JWT_SECRET);
           authenticated = true;
+          lastToken = token;
           clearTimeout(authTimeout);
+          startReAuth();
 
           if (decoded.role !== role) {
             console.log(`⚠️ [WS] Role mismatch: token=${decoded.role}, informado=${role}`);
@@ -140,8 +190,8 @@ function handleFinanceiroConnection(ws) {
           if (['admin', 'admin_master', 'admin_financeiro'].includes(decoded.role)) {
             clientType = 'admin';
             wsClients.admins.add(ws);
-            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'admin', user: decoded.fullName }));
-            console.log(`✅ [WS] Admin ${decoded.fullName} autenticado. Total: ${wsClients.admins.size}`);
+            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', role: 'admin', user: decoded.nome }));
+            console.log(`✅ [WS] Admin ${decoded.nome} autenticado. Total: ${wsClients.admins.size}`);
           } else if (decoded.codProfissional) {
             clientType = 'user';
             userCod = decoded.codProfissional;
@@ -157,6 +207,19 @@ function handleFinanceiroConnection(ws) {
         }
       }
 
+      // 🔒 SECURITY FIX: Permitir re-auth com novo token (após refresh no frontend)
+      if (data.type === 'REAUTH' && authenticated) {
+        try {
+          const decoded = jwt.verify(data.token, env.JWT_SECRET);
+          lastToken = data.token;
+          ws.send(JSON.stringify({ event: 'REAUTH_SUCCESS' }));
+          console.log(`🔄 [WS] Token renovado para ${userCod || 'admin'}`);
+        } catch (err) {
+          ws.send(JSON.stringify({ event: 'AUTH_EXPIRED', error: 'Novo token inválido' }));
+          ws.close(4003, 'Token inválido');
+        }
+      }
+
       if (data.type === 'PING' && authenticated) {
         ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
       }
@@ -167,6 +230,7 @@ function handleFinanceiroConnection(ws) {
 
   ws.on('close', () => {
     clearTimeout(authTimeout);
+    if (reAuthInterval) clearInterval(reAuthInterval);
     if (clientType === 'admin') {
       wsClients.admins.delete(ws);
       console.log(`🔌 [WS] Admin desconectado. Restam: ${wsClients.admins.size}`);
@@ -213,8 +277,8 @@ function handleDisponibilidadeConnection(ws) {
 
           if (['admin', 'admin_master', 'admin_financeiro'].includes(decoded.role)) {
             wsDispClients.add(ws);
-            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', wsId: ws._dispWsId, user: decoded.fullName }));
-            console.log(`✅ [WS-Disp] ${decoded.fullName} autenticado (${ws._dispWsId}). Total: ${wsDispClients.size}`);
+            ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', wsId: ws._dispWsId, user: decoded.nome }));
+            console.log(`✅ [WS-Disp] ${decoded.nome} autenticado (${ws._dispWsId}). Total: ${wsDispClients.size}`);
           } else {
             ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Acesso restrito a admins' }));
             ws.close(4003, 'Acesso restrito');
@@ -281,7 +345,9 @@ function registerGlobals() {
   global.notifyNewWithdrawal = notifyNewWithdrawal;
   global.notifyWithdrawalUpdate = notifyWithdrawalUpdate;
   global.broadcastToAdmins = broadcastToAdmins;
+  global.sendToUser = sendToUser;
   global.broadcastDisponibilidade = broadcastDisponibilidade;
+  global.notifyStarkPayment = notifyStarkPayment;
 }
 
-module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate, broadcastDisponibilidade };
+module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate, notifyStarkPayment, broadcastDisponibilidade };

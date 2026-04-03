@@ -65,6 +65,7 @@ function verificarCsrf(req, res, next) {
     '/api/users/login',
     '/api/users/register',
     '/api/users/2fa/authenticate',
+    '/api/users/refresh-token',
     '/api/password-recovery',
     '/api/webhook',
     '/api/solicitacao/webhook',
@@ -72,6 +73,7 @@ function verificarCsrf(req, res, next) {
     '/api/indicacao-link/cadastrar',
     '/api/indicacao-link/validar',
     '/api/stark/webhook',
+    '/api/crm',  // server-to-server do CRM Vercel (autenticado por x-service-key)
   ];
 
   if (rotasExcluidas.some(rota => req.path.startsWith(rota))) {

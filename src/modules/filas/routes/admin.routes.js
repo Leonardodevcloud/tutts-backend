@@ -1,5 +1,6 @@
 /**
  * Sub-Router: Filas Admin
+ * V2: reordenar drag-drop, penalidades, regiões, cronômetro 1ª nota, limpar bairros
  */
 const express = require('express');
 
@@ -193,7 +194,8 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
       
       const aguardando = await pool.query(`
         SELECT *, 
-               EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando
+               EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando,
+               EXTRACT(EPOCH FROM (NOW() - primeira_nota_at))/60 as minutos_desde_primeira_nota
         FROM filas_posicoes 
         WHERE central_id = $1 AND status = 'aguardando'
         ORDER BY posicao ASC
@@ -262,13 +264,18 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, $2, $3, $4, 'enviado_rota', $5, $6, $7)
       `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional, tempoEspera, req.user.codProfissional, req.user.nome]);
       
-      res.json({ success: true, tempo_espera: tempoEspera });
+      res.json({ success: true, tempo_espera: tempoEspera, notas_liberadas: parseInt(prof.notas_liberadas) || 0 });
+      
+      const totalNotas = parseInt(prof.notas_liberadas) || 0;
+      const msgDespacho = totalNotas > 0
+        ? `✅ Todas as ${totalNotas} nota(s) foram liberadas. Siga para o roteiro! Nenhuma outra nota adicional será atribuída.`
+        : '🚀 Seu roteiro já foi definido, não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas!';
       
       pool.query(`
         INSERT INTO filas_notificacoes (cod_profissional, tipo, mensagem, dados)
         VALUES ($1, 'roteiro_despachado', $2, $3)
-        ON CONFLICT (cod_profissional) DO UPDATE SET tipo = $1, mensagem = $2, dados = $3, lida = false, created_at = NOW()
-      `, [cod_profissional, '🚀 Seu roteiro já foi definido, não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome })]).catch(() => {});
+        ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'roteiro_despachado', mensagem = $2, dados = $3, lida = false, created_at = NOW()
+      `, [cod_profissional, msgDespacho, JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, notas_liberadas: totalNotas })]).catch(() => {});
       
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
@@ -400,6 +407,77 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     }
   });
 
+  // ==================== REORDENAR FILA (DRAG-DROP) ====================
+
+  router.post('/reordenar', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { central_id, cod_profissional, nova_posicao } = req.body;
+      
+      if (!central_id || !cod_profissional || !nova_posicao) {
+        return res.status(400).json({ error: 'central_id, cod_profissional e nova_posicao são obrigatórios' });
+      }
+
+      const posicao = await pool.query(
+        'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+        [cod_profissional, central_id, 'aguardando']
+      );
+
+      if (posicao.rows.length === 0) {
+        return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+      }
+
+      const posicaoAtual = posicao.rows[0].posicao;
+      const novaPosInt = parseInt(nova_posicao);
+
+      if (posicaoAtual === novaPosInt) {
+        return res.json({ success: true, message: 'Posição inalterada' });
+      }
+
+      // Mover para frente (ex: pos 5 -> pos 2): quem está entre 2 e 4 desce +1
+      if (novaPosInt < posicaoAtual) {
+        await pool.query(`
+          UPDATE filas_posicoes 
+          SET posicao = posicao + 1
+          WHERE central_id = $1 AND status = 'aguardando' 
+            AND posicao >= $2 AND posicao < $3
+            AND cod_profissional != $4
+        `, [central_id, novaPosInt, posicaoAtual, cod_profissional]);
+      } else {
+        // Mover para trás (ex: pos 1 -> pos 3): quem está entre 2 e 3 sobe -1
+        await pool.query(`
+          UPDATE filas_posicoes 
+          SET posicao = posicao - 1
+          WHERE central_id = $1 AND status = 'aguardando' 
+            AND posicao > $2 AND posicao <= $3
+            AND cod_profissional != $4
+        `, [central_id, posicaoAtual, novaPosInt, cod_profissional]);
+      }
+
+      await pool.query(`
+        UPDATE filas_posicoes 
+        SET posicao = $1, motivo_posicao = 'reordenado_admin', updated_at = NOW()
+        WHERE cod_profissional = $2 AND central_id = $3
+      `, [novaPosInt, cod_profissional, central_id]);
+
+      const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+
+      await pool.query(`
+        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+        VALUES ($1, $2, $3, $4, 'reordenado', $5, $6, $7)
+      `, [central_id, central.rows[0]?.nome, cod_profissional, posicao.rows[0].nome_profissional,
+        `Movido da posição ${posicaoAtual} para ${novaPosInt}`, req.user.codProfissional, req.user.nome]);
+
+      res.json({ success: true, posicao_anterior: posicaoAtual, posicao_nova: novaPosInt });
+
+      registrarAuditoria(req, 'REORDENAR_FILA', 'admin', 'filas_posicoes', null,
+        { cod_profissional, central_id, posicao_anterior: posicaoAtual, nova_posicao: novaPosInt }).catch(() => {});
+
+    } catch (error) {
+      console.error('❌ Erro ao reordenar:', error);
+      res.status(500).json({ error: 'Erro ao reordenar fila' });
+    }
+  });
+
   // Remover profissional da fila (admin)
   router.post('/remover', verificarToken, verificarAdmin, async (req, res) => {
     try {
@@ -445,9 +523,243 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     }
   });
 
-  // ==================== OPERAÇÕES DO PROFISSIONAL (USER) ====================
+  // ==================== LIMPAR BAIRROS DE UM PROFISSIONAL ====================
 
-  // Verificar central do profissional
+  router.post('/limpar-bairros', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id } = req.body;
+      if (!cod_profissional || !central_id) return res.status(400).json({ error: 'cod_profissional e central_id obrigatórios' });
+      
+      await pool.query(
+        `UPDATE filas_posicoes SET bairros = '[]'::jsonb, updated_at = NOW() WHERE cod_profissional = $1 AND central_id = $2`,
+        [cod_profissional, central_id]
+      );
+      
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao limpar bairros' });
+    }
+  });
+
+  // ==================== BAIRROS CONFIG ====================
+
+  // Listar bairros de uma central (com região)
+  router.get('/bairros-config/:central_id', verificarToken, async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT b.*, r.nome as regiao_nome 
+         FROM filas_bairros_config b 
+         LEFT JOIN filas_regioes r ON r.id = b.regiao_id
+         WHERE b.central_id = $1 ORDER BY r.nome NULLS LAST, b.nome`,
+        [req.params.central_id]
+      );
+      res.json({ success: true, bairros: result.rows });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao listar bairros' });
+    }
+  });
+
+  // Adicionar bairro
+  router.post('/bairros-config', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { central_id, nome, regiao_id } = req.body;
+      if (!central_id || !nome?.trim()) return res.status(400).json({ error: 'central_id e nome obrigatórios' });
+      const nomeUpper = nome.trim().toUpperCase();
+      const result = await pool.query(
+        'INSERT INTO filas_bairros_config (central_id, nome, regiao_id) VALUES ($1, $2, $3) ON CONFLICT (central_id, nome) DO NOTHING RETURNING *',
+        [central_id, nomeUpper, regiao_id || null]
+      );
+      if (result.rows.length === 0) return res.json({ success: true, msg: 'Já existe' });
+      res.json({ success: true, bairro: result.rows[0] });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao adicionar bairro' });
+    }
+  });
+
+  // Atualizar região de um bairro
+  router.put('/bairros-config/:id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { regiao_id } = req.body;
+      await pool.query('UPDATE filas_bairros_config SET regiao_id = $1 WHERE id = $2', [regiao_id || null, req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao atualizar bairro' });
+    }
+  });
+
+  // Remover bairro
+  router.delete('/bairros-config/:id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      await pool.query('DELETE FROM filas_bairros_config WHERE id = $1', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao remover bairro' });
+    }
+  });
+
+  // Atribuir bairros a um profissional na fila
+  router.post('/atribuir-bairros', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id, bairros } = req.body;
+      if (!cod_profissional || !central_id) return res.status(400).json({ error: 'cod_profissional e central_id obrigatórios' });
+      
+      const bairrosArr = Array.isArray(bairros) ? bairros : [];
+      await pool.query(
+        'UPDATE filas_posicoes SET bairros = $1::jsonb, updated_at = NOW() WHERE cod_profissional = $2 AND central_id = $3',
+        [JSON.stringify(bairrosArr), cod_profissional, central_id]
+      );
+      
+      res.json({ success: true, bairros: bairrosArr });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao atribuir bairros' });
+    }
+  });
+
+  // ==================== REGIÕES DE ROTAS ====================
+
+  router.get('/regioes/:central_id', verificarToken, async (req, res) => {
+    try {
+      const result = await pool.query(
+        'SELECT r.*, COUNT(b.id) as total_bairros FROM filas_regioes r LEFT JOIN filas_bairros_config b ON b.regiao_id = r.id WHERE r.central_id = $1 GROUP BY r.id ORDER BY r.nome',
+        [req.params.central_id]
+      );
+      res.json({ success: true, regioes: result.rows });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao listar regiões' });
+    }
+  });
+
+  router.post('/regioes', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { central_id, nome } = req.body;
+      if (!central_id || !nome?.trim()) return res.status(400).json({ error: 'central_id e nome obrigatórios' });
+      const result = await pool.query(
+        'INSERT INTO filas_regioes (central_id, nome) VALUES ($1, $2) ON CONFLICT (central_id, nome) DO NOTHING RETURNING *',
+        [central_id, nome.trim().toUpperCase()]
+      );
+      if (result.rows.length === 0) return res.json({ success: true, msg: 'Já existe' });
+      res.json({ success: true, regiao: result.rows[0] });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao criar região' });
+    }
+  });
+
+  router.delete('/regioes/:id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      await pool.query('UPDATE filas_bairros_config SET regiao_id = NULL WHERE regiao_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM filas_regioes WHERE id = $1', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao remover região' });
+    }
+  });
+
+  // ==================== LIBERAÇÃO GRADATIVA DE NOTAS ====================
+
+  // Liberar próxima nota de um profissional na fila
+  router.post('/liberar-nota', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id } = req.body;
+      
+      const posicao = await pool.query(
+        'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 AND status = $3',
+        [cod_profissional, central_id, 'aguardando']
+      );
+      
+      if (posicao.rows.length === 0) {
+        return res.status(404).json({ error: 'Profissional não encontrado na fila' });
+      }
+      
+      const prof = posicao.rows[0];
+      const novasNotas = (parseInt(prof.notas_liberadas) || 0) + 1;
+      
+      // Se é a primeira nota, marcar timestamp para cronômetro
+      const setPrimeiraNota = novasNotas === 1 ? ', primeira_nota_at = NOW()' : '';
+      
+      await pool.query(
+        `UPDATE filas_posicoes SET notas_liberadas = $1${setPrimeiraNota}, updated_at = NOW() WHERE cod_profissional = $2 AND central_id = $3`,
+        [novasNotas, cod_profissional, central_id]
+      );
+      
+      const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+      
+      // Registrar no histórico
+      await pool.query(`
+        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+        VALUES ($1, $2, $3, $4, 'nota_liberada', $5, $6, $7)
+      `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional,
+        `Nota ${novasNotas} liberada`, req.user.codProfissional, req.user.nome]);
+      
+      // Notificar o profissional
+      const msgNota = `📦 A ${novasNotas}ª nota já foi liberada! Verifique o APP Tutts e realize a coleta.`;
+      await pool.query(`
+        INSERT INTO filas_notificacoes (cod_profissional, tipo, mensagem, dados)
+        VALUES ($1, 'nota_liberada', $2, $3)
+        ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'nota_liberada', mensagem = $2, dados = $3, lida = false, created_at = NOW()
+      `, [cod_profissional, msgNota, JSON.stringify({ 
+        notas_liberadas: novasNotas, 
+        central: central.rows[0]?.nome,
+        admin: req.user.nome
+      })]);
+      
+      console.log(`📦 Nota ${novasNotas} liberada para ${prof.nome_profissional} (${cod_profissional}) por ${req.user.codProfissional}`);
+      
+      res.json({ success: true, notas_liberadas: novasNotas, profissional: prof.nome_profissional });
+      
+      registrarAuditoria(req, 'LIBERAR_NOTA', 'admin', 'filas_posicoes', null, 
+        { cod_profissional, central_id, nota_numero: novasNotas }).catch(() => {});
+      
+    } catch (error) {
+      console.error('❌ Erro ao liberar nota:', error);
+      res.status(500).json({ error: 'Erro ao liberar nota' });
+    }
+  });
+
+  // ==================== PENALIDADES (ADMIN) ====================
+
+  // Listar penalidades ativas de uma central
+  router.get('/penalidades/:central_id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT * FROM filas_penalidades 
+        WHERE central_id = $1 AND bloqueado_ate > NOW() AND anulado_em IS NULL
+        ORDER BY bloqueado_ate DESC
+      `, [req.params.central_id]);
+      res.json({ success: true, penalidades: result.rows });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro ao listar penalidades' });
+    }
+  });
+
+  // Anular penalidade (devolver motoboy)
+  router.post('/anular-penalidade', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id } = req.body;
+      if (!cod_profissional || !central_id) return res.status(400).json({ error: 'Dados obrigatórios' });
+
+      await pool.query(`
+        UPDATE filas_penalidades 
+        SET anulado_por = $1, anulado_em = NOW(), bloqueado_ate = NOW(), updated_at = NOW()
+        WHERE cod_profissional = $2 AND central_id = $3 AND bloqueado_ate > NOW() AND anulado_em IS NULL
+      `, [req.user.codProfissional, cod_profissional, central_id]);
+
+      const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
+
+      await pool.query(`
+        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+        VALUES ($1, $2, $3, '', 'penalidade_anulada', 'Penalidade anulada pelo admin', $4, $5)
+      `, [central_id, central.rows[0]?.nome, cod_profissional, req.user.codProfissional, req.user.nome]);
+
+      res.json({ success: true });
+
+      registrarAuditoria(req, 'ANULAR_PENALIDADE', 'admin', 'filas_penalidades', null,
+        { cod_profissional, central_id }).catch(() => {});
+
+    } catch (error) {
+      console.error('❌ Erro ao anular penalidade:', error);
+      res.status(500).json({ error: 'Erro ao anular penalidade' });
+    }
+  });
 
   return router;
 }

@@ -98,6 +98,14 @@ async function initFinancialTables(pool) {
       // Coluna já existe ou outro erro
     }
 
+    // Garantir que a coluna debito_erro existe (mensagem de erro quando auto-débito Plific falha)
+    try {
+      await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS debito_erro VARCHAR(500)`);
+      console.log('✅ Coluna debito_erro verificada');
+    } catch (e) {
+      // Coluna já existe ou outro erro
+    }
+
     // Garantir que a coluna approved_at existe (migração)
     try {
       await pool.query(`ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP`);
@@ -142,6 +150,8 @@ async function initFinancialTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_created_at ON withdrawal_requests(created_at DESC)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_conciliacao ON withdrawal_requests(conciliacao_omie, debito)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_status_created ON withdrawal_requests(status, created_at DESC)`).catch(() => {});
+    // Índice para cron de batch automático Stark Bank
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_withdrawal_aguardando_stark ON withdrawal_requests(status, debito) WHERE status = 'aguardando_pagamento_stark' AND debito = true`).catch(() => {});
     
     // Índices para gratuities
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_gratuities_user_cod ON gratuities(user_cod)`).catch(() => {});
@@ -201,6 +211,33 @@ async function initFinancialTables(pool) {
     // Migração: adicionar colunas em restricted_professionals
     await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS user_name VARCHAR(255)`).catch(() => {});
     await pool.query(`ALTER TABLE restricted_professionals ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)`).catch(() => {});
+
+    // ==================== TABELA: LIBERAÇÕES DE LIMITE ====================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS withdrawal_limit_liberacoes (
+        id SERIAL PRIMARY KEY,
+        user_cod VARCHAR(50) NOT NULL,
+        user_name VARCHAR(255) NOT NULL,
+        tipo VARCHAR(30) DEFAULT 'solicitacao',
+        status VARCHAR(20) DEFAULT 'pendente',
+        valor_extra DECIMAL(10,2) DEFAULT 0,
+        motivo TEXT,
+        admin_id INTEGER,
+        admin_name VARCHAR(255),
+        liberado_at TIMESTAMP,
+        ciclo_inicio DATE NOT NULL,
+        ciclo_fim DATE NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela withdrawal_limit_liberacoes verificada');
+
+    // Índices para liberações
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_limit_lib_user_cod ON withdrawal_limit_liberacoes(user_cod)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_limit_lib_status ON withdrawal_limit_liberacoes(status)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_limit_lib_user_ciclo ON withdrawal_limit_liberacoes(user_cod, ciclo_inicio, status)`).catch(() => {});
+    console.log('✅ Índices withdrawal_limit_liberacoes criados/verificados');
 
 }
 

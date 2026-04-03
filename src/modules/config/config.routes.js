@@ -6,10 +6,21 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { gerarTokenIndicacao } = require('./config.service');
+const { createValidacaoIaRoutes } = require('./routes/validacao-ia.routes');
 
 function createConfigRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
+
+  // 🔒 SECURITY FIX (CRIT-06): Rate limiter para endpoint público de indicação
+  const indicacaoCadastroLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 5,
+    message: { error: 'Muitas tentativas. Aguarde 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   // ==================== PERMISSÕES DE ADMIN ====================
 
@@ -139,7 +150,7 @@ router.get('/admin-permissions/:codProfissional', verificarToken, async (req, re
 
 router.post('/submissions', verificarToken, async (req, res) => {
   try {
-    const { ordemServico, motivo, imagemComprovante, imagens, coordenadas } = req.body;
+    const { ordemServico, motivo, subcategoria, imagemComprovante, imagens, coordenadas, validacao_ia, tentativas_foto } = req.body;
     
     // SEGURANÇA: Usar dados do token JWT, não do body
     const userId = req.user.id;
@@ -159,11 +170,12 @@ router.post('/submissions', verificarToken, async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO submissions 
-       (ordem_servico, motivo, status, user_id, user_cod, user_name, 
-        imagem_comprovante, imagens, coordenadas, created_at) 
-       VALUES ($1, $2, 'pendente', $3, $4, $5, $6, $7, $8, NOW()) 
+       (ordem_servico, motivo, subcategoria, status, user_id, user_cod, user_name, 
+        imagem_comprovante, imagens, coordenadas, validacao_ia, tentativas_foto, validada_por_ia, created_at) 
+       VALUES ($1, $2, $3, 'pendente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()) 
        RETURNING *`,
-      [sanitizedOrdemServico, sanitizedMotivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas]
+      [sanitizedOrdemServico, sanitizedMotivo, subcategoria || null, userId, userCod, userName, imagemComprovante, imagens, coordenadas,
+       validacao_ia || null, parseInt(tentativas_foto) || 0, validacao_ia ? true : false]
     );
 
     await registrarAuditoria(req, 'SUBMISSION_CREATE', AUDIT_CATEGORIES.DATA, 'submissions', result.rows[0].id, {
@@ -273,8 +285,12 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
     }
 
     if (status) {
-      conditions.push(`status = $${paramIdx++}`);
-      params.push(status);
+      if (status === 'contestado') {
+        conditions.push(`contestacao_status = 'aberta'`);
+      } else {
+        conditions.push(`status = $${paramIdx++}`);
+        params.push(status);
+      }
     }
 
     if (dataInicio && dataFim) {
@@ -297,13 +313,17 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
 
     const dataResult = await pool.query(`
       SELECT 
-        id, ordem_servico, motivo, status, 
+        id, ordem_servico, motivo, subcategoria, status, 
         user_id, user_cod, user_name,
         CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
         observacao, validated_by, validated_by_name,
+        validacao_ia, tentativas_foto,
+        contestacao_status, motivo_rejeicao, contestacao_lida,
         created_at, updated_at
       FROM submissions ${where}
-      ORDER BY created_at DESC
+      ORDER BY 
+        CASE WHEN contestacao_status = 'aberta' THEN 0 ELSE 1 END,
+        created_at DESC
       LIMIT $${paramIdx++} OFFSET $${paramIdx}
     `, [...params, parseInt(limit), offset]);
 
@@ -532,27 +552,33 @@ router.get('/submissions', verificarToken, async (req, res) => {
     if (isAdmin) {
       query = `
         SELECT 
-          id, ordem_servico, motivo, status, 
+          id, ordem_servico, motivo, subcategoria, status, 
           user_id, user_cod, user_name,
           CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
           LENGTH(imagem_comprovante) as tamanho_imagem,
           coordenadas, observacao,
           validated_by, validated_by_name,
+          validacao_ia, tentativas_foto,
+          contestacao_status, motivo_rejeicao,
           created_at, updated_at
         FROM submissions 
-        ORDER BY created_at DESC
+        ORDER BY 
+          CASE WHEN contestacao_status = 'aberta' THEN 0 ELSE 1 END,
+          created_at DESC
         LIMIT 500
       `;
       params = [];
     } else {
       query = `
         SELECT 
-          id, ordem_servico, motivo, status, 
+          id, ordem_servico, motivo, subcategoria, status, 
           user_id, user_cod, user_name,
           CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END as tem_imagem,
           LENGTH(imagem_comprovante) as tamanho_imagem,
           coordenadas, observacao,
           validated_by, validated_by_name,
+          validacao_ia, tentativas_foto,
+          contestacao_status, motivo_rejeicao, contestacao_lida,
           created_at, updated_at
         FROM submissions 
         WHERE user_cod = $1 
@@ -629,7 +655,7 @@ router.patch('/submissions/:id', verificarToken, verificarAdmin, async (req, res
        SET status = $1, 
            observacao = $2, 
            validated_by = $3, 
-           validated_by_name = $4, 
+           validated_by_name = $4,
            updated_at = NOW() 
        WHERE id = $5 
        RETURNING *`,
@@ -638,6 +664,14 @@ router.patch('/submissions/:id', verificarToken, verificarAdmin, async (req, res
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Submissão não encontrada' });
+    }
+
+    // Atualizar colunas de contestação (silencia se não existirem ainda)
+    if (status === 'rejeitado') {
+      pool.query(
+        `UPDATE submissions SET motivo_rejeicao = $1, contestacao_lida = false WHERE id = $2`,
+        [(observacao || '').substring(0, 1000), submissionId]
+      ).catch(() => {});
     }
 
     await registrarAuditoria(req, 'SUBMISSION_UPDATE', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, {
@@ -690,9 +724,205 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
   }
 });
 
+  // ==================== CONTESTAÇÃO DE SUBMISSIONS ====================
+
+  // GET - Rejeições não lidas do motoboy (para modal)
+  router.get('/submissions/minhas-rejeicoes', verificarToken, async (req, res) => {
+    try {
+      const userCod = req.user.codProfissional;
+      const result = await pool.query(`
+        SELECT id, ordem_servico, motivo, motivo_rejeicao, observacao, contestacao_status, created_at, updated_at
+        FROM submissions
+        WHERE user_cod = $1 AND status = 'rejeitado' AND (contestacao_lida = false OR contestacao_lida IS NULL)
+          AND (contestacao_status IS NULL OR contestacao_status NOT IN ('encerrada_rejeitada', 'aberta'))
+        ORDER BY updated_at DESC
+      `, [userCod]);
+      res.json({ success: true, rejeicoes: result.rows });
+    } catch (error) {
+      console.error('❌ Erro ao buscar rejeições:', error);
+      res.status(500).json({ error: 'Erro interno' });
+    }
+  });
+
+  // PATCH - Marcar rejeição como lida
+  router.patch('/submissions/:id/marcar-lida', verificarToken, async (req, res) => {
+    try {
+      const submissionId = parseInt(req.params.id);
+      await pool.query(
+        'UPDATE submissions SET contestacao_lida = true WHERE id = $1 AND user_cod = $2',
+        [submissionId, req.user.codProfissional]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Erro interno' });
+    }
+  });
+
+  // POST - Motoboy contesta uma rejeição
+  router.post('/submissions/:id/contestar', verificarToken, async (req, res) => {
+    try {
+      const submissionId = parseInt(req.params.id);
+      const { mensagem, imagens } = req.body;
+      const userCod = req.user.codProfissional;
+      const userName = req.user.nome;
+
+      const sub = await pool.query('SELECT * FROM submissions WHERE id = $1 AND user_cod = $2', [submissionId, userCod]);
+      if (sub.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
+      if (sub.rows[0].status !== 'rejeitado') return res.status(400).json({ error: 'Só é possível contestar solicitações rejeitadas' });
+      if (sub.rows[0].contestacao_status === 'encerrada_rejeitada') return res.status(400).json({ error: 'Contestação já encerrada definitivamente' });
+
+      await pool.query(
+        `UPDATE submissions SET contestacao_status = 'aberta', contestacao_aberta_em = NOW(), contestacao_lida = true, updated_at = NOW() WHERE id = $1`,
+        [submissionId]
+      );
+
+      const imagensArr = Array.isArray(imagens) ? imagens : [];
+      await pool.query(`
+        INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
+        VALUES ($1, 'motoboy', $2, $3, $4, $5)
+      `, [submissionId, userCod, userName, (mensagem || '').substring(0, 2000), JSON.stringify(imagensArr)]);
+
+      // 🔔 Notificar admins via WebSocket
+      try {
+        if (typeof global.broadcastToAdmins === 'function') {
+          global.broadcastToAdmins('NEW_CONTESTATION', {
+            submission_id: submissionId,
+            ordem_servico: sub.rows[0].ordem_servico,
+            motivo: sub.rows[0].motivo,
+            user_cod: userCod,
+            user_name: userName,
+            mensagem: (mensagem || '').substring(0, 200),
+          });
+        }
+      } catch (wsErr) {
+        console.error('⚠️ Erro ao notificar WS contestação:', wsErr.message);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('❌ Erro ao contestar:', error);
+      res.status(500).json({ error: 'Erro ao contestar' });
+    }
+  });
+
+  // GET - Mensagens da contestação
+  router.get('/submissions/:id/contestacao', verificarToken, async (req, res) => {
+    try {
+      const submissionId = parseInt(req.params.id);
+      const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+      if (!isAdmin) {
+        const sub = await pool.query('SELECT id FROM submissions WHERE id = $1 AND user_cod = $2', [submissionId, req.user.codProfissional]);
+        if (sub.rows.length === 0) return res.status(404).json({ error: 'Não encontrada' });
+      }
+      const msgs = await pool.query('SELECT * FROM submissions_contestacoes WHERE submission_id = $1 ORDER BY created_at ASC', [submissionId]);
+      const sub = await pool.query('SELECT id, ordem_servico, motivo, status, contestacao_status, motivo_rejeicao, observacao, user_cod, user_name FROM submissions WHERE id = $1', [submissionId]);
+      res.json({ success: true, mensagens: msgs.rows, submission: sub.rows[0] || null });
+    } catch (error) {
+      console.error('❌ Erro ao buscar contestação:', error);
+      res.status(500).json({ error: 'Erro interno' });
+    }
+  });
+
+  // POST - Responder contestação (motoboy ou admin)
+  router.post('/submissions/:id/contestacao-responder', verificarToken, async (req, res) => {
+    try {
+      const submissionId = parseInt(req.params.id);
+      const { mensagem, imagens } = req.body;
+      const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+      const sub = await pool.query('SELECT * FROM submissions WHERE id = $1', [submissionId]);
+      if (sub.rows.length === 0) return res.status(404).json({ error: 'Não encontrada' });
+      if (sub.rows[0].contestacao_status !== 'aberta') return res.status(400).json({ error: 'Contestação não está aberta' });
+      if (!isAdmin && sub.rows[0].user_cod !== req.user.codProfissional) return res.status(403).json({ error: 'Acesso negado' });
+
+      const autorTipo = isAdmin ? 'admin' : 'motoboy';
+      const imagensArr = Array.isArray(imagens) ? imagens : [];
+      await pool.query(`
+        INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [submissionId, autorTipo, req.user.codProfissional || req.user.id, req.user.nome, (mensagem || '').substring(0, 2000), JSON.stringify(imagensArr)]);
+      await pool.query('UPDATE submissions SET updated_at = NOW() WHERE id = $1', [submissionId]);
+
+      // 🔔 Notificar a outra parte via WebSocket
+      try {
+        if (isAdmin && typeof global.sendToUser === 'function') {
+          // Admin respondeu → notificar motoboy
+          global.sendToUser(sub.rows[0].user_cod, 'CONTESTATION_REPLY', {
+            submission_id: submissionId,
+            ordem_servico: sub.rows[0].ordem_servico,
+            autor_nome: req.user.nome,
+          });
+        } else if (!isAdmin && typeof global.broadcastToAdmins === 'function') {
+          // Motoboy respondeu → notificar admins
+          global.broadcastToAdmins('CONTESTATION_REPLY', {
+            submission_id: submissionId,
+            ordem_servico: sub.rows[0].ordem_servico,
+            user_cod: req.user.codProfissional,
+            user_name: req.user.nome,
+          });
+        }
+      } catch (wsErr) {
+        console.error('⚠️ Erro ao notificar WS resposta contestação:', wsErr.message);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('❌ Erro ao responder contestação:', error);
+      res.status(500).json({ error: 'Erro ao responder' });
+    }
+  });
+
+  // PATCH - Encerrar contestação (ADMIN)
+  router.patch('/submissions/:id/contestacao-encerrar', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const submissionId = parseInt(req.params.id);
+      const { decisao, observacao } = req.body;
+      if (!['aprovar', 'rejeitar'].includes(decisao)) return res.status(400).json({ error: 'Decisão deve ser aprovar ou rejeitar' });
+
+      // Buscar dados da submission antes de atualizar (para pegar user_cod)
+      const subAntes = await pool.query('SELECT user_cod, user_name, ordem_servico FROM submissions WHERE id = $1', [submissionId]);
+      
+      const novoStatus = decisao === 'aprovar' ? 'aprovado' : 'rejeitado';
+      const contestacaoStatus = decisao === 'aprovar' ? 'encerrada_aprovada' : 'encerrada_rejeitada';
+
+      await pool.query(`
+        UPDATE submissions SET status = $1, contestacao_status = $2, contestacao_encerrada_em = NOW(),
+          observacao = COALESCE($3, observacao), validated_by = $4, validated_by_name = $5, updated_at = NOW()
+        WHERE id = $6
+      `, [novoStatus, contestacaoStatus, observacao, req.user.id, req.user.nome, submissionId]);
+
+      await pool.query(`
+        INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem)
+        VALUES ($1, 'admin', $2, $3, $4)
+      `, [submissionId, req.user.codProfissional || req.user.id, req.user.nome,
+        `📋 Contestação encerrada: ${decisao === 'aprovar' ? '✅ APROVADA' : '❌ REJEITADA DEFINITIVAMENTE'}${observacao ? ' — ' + observacao : ''}`]);
+
+      await registrarAuditoria(req, 'CONTESTACAO_ENCERRADA', AUDIT_CATEGORIES.DATA, 'submissions', submissionId, { decisao });
+
+      // 🔔 Notificar motoboy via WebSocket
+      try {
+        if (subAntes.rows.length > 0 && typeof global.sendToUser === 'function') {
+          global.sendToUser(subAntes.rows[0].user_cod, 'CONTESTATION_CLOSED', {
+            submission_id: submissionId,
+            ordem_servico: subAntes.rows[0].ordem_servico,
+            decisao,
+            status: novoStatus,
+            contestacao_status: contestacaoStatus,
+          });
+        }
+      } catch (wsErr) {
+        console.error('⚠️ Erro ao notificar WS encerramento:', wsErr.message);
+      }
+
+      res.json({ success: true, status: novoStatus, contestacao_status: contestacaoStatus });
+    } catch (error) {
+      console.error('❌ Erro ao encerrar contestação:', error);
+      res.status(500).json({ error: 'Erro ao encerrar' });
+    }
+  });
+
   // ==================== HORÁRIOS + AVISOS ====================
 
-router.get('/horarios', async (req, res) => {
+router.get('/horarios', verificarToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM horarios_atendimento ORDER BY dia_semana');
     res.json(result.rows);
@@ -703,7 +933,7 @@ router.get('/horarios', async (req, res) => {
 });
 
 // PUT /api/horarios/:id - Atualizar horário de um dia
-router.put('/horarios/:id', async (req, res) => {
+router.put('/horarios/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { hora_inicio, hora_fim, ativo } = req.body;
@@ -723,7 +953,7 @@ router.put('/horarios/:id', async (req, res) => {
 });
 
 // GET /api/horarios/especiais - Listar horários especiais
-router.get('/horarios/especiais', async (req, res) => {
+router.get('/horarios/especiais', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM horarios_especiais WHERE data >= CURRENT_DATE ORDER BY data'
@@ -736,7 +966,7 @@ router.get('/horarios/especiais', async (req, res) => {
 });
 
 // POST /api/horarios/especiais - Criar horário especial
-router.post('/horarios/especiais', async (req, res) => {
+router.post('/horarios/especiais', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { data, descricao, hora_inicio, hora_fim, fechado } = req.body;
     
@@ -757,7 +987,7 @@ router.post('/horarios/especiais', async (req, res) => {
 });
 
 // DELETE /api/horarios/especiais/:id - Remover horário especial
-router.delete('/horarios/especiais/:id', async (req, res) => {
+router.delete('/horarios/especiais/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM horarios_especiais WHERE id = $1', [id]);
@@ -769,7 +999,7 @@ router.delete('/horarios/especiais/:id', async (req, res) => {
 });
 
 // GET /api/horarios/verificar - Verificar se está dentro do horário de atendimento
-router.get('/horarios/verificar', async (req, res) => {
+router.get('/horarios/verificar', verificarToken, async (req, res) => {
   try {
     const agora = new Date();
     // Ajustar para horário de Brasília (GMT-3)
@@ -889,7 +1119,7 @@ router.get('/horarios/verificar', async (req, res) => {
 });
 
 // GET /api/avisos - Listar avisos do financeiro
-router.get('/avisos', async (req, res) => {
+router.get('/avisos', verificarToken, async (req, res) => {
   try {
     const { ativos } = req.query;
     let query = 'SELECT * FROM avisos_financeiro';
@@ -907,7 +1137,7 @@ router.get('/avisos', async (req, res) => {
 });
 
 // POST /api/avisos - Criar aviso
-router.post('/avisos', async (req, res) => {
+router.post('/avisos', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { titulo, mensagem, tipo, exibir_fora_horario } = req.body;
     
@@ -925,7 +1155,7 @@ router.post('/avisos', async (req, res) => {
 });
 
 // PUT /api/avisos/:id - Atualizar aviso
-router.put('/avisos/:id', async (req, res) => {
+router.put('/avisos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { titulo, mensagem, tipo, ativo, exibir_fora_horario } = req.body;
@@ -945,7 +1175,7 @@ router.put('/avisos/:id', async (req, res) => {
 });
 
 // DELETE /api/avisos/:id - Remover aviso
-router.delete('/avisos/:id', async (req, res) => {
+router.delete('/avisos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM avisos_financeiro WHERE id = $1', [id]);
@@ -958,7 +1188,7 @@ router.delete('/avisos/:id', async (req, res) => {
 
   // ==================== NOTIFICAÇÕES ====================
 
-router.post('/notifications', async (req, res) => {
+router.post('/notifications', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { message, type, forUser } = req.body;
 
@@ -976,7 +1206,7 @@ router.post('/notifications', async (req, res) => {
   }
 });
 
-router.get('/notifications/:userCod', async (req, res) => {
+router.get('/notifications/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
 
@@ -994,7 +1224,7 @@ router.get('/notifications/:userCod', async (req, res) => {
 
   // ==================== PROMOÇÕES + INDICAÇÕES + NOVATOS + QUIZ ====================
 
-router.get('/promocoes', async (req, res) => {
+router.get('/promocoes', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM promocoes_indicacao ORDER BY created_at DESC'
@@ -1007,7 +1237,7 @@ router.get('/promocoes', async (req, res) => {
 });
 
 // Listar promoções ativas (para usuário)
-router.get('/promocoes/ativas', async (req, res) => {
+router.get('/promocoes/ativas', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM promocoes_indicacao WHERE status = 'ativa' ORDER BY created_at DESC"
@@ -1020,7 +1250,7 @@ router.get('/promocoes/ativas', async (req, res) => {
 });
 
 // Criar promoção
-router.post('/promocoes', async (req, res) => {
+router.post('/promocoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { regiao, valor_bonus, detalhes, created_by } = req.body;
 
@@ -1042,7 +1272,7 @@ router.post('/promocoes', async (req, res) => {
 });
 
 // Atualizar promoção (status ou dados completos)
-router.patch('/promocoes/:id', async (req, res) => {
+router.patch('/promocoes/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, regiao, valor_bonus, detalhes } = req.body;
@@ -1075,7 +1305,7 @@ router.patch('/promocoes/:id', async (req, res) => {
 });
 
 // Excluir promoção
-router.delete('/promocoes/:id', async (req, res) => {
+router.delete('/promocoes/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1129,7 +1359,7 @@ router.get('/indicacoes/usuario/:userCod', verificarToken, async (req, res) => {
 });
 
 // Criar indicação
-router.post('/indicacoes', async (req, res) => {
+router.post('/indicacoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { promocao_id, user_cod, user_name, indicado_nome, indicado_cpf, indicado_contato, valor_bonus, regiao } = req.body;
 
@@ -1155,7 +1385,7 @@ router.post('/indicacoes', async (req, res) => {
 });
 
 // Aprovar indicação
-router.patch('/indicacoes/:id/aprovar', async (req, res) => {
+router.patch('/indicacoes/:id/aprovar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { resolved_by } = req.body;
@@ -1181,7 +1411,7 @@ router.patch('/indicacoes/:id/aprovar', async (req, res) => {
 });
 
 // Rejeitar indicação
-router.patch('/indicacoes/:id/rejeitar', async (req, res) => {
+router.patch('/indicacoes/:id/rejeitar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { motivo_rejeicao, resolved_by } = req.body;
@@ -1207,7 +1437,7 @@ router.patch('/indicacoes/:id/rejeitar', async (req, res) => {
 });
 
 // Atualizar crédito lançado
-router.patch('/indicacoes/:id/credito', async (req, res) => {
+router.patch('/indicacoes/:id/credito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { credito_lancado, lancado_por } = req.body;
@@ -1235,7 +1465,7 @@ router.patch('/indicacoes/:id/credito', async (req, res) => {
 });
 
 // Verificar e expirar indicações antigas (pode ser chamado periodicamente)
-router.post('/indicacoes/verificar-expiradas', async (req, res) => {
+router.post('/indicacoes/verificar-expiradas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE indicacoes 
@@ -1253,7 +1483,7 @@ router.post('/indicacoes/verificar-expiradas', async (req, res) => {
 });
 
 // Verificar cadastro de indicados via API Tutts (prof-status)
-router.post('/indicacoes/verificar-cadastros', async (req, res) => {
+router.post('/indicacoes/verificar-cadastros', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { celulares } = req.body;
     if (!celulares || !Array.isArray(celulares) || celulares.length === 0) {
@@ -1364,7 +1594,7 @@ router.delete('/indicacoes/:id', verificarToken, async (req, res) => {
 });
 
 // Gerar ou obter link de indicação do usuário
-router.post('/indicacao-link/gerar', async (req, res) => {
+router.post('/indicacao-link/gerar', verificarToken, async (req, res) => {
   try {
     const { user_cod, user_name, promocao_id, regiao, valor_bonus } = req.body;
     
@@ -1398,7 +1628,7 @@ router.post('/indicacao-link/gerar', async (req, res) => {
 });
 
 // Obter link existente do usuário
-router.get('/indicacao-link/usuario/:userCod', async (req, res) => {
+router.get('/indicacao-link/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1433,7 +1663,8 @@ router.get('/indicacao-link/validar/:token', async (req, res) => {
 });
 
 // Cadastrar indicado via link (público)
-router.post('/indicacao-link/cadastrar', async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-06): Rate limiter no endpoint público
+router.post('/indicacao-link/cadastrar', indicacaoCadastroLimiter, async (req, res) => {
   try {
     const { token, nome, telefone } = req.body;
     
@@ -1521,7 +1752,7 @@ router.post('/indicacao-link/cadastrar', async (req, res) => {
 });
 
 // Listar indicações recebidas via link (para admin)
-router.get('/indicacao-link/indicacoes', async (req, res) => {
+router.get('/indicacao-link/indicacoes', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT * FROM indicacoes WHERE link_token IS NOT NULL ORDER BY created_at DESC`
@@ -1534,7 +1765,7 @@ router.get('/indicacao-link/indicacoes', async (req, res) => {
 });
 
 // Estatísticas de indicações por usuário
-router.get('/indicacao-link/estatisticas/:userCod', async (req, res) => {
+router.get('/indicacao-link/estatisticas/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1559,7 +1790,7 @@ router.get('/indicacao-link/estatisticas/:userCod', async (req, res) => {
 // ============================================
 
 // Listar regiões disponíveis da planilha (para criar promoções)
-router.get('/promocoes-novatos/regioes', async (req, res) => {
+router.get('/promocoes-novatos/regioes', verificarToken, async (req, res) => {
   try {
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
     const response = await fetch(sheetUrl);
@@ -1586,7 +1817,7 @@ router.get('/promocoes-novatos/regioes', async (req, res) => {
 // Regras: 
 // 1. Deve haver promoção ativa para a região do usuário (região vem da planilha)
 // 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 10 dias
-router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
+router.get('/promocoes-novatos/elegibilidade/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     
@@ -1712,7 +1943,7 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
 });
 
 // Listar todas as promoções de novatos
-router.get('/promocoes-novatos', async (req, res) => {
+router.get('/promocoes-novatos', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM promocoes_novatos ORDER BY created_at DESC'
@@ -1738,7 +1969,7 @@ router.get('/promocoes-novatos', async (req, res) => {
 });
 
 // Listar promoções ativas (para usuários)
-router.get('/promocoes-novatos/ativas', async (req, res) => {
+router.get('/promocoes-novatos/ativas', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM promocoes_novatos WHERE status = 'ativa' ORDER BY created_at DESC"
@@ -1764,7 +1995,7 @@ router.get('/promocoes-novatos/ativas', async (req, res) => {
 });
 
 // Criar nova promoção novatos
-router.post('/promocoes-novatos', async (req, res) => {
+router.post('/promocoes-novatos', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas, created_by } = req.body;
     
@@ -1808,7 +2039,7 @@ router.post('/promocoes-novatos', async (req, res) => {
 });
 
 // Atualizar promoção novatos (status ou dados)
-router.patch('/promocoes-novatos/:id', async (req, res) => {
+router.patch('/promocoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, regiao, apelido, clientes, valor_bonus, detalhes, quantidade_entregas } = req.body;
@@ -1867,7 +2098,7 @@ router.patch('/promocoes-novatos/:id', async (req, res) => {
 });
 
 // Deletar promoção novatos
-router.delete('/promocoes-novatos/:id', async (req, res) => {
+router.delete('/promocoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -1899,7 +2130,7 @@ router.delete('/promocoes-novatos/:id', async (req, res) => {
 // ============================================
 
 // Listar todas as inscrições (admin)
-router.get('/inscricoes-novatos', async (req, res) => {
+router.get('/inscricoes-novatos', verificarToken, async (req, res) => {
   try {
     // Buscar inscrições com dados da promoção
     const result = await pool.query(`
@@ -1965,7 +2196,7 @@ router.get('/inscricoes-novatos', async (req, res) => {
 });
 
 // Listar inscrições de um usuário
-router.get('/inscricoes-novatos/usuario/:userCod', async (req, res) => {
+router.get('/inscricoes-novatos/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -1980,7 +2211,7 @@ router.get('/inscricoes-novatos/usuario/:userCod', async (req, res) => {
 });
 
 // Criar inscrição novatos (usuário se inscreve)
-router.post('/inscricoes-novatos', async (req, res) => {
+router.post('/inscricoes-novatos', verificarToken, async (req, res) => {
   try {
     const { promocao_id, user_cod, user_name, valor_bonus, regiao, cliente } = req.body;
 
@@ -2011,7 +2242,7 @@ router.post('/inscricoes-novatos', async (req, res) => {
 });
 
 // Aprovar inscrição novatos
-router.patch('/inscricoes-novatos/:id/aprovar', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/aprovar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { resolved_by } = req.body;
@@ -2033,7 +2264,7 @@ router.patch('/inscricoes-novatos/:id/aprovar', async (req, res) => {
 });
 
 // Rejeitar inscrição novatos
-router.patch('/inscricoes-novatos/:id/rejeitar', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/rejeitar', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { motivo_rejeicao, resolved_by } = req.body;
@@ -2055,7 +2286,7 @@ router.patch('/inscricoes-novatos/:id/rejeitar', async (req, res) => {
 });
 
 // Atualizar crédito lançado para inscrição novatos
-router.patch('/inscricoes-novatos/:id/credito', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/credito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { credito_lancado, lancado_por } = req.body;
@@ -2077,7 +2308,7 @@ router.patch('/inscricoes-novatos/:id/credito', async (req, res) => {
 });
 
 // Deletar inscrição novatos
-router.delete('/inscricoes-novatos/:id', async (req, res) => {
+router.delete('/inscricoes-novatos/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2099,7 +2330,7 @@ router.delete('/inscricoes-novatos/:id', async (req, res) => {
 });
 
 // Verificar e expirar inscrições novatos antigas (chamado periodicamente)
-router.post('/inscricoes-novatos/verificar-expiradas', async (req, res) => {
+router.post('/inscricoes-novatos/verificar-expiradas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE inscricoes_novatos 
@@ -2117,7 +2348,7 @@ router.post('/inscricoes-novatos/verificar-expiradas', async (req, res) => {
 });
 
 // Atualizar débito para inscrição novatos
-router.patch('/inscricoes-novatos/:id/debito', async (req, res) => {
+router.patch('/inscricoes-novatos/:id/debito', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { debito, debitado_por } = req.body;
@@ -2139,7 +2370,7 @@ router.patch('/inscricoes-novatos/:id/debito', async (req, res) => {
 });
 
 // Buscar entregas do profissional no período da inscrição (integração com BI)
-router.get('/inscricoes-novatos/:id/entregas', async (req, res) => {
+router.get('/inscricoes-novatos/:id/entregas', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2228,7 +2459,7 @@ router.get('/inscricoes-novatos/:id/entregas', async (req, res) => {
 });
 
 // Buscar progresso de todas as inscrições de um usuário
-router.get('/inscricoes-novatos/progresso/:userCod', async (req, res) => {
+router.get('/inscricoes-novatos/progresso/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const userCodNumerico = parseInt(userCod.toString().replace(/\D/g, ''), 10);
@@ -2306,7 +2537,7 @@ router.get('/inscricoes-novatos/progresso/:userCod', async (req, res) => {
 // ============================================
 
 // Obter configuração do quiz
-router.get('/quiz-procedimentos/config', async (req, res) => {
+router.get('/quiz-procedimentos/config', verificarToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1');
     if (result.rows.length === 0) {
@@ -2347,7 +2578,7 @@ router.get('/quiz-procedimentos/config', async (req, res) => {
 });
 
 // Salvar configuração do quiz
-router.post('/quiz-procedimentos/config', async (req, res) => {
+router.post('/quiz-procedimentos/config', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { titulo, imagens, perguntas, valor_gratuidade, ativo } = req.body;
     
@@ -2409,7 +2640,7 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
 });
 
 // Verificar se usuário já respondeu o quiz
-router.get('/quiz-procedimentos/verificar/:userCod', async (req, res) => {
+router.get('/quiz-procedimentos/verificar/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
     const result = await pool.query(
@@ -2427,7 +2658,7 @@ router.get('/quiz-procedimentos/verificar/:userCod', async (req, res) => {
 });
 
 // Responder o quiz
-router.post('/quiz-procedimentos/responder', async (req, res) => {
+router.post('/quiz-procedimentos/responder', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { user_cod, user_name, respostas } = req.body;
     
@@ -2490,7 +2721,7 @@ router.post('/quiz-procedimentos/responder', async (req, res) => {
 });
 
 // Listar quem respondeu o quiz (admin)
-router.get('/quiz-procedimentos/respostas', async (req, res) => {
+router.get('/quiz-procedimentos/respostas', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM quiz_procedimentos_respostas ORDER BY created_at DESC'
@@ -2505,7 +2736,7 @@ router.get('/quiz-procedimentos/respostas', async (req, res) => {
   // ==================== RECRUTAMENTO ====================
 
 // GET /api/recrutamento - Listar todas as necessidades
-router.get('/recrutamento', async (req, res) => {
+router.get('/recrutamento', verificarToken, async (req, res) => {
   try {
     const { status } = req.query;
     
@@ -2553,7 +2784,7 @@ router.get('/recrutamento', async (req, res) => {
 });
 
 // POST /api/recrutamento - Criar nova necessidade
-router.post('/recrutamento', async (req, res) => {
+router.post('/recrutamento', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, criado_por } = req.body;
     
@@ -2577,7 +2808,7 @@ router.post('/recrutamento', async (req, res) => {
 });
 
 // PUT /api/recrutamento/:id - Atualizar necessidade
-router.put('/recrutamento/:id', async (req, res) => {
+router.put('/recrutamento/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { nome_cliente, data_conclusao, quantidade_motos, quantidade_backup, observacao, status } = req.body;
@@ -2608,7 +2839,7 @@ router.put('/recrutamento/:id', async (req, res) => {
 });
 
 // DELETE /api/recrutamento/:id - Deletar necessidade
-router.delete('/recrutamento/:id', async (req, res) => {
+router.delete('/recrutamento/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2629,7 +2860,7 @@ router.delete('/recrutamento/:id', async (req, res) => {
 });
 
 // POST /api/recrutamento/:id/atribuir - Atribuir moto a uma necessidade
-router.post('/recrutamento/:id/atribuir', async (req, res) => {
+router.post('/recrutamento/:id/atribuir', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { cod_profissional, tipo, atribuido_por } = req.body;
@@ -2731,7 +2962,7 @@ router.post('/recrutamento/:id/atribuir', async (req, res) => {
 });
 
 // DELETE /api/recrutamento/atribuicao/:id - Remover atribuição
-router.delete('/recrutamento/atribuicao/:id', async (req, res) => {
+router.delete('/recrutamento/atribuicao/:id', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -2766,7 +2997,7 @@ router.delete('/recrutamento/atribuicao/:id', async (req, res) => {
 });
 
 // GET /api/recrutamento/buscar-profissional/:cod - Buscar profissional por código
-router.get('/recrutamento/buscar-profissional/:cod', async (req, res) => {
+router.get('/recrutamento/buscar-profissional/:cod', verificarToken, async (req, res) => {
   try {
     const { cod } = req.params;
     
@@ -2825,7 +3056,7 @@ router.get('/recrutamento/buscar-profissional/:cod', async (req, res) => {
 });
 
 // GET /api/recrutamento/estatisticas - Estatísticas gerais de recrutamento
-router.get('/recrutamento/estatisticas', async (req, res) => {
+router.get('/recrutamento/estatisticas', verificarToken, async (req, res) => {
   try {
     const stats = await pool.query(`
       SELECT 
@@ -2847,6 +3078,14 @@ router.get('/recrutamento/estatisticas', async (req, res) => {
   }
 });
 
+
+  // ==================== VALIDAÇÃO IA + RESPOSTAS PRONTAS ====================
+  try {
+    router.use(createValidacaoIaRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES));
+    console.log('✅ Sub-router validação IA montado');
+  } catch (err) {
+    console.error('⚠️ Erro ao montar validação IA:', err.message);
+  }
 
   return router;
 }

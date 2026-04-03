@@ -82,6 +82,69 @@ async function initFilasTables(pool) {
     )
   `);
   console.log('✅ Tabela filas_notificacoes verificada');
+
+  // 🔧 Coluna notas_liberadas para despacho gradativo
+  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS notas_liberadas INTEGER DEFAULT 0`).catch(() => {});
+  console.log('✅ Coluna notas_liberadas verificada');
+
+  // 🗺️ Bairros: coluna na posição + tabela de config
+  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS bairros JSONB DEFAULT '[]'`).catch(() => {});
+  console.log('✅ Coluna bairros verificada');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS filas_bairros_config (
+      id SERIAL PRIMARY KEY,
+      central_id INTEGER REFERENCES filas_centrais(id) ON DELETE CASCADE,
+      nome VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(central_id, nome)
+    )
+  `);
+  console.log('✅ Tabela filas_bairros_config verificada');
+
+  // ==================== V2 ====================
+
+  // ⏱️ Timestamp da primeira nota liberada (cronômetro admin)
+  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS primeira_nota_at TIMESTAMP`).catch(() => {});
+  console.log('✅ Coluna primeira_nota_at verificada');
+
+  // 🚫 Tabela de penalidades por saída voluntária
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS filas_penalidades (
+      id SERIAL PRIMARY KEY,
+      central_id INTEGER REFERENCES filas_centrais(id) ON DELETE CASCADE,
+      cod_profissional VARCHAR(50) NOT NULL,
+      nome_profissional VARCHAR(255),
+      saidas_hoje INTEGER DEFAULT 0,
+      bloqueado_ate TIMESTAMP,
+      anulado_por VARCHAR(50),
+      anulado_em TIMESTAMP,
+      data_ref DATE DEFAULT CURRENT_DATE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_filas_penalidades_unico 
+      ON filas_penalidades (cod_profissional, central_id, data_ref)
+  `).catch(() => {});
+  console.log('✅ Tabela filas_penalidades verificada');
+
+  // 🗺️ Regiões de rotas
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS filas_regioes (
+      id SERIAL PRIMARY KEY,
+      central_id INTEGER REFERENCES filas_centrais(id) ON DELETE CASCADE,
+      nome VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(central_id, nome)
+    )
+  `);
+  console.log('✅ Tabela filas_regioes verificada');
+
+  // FK regiao_id nos bairros
+  await pool.query(`ALTER TABLE filas_bairros_config ADD COLUMN IF NOT EXISTS regiao_id INTEGER REFERENCES filas_regioes(id) ON DELETE SET NULL`).catch(() => {});
+  console.log('✅ Coluna regiao_id em filas_bairros_config verificada');
 }
 
 module.exports = { initFilasTables };

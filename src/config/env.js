@@ -5,7 +5,8 @@
 
 require('dotenv').config();
 
-const required = ['DATABASE_URL', 'JWT_SECRET'];
+// 🔒 SECURITY FIX (AUDIT-07): REFRESH_SECRET obrigatório em TODOS os ambientes
+const required = ['DATABASE_URL', 'JWT_SECRET', 'REFRESH_SECRET'];
 const missing = required.filter(key => !process.env[key]);
 
 if (missing.length > 0) {
@@ -26,9 +27,8 @@ const env = {
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: '1h',
   REFRESH_TOKEN_EXPIRES_IN: '7d',
-  // 🔒 SECURITY: Separate secret for refresh tokens
-  // If REFRESH_SECRET env var exists, use it; otherwise derive from JWT_SECRET (backward compatible)
-  REFRESH_SECRET: process.env.REFRESH_SECRET || (process.env.JWT_SECRET + '_REFRESH_v2_' + (process.env.JWT_SECRET || '').slice(-8)),
+  // 🔒 SECURITY FIX (AUDIT-07): Sem derivação — REFRESH_SECRET é obrigatório
+  REFRESH_SECRET: process.env.REFRESH_SECRET,
   BCRYPT_ROUNDS: 10,
 
   // Tutts API tokens
@@ -62,10 +62,6 @@ if (tuttsNaoConfigurados.length > 0) {
 
 if (!env.ORS_API_KEY) {
   console.warn('⚠️ ORS_API_KEY não configurada - Roteirizador não funcionará');
-}
-
-if (!process.env.REFRESH_SECRET) {
-  console.warn('⚠️ REFRESH_SECRET não configurado - usando derivação do JWT_SECRET. Configure REFRESH_SECRET como variável separada para maior segurança.');
 }
 
 module.exports = env;

@@ -48,7 +48,14 @@ async function screenshot(page, os, etapa) {
 
 async function isLoggedIn(page) {
   const url = page.url();
-  return url.includes('/expresso') && !url.includes('loginFuncionarioNovo');
+  if (!url.includes('/expresso') || url.includes('loginFuncionarioNovo')) return false;
+  // Validar presença de elemento real da página (não só URL)
+  try {
+    await page.locator('#pills-em-execucao-tab, #search-type, button.btn-modal').first().waitFor({ state: 'visible', timeout: 8000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function fazerLogin(page) {
@@ -99,7 +106,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       '--disable-default-apps',
       '--mute-audio',
       '--no-first-run',
-      '--single-process',        // Usa menos memória no Railway
     ],
   });
 
@@ -123,7 +129,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     log('📌 Passo 1: Autenticação');
 
     await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(2000);
 
     if (!(await isLoggedIn(page))) {
       if (fs.existsSync(SESSION_FILE)) {
@@ -132,7 +138,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
       await fazerLogin(page);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(2000);
       await context.storageState({ path: SESSION_FILE });
       log('💾 Sessão salva');
     } else {
@@ -205,7 +211,49 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       // Preencher número da OS no campo de busca
       const inputBusca = page.locator('#search-autocomplete-input, input[placeholder*="número do serviço"]').first();
-      await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+      let inputVisivel = false;
+      try {
+        await inputBusca.waitFor({ state: 'visible', timeout: 8000 });
+        inputVisivel = true;
+      } catch { inputVisivel = false; }
+      
+      if (!inputVisivel) {
+        // Sessão pode ter expirado — forçar re-login
+        log('⚠️ Campo de busca não apareceu — forçando re-login...');
+        if (fs.existsSync(SESSION_FILE)) {
+          fs.unlinkSync(SESSION_FILE);
+          log('🗑️  Sessão removida');
+        }
+        await screenshot(page, os_numero, 'passo2_relogin_antes');
+        await fazerLogin(page);
+        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+        await page.waitForTimeout(2000);
+        await context.storageState({ path: SESSION_FILE });
+        log('💾 Sessão renovada');
+
+        // Re-clicar na aba Em execução
+        const abaRetry = page.locator('#pills-em-execucao-tab');
+        if (await abaRetry.isVisible().catch(() => false)) {
+          await abaRetry.click();
+          await page.waitForTimeout(800);
+        }
+
+        // Re-expandir pesquisa
+        const barraRetry = page.locator('text=Pesquisar serviços').first();
+        if (await barraRetry.isVisible().catch(() => false)) {
+          await barraRetry.click();
+          await page.waitForTimeout(500);
+        }
+        const selectRetry = page.locator('#search-type');
+        if (await selectRetry.isVisible().catch(() => false)) {
+          await selectRetry.selectOption({ label: 'Serviço' });
+          await page.waitForTimeout(500);
+        }
+
+        // Agora sim esperar o campo de busca (timeout completo)
+        await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+        log('✅ Campo de busca visível após re-login');
+      }
       await screenshot(page, os_numero, 'passo2_campo_busca');
 
       await inputBusca.fill(String(os_numero));

@@ -16,8 +16,116 @@
 
 const express = require('express');
 
+// 📱 WhatsApp — import seguro (não derruba o backend se falhar)
+let notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, notificarResumoDiario, LIMIAR_SAQUE_DESTAQUE;
+try {
+  const whatsapp = require('./whatsapp.service');
+  notificarLoteGerado = whatsapp.notificarLoteGerado;
+  notificarLoteFinalizado = whatsapp.notificarLoteFinalizado;
+  enviarMensagemWhatsApp = whatsapp.enviarMensagemWhatsApp;
+  notificarResumoDiario = whatsapp.notificarResumoDiario;
+  LIMIAR_SAQUE_DESTAQUE = whatsapp.LIMIAR_SAQUE_DESTAQUE;
+  console.log('✅ [WhatsApp] Módulo carregado com sucesso');
+} catch (errWhatsApp) {
+  console.error('⚠️ [WhatsApp] Módulo não carregou:', errWhatsApp.message);
+  // Funções stub para não quebrar nada
+  notificarLoteGerado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  notificarLoteFinalizado = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  enviarMensagemWhatsApp = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  notificarResumoDiario = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+  LIMIAR_SAQUE_DESTAQUE = 200;
+}
+
 function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
+
+  // ═══════════════════════════════════════════════════════════
+  // MAPEAMENTO DE ERROS STARK BANK → MENSAGENS CLARAS PT-BR
+  // ═══════════════════════════════════════════════════════════
+  const STARK_ERROR_MAP = {
+    // Erros de chave Pix
+    'invalidPixKey': 'Chave Pix inválida — a chave informada não existe ou está incorreta no BACEN.',
+    'invalidAccountNumber': 'Número da conta bancária inválido.',
+    'invalidBranchCode': 'Código da agência inválido.',
+    'invalidTaxId': 'CPF/CNPJ inválido ou divergente da chave Pix.',
+    'invalidName': 'Nome do beneficiário diverge do cadastro no banco.',
+    'invalidAmount': 'Valor da transferência inválido (deve ser > R$ 0,00).',
+    'invalidExternalId': 'ID externo duplicado — transferência já foi processada.',
+    // Erros de conta / saldo
+    'insufficientFunds': 'Saldo insuficiente na conta Stark Bank para realizar a transferência.',
+    'insufficientBalance': 'Saldo insuficiente na conta Stark Bank.',
+    'accountClosed': 'A conta do beneficiário está encerrada.',
+    'accountBlocked': 'A conta do beneficiário está bloqueada.',
+    'invalidAccountType': 'Tipo de conta do beneficiário incompatível.',
+    // Erros de processamento
+    'timeout': 'Timeout — o banco do beneficiário não respondeu a tempo. Tente novamente.',
+    'internalError': 'Erro interno do Stark Bank. Tente novamente em alguns minutos.',
+    'bankError': 'Erro no banco do beneficiário — a instituição recusou a transferência.',
+    'pspError': 'Erro no PSP (Provedor de Serviço de Pagamento).',
+    'systemUnavailable': 'Sistema Pix temporariamente indisponível. Tente novamente.',
+    'pixKeyNotFound': 'Chave Pix não encontrada no diretório do BACEN.',
+    'pixKeyInactive': 'Chave Pix inativa ou excluída pelo titular.',
+    'transactionRefused': 'Transação recusada pelo banco destinatário.',
+    'limitExceeded': 'Limite de transação excedido (limite Pix do beneficiário).',
+    'fraudSuspicion': 'Transação bloqueada por suspeita de fraude.',
+    'regulatoryBlock': 'Bloqueio regulatório — conta sob restrição judicial ou BACEN.',
+    // Erros de validação DICT
+    'entryNotFound': 'Chave Pix não encontrada no DICT (diretório do BACEN).',
+    'entryInactive': 'Chave Pix inativa no DICT.',
+    'entryLocked': 'Chave Pix em processo de portabilidade — tente novamente depois.',
+    'requestTimeout': 'Timeout na consulta DICT — o BACEN não respondeu a tempo.',
+  };
+  
+  /**
+   * Traduz um erro Stark Bank (JSON ou string) para mensagem legível
+   * @param {string} erroOriginal - Erro bruto (pode ser JSON stringificado ou string livre)
+   * @returns {string} Mensagem traduzida para exibir ao admin
+   */
+  function traduzirErroStark(erroOriginal) {
+    if (!erroOriginal) return 'Erro desconhecido';
+    
+    const erroStr = String(erroOriginal);
+    
+    // Tentar parsear como JSON (formato típico: [{"code":"invalidPixKey","message":"..."}])
+    try {
+      const parsed = JSON.parse(erroStr);
+      const erros = Array.isArray(parsed) ? parsed : [parsed];
+      
+      const mensagens = erros.map(e => {
+        const code = e.code || '';
+        const msg = e.message || '';
+        
+        // Buscar no mapeamento
+        if (STARK_ERROR_MAP[code]) {
+          return STARK_ERROR_MAP[code];
+        }
+        
+        // Se tem mensagem do Stark, traduzir parcialmente
+        if (msg) {
+          return `${code ? code + ': ' : ''}${msg}`;
+        }
+        
+        return code || 'Erro não identificado';
+      });
+      
+      return mensagens.join(' | ');
+    } catch (parseErr) {
+      // Não é JSON — verificar se contém algum código conhecido
+      for (const [code, mensagem] of Object.entries(STARK_ERROR_MAP)) {
+        if (erroStr.includes(code)) {
+          return mensagem;
+        }
+      }
+      
+      // Limpar prefixos comuns
+      const limpo = erroStr
+        .replace(/^Chave Pix inválida ou não encontrada:\s*/i, '')
+        .replace(/^Retry falhou:\s*/i, '')
+        .replace(/^\[?\{?"?code"?:?"?/i, '');
+      
+      return limpo || erroStr;
+    }
+  }
 
   // ==================== CONFIGURAÇÃO STARK BANK ====================
 
@@ -69,7 +177,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
     const projectId = process.env.STARK_PROJECT_ID;
     const privateKey = process.env.STARK_PRIVATE_KEY;
-    const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
+    const environment = process.env.STARK_ENVIRONMENT || 'production';
 
     if (!projectId || !privateKey) {
       starkErroInit = 'Variáveis STARK_PROJECT_ID e/ou STARK_PRIVATE_KEY não configuradas';
@@ -156,7 +264,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao consultar saldo:', error.message);
-      res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
+      res.status(500).json({ error: 'Erro ao consultar saldo', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -169,7 +277,23 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         return res.status(400).json({ error: 'Nenhum saque selecionado' });
       }
 
-      // Marcar os saques como 'em_lote' — só os que são aprovados e ainda não foram marcados
+      // Marcar os saques como 'em_lote' — só os que são aprovados (ou aguardando pagamento stark) e ainda não foram marcados
+      // Saques aguardando_pagamento_stark são auto-aprovados ao marcar para lote
+      await pool.query(`
+        UPDATE withdrawal_requests 
+        SET status = CASE 
+              WHEN status = 'aguardando_pagamento_stark' AND has_gratuity THEN 'aprovado_gratuidade'
+              WHEN status = 'aguardando_pagamento_stark' THEN 'aprovado'
+              ELSE status
+            END,
+            approved_at = CASE WHEN status = 'aguardando_pagamento_stark' AND approved_at IS NULL THEN NOW() ELSE approved_at END,
+            lancamento_at = CASE WHEN status = 'aguardando_pagamento_stark' AND lancamento_at IS NULL THEN NOW() ELSE lancamento_at END,
+            admin_name = CASE WHEN status = 'aguardando_pagamento_stark' THEN COALESCE(admin_name, 'Sistema (Lote Manual)') ELSE admin_name END
+        WHERE id = ANY($1)
+          AND status IN ('aprovado', 'aprovado_gratuidade', 'aguardando_pagamento_stark')
+          AND (stark_status IS NULL OR stark_status = 'erro')
+      `, [saque_ids]);
+
       const result = await pool.query(`
         UPDATE withdrawal_requests 
         SET stark_status = 'em_lote', updated_at = NOW()
@@ -226,7 +350,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, 
           w.requested_amount, w.fee_amount, w.final_amount,
           w.has_gratuity, w.status, w.approved_at, w.created_at,
-          w.stark_status, w.stark_transfer_id, w.stark_erro,
+          w.stark_status, w.stark_transfer_id, w.stark_erro, w.stark_lote_id,
           ufd.pix_tipo
         FROM withdrawal_requests w
         LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
@@ -273,7 +397,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (saque_ids && Array.isArray(saque_ids) && saque_ids.length > 0) {
         queryPendentes = `
-          SELECT w.*, ufd.pix_tipo
+          SELECT w.*, ufd.pix_tipo,
+            COALESCE(ufd.cpf, w.cpf) as cpf_real,
+            COALESCE(ufd.pix_key, w.pix_key) as pix_key_real
           FROM withdrawal_requests w
           LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
           WHERE w.id = ANY($1)
@@ -284,7 +410,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         paramsPendentes = [saque_ids];
       } else {
         queryPendentes = `
-          SELECT w.*, ufd.pix_tipo
+          SELECT w.*, ufd.pix_tipo,
+            COALESCE(ufd.cpf, w.cpf) as cpf_real,
+            COALESCE(ufd.pix_key, w.pix_key) as pix_key_real
           FROM withdrawal_requests w
           LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
           WHERE w.status IN ('aprovado', 'aprovado_gratuidade')
@@ -312,7 +440,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       } catch (errSaldo) {
         await client.query('ROLLBACK');
         releaseClient();
-        return res.status(500).json({ error: 'Não foi possível verificar saldo', details: errSaldo.message });
+        return res.status(500).json({ error: 'Não foi possível verificar saldo', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : errSaldo.message });
       }
 
       if (saldoDisponivel < valorTotal) {
@@ -329,8 +457,8 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       // 3. Validar dados ANTES de enviar para a Stark Bank
       const errosValidacao = [];
       for (const saque of saques) {
-        const cpf = (saque.cpf || '').replace(/\D/g, '');
-        const pixKey = (saque.pix_key || '').trim();
+        const cpf = (saque.cpf_real || saque.cpf || '').replace(/\D/g, '');
+        const pixKey = (saque.pix_key_real || saque.pix_key || '').trim();
 
         if (!cpf || cpf.length !== 11) {
           errosValidacao.push(`Saque #${saque.id} (${saque.user_name}): CPF inválido — "${saque.cpf || 'vazio'}" (${cpf.length} dígitos, esperado 11)`);
@@ -353,16 +481,40 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      // 4. Criar registro do lote
-      const loteResult = await client.query(`
-        INSERT INTO stark_lotes (
-          quantidade, valor_total, saldo_antes, status, 
-          executado_por_id, executado_por_nome
-        ) VALUES ($1, $2, $3, 'processando', $4, $5)
-        RETURNING *
-      `, [saques.length, valorTotal, saldoDisponivel, req.user.id, req.user.nome || req.user.username]);
+      // 4. Reusar lote 'pendente' existente ou criar novo
+      let loteId;
+      
+      // Verificar se os saques já pertencem a um lote pendente (criado pelo cron)
+      const lotesExistentes = [...new Set(saques.map(s => s.stark_lote_id).filter(Boolean))];
+      if (lotesExistentes.length === 1) {
+        // Todos do mesmo lote — reusar
+        const loteExistente = await client.query(
+          `SELECT * FROM stark_lotes WHERE id = $1 AND status = 'pendente'`,
+          [lotesExistentes[0]]
+        );
+        if (loteExistente.rows.length > 0) {
+          loteId = loteExistente.rows[0].id;
+          await client.query(`
+            UPDATE stark_lotes 
+            SET status = 'processando', saldo_antes = $1, quantidade = $2, valor_total = $3,
+                executado_por_id = $4, executado_por_nome = $5
+            WHERE id = $6
+          `, [saldoDisponivel, saques.length, valorTotal, req.user.id, req.user.nome || req.user.username, loteId]);
+          console.log(`🏦 [Stark Bank] Reusando lote pendente #${loteId}`);
+        }
+      }
 
-      const loteId = loteResult.rows[0].id;
+      // Se não reusou, criar novo
+      if (!loteId) {
+        const loteResult = await client.query(`
+          INSERT INTO stark_lotes (
+            quantidade, valor_total, saldo_antes, status, 
+            executado_por_id, executado_por_nome
+          ) VALUES ($1, $2, $3, 'processando', $4, $5)
+          RETURNING *
+        `, [saques.length, valorTotal, saldoDisponivel, req.user.id, req.user.nome || req.user.username]);
+        loteId = loteResult.rows[0].id;
+      }
 
       // 5. Consultar DICT e montar transfers
       // Cada saque é processado individualmente — se um falhar no DICT, marca erro mas continua os outros
@@ -370,8 +522,8 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       const saquesRejeitados = []; // saques que falharam na validação/DICT
 
       for (const saque of saques) {
-        const pixKeyRaw = (saque.pix_key || '').trim();
-        const cpf = (saque.cpf || '').replace(/\D/g, '');
+        const pixKeyRaw = (saque.pix_key_real || saque.pix_key || '').trim();
+        const cpf = (saque.cpf_real || saque.cpf || '').replace(/\D/g, '');
         const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
         const pixTipo = (saque.pix_tipo || '').toLowerCase();
 
@@ -406,13 +558,16 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         }
         // Se nenhum padrão bateu, usa como está
 
-        console.log(`📋 [Stark Bank] Saque #${saque.id} (${saque.user_name}): pixRaw="${pixKeyRaw}", pixTipo="${pixTipo}", chaveDict="${chaveDict}", cpf="${cpfFormatado}"`);
+        // 🔒 SECURITY FIX: Mascarar dados sensíveis nos logs
+        const cpfMask = cpf ? cpf.slice(0, 3) + '***' + cpf.slice(-2) : 'vazio';
+        const pixMask = pixKeyRaw.length > 6 ? pixKeyRaw.slice(0, 3) + '***' + pixKeyRaw.slice(-3) : '***';
+        console.log(`📋 [Stark Bank] Saque #${saque.id} (${saque.user_name}): pixTipo="${pixTipo}", cpf="${cpfMask}"`);
 
         // ── Consultar DICT ──
         try {
           const dictKey = await starkbank.dictKey.get(chaveDict);
 
-          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}", taxId="${dictKey.taxId}"`);
+          console.log(`🔍 [Stark Bank] DICT OK saque #${saque.id}: banco=${dictKey.ispb}, tipo=${dictKey.accountType}, nome="${dictKey.name}"`);
 
           // Usar o taxId do DICT (titular real da chave Pix) — evita taxIdMismatch
           // Se o DICT retornar taxId, usar ele. Senão fallback para o CPF do cadastro.
@@ -420,7 +575,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
           // Log se o CPF diverge (para o admin saber que o cadastro está desatualizado)
           if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
-            console.warn(`⚠️ [Stark Bank] CPF divergente saque #${saque.id}: cadastro=${cpf}, DICT=${dictKey.taxId.replace(/\D/g, '')} (${dictKey.name})`);
+            console.warn(`⚠️ [Stark Bank] CPF divergente saque #${saque.id}: cadastro=${cpf.slice(0,3)}***${cpf.slice(-2)}, DICT=${dictKey.taxId.replace(/\D/g, '').slice(0,3)}***${dictKey.taxId.replace(/\D/g, '').slice(-2)} (${dictKey.name})`);
           }
 
           const transferData = {
@@ -446,13 +601,13 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
             UPDATE withdrawal_requests
             SET stark_status = 'erro', stark_erro = $1, updated_at = NOW()
             WHERE id = $2
-          `, [`Chave Pix inválida ou não encontrada: ${erroMsg}`, saque.id]);
+          `, [traduzirErroStark(erroMsg), saque.id]);
 
           saquesRejeitados.push({
             id: saque.id,
             nome: saque.user_name,
             chave: chaveDict,
-            erro: erroMsg
+            erro: traduzirErroStark(erroMsg)
           });
         }
       }
@@ -496,14 +651,14 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
             UPDATE withdrawal_requests
             SET stark_status = 'erro', stark_erro = $1, stark_lote_id = $2, updated_at = NOW()
             WHERE id = $3
-          `, [erroMsg, loteId, saque.id]);
+          `, [traduzirErroStark(erroMsg), loteId, saque.id]);
 
           await client.query(`
             INSERT INTO stark_lote_itens (lote_id, withdrawal_id, valor, status, erro)
             VALUES ($1, $2, $3, 'rejeitado', $4)
-          `, [loteId, saque.id, saque.final_amount, erroMsg]);
+          `, [loteId, saque.id, saque.final_amount, traduzirErroStark(erroMsg)]);
 
-          errosEnvio.push({ id: saque.id, nome: saque.user_name, erro: erroMsg });
+          errosEnvio.push({ id: saque.id, nome: saque.user_name, erro: traduzirErroStark(erroMsg) });
         }
       }
 
@@ -534,9 +689,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
               stark_transfer_id = $1,
               stark_lote_id = $2,
               stark_enviado_em = NOW(),
+              admin_name = $4,
               updated_at = NOW()
           WHERE id = $3
-        `, [transfer.id, loteId, saque.id]);
+        `, [transfer.id, loteId, saque.id, req.user.nome || req.user.username || 'Admin']);
 
         await client.query(`
           INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
@@ -584,7 +740,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Stark Bank] Erro ao executar lote:', error.message);
-      res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: error.message });
+      res.status(500).json({ error: 'Erro ao executar lote de pagamento', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       releaseClient();
     }
@@ -660,9 +816,13 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       await client.query('BEGIN');
 
       const itensErro = await client.query(`
-        SELECT li.*, w.user_name, w.cpf, w.pix_key, w.final_amount, w.user_cod
+        SELECT li.*, w.user_name, w.cpf, w.pix_key, w.final_amount, w.user_cod,
+          COALESCE(ufd.cpf, w.cpf) as cpf_real,
+          COALESCE(ufd.pix_key, w.pix_key) as pix_key_real,
+          ufd.pix_tipo
         FROM stark_lote_itens li
         JOIN withdrawal_requests w ON w.id = li.withdrawal_id
+        LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
         WHERE li.lote_id = $1 AND li.status = 'erro'
         FOR UPDATE OF li
       `, [id]);
@@ -688,39 +848,80 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         });
       }
 
-      const transfers = itens.map(item => {
-        const cpf = (item.cpf || '').replace(/\D/g, '');
+      // 🔒 SECURITY FIX: Retry com validação DICT (igual ao fluxo principal)
+      // Processar individualmente — se um falhar no DICT, marca erro mas continua os outros
+      const transfersCriadas = [];
+      const errosRetry = [];
+
+      for (const item of itens) {
+        const pixKeyRaw = (item.pix_key_real || item.pix_key || '').trim();
+        const cpf = (item.cpf_real || item.cpf || '').replace(/\D/g, '');
         const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
-        const pixKey = (item.pix_key || '').trim();
 
-        let accountNumber = pixKey;
-        if (/^\d{3}[\.\-]?\d{3}[\.\-]?\d{3}[\.\-]?\d{2}$/.test(pixKey.replace(/\D/g, '')) && pixKey.replace(/\D/g, '').length === 11) {
-          accountNumber = pixKey.replace(/\D/g, '');
+        // Normalizar chave Pix
+        let chaveDict = pixKeyRaw;
+        const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+        if (pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+')) {
+          chaveDict = pixSoDigitos;
+        } else if (pixSoDigitos.length === 14) {
+          chaveDict = pixSoDigitos;
+        } else if (pixKeyRaw.startsWith('+55') || (pixSoDigitos.length >= 10 && pixSoDigitos.length <= 13)) {
+          let tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
+          else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
+          else chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+        } else if (pixKeyRaw.includes('@')) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
         }
-        if (pixKey.startsWith('+')) {
-          accountNumber = pixKey.replace(/[\s\-\(\)]/g, '');
+
+        try {
+          const dictKey = await starkbank.dictKey.get(chaveDict);
+          const taxIdFinal = dictKey.taxId || cpfFormatado;
+
+          console.log(`🔍 [Stark Retry] DICT OK item #${item.id}: banco=${dictKey.ispb}, nome="${dictKey.name}"`);
+
+          const transferData = {
+            amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
+            name: item.user_name,
+            taxId: taxIdFinal,
+            bankCode: dictKey.ispb || '20018183',
+            branchCode: dictKey.branchCode || '0001',
+            accountNumber: dictKey.accountNumber || chaveDict,
+            accountType: dictKey.accountType || 'checking',
+            externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
+            tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
+          };
+
+          const resultado = await starkbank.transfer.create([new starkbank.Transfer(transferData)]);
+          transfersCriadas.push({ item, transfer: resultado[0] });
+          console.log(`  ✅ Retry transfer item #${item.id} — ID: ${resultado[0].id}`);
+        } catch (errRetry) {
+          const erroMsg = errRetry.errors ? JSON.stringify(errRetry.errors) : errRetry.message;
+          console.warn(`  ❌ Retry falhou item #${item.id}: ${erroMsg}`);
+
+          await client.query(`
+            UPDATE stark_lote_itens SET status = 'erro', erro = $1, atualizado_em = NOW() WHERE id = $2
+          `, [traduzirErroStark(`Retry falhou: ${erroMsg}`), item.id]);
+
+          await client.query(`
+            UPDATE withdrawal_requests SET stark_status = 'erro', stark_erro = $1, updated_at = NOW() WHERE id = $2
+          `, [traduzirErroStark(`Retry falhou: ${erroMsg}`), item.withdrawal_id]);
+
+          errosRetry.push({ id: item.id, nome: item.user_name, erro: traduzirErroStark(erroMsg) });
         }
+      }
 
-        return new starkbank.Transfer({
-          amount: Math.round(parseFloat(item.final_amount || item.valor) * 100),
-          name: item.user_name,
-          taxId: cpfFormatado,
-          bankCode: '20018183',
-          branchCode: '0001',
-          accountNumber: accountNumber,
-          accountType: 'checking',
-          externalId: `tutts-saque-${item.withdrawal_id}-retry-${Date.now()}`,
-          tags: [`lote:${id}`, `saque:${item.withdrawal_id}`, 'retry']
-        });
-      });
-
-      const transfersCriadas = await starkbank.transfer.create(transfers);
+      if (transfersCriadas.length === 0) {
+        await client.query(`UPDATE stark_lotes SET status = 'erro', erro = 'Todas as retentativas falharam' WHERE id = $1`, [id]);
+        await client.query('COMMIT');
+        releaseClient();
+        return res.json({ success: false, lote_id: parseInt(id), retentados: 0, erros: errosRetry });
+      }
 
       // Atualizar itens e saques
-      for (let i = 0; i < itens.length; i++) {
-        const item = itens[i];
-        const transfer = transfersCriadas[i];
-
+      for (const { item, transfer } of transfersCriadas) {
         await client.query(`
           UPDATE stark_lote_itens 
           SET stark_transfer_id = $1, status = 'processando', erro = NULL, atualizado_em = NOW()
@@ -729,9 +930,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
         await client.query(`
           UPDATE withdrawal_requests 
-          SET stark_status = 'processando', stark_transfer_id = $1, stark_erro = NULL, updated_at = NOW()
+          SET stark_status = 'processando', stark_transfer_id = $1, stark_erro = NULL, admin_name = $3, updated_at = NOW()
           WHERE id = $2
-        `, [transfer.id, item.withdrawal_id]);
+        `, [transfer.id, item.withdrawal_id, req.user.nome || req.user.username || 'Admin']);
       }
 
       // Atualizar status do lote
@@ -742,23 +943,26 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       await client.query('COMMIT');
 
       await registrarAuditoria(req, 'STARK_LOTE_RETENTATIVA', AUDIT_CATEGORIES.FINANCIAL, 'stark_lotes', id, {
-        itens_retentados: itens.length,
-        valor: valorTotal
+        itens_retentados: transfersCriadas.length,
+        itens_falharam: errosRetry.length,
+        valor: transfersCriadas.reduce((a, t) => a + parseFloat(t.item.final_amount || t.item.valor || 0), 0)
       });
 
-      console.log(`🔄 [Stark Bank] Retentativa do lote #${id}: ${itens.length} pagamentos`);
+      console.log(`🔄 [Stark Bank] Retentativa do lote #${id}: ${transfersCriadas.length} enviados, ${errosRetry.length} falharam`);
 
       res.json({
         success: true,
         lote_id: parseInt(id),
-        itens_retentados: itens.length,
-        valor_total: valorTotal
+        itens_retentados: transfersCriadas.length,
+        itens_falharam: errosRetry.length,
+        erros: errosRetry,
+        valor_total: transfersCriadas.reduce((a, t) => a + parseFloat(t.item.final_amount || t.item.valor || 0), 0)
       });
 
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Stark Bank] Erro na retentativa:', error.message);
-      res.status(500).json({ error: 'Erro ao retentar pagamentos', details: error.message });
+      res.status(500).json({ error: 'Erro ao retentar pagamentos', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     } finally {
       releaseClient();
     }
@@ -792,12 +996,105 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     }
   });
 
+  // ==================== VALIDAR CHAVES PIX DO LOTE (DICT) ====================
+  router.post('/stark/lote/validar', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
+    try {
+      const { saque_ids } = req.body;
+      if (!saque_ids || !Array.isArray(saque_ids) || saque_ids.length === 0) {
+        return res.status(400).json({ error: 'Nenhum saque para validar' });
+      }
+
+      // Buscar saques
+      const result = await pool.query(`
+        SELECT w.id, w.user_cod, w.user_name, w.cpf, w.pix_key, w.final_amount, ufd.pix_tipo,
+          COALESCE(ufd.cpf, w.cpf) as cpf_real,
+          COALESCE(ufd.pix_key, w.pix_key) as pix_key_real
+        FROM withdrawal_requests w
+        LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+        WHERE w.id = ANY($1)
+      `, [saque_ids]);
+
+      const validacoes = [];
+      let comAlerta = 0;
+
+      for (const saque of result.rows) {
+        const pixKeyRaw = (saque.pix_key_real || saque.pix_key || '').trim();
+        const cpf = (saque.cpf_real || saque.cpf || '').replace(/\D/g, '');
+        const pixTipo = (saque.pix_tipo || '').toLowerCase();
+        const alertas = [];
+        let dictStatus = 'erro';
+        let dictNome = null;
+        let dictBanco = null;
+        let cpfDivergente = false;
+
+        // Normalizar chave Pix
+        let chaveDict = pixKeyRaw;
+        const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+        if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'cnpj' || (!pixTipo && pixSoDigitos.length === 14)) {
+          chaveDict = pixSoDigitos;
+        } else if (pixTipo === 'telefone' || pixTipo === 'phone' || pixKeyRaw.startsWith('+55')) {
+          let tel = pixSoDigitos;
+          if (tel.startsWith('55') && tel.length >= 12) chaveDict = '+' + tel;
+          else if (tel.length === 10 || tel.length === 11) chaveDict = '+55' + tel;
+          else chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+        } else if (pixTipo === 'email' || pixKeyRaw.includes('@')) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+          chaveDict = pixKeyRaw.toLowerCase().trim();
+        }
+
+        try {
+          const dictKey = await starkbank.dictKey.get(chaveDict);
+          dictStatus = 'ok';
+          dictNome = dictKey.name || null;
+          dictBanco = dictKey.ispb || null;
+
+          // Verificar CPF divergente
+          if (dictKey.taxId && dictKey.taxId.replace(/\D/g, '') !== cpf) {
+            cpfDivergente = true;
+            alertas.push(`CPF divergente: cadastro=${cpf.substring(0,3)}...${cpf.substring(9)}, DICT=${dictKey.taxId.replace(/\D/g, '').substring(0,3)}...${dictKey.taxId.replace(/\D/g, '').substring(9)} (${dictKey.name})`);
+          }
+
+          console.log(`🔍 [DICT Validação] Saque #${saque.id}: OK — ${dictKey.name} (banco ${dictKey.ispb})`);
+        } catch (errDict) {
+          const erroMsg = errDict.errors ? JSON.stringify(errDict.errors) : errDict.message;
+          alertas.push('Chave Pix inválida ou não encontrada: ' + erroMsg);
+          console.warn(`⚠️ [DICT Validação] Saque #${saque.id}: FALHA — ${erroMsg}`);
+        }
+
+        if (alertas.length > 0) comAlerta++;
+
+        validacoes.push({
+          id: saque.id,
+          dict_status: dictStatus,
+          dict_nome: dictNome,
+          dict_banco: dictBanco,
+          cpf_divergente: cpfDivergente,
+          alertas: alertas
+        });
+      }
+
+      res.json({
+        total: validacoes.length,
+        validados: validacoes.filter(v => v.dict_status === 'ok').length,
+        com_alerta: comAlerta,
+        validacoes: validacoes
+      });
+
+    } catch (error) {
+      console.error('❌ [DICT Validação] Erro:', error.message);
+      res.status(500).json({ error: 'Erro ao validar chaves Pix', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
+    }
+  });
+
   // ==================== WEBHOOK STARK BANK (PÚBLICO - sem JWT) ====================
+  // 🔒 SECURITY FIX (HIGH-03): Webhook SEMPRE exige assinatura válida — sandbox removido
   router.post('/stark/webhook', async (req, res) => {
     try {
       const signature = req.headers['digital-signature'];
       const content = req.rawBody || JSON.stringify(req.body);
-      const environment = process.env.STARK_ENVIRONMENT || 'sandbox';
 
       console.log(`📨 [Stark Webhook] Recebido! signature=${signature ? 'SIM(' + signature.substring(0, 20) + '...)' : 'NÃO'}, bodySize=${content.length}, rawBody=${req.rawBody ? 'SIM' : 'NÃO'}`);
 
@@ -807,47 +1104,23 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         return res.status(200).send('OK');
       }
 
-      if (environment === 'production') {
-        if (!signature) {
-          console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital');
-          return res.status(200).send('OK');
-        }
+      // Sem assinatura = rejeitar sempre
+      if (!signature) {
+        console.warn('⚠️ [Stark Webhook] REJEITADO — sem assinatura digital de', req.ip);
+        return res.status(200).send('OK');
+      }
 
-        try {
-          const event = await starkbank.event.parse({
-            content: content,
-            signature: signature
-          });
-          console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
-          await processarEventoStark(event);
-        } catch (errValidacao) {
-          console.warn('⚠️ [Stark Webhook] Assinatura inválida:', errValidacao.message);
-          console.warn('⚠️ [Stark Webhook] rawBody presente:', !!req.rawBody, '| content length:', content.length);
-
-          // FALLBACK: processar pelo body parseado para não perder eventos
-          try {
-            const body = req.body;
-            if (body && body.event) {
-              console.log('🔄 [Stark Webhook] Fallback: processando pelo body parseado...');
-              await processarEventoStark(body.event);
-            }
-          } catch (errFallback) {
-            console.error('❌ [Stark Webhook] Fallback falhou:', errFallback.message);
-          }
-          return res.status(200).send('OK');
-        }
-      } else {
-        // Sandbox
-        if (signature) {
-          try {
-            const event = await starkbank.event.parse({ content, signature });
-            await processarEventoStark(event);
-          } catch (e) {
-            if (req.body && req.body.event) await processarEventoStark(req.body.event);
-          }
-        } else if (req.body && req.body.event) {
-          await processarEventoStark(req.body.event);
-        }
+      try {
+        const event = await starkbank.event.parse({
+          content: content,
+          signature: signature
+        });
+        console.log(`✅ [Stark Webhook] Assinatura válida! subscription=${event.subscription}`);
+        await processarEventoStark(event);
+      } catch (errValidacao) {
+        console.error('❌ [Stark Webhook] REJEITADO — assinatura inválida:', errValidacao.message);
+        console.error('❌ [Stark Webhook] IP:', req.ip, '| rawBody presente:', !!req.rawBody, '| content length:', content.length);
+        return res.status(200).send('OK');
       }
 
       res.status(200).send('OK');
@@ -858,6 +1131,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
   });
 
   // ==================== SYNC MANUAL — CONSULTAR STATUS NA STARK BANK ====================
+  // Sincroniza AMBOS: saques (withdrawal_requests) e acertos (stark_lote_itens)
   router.post('/stark/sync', verificarToken, verificarAdminOuFinanceiro, verificarStark, async (req, res) => {
     try {
       // Limpar transfers antigas do sandbox que nunca vão resolver
@@ -869,8 +1143,9 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           AND stark_enviado_em < '2026-03-11T14:00:00Z'
       `);
 
-      const pendentes = await pool.query(`
-        SELECT id, stark_transfer_id, user_name
+      // ── 1. Buscar saques pendentes (withdrawal_requests) ──
+      const pendentesSaques = await pool.query(`
+        SELECT id, stark_transfer_id, user_name, 'saque' as origem
         FROM withdrawal_requests
         WHERE stark_status = 'processando'
           AND stark_transfer_id IS NOT NULL
@@ -879,29 +1154,44 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         LIMIT 50
       `);
 
-      if (pendentes.rows.length === 0) {
+      // ── 2. Buscar acertos pendentes (stark_lote_itens) ──
+      const pendentesAcertos = await pool.query(`
+        SELECT li.id, li.stark_transfer_id, li.nome_prof as user_name, 'acerto' as origem, li.lote_id
+        FROM stark_lote_itens li
+        JOIN stark_lotes l ON l.id = li.lote_id
+        WHERE li.status = 'processando'
+          AND li.stark_transfer_id IS NOT NULL
+          AND l.tipo = 'acerto'
+          AND li.created_at < NOW() - INTERVAL '30 seconds'
+        ORDER BY li.created_at ASC
+        LIMIT 50
+      `);
+
+      const todosPendentes = [...pendentesSaques.rows, ...pendentesAcertos.rows];
+
+      if (todosPendentes.length === 0) {
         return res.json({ message: 'Nenhuma transfer pendente', atualizados: 0 });
       }
 
-      console.log(`🔄 [Stark Sync] Verificando ${pendentes.rows.length} transfers pendentes...`);
+      console.log(`🔄 [Stark Sync] Verificando ${pendentesSaques.rows.length} saques + ${pendentesAcertos.rows.length} acertos pendentes...`);
 
       let atualizados = 0;
       const resultados = [];
 
-      for (const saque of pendentes.rows) {
+      for (const item of todosPendentes) {
         try {
           // Tentar transfer.get() primeiro
           let transfer;
           try {
-            transfer = await starkbank.transfer.get(saque.stark_transfer_id);
+            transfer = await starkbank.transfer.get(item.stark_transfer_id);
           } catch (getErr) {
             // Se transfer.get falhar, tentar via query com o id
-            console.warn(`⚠️ [Stark Sync] transfer.get falhou para ${saque.stark_transfer_id}: ${getErr.message}`);
+            console.warn(`⚠️ [Stark Sync] transfer.get falhou para ${item.stark_transfer_id}: ${getErr.message}`);
             console.log(`🔄 [Stark Sync] Tentando via transfer.log.query...`);
 
             // Consultar os logs da transfer
             let found = false;
-            const logs = await starkbank.transfer.log.query({ transferIds: [saque.stark_transfer_id], limit: 5 });
+            const logs = await starkbank.transfer.log.query({ transferIds: [item.stark_transfer_id], limit: 5 });
             for await (const log of logs) {
               console.log(`🔄 [Stark Sync] Log: type=${log.type}, transfer.status=${log.transfer?.status}`);
               if (log.transfer && (log.transfer.status === 'success' || log.transfer.status === 'failed' || log.transfer.status === 'canceled')) {
@@ -911,32 +1201,34 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
               }
             }
             if (!found) {
-              resultados.push({ id: saque.id, nome: saque.user_name, status: 'sem_info', erro: 'Não foi possível consultar status' });
+              resultados.push({ id: item.id, nome: item.user_name, origem: item.origem, status: 'sem_info', erro: 'Não foi possível consultar status' });
               continue;
             }
           }
 
-          console.log(`🔄 [Stark Sync] Transfer ${saque.stark_transfer_id} (saque #${saque.id}): status=${transfer.status}`);
+          console.log(`🔄 [Stark Sync] Transfer ${item.stark_transfer_id} (${item.origem} #${item.id}): status=${transfer.status}`);
 
           if (transfer.status === 'success') {
-            await atualizarStatusPagamento(saque.stark_transfer_id, 'pago', null);
+            await atualizarStatusPagamento(item.stark_transfer_id, 'pago', null);
             atualizados++;
-            resultados.push({ id: saque.id, nome: saque.user_name, status: 'pago' });
+            resultados.push({ id: item.id, nome: item.user_name, origem: item.origem, status: 'pago' });
           } else if (transfer.status === 'failed' || transfer.status === 'canceled') {
-            const erro = transfer.errors?.[0]?.message || transfer.reason || `Status: ${transfer.status}`;
-            await atualizarStatusPagamento(saque.stark_transfer_id, 'erro', erro);
+            const erroRaw = transfer.errors?.[0]?.message || transfer.reason || `Status: ${transfer.status}`;
+            const erroCode = transfer.errors?.[0]?.code || '';
+            const erroTraduzido = traduzirErroStark(erroCode ? JSON.stringify(transfer.errors) : erroRaw);
+            await atualizarStatusPagamento(item.stark_transfer_id, 'erro', erroTraduzido);
             atualizados++;
-            resultados.push({ id: saque.id, nome: saque.user_name, status: 'erro', erro });
+            resultados.push({ id: item.id, nome: item.user_name, origem: item.origem, status: 'erro', erro: erroTraduzido });
           } else {
-            resultados.push({ id: saque.id, nome: saque.user_name, status: transfer.status });
+            resultados.push({ id: item.id, nome: item.user_name, origem: item.origem, status: transfer.status });
           }
         } catch (errTransfer) {
-          console.error(`❌ [Stark Sync] Erro transfer ${saque.stark_transfer_id}:`, errTransfer.message);
-          resultados.push({ id: saque.id, nome: saque.user_name, status: 'erro_consulta', erro: errTransfer.message });
+          console.error(`❌ [Stark Sync] Erro transfer ${item.stark_transfer_id}:`, errTransfer.message);
+          resultados.push({ id: item.id, nome: item.user_name, origem: item.origem, status: 'erro_consulta', erro: errTransfer.message });
         }
       }
 
-      console.log(`✅ [Stark Sync] ${atualizados}/${pendentes.rows.length} atualizadas`);
+      console.log(`✅ [Stark Sync] ${atualizados}/${todosPendentes.length} atualizadas`);
 
       // Finalizar lotes que ficaram como 'processando' mas todos os itens já foram processados
       try {
@@ -961,6 +1253,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           `, [statusLote, lote.id]);
 
           console.log(`✅ [Stark Sync] Lote #${lote.id} finalizado: ${statusLote}`);
+
         }
 
         if (lotesPendentes.rows.length > 0) {
@@ -970,10 +1263,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         console.error('⚠️ [Stark Sync] Erro ao finalizar lotes:', errLotes.message);
       }
 
-      res.json({ consultadas: pendentes.rows.length, atualizados, resultados });
+      res.json({ consultadas: todosPendentes.length, atualizados, resultados });
     } catch (error) {
       console.error('❌ [Stark Sync] Erro:', error.message);
-      res.status(500).json({ error: 'Erro ao sincronizar', details: error.message });
+      res.status(500).json({ error: 'Erro ao sincronizar', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
 
@@ -999,86 +1292,133 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         // Pagamento confirmado!
         await atualizarStatusPagamento(transferId, 'pago', null);
       } else if (status === 'failed' || status === 'canceled') {
-        const erro = transfer.errors?.[0]?.message || transfer.reason || `Status: ${status}`;
-        await atualizarStatusPagamento(transferId, 'erro', erro);
+        const erroRaw = transfer.errors?.[0]?.message || transfer.reason || `Status: ${status}`;
+        const erroCode = transfer.errors?.[0]?.code || '';
+        const erroTraduzido = traduzirErroStark(erroCode ? JSON.stringify(transfer.errors) : erroRaw);
+        await atualizarStatusPagamento(transferId, 'erro', erroTraduzido);
       }
       // 'processing' e 'created' não precisam de ação — já estão como 'processando'
     }
   }
 
   // Atualizar status do pagamento no banco
+  // Suporta AMBOS: saques (withdrawal_requests) e acertos (stark_lote_itens)
   async function atualizarStatusPagamento(starkTransferId, novoStatus, erro) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Atualizar o saque — cast explícito para evitar "inconsistent types deduced"
+      const transferIdStr = String(starkTransferId);
+
+      // 1. Tentar atualizar em withdrawal_requests (fluxo de saques)
       const updateResult = await client.query(`
         UPDATE withdrawal_requests 
         SET stark_status = $1::text,
             stark_erro = $2::text,
             stark_pago_em = CASE WHEN $1::text = 'pago' THEN NOW() ELSE stark_pago_em END,
+            status = CASE WHEN $1::text = 'pago' THEN 'pago_stark' ELSE status END,
             updated_at = NOW()
         WHERE stark_transfer_id = $3::text
         RETURNING *
-      `, [novoStatus, erro, String(starkTransferId)]); 
+      `, [novoStatus, erro, transferIdStr]); 
 
-      if (updateResult.rows.length === 0) {
-        console.warn(`⚠️ [Stark Webhook] Saque não encontrado para transfer ${starkTransferId}`);
-        await client.query('ROLLBACK');
-        client.release();
+      if (updateResult.rows.length > 0) {
+        // ── FLUXO SAQUES — encontrou em withdrawal_requests ──
+        const saque = updateResult.rows[0];
+
+        // Atualizar o item do lote correspondente
+        await client.query(`
+          UPDATE stark_lote_itens 
+          SET status = $1::text, erro = $2::text, atualizado_em = NOW()
+          WHERE stark_transfer_id = $3::text
+        `, [novoStatus, erro, transferIdStr]);
+
+        // Verificar se todos os itens do lote já foram processados
+        if (saque.stark_lote_id) {
+          await _finalizarLoteSeCompleto(client, saque.stark_lote_id);
+        }
+
+        await client.query('COMMIT');
+
+        // Notificar via WebSocket se disponível
+        if (global.notifyStarkPayment) {
+          global.notifyStarkPayment(saque, novoStatus);
+        }
+
+        console.log(`✅ [Stark Webhook] Saque #${saque.id} atualizado: ${novoStatus}${erro ? ` (${erro})` : ''}`);
         return;
       }
 
-      const saque = updateResult.rows[0];
-
-      // Atualizar o item do lote
-      await client.query(`
+      // 2. Fallback: tentar em stark_lote_itens (fluxo de ACERTO)
+      const updateAcerto = await client.query(`
         UPDATE stark_lote_itens 
         SET status = $1::text, erro = $2::text, atualizado_em = NOW()
         WHERE stark_transfer_id = $3::text
-      `, [novoStatus, erro, String(starkTransferId)]);
+        RETURNING *
+      `, [novoStatus, erro, transferIdStr]);
 
-      // Verificar se todos os itens do lote já foram processados
-      if (saque.stark_lote_id) {
-        const pendentes = await client.query(`
-          SELECT COUNT(*) as total FROM stark_lote_itens 
-          WHERE lote_id = $1 AND status IN ('processando', 'em_lote', 'pendente')
-        `, [saque.stark_lote_id]);
+      if (updateAcerto.rows.length > 0) {
+        const item = updateAcerto.rows[0];
+        console.log(`✅ [Stark Webhook] Acerto item #${item.id} (lote #${item.lote_id}) atualizado: ${novoStatus}${erro ? ` (${erro})` : ''}`);
 
-        if (parseInt(pendentes.rows[0].total) === 0) {
-          // Todos processados — verificar se teve erros ou rejeitados
-          const erros = await client.query(`
-            SELECT COUNT(*) as total FROM stark_lote_itens 
-            WHERE lote_id = $1 AND status IN ('erro', 'rejeitado')
-          `, [saque.stark_lote_id]);
+        // Verificar se todos os itens do lote já foram processados
+        await _finalizarLoteSeCompleto(client, item.lote_id);
 
-          const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
+        await client.query('COMMIT');
 
-          await client.query(`
-            UPDATE stark_lotes 
-            SET status = $1, finalizado_em = NOW()
-            WHERE id = $2 AND status != $1
-          `, [statusLote, saque.stark_lote_id]);
-
-          console.log(`✅ [Stark Webhook] Lote #${saque.stark_lote_id} finalizado: ${statusLote}`);
+        // Notificar via WebSocket — broadcast para admins (acerto)
+        if (global.notifyStarkPayment) {
+          global.notifyStarkPayment({
+            id: item.id,
+            lote_id: item.lote_id,
+            cod_prof: item.cod_prof,
+            nome_prof: item.nome_prof,
+            stark_transfer_id: transferIdStr,
+            stark_status: novoStatus,
+            stark_erro: erro,
+            stark_lote_id: item.lote_id,
+            final_amount: item.valor,
+          }, novoStatus);
         }
+        return;
       }
 
-      await client.query('COMMIT');
-
-      // Notificar via WebSocket se disponível
-      if (global.notifyStarkPayment) {
-        global.notifyStarkPayment(saque, novoStatus);
-      }
-
-      console.log(`✅ [Stark Webhook] Saque #${saque.id} atualizado: ${novoStatus}${erro ? ` (${erro})` : ''}`);
+      // 3. Nenhum registro encontrado
+      console.warn(`⚠️ [Stark Webhook] Transfer ${transferIdStr} não encontrada em withdrawal_requests NEM em stark_lote_itens`);
+      await client.query('ROLLBACK');
 
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
       console.error('❌ [Stark Webhook] Erro ao atualizar status:', error.message);
     } finally {
       client.release();
+    }
+  }
+
+  // Helper: Verifica se todos os itens de um lote foram processados e finaliza se sim
+  async function _finalizarLoteSeCompleto(client, loteId) {
+    if (!loteId) return;
+
+    const pendentes = await client.query(`
+      SELECT COUNT(*) as total FROM stark_lote_itens 
+      WHERE lote_id = $1 AND status IN ('processando', 'em_lote', 'pendente')
+    `, [loteId]);
+
+    if (parseInt(pendentes.rows[0].total) === 0) {
+      const erros = await client.query(`
+        SELECT COUNT(*) as total FROM stark_lote_itens 
+        WHERE lote_id = $1 AND status IN ('erro', 'rejeitado')
+      `, [loteId]);
+
+      const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
+
+      await client.query(`
+        UPDATE stark_lotes 
+        SET status = $1, finalizado_em = NOW()
+        WHERE id = $2 AND status NOT IN ($1, 'concluido')
+      `, [statusLote, loteId]);
+
+      console.log(`✅ [Stark] Lote #${loteId} finalizado: ${statusLote}`);
     }
   }
 
@@ -1102,12 +1442,10 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
         }
       }
 
-      // Diagnóstico de configuração
+      // Diagnóstico de configuração (🔒 sem info sensível de chave)
       const diagnostico = {
         project_id_presente: !!process.env.STARK_PROJECT_ID,
         private_key_presente: !!process.env.STARK_PRIVATE_KEY,
-        private_key_tem_header_pem: !!(process.env.STARK_PRIVATE_KEY && (process.env.STARK_PRIVATE_KEY.includes('-----BEGIN') || process.env.STARK_PRIVATE_KEY.includes('-----BEGIN'))),
-        private_key_tamanho: process.env.STARK_PRIVATE_KEY ? process.env.STARK_PRIVATE_KEY.length : 0,
         sdk_carregado: !!starkbank,
         inicializado: starkIniciado,
       };
@@ -1135,9 +1473,256 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
       });
     } catch (error) {
       console.error('❌ [Stark Bank] Erro ao verificar status:', error.message);
-      res.status(500).json({ error: 'Erro ao verificar status', details: error.message });
+      res.status(500).json({ error: 'Erro ao verificar status', details: process.env.NODE_ENV === 'production' ? 'Erro interno' : error.message });
     }
   });
+
+  // ==================== WHATSAPP — TESTE E STATUS ====================
+
+  // Testar envio de mensagem WhatsApp (sem executar lote real)
+  router.post('/stark/whatsapp/testar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      // Montar mensagem de teste simulando um lote
+      const resultado = await notificarLoteGerado({
+        loteId: 0,
+        quantidade: 3,
+        valorTotal: 1250.00,
+        saques: [
+          { user_cod: '99999', user_name: 'Teste Silva', final_amount: 350 },
+          { user_cod: '88888', user_name: 'Teste Santos', final_amount: 500 },
+          { user_cod: '77777', user_name: 'Teste Oliveira', final_amount: 400 }
+        ]
+      });
+
+      await registrarAuditoria(req, 'WHATSAPP_TESTE', AUDIT_CATEGORIES.FINANCIAL, 'whatsapp', null, {
+        resultado: resultado.enviado ? 'ok' : resultado.motivo
+      });
+
+      res.json({
+        success: resultado.enviado,
+        resultado,
+        config: {
+          ativo: (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true',
+          url_configurada: !!process.env.EVOLUTION_API_URL,
+          api_key_configurada: !!process.env.EVOLUTION_API_KEY,
+          instancia_configurada: !!process.env.EVOLUTION_INSTANCE,
+          grupo_configurado: !!process.env.EVOLUTION_GROUP_ID
+        }
+      });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro no teste:', error.message);
+      res.status(500).json({ error: 'Erro ao testar WhatsApp', details: error.message });
+    }
+  });
+
+  // Testar resumo diário com dados reais (aceita ?data=2026-03-14)
+  router.post('/stark/whatsapp/testar-resumo', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const dataAlvo = req.query.data || new Date().toISOString().split('T')[0];
+
+      // Mesma lógica do endpoint /withdrawals (UTC, sem conversão de timezone)
+      const resumo = await pool.query(`
+        SELECT 
+          COUNT(*) as total_recebidas,
+          COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark')) as total_aprovadas,
+          COUNT(*) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)) as sem_gratuidade,
+          COUNT(*) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)) as com_gratuidade,
+          COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitadas,
+          COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
+          COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
+        FROM withdrawal_requests
+        WHERE created_at >= $1::date
+          AND created_at < ($1::date + INTERVAL '1 day')
+      `, [dataAlvo]);
+
+      const r = resumo.rows[0];
+      const totalRecebidas = parseInt(r.total_recebidas) || 0;
+      const totalAprovadas = parseInt(r.total_aprovadas) || 0;
+      const semGratuidade = parseInt(r.sem_gratuidade) || 0;
+      const comGratuidade = parseInt(r.com_gratuidade) || 0;
+      const rejeitadas = parseInt(r.rejeitadas) || 0;
+      const valorSemGratuidade = parseFloat(r.valor_sem_gratuidade) || 0;
+      const valorComGratuidade = parseFloat(r.valor_com_gratuidade) || 0;
+      const valorTotalAprovado = valorSemGratuidade + valorComGratuidade;
+      const lucro = valorSemGratuidade * 0.045;
+      const deixouArrecadar = valorComGratuidade * 0.045;
+
+      // Saldo Stark Bank atual
+      let saldoStark = 0;
+      try {
+        if (inicializarStark()) {
+          const result = await starkbank.balance.get();
+          if (Array.isArray(result)) {
+            saldoStark = result.length > 0 ? result[0].amount / 100 : 0;
+          } else if (result && result.amount !== undefined) {
+            saldoStark = result.amount / 100;
+          }
+        }
+      } catch (e) { console.warn('⚠️ Saldo indisponível:', e.message); }
+
+      const dados = { totalRecebidas, totalAprovadas, semGratuidade, comGratuidade, rejeitadas, valorTotalAprovado, lucro, deixouArrecadar, saldoStark };
+      const resultado = await notificarResumoDiario(dados);
+
+      res.json({
+        success: resultado.enviado,
+        data_consultada: dataAlvo,
+        dados,
+        resultado
+      });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro no teste resumo:', error.message);
+      res.status(500).json({ error: 'Erro ao testar resumo', details: error.message });
+    }
+  });
+
+  // Status da integração WhatsApp
+  router.get('/stark/whatsapp/status', verificarToken, verificarAdminOuFinanceiro, (req, res) => {
+    const ativo = (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true';
+    res.json({
+      ativo,
+      evolution_url: process.env.EVOLUTION_API_URL ? process.env.EVOLUTION_API_URL.replace(/\/+$/, '') : null,
+      instancia: process.env.EVOLUTION_INSTANCE || null,
+      grupo_id: process.env.EVOLUTION_GROUP_ID ? process.env.EVOLUTION_GROUP_ID.substring(0, 15) + '...' : null,
+      api_key_presente: !!process.env.EVOLUTION_API_KEY,
+      limiar_destaque: `R$ ${LIMIAR_SAQUE_DESTAQUE}`
+    });
+  });
+
+  // Enviar mensagem customizada para o grupo (admin)
+  router.post('/stark/whatsapp/enviar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const { mensagem } = req.body;
+      if (!mensagem || mensagem.trim().length === 0) {
+        return res.status(400).json({ error: 'Mensagem obrigatória' });
+      }
+      if (mensagem.length > 2000) {
+        return res.status(400).json({ error: 'Mensagem muito longa (máx 2000 caracteres)' });
+      }
+
+      const resultado = await enviarMensagemWhatsApp(mensagem.trim());
+
+      await registrarAuditoria(req, 'WHATSAPP_ENVIO_MANUAL', AUDIT_CATEGORIES.FINANCIAL, 'whatsapp', null, {
+        enviado: resultado.enviado,
+        tamanho: mensagem.length
+      });
+
+      res.json({ success: resultado.enviado, resultado });
+    } catch (error) {
+      console.error('❌ [WhatsApp] Erro ao enviar:', error.message);
+      res.status(500).json({ error: 'Erro ao enviar mensagem', details: error.message });
+    }
+  });
+
+  // ==================== AUTO-SYNC (chamável pelo cron do server.js) ====================
+  // Consulta a Stark Bank para transfers pendentes e atualiza o status
+  async function sincronizarTransfersStark() {
+    if (!inicializarStark() || !starkbank) {
+      console.log('🔄 [Auto-Sync] Stark Bank não inicializado — pulando');
+      return { atualizados: 0 };
+    }
+
+    try {
+      // Buscar saques pendentes
+      const pendentesSaques = await pool.query(`
+        SELECT id, stark_transfer_id, user_name, 'saque' as origem
+        FROM withdrawal_requests
+        WHERE stark_status = 'processando'
+          AND stark_transfer_id IS NOT NULL
+          AND stark_enviado_em < NOW() - INTERVAL '60 seconds'
+        ORDER BY stark_enviado_em ASC
+        LIMIT 30
+      `);
+
+      // Buscar acertos pendentes
+      const pendentesAcertos = await pool.query(`
+        SELECT li.id, li.stark_transfer_id, li.nome_prof as user_name, 'acerto' as origem, li.lote_id
+        FROM stark_lote_itens li
+        JOIN stark_lotes l ON l.id = li.lote_id
+        WHERE li.status = 'processando'
+          AND li.stark_transfer_id IS NOT NULL
+          AND l.tipo = 'acerto'
+          AND li.created_at < NOW() - INTERVAL '60 seconds'
+        ORDER BY li.created_at ASC
+        LIMIT 30
+      `);
+
+      const todosPendentes = [...pendentesSaques.rows, ...pendentesAcertos.rows];
+
+      if (todosPendentes.length === 0) return { atualizados: 0 };
+
+      console.log(`🔄 [Auto-Sync] ${pendentesSaques.rows.length} saques + ${pendentesAcertos.rows.length} acertos pendentes`);
+
+      let atualizados = 0;
+
+      for (const item of todosPendentes) {
+        try {
+          let transfer;
+          try {
+            transfer = await starkbank.transfer.get(item.stark_transfer_id);
+          } catch (getErr) {
+            // Fallback via logs
+            const logs = await starkbank.transfer.log.query({ transferIds: [item.stark_transfer_id], limit: 3 });
+            let found = false;
+            for await (const log of logs) {
+              if (log.transfer && ['success', 'failed', 'canceled'].includes(log.transfer.status)) {
+                transfer = log.transfer;
+                found = true;
+                break;
+              }
+            }
+            if (!found) continue;
+          }
+
+          if (transfer.status === 'success') {
+            await atualizarStatusPagamento(item.stark_transfer_id, 'pago', null);
+            atualizados++;
+          } else if (transfer.status === 'failed' || transfer.status === 'canceled') {
+            const erroRaw = transfer.errors?.[0]?.message || transfer.reason || `Status: ${transfer.status}`;
+            const erroCode = transfer.errors?.[0]?.code || '';
+            const erroTraduzido = traduzirErroStark(erroCode ? JSON.stringify(transfer.errors) : erroRaw);
+            await atualizarStatusPagamento(item.stark_transfer_id, 'erro', erroTraduzido);
+            atualizados++;
+          }
+        } catch (errTransfer) {
+          console.error(`❌ [Auto-Sync] Erro transfer ${item.stark_transfer_id}:`, errTransfer.message);
+        }
+      }
+
+      // Finalizar lotes processando sem itens pendentes
+      try {
+        const lotesPendentes = await pool.query(`
+          SELECT l.id FROM stark_lotes l
+          WHERE l.status = 'processando'
+            AND NOT EXISTS (
+              SELECT 1 FROM stark_lote_itens li 
+              WHERE li.lote_id = l.id AND li.status IN ('processando', 'em_lote', 'pendente')
+            )
+        `);
+
+        for (const lote of lotesPendentes.rows) {
+          const erros = await pool.query(`
+            SELECT COUNT(*) as total FROM stark_lote_itens WHERE lote_id = $1 AND status IN ('erro', 'rejeitado')
+          `, [lote.id]);
+          const statusLote = parseInt(erros.rows[0].total) > 0 ? 'parcial' : 'concluido';
+          await pool.query(`UPDATE stark_lotes SET status = $1, finalizado_em = NOW() WHERE id = $2`, [statusLote, lote.id]);
+          console.log(`✅ [Auto-Sync] Lote #${lote.id} → ${statusLote}`);
+          atualizados++;
+        }
+      } catch (e) { /* ignore */ }
+
+      if (atualizados > 0) {
+        console.log(`✅ [Auto-Sync] ${atualizados} transfer(s) atualizada(s)`);
+      }
+
+      return { atualizados };
+    } catch (error) {
+      console.error('❌ [Auto-Sync] Erro:', error.message);
+      return { atualizados: 0, erro: error.message };
+    }
+  }
+
+  // Expor para uso via cron no server.js
+  global.__sincronizarTransfersStark = sincronizarTransfersStark;
 
   return router;
 }

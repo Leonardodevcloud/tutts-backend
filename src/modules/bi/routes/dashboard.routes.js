@@ -60,7 +60,7 @@ router.get('/bi/dashboard-rapido', async (req, res) => {
             SUM(total_retornos) as total_retornos,
             SUM(valor_total) as valor_total,
             SUM(valor_prof) as valor_prof,
-            ROUND(SUM(valor_total)::numeric / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
+            ROUND((SUM(valor_total)::numeric - COALESCE(SUM(valor_prof)::numeric, 0)) / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
             ROUND(AVG(tempo_medio_entrega), 2) as tempo_medio_entrega,
             SUM(total_profissionais) as total_profissionais
           FROM bi_resumo_cliente
@@ -85,7 +85,7 @@ router.get('/bi/dashboard-rapido', async (req, res) => {
         SUM(total_retornos) as total_retornos,
         SUM(valor_total) as valor_total,
         SUM(valor_prof) as valor_prof,
-        ROUND(SUM(valor_total)::numeric / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
+        ROUND((SUM(valor_total)::numeric - COALESCE(SUM(valor_prof)::numeric, 0)) / NULLIF(SUM(total_entregas), 0), 2) as ticket_medio,
         ROUND(AVG(tempo_medio_entrega), 2) as tempo_medio_entrega,
         ROUND(AVG(tempo_medio_alocacao), 2) as tempo_medio_alocacao,
         ROUND(AVG(tempo_medio_coleta), 2) as tempo_medio_coleta,
@@ -113,7 +113,8 @@ router.get('/bi/dashboard', async (req, res) => {
   try {
     const { data_inicio, data_fim, cod_cliente, centro_custo, cod_prof, categoria, status_prazo, status_retorno, cidade } = req.query;
     
-    let where = 'WHERE 1=1';
+    // Base: só entregas (ponto >= 2), alinhado com gerencial
+    let where = 'WHERE COALESCE(ponto, 1) >= 2';
     const params = [];
     let paramIndex = 1;
     
@@ -165,33 +166,41 @@ router.get('/bi/dashboard', async (req, res) => {
     }
     
     // Métricas gerais completas
+    // Faturamento usa DISTINCT ON (os) ORDER BY ponto ASC para pegar 1 valor por OS
+    // Alinhado com Gerencial (EU_FAT) e Power BI (FIRSTNONBLANK)
     const metricas = await pool.query(`
+      WITH eu_fat AS (
+        SELECT DISTINCT ON (os) os, valor, valor_prof 
+        FROM bi_entregas 
+        ${where} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      )
       SELECT 
-        COUNT(DISTINCT os) as total_os,
+        COUNT(DISTINCT e.os) as total_os,
         COUNT(*) as total_entregas,
-        COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
-        COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
-        COUNT(*) FILTER (WHERE dentro_prazo IS NULL) as sem_prazo,
-        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
-        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
-        COUNT(*) FILTER (WHERE dentro_prazo_prof = true) as dentro_prazo_prof,
-        COUNT(*) FILTER (WHERE dentro_prazo_prof = false) as fora_prazo_prof,
-        COUNT(*) FILTER (WHERE dentro_prazo_prof IS NULL) as sem_prazo_prof,
-        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo_prof = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo_prof IS NOT NULL), 0), 2) as taxa_dentro_prof,
-        ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo_prof = false) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo_prof IS NOT NULL), 0), 2) as taxa_fora_prof,
-        ROUND(AVG(tempo_execucao_minutos)::numeric, 2) as tempo_medio,
-        ROUND(AVG(tempo_execucao_prof_minutos)::numeric, 2) as tempo_medio_prof,
-        ROUND(AVG(distancia)::numeric, 2) as distancia_media,
-        ROUND(SUM(distancia)::numeric, 2) as distancia_total,
-        ROUND(SUM(valor)::numeric, 2) as valor_total,
-        ROUND(SUM(valor_prof)::numeric, 2) as valor_profissional,
-        ROUND(SUM(valor)::numeric - COALESCE(SUM(valor_prof)::numeric, 0), 2) as faturamento,
-        ROUND(AVG(valor)::numeric, 2) as ticket_medio,
-        COUNT(DISTINCT cod_prof) as total_entregadores,
-        COUNT(DISTINCT cod_cliente) as total_clientes,
-        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT cod_prof), 0), 2) as media_entregas_entregador,
-        COUNT(*) FILTER (WHERE ocorrencia = 'Retorno') as retornos
-      FROM bi_entregas ${where}
+        COUNT(*) FILTER (WHERE e.dentro_prazo = true) as dentro_prazo,
+        COUNT(*) FILTER (WHERE e.dentro_prazo = false) as fora_prazo,
+        COUNT(*) FILTER (WHERE e.dentro_prazo IS NULL) as sem_prazo,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE e.dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE e.dentro_prazo IS NOT NULL), 0), 2) as taxa_dentro,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE e.dentro_prazo = false) / NULLIF(COUNT(*) FILTER (WHERE e.dentro_prazo IS NOT NULL), 0), 2) as taxa_fora,
+        COUNT(*) FILTER (WHERE e.dentro_prazo_prof = true) as dentro_prazo_prof,
+        COUNT(*) FILTER (WHERE e.dentro_prazo_prof = false) as fora_prazo_prof,
+        COUNT(*) FILTER (WHERE e.dentro_prazo_prof IS NULL) as sem_prazo_prof,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE e.dentro_prazo_prof = true) / NULLIF(COUNT(*) FILTER (WHERE e.dentro_prazo_prof IS NOT NULL), 0), 2) as taxa_dentro_prof,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE e.dentro_prazo_prof = false) / NULLIF(COUNT(*) FILTER (WHERE e.dentro_prazo_prof IS NOT NULL), 0), 2) as taxa_fora_prof,
+        ROUND(AVG(e.tempo_execucao_minutos)::numeric, 2) as tempo_medio,
+        ROUND(AVG(e.tempo_execucao_prof_minutos)::numeric, 2) as tempo_medio_prof,
+        ROUND(AVG(e.distancia)::numeric, 2) as distancia_media,
+        ROUND(SUM(e.distancia)::numeric, 2) as distancia_total,
+        (SELECT ROUND(COALESCE(SUM(valor), 0)::numeric, 2) FROM eu_fat) as valor_total,
+        (SELECT ROUND(COALESCE(SUM(valor_prof), 0)::numeric, 2) FROM eu_fat) as valor_profissional,
+        (SELECT ROUND(COALESCE(SUM(valor), 0)::numeric - COALESCE(SUM(valor_prof), 0)::numeric, 2) FROM eu_fat) as faturamento,
+        (SELECT ROUND((COALESCE(SUM(valor), 0)::numeric - COALESCE(SUM(valor_prof), 0)::numeric) / NULLIF((SELECT COUNT(*) FROM bi_entregas ${where}), 0), 2) FROM eu_fat) as ticket_medio,
+        COUNT(DISTINCT e.cod_prof) as total_entregadores,
+        COUNT(DISTINCT e.cod_cliente) as total_clientes,
+        ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT e.cod_prof), 0), 2) as media_entregas_entregador,
+        COUNT(*) FILTER (WHERE e.ocorrencia = 'Retorno') as retornos
+      FROM bi_entregas e ${where}
     `, params);
     
     // Entregas por dia
@@ -1095,7 +1104,8 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       tempo_medio_entrega_prof: tempoMedioEntregaProf,
       valor_total: somaValor.toFixed(2),
       valor_prof_total: somaValorProf.toFixed(2),
-      ticket_medio: totalEntregas > 0 ? (somaValor / totalEntregas).toFixed(2) : 0,
+      faturamento: (somaValor - somaValorProf).toFixed(2),
+      ticket_medio: totalEntregas > 0 ? ((somaValor - somaValorProf) / totalEntregas).toFixed(2) : 0,
       total_profissionais: profissionais.size,
       media_entregas_por_prof: profissionais.size > 0 ? (totalEntregas / profissionais.size).toFixed(2) : 0,
       total_retornos: totalRetornos,
@@ -1451,7 +1461,7 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       })).sort((a, b) => b.total_entregas - a.total_entregas);
       
       const totalProfs = c.profissionais_set.size;
-      const ticketMedio = c.total_entregas > 0 ? (c.soma_valor / c.total_entregas) : 0;
+      const ticketMedio = c.total_entregas > 0 ? ((c.soma_valor - c.soma_valor_prof) / c.total_entregas) : 0;
       const incentivo = totalProfs > 0 ? (c.total_entregas / totalProfs) : 0;
       
       return {
@@ -1464,6 +1474,7 @@ router.get('/bi/dashboard-completo', async (req, res) => {
         tempo_medio: tempoMedioCliente,
         tempo_medio_alocacao: tempoAlocacaoCliente,
         valor_total: c.soma_valor.toFixed(2), valor_prof: c.soma_valor_prof.toFixed(2),
+        faturamento: (c.soma_valor - c.soma_valor_prof).toFixed(2),
         distancia_total: c.soma_dist ? c.soma_dist.toFixed(2) : "0.00",
         ticket_medio: ticketMedio.toFixed(2),
         total_profissionais: totalProfs,

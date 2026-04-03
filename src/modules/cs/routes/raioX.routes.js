@@ -14,7 +14,7 @@ function createRaioXRoutes(pool) {
   // Gerador de gráficos SVG inline para o relatório
   // ══════════════════════════════════════════════════
 
-  function gerarBarraSVG(dados, { titulo = '', width = 560, barHeight = 24, cor = '#6366f1', showPercent = false, maxVal = null } = {}) {
+  function gerarBarraSVG(dados, { titulo = '', subtitulo = '', width = 560, barHeight = 24, cor = '#6366f1', showPercent = false, maxVal = null } = {}) {
     if (!dados || dados.length === 0) return '';
     const max = maxVal || Math.max(...dados.map(d => d.valor), 1);
     const gap = 6;
@@ -29,15 +29,18 @@ function createRaioXRoutes(pool) {
       const w = Math.max(2, (d.valor / max) * chartW);
       const label = (d.label || '').substring(0, 18);
       const displayVal = showPercent ? `${d.valor.toFixed(1)}%` : d.valor.toLocaleString('pt-BR');
+      // displayExtra: texto adicional após o valor principal (ex: "· 95.3% No Prazo · 33% do total")
+      const extra = d.displayExtra ? ` ${d.displayExtra}` : '';
       bars += `
         <text x="${labelW - 8}" y="${y + barHeight / 2 + 4}" text-anchor="end" font-size="11" fill="#475569" font-family="Segoe UI,sans-serif">${label}</text>
         <rect x="${labelW}" y="${y}" width="${w}" height="${barHeight}" rx="4" fill="${d.cor || cor}" opacity="0.85"/>
-        <text x="${labelW + w + 6}" y="${y + barHeight / 2 + 4}" font-size="11" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${displayVal}</text>
+        <text x="${labelW + w + 6}" y="${y + barHeight / 2 + 4}" font-size="11" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${displayVal}<tspan fill="#64748b" font-weight="400" font-size="10">${extra}</tspan></text>
       `;
     });
 
     return `\n\n<div style="margin:16px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;overflow-x:auto">
-${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:10px">${titulo}</div>` : ''}
+${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:4px">${titulo}</div>` : ''}
+${subtitulo ? `<div style="font-size:10px;color:#94a3b8;margin-bottom:10px">${subtitulo}</div>` : ''}
 <svg width="${width}" height="${h}" viewBox="0 0 ${width} ${h}" xmlns="http://www.w3.org/2000/svg">${bars}</svg></div>\n\n`;
   }
 
@@ -172,12 +175,19 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       // 2. Após "COBERTURA GEOGRÁFICA" — faixas de km (campo: quantidade)
       const { faixas_km } = dados;
       if (faixas_km && faixas_km.length > 0) {
-        const dadosF = faixas_km.map(f => ({
-          label: f.faixa,
-          valor: parseInt(f.quantidade) || parseInt(f.entregas) || 0,
-          cor: '#3b82f6',
-        }));
-        const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância' });
+        const totalFaixas = faixas_km.reduce((s, f) => s + (parseInt(f.quantidade) || parseInt(f.entregas) || 0), 0);
+        const dadosF = faixas_km.map(f => {
+          const qtd = parseInt(f.quantidade) || parseInt(f.entregas) || 0;
+          const pctTotal = totalFaixas > 0 ? ((qtd / totalFaixas) * 100).toFixed(1) : '0';
+          const taxaPrazo = f.taxa_prazo_faixa || 0;
+          return {
+            label: f.faixa,
+            valor: qtd,
+            cor: '#3b82f6',
+            displayExtra: ` · ${taxaPrazo}% No Prazo · ${pctTotal}% do total`,
+          };
+        });
+        const grafico = gerarBarraSVG(dadosF, { titulo: '📊 Entregas por Faixa de Distância', subtitulo: 'Barras = volume de entregas · % No Prazo por faixa · % do total de entregas' });
         resultado = resultado.replace(
           /(#{2,3}\s*📍.*?COBERTURA.*?\n(?:[\s\S]*?))(\n#{2,3}\s)/,
           `$1${grafico}$2`
@@ -189,7 +199,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       if (evolucao_semanal && evolucao_semanal.length > 0) {
         const dadosE = evolucao_semanal.map(s => {
           const d = new Date(s.semana);
-          return { label: `${d.getDate()}/${d.getMonth() + 1}`, valor: parseInt(s.entregas) || 0 };
+          return { label: `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth() + 1).padStart(2,'0')}`, valor: parseInt(s.entregas) || 0 };
         });
         const taxaE = evolucao_semanal.map(s => ({ valor: parseFloat(s.taxa_prazo) || 0 }));
         const grafico = gerarBarraVerticalSVG(dadosE, { titulo: '📊 Evolução Semanal de Entregas', dualAxis: true, dados2: taxaE });
@@ -233,7 +243,7 @@ ${titulo ? `<div style="font-size:13px;font-weight:700;color:#334155;margin-bott
       const h = Math.max(2, (motos / maxMotos) * chartH);
       const y = bottomY - h;
       const dia = new Date(d.dia);
-      const label = `${dia.getDate()}/${dia.getMonth() + 1}`;
+      const label = `${String(dia.getDate()).padStart(2,'0')}/${String(dia.getMonth() + 1).padStart(2,'0')}`;
       bars += `
         <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${cor}" opacity="0.85"/>
         <text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" font-size="9" font-weight="600" fill="#1e293b" font-family="Segoe UI,sans-serif">${motos}</text>
@@ -265,7 +275,7 @@ ${grid}${bars}
 
   router.post('/cs/raio-x', async (req, res) => {
     try {
-      const { cod_cliente, data_inicio, data_fim, tipo = 'completo', centro_custo } = req.body;
+      const { cod_cliente, data_inicio, data_fim, tipo = 'completo', centro_custo, categoria, categorias } = req.body;
       if (!cod_cliente || !data_inicio || !data_fim) {
         return res.status(400).json({ error: 'cod_cliente, data_inicio e data_fim são obrigatórios' });
       }
@@ -274,11 +284,13 @@ ${grid}${bars}
         return res.status(400).json({ error: 'API Key do Gemini não configurada. Configure GEMINI_API_KEY no .env' });
       }
       const temCC = centro_custo && centro_custo !== '';
-      console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}${temCC ? `, CC=${centro_custo}` : ''}`);
+      // Suportar tanto "categoria" (string única) quanto "categorias" (array)
+      const catArray = categorias && categorias.length > 0 ? categorias : (categoria ? [categoria] : []);
+      const temCat = catArray.length > 0;
+      console.log(`🔬 Gerando Raio-X IA: cliente=${cod_cliente}, período=${data_inicio} a ${data_fim}${temCC ? `, CC=${centro_custo}` : ''}${temCat ? `, CAT=${catArray.join(',')}` : ''}`);
       const codInt = parseInt(cod_cliente);
 
       // Cliente 767 (Grupo Comollati): prazo FIXO de 120min (2h) para QUALQUER faixa de km
-      // Para os demais clientes, usa o campo dentro_prazo já calculado no banco
       const isCliente767 = codInt === 767;
       if (isCliente767) console.log('⚠️ [Raio-X] Cliente 767 (Comollati): SLA fixo 120min aplicado');
       const DP = isCliente767
@@ -291,9 +303,12 @@ ${grid}${bars}
         ? '(tempo_execucao_minutos IS NOT NULL AND tempo_execucao_minutos > 0)'
         : 'dentro_prazo IS NOT NULL';
 
-      // Filtro SQL de centro de custo (aplicado em todas as queries do bi_entregas)
-      const ccSQL = temCC ? ' AND centro_custo = $4' : '';
-      const baseParams = temCC ? [codInt, data_inicio, data_fim, centro_custo] : [codInt, data_inicio, data_fim];
+      // Filtros SQL dinâmicos (centro de custo + categorias)
+      let paramIdx = 4; // $1=codInt, $2=data_inicio, $3=data_fim
+      let ccSQL = '', catSQL = '';
+      const baseParams = [codInt, data_inicio, data_fim];
+      if (temCC) { ccSQL = ` AND centro_custo = $${paramIdx}`; baseParams.push(centro_custo); paramIdx++; }
+      if (temCat) { catSQL = ` AND categoria = ANY($${paramIdx})`; baseParams.push(catArray); paramIdx++; }
 
       // 1. DADOS DO CLIENTE
       let fichaResult;
@@ -327,7 +342,7 @@ ${grid}${bars}
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio_alocacao,
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN velocidade_media END)::numeric, 1) as velocidade_media
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
       `, baseParams);
 
       // 3. FAIXAS DE KM
@@ -345,7 +360,7 @@ ${grid}${bars}
           ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo_faixa
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
           AND COALESCE(ponto, 1) >= 2 AND distancia IS NOT NULL AND distancia > 0
         GROUP BY CASE WHEN distancia <= 5 THEN '0-5 km'
                WHEN distancia <= 10 THEN '5-10 km'
@@ -365,7 +380,7 @@ ${grid}${bars}
           ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric /
             NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL} AND COALESCE(ponto, 1) >= 2
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL} AND COALESCE(ponto, 1) >= 2
         GROUP BY COALESCE(NULLIF(bairro, ''), 'Não informado'), COALESCE(cidade, '')
         ORDER BY COUNT(*) DESC LIMIT 20
       `, baseParams);
@@ -382,7 +397,7 @@ ${grid}${bars}
             CASE WHEN ${DP} THEN true ELSE false END as dp_ok,
             CASE WHEN ${DP_NOT_NULL} THEN true ELSE false END as dp_valido
           FROM bi_entregas
-          WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+          WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
             AND data_hora IS NOT NULL
         ),
         roteiros AS (
@@ -443,7 +458,7 @@ ${grid}${bars}
             NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
           ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
           AND COALESCE(ponto, 1) >= 2 AND data_hora IS NOT NULL
         GROUP BY CASE WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 8 AND 9 THEN '08-10h'
                WHEN EXTRACT(HOUR FROM data_hora) BETWEEN 10 AND 11 THEN '10-12h'
@@ -462,7 +477,7 @@ ${grid}${bars}
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
         GROUP BY DATE_TRUNC('week', data_solicitado) ORDER BY semana
       `, baseParams);
 
@@ -470,10 +485,10 @@ ${grid}${bars}
       const retornosDetalhe = await pool.query(`
         SELECT ocorrencia, COUNT(*) as quantidade,
           ROUND(COUNT(*)::numeric / NULLIF((
-            SELECT COUNT(*) FROM bi_entregas WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL} AND COALESCE(ponto, 1) >= 2
+            SELECT COUNT(*) FROM bi_entregas WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL} AND COALESCE(ponto, 1) >= 2
           ), 0) * 100, 2) as percentual
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
           AND COALESCE(ponto, 1) >= 2 AND ocorrencia IS NOT NULL AND ocorrencia != ''
         GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 10
       `, baseParams);
@@ -486,7 +501,7 @@ ${grid}${bars}
           ROUND(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END)::numeric / 
             NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END), 0), 1) as entregas_por_moto
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
         GROUP BY data_solicitado
         ORDER BY data_solicitado
       `, baseParams);
@@ -496,46 +511,7 @@ ${grid}${bars}
         `SELECT estado FROM bi_entregas WHERE cod_cliente = $1 AND estado IS NOT NULL LIMIT 1`, [codInt]
       )).rows[0]?.estado || 'N/A';
 
-      const benchmarkGeral = await pool.query(`
-        SELECT ROUND(AVG(taxa_prazo)::numeric, 1) as media_taxa_prazo,
-          ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as mediana_taxa_prazo,
-          ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY taxa_prazo)::numeric, 1) as p75_taxa_prazo,
-          ROUND(AVG(total_entregas)::numeric, 0) as media_entregas,
-          ROUND(AVG(km_medio)::numeric, 1) as media_km,
-          ROUND(AVG(tempo_medio)::numeric, 1) as media_tempo_entrega,
-          ROUND(AVG(taxa_retorno)::numeric, 2) as media_taxa_retorno,
-          COUNT(*) as total_clientes
-        FROM (
-          SELECT cod_cliente,
-            ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
-            COUNT(*) as total_entregas, ROUND(AVG(distancia)::numeric, 1) as km_medio,
-            ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio,
-            ROUND(SUM(CASE WHEN (LOWER(ocorrencia) LIKE '%%cliente fechado%%' OR LOWER(ocorrencia) LIKE '%%clienteaus%%' OR
-              LOWER(ocorrencia) LIKE '%%cliente ausente%%' OR LOWER(ocorrencia) LIKE '%%loja fechada%%'
-            ) THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as taxa_retorno
-          FROM bi_entregas
-          WHERE data_solicitado >= $1 AND data_solicitado <= $2 AND COALESCE(ponto, 1) >= 2
-            AND cod_cliente IS NOT NULL
-          GROUP BY cod_cliente HAVING COUNT(*) >= 5
-        ) sub
-      `, [data_inicio, data_fim]);
-
-      // 10. RANKING GERAL TUTTS
-      const ranking = await pool.query(`
-        WITH ranking_clientes AS (
-          SELECT cod_cliente,
-            ROUND(SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100, 1) as taxa_prazo,
-            COUNT(*) as total_entregas,
-            RANK() OVER (ORDER BY SUM(CASE WHEN ${DP} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(CASE WHEN ${DP_NOT_NULL} THEN 1 END), 0) * 100 DESC) as rank_prazo,
-            RANK() OVER (ORDER BY COUNT(*) DESC) as rank_volume
-          FROM bi_entregas
-          WHERE data_solicitado >= $1 AND data_solicitado <= $2
-            AND COALESCE(ponto, 1) >= 2 AND cod_cliente IS NOT NULL
-          GROUP BY cod_cliente HAVING COUNT(*) >= 5
-        )
-        SELECT rank_prazo, rank_volume, (SELECT COUNT(*) FROM ranking_clientes) as total_ranqueados
-        FROM ranking_clientes WHERE cod_cliente = $3
-      `, [data_inicio, data_fim, codInt]);
+      // 9-10. BENCHMARK E RANKING REMOVIDOS — seção eliminada do relatório
 
       // 11. PERÍODO ANTERIOR
       const diasPeriodo = Math.ceil((new Date(data_fim) - new Date(data_inicio)) / (1000 * 60 * 60 * 24));
@@ -550,13 +526,11 @@ ${grid}${bars}
           ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END)::numeric, 1) as km_medio,
           COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais_unicos
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
-      `, temCC ? [codInt, inicioAnterior, fimAnterior, centro_custo] : [codInt, inicioAnterior, fimAnterior]);
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQL}
+      `, (() => { const p = [codInt, inicioAnterior, fimAnterior]; if (temCC) p.push(centro_custo); if (temCat) p.push(catArray); return p; })());
 
       // 12. MONTAR DADOS
       const metricas = metricasCliente.rows[0];
-      const benchmark = benchmarkGeral.rows[0] || {};
-      const rankingData = ranking.rows[0] || {};
       const metrAnterior = metricasAnteriores.rows[0];
       const healthScore = calcularHealthScore(metricas, getClienteConfig(codInt));
 
@@ -573,7 +547,7 @@ ${grid}${bars}
 
       // Link do mapa de calor interativo (acesso público)
       const baseUrl = process.env.BASE_URL || req.protocol + '://' + req.get('host');
-      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}${temCC ? `&centro_custo=${encodeURIComponent(centro_custo)}` : ''}`;
+      const linkMapaCalor = `${baseUrl}/api/cs/mapa-calor/${codInt}?data_inicio=${data_inicio}&data_fim=${data_fim}${temCC ? `&centro_custo=${encodeURIComponent(centro_custo)}` : ''}${temCat ? `&categorias=${encodeURIComponent(catArray.join(','))}` : ''}`;
 
       // 12b. BUSCAR INTERAÇÕES DO PERÍODO
       const interacoesCliente = await pool.query(`
@@ -625,24 +599,16 @@ ${grid}${bars}
         media_motos_dia: mediaMotosdia,
         interacoes_periodo: interacoesCliente.rows,
         ocorrencias_periodo: ocorrenciasCliente.rows,
-        benchmark_geral_tutts: { ...benchmark, total_clientes: benchmark.total_clientes },
-        ranking_geral: { posicao_prazo: rankingData.rank_prazo, posicao_volume: rankingData.rank_volume, total_clientes: rankingData.total_ranqueados },
+        benchmark_geral_tutts: null,
+        ranking_geral: null,
         link_mapa_calor: linkMapaCalor,
       };
 
       // 13. Dados para o Gemini (sem bairros para evitar listagem)
       const dadosParaGemini = { ...dadosAnalise };
-      delete dadosParaGemini.mapa_calor_bairros; // Remover para evitar que o Gemini liste bairros
-      // Manter benchmark geral para comparação com todos os clientes Tutts
-      // Manter ranking para posicionamento percentual
-      const totalClientes = dadosParaGemini.ranking_geral?.total_clientes || 1;
-      const posPrazo = dadosParaGemini.ranking_geral?.posicao_prazo || 1;
-      const posVolume = dadosParaGemini.ranking_geral?.posicao_volume || 1;
-      dadosParaGemini.ranking_geral = {
-        ...dadosParaGemini.ranking_geral,
-        percentil_prazo: Math.round((1 - posPrazo / totalClientes) * 100),
-        percentil_volume: Math.round((1 - posVolume / totalClientes) * 100),
-      };
+      delete dadosParaGemini.mapa_calor_bairros;
+      delete dadosParaGemini.benchmark_geral_tutts;
+      delete dadosParaGemini.ranking_geral;
 
       // 14. PROMPT GEMINI
       const slaInfo767 = isCliente767
@@ -702,16 +668,7 @@ ${parseFloat(taxaRetorno) <= 2
     : '🔴 Acima do limite. Inclua no plano de ação com prioridade alta.'}
 
 ═══════════════════════════════════
-BLOCO 4 — REGRAS DO BENCHMARK (COMPARATIVO COM O MERCADO)
-═══════════════════════════════════
-O campo "benchmark_geral_tutts" contém médias calculadas com TODOS os clientes ativos da Tutts no mesmo período — independente de região ou porte. Os campos "ranking_geral" mostram a posição percentil deste cliente entre todos.
-
-- Use esses dados para posicionar o cliente de forma RELATIVA E PERCENTUAL (ex: "está acima de X% dos clientes da nossa base").
-- ⛔ NÃO cite regiões específicas, NÃO compare com "clientes da mesma região".
-- ⛔ NÃO invente médias nem use dados que não estejam nos campos fornecidos.
-
-═══════════════════════════════════
-BLOCO 5 — OCORRÊNCIAS E INTERAÇÕES (INSUMO OBRIGATÓRIO PARA O PLANO DE AÇÃO)
+BLOCO 4 — OCORRÊNCIAS E INTERAÇÕES (INSUMO OBRIGATÓRIO PARA O PLANO DE AÇÃO)
 ═══════════════════════════════════
 OCORRÊNCIAS DO PERÍODO (${ocorrenciasCliente.rows.length} registros):
 ${resumoOcorrencias}
@@ -780,16 +737,6 @@ Liste cada faixa horária dos dados "padroes_horario" exatamente assim:
 
 Parágrafo sobre picos de demanda e variação de SLA entre faixas.
 
-## 📈 COMPARATIVO COM O MERCADO (Todos os Clientes Tutts)
-
-⚠️ INSTRUÇÕES ESPECÍFICAS DESTA SEÇÃO:
-- Use os dados de "benchmark_geral_tutts" (médias de TODOS os clientes da Tutts, não só da região).
-- Use "ranking_geral" para percentil (percentil_prazo e percentil_volume).
-- Posicione o cliente de forma percentual: "está entre os X% melhores da nossa base em [métrica]".
-- Compare taxa de prazo atual com a média geral da Tutts e com a mediana.
-- Compare taxa de retorno atual (${taxaRetorno}%) com a média geral da base.
-- ⛔ NÃO compare com região específica. ⛔ NÃO use nome de outros clientes.
-
 ## 📉 TENDÊNCIAS E PROJEÇÕES
 
 Parágrafo sobre evolução semanal baseado em "evolucao_semanal": volume crescendo, estável ou caindo?
@@ -849,7 +796,6 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
 [ ] Evitei sugerir aumento de frequência de contato?
 [ ] O plano de ação endereça as ocorrências/interações?
 [ ] Contextualizei a taxa de retorno de ${taxaRetorno}% corretamente (até 2% = saudável)?
-[ ] O benchmark usa todos os clientes Tutts, não só da região?
 [ ] Incluí a seção de motos por dia?`;
 
       // Incluir link do mapa no response final
@@ -891,7 +837,7 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
         RETURNING id
       `, [
         codInt, temCC ? `${nomeRelatorio}` : (mascara || ficha.nome_fantasia || `Cliente ${cod_cliente}`), data_inicio, data_fim,
-        JSON.stringify(dadosAnalise), JSON.stringify(benchmark), analiseComGraficos,
+        JSON.stringify(dadosAnalise), JSON.stringify({}), analiseComGraficos,
         tipo, healthScore, JSON.stringify([]), JSON.stringify([]),
         req.user?.codProfissional, req.user?.nome, tokensUsados,
       ]);
@@ -918,12 +864,18 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
   router.get('/cs/mapa-calor/:cod', async (req, res) => {
     try {
       const cod = parseInt(req.params.cod);
-      const { data_inicio, data_fim, centro_custo } = req.query;
+      const { data_inicio, data_fim, centro_custo, categoria, categorias } = req.query;
       const inicio = data_inicio || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const fim = data_fim || new Date().toISOString().split('T')[0];
       const temCC = centro_custo && centro_custo.trim() !== '';
-      const ccSQL = temCC ? ' AND centro_custo = $4' : '';
-      const baseParams = temCC ? [cod, inicio, fim, centro_custo] : [cod, inicio, fim];
+      // Suportar categoria (string) ou categorias (comma-separated)
+      const catArrayMapa = categorias ? categorias.split(',').map(c => c.trim()).filter(Boolean) : (categoria && categoria.trim() ? [categoria.trim()] : []);
+      const temCatMapa = catArrayMapa.length > 0;
+      let paramIdxMapa = 4;
+      let ccSQL = '', catSQLMapa = '';
+      const baseParams = [cod, inicio, fim];
+      if (temCC) { ccSQL = ` AND centro_custo = $${paramIdxMapa}`; baseParams.push(centro_custo); paramIdxMapa++; }
+      if (temCatMapa) { catSQLMapa = ` AND categoria = ANY($${paramIdxMapa})`; baseParams.push(catArrayMapa); paramIdxMapa++; }
 
       const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
       if (!GOOGLE_API_KEY) return res.status(400).send('GOOGLE_GEOCODING_API_KEY não configurada');
@@ -964,7 +916,7 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
           ROUND(AVG(distancia)::numeric, 1) as km_medio,
           ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
         FROM bi_entregas
-        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}
+        WHERE cod_cliente = $1 AND data_solicitado >= $2 AND data_solicitado <= $3${ccSQL}${catSQLMapa}
           AND COALESCE(ponto, 1) >= 2
           AND endereco IS NOT NULL AND endereco != ''
         GROUP BY endereco, bairro, cidade, estado
@@ -1078,15 +1030,13 @@ body{font-family:'Segoe UI',-apple-system,sans-serif;background:#0f172a}
 .toggle-btn{background:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.1);display:flex;align-items:center;gap:6px;color:#334155}
 .toggle-btn:hover{background:#f1f5f9}
 .toggle-btn.active{background:#6366f1;color:#fff}
-.info-panel{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.15);padding:16px 20px;font-size:13px;line-height:1.7;min-width:200px}
-.info-panel h3{font-size:14px;font-weight:700;color:#1e293b;margin-bottom:4px}
 </style></head><body>
 <div id="header"><div class="left"><h1>🗺️ Mapa de Calor — ${nomeCliente}</h1><p>Período: ${inicio} a ${fim}</p></div>
 <div class="right"><div class="stat">${totalEntregas.toLocaleString('pt-BR')}</div><div class="stat-label">entregas mapeadas</div></div></div>
 <div id="map"></div>
 <script>
 var pontos=${JSON.stringify(pontosGeo)};
-var map,heatmap,markers=[];
+var map,heatmap,markers=[],infoWin;
 var showHeat=true,showMarkers=true;
 function initMap(){
   map=new google.maps.Map(document.getElementById('map'),{
@@ -1094,6 +1044,7 @@ function initMap(){
     styles:[{featureType:'poi',stylers:[{visibility:'off'}]},{featureType:'transit',stylers:[{visibility:'simplified'}]}],
     mapTypeControl:true,mapTypeControlOptions:{position:google.maps.ControlPosition.TOP_LEFT},fullscreenControl:true
   });
+  infoWin=new google.maps.InfoWindow();
   var ld=document.createElement('div');ld.className='legend';ld.style.margin='10px';
   ld.innerHTML='<h4>📊 Legenda SLA</h4><div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Prazo ≥ 95%</div><div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Prazo 85-95%</div><div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> Prazo &lt; 85%</div><div style="border-top:1px solid #e2e8f0;margin:8px 0;padding-top:8px"><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.5);width:8px;height:8px"></div> Menor volume</div><div class="legend-item"><div class="legend-dot" style="background:rgba(99,102,241,.8);width:16px;height:16px"></div> Maior volume</div></div>';
   map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(ld);
@@ -1106,21 +1057,27 @@ function initMap(){
     var pos=new google.maps.LatLng(p.lat,p.lng);
     heatData.push({location:pos,weight:Math.min(p.quantidade,30)});
     bounds.extend(pos);
+  });
+  // Marcadores: só top 150 por volume para performance
+  var sorted=pontos.slice().sort(function(a,b){return b.quantidade-a.quantidade}).slice(0,150);
+  sorted.forEach(function(p){
     var color=p.taxa_prazo>=95?'#10b981':p.taxa_prazo>=85?'#f59e0b':'#ef4444';
-    var sz=Math.max(6,Math.min(p.quantidade*1.5,22));
-    var mk=new google.maps.Marker({position:pos,map:map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:sz,fillColor:color,fillOpacity:.7,strokeColor:'#fff',strokeWeight:2}});
-    var iw=new google.maps.InfoWindow({content:'<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:180px"><b style="font-size:14px;color:#1e293b">'+(p.bairro||p.endereco)+'</b><div style="color:#64748b;font-size:12px;margin-bottom:8px">'+p.cidade+'</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px"><span>📦 Entregas</span><b>'+p.quantidade+'</b><span>⏱️ Prazo</span><b style="color:'+color+'">'+p.taxa_prazo+'%</b><span>📏 KM</span><b>'+(p.km_medio||'-')+'</b><span>🕐 Tempo</span><b>'+(p.tempo_medio||'-')+' min</b></div></div>'});
-    mk.addListener('click',function(){iw.open(map,mk)});
+    var sz=Math.max(5,Math.min(p.quantidade*1.2,18));
+    var mk=new google.maps.Marker({position:{lat:p.lat,lng:p.lng},map:map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:sz,fillColor:color,fillOpacity:.7,strokeColor:'#fff',strokeWeight:1.5}});
+    mk._data=p;mk._color=color;
+    mk.addListener('click',function(){
+      var d=mk._data;
+      infoWin.setContent('<div style="font-family:Segoe UI,sans-serif;padding:4px;min-width:170px"><b style="font-size:13px;color:#1e293b">'+(d.bairro||d.endereco)+'</b><div style="color:#64748b;font-size:11px;margin-bottom:6px">'+d.cidade+'</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;font-size:12px"><span>📦</span><b>'+d.quantidade+'</b><span>⏱️</span><b style="color:'+mk._color+'">'+d.taxa_prazo+'%</b><span>📏</span><b>'+(d.km_medio||'-')+' km</b><span>🕐</span><b>'+(d.tempo_medio||'-')+' min</b></div></div>');
+      infoWin.open(map,mk);
+    });
     markers.push(mk);
   });
   if(heatData.length>0){
-    heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:40,opacity:.6,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
+    heatmap=new google.maps.visualization.HeatmapLayer({data:heatData,map:map,radius:35,opacity:.55,gradient:['rgba(0,0,0,0)','rgba(99,102,241,.3)','rgba(59,130,246,.5)','rgba(16,185,129,.6)','rgba(245,158,11,.7)','rgba(239,68,68,.8)','rgba(220,38,38,.9)']});
   }
   if(!bounds.isEmpty()){
     map.fitBounds(bounds);
-    google.maps.event.addListenerOnce(map,'bounds_changed',function(){
-      if(map.getZoom()>16) map.setZoom(16);
-    });
+    google.maps.event.addListenerOnce(map,'bounds_changed',function(){if(map.getZoom()>16)map.setZoom(16)});
   }
 }
 function toggleHeat(){showHeat=!showHeat;heatmap&&heatmap.setMap(showHeat?map:null);document.getElementById('btnHeat').classList.toggle('active',showHeat)}

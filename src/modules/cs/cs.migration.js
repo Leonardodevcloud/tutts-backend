@@ -131,6 +131,12 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_interacoes_cliente ON cs_interacoes(cod_cliente)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_interacoes_tipo ON cs_interacoes(tipo)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_interacoes_data ON cs_interacoes(data_interacao DESC)`).catch(() => {});
+
+  // Migração: adicionar centro_custo às interações
+  try {
+    await pool.query(`ALTER TABLE cs_interacoes ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`);
+  } catch (e) { /* já existe */ }
+
   console.log('✅ Tabela cs_interacoes verificada');
 
   // ========== OCORRÊNCIAS ==========
@@ -162,6 +168,12 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_ocorrencias_status ON cs_ocorrencias(status)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_ocorrencias_sev ON cs_ocorrencias(severidade)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_ocorrencias_data ON cs_ocorrencias(data_abertura DESC)`).catch(() => {});
+
+  // Migração: adicionar centro_custo às ocorrências
+  try {
+    await pool.query(`ALTER TABLE cs_ocorrencias ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255) DEFAULT NULL`);
+  } catch (e) { /* já existe */ }
+
   console.log('✅ Tabela cs_ocorrencias verificada');
 
   // ========== HISTÓRICO RAIO-X IA ==========

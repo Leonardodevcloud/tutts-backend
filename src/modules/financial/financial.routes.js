@@ -19,6 +19,11 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   const acertoRouter = createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES);
   router.use('/', acertoRouter);
 
+  // ==================== SUB-ROUTER: LIMITES DE SAQUE ====================
+  const { createLimitesRoutes } = require('./routes/limites.routes');
+  const limitesRouter = createLimitesRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES);
+  router.use('/', limitesRouter);
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -46,7 +51,20 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   const PLIFIC_BASE_URL = PLIFIC_AMBIENTE === 'producao' ? PLIFIC_CONFIG.BASE_URL_PRODUCAO : PLIFIC_CONFIG.BASE_URL_TESTE;
   const PLIFIC_TOKEN = process.env.PLIFIC_TOKEN;
 
+  // 🔒 SECURITY FIX (HIGH-09): Fetch com timeout para evitar conexões penduradas
+  async function plificFetch(url, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      return response;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   const plificSaldoCache = new Map();
+  const PLIFIC_CACHE_MAX_SIZE = 500; // 🔒 SECURITY FIX (MED-04): Limite de tamanho do cache
 
   const limparCachePlific = () => {
     const agora = Date.now();
@@ -54,6 +72,12 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
       if (agora - value.timestamp > PLIFIC_CONFIG.CACHE_TTL) {
         plificSaldoCache.delete(key);
       }
+    }
+    // 🔒 Se ainda passou do limite, remover os mais antigos
+    if (plificSaldoCache.size > PLIFIC_CACHE_MAX_SIZE) {
+      const entries = [...plificSaldoCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+      const toRemove = entries.slice(0, plificSaldoCache.size - PLIFIC_CACHE_MAX_SIZE);
+      for (const [key] of toRemove) plificSaldoCache.delete(key);
     }
   };
 
@@ -153,7 +177,26 @@ router.get('/financial/data/:userCod', verificarToken, async (req, res) => {
       return res.json({ data: null });
     }
 
-    res.json({ data: result.rows[0] });
+    // 🔒 SECURITY FIX (CRIT-04): Mascarar dados sensíveis na resposta
+    // Admin recebe dados completos para operações, profissional recebe mascarado
+    const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    const row = result.rows[0];
+    
+    if (!isAdmin) {
+      // Mascarar CPF: ***456**89
+      if (row.cpf) row.cpf = '***' + row.cpf.slice(3, 6) + '**' + row.cpf.slice(-2);
+      // Mascarar chave Pix
+      if (row.pix_key) {
+        if (row.pix_tipo === 'email' && row.pix_key.includes('@')) {
+          const parts = row.pix_key.split('@');
+          row.pix_key = parts[0].slice(0, 3) + '***@' + parts[1];
+        } else {
+          row.pix_key = row.pix_key.slice(0, 4) + '***' + row.pix_key.slice(-3);
+        }
+      }
+    }
+
+    res.json({ data: row });
   } catch (error) {
     console.error('❌ Erro ao obter dados financeiros:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
@@ -279,16 +322,20 @@ router.post('/financial/data', verificarToken, async (req, res) => {
         );
       }
       if (oldData.pix_key !== pixKeyLimpo) {
+        // 🔒 SECURITY FIX (CRIT-07): Mascarar chave Pix nos logs
+        const pixOldMask = oldData.pix_key ? oldData.pix_key.slice(0, 4) + '***' + oldData.pix_key.slice(-3) : '***';
+        const pixNewMask = pixKeyLimpo ? pixKeyLimpo.slice(0, 4) + '***' + pixKeyLimpo.slice(-3) : '***';
         await pool.query(
           'INSERT INTO financial_logs (user_cod, action, old_value, new_value) VALUES ($1, $2, $3, $4)',
-          [userCod, 'ALTERACAO_PIX', oldData.pix_key, pixKey]
+          [userCod, 'ALTERACAO_PIX', pixOldMask, pixNewMask]
         );
       }
     } else {
+      // 🔒 SECURITY FIX (CRIT-05): Usar dados sanitizados no INSERT (nomeSeguro, cpfLimpo, pixKeyLimpo)
       await pool.query(
         `INSERT INTO user_financial_data (user_cod, full_name, cpf, pix_key, pix_tipo, terms_accepted) 
          VALUES ($1, $2, $3, $4, $5, true)`,
-        [userCod, fullName, cpf, pixKey, pixTipo || 'cpf']
+        [userCod, nomeSeguro, cpfLimpo, pixKeyLimpo, tipoPixSeguro]
       );
 
       await pool.query(
@@ -342,7 +389,7 @@ router.get('/withdrawals/pendentes', verificarToken, verificarAdminOuFinanceiro,
         EXTRACT(EPOCH FROM (NOW() - w.created_at))/3600 as horas_aguardando
       FROM withdrawal_requests w
       LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-      WHERE w.status IN ('pending', 'aguardando_aprovacao')
+      WHERE w.status IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')
       ORDER BY w.created_at ASC
     `);
     
@@ -364,7 +411,7 @@ router.get('/withdrawals/contadores', verificarToken, verificarAdminOuFinanceiro
   try {
     const result = await pool.query(`
       SELECT 
-        COUNT(*) FILTER (WHERE status IN ('pending', 'aguardando_aprovacao')) as pendentes,
+        COUNT(*) FILTER (WHERE status IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')) as pendentes,
         COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')) as aprovados,
         COUNT(*) FILTER (WHERE status = 'rejeitado') as rejeitados,
         COUNT(*) as total
@@ -389,7 +436,7 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
       params.push(status);
       whereConditions.push(`w.status = $${params.length}`);
     } else {
-      whereConditions.push(`w.status NOT IN ('pending', 'aguardando_aprovacao')`);
+      whereConditions.push(`w.status NOT IN ('pending', 'aguardando_aprovacao', 'aguardando_pagamento_stark')`);
     }
     
     if (user_cod) {
@@ -436,88 +483,397 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
 
 // Criar solicitação de saque
 router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req, res) => {
+  const client = await pool.connect(); // 🔒 SECURITY FIX: Transação atômica para gratuidade
+  
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount } = req.body;
+
+    // ==================== 🔒 SECURITY FIX: VALIDAÇÃO DE VALOR ====================
+    const valorSaque = parseFloat(requestedAmount);
+    if (!requestedAmount || isNaN(valorSaque) || !isFinite(valorSaque)) {
+      client.release();
+      return res.status(400).json({ error: 'Valor de saque inválido. Informe um número válido.' });
+    }
+    if (valorSaque <= 0) {
+      client.release();
+      return res.status(400).json({ error: 'Valor de saque deve ser positivo.' });
+    }
+    if (valorSaque < 10) {
+      client.release();
+      return res.status(400).json({ error: 'Valor mínimo de saque é R$ 10,00.' });
+    }
+    if (valorSaque > 1000) {
+      client.release();
+      return res.status(400).json({ error: 'Valor máximo de saque é R$ 1.000,00. Para valores maiores, entre em contato com o financeiro.' });
+    }
+    // Arredondar para 2 casas decimais para evitar problemas de float
+    const valorArredondado = Math.round(valorSaque * 100) / 100;
+    // ==================== FIM VALIDAÇÃO DE VALOR ====================
+
+    // =============== LIMITES DIÁRIO E SEMANAL (server-side, ciclo terça + liberações) ===============
+    const LIMITE_DIARIO = parseFloat(process.env.LIMITE_DIARIO_SAQUE || '1000');
+    const LIMITE_SEMANAL = parseFloat(process.env.LIMITE_SEMANAL_SAQUE || '1500');
+    const SQL_CICLO_POST = `(date_trunc('week', CURRENT_DATE - interval '1 day') + interval '1 day')::date`;
+
+    const [sacadoHojeCheck, sacadoSemanaCheck, liberacoesCheck] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(requested_amount), 0) as total
+         FROM withdrawal_requests 
+         WHERE user_cod = $1 
+           AND created_at >= CURRENT_DATE
+           AND status NOT IN ('rejeitado', 'excluido')`,
+        [userCod]
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(requested_amount), 0) as total
+         FROM withdrawal_requests 
+         WHERE user_cod = $1 
+           AND created_at >= ${SQL_CICLO_POST}
+           AND status NOT IN ('rejeitado', 'excluido')`,
+        [userCod]
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(valor_extra), 0) as total_extra
+         FROM withdrawal_limit_liberacoes
+         WHERE user_cod = $1 
+           AND status = 'liberado'
+           AND ciclo_inicio = ${SQL_CICLO_POST}`,
+        [userCod]
+      )
+    ]);
+
+    const totalHojeCheck = parseFloat(sacadoHojeCheck.rows[0].total);
+    const totalSemanaCheck = parseFloat(sacadoSemanaCheck.rows[0].total);
+    const totalExtraLiberado = parseFloat(liberacoesCheck.rows[0].total_extra);
+    const limiteDiarioEfetivo = LIMITE_DIARIO + totalExtraLiberado;
+    const limiteSemanalEfetivo = LIMITE_SEMANAL + totalExtraLiberado;
+
+    if (totalHojeCheck + valorArredondado > limiteDiarioEfetivo) {
+      const disponivel = Math.max(0, limiteDiarioEfetivo - totalHojeCheck);
+      client.release();
+      console.log(`⚠️ [LIMITE DIÁRIO] ${userCod}: já sacou R$ ${totalHojeCheck.toFixed(2)} hoje (limite efetivo: R$ ${limiteDiarioEfetivo.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite diário de R$ ${limiteDiarioEfetivo.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalHojeCheck.toFixed(2).replace('.', ',')} hoje.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Tente novamente amanhã ou solicite mais limite.'}`,
+        tipo_limite: 'diario', limite: limiteDiarioEfetivo, limite_base: LIMITE_DIARIO, extra_liberado: totalExtraLiberado, utilizado: totalHojeCheck, disponivel
+      });
+    }
+
+    if (totalSemanaCheck + valorArredondado > limiteSemanalEfetivo) {
+      const disponivel = Math.max(0, limiteSemanalEfetivo - totalSemanaCheck);
+      client.release();
+      console.log(`⚠️ [LIMITE SEMANAL] ${userCod}: já sacou R$ ${totalSemanaCheck.toFixed(2)} na semana (limite efetivo: R$ ${limiteSemanalEfetivo.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite semanal de R$ ${limiteSemanalEfetivo.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalSemanaCheck.toFixed(2).replace('.', ',')} neste ciclo.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Solicite mais limite ou aguarde o próximo ciclo (terça-feira).'}`,
+        tipo_limite: 'semanal', limite: limiteSemanalEfetivo, limite_base: LIMITE_SEMANAL, extra_liberado: totalExtraLiberado, utilizado: totalSemanaCheck, disponivel
+      });
+    }
+    // =============== FIM LIMITES DIÁRIO E SEMANAL ===============
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
     if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
       if (req.user.codProfissional !== userCod) {
         console.log(`⚠️ [SEGURANÇA] Tentativa de criar saque para outro usuário: ${req.user.codProfissional} tentou criar para ${userCod}`);
+        client.release();
         return res.status(403).json({ error: 'Você só pode criar saques para sua própria conta' });
       }
     }
 
+    // 🔒 SECURITY FIX: Validar campos obrigatórios
+    if (!userCod || !userName || !cpf || !pixKey) {
+      client.release();
+      return res.status(400).json({ error: 'Campos obrigatórios: userCod, userName, cpf, pixKey' });
+    }
+
+    // ==================== INÍCIO DA TRANSAÇÃO ====================
+    await client.query('BEGIN');
+
+    // 🔒 CRITICAL FIX: Advisory lock por profissional — serializa TODAS as solicitações
+    // do mesmo motoboy. Se chegar 2 requests simultâneos, o segundo ESPERA o primeiro
+    // commitar/rollbackar antes de prosseguir. Isso elimina race conditions.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [userCod]);
+
+    // 🔒 CRITICAL FIX: Re-verificar limites DENTRO da transação (com lock ativo)
+    // As verificações anteriores (pool.query) são otimistas e podem sofrer race condition.
+    // Aqui dentro do lock, os dados são consistentes.
+    const [sacadoHojeLock, sacadoSemanaLock, liberacoesLock] = await Promise.all([
+      client.query(
+        `SELECT COALESCE(SUM(requested_amount), 0) as total
+         FROM withdrawal_requests 
+         WHERE user_cod = $1 
+           AND created_at >= CURRENT_DATE
+           AND status NOT IN ('rejeitado', 'excluido')`,
+        [userCod]
+      ),
+      client.query(
+        `SELECT COALESCE(SUM(requested_amount), 0) as total
+         FROM withdrawal_requests 
+         WHERE user_cod = $1 
+           AND created_at >= ${SQL_CICLO_POST}
+           AND status NOT IN ('rejeitado', 'excluido')`,
+        [userCod]
+      ),
+      client.query(
+        `SELECT COALESCE(SUM(valor_extra), 0) as total_extra
+         FROM withdrawal_limit_liberacoes
+         WHERE user_cod = $1 
+           AND status = 'liberado'
+           AND ciclo_inicio = ${SQL_CICLO_POST}`,
+        [userCod]
+      )
+    ]);
+
+    const totalHojeLock = parseFloat(sacadoHojeLock.rows[0].total);
+    const totalSemanaLock = parseFloat(sacadoSemanaLock.rows[0].total);
+    const totalExtraLock = parseFloat(liberacoesLock.rows[0].total_extra);
+    const limiteDiarioLock = LIMITE_DIARIO + totalExtraLock;
+    const limiteSemanalLock = LIMITE_SEMANAL + totalExtraLock;
+
+    if (totalHojeLock + valorArredondado > limiteDiarioLock) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(400).json({ 
+        error: `Limite diário atingido! Já solicitou R$ ${totalHojeLock.toFixed(2).replace('.', ',')} hoje.`,
+        tipo_limite: 'diario'
+      });
+    }
+
+    if (totalSemanaLock + valorArredondado > limiteSemanalLock) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(400).json({ 
+        error: `Limite semanal atingido! Já solicitou R$ ${totalSemanaLock.toFixed(2).replace('.', ',')} neste ciclo.`,
+        tipo_limite: 'semanal'
+      });
+    }
+
+    // 🔒 CRITICAL FIX: Verificar saldo Plific ANTES de criar o saque
+    // Sem isso, o motoboy pode solicitar mais do que tem de saldo.
+    try {
+      const urlSaldo = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${parseInt(userCod)}`;
+      const respSaldo = await plificFetch(urlSaldo, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
+      });
+      const dataSaldo = await respSaldo.json();
+      
+      if (dataSaldo.dados?.profissional?.saldo !== undefined) {
+        const saldoStr = String(dataSaldo.dados.profissional.saldo);
+        const saldoNumero = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+        
+        if (saldoNumero < valorArredondado) {
+          await client.query('ROLLBACK');
+          client.release();
+          console.log(`⚠️ [SALDO] ${userCod}: saldo Plific R$ ${saldoNumero.toFixed(2)} < saque R$ ${valorArredondado.toFixed(2)}`);
+          return res.status(400).json({ 
+            error: `Saldo insuficiente! Seu saldo atual é R$ ${saldoNumero.toFixed(2).replace('.', ',')}.`,
+            tipo_limite: 'saldo',
+            saldo_atual: saldoNumero,
+            valor_solicitado: valorArredondado
+          });
+        }
+        console.log(`✅ [SALDO] ${userCod}: saldo Plific R$ ${saldoNumero.toFixed(2)} >= saque R$ ${valorArredondado.toFixed(2)}`);
+      } else {
+        console.log(`⚠️ [SALDO] Não foi possível verificar saldo Plific para ${userCod} - prosseguindo sem verificação`);
+      }
+    } catch (erroSaldo) {
+      // Se a consulta de saldo falhar, prossegue sem bloquear (fail-open)
+      // O auto-débito depois vai falhar se não tiver saldo
+      console.log(`⚠️ [SALDO] Erro ao consultar saldo Plific para ${userCod}: ${erroSaldo.message} - prosseguindo`);
+    }
+
     // Verificar se está restrito
-    const restricted = await pool.query(
+    const restricted = await client.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
       [userCod]
     );
     const isRestricted = restricted.rows.length > 0;
 
-    // Verificar gratuidade ativa
-    const gratuity = await pool.query(
-      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1",
+    // 🔒 SECURITY FIX: Verificar gratuidade COM LOCK (FOR UPDATE) para evitar race condition
+    const gratuity = await client.query(
+      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
       [userCod]
     );
     
     const hasGratuity = gratuity.rows.length > 0;
     let gratuityId = null;
-    let feeAmount = requestedAmount * 0.045; // 4.5%
-    let finalAmount = requestedAmount - feeAmount;
+    let feeAmount = valorArredondado * 0.045; // 4.5%
+    let finalAmount = valorArredondado - feeAmount;
+    // Arredondar valores calculados
+    feeAmount = Math.round(feeAmount * 100) / 100;
+    finalAmount = Math.round(finalAmount * 100) / 100;
 
     if (hasGratuity) {
       gratuityId = gratuity.rows[0].id;
       feeAmount = 0;
-      finalAmount = requestedAmount;
+      finalAmount = valorArredondado;
 
-      // Decrementar gratuidade
+      // 🔒 SECURITY FIX: Decrementar gratuidade DENTRO da transação
       const newRemaining = gratuity.rows[0].remaining - 1;
       if (newRemaining <= 0) {
-        await pool.query(
+        await client.query(
           "UPDATE gratuities SET remaining = 0, status = 'expirada', expired_at = NOW() WHERE id = $1",
           [gratuityId]
         );
       } else {
-        await pool.query(
+        await client.query(
           'UPDATE gratuities SET remaining = $1 WHERE id = $2',
           [newRemaining, gratuityId]
         );
       }
     }
 
-    const result = await pool.query(
+    // 🔒 SECURITY FIX: Verificar saque duplicado recente (mesmo profissional, mesmo valor, últimos 5 minutos)
+    const saqueDuplicado = await client.query(
+      `SELECT id FROM withdrawal_requests 
+       WHERE user_cod = $1 AND requested_amount = $2 
+       AND created_at > NOW() - INTERVAL '5 minutes'
+       AND status NOT IN ('rejeitado', 'cancelado')`,
+      [userCod, valorArredondado]
+    );
+    if (saqueDuplicado.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({ 
+        error: 'Saque duplicado detectado. Você já solicitou este valor nos últimos 5 minutos.',
+        saque_existente_id: saqueDuplicado.rows[0].id
+      });
+    }
+
+    // =============== BUSCAR DADOS REAIS DO BANCO (nunca confiar no frontend) ===============
+    const dadosReais = await client.query(
+      'SELECT cpf, pix_key FROM user_financial_data WHERE user_cod = $1',
+      [userCod]
+    );
+    const cpfReal = dadosReais.rows.length > 0 ? dadosReais.rows[0].cpf : cpf;
+    const pixKeyReal = dadosReais.rows.length > 0 ? dadosReais.rows[0].pix_key : pixKey;
+
+    const result = await client.query(
       `INSERT INTO withdrawal_requests 
        (user_cod, user_name, cpf, pix_key, requested_amount, fee_amount, final_amount, has_gratuity, gratuity_id, status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aguardando_aprovacao') 
        RETURNING *`,
-      [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
+      [userCod, userName, cpfReal, pixKeyReal, valorArredondado, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
 
+    // COMMIT da transação (gratuidade + saque atômicos)
+    await client.query('COMMIT');
+    client.release();
+
+    const novoSaque = result.rows[0];
+
+    // ==================== AUTO DÉBITO PLIFIC (ao receber solicitação) ====================
+    // Tenta debitar automaticamente na Plific. Se OK → aguardando_pagamento_stark.
+    // Se falhar → mantém aguardando_aprovacao para admin resolver manualmente.
+    try {
+      const valorDebito = valorArredondado; // 🔒 Já validado acima
+      const idProf = userCod;
+      const descricaoDebito = hasGratuity
+        ? 'Saque Emergencial - Gratuito'
+        : 'Saque emergencial - Prestação de Serviços';
+      const dataDebitoFormatada = new Date().toISOString().split('T')[0];
+
+      console.log(`💳 [Auto-Débito] Iniciando para saque #${novoSaque.id} - Prof: ${idProf}, Valor: R$ ${valorDebito}`);
+
+      const responseDebito = await plificFetch(`${PLIFIC_BASE_URL}/lancarDebitoProfissional`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${PLIFIC_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          idProf: parseInt(idProf),
+          valor: valorDebito,
+          descricao: descricaoDebito,
+          data: dataDebitoFormatada
+        })
+      });
+
+      const respostaDebito = await responseDebito.json();
+
+      if (respostaDebito.status === '200' || respostaDebito.status === 200) {
+        // ✅ Débito OK → status aguardando_pagamento_stark
+        await pool.query(
+          `UPDATE withdrawal_requests 
+           SET status = 'aguardando_pagamento_stark', 
+               debito = true, 
+               debito_plific_at = NOW(),
+               debito_erro = NULL,
+               updated_at = NOW() 
+           WHERE id = $1`,
+          [novoSaque.id]
+        );
+        novoSaque.status = 'aguardando_pagamento_stark';
+        novoSaque.debito = true;
+        novoSaque.debito_plific_at = new Date().toISOString();
+
+        // Limpar cache de saldo do profissional
+        const cacheKey = `saldo_${idProf}`;
+        plificSaldoCache.delete(cacheKey);
+
+        console.log(`✅ [Auto-Débito] OK para saque #${novoSaque.id} (Prof: ${idProf}) → aguardando_pagamento_stark`);
+      } else {
+        // ❌ Débito FALHOU → sinalizar na coluna debito + debito_erro
+        const erroMsg = respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito Plific';
+        await pool.query(
+          `UPDATE withdrawal_requests 
+           SET debito = false, 
+               debito_erro = $1, 
+               updated_at = NOW() 
+           WHERE id = $2`,
+          [erroMsg.substring(0, 500), novoSaque.id]
+        );
+        novoSaque.debito = false;
+        novoSaque.debito_erro = erroMsg;
+
+        console.error(`❌ [Auto-Débito] FALHOU saque #${novoSaque.id} (Prof: ${idProf}): ${erroMsg}`);
+      }
+    } catch (erroDebito) {
+      // ❌ Exceção (timeout, rede, etc) → sinalizar falha
+      const erroMsg = (erroDebito.message || 'Erro de conexão com Plific').substring(0, 500);
+      await pool.query(
+        `UPDATE withdrawal_requests 
+         SET debito = false, 
+             debito_erro = $1, 
+             updated_at = NOW() 
+         WHERE id = $2`,
+        [erroMsg, novoSaque.id]
+      ).catch(e => console.error('❌ Erro ao registrar falha do auto-débito:', e.message));
+      novoSaque.debito = false;
+      novoSaque.debito_erro = erroMsg;
+
+      console.error(`❌ [Auto-Débito] Exceção saque #${novoSaque.id}: ${erroMsg}`);
+    }
+    // ==================== FIM AUTO DÉBITO PLIFIC ====================
+
     // Registrar auditoria
-    await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
-      valor: requestedAmount,
+    await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', novoSaque.id, {
+      valor: valorArredondado,
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
-      restrito: isRestricted
+      restrito: isRestricted,
+      auto_debito: novoSaque.debito === true ? 'ok' : 'falha',
+      status_final: novoSaque.status
     });
 
     // ==================== NOTIFICAR VIA WEBSOCKET ====================
     if (global.notifyNewWithdrawal) {
-      global.notifyNewWithdrawal(result.rows[0]);
+      global.notifyNewWithdrawal(novoSaque);
     }
 
     res.status(201).json({ 
-      ...result.rows[0], 
+      ...novoSaque, 
       isRestricted 
     });
   } catch (error) {
+    // 🔒 SECURITY FIX: Rollback da transação se ainda estiver ativa
+    try { await client.query('ROLLBACK'); } catch (e) { /* ignore - pode já ter sido committed */ }
+    try { client.release(); } catch (e) { /* ignore - pode já ter sido released */ }
     console.error('❌ Erro ao criar saque:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
-// Listar saques do usuário
 router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
@@ -543,7 +899,7 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
       
       return {
         ...w,
-        isDelayed: w.status === 'aguardando_aprovacao' && diffHours > 1
+        isDelayed: (w.status === 'aguardando_aprovacao' || w.status === 'aguardando_pagamento_stark') && diffHours > 1
       };
     });
 
@@ -555,17 +911,73 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
 });
 
 // Listar todos os saques (admin financeiro)
+// Suporta 2 modos:
+//   1) PAGINADO: ?page=1&pageSize=50&status=xxx — retorna { data, total, page, pageSize, totalPages }
+//   2) LEGADO: ?dataInicio=&dataFim=&tipoFiltro= — retorna array direto (validação, conciliação, resumo)
 router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { status, limit, dataInicio, dataFim, tipoFiltro } = req.query;
-    // Com filtro de data: sem limite (retorna tudo do período)
-    // Sem filtro de data: máximo 200 para performance
+    const { status, limit, dataInicio, dataFim, tipoFiltro, page, pageSize: pageSizeParam, userCod } = req.query;
+    
+    // ════════ MODO PAGINADO (quando page é informado e sem filtro de data) ════════
+    if (page && !dataInicio && !dataFim && !userCod) {
+      const pag = Math.max(1, parseInt(page) || 1);
+      const tamPagina = Math.min(Math.max(1, parseInt(pageSizeParam) || 50), 200);
+      const offset = (pag - 1) * tamPagina;
+      
+      let whereClause = '';
+      const countParams = [];
+      
+      if (status) {
+        countParams.push(status);
+        whereClause = `WHERE w.status = $${countParams.length}`;
+      }
+      
+      // Contar total
+      const countResult = await pool.query(
+        `SELECT COUNT(*) as total FROM withdrawal_requests w ${whereClause}`,
+        countParams
+      );
+      const total = parseInt(countResult.rows[0].total);
+      const totalPages = Math.ceil(total / tamPagina);
+      
+      // Buscar página
+      const dataParams = [...countParams];
+      dataParams.push(tamPagina);
+      const limitIdx = dataParams.length;
+      dataParams.push(offset);
+      const offsetIdx = dataParams.length;
+      
+      const dataQuery = `
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        ${whereClause}
+        ORDER BY w.created_at DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `;
+      
+      const result = await pool.query(dataQuery, dataParams);
+      console.log(`📋 Withdrawals paginado: page=${pag}, size=${tamPagina}, total=${total}, retornados=${result.rows.length}`);
+      
+      return res.json({
+        data: result.rows,
+        total,
+        page: pag,
+        pageSize: tamPagina,
+        totalPages
+      });
+    }
+    
+    // ════════ MODO LEGADO (validação, conciliação, resumo — sem paginação) ════════
     const comFiltroData = !!(dataInicio && dataFim);
-    const limiteFiltro = comFiltroData ? null : Math.min(parseInt(limit) || 200, 200);
+    // Com filtro de data: sem limite. Sem filtro: usa limit do query ou fallback alto
+    const limiteFiltro = comFiltroData ? null : (parseInt(limit) || 999999);
     
     let query, params;
     
-    // Caso 1: Filtro por data (aba validação) — SEM LIMIT
+    // Caso 1: Filtro por data (aba validação/conciliação) — SEM LIMIT
     if (comFiltroData) {
       const coluna = tipoFiltro === 'lancamento' ? 'w.lancamento_at' 
                    : tipoFiltro === 'debito' ? 'w.debito_plific_at' 
@@ -595,7 +1007,21 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
         params = [dataInicio, dataFim];
       }
     }
-    // Caso 2: Filtro por status (sem data)
+    // Caso 2: Filtro por userCod (aba resumo)
+    else if (userCod) {
+      query = `
+        SELECT w.*, 
+          CASE WHEN r.id IS NOT NULL THEN true ELSE false END as is_restricted,
+          r.reason as restriction_reason
+        FROM withdrawal_requests w
+        LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
+        WHERE w.user_cod = $1
+        ORDER BY w.created_at DESC
+        LIMIT $2
+      `;
+      params = [userCod, parseInt(limit) || 500];
+    }
+    // Caso 3: Filtro por status (sem data, sem page)
     else if (status) {
       query = `
         SELECT w.*, 
@@ -609,7 +1035,7 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
       `;
       params = [status, limiteFiltro];
     }
-    // Caso 3: Sem filtro
+    // Caso 4: Sem filtro (fallback)
     else {
       query = `
         SELECT w.*, 
@@ -625,7 +1051,7 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
 
     console.log('📋 Withdrawals query:', { status, dataInicio, dataFim, tipoFiltro, limiteFiltro, comFiltroData });
     const result = await pool.query(query, params);
-    console.log(`📋 Withdrawals retornados: ${result.rows.length} (sem limit: ${comFiltroData})`);
+    console.log(`📋 Withdrawals retornados: ${result.rows.length}`);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar saques:', error);
@@ -654,7 +1080,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       
       if (idempotenciaExistente.rows.length > 0) {
         console.log(`⚠️ Requisição duplicada detectada! Key: ${idempotencyKey}`);
-        client.release();
         // Retornar a resposta anterior (idempotência)
         return res.status(200).json({
           ...idempotenciaExistente.rows[0].response_data,
@@ -676,7 +1101,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     
     if (saqueAtual.rows.length === 0) {
       await client.query('ROLLBACK');
-      client.release();
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
     
@@ -684,13 +1108,12 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     const isAprovado = status === 'aprovado' || status === 'aprovado_gratuidade';
 
     // =============== PROTEÇÃO 3: VERIFICAR STATUS ANTERIOR ===============
-    // Só permitir aprovar se estiver aguardando
+    // Só permitir aprovar se estiver aguardando ou aguardando_pagamento_stark
     if (isAprovado) {
       // Verificar se já está aprovado
       if (dadosSaque.status === 'aprovado' || dadosSaque.status === 'aprovado_gratuidade') {
         console.log(`⚠️ Tentativa de aprovar saque já aprovado! ID: ${id}, Status atual: ${dadosSaque.status}`);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(400).json({ 
           error: 'Este saque já foi aprovado anteriormente',
           status_atual: dadosSaque.status,
@@ -698,11 +1121,10 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         });
       }
       
-      // Verificar se já tem débito registrado
-      if (dadosSaque.debito_plific_at) {
+      // Verificar se já tem débito registrado — MAS permitir se veio do auto-débito (status aguardando_pagamento_stark)
+      if (dadosSaque.debito_plific_at && dadosSaque.status !== 'aguardando_pagamento_stark') {
         console.log(`⚠️ Saque já teve débito realizado! ID: ${id}, Débito em: ${dadosSaque.debito_plific_at}`);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(400).json({ 
           error: 'Débito já foi realizado para este saque',
           debito_em: dadosSaque.debito_plific_at
@@ -716,7 +1138,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         if (lockAge < 60000) {
           console.log(`⚠️ Saque em processamento! ID: ${id}, Lock há: ${lockAge}ms`);
           await client.query('ROLLBACK');
-          client.release();
           return res.status(409).json({ 
             error: 'Este saque está sendo processado. Aguarde alguns segundos.',
             processing_since: dadosSaque.processing_lock
@@ -736,8 +1157,9 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
     }
 
     // Se for aprovação, fazer débito automático na API Plific
+    // PULAR se o débito já foi realizado automaticamente na criação do saque
     let debitoRealizado = false;
-    if (isAprovado) {
+    if (isAprovado && !dadosSaque.debito) {
       try {
         const valorDebito = parseFloat(dadosSaque.requested_amount);
         const idProf = dadosSaque.user_cod;
@@ -751,7 +1173,7 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
         console.log(`💳 Iniciando débito Plific - Prof: ${idProf}, Tipo: ${status}, Data: ${dataDebitoFormatada}`);
         
         const urlDebito = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
-        const responseDebito = await fetch(urlDebito, {
+        const responseDebito = await plificFetch(urlDebito, {
           method: 'POST',
           headers: { 
             'Authorization': `Bearer ${PLIFIC_TOKEN}`, 
@@ -771,7 +1193,6 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
           console.error('❌ Erro ao debitar Plific:', respostaDebito);
           // Remover lock e fazer rollback
           await client.query('ROLLBACK');
-          client.release();
           return res.status(400).json({ 
             error: 'Erro ao debitar no Plific', 
             details: respostaDebito.msgUsuario || respostaDebito.dados?.msg || 'Falha no débito'
@@ -788,17 +1209,22 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
       } catch (erroDebito) {
         console.error('❌ Exceção ao debitar Plific:', erroDebito);
         await client.query('ROLLBACK');
-        client.release();
         return res.status(500).json({ 
           error: 'Erro ao processar débito', 
-          details: erroDebito.message 
+          details: process.env.NODE_ENV === 'production' ? 'Erro interno' : erroDebito.message 
         });
       }
+    } else if (isAprovado && dadosSaque.debito) {
+      // Débito já foi realizado automaticamente na criação — pular Plific
+      debitoRealizado = true;
+      console.log(`✅ [Aprovação] Débito já realizado automaticamente para saque #${id}, pulando Plific`);
     }
     
     // =============== ATUALIZAR REGISTRO NO BANCO ===============
-    // Definir a data do débito na Plific (a que foi enviada ou NOW())
-    const debitoPlificAt = isAprovado ? (dataDebito || new Date().toISOString()) : null;
+    // Se o débito já foi feito no auto-débito, preservar a data original. Senão usar a nova.
+    const debitoPlificAt = isAprovado 
+      ? (dadosSaque.debito_plific_at || dataDebito || new Date().toISOString()) 
+      : null;
     
     const result = await client.query(
       `UPDATE withdrawal_requests 
@@ -809,6 +1235,8 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
            approved_at = CASE WHEN $5 THEN NOW() ELSE approved_at END,
            lancamento_at = CASE WHEN $5 THEN NOW() ELSE lancamento_at END,
            debito_plific_at = CASE WHEN $5 THEN $7::timestamp ELSE debito_plific_at END,
+           debito = CASE WHEN $5 THEN true ELSE debito END,
+           debito_erro = CASE WHEN $5 THEN NULL ELSE debito_erro END,
            processing_lock = NULL,
            updated_at = NOW() 
        WHERE id = $6 
@@ -865,31 +1293,50 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
   }
 });
 
-// Excluir saque
+// Excluir saque (🔒 SECURITY FIX: Soft delete + proteção de status)
 router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Buscar dados antes de excluir para auditoria
+    // Buscar dados antes para auditoria e validação
     const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
 
-    const result = await pool.query(
-      'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    if (saqueAntes.rows.length === 0) {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
 
+    const saque = saqueAntes.rows[0];
+
+    // 🔒 SECURITY FIX: Não permitir exclusão de saques já pagos ou em processamento
+    const statusProtegidos = ['pago_stark', 'processando', 'aguardando_pagamento_stark'];
+    if (statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago') {
+      return res.status(400).json({ 
+        error: 'Não é possível excluir um saque com status: ' + (saque.status || saque.stark_status),
+        motivo: 'Saques pagos ou em processamento não podem ser removidos por integridade financeira.'
+      });
+    }
+
+    // 🔒 SECURITY FIX: Soft delete ao invés de hard delete
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET status = 'cancelado', 
+           admin_name = COALESCE(admin_name, $2),
+           reject_reason = COALESCE(reject_reason, 'Excluído pelo admin'),
+           updated_at = NOW() 
+       WHERE id = $1 
+       RETURNING *`,
+      [id, req.user.nome || req.user.username || 'Admin']
+    );
+
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
-      user_cod: result.rows[0].user_cod,
-      valor: result.rows[0].requested_amount,
-      status_anterior: result.rows[0].status
+      user_cod: saque.user_cod,
+      valor: saque.requested_amount,
+      status_anterior: saque.status,
+      acao: 'soft_delete_cancelado'
     });
 
-    console.log('🗑️ Saque excluído:', id);
+    console.log('🗑️ Saque cancelado (soft delete):', id, 'por', req.user.nome || req.user.username);
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao excluir saque:', error);
@@ -977,12 +1424,12 @@ router.get('/withdrawals/dashboard/conciliacao', verificarToken, verificarAdminO
   try {
     const result = await pool.query(`
       SELECT 
-        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')) as total_aprovados,
+        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark')) as total_aprovados,
         COUNT(*) FILTER (WHERE conciliacao_omie = true) as total_conciliado,
-        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade') AND conciliacao_omie = false) as pendente_conciliacao,
+        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark') AND conciliacao_omie = false) as pendente_conciliacao,
         COUNT(*) FILTER (WHERE debito = true) as total_debitado,
-        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade') AND debito = false) as pendente_debito,
-        COALESCE(SUM(final_amount) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade')), 0) as valor_total_aprovado,
+        COUNT(*) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark') AND debito = false) as pendente_debito,
+        COALESCE(SUM(final_amount) FILTER (WHERE status IN ('aprovado', 'aprovado_gratuidade', 'pago_stark')), 0) as valor_total_aprovado,
         COALESCE(SUM(final_amount) FILTER (WHERE conciliacao_omie = true), 0) as valor_conciliado,
         COALESCE(SUM(final_amount) FILTER (WHERE debito = true), 0) as valor_debitado
       FROM withdrawal_requests
@@ -1063,23 +1510,34 @@ router.post('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (re
   }
 });
 
-// Deletar gratuidade
+// Deletar gratuidade — 🔒 SECURITY FIX (HIGH-06): Soft delete para preservar trilha de auditoria
 router.delete('/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
-      'DELETE FROM gratuities WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    // Verificar se existe
+    const existing = await pool.query('SELECT * FROM gratuities WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
       return res.status(404).json({ error: 'Gratuidade não encontrada' });
     }
 
+    // 🔒 Soft delete: marca como removida ao invés de deletar
+    const result = await pool.query(
+      `UPDATE gratuities SET status = 'removida', expired_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    // Registrar auditoria
+    await registrarAuditoria(req, 'GRATUIDADE_REMOVIDA', AUDIT_CATEGORIES.FINANCIAL, 'gratuities', id, {
+      user_cod: existing.rows[0].user_cod,
+      quantidade_original: existing.rows[0].quantity,
+      restante: existing.rows[0].remaining,
+      removido_por: req.user.nome || req.user.username
+    });
+
     res.json({ success: true });
   } catch (error) {
-    console.error('❌ Erro ao deletar gratuidade:', error);
+    console.error('❌ Erro ao remover gratuidade:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
@@ -1109,10 +1567,19 @@ router.get('/restricted', verificarToken, verificarAdminOuFinanceiro, async (req
   }
 });
 
-// Verificar se usuário está restrito
-router.get('/restricted/check/:userCod', async (req, res) => {
+// Verificar se usuário está restrito (🔒 SECURITY FIX: adicionado verificarToken)
+router.get('/restricted/check/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    
+    // 🔒 SECURITY FIX (HIGH-04): Ownership check — só o próprio ou admin/financeiro
+    const isAdmin = req.user && ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+    const isOwner = req.user && req.user.codProfissional === userCod;
+    
+    if (!isAdmin && !isOwner) {
+      console.log(`⚠️ [SEGURANÇA] IDOR bloqueado em /restricted/check: ${req.user.codProfissional} tentou acessar ${userCod}`);
+      return res.status(403).json({ error: 'Acesso negado. Você só pode consultar seu próprio status.' });
+    }
     
     const result = await pool.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
@@ -1206,9 +1673,18 @@ router.patch('/restricted/:id/remove', verificarToken, verificarAdminOuFinanceir
 
   // ==================== PLIFIC ENDPOINTS ====================
 
+// 🔒 SECURITY FIX (CRIT-01): Permite próprio profissional OU admin/financeiro
 router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
     try {
         const { idProf } = req.params;
+
+        // Verificar permissão: admin/financeiro consulta qualquer um, profissional só o próprio
+        const isAdmin = ['admin', 'admin_master', 'admin_financeiro'].includes(req.user.role);
+        const isProprio = String(req.user.codProfissional) === String(idProf);
+        if (!isAdmin && !isProprio) {
+            return res.status(403).json({ error: 'Acesso negado. Você só pode consultar seu próprio saldo.' });
+        }
+
         const forceRefresh = req.query.refresh === 'true';
         
         if (!idProf || isNaN(parseInt(idProf))) {
@@ -1227,7 +1703,7 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
         const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
         console.log(`🔍 Plific: Consultando saldo do profissional ${idProf}...`);
         
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
         });
@@ -1260,7 +1736,7 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
         };
 
         plificSaldoCache.set(cacheKey, { data: resultado, timestamp: Date.now() });
-        console.log(`✅ Plific: Saldo do profissional ${idProf} = R$ ${resultado.profissional?.saldo || 0}`);
+        console.log(`✅ Plific: Saldo do profissional ${idProf} consultado com sucesso`);
         
         await registrarAuditoria(req, 'CONSULTA_SALDO_PLIFIC', AUDIT_CATEGORIES.FINANCIAL, 'plific_saldo', idProf, { saldo: resultado.profissional?.saldo, ambiente: PLIFIC_AMBIENTE });
 
@@ -1272,7 +1748,8 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
 });
 
 // Buscar Saldos em Lote
-router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.post('/plific/saldos-lote', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { ids } = req.body;
         
@@ -1303,7 +1780,7 @@ router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
 
                 try {
                     const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${idProf}`;
-                    const response = await fetch(url, {
+                    const response = await plificFetch(url, {
                         method: 'GET',
                         headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
                     });
@@ -1343,7 +1820,8 @@ router.post('/plific/saldos-lote', verificarToken, async (req, res) => {
 });
 
 // Lançar Débito
-router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro — CRÍTICO: débito financeiro
+router.post('/plific/lancar-debito', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { idProf, valor, descricao } = req.body;
         
@@ -1360,7 +1838,7 @@ router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
         const url = `${PLIFIC_BASE_URL}/lancarDebitoProfissional`;
         console.log(`💳 Plific: Lançando débito de R$ ${valor} para profissional ${idProf}...`);
 
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ idProf: parseInt(idProf), valor: parseFloat(valor), descricao: descricao.trim() })
@@ -1392,7 +1870,8 @@ router.post('/plific/lancar-debito', verificarToken, async (req, res) => {
 });
 
 // Buscar Profissionais para Consulta
-router.get('/plific/profissionais', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/profissionais', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { regiao, limite } = req.query;
         
@@ -1421,7 +1900,8 @@ router.get('/plific/profissionais', verificarToken, async (req, res) => {
 });
 
 // Listar todos os profissionais com saldo (do banco local + API Plific)
-router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const { pagina = 1, porPagina = 20 } = req.query;
         const paginaNum = parseInt(pagina);
@@ -1474,7 +1954,7 @@ router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
                 
                 // Buscar da API
                 const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${prof.codigo}`;
-                const response = await fetch(url, {
+                const response = await plificFetch(url, {
                     method: 'GET',
                     headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
                 });
@@ -1537,13 +2017,14 @@ router.get('/plific/saldos-todos', verificarToken, async (req, res) => {
 });
 
 // Status da Integração
-router.get('/plific/status', verificarToken, async (req, res) => {
+// 🔒 SECURITY FIX (CRIT-01): Adicionar verificarAdminOuFinanceiro
+router.get('/plific/status', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
         const testId = PLIFIC_AMBIENTE === 'teste' ? '8888' : '1';
         const url = `${PLIFIC_BASE_URL}/buscarSaldoProf?idProf=${testId}`;
         
         const startTime = Date.now();
-        const response = await fetch(url, {
+        const response = await plificFetch(url, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${PLIFIC_TOKEN}`, 'Content-Type': 'application/json' }
         });

@@ -29,14 +29,38 @@ function extractToken(req) {
 }
 
 // Rotas públicas que não precisam de autenticação
+// 🔒 SECURITY FIX (CRIT-01): Match exato por req.path (sem query string)
+// Formato: { path: '/prefixo', method: 'GET', startsWith: true }
 const PUBLIC_PATHS = [
-  '/cs/mapa-calor/',
+  { path: '/api/cs/mapa-calor/', method: 'GET', startsWith: true },
 ];
+
+/**
+ * Verifica se a rota atual é pública
+ * Usa req.path (sem query string) e método HTTP para evitar bypass por substring
+ */
+function isPublicRoute(req) {
+  const reqPath = (req.path || '').toLowerCase();
+  const reqMethod = (req.method || '').toUpperCase();
+  
+  return PUBLIC_PATHS.some(rule => {
+    // Verificar método HTTP (se especificado)
+    if (rule.method && rule.method.toUpperCase() !== reqMethod) return false;
+    
+    const rulePath = rule.path.toLowerCase();
+    
+    if (rule.startsWith) {
+      return reqPath.startsWith(rulePath);
+    }
+    // Match exato
+    return reqPath === rulePath;
+  });
+}
 
 // Verificar token JWT (obrigatório)
 const verificarToken = (req, res, next) => {
   // Bypass para rotas públicas (ex: mapa de calor CS)
-  if (PUBLIC_PATHS.some(p => (req.originalUrl || '').includes(p))) {
+  if (isPublicRoute(req)) {
     req.user = req.user || { nome: 'Acesso Público', role: 'viewer' };
     return next();
   }

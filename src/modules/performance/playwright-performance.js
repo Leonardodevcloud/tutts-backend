@@ -1,24 +1,10 @@
 /**
- * playwright-performance.js
- * Automação RPA: acessa entregasExportarExcel, aplica filtros,
- * lê a tabela e retorna array de entregas para cálculo de SLA.
- *
- * Seletores 100% mapeados do HTML real (console dump):
- *   Data inicial      : #data                    (type=text, value="12/03/2026")
- *   Data final        : #dataF                   (type=text)
- *   Com endereços     : input[name="endereco"][value="CE"]    (radio)
- *   Com dados prof    : input[name="profissional"][value="CDP"] (radio)
- *   Status multiselect: #status (select-multiple) + checkboxes name=statusOS value=F
- *   Cliente específico: input[name="cliente"][value="CE"]     (radio)
- *   Input cliente vis : #autocomplet-cliente      (text)
- *   Input cliente hid : #codCliente               (hidden)
- *   Centro de custo   : #centrocusto-cliente      (select-one)
- *   Qtd por página    : #quantLimite → "500"
- *   Botão buscar      : input[name="buscarDados"] (type=button)
- *
- *   Colunas tabela:
- *   [0] Serviço  [1] Cliente  [3] Distância  [4] Profissional
- *   [5] Data/Agendado  [11] Finalizado
+ * playwright-performance.js — v9
+ * Usa EXATAMENTE o mesmo padrão de navegação do playwright-agent.js
+ * que funciona em produção:
+ *   - waitUntil: 'domcontentloaded' (NÃO networkidle)
+ *   - waitForURL após login (NÃO waitForNavigation)
+ *   - page.goto(URL) após login (NÃO window.location.href)
  */
 
 'use strict';
@@ -29,15 +15,24 @@ const path = require('path');
 const { logger } = require('../../config/logger');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
-const TIMEOUT           = 30_000;
+const SCREENSHOT_DIR    = '/tmp/screenshots';
+const TIMEOUT           = 30_000;  // mesmo do agente (25s lá, 30s aqui por margem)
 const EXCEL_URL         = 'https://tutts.com.br/expresso/expressoat/entregasExportarExcel';
 const LOGIN_URL         = () => process.env.SISTEMA_EXTERNO_URL;
 
 function log(msg) { logger.info(`[playwright-perf] ${msg}`); }
 
-// ─────────────────────────────────────────────────────────────
-// TABELA DE PRAZOS (espelho do bookmarklet v5.4)
-// ─────────────────────────────────────────────────────────────
+function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
+ensureDir(SCREENSHOT_DIR);
+
+async function screenshotDebug(page, nome) {
+  try {
+    const file = path.join(SCREENSHOT_DIR, `perf-${nome}-${Date.now()}.png`);
+    await page.screenshot({ path: file, fullPage: false });
+    log(`📸 ${path.basename(file)}`);
+  } catch (e) { log(`⚠️ Screenshot falhou: ${e.message}`); }
+}
+
 const TABELA_PRAZOS_KM = [
   [0,10,60],[10,15,75],[15,20,90],[20,25,105],[25,30,120],
   [30,35,135],[35,40,150],[40,45,165],[45,50,180],[50,55,195],
@@ -60,9 +55,9 @@ function parseDataBR(texto) {
   return new Date(+a, +mo - 1, +d, +h, +mi, +(s || 0));
 }
 
-// ─────────────────────────────────────────────────────────────
-// LOGIN (reutiliza padrão do playwright-agent.js)
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// LOGIN — cópia exata do playwright-agent.js
+// ══════════════════════════════════════════════════════════════
 async function isLoggedIn(page) {
   const url = page.url();
   return url.includes('/expresso') && !url.includes('loginFuncionarioNovo');
@@ -79,247 +74,294 @@ async function fazerLogin(page) {
   await page.fill('#loginEmail', process.env.SISTEMA_EXTERNO_EMAIL);
   await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
   await page.locator('input[name="logar"]').first().click();
+
+  // Aguardar sair da página de login — EXATO do agente
   await page.waitForURL(
     url => !url.toString().includes('loginFuncionarioNovo'),
     { timeout: TIMEOUT }
   );
-  log('✅ Login OK');
+  log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// NAVEGAÇÃO — mesma lógica do agente: goto → login? → goto
+// ══════════════════════════════════════════════════════════════
+async function navegarParaFiltros(page, context) {
+  log('📌 Passo 1: Navegando para entregasExportarExcel');
+
+  // goto direto — domcontentloaded (NÃO networkidle!)
+  await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.waitForTimeout(1000);
+
+  if (!(await isLoggedIn(page))) {
+    if (fs.existsSync(SESSION_FILE_PERF)) {
+      fs.unlinkSync(SESSION_FILE_PERF);
+      log('🗑️ Sessão inválida removida');
+    }
+    await fazerLogin(page);
+
+    // Após login, goto de novo — EXATO padrão do agente
+    await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.waitForTimeout(1000);
+
+    await context.storageState({ path: SESSION_FILE_PERF });
+    log('💾 Sessão salva');
+  } else {
+    log('✅ Já logado');
+  }
+
+  const url = page.url();
+  log(`📍 URL: ${url}`);
+
+  // Verificar se chegou na página certa
+  const temData = await page.evaluate(() => !!document.getElementById('data'));
+  if (!temData) {
+    await screenshotDebug(page, 'no-form');
+    throw new Error(`Formulário não encontrado. URL: ${url}`);
+  }
+  log('✅ Formulário detectado');
+}
+
+// ══════════════════════════════════════════════════════════════
 // PREENCHER FILTROS
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
 async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto }) {
   log('📋 Preenchendo filtros...');
 
-  // Datas — triple-click para selecionar tudo antes de digitar
-  await page.click('#data', { clickCount: 3 });
-  await page.fill('#data',  dataInicio);   // formato DD/MM/YYYY
-  await page.click('#dataF', { clickCount: 3 });
-  await page.fill('#dataF', dataFim);
-  log(`  📅 Datas: ${dataInicio} → ${dataFim}`);
+  await page.evaluate(({ di, df }) => {
+    if (window.jQuery) { jQuery('#data').val(di); jQuery('#dataF').val(df); }
+    else { document.getElementById('data').value = di; document.getElementById('dataF').value = df; }
 
-  // Com endereços (radio CE)
-  await page.check('input[name="endereco"][value="CE"]');
-  log('  ✅ Com endereços');
+    const radioEnd = document.querySelector('input[name="endereco"][value="CE"]');
+    if (radioEnd) { radioEnd.checked = true; radioEnd.click(); }
 
-  // Com dados profissional (radio CDP)
-  await page.check('input[name="profissional"][value="CDP"]');
-  log('  ✅ Com dados profissional');
+    const radioProf = document.querySelector('input[name="profissional"][value="CDP"]');
+    if (radioProf) { radioProf.checked = true; radioProf.click(); }
 
-  // Status = Concluído — select-multiple com plugin multiselect
-  // Estratégia: setar via JS direto no select nativo + checkboxes do plugin
-  await page.evaluate(() => {
     const sel = document.getElementById('status');
-    if (!sel) return;
-    for (const opt of sel.options) opt.selected = (opt.value === 'F');
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    // Sincroniza os checkboxes visuais do plugin multiselect
+    if (sel) {
+      for (const opt of sel.options) opt.selected = (opt.value === 'F');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     document.querySelectorAll('input[name="statusOS"]').forEach(cb => {
-      cb.checked = cb.value === 'F';
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
+      const check = (cb.value === 'F');
+      cb.checked = check;
+      const btn = cb.closest('button.multiselect-option');
+      if (btn) { if (check) btn.classList.add('active'); else btn.classList.remove('active'); }
     });
-  });
-  log('  ✅ Status = Concluído (F)');
+    const msTxt = document.querySelector('.multiselect-selected-text');
+    if (msTxt) msTxt.textContent = 'Concluídos';
 
-  // Qtd por página = 500
-  await page.selectOption('#quantLimite', '500');
-  log('  ✅ Qtd/página: 500');
+    const quantSel = document.getElementById('quantLimite');
+    if (quantSel) quantSel.value = '10000';
+  }, { di: dataInicio, df: dataFim });
 
-  // Cliente específico
+  log(`  📅 ${dataInicio} → ${dataFim} | End=CE | Prof=CDP | Status=F | Pag=10000`);
+
   if (codCliente) {
-    await page.check('input[name="cliente"][value="CE"]');
-    await page.waitForTimeout(400);
+    await page.evaluate(() => {
+      const radio = document.querySelector('input[name="cliente"][value="CE"]');
+      if (radio) radio.click();
+    });
+    await page.waitForTimeout(800);
 
     await page.evaluate((cod) => {
-      const hidden = document.getElementById('codCliente');
-      if (hidden) hidden.value = String(cod);
-      const txt = document.getElementById('autocomplet-cliente');
-      if (txt) {
-        txt.value = String(cod);
-        txt.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      document.getElementById('codCliente').value = String(cod);
     }, codCliente);
-    log(`  ✅ Cliente: ${codCliente}`);
 
-    // Centro de custo — aguarda select ser populado pelo cliente
-    if (centroCusto) {
-      await page.waitForFunction(
-        () => document.querySelectorAll('#centrocusto-cliente option').length > 1,
-        { timeout: 5000 }
-      ).catch(() => log('  ⚠️  CC: select não populado'));
+    const input = page.locator('#autocomplet-cliente');
+    await input.click();
+    await input.fill('');
+    await input.type(String(codCliente), { delay: 100 });
+    log(`  ⌨️ Digitou "${codCliente}"`);
 
-      await page.selectOption('#centrocusto-cliente', centroCusto).catch(() => {
-        log(`  ⚠️  CC "${centroCusto}" não encontrado`);
-      });
-      log(`  ✅ Centro de custo: ${centroCusto}`);
+    try {
+      await page.waitForSelector('ul.ui-autocomplete li.ui-menu-item', { timeout: 10000 });
+      await page.click('ul.ui-autocomplete li.ui-menu-item:first-child');
+      log('  ✅ Cliente selecionado');
+    } catch {
+      log('  ⚠️ Autocomplete timeout, forçando');
+      await page.evaluate((cod) => {
+        document.getElementById('codCliente').value = String(cod);
+        document.getElementById('autocomplet-cliente').value = String(cod);
+      }, codCliente);
     }
+    await page.waitForTimeout(1000);
+
+    if (centroCusto) {
+      try {
+        await page.waitForFunction(
+          () => document.querySelectorAll('#centrocusto-cliente option').length > 1,
+          { timeout: 10000 }
+        );
+        // Buscar opção pelo TEXTO (não pelo value) — o value pode ser ID numérico
+        const matched = await page.evaluate((cc) => {
+          const s = document.getElementById('centrocusto-cliente');
+          if (!s) return { found: false, options: [] };
+          const ccLower = cc.toLowerCase().trim();
+          const allOptions = Array.from(s.options).map(o => ({ value: o.value, text: o.textContent.trim() }));
+          // 1. Match exato pelo value
+          for (const o of s.options) {
+            if (o.value === cc) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'value_exato', selected: o.value }; }
+          }
+          // 2. Match exato pelo texto
+          for (const o of s.options) {
+            if (o.textContent.trim().toLowerCase() === ccLower) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'texto_exato', selected: o.value }; }
+          }
+          // 3. Match parcial — texto contém o CC ou CC contém o texto
+          for (const o of s.options) {
+            const oText = o.textContent.trim().toLowerCase();
+            if (oText.includes(ccLower) || ccLower.includes(oText)) {
+              if (o.value && o.value !== '' && oText !== '') { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'parcial', selected: o.value, texto: o.textContent.trim() }; }
+            }
+          }
+          return { found: false, options: allOptions.slice(0, 15) };
+        }, centroCusto);
+
+        if (matched.found) {
+          log(`  ✅ CC: "${centroCusto}" → match ${matched.match}${matched.texto ? ` (${matched.texto})` : ''} → value="${matched.selected}"`);
+        } else {
+          log(`  ⚠️ CC: "${centroCusto}" NÃO encontrado. Opções disponíveis:`);
+          (matched.options || []).forEach(o => log(`     - value="${o.value}" text="${o.text}"`));
+        }
+      } catch (ccErr) { log(`  ⚠️ CC não carregou: ${ccErr.message}`); }
+      await page.waitForTimeout(1500); // Aguardar sistema externo reagir à mudança de CC
+    }
+    log(`  ✅ Cliente: ${codCliente}`);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// LER TABELA (todas as páginas)
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// LER TABELA
+// ══════════════════════════════════════════════════════════════
 async function lerTabela(page) {
   const todasLinhas = [];
   let pagina = 1;
-
   while (true) {
-    log(`📄 Lendo página ${pagina}...`);
-
+    log(`📄 Página ${pagina}...`);
     const linhas = await page.evaluate(() => {
-      const rows = document.querySelectorAll('table tbody tr');
+      const ths = Array.from(document.querySelectorAll('#divRetornoTable table thead th'));
+      const idx = {};
+      ths.forEach((th, i) => {
+        const t = (th.textContent || '').trim().toLowerCase()
+          .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (t.includes('servic'))     idx.os = i;
+        if (t.includes('cliente'))    idx.cliente = i;
+        if (t.includes('distanc'))    idx.distancia = i;
+        if (t.includes('data'))       idx.data = i;
+        if (t.includes('finalizado')) idx.finalizado = i;
+      });
+      const rows = document.querySelectorAll('#divRetornoTable table tbody tr');
       const dados = [];
       rows.forEach(tr => {
         const tds = tr.querySelectorAll('td');
-        if (tds.length < 12) return;
+        if (tds.length < 5) return;
+        const first = (tds[0]?.textContent || '').trim();
+        if (first.toLowerCase().startsWith('total')) return;
+        if (tds[0]?.getAttribute('colspan')) return;
         dados.push({
-          os:           tds[0]?.textContent?.trim() || '',
-          cliente_txt:  tds[1]?.textContent?.trim() || '',
-          distancia:    tds[3]?.textContent?.trim() || '',
-          profissional: tds[4]?.textContent?.trim() || '',
-          data_hora:    tds[5]?.textContent?.trim() || '',
-          finalizado:   tds[11]?.textContent?.trim() || '',
+          os: first,
+          cliente_txt: idx.cliente != null ? (tds[idx.cliente]?.textContent || '').trim() : '',
+          distancia:   idx.distancia != null ? (tds[idx.distancia]?.textContent || '').trim() : '',
+          data_hora:   idx.data != null ? (tds[idx.data]?.textContent || '').trim() : '',
+          finalizado:  idx.finalizado != null ? (tds[idx.finalizado]?.textContent || '').trim() : '',
         });
       });
       return dados;
     });
-
     todasLinhas.push(...linhas);
     log(`  → ${linhas.length} linhas`);
-
-    // Verifica próxima página (Bootstrap pagination padrão)
     const temProxima = await page.evaluate(() => {
-      const sels = [
-        'a[data-page][aria-label="Próximo"]',
-        '.pagination li.next:not(.disabled) a',
-        '.pagination a[rel="next"]',
-        '.paginate_button.next:not(.disabled)',
-      ];
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el && !el.closest('.disabled')) return true;
+      for (const s of ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a']) {
+        const el = document.querySelector(s); if (el && !el.closest('.disabled')) return true;
       }
       return false;
     });
-
     if (!temProxima || linhas.length < 10) break;
-
-    await page.locator([
-      'a[data-page][aria-label="Próximo"]',
-      '.pagination li.next:not(.disabled) a',
-      '.paginate_button.next:not(.disabled)',
-    ].join(', ')).first().click();
-
-    await page.waitForTimeout(1500);
+    await page.evaluate(() => {
+      for (const s of ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a']) {
+        const el = document.querySelector(s); if (el) { el.click(); return; }
+      }
+    });
+    await page.waitForTimeout(2500);
     pagina++;
-    if (pagina > 20) { log('⚠️  Limite de 20 páginas'); break; }
+    if (pagina > 20) break;
   }
-
-  log(`📊 Total: ${todasLinhas.length} linhas lidas`);
+  log(`📊 Total: ${todasLinhas.length} linhas`);
   return todasLinhas;
 }
 
-// ─────────────────────────────────────────────────────────────
-// CALCULAR SLA POR LINHA
-// ─────────────────────────────────────────────────────────────
+// ── SLA ─────────────────────────────────────────────────────
 function calcularLinhas(linhas) {
   return linhas.map(linha => {
-    const mCli    = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
-    const codCli  = mCli ? parseInt(mCli[1]) : null;
-    const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').trim();
-
+    const mCli = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
+    const codCli = mCli ? parseInt(mCli[1]) : null;
+    const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
+    const linhasTexto = linha.cliente_txt.split('\n').map(l => l.trim()).filter(Boolean);
+    const profissional = linhasTexto.length >= 2 ? linhasTexto[1] : '';
     const mKm = linha.distancia.match(/([\d]+[.,][\d]+)/);
-    const km  = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
-
+    const km = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
     const prazo = (codCli !== null && CLIENTES_PRAZO_FIXO[codCli] !== undefined)
-      ? CLIENTES_PRAZO_FIXO[codCli]
-      : (km !== null ? getPrazoPorKm(km) : null);
-
-    // col[5] pode vir como "DD/MM/YYYY HH:MM" ou "DD/MM/YYYY HH:MM / DD/MM/YYYY HH:MM" (agendado)
-    // parseDataBR extrai a PRIMEIRA data encontrada
+      ? CLIENTES_PRAZO_FIXO[codCli] : (km !== null ? getPrazoPorKm(km) : null);
     const dtCriacao = parseDataBR(linha.data_hora);
-    const dtFinal   = parseDataBR(linha.finalizado);
-
-    let sla_no_prazo = null;
-    let duracao_min  = null;
-    let delta_min    = null;
-    const sem_dados  = !prazo || !dtCriacao || !dtFinal;
-
+    const dtFinal = parseDataBR(linha.finalizado);
+    let sla_no_prazo = null, duracao_min = null, delta_min = null;
+    const sem_dados = !prazo || !dtCriacao || !dtFinal;
     if (!sem_dados) {
-      duracao_min  = Math.round((dtFinal - dtCriacao) / 60000);
+      duracao_min = Math.round((dtFinal - dtCriacao) / 60000);
       sla_no_prazo = duracao_min <= prazo;
-      delta_min    = Math.abs(duracao_min - prazo);
+      delta_min = Math.abs(duracao_min - prazo);
     }
-
-    return {
-      os: linha.os,
-      cliente_txt:  linha.cliente_txt,
-      cod_cliente:  codCli,
-      nome_cliente: nomeCli,
-      profissional: linha.profissional,
-      km,
-      prazo_min:   prazo,
+    return { os: linha.os, cliente_txt: linha.cliente_txt, cod_cliente: codCli,
+      nome_cliente: nomeCli, profissional, km, prazo_min: prazo,
       data_criacao: dtCriacao?.toISOString() ?? null,
-      finalizado:   dtFinal?.toISOString() ?? null,
-      sla_no_prazo,
-      duracao_min,
-      delta_min,
-      sem_dados,
-    };
+      finalizado: dtFinal?.toISOString() ?? null,
+      sla_no_prazo, duracao_min, delta_min, sem_dados };
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// AGRUPAMENTO POR CLIENTE
-// ─────────────────────────────────────────────────────────────
 function agruparPorCliente(registros) {
   const mapa = {};
   for (const r of registros) {
     const key = r.cod_cliente ?? '__sem__';
     if (!mapa[key]) {
-      mapa[key] = {
-        cod_cliente:  r.cod_cliente,
-        nome_cliente: r.nome_cliente,
-        total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0,
-      };
+      mapa[key] = { cod_cliente: r.cod_cliente, nome_cliente: r.nome_cliente,
+        total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0 };
     }
     mapa[key].total++;
-    if (r.sem_dados)         mapa[key].sem_dados++;
+    if (r.sem_dados) mapa[key].sem_dados++;
     else if (r.sla_no_prazo) mapa[key].no_prazo++;
-    else                     mapa[key].fora_prazo++;
+    else mapa[key].fora_prazo++;
   }
-
   return Object.values(mapa)
-    .map(c => ({
-      ...c,
+    .map(c => ({ ...c,
       pct_no_prazo: (c.total - c.sem_dados) > 0
-        ? parseFloat(((c.no_prazo / (c.total - c.sem_dados)) * 100).toFixed(2))
-        : 0,
-    }))
+        ? parseFloat(((c.no_prazo / (c.total - c.sem_dados)) * 100).toFixed(2)) : 0 }))
     .sort((a, b) => b.total - a.total);
 }
 
-// ─────────────────────────────────────────────────────────────
-// EXPORTAÇÃO PRINCIPAL
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// FUNÇÃO PRINCIPAL
+// ══════════════════════════════════════════════════════════════
 async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto }) {
-  if (!process.env.SISTEMA_EXTERNO_URL) {
-    throw new Error('SISTEMA_EXTERNO_URL não configurada.');
-  }
+  if (!process.env.SISTEMA_EXTERNO_URL) throw new Error('SISTEMA_EXTERNO_URL não configurada.');
+  log(`🚀 ${dataInicio}→${dataFim} | cli=${codCliente ?? 'todos'} | cc=${centroCusto ?? '—'}`);
 
-  log(`🚀 Iniciando: ${dataInicio}→${dataFim} | cli=${codCliente ?? 'todos'} | cc=${centroCusto ?? '—'}`);
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-gpu', '--disable-extensions', '--disable-background-networking',
+      '--disable-default-apps', '--mute-audio', '--no-first-run',
+    ],
+  });
 
   let contextOptions = {};
   if (fs.existsSync(SESSION_FILE_PERF)) {
     contextOptions = { storageState: SESSION_FILE_PERF };
-    log('♻️  Usando sessão salva');
+    log('♻️ Sessão encontrada');
   }
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
   const context = await browser.newContext({
     ...contextOptions,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
@@ -329,49 +371,51 @@ async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto 
   page.setDefaultTimeout(TIMEOUT);
 
   try {
-    // 1. Navega + login
-    await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await page.waitForTimeout(1000);
-
-    if (!(await isLoggedIn(page))) {
-      if (fs.existsSync(SESSION_FILE_PERF)) { fs.unlinkSync(SESSION_FILE_PERF); log('🗑️  Sessão inválida'); }
-      await fazerLogin(page);
-      await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(1000);
-      await context.storageState({ path: SESSION_FILE_PERF });
-      log('💾 Sessão salva');
-    } else {
-      log('✅ Já logado');
-    }
-
-    // 2. Filtros
+    await navegarParaFiltros(page, context);
     await preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto });
+    await page.waitForTimeout(500);
 
-    // 3. Busca
-    log('🔍 Clicando Buscar dados...');
-    await page.click('input[name="buscarDados"]');
-    await page.waitForSelector('table tbody tr td', { timeout: TIMEOUT });
-    await page.waitForTimeout(1500);
+    log('🔍 Executando busca...');
+    await page.evaluate(() => {
+      if (typeof buscaServicoExcel === 'function') buscaServicoExcel(1, 0, '', null);
+      else { const b = document.querySelector('input[name="buscarDados"]'); if (b) b.click(); }
+    });
+
+    log('⏳ Aguardando resultado...');
+    try {
+      await page.waitForFunction(
+        () => { const d = document.getElementById('divRetornoTable');
+          return d && d.querySelectorAll('table tbody tr td').length > 0; },
+        { timeout: 120_000 }
+      );
+    } catch {
+      await screenshotDebug(page, 'no-table');
+      const html = await page.evaluate(() => {
+        const d = document.getElementById('divRetornoTable');
+        return d ? d.innerHTML.slice(0, 300) : 'div não encontrado';
+      });
+      throw new Error(`Tabela não carregou. Content: ${html.slice(0, 200)}`);
+    }
+    await page.waitForTimeout(2000);
     log('✅ Tabela carregada');
 
-    // 4. Lê páginas
     const linhasBrutas = await lerTabela(page);
-
-    // 5. Calcula
-    const registros  = calcularLinhas(linhasBrutas);
-    const total      = registros.length;
-    const no_prazo   = registros.filter(r => r.sla_no_prazo === true).length;
+    const registros = calcularLinhas(linhasBrutas);
+    const total = registros.length;
+    const no_prazo = registros.filter(r => r.sla_no_prazo === true).length;
     const fora_prazo = registros.filter(r => r.sla_no_prazo === false).length;
-    const sem_dados  = registros.filter(r => r.sem_dados).length;
+    const sem_dados = registros.filter(r => r.sem_dados).length;
     const analisados = total - sem_dados;
     const pct_no_prazo = analisados > 0
       ? parseFloat(((no_prazo / analisados) * 100).toFixed(2)) : 0;
-
-    log(`✅ ${total} OS | ${no_prazo}✓ | ${fora_prazo}✗ | ${sem_dados} s/dados | ${pct_no_prazo}%`);
+    log(`✅ ${total} OS | ${no_prazo}✓ | ${fora_prazo}✗ | ${sem_dados}? | ${pct_no_prazo}%`);
 
     return { total, no_prazo, fora_prazo, sem_dados, pct_no_prazo,
-             por_cliente: agruparPorCliente(registros), registros };
+      por_cliente: agruparPorCliente(registros), registros };
 
+  } catch (err) {
+    await screenshotDebug(page, 'error');
+    throw err;
   } finally {
     await browser.close();
   }

@@ -3,6 +3,33 @@ const express = require('express');
 function createLiderancaRouter(pool) {
   const liderancaRouter = express.Router();
 
+  // 🔧 Helper: Calcula próxima exibição baseado no tipo e intervalo de recorrência
+  // Centralizado para evitar inconsistências entre POST, PUT e processamento
+  const calcularProximaExibicao = (baseDate, tipo_recorrencia, intervalo_recorrencia) => {
+    const proxima = new Date(baseDate);
+    const intervalo = intervalo_recorrencia || 1;
+    
+    switch (tipo_recorrencia) {
+      case 'diaria':
+      case 'diario': // 🔧 FIX: alias para compatibilidade com dados antigos
+        proxima.setDate(proxima.getDate() + intervalo);
+        break;
+      case 'semanal':
+        proxima.setDate(proxima.getDate() + intervalo * 7);
+        break;
+      case 'mensal':
+        proxima.setMonth(proxima.getMonth() + intervalo);
+        break;
+      default:
+        // 🔧 FIX: Safety — tipo desconhecido trata como diária para não travar em loop
+        console.warn(`⚠️ tipo_recorrencia desconhecido: "${tipo_recorrencia}", usando diária como fallback`);
+        proxima.setDate(proxima.getDate() + intervalo);
+        break;
+    }
+    
+    return proxima;
+  };
+
   liderancaRouter.post('/mensagens', async (req, res) => {
     try {
       const {
@@ -14,19 +41,7 @@ function createLiderancaRouter(pool) {
       // Calcular próxima exibição se for recorrente
       let proxima_exibicao = null;
       if (recorrente && tipo_recorrencia) {
-        const agora = new Date();
-        switch (tipo_recorrencia) {
-          case 'diaria':
-            proxima_exibicao = new Date(agora.getTime() + (intervalo_recorrencia || 1) * 24 * 60 * 60 * 1000);
-            break;
-          case 'semanal':
-            proxima_exibicao = new Date(agora.getTime() + (intervalo_recorrencia || 1) * 7 * 24 * 60 * 60 * 1000);
-            break;
-          case 'mensal':
-            proxima_exibicao = new Date(agora);
-            proxima_exibicao.setMonth(proxima_exibicao.getMonth() + (intervalo_recorrencia || 1));
-            break;
-        }
+        proxima_exibicao = calcularProximaExibicao(new Date(), tipo_recorrencia, intervalo_recorrencia);
       }
 
       const result = await pool.query(`
@@ -42,7 +57,8 @@ function createLiderancaRouter(pool) {
         recorrente || false, tipo_recorrencia, intervalo_recorrencia || 1, proxima_exibicao
       ]);
 
-      console.log('📢 Nova mensagem da liderança criada:', result.rows[0].id);
+      console.log('📢 Nova mensagem da liderança criada:', result.rows[0].id, 
+        recorrente ? `(recorrente: ${tipo_recorrencia}, intervalo: ${intervalo_recorrencia}, próxima: ${proxima_exibicao?.toISOString()})` : '(única)');
       res.json(result.rows[0]);
     } catch (err) {
       console.error('❌ Erro ao criar mensagem da liderança:', err);
@@ -72,6 +88,7 @@ function createLiderancaRouter(pool) {
       const { userCod } = req.params;
       
       // Processar recorrências pendentes antes de buscar
+      // NÃO deleta visualizações — apenas atualiza ultima_recorrencia e proxima_exibicao
       const agora = new Date();
       const recorrentes = await pool.query(`
         SELECT * FROM lideranca_mensagens
@@ -79,33 +96,30 @@ function createLiderancaRouter(pool) {
       `, [agora]);
       
       for (const msg of recorrentes.rows) {
-        // Limpar visualizações para reexibir
-        await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
+        // 🔧 FIX: Usar helper centralizado (suporta diario/diaria + default)
+        const proxima = calcularProximaExibicao(agora, msg.tipo_recorrencia, msg.intervalo_recorrencia);
         
-        // Calcular próxima exibição
-        let proxima = new Date(agora);
-        switch (msg.tipo_recorrencia) {
-          case 'diaria':
-            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1));
-            break;
-          case 'semanal':
-            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1) * 7);
-            break;
-          case 'mensal':
-            proxima.setMonth(proxima.getMonth() + (msg.intervalo_recorrencia || 1));
-            break;
-        }
-        
-        await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
-        console.log(`🔄 Recorrência processada: "${msg.titulo}" - próxima: ${proxima.toISOString()}`);
+        // Atualizar proxima_exibicao e marcar ultima_recorrencia
+        await pool.query(
+          'UPDATE lideranca_mensagens SET proxima_exibicao = $1, ultima_recorrencia = $2 WHERE id = $3', 
+          [proxima, agora, msg.id]
+        );
+        console.log(`🔄 Recorrência processada: "${msg.titulo}" (tipo=${msg.tipo_recorrencia}, intervalo=${msg.intervalo_recorrencia}) - próxima: ${proxima.toISOString()}`);
       }
       
-      // Agora buscar pendentes normalmente
+      // Buscar pendentes: mensagens que o usuário NÃO visualizou neste ciclo
+      // - Não-recorrentes: nunca visualizadas pelo usuário
+      // - Recorrentes: não visualizadas DESDE a última recorrência (ou desde a criação se nunca recorreu)
       const result = await pool.query(`
         SELECT m.* FROM lideranca_mensagens m
+        LEFT JOIN lideranca_visualizacoes v ON m.id = v.mensagem_id AND v.user_cod = $1
         WHERE m.ativo = true
-          AND m.id NOT IN (
-            SELECT mensagem_id FROM lideranca_visualizacoes WHERE user_cod = $1
+          AND (
+            -- Não-recorrente: nunca visualizada
+            (m.recorrente = false AND v.id IS NULL)
+            OR
+            -- Recorrente: nunca visualizada OU visualizada antes da última recorrência
+            (m.recorrente = true AND (v.id IS NULL OR v.visualizado_em < COALESCE(m.ultima_recorrencia, m.created_at)))
           )
         ORDER BY m.created_at DESC
       `, [userCod]);
@@ -175,23 +189,60 @@ function createLiderancaRouter(pool) {
       const { id } = req.params;
       const { titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo } = req.body;
 
-      const result = await pool.query(`
-        UPDATE lideranca_mensagens SET
-          titulo = COALESCE($1, titulo),
-          conteudo = COALESCE($2, conteudo),
-          tipo_conteudo = COALESCE($3, tipo_conteudo),
-          midia_url = COALESCE($4, midia_url),
-          midia_tipo = COALESCE($5, midia_tipo),
-          recorrente = COALESCE($6, recorrente),
-          tipo_recorrencia = COALESCE($7, tipo_recorrencia),
-          intervalo_recorrencia = COALESCE($8, intervalo_recorrencia),
-          ativo = COALESCE($9, ativo),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $10
-        RETURNING *
-      `, [titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo, id]);
+      // 🔧 FIX: Recalcular proxima_exibicao quando configuração de recorrência muda
+      let proxima_exibicao = undefined; // undefined = não alterar
+      
+      if (recorrente !== undefined) {
+        if (recorrente && tipo_recorrencia) {
+          // Recorrência habilitada/alterada — recalcular a partir de agora
+          proxima_exibicao = calcularProximaExibicao(new Date(), tipo_recorrencia, intervalo_recorrencia);
+          console.log(`🔄 Recorrência atualizada para msg ${id}: tipo=${tipo_recorrencia}, intervalo=${intervalo_recorrencia}, próxima=${proxima_exibicao.toISOString()}`);
+        } else if (recorrente === false) {
+          // Recorrência desabilitada — limpar
+          proxima_exibicao = null;
+        }
+      }
 
-      res.json(result.rows[0]);
+      // Construir query dinâmica para incluir proxima_exibicao apenas se necessário
+      if (proxima_exibicao !== undefined) {
+        const result = await pool.query(`
+          UPDATE lideranca_mensagens SET
+            titulo = COALESCE($1, titulo),
+            conteudo = COALESCE($2, conteudo),
+            tipo_conteudo = COALESCE($3, tipo_conteudo),
+            midia_url = COALESCE($4, midia_url),
+            midia_tipo = COALESCE($5, midia_tipo),
+            recorrente = COALESCE($6, recorrente),
+            tipo_recorrencia = COALESCE($7, tipo_recorrencia),
+            intervalo_recorrencia = COALESCE($8, intervalo_recorrencia),
+            ativo = COALESCE($9, ativo),
+            proxima_exibicao = $10,
+            ultima_recorrencia = NULL,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = $11
+          RETURNING *
+        `, [titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo, proxima_exibicao, id]);
+        
+        res.json(result.rows[0]);
+      } else {
+        const result = await pool.query(`
+          UPDATE lideranca_mensagens SET
+            titulo = COALESCE($1, titulo),
+            conteudo = COALESCE($2, conteudo),
+            tipo_conteudo = COALESCE($3, tipo_conteudo),
+            midia_url = COALESCE($4, midia_url),
+            midia_tipo = COALESCE($5, midia_tipo),
+            recorrente = COALESCE($6, recorrente),
+            tipo_recorrencia = COALESCE($7, tipo_recorrencia),
+            intervalo_recorrencia = COALESCE($8, intervalo_recorrencia),
+            ativo = COALESCE($9, ativo),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = $10
+          RETURNING *
+        `, [titulo, conteudo, tipo_conteudo, midia_url, midia_tipo, recorrente, tipo_recorrencia, intervalo_recorrencia, ativo, id]);
+
+        res.json(result.rows[0]);
+      }
     } catch (err) {
       console.error('❌ Erro ao atualizar mensagem:', err);
       res.status(500).json({ error: err.message });
@@ -210,7 +261,7 @@ function createLiderancaRouter(pool) {
     }
   });
 
-  // POST /processar-recorrencias - Processar recorrências
+  // POST /processar-recorrencias - Processar recorrências (cron ou manual)
   liderancaRouter.post('/processar-recorrencias', async (req, res) => {
     try {
       const agora = new Date();
@@ -222,24 +273,15 @@ function createLiderancaRouter(pool) {
       `, [agora]);
 
       for (const msg of mensagens.rows) {
-        // Limpar visualizações antigas para reexibir
-        await pool.query('DELETE FROM lideranca_visualizacoes WHERE mensagem_id = $1', [msg.id]);
+        // 🔧 FIX: Usar helper centralizado
+        const proxima = calcularProximaExibicao(agora, msg.tipo_recorrencia, msg.intervalo_recorrencia);
 
-        // Calcular próxima exibição
-        let proxima = new Date(agora);
-        switch (msg.tipo_recorrencia) {
-          case 'diaria':
-            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1));
-            break;
-          case 'semanal':
-            proxima.setDate(proxima.getDate() + (msg.intervalo_recorrencia || 1) * 7);
-            break;
-          case 'mensal':
-            proxima.setMonth(proxima.getMonth() + (msg.intervalo_recorrencia || 1));
-            break;
-        }
-
-        await pool.query('UPDATE lideranca_mensagens SET proxima_exibicao = $1 WHERE id = $2', [proxima, msg.id]);
+        // Atualizar proxima_exibicao e marcar ultima_recorrencia (NÃO deleta visualizações)
+        await pool.query(
+          'UPDATE lideranca_mensagens SET proxima_exibicao = $1, ultima_recorrencia = $2 WHERE id = $3', 
+          [proxima, agora, msg.id]
+        );
+        console.log(`🔄 Recorrência processada: "${msg.titulo}" -> próxima: ${proxima.toISOString()}`);
       }
 
       res.json({ processadas: mensagens.rows.length });

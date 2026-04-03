@@ -1,6 +1,9 @@
 /**
  * src/config/cookies.js
  * Configuração centralizada de cookies HttpOnly para JWT
+ * 
+ * 🔧 FIX: maxAge do access cookie alinhado com JWT_EXPIRES_IN (8h)
+ *    Antes: 1h → cookie expirava mas JWT era válido por 8h → sessão caía
  */
 
 const env = require('./env');
@@ -15,11 +18,11 @@ const COOKIE_BASE = {
   path: '/',
 };
 
-// Access token cookie (1 hora)
+// Access token cookie (8 horas — DEVE coincidir com JWT_EXPIRES_IN em auth.service.js)
 const ACCESS_COOKIE_NAME = 'tutts_access';
 const ACCESS_COOKIE_OPTIONS = {
   ...COOKIE_BASE,
-  maxAge: 60 * 60 * 1000, // 1h em ms
+  maxAge: 8 * 60 * 60 * 1000, // 🔧 FIX: 8h em ms (era 1h — causava logout prematuro)
 };
 
 // Refresh token cookie (7 dias)

@@ -444,6 +444,9 @@ router.delete('/disponibilidade/faltosos/:id', async (req, res) => {
     const { id } = req.params;
     await pool.query('DELETE FROM disponibilidade_faltosos WHERE id = $1', [id]);
     console.log('🗑️ Falta excluída:', id);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'faltoso-removido' }, getSenderWsId(req));
+    }
     res.json({ success: true });
   } catch (err) {
     console.error('❌ Erro ao excluir falta:', err);
@@ -807,6 +810,9 @@ router.post('/disponibilidade/restricoes', async (req, res) => {
     ]);
     
     console.log(`🚫 Nova restrição criada: ${cod_profissional} - ${nome_profissional}`);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-criada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao criar restrição:', err);
@@ -837,6 +843,9 @@ router.put('/disponibilidade/restricoes/:id', async (req, res) => {
       return res.status(404).json({ error: 'Restrição não encontrada' });
     }
     
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-atualizada' }, getSenderWsId(req));
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('❌ Erro ao atualizar restrição:', err);
@@ -862,6 +871,9 @@ router.delete('/disponibilidade/restricoes/:id', async (req, res) => {
     }
     
     console.log(`✅ Restrição ${id} desativada`);
+    if (global.broadcastDisponibilidade) {
+      global.broadcastDisponibilidade('DISP_RELOAD', { reason: 'restricao-removida' }, getSenderWsId(req));
+    }
     res.json({ success: true, message: 'Restrição removida' });
   } catch (err) {
     console.error('❌ Erro ao remover restrição:', err);
@@ -1738,6 +1750,132 @@ router.get('/disponibilidade/publico', async (req, res) => {
   } catch (err) {
     console.error('❌ Erro ao gerar página pública:', err);
     res.status(500).send('Erro ao gerar página');
+  }
+});
+
+// GET /api/disponibilidade/alerta-whatsapp - Testar/disparar alerta de preenchimento
+// Query param ?enviar=true para enviar de verdade, senão só retorna preview
+router.get('/disponibilidade/alerta-whatsapp', async (req, res) => {
+  try {
+    const enviar = req.query.enviar === 'true';
+    
+    const result = await pool.query(`
+      SELECT 
+        l.id, l.codigo, l.nome, l.qtd_titulares,
+        COUNT(li.id) FILTER (WHERE li.is_excedente = false AND li.is_reposicao = false) as total_linhas,
+        COUNT(li.id) FILTER (
+          WHERE li.cod_profissional IS NOT NULL 
+          AND li.cod_profissional != ''
+          AND li.status = 'EM LOJA'
+        ) as preenchidas,
+        COUNT(li.id) FILTER (
+          WHERE li.cod_profissional IS NOT NULL 
+          AND li.cod_profissional != ''
+          AND li.status = 'A CAMINHO'
+        ) as a_caminho,
+        r.nome as regiao_nome
+      FROM disponibilidade_lojas l
+      LEFT JOIN disponibilidade_linhas li ON li.loja_id = l.id
+      LEFT JOIN disponibilidade_regioes r ON r.id = l.regiao_id
+      GROUP BY l.id, l.codigo, l.nome, l.qtd_titulares, r.nome
+      HAVING COUNT(li.id) FILTER (WHERE li.is_excedente = false AND li.is_reposicao = false) > 0
+      ORDER BY r.nome, l.nome
+    `);
+
+    const LIMIAR = 95;
+    let totalGeralTitulares = 0;
+    let totalGeralPreenchidas = 0;
+    const clientesAbaixo = [];
+    const todosClientes = [];
+
+    for (const loja of result.rows) {
+      const titulares = parseInt(loja.total_linhas) || 0;
+      const preenchidas = parseInt(loja.preenchidas) || 0;
+      const aCaminho = parseInt(loja.a_caminho) || 0;
+      const pct = titulares > 0 ? Math.round((preenchidas / titulares) * 100) : 0;
+      totalGeralTitulares += titulares;
+      totalGeralPreenchidas += preenchidas;
+
+      const item = { codigo: loja.codigo, nome: loja.nome, regiao: loja.regiao_nome || 'Sem região', preenchidas, titulares, faltando: titulares - preenchidas, pct, a_caminho: aCaminho };
+      todosClientes.push(item);
+      if (pct < LIMIAR) clientesAbaixo.push(item);
+    }
+
+    const pctGeral = totalGeralTitulares > 0 ? Math.round((totalGeralPreenchidas / totalGeralTitulares) * 100) : 0;
+
+    // Montar mensagem
+    const agora = new Date();
+    const dataHora = agora.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    let msg = `🏍️ *Alerta de Disponibilidade*\n`;
+    msg += `📅 ${dataHora}\n\n`;
+    msg += `📊 Preenchimento geral: *${pctGeral}%* (${totalGeralPreenchidas}/${totalGeralTitulares})\n\n`;
+
+    if (clientesAbaixo.length > 0) {
+      msg += `⚠️ *Clientes abaixo de ${LIMIAR}%:*\n\n`;
+      const porRegiao = {};
+      for (const c of clientesAbaixo) {
+        if (!porRegiao[c.regiao]) porRegiao[c.regiao] = [];
+        porRegiao[c.regiao].push(c);
+      }
+      for (const [regiao, clientes] of Object.entries(porRegiao)) {
+        msg += `📍 *${regiao}*\n`;
+        for (const c of clientes) {
+          const emoji = c.pct === 0 ? '🔴' : c.pct < 50 ? '🟠' : '🟡';
+          msg += `${emoji} ${c.codigo} ${c.nome} — *${c.preenchidas}/${c.titulares}* (${c.pct}%)`;
+          if (c.a_caminho > 0) msg += ` + ${c.a_caminho} a caminho 🚀`;
+          msg += ` falta *${c.faltando}*\n`;
+        }
+        msg += `\n`;
+      }
+    } else {
+      msg += `✅ Todos os clientes estão com *${LIMIAR}%* ou mais de preenchimento!\n\n`;
+    }
+    msg += `_*Argos, seu sentinela operacional!*_`;
+
+    let envioResult = { enviado: false, motivo: 'preview_only' };
+
+    if (enviar) {
+      const ativo = (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true';
+      if (!ativo) {
+        envioResult = { enviado: false, motivo: 'WHATSAPP_NOTIF_ATIVO desativado' };
+      } else {
+        const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+        const apiKey = process.env.EVOLUTION_API_KEY;
+        const instancia = process.env.EVOLUTION_INSTANCE;
+        const grupoId = (process.env.EVOLUTION_GROUP_ID_DISP || '').trim();
+        if (!grupoId) {
+          envioResult = { enviado: false, motivo: 'EVOLUTION_GROUP_ID_DISP não configurado' };
+        } else if (!baseUrl || !apiKey || !instancia) {
+          envioResult = { enviado: false, motivo: 'config_incompleta' };
+        } else {
+          const url = `${baseUrl}/message/sendText/${instancia}`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+            body: JSON.stringify({ number: grupoId, text: msg })
+          });
+          const data = await response.json().catch(() => ({}));
+          envioResult = response.ok 
+            ? { enviado: true, grupo: grupoId } 
+            : { enviado: false, motivo: 'erro_api', status: response.status, data };
+        }
+      }
+    }
+
+    res.json({
+      pctGeral,
+      totalGeralPreenchidas,
+      totalGeralTitulares,
+      limiar: LIMIAR,
+      clientesAbaixo: clientesAbaixo.length,
+      todosClientes,
+      mensagem: msg,
+      envio: envioResult
+    });
+  } catch (err) {
+    console.error('❌ Erro no alerta disp:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

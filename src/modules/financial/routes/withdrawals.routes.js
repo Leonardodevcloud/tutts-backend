@@ -156,10 +156,26 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount, selectedGratuityId } = req.body;
 
-    // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 ===============
-    if (!requestedAmount || parseFloat(requestedAmount) < 15) {
+    // =============== VALIDAÇÃO: VALOR MÍNIMO R$ 15,00 E MÁXIMO R$ 5.000,00 ===============
+    const LIMITE_MIN_SAQUE = 15;
+    const LIMITE_MAX_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '1000');
+    
+    const valorSolicitado = parseFloat(requestedAmount);
+    
+    if (!requestedAmount || isNaN(valorSolicitado) || !isFinite(valorSolicitado)) {
       client.release();
-      return res.status(400).json({ error: 'Valor mínimo para saque é R$ 15,00' });
+      return res.status(400).json({ error: 'Valor inválido para saque' });
+    }
+    
+    if (valorSolicitado < LIMITE_MIN_SAQUE) {
+      client.release();
+      return res.status(400).json({ error: `Valor mínimo para saque é R$ ${LIMITE_MIN_SAQUE.toFixed(2)}` });
+    }
+    
+    if (valorSolicitado > LIMITE_MAX_SAQUE) {
+      client.release();
+      console.warn(`⚠️ [SEGURANÇA] Saque acima do limite: ${userCod} tentou R$ ${valorSolicitado.toFixed(2)} (max: R$ ${LIMITE_MAX_SAQUE.toFixed(2)})`);
+      return res.status(400).json({ error: `Valor máximo para saque é R$ ${LIMITE_MAX_SAQUE.toFixed(2)}` });
     }
 
     // Validar que o usuário só pode criar saque para si mesmo (exceto admin)
@@ -219,6 +235,60 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       return res.status(429).json({ error: 'Aguarde alguns segundos antes de solicitar novamente.' });
     }
 
+    // =============== LIMITES DIÁRIO E SEMANAL ===============
+    const LIMITE_DIARIO = parseFloat(process.env.LIMITE_DIARIO_SAQUE || '1000');
+    const LIMITE_SEMANAL = parseFloat(process.env.LIMITE_SEMANAL_SAQUE || '1500');
+
+    // Total sacado hoje (saques que não foram rejeitados/excluídos)
+    const sacadoHoje = await client.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= CURRENT_DATE
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+    const totalHoje = parseFloat(sacadoHoje.rows[0].total);
+
+    if (totalHoje + valorSolicitado > LIMITE_DIARIO) {
+      const disponivel = Math.max(0, LIMITE_DIARIO - totalHoje);
+      await client.query('ROLLBACK');
+      client.release();
+      console.log(`⚠️ [LIMITE DIÁRIO] ${userCod} (${userName}): já sacou R$ ${totalHoje.toFixed(2)} hoje, tentou +R$ ${valorSolicitado.toFixed(2)} (limite: R$ ${LIMITE_DIARIO.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite diário de R$ ${LIMITE_DIARIO.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalHoje.toFixed(2).replace('.', ',')} hoje.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Tente novamente amanhã.'}`,
+        tipo_limite: 'diario',
+        limite: LIMITE_DIARIO,
+        utilizado: totalHoje,
+        disponivel: disponivel
+      });
+    }
+
+    // Total sacado na semana (segunda a domingo)
+    const sacadoSemana = await client.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= date_trunc('week', CURRENT_DATE)
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+    const totalSemana = parseFloat(sacadoSemana.rows[0].total);
+
+    if (totalSemana + valorSolicitado > LIMITE_SEMANAL) {
+      const disponivel = Math.max(0, LIMITE_SEMANAL - totalSemana);
+      await client.query('ROLLBACK');
+      client.release();
+      console.log(`⚠️ [LIMITE SEMANAL] ${userCod} (${userName}): já sacou R$ ${totalSemana.toFixed(2)} na semana, tentou +R$ ${valorSolicitado.toFixed(2)} (limite: R$ ${LIMITE_SEMANAL.toFixed(2)})`);
+      return res.status(400).json({ 
+        error: `Limite semanal de R$ ${LIMITE_SEMANAL.toFixed(2).replace('.', ',')} atingido! Você já solicitou R$ ${totalSemana.toFixed(2).replace('.', ',')} esta semana.${disponivel > 0 ? ` Disponível: R$ ${disponivel.toFixed(2).replace('.', ',')}` : ' Tente novamente na próxima semana.'}`,
+        tipo_limite: 'semanal',
+        limite: LIMITE_SEMANAL,
+        utilizado: totalSemana,
+        disponivel: disponivel
+      });
+    }
+
     // Verificar se está restrito — BLOQUEAR SAQUE
     const restricted = await client.query(
       "SELECT * FROM restricted_professionals WHERE user_cod = $1 AND status = 'ativo'",
@@ -257,13 +327,13 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
     
     const hasGratuity = gratuityQuery.rows.length > 0;
     let gratuityId = null;
-    let feeAmount = requestedAmount * 0.045;
-    let finalAmount = requestedAmount - feeAmount;
+    let feeAmount = valorSolicitado * 0.045;
+    let finalAmount = valorSolicitado - feeAmount;
 
     if (hasGratuity) {
       gratuityId = gratuityQuery.rows[0].id;
       feeAmount = 0;
-      finalAmount = requestedAmount;
+      finalAmount = valorSolicitado;
 
       const newRemaining = gratuityQuery.rows[0].remaining - 1;
       if (newRemaining <= 0) {
@@ -279,12 +349,20 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
       }
     }
 
+    // =============== BUSCAR DADOS REAIS DO BANCO (nunca confiar no frontend) ===============
+    const dadosReais = await client.query(
+      'SELECT cpf, pix_key FROM user_financial_data WHERE user_cod = $1',
+      [userCod]
+    );
+    const cpfReal = dadosReais.rows.length > 0 ? dadosReais.rows[0].cpf : cpf;
+    const pixKeyReal = dadosReais.rows.length > 0 ? dadosReais.rows[0].pix_key : pixKey;
+
     const result = await client.query(
       `INSERT INTO withdrawal_requests 
        (user_cod, user_name, cpf, pix_key, requested_amount, fee_amount, final_amount, has_gratuity, gratuity_id, status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aguardando_aprovacao') 
        RETURNING *`,
-      [userCod, userName, cpf, pixKey, requestedAmount, feeAmount, finalAmount, hasGratuity, gratuityId]
+      [userCod, userName, cpfReal, pixKeyReal, valorSolicitado, feeAmount, finalAmount, hasGratuity, gratuityId]
     );
 
     await client.query('COMMIT');
@@ -295,7 +373,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
 
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', result.rows[0].id, {
-      valor: requestedAmount,
+      valor: valorSolicitado,
       taxa: feeAmount,
       valor_final: finalAmount,
       gratuidade: hasGratuity,
@@ -356,6 +434,58 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   }
 });
 
+// ==================== LIMITES DO USUÁRIO (para exibir no frontend) ====================
+router.get('/withdrawals/limites/:userCod', verificarToken, async (req, res) => {
+  try {
+    const { userCod } = req.params;
+    
+    // Usuário só pode ver seus próprios limites (exceto admin)
+    if (req.user.role !== 'admin' && req.user.role !== 'admin_master' && req.user.role !== 'admin_financeiro') {
+      if (req.user.codProfissional !== userCod) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+    }
+    
+    const LIMITE_POR_SAQUE = parseFloat(process.env.LIMITE_MAX_SAQUE || '1000');
+    const LIMITE_DIARIO = parseFloat(process.env.LIMITE_DIARIO_SAQUE || '1000');
+    const LIMITE_SEMANAL = parseFloat(process.env.LIMITE_SEMANAL_SAQUE || '1500');
+
+    // Total sacado hoje
+    const sacadoHoje = await pool.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= CURRENT_DATE
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+
+    // Total sacado na semana
+    const sacadoSemana = await pool.query(
+      `SELECT COALESCE(SUM(requested_amount), 0) as total
+       FROM withdrawal_requests 
+       WHERE user_cod = $1 
+         AND created_at >= date_trunc('week', CURRENT_DATE)
+         AND status NOT IN ('rejeitado', 'excluido')`,
+      [userCod]
+    );
+
+    const totalHoje = parseFloat(sacadoHoje.rows[0].total);
+    const totalSemana = parseFloat(sacadoSemana.rows[0].total);
+
+    res.json({
+      por_saque: { limite: LIMITE_POR_SAQUE },
+      diario: { limite: LIMITE_DIARIO, utilizado: totalHoje, disponivel: Math.max(0, LIMITE_DIARIO - totalHoje) },
+      semanal: { limite: LIMITE_SEMANAL, utilizado: totalSemana, disponivel: Math.max(0, LIMITE_SEMANAL - totalSemana) },
+      // O menor disponível entre diário e semanal é o máximo que pode sacar agora
+      max_disponivel: Math.min(LIMITE_POR_SAQUE, Math.max(0, LIMITE_DIARIO - totalHoje), Math.max(0, LIMITE_SEMANAL - totalSemana))
+    });
+  } catch (error) {
+    console.error('❌ Erro ao buscar limites:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ⚡ CONTADORES — com cache de 30s
 router.get('/withdrawals/counts', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
@@ -390,10 +520,10 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
   try {
     const { status, limit, dias, page, offset: offsetParam, dataInicio, dataFim, tipoFiltro } = req.query;
     
-    // Com filtro de data (validação/conciliação) retorna todos os registros do período sem cap
-    const maxLimit = (dataInicio && dataFim) ? 999999 : 200;
-    const limiteFiltro = parseInt(limit) ? Math.min(parseInt(limit), maxLimit) : (dataInicio && dataFim ? maxLimit : 200);
-    const diasFiltro = parseInt(dias) || 90;
+    // Sem cap de limite — retorna todos os registros relevantes
+    const maxLimit = 999999;
+    const limiteFiltro = parseInt(limit) ? Math.min(parseInt(limit), maxLimit) : maxLimit;
+    const diasFiltro = parseInt(dias) || 365;
     const offset = parseInt(offsetParam) || ((parseInt(page) || 1) - 1) * limiteFiltro;
     
     // Chave de cache baseada nos parâmetros
@@ -416,7 +546,9 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     
     // Filtro por data customizada (validação)
     if (dataInicio && dataFim) {
-      const coluna = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
+      // 🔒 SECURITY: Whitelist explícita de colunas permitidas (anti SQL injection)
+      const COLUNAS_FILTRO = { 'lancamento': 'lancamento_at', 'debito': 'debito_plific_at' };
+      const coluna = COLUNAS_FILTRO[tipoFiltro] || 'created_at';
       conditions.push(`${coluna} >= $${paramIdx}::date AND ${coluna} < ($${paramIdx + 1}::date + INTERVAL '1 day')`);
       params.push(dataInicio, dataFim);
       paramIdx += 2;
@@ -691,31 +823,51 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
   }
 });
 
-// Excluir saque
+// Excluir saque (soft-delete — marca como excluído, não remove do banco)
 router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { id } = req.params;
 
     // Buscar dados antes de excluir para auditoria
     const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
-
-    const result = await pool.query(
-      'DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    
+    if (saqueAntes.rows.length === 0) {
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
+    
+    const saque = saqueAntes.rows[0];
+    
+    // 🔒 SECURITY: Bloquear exclusão de saques já processados financeiramente
+    const statusProtegidos = ['aprovado', 'aprovado_gratuidade', 'pago_stark', 'processando'];
+    if (statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago') {
+      console.warn(`⚠️ [SEGURANÇA] Tentativa de excluir saque protegido #${id} (status: ${saque.status}, stark: ${saque.stark_status}) por ${req.user.nome || req.user.username}`);
+      return res.status(403).json({ 
+        error: 'Não é possível excluir saques aprovados, pagos ou em processamento',
+        status_atual: saque.status,
+        stark_status: saque.stark_status
+      });
+    }
+    
+    // 🔒 SECURITY: Soft-delete em vez de DELETE permanente
+    const result = await pool.query(
+      `UPDATE withdrawal_requests 
+       SET status = 'excluido', 
+           admin_name = $2,
+           updated_at = NOW() 
+       WHERE id = $1 
+       RETURNING *`,
+      [id, req.user.nome || req.user.username || 'Admin']
+    );
 
     // Registrar auditoria
-    await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
-      user_cod: result.rows[0].user_cod,
-      valor: result.rows[0].requested_amount,
-      status_anterior: result.rows[0].status
+    await registrarAuditoria(req, 'WITHDRAWAL_SOFT_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+      user_cod: saque.user_cod,
+      valor: saque.requested_amount,
+      status_anterior: saque.status,
+      admin: req.user.nome || req.user.username
     });
 
-    console.log('🗑️ Saque excluído:', id);
+    console.log('🗑️ Saque soft-deleted:', id, '| status anterior:', saque.status);
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
     console.error('❌ Erro ao excluir saque:', error);

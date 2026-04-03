@@ -22,7 +22,9 @@ console.log(`🔒 CORS configurado para ${env.IS_PRODUCTION ? 'PRODUÇÃO' : 'DE
 
 function isOriginAllowed(origin) {
   if (!origin) return false;
-  if (origin.includes('tutts-frontend') && origin.includes('vercel.app')) return true;
+  // 🔒 SECURITY FIX (MED-01): Pattern restrito — apenas deploy principal e previews git-main
+  // Bloqueia forks/deploys de terceiros no Vercel
+  if (/^https:\/\/tutts-frontend(-git-main-[a-z0-9-]+)?\.vercel\.app$/.test(origin)) return true;
   return allowedOrigins.includes(origin);
 }
 

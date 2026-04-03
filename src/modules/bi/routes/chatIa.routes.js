@@ -1,6 +1,6 @@
 /**
  * BI Sub-Router: Chat IA — Analista de Dados Conversacional
- * v4.0 — Claude API (Anthropic)
+ * v5.0 — Gemini API (Google)
  */
 const express = require('express');
 
@@ -14,67 +14,74 @@ function createChatIaRoutes(pool) {
   const SAMPLES_CACHE_TTL = 30 * 60 * 1000;
 
   // ==================== TABELAS PERMITIDAS ====================
+  // 🔒 SECURITY FIX (CRIT-03): Tabelas financeiras sensíveis REMOVIDAS (CPF, Pix, valores de saque)
+  // Removidos: withdrawal_requests, gratuities, restricted_professionals, indicacoes, indicacao_links
   const TABELAS_PERMITIDAS = [
     'bi_entregas', 'bi_upload_historico', 'bi_relatorios_ia',
     'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_prazo_padrao',
     'bi_prazos_prof_cliente', 'bi_faixas_prazo_prof', 'bi_prazo_prof_padrao',
     'bi_regioes', 'bi_regras_contagem', 'bi_mascaras',
     'bi_resumo_cliente', 'bi_resumo_diario', 'bi_resumo_geral', 'bi_resumo_profissional',
-    'withdrawal_requests', 'gratuities', 'restricted_professionals',
     'cs_clientes', 'cs_interacoes', 'cs_ocorrencias',
     'solicitacoes_corrida', 'solicitacoes_pontos',
     'operacoes', 'operacoes_faixas_km',
     'disponibilidade_linhas', 'disponibilidade_lojas', 'disponibilidade_regioes',
     'score_totais', 'score_historico',
-    'indicacoes', 'indicacao_links',
     'loja_produtos', 'loja_pedidos', 'loja_estoque',
     'bi_garantido_cache', 'garantido_status'
   ];
 
-  // ==================== CHAMAR CLAUDE ====================
-  async function chamarClaude(messages, systemPrompt, opts = {}) {
+  // ==================== CHAMAR GEMINI ====================
+  async function chamarGemini(messages, systemPrompt, opts = {}) {
     const { temperature = 0.4, maxTokens = 4096 } = opts;
-    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY não configurada');
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY não configurada');
+
+    // Converter formato messages[] → formato Gemini (contents[])
+    const contents = messages.map(function(m) {
+      return {
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }]
+      };
+    });
 
     const body = {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: maxTokens,
-      temperature,
-      system: systemPrompt,
-      messages
+      contents: contents,
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        temperature: temperature,
+        maxOutputTokens: maxTokens,
+        topP: 0.95
+      }
     };
 
-    console.log(`📡 [Chat IA] Chamando Claude (${messages.length} msgs, temp=${temperature})...`);
+    console.log(`📡 [Chat IA] Chamando Gemini (${messages.length} msgs, temp=${temperature})...`);
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(body)
-    });
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }
+    );
 
     if (!resp.ok) {
       const errText = await resp.text();
-      console.error(`❌ [Chat IA] Claude HTTP ${resp.status}:`, errText);
-      throw new Error(`Claude API HTTP ${resp.status}: ${errText.substring(0, 200)}`);
+      console.error(`❌ [Chat IA] Gemini HTTP ${resp.status}:`, errText);
+      throw new Error(`Gemini API HTTP ${resp.status}: ${errText.substring(0, 200)}`);
     }
 
     const data = await resp.json();
     if (data.error) {
-      console.error(`❌ [Chat IA] Claude error:`, data.error);
-      throw new Error(`Claude API: ${data.error.message}`);
+      console.error(`❌ [Chat IA] Gemini error:`, data.error);
+      throw new Error(`Gemini API: ${data.error.message}`);
     }
 
-    const text = data.content
-      ?.filter(b => b.type === 'text')
-      ?.map(b => b.text)
-      ?.join('\n') || '';
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const tokensUsados = data.usageMetadata?.totalTokenCount || 0;
 
-    console.log(`✅ [Chat IA] Claude respondeu (${text.length} chars, stop=${data.stop_reason})`);
+    console.log(`✅ [Chat IA] Gemini respondeu (${text.length} chars, ${tokensUsados} tokens)`);
     return text;
   }
 
@@ -174,7 +181,7 @@ function createChatIaRoutes(pool) {
       if (queries.length > 0) sqlLimpo = queries[0].trim();
     }
 
-    // Extrair tabelas usadas — ignorar FROM dentro de EXTRACT(), DATE_PART(), etc
+    // 🔒 SECURITY FIX (CRIT-03): Validar subqueries — extrair TODAS as tabelas incluindo subselects
     const sqlSemExtract = sqlLimpo.replace(/EXTRACT\s*\([^)]*\)/gi, '').replace(/DATE_PART\s*\([^)]*\)/gi, '').replace(/DATE_TRUNC\s*\([^)]*\)/gi, '');
     const tabelasUsadas = sqlSemExtract.toUpperCase().match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
@@ -183,21 +190,41 @@ function createChatIaRoutes(pool) {
         return { valido: false, erro: `Tabela "${tabela}" não autorizada.` };
     }
 
+    // 🔒 SECURITY FIX (CRIT-03): Bloquear tabelas sensíveis mesmo em subqueries
+    const tabelasSensiveis = ['users', 'user_financial_data', 'financial_logs', 'withdrawal_requests', 
+      'withdrawal_idempotency', 'gratuities', 'restricted_professionals', 'indicacoes', 'indicacao_links',
+      'login_attempts', 'user_sessions', 'stark_lotes', 'stark_lote_itens'];
+    const sqlLower = sqlLimpo.toLowerCase();
+    for (const ts of tabelasSensiveis) {
+      if (sqlLower.includes(ts)) {
+        return { valido: false, erro: `Acesso à tabela "${ts}" não permitido no Chat IA.` };
+      }
+    }
+
+    // 🔒 SECURITY FIX: Bloquear pg_catalog, information_schema, pg_*
+    if (/\bpg_\w+/i.test(sqlLimpo) || /\binformation_schema\b/i.test(sqlLimpo)) {
+      return { valido: false, erro: 'Acesso a tabelas do sistema não permitido.' };
+    }
+
     if (!sqlLimpo.toUpperCase().includes('LIMIT')) sqlLimpo += ' LIMIT 500';
     return { valido: true, sql: sqlLimpo };
   }
 
+  // 🔒 SECURITY FIX (CRIT-03): Usar client dedicado para isolar statement_timeout
   async function executarSQL(sql) {
     const validacao = validarSQL(sql);
     if (!validacao.valido) return { success: false, erro: validacao.erro, sql };
+    const client = await pool.connect();
     try {
-      await pool.query('SET statement_timeout = 15000');
-      const result = await pool.query(validacao.sql);
-      await pool.query('SET statement_timeout = 0');
+      await client.query('SET statement_timeout = 15000');
+      const result = await client.query(validacao.sql);
+      await client.query('SET statement_timeout = 0');
       return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: validacao.sql };
     } catch (sqlError) {
-      await pool.query('SET statement_timeout = 0').catch(() => {});
+      await client.query('SET statement_timeout = 0').catch(() => {});
       return { success: false, erro: sqlError.message, sql: validacao.sql };
+    } finally {
+      client.release();
     }
   }
 
@@ -230,10 +257,13 @@ Tipos: "Cliente Fechado", "ClienteAus"/"Cliente Ausente", "Loja Fechada", "Produ
 Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
 
 ## 4. FINANCEIRO
-- Receita bruta = SUM(valor)
-- Custo profissionais = SUM(valor_prof)
-- Faturamento líquido = SUM(valor) - COALESCE(SUM(valor_prof), 0). NUNCA use SUM(valor) como faturamento.
-- Ticket médio = receita / total entregas
+- Receita bruta = valor da OS (1 por OS, não por ponto)
+- Custo profissionais = valor_prof da OS
+- REGRA CRÍTICA DE FATURAMENTO: Para calcular valor/faturamento, SEMPRE use DISTINCT ON (os) ORDER BY ponto ASC. Isso garante 1 valor por OS (equivale ao FIRSTNONBLANK do Power BI). Exemplo:
+  WITH eu_fat AS (SELECT DISTINCT ON (os) os, valor, valor_prof FROM bi_entregas WHERE COALESCE(ponto,1) >= 2 AND os IS NOT NULL ORDER BY os, ponto ASC)
+  SELECT SUM(valor) - COALESCE(SUM(valor_prof), 0) as faturamento_liquido FROM eu_fat WHERE ...
+- Se fizer SUM(valor) direto da bi_entregas SEM DISTINCT ON, vai DUPLICAR valores porque cada OS tem múltiplos pontos
+- Ticket médio = faturamento_liquido / total_entregas (entregas = COUNT(*) da bi_entregas com ponto >= 2)
 - Garantido (bi_garantido_cache): complemento = MAX(0, valor_negociado - valor_produzido)
 
 ## 5. FROTA
@@ -281,38 +311,37 @@ Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
         [userId]
       );
 
-      // Usar Claude pra extrair a memória de forma inteligente
-      const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-      if (!ANTHROPIC_API_KEY) return;
+      // Usar Gemini pra extrair a memória de forma inteligente
+      const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+      if (!GEMINI_API_KEY) return;
 
       const memoriasAtuais = existentes.rows.map(r => r.conteudo).join('\n');
 
-      const extractResp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 300,
-          temperature: 0,
-          system: `Você extrai preferências e instruções de conversas. Responda APENAS com a memória a ser salva, em uma frase curta e direta. Se não houver preferência/instrução clara, responda exatamente "NENHUMA".
+      const systemText = `Você extrai preferências e instruções de conversas. Responda APENAS com a memória a ser salva, em uma frase curta e direta. Se não houver preferência/instrução clara, responda exatamente "NENHUMA".
 
 Memórias já salvas deste usuário:
 ${memoriasAtuais || '(nenhuma)'}
 
-Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHUMA" para evitar duplicatas.`,
-          messages: [{
-            role: 'user',
-            content: `O gestor disse: "${prompt}"\n\nExtraia a preferência/instrução em uma frase curta (máx 100 chars). Ex: "Prefere faturamento separado por centro de custo" ou "Chama motoboys de motos".`
-          }]
-        })
-      });
+Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHUMA" para evitar duplicatas.`;
+
+      const extractResp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              role: 'user',
+              parts: [{ text: `O gestor disse: "${prompt}"\n\nExtraia a preferência/instrução em uma frase curta (máx 100 chars). Ex: "Prefere faturamento separado por centro de custo" ou "Chama motoboys de motos".` }]
+            }],
+            systemInstruction: { parts: [{ text: systemText }] },
+            generationConfig: { temperature: 0, maxOutputTokens: 300 }
+          })
+        }
+      );
 
       const extractData = await extractResp.json();
-      const memoria = extractData.content?.[0]?.text?.trim();
+      const memoria = extractData.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 
       if (memoria && memoria !== 'NENHUMA' && memoria.length > 5 && memoria.length < 200) {
         await pool.query(
@@ -353,7 +382,8 @@ Regras técnicas do SQL (interno, nunca exponha):
 - Sempre LIMIT (máx 500)
 - Divisões: NULLIF(x, 0)
 - Taxa prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-- Faturamento líquido: SUM(valor) - COALESCE(SUM(valor_prof), 0)
+- FATURAMENTO: SEMPRE use CTE com DISTINCT ON (os) ORDER BY ponto ASC para somar valores. Exemplo: WITH eu_fat AS (SELECT DISTINCT ON (os) os, valor, valor_prof FROM bi_entregas WHERE COALESCE(ponto,1) >= 2 AND os IS NOT NULL ORDER BY os, ponto ASC) SELECT SUM(valor) - COALESCE(SUM(valor_prof), 0) FROM eu_fat WHERE ...
+- NUNCA faça SUM(valor) direto da bi_entregas — duplica valores porque cada OS tem múltiplos pontos
 - Retornos: LOWER(ocorrencia) LIKE '%cliente fechado%' OR '%clienteaus%' OR '%cliente ausente%' OR '%loja fechada%' OR '%retorno%'
 - Clientes: nome_fantasia. Profissionais: nome_prof
 - Só tabelas do schema abaixo
@@ -435,6 +465,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
     const dataInicio = filtros?.data_inicio || null;
     const dataFim = filtros?.data_fim || null;
     const nomeCliente = filtros?.nome_fantasia || null;
+    const nomeRegiao = filtros?.nome_regiao || null;
 
     const codClientes = rawCliente
       ? (Array.isArray(rawCliente) ? rawCliente : [rawCliente]).map(c => parseInt(c)).filter(c => !isNaN(c))
@@ -445,6 +476,11 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
 
     let contexto = '';
     let filtroSQL = '';
+
+    // Se filtro veio de uma região, informar a IA
+    if (nomeRegiao) {
+      contexto += `Região selecionada: ${nomeRegiao}\n`;
+    }
 
     if (codClientes.length === 1) {
       contexto += `Cliente: ${nomeCliente || 'cod ' + codClientes[0]} (cod_cliente = ${codClientes[0]})\n`;
@@ -482,7 +518,43 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
     try {
       const { prompt, historico, filtros, conversa_id } = req.body;
       if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
-      if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'ANTHROPIC_API_KEY não configurada. Adicione nas variáveis de ambiente do Railway.' });
+      if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada. Adicione nas variáveis de ambiente do Railway.' });
+
+      // ═══ Expansão de Região → Clientes ═══
+      // Se filtros.regiao está definido, buscar bi_regioes e expandir para cod_cliente
+      if (filtros && filtros.regiao && !filtros._regiao_expandida) {
+        try {
+          const regiaoResult = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
+          if (regiaoResult.rows.length > 0) {
+            const regiao = regiaoResult.rows[0];
+            const itens = typeof regiao.clientes === 'string' ? JSON.parse(regiao.clientes) : regiao.clientes;
+            if (Array.isArray(itens) && itens.length > 0) {
+              const codClientes = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
+              const centros = itens.filter(i => i.centro_custo).map(i => i.centro_custo);
+              
+              filtros.cod_cliente = codClientes;
+              filtros.nome_regiao = regiao.nome;
+              if (centros.length > 0 && centros.length < codClientes.length * 3) {
+                filtros.centro_custo = centros;
+              }
+              // Buscar nomes dos clientes
+              try {
+                const nomesResult = await pool.query(
+                  `SELECT DISTINCT cod_cliente, nome_fantasia FROM bi_entregas WHERE cod_cliente = ANY($1) AND nome_fantasia IS NOT NULL`,
+                  [codClientes]
+                );
+                filtros.nomes_clientes = nomesResult.rows.map(r => r.nome_fantasia || ('cod ' + r.cod_cliente)).join(', ');
+              } catch (e) {
+                filtros.nomes_clientes = codClientes.map(c => 'cod ' + c).join(', ');
+              }
+              filtros._regiao_expandida = true;
+              console.log(`🗺️ [Chat IA] Região "${regiao.nome}" expandida para ${codClientes.length} clientes`);
+            }
+          }
+        } catch (errRegiao) {
+          console.warn('⚠️ [Chat IA] Erro ao expandir região:', errRegiao.message);
+        }
+      }
 
       console.log(`\n🤖 [Chat IA v4] Prompt: "${prompt.substring(0, 100)}"`);
       console.log(`   Filtros: ${JSON.stringify(filtros || {}).substring(0, 200)}`);
@@ -520,10 +592,10 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       // ETAPA 1
       let resposta1;
       try {
-        resposta1 = await chamarClaude(messages, systemPrompt, { temperature: 0.8, maxTokens: 4096 });
-      } catch (claudeErr) {
-        console.error('❌ [Chat IA] Erro Claude:', claudeErr.message);
-        return res.status(500).json({ error: 'Erro IA: ' + claudeErr.message });
+        resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.8, maxTokens: 4096 });
+      } catch (iaErr) {
+        console.error('❌ [Chat IA] Erro Gemini:', iaErr.message);
+        return res.status(500).json({ error: 'Erro IA: ' + iaErr.message });
       }
 
       const sqlBlocks = [];
@@ -567,7 +639,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
         console.log('🔄 [Chat IA v4] Retry...');
         try {
           const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nProvavelmente você usou colunas que não existem. Consulte o schema fornecido no system prompt e gere queries usando APENAS as colunas que existem. A tabela principal é bi_entregas.` }];
-          const resp2 = await chamarClaude(retryMsgs, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
+          const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
           const r2 = /```sql\n?([\s\S]*?)\n?```/g;
           let m2;
           while ((m2 = r2.exec(resp2)) !== null) {
@@ -589,7 +661,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       let respostaFinal;
       try {
         const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 150 ? ', mostrando 150' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 30000)}\n\`\`\`\n\nAnalise e responda. NÃO inclua SQL.` }];
-        respostaFinal = await chamarClaude(analiseMsgs, systemPrompt, { temperature: 1, maxTokens: 4096 });
+        respostaFinal = await chamarGemini(analiseMsgs, systemPrompt, { temperature: 1, maxTokens: 4096 });
       } catch (e) {
         respostaFinal = `Dados encontrados (${todosResultados.length} registros), mas houve erro na análise.`;
       }

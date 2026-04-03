@@ -1,4 +1,25 @@
 const express = require('express');
+
+// Helper: build WHERE clause for client + optional centro_custo filter
+function buildClienteCcFilter(clientes, centros, startIdx) {
+  if (!clientes || clientes.length === 0) return { filter: '', params: [], nextIdx: startIdx };
+  var cv = centros || {};
+  var conditions = [], params = [], idx = startIdx;
+  clientes.forEach(function(cod) {
+    var cc = cv[String(cod)];
+    if (cc) {
+      conditions.push('(cod_cliente = $' + idx + ' AND centro_custo = $' + (idx + 1) + ')');
+      params.push(cod, cc);
+      idx += 2;
+    } else {
+      conditions.push('cod_cliente = $' + idx);
+      params.push(cod);
+      idx += 1;
+    }
+  });
+  return { filter: ' AND (' + conditions.join(' OR ') + ')', params: params, nextIdx: idx };
+}
+
 function createIncentivosRouter(pool) {
   const router = express.Router();
 
@@ -85,8 +106,9 @@ function createIncentivosRouter(pool) {
       let clienteFilter = '';
       
       if (incentivo.clientes_vinculados && incentivo.clientes_vinculados.length > 0) {
-        clienteFilter = ` AND cod_cliente = ANY($3)`;
-        queryParams.push(incentivo.clientes_vinculados);
+        var ccf = buildClienteCcFilter(incentivo.clientes_vinculados, incentivo.centros_vinculados, queryParams.length + 1);
+        clienteFilter = ccf.filter;
+        queryParams.push(...ccf.params);
       }
       
       let horaFilter = '';
@@ -113,19 +135,28 @@ function createIncentivosRouter(pool) {
       // Buscar detalhes por cliente se houver clientes vinculados
       let detalhesPorCliente = [];
       if (incentivo.clientes_vinculados && incentivo.clientes_vinculados.length > 0) {
+        var dParams = [incentivo.data_inicio, incentivo.data_fim];
+        var dCcf = buildClienteCcFilter(incentivo.clientes_vinculados, incentivo.centros_vinculados, 3);
+        dParams.push(...dCcf.params);
+        var dHoraFilter = '';
+        if (incentivo.hora_inicio && incentivo.hora_fim) {
+          dHoraFilter = ' AND hora_solicitado >= $' + (dParams.length + 1) + ' AND hora_solicitado <= $' + (dParams.length + 2);
+          dParams.push(incentivo.hora_inicio, incentivo.hora_fim);
+        }
         const detalhesResult = await pool.query(`
           SELECT 
             cod_cliente,
+            COALESCE(centro_custo, '') as centro_custo,
             MAX(nome_cliente) as nome_cliente,
             COUNT(DISTINCT os) as quantidade_os
           FROM bi_entregas
           WHERE data_solicitado >= $1 
             AND data_solicitado <= $2
-            AND cod_cliente = ANY($3)
-            ${horaFilter}
-          GROUP BY cod_cliente
+            ${dCcf.filter}
+            ${dHoraFilter}
+          GROUP BY cod_cliente, centro_custo
           ORDER BY COUNT(DISTINCT os) DESC
-        `, horaFilter ? [incentivo.data_inicio, incentivo.data_fim, incentivo.clientes_vinculados, incentivo.hora_inicio, incentivo.hora_fim] : [incentivo.data_inicio, incentivo.data_fim, incentivo.clientes_vinculados]);
+        `, dParams);
         
         detalhesPorCliente = detalhesResult.rows.map(row => ({
           cod_cliente: row.cod_cliente,
@@ -192,8 +223,9 @@ function createIncentivosRouter(pool) {
         let clienteFilter = '';
         
         if (inc.clientes_vinculados && inc.clientes_vinculados.length > 0) {
-          clienteFilter = ` AND cod_cliente = ANY($3)`;
-          qParams.push(inc.clientes_vinculados);
+          var rCcf = buildClienteCcFilter(inc.clientes_vinculados, inc.centros_vinculados, 3);
+          clienteFilter = rCcf.filter;
+          qParams.push(...rCcf.params);
         }
         
         let horaFilter = '';
@@ -272,8 +304,9 @@ function createIncentivosRouter(pool) {
             let clienteFilter = '';
             
             if (inc.clientes_vinculados && inc.clientes_vinculados.length > 0) {
-              clienteFilter = ` AND cod_cliente = ANY($3)`;
-              queryParams.push(inc.clientes_vinculados);
+              var lCcf = buildClienteCcFilter(inc.clientes_vinculados, inc.centros_vinculados, 3);
+              clienteFilter = lCcf.filter;
+              queryParams.push(...lCcf.params);
             }
             
             let horaFilter = '';
@@ -349,15 +382,15 @@ function createIncentivosRouter(pool) {
       const { 
         titulo, descricao, tipo, operacoes, todas_operacoes,
         data_inicio, data_fim, hora_inicio, hora_fim,
-        valor, valor_incentivo, clientes_vinculados,
+        valor, valor_incentivo, clientes_vinculados, centros_vinculados,
         condicoes, cor, created_by 
       } = req.body;
       
       const result = await pool.query(`
         INSERT INTO incentivos_operacionais 
           (titulo, descricao, tipo, operacoes, todas_operacoes, data_inicio, data_fim, 
-           hora_inicio, hora_fim, valor, valor_incentivo, clientes_vinculados, condicoes, cor, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           hora_inicio, hora_fim, valor, valor_incentivo, clientes_vinculados, centros_vinculados, condicoes, cor, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *
       `, [
         titulo, 
@@ -372,6 +405,7 @@ function createIncentivosRouter(pool) {
         valor || '', 
         valor_incentivo || null,
         clientes_vinculados || [],
+        centros_vinculados ? JSON.stringify(centros_vinculados) : '{}',
         condicoes || '', 
         cor || '#0d9488',
         created_by
@@ -391,7 +425,7 @@ function createIncentivosRouter(pool) {
       const { 
         titulo, descricao, tipo, operacoes, todas_operacoes,
         data_inicio, data_fim, hora_inicio, hora_fim,
-        valor, valor_incentivo, clientes_vinculados,
+        valor, valor_incentivo, clientes_vinculados, centros_vinculados,
         condicoes, status, cor 
       } = req.body;
       
@@ -399,14 +433,15 @@ function createIncentivosRouter(pool) {
         UPDATE incentivos_operacionais 
         SET titulo = $1, descricao = $2, tipo = $3, operacoes = $4, todas_operacoes = $5,
             data_inicio = $6, data_fim = $7, hora_inicio = $8, hora_fim = $9,
-            valor = $10, valor_incentivo = $11, clientes_vinculados = $12,
-            condicoes = $13, status = $14, cor = $15, updated_at = NOW()
-        WHERE id = $16
+            valor = $10, valor_incentivo = $11, clientes_vinculados = $12, centros_vinculados = $13,
+            condicoes = $14, status = $15, cor = $16, updated_at = NOW()
+        WHERE id = $17
         RETURNING *
       `, [
         titulo, descricao, tipo, operacoes, todas_operacoes,
         data_inicio, data_fim, hora_inicio, hora_fim,
         valor, valor_incentivo, clientes_vinculados,
+        centros_vinculados ? JSON.stringify(centros_vinculados) : '{}',
         condicoes, status, cor, id
       ]);
       

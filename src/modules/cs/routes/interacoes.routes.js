@@ -73,7 +73,7 @@ function createInteracoesRoutes(pool) {
       const {
         cod_cliente, tipo, titulo, descricao, data_interacao,
         duracao_minutos, participantes, resultado,
-        proxima_acao, data_proxima_acao, tags,
+        proxima_acao, data_proxima_acao, tags, centro_custo,
       } = req.body;
 
       if (!cod_cliente || !tipo || !titulo) {
@@ -89,8 +89,8 @@ function createInteracoesRoutes(pool) {
           cod_cliente, tipo, titulo, descricao, data_interacao,
           duracao_minutos, participantes, resultado,
           proxima_acao, data_proxima_acao, tags,
-          criado_por, criado_por_nome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          criado_por, criado_por_nome, centro_custo
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING *
       `, [
         parseInt(cod_cliente), tipo, titulo, descricao,
@@ -103,6 +103,7 @@ function createInteracoesRoutes(pool) {
         JSON.stringify(tags || []),
         req.user?.codProfissional,
         req.user?.nome,
+        centro_custo || null,
       ]);
 
       console.log(`📝 CS Interação criada: ${tipo} — ${titulo} (cliente ${cod_cliente})`);
