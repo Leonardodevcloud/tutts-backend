@@ -146,10 +146,10 @@ function createLeadsCapturaRoutes(pool) {
         ativPorRegiao[reg] = (ativPorRegiao[reg] || 0) + 1;
       }
 
-      // 2. Alocações do dia
+      // 2. Alocações do dia (só manuais, não importadas)
       const { rows: alocacoes } = await pool.query(
         `SELECT nome_cliente, quem_alocou FROM crm_alocacoes
-         WHERE created_at::date = CURRENT_DATE AND ativo = true`
+         WHERE created_at::date = CURRENT_DATE AND ativo = true AND (importado IS NULL OR importado = FALSE)`
       );
 
       const alocPorResponsavel = {};

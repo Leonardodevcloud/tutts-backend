@@ -69,6 +69,14 @@ function createAlocacaoRoutes(pool) {
       `);
 
       console.log('  ✅ crm_alocacoes + dropdowns');
+
+      // Migration: coluna importado
+      const { rows: colCheck } = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='crm_alocacoes' AND column_name='importado'`);
+      if (colCheck.length === 0) {
+        await pool.query('ALTER TABLE crm_alocacoes ADD COLUMN importado BOOLEAN DEFAULT FALSE');
+        await pool.query('UPDATE crm_alocacoes SET importado = TRUE');
+        console.log('  ✅ Coluna importado criada (existentes marcados como TRUE)');
+      }
     } catch (err) {
       console.error('❌ [Alocação] Migration:', err.message);
     }
@@ -394,8 +402,8 @@ function createAlocacaoRoutes(pool) {
         }
 
         await pool.query(
-          `INSERT INTO crm_alocacoes (cod_cliente, nome_cliente, cod_prof, nome_prof, quem_alocou, data_prevista, status, dias_operacao, obs)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO crm_alocacoes (cod_cliente, nome_cliente, cod_prof, nome_prof, quem_alocou, data_prevista, status, dias_operacao, obs, importado)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)`,
           [codCliente, nomeCliente, codProf, nomeProf, quemAlocou, dataPrevista, status, diasOp, obs || null]
         );
 
