@@ -119,7 +119,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                   cod_profissional, frete_recalculado,
                   latitude, longitude, motoboy_lat, motoboy_lng,
                   ponto1_lat, ponto1_lng, ponto1_endereco,
-                  endereco_antigo_lat, endereco_antigo_lng
+                  endereco_antigo_lat, endereco_antigo_lng,
+                  validacao_localizacao
            FROM ajustes_automaticos ${where}
            ORDER BY criado_em DESC
            LIMIT $${p} OFFSET $${p + 1}`,
@@ -160,7 +161,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                 usuario_nome, cod_profissional,
                 frete_recalculado,
                 ponto1_lat, ponto1_lng, ponto1_endereco,
-                endereco_antigo_lat, endereco_antigo_lng
+                endereco_antigo_lat, endereco_antigo_lng,
+                validacao_localizacao
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
