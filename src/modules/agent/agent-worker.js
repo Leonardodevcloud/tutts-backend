@@ -171,9 +171,11 @@ async function processarProximoPendente(pool) {
 
       await pool.query(
         `UPDATE ajustes_automaticos
-         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3, frete_recalculado = $4
+         SET status = 'sucesso', processado_em = NOW(), endereco_corrigido = $2, endereco_antigo = $3, frete_recalculado = $4, valores_antes = $5, valores_depois = $6
          WHERE id = $1`,
-        [registro.id, endCorrigido, endAntigo, resultado.frete_recalculado || false]
+        [registro.id, endCorrigido, endAntigo, resultado.frete_recalculado || false,
+         resultado.valores_antes ? JSON.stringify(resultado.valores_antes) : null,
+         resultado.valores_depois ? JSON.stringify(resultado.valores_depois) : null]
       );
 
       if (endAntigo) {

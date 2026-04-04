@@ -84,15 +84,30 @@ function createCorrecaoRoutes(pool) {
       const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
       const codProfissional = req.user?.codProfissional || req.user?.cod_profissional || null;
 
-      // Validar OS duplicada — bloqueia apenas se já teve sucesso
-      const osExistente = await pool.query(
-        `SELECT id, status FROM ajustes_automaticos WHERE os_numero = $1 AND status = 'sucesso' LIMIT 1`,
-        [String(os_numero).trim()]
+      // Validar OS+Ponto duplicada
+      const pontoNum = parseInt(ponto, 10);
+      
+      // 1. Já corrigida com sucesso neste ponto?
+      const jaCorrigida = await pool.query(
+        `SELECT id FROM ajustes_automaticos WHERE os_numero = $1 AND ponto = $2 AND status = 'sucesso' LIMIT 1`,
+        [String(os_numero).trim(), pontoNum]
       );
-      if (osExistente.rows.length > 0) {
+      if (jaCorrigida.rows.length > 0) {
         return res.status(409).json({
           sucesso: false,
-          erros: ['Essa ordem de serviço já foi corrigida com sucesso anteriormente. Por favor, entre em contato com o suporte.'],
+          erros: [`O Ponto ${pontoNum} da OS ${os_numero} já foi corrigido com sucesso anteriormente. Entre em contato com o suporte caso precise de outra correção.`],
+        });
+      }
+
+      // 2. Já tem pendente/processando neste ponto?
+      const emAndamento = await pool.query(
+        `SELECT id, status FROM ajustes_automaticos WHERE os_numero = $1 AND ponto = $2 AND status IN ('pendente', 'processando') LIMIT 1`,
+        [String(os_numero).trim(), pontoNum]
+      );
+      if (emAndamento.rows.length > 0) {
+        return res.status(409).json({
+          sucesso: false,
+          erros: [`O Ponto ${pontoNum} da OS ${os_numero} já está sendo processado. Aguarde a conclusão antes de enviar novamente.`],
         });
       }
 
@@ -198,7 +213,7 @@ function createCorrecaoRoutes(pool) {
 
     try {
       const { rows } = await pool.query(
-        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em
+        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em, valores_antes, valores_depois
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );

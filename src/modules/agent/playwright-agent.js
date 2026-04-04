@@ -397,6 +397,79 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
     }
 
+    // ── Passo 2c: Capturar valores ANTES da correção (Resumo Serviço) ──
+    let valoresAntes = { km: null, valor_servico: null, valor_profissional: null };
+    try {
+      log('📌 Passo 2c: Capturando valores antigos (Resumo Serviço)');
+      const rowOS = page.locator('tr').filter({ has: btnEnd }).first();
+
+      // Encontrar e clicar no dropdown (engrenagem) na mesma row
+      const dropdownBtn = rowOS.locator('button.dropdown-toggle, button#dropdownMenuButton').first();
+      const temDropdown = await dropdownBtn.count().catch(() => 0);
+
+      if (temDropdown > 0) {
+        await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
+        await dropdownBtn.click();
+        await page.waitForTimeout(500);
+
+        // Clicar em "Resumo Serviço"
+        const resumoLink = page.locator('a.dropdown-item[data-action="ajaxModalInformacoesServico"], a.dropdown-item:has-text("Resumo Serviço"), a.dropdown-item:has-text("Resumo do Serviço")').first();
+        const temResumo = await resumoLink.count().catch(() => 0);
+
+        if (temResumo > 0) {
+          await resumoLink.click();
+          await page.waitForTimeout(2000);
+
+          // Capturar valores do modal
+          valoresAntes = await page.evaluate(() => {
+            const body = document.querySelector('.modal.show .modal-body, .modal.in .modal-body, #modalPadrao .modal-body');
+            if (!body) return { km: null, valor_servico: null, valor_profissional: null };
+            const texto = body.textContent || '';
+
+            // Distância rota: 18.71
+            const mKm = texto.match(/Dist[aâ]ncia\s*rota[:\s]*(\d+[.,]?\d*)/i);
+            const km = mKm ? mKm[1].replace(',', '.') : null;
+
+            // Valor deste serviço: 43,00
+            const mServ = texto.match(/Valor\s*(?:deste|do)\s*servi[çc]o[:\s]*(\d+[.,]?\d*)/i);
+            const valorServico = mServ ? mServ[1].replace(',', '.') : null;
+
+            // Valor do profissional: 30,00
+            const mProf = texto.match(/Valor\s*do\s*profissional[:\s]*(\d+[.,]?\d*)/i);
+            const valorProf = mProf ? mProf[1].replace(',', '.') : null;
+
+            return { km, valor_servico: valorServico, valor_profissional: valorProf };
+          }).catch(() => ({ km: null, valor_servico: null, valor_profissional: null }));
+
+          log(`📊 ANTES: km=${valoresAntes.km} | serviço=R$${valoresAntes.valor_servico} | profissional=R$${valoresAntes.valor_profissional}`);
+          await screenshot(page, os_numero, 'passo2c_resumo_servico');
+
+          // Fechar modal
+          await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .btn-primary[onclick*="limpar"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click().catch(() => {});
+          await page.waitForTimeout(800);
+
+          // Garantir que o modal fechou
+          const modalAindaAberto = await page.locator('.modal.show, .modal.in').isVisible().catch(() => false);
+          if (modalAindaAberto) {
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(500);
+          }
+        } else {
+          log('⚠️ Link "Resumo Serviço" não encontrado no dropdown');
+          // Fechar dropdown
+          await page.keyboard.press('Escape');
+          await page.waitForTimeout(300);
+        }
+      } else {
+        log('⚠️ Dropdown (engrenagem) não encontrado na row da OS');
+      }
+    } catch (e) {
+      log(`⚠️ Erro ao capturar resumo: ${e.message} — prosseguindo`);
+      // Fechar qualquer modal/dropdown que possa ter ficado aberto
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
     log('📌 Passo 3: Abrindo modal de endereços');
     await btnEnd.click({ force: true });
@@ -1052,6 +1125,28 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           await screenshot(page, os_numero, 'passo9_retry_calcular');
         }
 
+        // ── Capturar valores DEPOIS do cálculo ──
+        let valoresDepois = { km: null, valor_servico: null };
+        try {
+          valoresDepois = await page.evaluate(() => {
+            const texto = document.body.textContent || '';
+
+            // Distância aproximada: 18,71 Km
+            const mKm = texto.match(/Dist[aâ]ncia\s*aproximada[:\s]*([\d]+[.,]?\d*)\s*[Kk]m/i);
+            const km = mKm ? mKm[1].replace(',', '.') : null;
+
+            // Valor: R$ 43,00
+            const mValor = texto.match(/Valor[:\s]*R\$\s*([\d]+[.,]?\d*)/i);
+            const valor = mValor ? mValor[1].replace(',', '.') : null;
+
+            return { km, valor_servico: valor };
+          }).catch(() => ({ km: null, valor_servico: null }));
+
+          log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico}`);
+        } catch (e) {
+          log(`⚠️ Erro ao capturar valores novos: ${e.message}`);
+        }
+
         // Passo 10: Salvar alteracoes
         log('\u{1f4cc} Passo 10: Salvando alteracoes');
 
@@ -1095,7 +1190,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
-    return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado, ponto1: ponto1Info };
+    return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado, ponto1: ponto1Info, valores_antes: valoresAntes, valores_depois: valoresDepois || null };
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);

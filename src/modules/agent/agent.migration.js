@@ -47,6 +47,8 @@ async function initAgentTables(pool) {
     { nome: 'endereco_antigo_lat', tipo: 'DECIMAL(10, 8)' },
     { nome: 'endereco_antigo_lng', tipo: 'DECIMAL(11, 8)' },
     { nome: 'validacao_localizacao', tipo: 'JSONB' },
+    { nome: 'valores_antes', tipo: 'JSONB' },
+    { nome: 'valores_depois', tipo: 'JSONB' },
   ];
 
   for (const col of colunas) {
