@@ -105,22 +105,23 @@ function createCorrecaoRoutes(pool) {
           parseFloat(motoboy_lng)
         );
 
-        if (validacaoLoc && !validacaoLoc.valido) {
-          console.log(`[agent] ❌ Localização não validada: ${validacaoLoc.motivo}`);
-          return res.status(400).json({
-            sucesso: false,
-            validacao_localizacao: validacaoLoc,
-            erros: [`Não foi possível confirmar o endereço. ${validacaoLoc.motivo}. Verifique se você está no local correto e tente novamente.`],
-          });
-        }
-
-        if (validacaoLoc) {
+        if (validacaoLoc && validacaoLoc.valido) {
           console.log(`[agent] ✅ Localização validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
+        } else if (validacaoLoc) {
+          console.log(`[agent] ⚠️ Localização NÃO validada: ${validacaoLoc.motivo} — prosseguindo com aviso`);
         }
       } catch (valErr) {
         console.error('[agent] ⚠️ Erro validação localização (não-bloqueante):', valErr.message);
-        // Não bloqueia se a validação falhar
       }
+
+      const validacaoJson = validacaoLoc ? JSON.stringify({
+        valido: validacaoLoc.valido,
+        nome_foto: validacaoLoc.nome_foto,
+        match: validacaoLoc.match_google,
+        confianca: validacaoLoc.confianca,
+        motivo: validacaoLoc.motivo,
+        lugares_proximos: validacaoLoc.lugares_proximos,
+      }) : null;
 
       const { rows } = await pool.query(
         `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome, cod_profissional, validacao_localizacao)
@@ -136,15 +137,42 @@ function createCorrecaoRoutes(pool) {
           usuarioId,
           usuarioNome,
           codProfissional,
-          validacaoLoc ? JSON.stringify({ valido: validacaoLoc.valido, nome_foto: validacaoLoc.nome_foto, match: validacaoLoc.match_google, confianca: validacaoLoc.confianca }) : null,
+          validacaoJson,
         ]
       );
 
       const reg = rows[0];
+
+      // 🔔 Notificar admin via WebSocket
+      if (typeof global.broadcastToAdmins === 'function') {
+        const wsPayload = {
+          id: reg.id,
+          os_numero: String(os_numero).trim(),
+          cod_profissional: codProfissional,
+          usuario_nome: usuarioNome,
+          validacao: validacaoLoc ? {
+            valido: validacaoLoc.valido,
+            nome_foto: validacaoLoc.nome_foto,
+            match: validacaoLoc.match_google,
+            confianca: validacaoLoc.confianca,
+            motivo: validacaoLoc.motivo,
+          } : null,
+        };
+        global.broadcastToAdmins('AGENT_VALIDACAO', wsPayload);
+      }
+
       return res.status(201).json({
-        id:       reg.id,
-        status:   reg.status,
+        id: reg.id,
+        status: reg.status,
         mensagem: 'Solicitação recebida, processando...',
+        validacao_localizacao: validacaoLoc ? {
+          valido: validacaoLoc.valido,
+          nome_foto: validacaoLoc.nome_foto,
+          match_google: validacaoLoc.match_google,
+          confianca: validacaoLoc.confianca,
+          motivo: validacaoLoc.motivo,
+          alerta: !validacaoLoc.valido,
+        } : null,
       });
     } catch (err) {
       console.error('[agent/corrigir-endereco]', err.message);
