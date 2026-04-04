@@ -395,11 +395,89 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, $2, $3, $4, 'movido_ultimo', $5, $6, $7)
       `, [central_id, central.rows[0]?.nome, cod_profissional, prof.nome_profissional,
         `Movido da posição ${posicaoAnterior} para ${novaPosicao}`, req.user.codProfissional, req.user.nome]);
+
+      // ── Penalidade progressiva ──
+      // Contar quantas vezes foi movido hoje nesta central
+      const movimentosHoje = await pool.query(
+        `SELECT COUNT(*) as total FROM filas_historico
+         WHERE cod_profissional = $1 AND central_id = $2 AND acao = 'movido_ultimo'
+         AND created_at::date = CURRENT_DATE`,
+        [cod_profissional, central_id]
+      );
+      const vezesMovido = parseInt(movimentosHoje.rows[0].total) || 0; // Já inclui o INSERT acima
+
+      let penalidade = null;
+      let mensagemUsuario = '';
+      let proximaPunicao = '';
+
+      if (vezesMovido >= 3) {
+        // 3ª vez: bloqueia 24h
+        const bloqueadoAte = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        await pool.query(`
+          INSERT INTO filas_penalidades (central_id, cod_profissional, nome_profissional, saidas_hoje, bloqueado_ate, data_ref)
+          VALUES ($1, $2, $3, $4, $5, CURRENT_DATE)
+          ON CONFLICT (cod_profissional, central_id, data_ref)
+          DO UPDATE SET saidas_hoje = $4, bloqueado_ate = $5, updated_at = NOW()
+        `, [central_id, cod_profissional, prof.nome_profissional, vezesMovido, bloqueadoAte]);
+
+        // Remover da fila
+        await pool.query(
+          `DELETE FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2`,
+          [cod_profissional, central_id]
+        );
+
+        penalidade = { minutos: 1440, bloqueado_ate: bloqueadoAte };
+        mensagemUsuario = 'Você foi movido para o final da fila pois não teve disponibilidade para executar o roteiro ofertado.';
+        proximaPunicao = 'Você está impedido de entrar na fila por 24 horas.';
+      } else if (vezesMovido === 2) {
+        // 2ª vez: bloqueia 2h
+        const bloqueadoAte = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        await pool.query(`
+          INSERT INTO filas_penalidades (central_id, cod_profissional, nome_profissional, saidas_hoje, bloqueado_ate, data_ref)
+          VALUES ($1, $2, $3, $4, $5, CURRENT_DATE)
+          ON CONFLICT (cod_profissional, central_id, data_ref)
+          DO UPDATE SET saidas_hoje = $4, bloqueado_ate = $5, updated_at = NOW()
+        `, [central_id, cod_profissional, prof.nome_profissional, vezesMovido, bloqueadoAte]);
+
+        // Remover da fila
+        await pool.query(
+          `DELETE FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2`,
+          [cod_profissional, central_id]
+        );
+
+        penalidade = { minutos: 120, bloqueado_ate: bloqueadoAte };
+        mensagemUsuario = 'Você foi movido para o final da fila pois não teve disponibilidade para executar o roteiro ofertado.';
+        proximaPunicao = 'Você está impedido de entrar na fila por 2 horas. Caso ocorra novamente, será impedido por 24 horas.';
+      } else {
+        // 1ª vez: só aviso
+        mensagemUsuario = 'Você foi movido para o final da fila pois não teve disponibilidade para executar o roteiro ofertado.';
+        proximaPunicao = 'Caso isso ocorra novamente, você será impedido de entrar na fila por 2 horas.';
+      }
+
+      // 🔔 Notificar motoboy via WebSocket
+      if (typeof global.sendToUser === 'function') {
+        global.sendToUser(cod_profissional, 'FILA_MOVIDO_ULTIMO', {
+          central_id,
+          central_nome: central.rows[0]?.nome || '',
+          posicao_anterior: posicaoAnterior,
+          posicao_nova: novaPosicao,
+          vezes_movido: vezesMovido,
+          mensagem: mensagemUsuario,
+          proxima_punicao: proximaPunicao,
+          penalidade,
+        });
+      }
       
-      res.json({ success: true, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao });
+      res.json({
+        success: true,
+        posicao_anterior: posicaoAnterior,
+        posicao_nova: novaPosicao,
+        vezes_movido: vezesMovido,
+        penalidade,
+      });
       
       registrarAuditoria(req, 'MOVER_PARA_ULTIMO', 'admin', 'filas_posicoes', null, 
-        { cod_profissional, central_id, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao }).catch(() => {});
+        { cod_profissional, central_id, posicao_anterior: posicaoAnterior, posicao_nova: novaPosicao, vezes_movido: vezesMovido }).catch(() => {});
       
     } catch (error) {
       console.error('❌ Erro ao mover para último:', error);
