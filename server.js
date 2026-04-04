@@ -769,6 +769,19 @@ initDatabase().then(async () => {
            JSON.stringify(resultado.screenshots || [])]
         );
         console.log(`[CRM-Cron] ✅ Job #${jobId}: ${novos} novos | ${jaExistentes} atualizados | ${ativos} ativos`);
+
+        // 📱 Notificar grupo WhatsApp com novos leads
+        try {
+          const notifResp = await fetch(`http://localhost:${PORT}/api/crm/leads-captura/notificar-novos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-service-key': process.env.CRM_SERVICE_KEY || '' },
+            body: '{}',
+          });
+          const notifData = await notifResp.json();
+          console.log(`[CRM-Cron] 📱 Notificação: ${notifData.enviado ? '✅' : '❌'}`, notifData.motivo || '');
+        } catch (notifErr) {
+          console.error(`[CRM-Cron] ❌ Erro notificação: ${notifErr.message}`);
+        }
       } catch (err) {
         console.error(`[CRM-Cron] ❌ Job #${jobId}: ${err.message}`);
         await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',

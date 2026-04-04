@@ -924,6 +924,17 @@ function createLeadsCapturaRoutes(pool) {
   // ══════════════════════════════════════════════════════════════
   // POST /resumo-diario — Enviar resumo diário manualmente
   // ══════════════════════════════════════════════════════════════
+  // ═══ POST /notificar-novos — Envia notificação WhatsApp com leads não notificados ═══
+  router.post('/notificar-novos', async (req, res) => {
+    try {
+      await notificarGrupoNovosLeads();
+      res.json({ success: true, enviado: true });
+    } catch (err) {
+      console.error('[CRM-Notif] Erro endpoint:', err.message);
+      res.json({ success: true, enviado: false, motivo: err.message });
+    }
+  });
+
   router.post('/resumo-diario', async (req, res) => {
     try {
       const resultado = await enviarResumoDiario();
