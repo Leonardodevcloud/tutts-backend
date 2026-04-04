@@ -87,7 +87,7 @@ function createAlocacaoRoutes(pool) {
   // ══════════════════════════════════════════════════════════════
   router.get('/', async (req, res) => {
     try {
-      const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, todos, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
+      const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, todos, importado, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
 
       // Busca rápida de profissional por código
       if (lookup_prof) {
@@ -117,6 +117,8 @@ function createAlocacaoRoutes(pool) {
       if (cliente)     { where.push(`nome_cliente = $${idx++}`); params.push(cliente); }
       if (status)      { where.push(`status = $${idx++}`);       params.push(status); }
       if (quem_alocou) { where.push(`quem_alocou = $${idx++}`); params.push(quem_alocou); }
+      if (importado === 'false') { where.push(`(importado IS NULL OR importado = FALSE)`); }
+      if (importado === 'true')  { where.push(`importado = TRUE`); }
       if (search)      { where.push(`(nome_prof ILIKE $${idx} OR cod_prof ILIKE $${idx} OR nome_cliente ILIKE $${idx})`); params.push(`%${search}%`); idx++; }
 
       const whereStr = where.join(' AND ');
