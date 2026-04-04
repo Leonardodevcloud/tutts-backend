@@ -307,6 +307,22 @@ async function initConfigTables(pool) {
   console.log('✅ Tabela admin_permissions verificada');
 
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_modules JSONB DEFAULT '[]'`).catch(() => {});
+
+  // ==================== FOTO HASHES (Anti-fraude pHash) ====================
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS foto_hashes (
+      id SERIAL PRIMARY KEY,
+      hash VARCHAR(32) NOT NULL,
+      user_cod VARCHAR(50),
+      user_nome VARCHAR(255),
+      origem VARCHAR(50) DEFAULT 'submission',
+      referencia_id INT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_foto_hashes_hash ON foto_hashes(hash)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_foto_hashes_created ON foto_hashes(created_at)`).catch(() => {});
+  console.log('✅ Tabela foto_hashes verificada');
 }
 
 module.exports = { initConfigTables };

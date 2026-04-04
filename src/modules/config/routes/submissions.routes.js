@@ -1,8 +1,10 @@
 /**
  * Config Sub-Router: Submissions (cadastros)
  * V2: Contestação, múltiplas fotos, modal rejeição
+ * V3: pHash anti-fraude de fotos duplicadas
  */
 const express = require('express');
+const { processarFotos } = require('../../../shared/phash');
 
 function createSubmissionsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
@@ -20,6 +22,36 @@ router.post('/submissions', verificarToken, async (req, res) => {
     if (!motivo || motivo.length < 1 || motivo.length > 1000) {
       return res.status(400).json({ error: 'Motivo inválido' });
     }
+
+    // ── Anti-fraude: verificar fotos duplicadas via pHash ──
+    const fotosParaVerificar = [];
+    if (imagemComprovante && typeof imagemComprovante === 'string' && imagemComprovante.length > 100) {
+      fotosParaVerificar.push(imagemComprovante);
+    }
+    if (Array.isArray(imagens)) {
+      fotosParaVerificar.push(...imagens.filter(img => img && typeof img === 'string' && img.length > 100));
+    }
+
+    if (fotosParaVerificar.length > 0) {
+      try {
+        const check = await processarFotos(pool, fotosParaVerificar, {
+          user_cod: userCod,
+          user_nome: userName,
+          origem: 'submission',
+          referencia_id: null, // será atualizado após INSERT
+        });
+        if (check.bloqueada) {
+          return res.status(400).json({
+            error: '🚨 Foto duplicada detectada',
+            motivo: check.motivo,
+            foto_index: check.foto_index,
+          });
+        }
+      } catch (hashErr) {
+        console.error('[pHash] Erro (não-bloqueante):', hashErr.message);
+        // Não bloqueia se pHash falhar — segue sem verificação
+      }
+    }
     
     const sanitizedOrdemServico = ordemServico.toString().trim().substring(0, 50);
     const sanitizedMotivo = motivo.toString().trim().substring(0, 1000);
@@ -33,7 +65,14 @@ router.post('/submissions', verificarToken, async (req, res) => {
       [sanitizedOrdemServico, sanitizedMotivo, userId, userCod, userName, imagemComprovante, imagens, coordenadas]
     );
 
-    await registrarAuditoria(req, 'SUBMISSION_CREATE', AUDIT_CATEGORIES.DATA, 'submissions', result.rows[0].id, {
+    // Atualizar referencia_id nos hashes salvos
+    const subId = result.rows[0].id;
+    await pool.query(
+      `UPDATE foto_hashes SET referencia_id = $1 WHERE referencia_id IS NULL AND user_cod = $2 AND origem = 'submission' AND created_at > NOW() - INTERVAL '1 minute'`,
+      [subId, userCod]
+    ).catch(() => {});
+
+    await registrarAuditoria(req, 'SUBMISSION_CREATE', AUDIT_CATEGORIES.DATA, 'submissions', subId, {
       ordem_servico: sanitizedOrdemServico
     });
 
@@ -382,6 +421,19 @@ router.post('/submissions/:id/contestar', verificarToken, async (req, res) => {
 
     // Inserir primeira mensagem
     const imagensArr = Array.isArray(imagens) ? imagens : [];
+
+    // ── Anti-fraude: verificar fotos duplicadas ──
+    if (imagensArr.length > 0) {
+      try {
+        const check = await processarFotos(pool, imagensArr, {
+          user_cod: userCod, user_nome: userName, origem: 'contestacao', referencia_id: submissionId,
+        });
+        if (check.bloqueada) {
+          return res.status(400).json({ error: '🚨 Foto duplicada detectada', motivo: check.motivo });
+        }
+      } catch (hashErr) { console.error('[pHash] Erro contestação:', hashErr.message); }
+    }
+
     await pool.query(`
       INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
       VALUES ($1, 'motoboy', $2, $3, $4, $5)
@@ -444,6 +496,18 @@ router.post('/submissions/:id/contestacao-responder', verificarToken, async (req
     const autorCod = isAdmin ? req.user.codProfissional || req.user.id : req.user.codProfissional;
     const autorNome = req.user.nome;
     const imagensArr = Array.isArray(imagens) ? imagens : [];
+
+    // ── Anti-fraude: verificar fotos de motoboys (admin não precisa) ──
+    if (!isAdmin && imagensArr.length > 0) {
+      try {
+        const check = await processarFotos(pool, imagensArr, {
+          user_cod: autorCod, user_nome: autorNome, origem: 'contestacao', referencia_id: submissionId,
+        });
+        if (check.bloqueada) {
+          return res.status(400).json({ error: '🚨 Foto duplicada detectada', motivo: check.motivo });
+        }
+      } catch (hashErr) { console.error('[pHash] Erro resposta:', hashErr.message); }
+    }
 
     await pool.query(`
       INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
