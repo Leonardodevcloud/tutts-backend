@@ -79,7 +79,16 @@ function createAlocacaoRoutes(pool) {
   // ══════════════════════════════════════════════════════════════
   router.get('/', async (req, res) => {
     try {
-      const { cliente, status, quem_alocou, search, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
+      const { cliente, status, quem_alocou, search, lookup_prof, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
+
+      // Busca rápida de profissional por código
+      if (lookup_prof) {
+        const { rows } = await pool.query(
+          'SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1',
+          [lookup_prof]
+        );
+        return res.json({ success: true, nome: rows.length > 0 ? rows[0].nome_prof : null });
+      }
 
       const where = ['ativo = true'];
       const params = [];
@@ -121,12 +130,18 @@ function createAlocacaoRoutes(pool) {
         FROM crm_alocacoes WHERE ativo = true
       `);
 
+      // Dropdowns embutidos
+      const { rows: clientesRows } = await pool.query('SELECT cod, nome FROM crm_alocacao_clientes ORDER BY nome ASC');
+      const { rows: alocadoresRows } = await pool.query('SELECT nome FROM crm_alocacao_alocadores ORDER BY nome ASC');
+
       res.json({
         success: true,
         data: dataRes.rows,
         total,
         page: parseInt(page),
         totalPages: Math.ceil(total / parseInt(limit)),
+        clientes: clientesRows,
+        alocadores: alocadoresRows.map(r => r.nome),
         kpis: {
           total: parseInt(kpis.total) || 0,
           nao_rodou: parseInt(kpis.nao_rodou) || 0,
