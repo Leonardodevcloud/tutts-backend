@@ -97,9 +97,9 @@ function createAlocacaoRoutes(pool) {
       let idx = 1;
 
       // Filtro de mês/ano (skip se todos=true — usado pelo analytics)
+      const mesInt = parseInt(mes) || (new Date().getMonth() + 1);
+      const anoInt = parseInt(ano) || new Date().getFullYear();
       if (todos !== 'true') {
-        const mesInt = parseInt(mes) || (new Date().getMonth() + 1);
-        const anoInt = parseInt(ano) || new Date().getFullYear();
         where.push(`EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
         params.push(mesInt);
         where.push(`EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
@@ -128,21 +128,11 @@ function createAlocacaoRoutes(pool) {
 
       const total = parseInt(countRes.rows[0].total);
 
-      // KPIs (mesmos filtros de mês)
-      const { rows: [kpis] } = await pool.query(`
-        SELECT
-          COUNT(*) as total,
-          COUNT(*) FILTER (WHERE status = 'nao_rodou') as nao_rodou,
-          COUNT(*) FILTER (WHERE status = 'em_operacao') as em_operacao,
-          COUNT(*) FILTER (WHERE status = 'possivel_churn') as possivel_churn,
-          COUNT(*) FILTER (WHERE status = 'churn') as churn,
-          COUNT(*) FILTER (WHERE status = 'voltou_operacao') as voltou_operacao,
-          COUNT(DISTINCT nome_cliente) as total_clientes,
-          COUNT(DISTINCT quem_alocou) FILTER (WHERE quem_alocou IS NOT NULL AND quem_alocou != '') as total_alocadores
-        FROM crm_alocacoes WHERE ativo = true
-          AND EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $1
-          AND EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $2
-      `, [mesInt, anoInt]);
+      // KPIs (mesmos filtros de mês, ou sem filtro se todos=true)
+      const kpisQuery = todos === 'true'
+        ? `SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'nao_rodou') as nao_rodou, COUNT(*) FILTER (WHERE status = 'em_operacao') as em_operacao, COUNT(*) FILTER (WHERE status = 'possivel_churn') as possivel_churn, COUNT(*) FILTER (WHERE status = 'churn') as churn, COUNT(*) FILTER (WHERE status = 'voltou_operacao') as voltou_operacao, COUNT(DISTINCT nome_cliente) as total_clientes, COUNT(DISTINCT quem_alocou) FILTER (WHERE quem_alocou IS NOT NULL AND quem_alocou != '') as total_alocadores FROM crm_alocacoes WHERE ativo = true`
+        : `SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'nao_rodou') as nao_rodou, COUNT(*) FILTER (WHERE status = 'em_operacao') as em_operacao, COUNT(*) FILTER (WHERE status = 'possivel_churn') as possivel_churn, COUNT(*) FILTER (WHERE status = 'churn') as churn, COUNT(*) FILTER (WHERE status = 'voltou_operacao') as voltou_operacao, COUNT(DISTINCT nome_cliente) as total_clientes, COUNT(DISTINCT quem_alocou) FILTER (WHERE quem_alocou IS NOT NULL AND quem_alocou != '') as total_alocadores FROM crm_alocacoes WHERE ativo = true AND EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $1 AND EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $2`;
+      const { rows: [kpis] } = await pool.query(kpisQuery, todos === 'true' ? [] : [mesInt, anoInt]);
 
       // Dropdowns embutidos
       const { rows: clientesRows } = await pool.query('SELECT cod, nome FROM crm_alocacao_clientes ORDER BY nome ASC');
