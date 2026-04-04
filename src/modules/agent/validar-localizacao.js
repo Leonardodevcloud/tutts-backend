@@ -298,17 +298,19 @@ async function validarLocalizacao(base64Foto, lat, lng) {
 
   const nomeFoto = gemini.nome_estabelecimento;
 
-  // 3. Nome não identificado — aprovar (pode ser residência sem placa)
+  // 3. Nome não identificado — se residencial ou sem placa, aviso (não bloqueio)
   if (!nomeFoto || nomeFoto === 'NAO_IDENTIFICADO') {
-    log(`⚠️ Nome não identificável (tipo: ${gemini.tipo_local}) — aprovando`);
+    log(`⚠️ Nome não identificável (tipo: ${gemini.tipo_local}) — aviso para suporte validar`);
     return {
-      valido: true,
+      valido: false,
       foto_valida: true,
       nome_foto: null,
       match_google: null,
       confianca: 0,
       tipo_local: gemini.tipo_local,
-      motivo: gemini.tipo_local === 'residencial' ? 'Local residencial identificado' : 'Nome não identificável na foto',
+      motivo: gemini.tipo_local === 'residencial'
+        ? 'Local residencial identificado — sem nome de estabelecimento visível'
+        : 'Não foi possível identificar o nome do estabelecimento na foto',
       detalhes: { gemini }
     };
   }
