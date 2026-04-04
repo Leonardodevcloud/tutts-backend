@@ -861,59 +861,166 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // ── Passo 9: Calcular frete ─────────────────────────────────────────────
       log('\u{1f4cc} Passo 9: Calculando frete');
 
-      // Aguardar spinner da lupa sumir antes de calcular
-      for (let sw = 0; sw < 10; sw++) {
+      // Aguardar spinners da lupa sumirem COMPLETAMENTE
+      for (let sw = 0; sw < 15; sw++) {
         const spinnerAtivo = await page.evaluate(() => {
-          const spinners = document.querySelectorAll('.fa-spinner, .fa-spin, .loading, img[src*="loading"]');
+          const spinners = document.querySelectorAll('.fa-spinner, .fa-spin, .loading, img[src*="loading"], .spinner-border');
           for (const s of spinners) { if (s.offsetParent !== null) return true; }
+          // Verificar se algum overlay está ativo
+          const overlays = document.querySelectorAll('.modal-backdrop, .loading-overlay, .blockUI');
+          for (const o of overlays) { if (o.offsetParent !== null) return true; }
           return false;
         }).catch(() => false);
         if (!spinnerAtivo) break;
-        log('\u23f3 Spinner ativo, aguardando...');
+        log('\u23f3 Spinner/loading ativo, aguardando...');
         await page.waitForTimeout(1000);
       }
+      await page.waitForTimeout(1000); // Folga extra após spinner sumir
 
-      // Procurar botao Calcular
-      const seletoresCalc = ['#btnCalcFreteCEN', '#btnCalcular', 'button:has-text("Calcular")', 'input[value="Calcular"]'];
+      // Procurar botão Calcular — múltiplos seletores incluindo fallbacks
+      const seletoresCalc = [
+        '#btnCalcFreteCEN',
+        '#btnCalcular',
+        '#btnCalcularFrete',
+        'button#btnCalcFreteCEN',
+        'input#btnCalcFreteCEN',
+        'input[value="Calcular"]',
+        'input[value="Calcular Frete"]',
+        'button:has-text("Calcular")',
+        'button:has-text("Calc. Frete")',
+        'a:has-text("Calcular")',
+      ];
+
       let btnCalcEncontrado = null;
       for (const sel of seletoresCalc) {
-        const btn = page.locator(sel).first();
-        const existe = await btn.count().catch(() => 0);
-        if (existe > 0) {
-          btnCalcEncontrado = btn;
-          log('\u{1f4cc} Botao Calcular encontrado: ' + sel);
-          break;
+        try {
+          const btn = page.locator(sel).first();
+          const existe = await btn.count().catch(() => 0);
+          if (existe > 0) {
+            const visivel = await btn.isVisible().catch(() => false);
+            if (visivel) {
+              btnCalcEncontrado = btn;
+              log('\u{1f4cc} Botao Calcular encontrado: ' + sel);
+              break;
+            }
+          }
+        } catch (e) { /* seletor inválido, ignora */ }
+      }
+
+      // Fallback: buscar via JavaScript qualquer botão com texto "calcular"
+      if (!btnCalcEncontrado) {
+        log('\u{1f50d} Tentando fallback JS para botão Calcular...');
+        const encontrouFallback = await page.evaluate(() => {
+          // Procurar inputs e buttons com valor/texto "Calcular"
+          const candidates = document.querySelectorAll('input[type="button"], input[type="submit"], button, a.btn');
+          for (const el of candidates) {
+            const texto = (el.value || el.textContent || '').toLowerCase().trim();
+            if (texto.includes('calcular') && el.offsetParent !== null) {
+              return { tag: el.tagName, id: el.id, value: el.value || el.textContent?.trim() };
+            }
+          }
+          return null;
+        }).catch(() => null);
+
+        if (encontrouFallback) {
+          log(`\u{1f4cc} Fallback: ${encontrouFallback.tag}#${encontrouFallback.id} "${encontrouFallback.value}"`);
+          if (encontrouFallback.id) {
+            btnCalcEncontrado = page.locator('#' + encontrouFallback.id).first();
+          }
         }
       }
 
       if (btnCalcEncontrado) {
         await btnCalcEncontrado.scrollIntoViewIfNeeded().catch(() => {});
         await page.waitForTimeout(500);
-        await btnCalcEncontrado.click();
-        log('\u{1f4cc} Botao Calcular clicado');
 
-        // Aguardar calculo - polling por valor R$ E botao Salvar
+        // Verificar se está disabled
+        const estaDisabled = await btnCalcEncontrado.isDisabled().catch(() => false);
+        if (estaDisabled) {
+          log('\u26a0\ufe0f Botão Calcular está desabilitado — tentando habilitar via JS');
+          await page.evaluate(() => {
+            const btns = document.querySelectorAll('#btnCalcFreteCEN, #btnCalcular, input[value="Calcular"]');
+            btns.forEach(b => { b.disabled = false; b.removeAttribute('disabled'); });
+          }).catch(() => {});
+          await page.waitForTimeout(500);
+        }
+
+        // Clicar com retry
+        for (let tentCalc = 0; tentCalc < 3; tentCalc++) {
+          try {
+            await btnCalcEncontrado.click({ force: true, timeout: 5000 });
+            log('\u{1f4cc} Botao Calcular clicado (tentativa ' + (tentCalc + 1) + ')');
+            break;
+          } catch (clickErr) {
+            log('\u26a0\ufe0f Clique falhou (tentativa ' + (tentCalc + 1) + '): ' + clickErr.message);
+            if (tentCalc < 2) {
+              // Tentar via JS direto
+              await page.evaluate(() => {
+                const btn = document.querySelector('#btnCalcFreteCEN') || document.querySelector('#btnCalcular') || document.querySelector('input[value="Calcular"]');
+                if (btn) btn.click();
+              }).catch(() => {});
+              await page.waitForTimeout(1000);
+            }
+          }
+        }
+
+        // Aguardar cálculo — polling por valor R$ E botão Salvar
         let valorEncontrado = false;
         let salvarApareceu = false;
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 25; i++) {
           await page.waitForTimeout(1000);
+
+          // Tratar dialogs que possam aparecer durante o cálculo
+          const alertaVisivel = await page.locator('.swal2-popup:visible, .bootbox:visible').count().catch(() => 0);
+          if (alertaVisivel > 0) {
+            log('\u{1f4ac} Dialog detectado durante cálculo — aceitando');
+            await page.locator('.swal2-confirm, .bootbox .btn-primary, .bootbox .btn-success').first().click().catch(() => {});
+            await page.waitForTimeout(1000);
+          }
+
           const status = await page.evaluate(() => {
-            const temValor = !!(document.body.textContent || '').match(/R\$\s*\d+[.,]\d{2}/);
+            const bodyText = document.body.textContent || '';
+            const temValor = !!/R\$\s*\d+[.,]\d{2}/.test(bodyText);
+            const temFrete = !!/frete.*R\$/i.test(bodyText) || !!/R\$.*frete/i.test(bodyText);
             const btnSalvar = document.getElementById('btnChamarMotoboy');
             const salvarVisivel = btnSalvar && btnSalvar.offsetParent !== null;
-            return { temValor, salvarVisivel };
-          }).catch(() => ({ temValor: false, salvarVisivel: false }));
-          if (status.temValor) valorEncontrado = true;
+            // Verificar spinner ainda ativo
+            const spinnerAtivo = !!(document.querySelector('.fa-spinner:not([style*="display: none"])') || document.querySelector('.fa-spin'));
+            return { temValor, temFrete, salvarVisivel, spinnerAtivo };
+          }).catch(() => ({ temValor: false, temFrete: false, salvarVisivel: false, spinnerAtivo: false }));
+
+          if (status.temValor || status.temFrete) valorEncontrado = true;
           if (status.salvarVisivel) { salvarApareceu = true; break; }
+          if (status.spinnerAtivo && i < 20) continue; // Ainda calculando, aguardar
+
           if (i === 5) log('\u23f3 Aguardando calculo do frete...');
           if (i === 10) log('\u23f3 Ainda aguardando (10s)...');
+          if (i === 15) log('\u23f3 Aguardando (15s)...');
+
+          // Se não tem spinner e já passou 15s, provavelmente algo deu errado
+          if (!status.spinnerAtivo && i >= 15 && !valorEncontrado) {
+            log('\u26a0\ufe0f Sem spinner e sem valor após 15s — possível falha silenciosa');
+            break;
+          }
         }
 
         await screenshot(page, os_numero, 'passo9_pos_calcular');
         if (valorEncontrado) {
           log('\u{1f4b0} Valor calculado com sucesso');
         } else {
-          log('\u26a0\ufe0f Valor R$ nao detectado apos 20s');
+          log('\u26a0\ufe0f Valor R$ nao detectado apos polling');
+          // Tentar clicar calcular de novo
+          log('\u{1f501} Tentando recalcular...');
+          await btnCalcEncontrado.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(5000);
+          const retryStatus = await page.evaluate(() => {
+            const temValor = !!/R\$\s*\d+[.,]\d{2}/.test(document.body.textContent || '');
+            const salvarVisivel = !!(document.getElementById('btnChamarMotoboy')?.offsetParent);
+            return { temValor, salvarVisivel };
+          }).catch(() => ({ temValor: false, salvarVisivel: false }));
+          if (retryStatus.temValor) { valorEncontrado = true; log('\u{1f4b0} Valor encontrado no retry!'); }
+          if (retryStatus.salvarVisivel) salvarApareceu = true;
+          await screenshot(page, os_numero, 'passo9_retry_calcular');
         }
 
         // Passo 10: Salvar alteracoes
