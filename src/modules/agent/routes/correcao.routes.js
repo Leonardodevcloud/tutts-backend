@@ -8,6 +8,7 @@
 'use strict';
 
 const express = require('express');
+const { validarLocalizacao } = require('../validar-localizacao');
 
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -95,9 +96,35 @@ function createCorrecaoRoutes(pool) {
         });
       }
 
+      // ── Validar localização: foto da fachada vs Google Places ──
+      let validacaoLoc = null;
+      try {
+        validacaoLoc = await validarLocalizacao(
+          foto_fachada,
+          parseFloat(motoboy_lat),
+          parseFloat(motoboy_lng)
+        );
+
+        if (validacaoLoc && !validacaoLoc.valido) {
+          console.log(`[agent] ❌ Localização não validada: ${validacaoLoc.motivo}`);
+          return res.status(400).json({
+            sucesso: false,
+            validacao_localizacao: validacaoLoc,
+            erros: [`Não foi possível confirmar o endereço. ${validacaoLoc.motivo}. Verifique se você está no local correto e tente novamente.`],
+          });
+        }
+
+        if (validacaoLoc) {
+          console.log(`[agent] ✅ Localização validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
+        }
+      } catch (valErr) {
+        console.error('[agent] ⚠️ Erro validação localização (não-bloqueante):', valErr.message);
+        // Não bloqueia se a validação falhar
+      }
+
       const { rows } = await pool.query(
-        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome, cod_profissional)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8, $9)
+        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome, cod_profissional, validacao_localizacao)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8, $9, $10)
          RETURNING id, status, criado_em`,
         [
           String(os_numero).trim(),
@@ -109,6 +136,7 @@ function createCorrecaoRoutes(pool) {
           usuarioId,
           usuarioNome,
           codProfissional,
+          validacaoLoc ? JSON.stringify({ valido: validacaoLoc.valido, nome_foto: validacaoLoc.nome_foto, match: validacaoLoc.match_google, confianca: validacaoLoc.confianca }) : null,
         ]
       );
 
