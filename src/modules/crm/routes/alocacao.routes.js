@@ -83,9 +83,11 @@ function createAlocacaoRoutes(pool) {
 
       // Busca rápida de profissional por código
       if (lookup_prof) {
+        const codInt = parseInt(lookup_prof);
+        if (isNaN(codInt)) return res.json({ success: true, nome: null });
         const { rows } = await pool.query(
           'SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1',
-          [lookup_prof]
+          [codInt]
         );
         return res.json({ success: true, nome: rows.length > 0 ? rows[0].nome_prof : null });
       }
