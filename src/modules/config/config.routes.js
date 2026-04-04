@@ -187,7 +187,23 @@ router.post('/submissions', verificarToken, async (req, res) => {
         });
         console.log(`[pHash] Resultado: bloqueada=${check.bloqueada}`);
         if (check.bloqueada) {
-          return res.status(400).json({ error: '🚨 Foto duplicada detectada', motivo: check.motivo, foto_index: check.foto_index });
+          // Buscar OS da submissão original
+          let osOriginal = '';
+          let dataOriginal = check.detalhes?.data || '';
+          if (check.detalhes?.referencia_id) {
+            const orig = await pool.query('SELECT ordem_servico, created_at FROM submissions WHERE id = $1', [check.detalhes.referencia_id]).catch(() => ({ rows: [] }));
+            if (orig.rows.length > 0) {
+              osOriginal = orig.rows[0].ordem_servico || '';
+              dataOriginal = new Date(orig.rows[0].created_at).toLocaleDateString('pt-BR');
+            }
+          }
+          return res.status(400).json({
+            error: 'foto_duplicada',
+            os_original: osOriginal,
+            data_original: dataOriginal,
+            submission_id_original: check.detalhes?.referencia_id,
+            foto_index: check.foto_index,
+          });
         }
       } catch (hashErr) {
         console.error('[pHash] Erro (não-bloqueante):', hashErr.message);
@@ -810,14 +826,6 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
 
       const imagensArr = Array.isArray(imagens) ? imagens : [];
 
-      // ── Anti-fraude: verificar fotos da contestação ──
-      if (imagensArr.length > 0) {
-        try {
-          const check = await processarFotos(pool, imagensArr, { user_cod: userCod, user_nome: userName, origem: 'contestacao', referencia_id: submissionId });
-          if (check.bloqueada) return res.status(400).json({ error: '🚨 Foto duplicada detectada', motivo: check.motivo });
-        } catch (hashErr) { console.error('[pHash] Erro contestação:', hashErr.message); }
-      }
-
       await pool.query(`
         INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
         VALUES ($1, 'motoboy', $2, $3, $4, $5)
@@ -877,14 +885,6 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
 
       const autorTipo = isAdmin ? 'admin' : 'motoboy';
       const imagensArr = Array.isArray(imagens) ? imagens : [];
-
-      // ── Anti-fraude: verificar fotos de motoboys ──
-      if (!isAdmin && imagensArr.length > 0) {
-        try {
-          const check = await processarFotos(pool, imagensArr, { user_cod: req.user.codProfissional, user_nome: req.user.nome, origem: 'contestacao', referencia_id: submissionId });
-          if (check.bloqueada) return res.status(400).json({ error: '🚨 Foto duplicada detectada', motivo: check.motivo });
-        } catch (hashErr) { console.error('[pHash] Erro resposta:', hashErr.message); }
-      }
 
       await pool.query(`
         INSERT INTO submissions_contestacoes (submission_id, autor_tipo, autor_cod, autor_nome, mensagem, imagens)
