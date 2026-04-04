@@ -61,6 +61,23 @@ async function initDisponibilidadeTables(pool) {
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS observacao_criada_em TIMESTAMP`).catch(() => {});
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS status_alterado_por VARCHAR(200)`).catch(() => {});
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS status_alterado_em TIMESTAMP`).catch(() => {});
+
+    // Migration: sincronizar qtd_titulares = 0 com contagem real de linhas titulares
+    try {
+      const { rowCount } = await pool.query(`
+        UPDATE disponibilidade_lojas l
+        SET qtd_titulares = sub.total_titulares
+        FROM (
+          SELECT loja_id, COUNT(*) as total_titulares
+          FROM disponibilidade_linhas
+          WHERE COALESCE(is_excedente, FALSE) = FALSE AND COALESCE(is_reposicao, FALSE) = FALSE
+          GROUP BY loja_id
+        ) sub
+        WHERE l.id = sub.loja_id AND (l.qtd_titulares IS NULL OR l.qtd_titulares = 0)
+      `);
+      if (rowCount > 0) console.log(`  🔄 ${rowCount} loja(s) com qtd_titulares sincronizado`);
+    } catch (e) { /* ignora */ }
+
     console.log('✅ Tabela disponibilidade_linhas verificada');
     
     // Tabela de Histórico de Observações (persiste após reset)

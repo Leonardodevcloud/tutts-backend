@@ -367,11 +367,13 @@ router.delete('/disponibilidade/linhas/:id', async (req, res) => {
       const { rows: [contagem] } = await pool.query(
         `SELECT COUNT(*) as total_titulares
          FROM disponibilidade_linhas
-         WHERE loja_id = $1 AND is_excedente = FALSE AND is_reposicao = FALSE`,
+         WHERE loja_id = $1 AND COALESCE(is_excedente, FALSE) = FALSE AND COALESCE(is_reposicao, FALSE) = FALSE`,
         [linha.loja_id]
       );
       const titularesAtuais = parseInt(contagem.total_titulares) || 0;
       const limiteMinimo = parseInt(linha.qtd_titulares) || 0;
+
+      console.log(`[Disp-Delete] Linha #${id} | loja_id=${linha.loja_id} | titularesAtuais=${titularesAtuais} | limiteMinimo=${limiteMinimo} | bloquear=${titularesAtuais <= limiteMinimo}`);
 
       if (titularesAtuais <= limiteMinimo) {
         return res.status(400).json({
