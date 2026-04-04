@@ -573,13 +573,42 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // Aguardar geocoder — esperar botão Confirmar aparecer (com polling)
     let confirmarVisivel = false;
+    let jaCorrigidoAntes = false;
     for (let tentativa = 0; tentativa < 10; tentativa++) {
       await page.waitForTimeout(700);
+
+      // Detectar alerta "Este endereço já foi corrigido anteriormente"
+      jaCorrigidoAntes = await page.evaluate(() => {
+        const alertas = document.querySelectorAll('.alert-danger, .alert-warning');
+        for (const a of alertas) {
+          const txt = (a.textContent || '').toLowerCase();
+          if (txt.includes('já foi corrigido') || txt.includes('ja foi corrigido') || txt.includes('corrigido anteriormente')) {
+            return true;
+          }
+        }
+        return false;
+      }).catch(() => false);
+
+      if (jaCorrigidoAntes) break;
+
       confirmarVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (confirmarVisivel) break;
     }
     
     await screenshot(page, os_numero, 'passo5_pos_validar');
+
+    // Se endereço já foi corrigido anteriormente — abortar com erro específico
+    if (jaCorrigidoAntes) {
+      const ss = await screenshot(page, os_numero, 'passo5_ja_corrigido');
+      log('⚠️ Endereço já foi corrigido anteriormente no sistema externo');
+      await browser.close();
+      return {
+        sucesso: false,
+        erro: 'ENDERECO_JA_CORRIGIDO',
+        detalhe: 'Este endereço já foi corrigido anteriormente no sistema. Por favor, refaça a solicitação diretamente com o suporte Tutts.',
+        screenshot: ss,
+      };
+    }
 
     if (!confirmarVisivel) {
       const ss = await screenshot(page, os_numero, 'passo5_geocoder_vazio');

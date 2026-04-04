@@ -207,8 +207,8 @@ async function processarProximoPendente(pool) {
       log(`✅ ID ${registro.id} concluído. Antigo: ${endAntigo || '—'} | Novo: ${endCorrigido || '—'} | Frete: ${resultado.frete_recalculado ? 'SIM' : 'NÃO'}`);
     } else {
       const detalhe = resultado.screenshot
-        ? `${resultado.erro} [Screenshot: ${resultado.screenshot}]`
-        : resultado.erro;
+        ? `${resultado.detalhe || resultado.erro} [Screenshot: ${resultado.screenshot}]`
+        : (resultado.detalhe || resultado.erro);
       await pool.query(
         `UPDATE ajustes_automaticos
          SET status = 'erro', detalhe_erro = $1, processado_em = NOW()
