@@ -22,6 +22,99 @@ let capturaEmAndamento = false;
 function createLeadsCapturaRoutes(pool) {
   const router = express.Router();
 
+  // ═══ Migration: coluna notificado_grupo ═══
+  (async () => {
+    try {
+      // Verifica se coluna já existe
+      const { rows } = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='crm_leads_capturados' AND column_name='notificado_grupo'`);
+      if (rows.length === 0) {
+        // Primeira vez: criar coluna e marcar todos existentes como já notificados
+        await pool.query('ALTER TABLE crm_leads_capturados ADD COLUMN notificado_grupo BOOLEAN DEFAULT FALSE');
+        await pool.query('UPDATE crm_leads_capturados SET notificado_grupo = TRUE');
+        console.log('  ✅ Coluna notificado_grupo criada (existentes marcados como TRUE)');
+      }
+    } catch (e) {}
+  })();
+
+  // ═══ HELPER: Notificar grupo WhatsApp com novos leads ═══
+  async function notificarGrupoNovosLeads() {
+    try {
+      const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+      const apiKey = process.env.EVOLUTION_API_KEY;
+      const instancia = process.env.EVOLUTION_INSTANCE;
+      const grupoId = process.env.EVOLUTION_GROUP_ID_CRM || process.env.EVOLUTION_GROUP_ID;
+
+      if (!baseUrl || !apiKey || !instancia || !grupoId) {
+        console.log('⚠️ [CRM-Notif] Vars Evolution não configuradas, pulando notificação');
+        return;
+      }
+
+      // Buscar leads não notificados
+      const { rows: leads } = await pool.query(
+        `SELECT cod, nome, celular, regiao, estado
+         FROM crm_leads_capturados
+         WHERE notificado_grupo = FALSE
+         ORDER BY regiao ASC, estado ASC, cod ASC`
+      );
+
+      const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Bahia' });
+      let msg;
+
+      if (leads.length === 0) {
+        // Nenhum lead novo — avisar
+        msg = `📋 *Atenção time!*\n\n📅 *Captura: ${hoje}*\n\n⚠️ Nenhum cadastro novo chegou no período.\n\nSolicito atenção nas ferramentas utilizadas para captação. Vamos verificar se está tudo funcionando corretamente!`;
+      } else {
+        // Agrupar por região
+        const grupos = {};
+        for (const lead of leads) {
+          const regiao = lead.regiao && lead.estado
+            ? `${lead.regiao.toUpperCase()} - ${lead.estado.toUpperCase()}`
+            : lead.regiao?.toUpperCase() || lead.estado?.toUpperCase() || 'SEM REGIÃO';
+          if (!grupos[regiao]) grupos[regiao] = [];
+          grupos[regiao].push(lead);
+        }
+
+        // Ordenar regiões por quantidade (maior primeiro)
+        const regioesOrdenadas = Object.entries(grupos).sort((a, b) => b[1].length - a[1].length);
+
+        msg = `📋 *Atenção time, chegaram novos cadastros na MAPP!*\nPrecisamos fazer contato com todos ainda hoje!\n\n📅 *Captura: ${hoje}*\n`;
+
+        for (const [regiao, leadsRegiao] of regioesOrdenadas) {
+          msg += `\n📍 *${regiao} (${leadsRegiao.length})*\n`;
+          for (const l of leadsRegiao) {
+            msg += `${l.cod} - ${l.nome || 'Sem nome'} - ${l.celular || 'Sem telefone'}\n`;
+          }
+        }
+
+        msg += `\n✅ *Total: ${leads.length} novos leads*`;
+      }
+
+      // Enviar
+      const response = await fetch(`${baseUrl}/message/sendText/${instancia}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+        body: JSON.stringify({ number: grupoId, text: msg }),
+      });
+
+      if (response.ok) {
+        console.log(`✅ [CRM-Notif] Mensagem enviada: ${leads.length} leads notificados`);
+        // Marcar como notificados
+        if (leads.length > 0) {
+          const ids = leads.map(l => l.cod);
+          await pool.query(
+            `UPDATE crm_leads_capturados SET notificado_grupo = TRUE WHERE cod = ANY($1::text[])`,
+            [ids]
+          );
+        }
+      } else {
+        const err = await response.text();
+        console.error(`❌ [CRM-Notif] Erro ${response.status}: ${err}`);
+      }
+    } catch (err) {
+      console.error('❌ [CRM-Notif] Exceção:', err.message);
+    }
+  }
+
   // ═══ HELPER: verificar status via API Tutts ═══
   async function verificarLeadAPI(celular) {
     const TUTTS_TOKEN = process.env.TUTTS_TOKEN_PROF_STATUS || process.env.TUTTS_INTEGRACAO_TOKEN || process.env.TUTTS_TOKEN_PROFISSIONAIS;
@@ -171,6 +264,9 @@ function createLeadsCapturaRoutes(pool) {
       );
 
       console.log(`[CRM-Captura] ✅ Job #${jobId}: ${novos} novos | ${jaExistentes} atualizados | ${ativos} ativos | ${inativos} inativos`);
+
+      // 📱 Notificar grupo WhatsApp com os novos leads
+      await notificarGrupoNovosLeads();
     } catch (err) {
       console.error(`[CRM-Captura] ❌ Job #${jobId}: ${err.message}`);
       await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',
