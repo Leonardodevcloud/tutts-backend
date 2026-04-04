@@ -460,6 +460,7 @@ function createLeadsCapturaRoutes(pool) {
       const sets = [];
       const params = [];
       let idx = 1;
+      let notificarAtivacao = false;
 
       if (quem_ativou !== undefined) {
         const nomeUpper = (quem_ativou || '').toUpperCase().trim();
@@ -479,6 +480,11 @@ function createLeadsCapturaRoutes(pool) {
             `INSERT INTO crm_ativadores (nome) VALUES ($1) ON CONFLICT (nome) DO NOTHING`,
             [nomeUpper]
           );
+          // Verificar se é primeira ativação (quem_ativou era null antes)
+          const { rows: [antes] } = await pool.query(
+            'SELECT quem_ativou FROM crm_leads_capturados WHERE id = $1', [req.params.id]
+          );
+          if (!antes?.quem_ativou) notificarAtivacao = true;
         }
       }
 
@@ -501,6 +507,42 @@ function createLeadsCapturaRoutes(pool) {
         `UPDATE crm_leads_capturados SET ${sets.join(', ')} WHERE id = $${idx}`,
         params
       );
+
+      // 📱 Notificar grupo WhatsApp na primeira ativação
+      if (notificarAtivacao) {
+        try {
+          const { rows: [lead] } = await pool.query(
+            'SELECT cod, nome, celular, regiao, estado, quem_ativou FROM crm_leads_capturados WHERE id = $1',
+            [req.params.id]
+          );
+          if (lead) {
+            const msg = `🚀 *Ativação realizada!* 🚀\n\n${lead.cod} ${lead.nome || ''}\n*Região:* ${lead.regiao || ''}${lead.estado ? ' - ' + lead.estado : ''}\n*Contato:* ${lead.celular || 'Não informado'}\n\n*Responsável:* ${lead.quem_ativou}`;
+
+            const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+            const apiKey = process.env.EVOLUTION_API_KEY;
+            const instancia = process.env.EVOLUTION_INSTANCE;
+            const grupoId = process.env.EVOLUTION_GROUP_ID_CRM || process.env.EVOLUTION_GROUP_ID;
+
+            if (baseUrl && apiKey && instancia && grupoId) {
+              const whatsRes = await fetch(`${baseUrl}/message/sendText/${instancia}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+                body: JSON.stringify({ number: grupoId, text: msg }),
+              });
+              const whatsData = await whatsRes.json();
+              if (whatsRes.ok) {
+                console.log(`✅ [CRM-WhatsApp] Ativação enviada: ${lead.cod} ${lead.nome} por ${lead.quem_ativou}`);
+              } else {
+                console.error(`❌ [CRM-WhatsApp] Erro ${whatsRes.status}:`, whatsData);
+              }
+            } else {
+              console.log('⚠️ [CRM-WhatsApp] Vars Evolution não configuradas para CRM');
+            }
+          }
+        } catch (whatsErr) {
+          console.error('⚠️ [CRM-WhatsApp] Erro ao notificar:', whatsErr.message);
+        }
+      }
 
       res.json({ success: true });
     } catch (err) {
