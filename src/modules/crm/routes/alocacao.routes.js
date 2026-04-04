@@ -79,7 +79,7 @@ function createAlocacaoRoutes(pool) {
   // ══════════════════════════════════════════════════════════════
   router.get('/', async (req, res) => {
     try {
-      const { cliente, status, quem_alocou, search, lookup_prof, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
+      const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
 
       // Busca rápida de profissional por código
       if (lookup_prof) {
@@ -95,6 +95,14 @@ function createAlocacaoRoutes(pool) {
       const where = ['ativo = true'];
       const params = [];
       let idx = 1;
+
+      // Filtro de mês/ano pela data prevista (default: mês corrente)
+      const mesInt = parseInt(mes) || (new Date().getMonth() + 1);
+      const anoInt = parseInt(ano) || new Date().getFullYear();
+      where.push(`EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
+      params.push(mesInt);
+      where.push(`EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
+      params.push(anoInt);
 
       if (cliente)     { where.push(`nome_cliente = $${idx++}`); params.push(cliente); }
       if (status)      { where.push(`status = $${idx++}`);       params.push(status); }
@@ -118,7 +126,7 @@ function createAlocacaoRoutes(pool) {
 
       const total = parseInt(countRes.rows[0].total);
 
-      // KPIs
+      // KPIs (mesmos filtros de mês)
       const { rows: [kpis] } = await pool.query(`
         SELECT
           COUNT(*) as total,
@@ -130,7 +138,9 @@ function createAlocacaoRoutes(pool) {
           COUNT(DISTINCT nome_cliente) as total_clientes,
           COUNT(DISTINCT quem_alocou) FILTER (WHERE quem_alocou IS NOT NULL AND quem_alocou != '') as total_alocadores
         FROM crm_alocacoes WHERE ativo = true
-      `);
+          AND EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $1
+          AND EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $2
+      `, [mesInt, anoInt]);
 
       // Dropdowns embutidos
       const { rows: clientesRows } = await pool.query('SELECT cod, nome FROM crm_alocacao_clientes ORDER BY nome ASC');
@@ -142,6 +152,8 @@ function createAlocacaoRoutes(pool) {
         total,
         page: parseInt(page),
         totalPages: Math.ceil(total / parseInt(limit)),
+        mes: mesInt,
+        ano: anoInt,
         clientes: clientesRows,
         alocadores: alocadoresRows.map(r => r.nome),
         kpis: {
