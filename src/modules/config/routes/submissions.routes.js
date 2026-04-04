@@ -28,9 +28,16 @@ router.post('/submissions', verificarToken, async (req, res) => {
     if (imagemComprovante && typeof imagemComprovante === 'string' && imagemComprovante.length > 100) {
       fotosParaVerificar.push(imagemComprovante);
     }
-    if (Array.isArray(imagens)) {
-      fotosParaVerificar.push(...imagens.filter(img => img && typeof img === 'string' && img.length > 100));
+    // imagens pode vir como Array ou como JSON string
+    let imagensArr = imagens;
+    if (typeof imagens === 'string') {
+      try { imagensArr = JSON.parse(imagens); } catch (e) { imagensArr = []; }
     }
+    if (Array.isArray(imagensArr)) {
+      fotosParaVerificar.push(...imagensArr.filter(img => img && typeof img === 'string' && img.length > 100));
+    }
+
+    console.log(`[pHash] POST /submissions | user=${userCod} | imagemComprovante=${imagemComprovante ? imagemComprovante.length + ' chars' : 'null'} | imagens type=${typeof imagens} isArray=${Array.isArray(imagens)} | fotosParaVerificar=${fotosParaVerificar.length}`);
 
     if (fotosParaVerificar.length > 0) {
       try {
@@ -38,8 +45,9 @@ router.post('/submissions', verificarToken, async (req, res) => {
           user_cod: userCod,
           user_nome: userName,
           origem: 'submission',
-          referencia_id: null, // será atualizado após INSERT
+          referencia_id: null,
         });
+        console.log(`[pHash] Resultado: bloqueada=${check.bloqueada}`);
         if (check.bloqueada) {
           return res.status(400).json({
             error: '🚨 Foto duplicada detectada',
@@ -49,7 +57,6 @@ router.post('/submissions', verificarToken, async (req, res) => {
         }
       } catch (hashErr) {
         console.error('[pHash] Erro (não-bloqueante):', hashErr.message);
-        // Não bloqueia se pHash falhar — segue sem verificação
       }
     }
     
