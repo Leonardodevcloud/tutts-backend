@@ -59,6 +59,8 @@ async function initDisponibilidadeTables(pool) {
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS is_reposicao BOOLEAN DEFAULT FALSE`).catch(() => {});
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS observacao_criada_por VARCHAR(200)`).catch(() => {});
     await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS observacao_criada_em TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS status_alterado_por VARCHAR(200)`).catch(() => {});
+    await pool.query(`ALTER TABLE disponibilidade_linhas ADD COLUMN IF NOT EXISTS status_alterado_em TIMESTAMP`).catch(() => {});
     console.log('✅ Tabela disponibilidade_linhas verificada');
     
     // Tabela de Histórico de Observações (persiste após reset)

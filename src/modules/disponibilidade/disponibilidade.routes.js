@@ -261,37 +261,50 @@ router.post('/disponibilidade/linhas', async (req, res) => {
 router.put('/disponibilidade/linhas/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { cod_profissional, nome_profissional, status, observacao, observacao_usuario } = req.body;
+    const { cod_profissional, nome_profissional, status, observacao, observacao_usuario, status_usuario } = req.body;
     
-    // Validar status - incluindo SEM CONTATO e A CAMINHO
+    // Validar status
     const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'A CAMINHO', 'EM LOJA', 'FALTANDO', 'SEM CONTATO'];
     const statusFinal = statusValidos.includes(status) ? status : 'A CONFIRMAR';
     
-    // Buscar linha atual para verificar se observação mudou
-    const linhaAtual = await pool.query('SELECT observacao FROM disponibilidade_linhas WHERE id = $1', [id]);
+    // Buscar linha atual
+    const linhaAtual = await pool.query('SELECT status, observacao FROM disponibilidade_linhas WHERE id = $1', [id]);
+    if (linhaAtual.rows.length === 0) return res.status(404).json({ error: 'Linha não encontrada' });
+
     const obsAtual = linhaAtual.rows[0]?.observacao || '';
+    const statusAtual = linhaAtual.rows[0]?.status || '';
     const obsNova = observacao || '';
     
-    // Se observação foi adicionada ou modificada, registrar quem e quando
+    // Rastrear quem alterou status
+    let statusAlteradoPor = null;
+    let statusAlteradoEm = null;
+    if (statusFinal !== statusAtual) {
+      statusAlteradoPor = status_usuario || observacao_usuario || 'Sistema';
+      statusAlteradoEm = new Date();
+    } else {
+      // Manter metadados existentes
+      const meta = await pool.query('SELECT status_alterado_por, status_alterado_em FROM disponibilidade_linhas WHERE id = $1', [id]);
+      if (meta.rows.length > 0) {
+        statusAlteradoPor = meta.rows[0].status_alterado_por;
+        statusAlteradoEm = meta.rows[0].status_alterado_em;
+      }
+    }
+
+    // Rastrear quem alterou observação
     let observacaoCriadaPor = null;
     let observacaoCriadaEm = null;
-    
     if (obsNova && obsNova !== obsAtual) {
-      // Observação foi modificada ou criada - registrar metadados
       observacaoCriadaPor = observacao_usuario || 'Sistema';
       observacaoCriadaEm = new Date();
     } else if (obsNova) {
-      // Observação não mudou - manter os metadados existentes
       const metadados = await pool.query(
-        'SELECT observacao_criada_por, observacao_criada_em FROM disponibilidade_linhas WHERE id = $1',
-        [id]
+        'SELECT observacao_criada_por, observacao_criada_em FROM disponibilidade_linhas WHERE id = $1', [id]
       );
       if (metadados.rows.length > 0) {
         observacaoCriadaPor = metadados.rows[0].observacao_criada_por;
         observacaoCriadaEm = metadados.rows[0].observacao_criada_em;
       }
     }
-    // Se observação foi removida (obsNova vazio), os metadados ficam null
     
     const result = await pool.query(
       `UPDATE disponibilidade_linhas 
@@ -301,8 +314,10 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
            observacao = $4,
            observacao_criada_por = $5,
            observacao_criada_em = $6,
+           status_alterado_por = $7,
+           status_alterado_em = $8,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $7 RETURNING *`,
+       WHERE id = $9 RETURNING *`,
       [
         cod_profissional || null, 
         nome_profissional || null, 
@@ -310,6 +325,8 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
         observacao || null,
         observacaoCriadaPor,
         observacaoCriadaEm,
+        statusAlteradoPor,
+        statusAlteradoEm,
         id
       ]
     );
@@ -332,11 +349,40 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
 router.delete('/disponibilidade/linhas/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *', [id]);
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Linha não encontrada' });
+    // Buscar a linha e a loja
+    const linhaCheck = await pool.query(
+      `SELECT li.id, li.loja_id, li.is_excedente, li.is_reposicao,
+              l.qtd_titulares
+       FROM disponibilidade_linhas li
+       JOIN disponibilidade_lojas l ON l.id = li.loja_id
+       WHERE li.id = $1`, [id]
+    );
+    if (linhaCheck.rows.length === 0) return res.status(404).json({ error: 'Linha não encontrada' });
+
+    const linha = linhaCheck.rows[0];
+
+    // Se é linha titular (não excedente, não reposição), verificar limite
+    if (!linha.is_excedente && !linha.is_reposicao) {
+      const { rows: [contagem] } = await pool.query(
+        `SELECT COUNT(*) as total_titulares
+         FROM disponibilidade_linhas
+         WHERE loja_id = $1 AND is_excedente = FALSE AND is_reposicao = FALSE`,
+        [linha.loja_id]
+      );
+      const titularesAtuais = parseInt(contagem.total_titulares) || 0;
+      const limiteMinimo = parseInt(linha.qtd_titulares) || 0;
+
+      if (titularesAtuais <= limiteMinimo) {
+        return res.status(400).json({
+          error: `Não é possível excluir. Limite mínimo de ${limiteMinimo} titular(es) atingido.`,
+          titulares_atuais: titularesAtuais,
+          limite: limiteMinimo
+        });
+      }
     }
+
+    const result = await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *', [id]);
     // Broadcast: linha removida
     if (global.broadcastDisponibilidade) {
       global.broadcastDisponibilidade('DISP_LINHA_DELETE', { id: parseInt(id), loja_id: result.rows[0].loja_id }, getSenderWsId(req));

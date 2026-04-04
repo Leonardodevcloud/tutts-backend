@@ -577,6 +577,10 @@ initDatabase().then(async () => {
               WHERE li.cod_profissional IS NOT NULL AND li.cod_profissional != ''
               AND li.status = 'A CAMINHO'
             ) as a_caminho,
+            COUNT(li.id) FILTER (
+              WHERE li.cod_profissional IS NOT NULL AND li.cod_profissional != ''
+              AND li.status = 'FALTANDO'
+            ) as faltando_count,
             r.nome as regiao_nome
           FROM disponibilidade_lojas l
           LEFT JOIN disponibilidade_linhas li ON li.loja_id = l.id
@@ -588,38 +592,22 @@ initDatabase().then(async () => {
         if (result.rows.length === 0) { console.log('🏍️ [CRON Disp] Nenhuma loja'); return; }
 
         const LIMIAR = 95;
-        let totalGeralTitulares = 0, totalGeralPreenchidas = 0;
-        const clientesAbaixo = [];
+        let totalGeralTitulares = 0, totalGeralPreenchidas = 0, totalGeralACaminho = 0;
+        const todosClientes = [];
         for (const loja of result.rows) {
           const titulares = parseInt(loja.total_linhas) || 0;
           const preenchidas = parseInt(loja.preenchidas) || 0;
           const aCaminho = parseInt(loja.a_caminho) || 0;
+          const faltandoCount = parseInt(loja.faltando_count) || 0;
           const pct = titulares > 0 ? Math.round((preenchidas / titulares) * 100) : 0;
           totalGeralTitulares += titulares;
           totalGeralPreenchidas += preenchidas;
-          if (pct < LIMIAR) {
-            clientesAbaixo.push({ codigo: loja.codigo, nome: loja.nome, regiao: loja.regiao_nome || 'Sem região', preenchidas, titulares, faltando: titulares - preenchidas, pct, a_caminho: aCaminho });
-          }
+          totalGeralACaminho += aCaminho;
+          todosClientes.push({ codigo: loja.codigo, nome: loja.nome, regiao: loja.regiao_nome || 'Sem região', preenchidas, titulares, faltando: titulares - preenchidas, pct, a_caminho: aCaminho, faltando_count: faltandoCount });
         }
+        const clientesAbaixo = todosClientes.filter(c => c.pct < LIMIAR);
         const pctGeral = totalGeralTitulares > 0 ? Math.round((totalGeralPreenchidas / totalGeralTitulares) * 100) : 0;
         if (clientesAbaixo.length === 0) { console.log(`✅ [CRON Disp] >= ${LIMIAR}% (geral: ${pctGeral}%)`); return; }
-
-        const agora = new Date();
-        const dataHora = agora.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-        let msg = `🏍️ *Alerta de Disponibilidade*\n📅 ${dataHora}\n\n📊 Preenchimento geral: *${pctGeral}%* (${totalGeralPreenchidas}/${totalGeralTitulares})\n\n⚠️ *Clientes abaixo de ${LIMIAR}%:*\n\n`;
-        const porRegiao = {};
-        for (const c of clientesAbaixo) { if (!porRegiao[c.regiao]) porRegiao[c.regiao] = []; porRegiao[c.regiao].push(c); }
-        for (const [regiao, clientes] of Object.entries(porRegiao)) {
-          msg += `📍 *${regiao}*\n`;
-          for (const c of clientes) {
-            const emoji = c.pct === 0 ? '🔴' : c.pct < 50 ? '🟠' : '🟡';
-            msg += `${emoji} ${c.codigo} ${c.nome} — *${c.preenchidas}/${c.titulares}* (${c.pct}%)`;
-            if (c.a_caminho > 0) msg += ` + ${c.a_caminho} a caminho 🚀`;
-            msg += ` falta *${c.faltando}*\n`;
-          }
-          msg += `\n`;
-        }
-        msg += `_*Argos, seu sentinela operacional!*_`;
 
         const ativo = (process.env.WHATSAPP_NOTIF_ATIVO || 'false').toLowerCase() === 'true';
         if (!ativo) { console.log('📱 [CRON Disp] WhatsApp desativado'); return; }
@@ -627,17 +615,121 @@ initDatabase().then(async () => {
         const apiKey = process.env.EVOLUTION_API_KEY;
         const instancia = process.env.EVOLUTION_INSTANCE;
         const grupoId = (process.env.EVOLUTION_GROUP_ID_DISP || '').trim();
-        if (!grupoId) { console.warn('⚠️ [CRON Disp] EVOLUTION_GROUP_ID_DISP não configurado — abortando'); return; }
-        console.log(`📱 [CRON Disp] Enviando para grupo DISP: ${grupoId}`);
+        if (!grupoId) { console.warn('⚠️ [CRON Disp] EVOLUTION_GROUP_ID_DISP não configurado'); return; }
         if (!baseUrl || !apiKey || !instancia) { console.warn('⚠️ [CRON Disp] Config incompleta'); return; }
-        const url = `${baseUrl}/message/sendText/${instancia}`;
-        const response = await fetch(url, {
+
+        // Agrupar por região
+        const porRegiao = {};
+        for (const c of clientesAbaixo) { if (!porRegiao[c.regiao]) porRegiao[c.regiao] = []; porRegiao[c.regiao].push(c); }
+
+        const agora = new Date();
+        const dataHora = agora.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+        // ── Gerar imagem via Playwright ──
+        const corBarra = (pct) => pct === 0 ? '#ef4444' : pct < 50 ? '#f97316' : pct < 80 ? '#eab308' : '#22c55e';
+        const corTexto = (pct) => pct === 0 ? '#dc2626' : pct < 50 ? '#ea580c' : pct < 80 ? '#ca8a04' : '#16a34a';
+
+        let regioesHtml = '';
+        for (const [regiao, clientes] of Object.entries(porRegiao)) {
+          let linhasHtml = '';
+          for (const c of clientes) {
+            linhasHtml += `
+              <tr>
+                <td style="padding:6px 10px;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6">${c.codigo}</td>
+                <td style="padding:6px 10px;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6">${c.nome}</td>
+                <td style="padding:6px 10px;text-align:center;border-bottom:1px solid #f3f4f6">
+                  <div style="display:flex;align-items:center;gap:6px;justify-content:center">
+                    <div style="width:60px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden">
+                      <div style="width:${c.pct}%;height:100%;background:${corBarra(c.pct)};border-radius:4px"></div>
+                    </div>
+                    <span style="font-size:12px;font-weight:600;color:${corTexto(c.pct)}">${c.pct}%</span>
+                  </div>
+                </td>
+                <td style="padding:6px 10px;text-align:center;font-size:13px;font-weight:600;color:${corTexto(c.pct)};border-bottom:1px solid #f3f4f6">${c.preenchidas}/${c.titulares}</td>
+                <td style="padding:6px 10px;text-align:center;font-size:13px;color:#dc2626;font-weight:600;border-bottom:1px solid #f3f4f6">${c.faltando}</td>
+                <td style="padding:6px 10px;text-align:center;font-size:12px;color:#2563eb;border-bottom:1px solid #f3f4f6">${c.a_caminho > 0 ? c.a_caminho + ' 🚀' : '—'}</td>
+              </tr>`;
+          }
+          regioesHtml += `
+            <div style="margin-bottom:16px">
+              <div style="background:#7C3AED;color:white;padding:6px 14px;border-radius:8px 8px 0 0;font-size:13px;font-weight:600">📍 ${regiao} (${clientes.length})</div>
+              <table style="width:100%;border-collapse:collapse;background:white;border-radius:0 0 8px 8px;overflow:hidden">
+                <thead><tr style="background:#f9fafb">
+                  <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;font-weight:600">CÓD</th>
+                  <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;font-weight:600">CLIENTE</th>
+                  <th style="padding:6px 10px;text-align:center;font-size:11px;color:#6b7280;font-weight:600">SLA</th>
+                  <th style="padding:6px 10px;text-align:center;font-size:11px;color:#6b7280;font-weight:600">EM LOJA</th>
+                  <th style="padding:6px 10px;text-align:center;font-size:11px;color:#6b7280;font-weight:600">FALTA</th>
+                  <th style="padding:6px 10px;text-align:center;font-size:11px;color:#6b7280;font-weight:600">A CAMINHO</th>
+                </tr></thead>
+                <tbody>${linhasHtml}</tbody>
+              </table>
+            </div>`;
+        }
+
+        const html = `
+          <div style="width:620px;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8f7ff">
+            <div style="text-align:center;margin-bottom:20px">
+              <div style="font-size:11px;color:#7C3AED;letter-spacing:3px;font-weight:600;margin-bottom:4px">ARGOS INTELLIGENCE</div>
+              <div style="font-size:20px;font-weight:700;color:#1f2937">Alerta de Disponibilidade</div>
+              <div style="font-size:13px;color:#6b7280;margin-top:4px">📅 ${dataHora}</div>
+            </div>
+            <div style="display:flex;gap:12px;margin-bottom:20px">
+              <div style="flex:1;background:white;border-radius:10px;padding:14px;text-align:center;border:1px solid #e5e7eb">
+                <div style="font-size:28px;font-weight:700;color:${pctGeral >= 80 ? '#16a34a' : pctGeral >= 50 ? '#ca8a04' : '#dc2626'}">${pctGeral}%</div>
+                <div style="font-size:11px;color:#6b7280;margin-top:2px">Preenchimento Geral</div>
+              </div>
+              <div style="flex:1;background:white;border-radius:10px;padding:14px;text-align:center;border:1px solid #e5e7eb">
+                <div style="font-size:28px;font-weight:700;color:#2563eb">${totalGeralPreenchidas}/${totalGeralTitulares}</div>
+                <div style="font-size:11px;color:#6b7280;margin-top:2px">Em Loja / Total</div>
+              </div>
+              <div style="flex:1;background:white;border-radius:10px;padding:14px;text-align:center;border:1px solid #e5e7eb">
+                <div style="font-size:28px;font-weight:700;color:#f97316">${clientesAbaixo.length}</div>
+                <div style="font-size:11px;color:#6b7280;margin-top:2px">Abaixo de ${LIMIAR}%</div>
+              </div>
+              <div style="flex:1;background:white;border-radius:10px;padding:14px;text-align:center;border:1px solid #e5e7eb">
+                <div style="font-size:28px;font-weight:700;color:#7C3AED">${totalGeralACaminho}</div>
+                <div style="font-size:11px;color:#6b7280;margin-top:2px">A Caminho 🚀</div>
+              </div>
+            </div>
+            ${regioesHtml}
+            <div style="text-align:center;margin-top:16px;font-size:11px;color:#9ca3af">Argos, seu sentinela operacional</div>
+          </div>`;
+
+        let imageBase64;
+        try {
+          const { chromium } = require('playwright');
+          const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
+          const page = await browser.newPage({ viewport: { width: 670, height: 800 } });
+          await page.setContent(`<!DOCTYPE html><html><body style="margin:0;background:#f8f7ff">${html}</body></html>`, { waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(300);
+          const el = await page.$('body > div');
+          const buf = await (el || page).screenshot({ type: 'png' });
+          imageBase64 = buf.toString('base64');
+          await browser.close();
+          console.log(`📸 [CRON Disp] Imagem gerada: ${Math.round(imageBase64.length / 1024)}KB`);
+        } catch (imgErr) {
+          console.error(`❌ [CRON Disp] Erro Playwright:`, imgErr.message);
+          // Fallback: enviar como texto
+          let msg = `🏍️ *Alerta de Disponibilidade*\n📅 ${dataHora}\n📊 Geral: *${pctGeral}%* (${totalGeralPreenchidas}/${totalGeralTitulares})\n\n`;
+          for (const [regiao, clientes] of Object.entries(porRegiao)) {
+            msg += `📍 *${regiao}*\n`;
+            for (const c of clientes) { msg += `${c.pct === 0 ? '🔴' : c.pct < 50 ? '🟠' : '🟡'} ${c.codigo} ${c.nome} — *${c.preenchidas}/${c.titulares}* (${c.pct}%) falta *${c.faltando}*\n`; }
+            msg += '\n';
+          }
+          await fetch(`${baseUrl}/message/sendText/${instancia}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'apikey': apiKey }, body: JSON.stringify({ number: grupoId, text: msg }) });
+          return;
+        }
+
+        // Enviar imagem
+        const caption = `*Alerta de Disponibilidade — ${dataHora}*\n\nPreenchimento geral: *${pctGeral}%* (${totalGeralPreenchidas}/${totalGeralTitulares})\n${clientesAbaixo.length} cliente(s) abaixo de ${LIMIAR}%\n\n_Argos, seu sentinela operacional_`;
+        const sendResp = await fetch(`${baseUrl}/message/sendMedia/${instancia}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
-          body: JSON.stringify({ number: grupoId, text: msg })
+          body: JSON.stringify({ number: grupoId, mediatype: 'image', mimetype: 'image/png', caption, media: imageBase64, fileName: 'disponibilidade-alerta.png' }),
         });
-        if (response.ok) { console.log(`✅ [CRON Disp] Alerta enviado — ${clientesAbaixo.length} cliente(s)`); }
-        else { const data = await response.json().catch(() => ({})); console.error(`❌ [CRON Disp] Erro ${response.status}:`, data); }
+        if (sendResp.ok) { console.log(`✅ [CRON Disp] Imagem enviada — ${clientesAbaixo.length} cliente(s)`); }
+        else { const data = await sendResp.json().catch(() => ({})); console.error(`❌ [CRON Disp] Erro ${sendResp.status}:`, data); }
       } catch (error) {
         console.error('❌ [CRON Disp] Erro:', error.message);
       }
