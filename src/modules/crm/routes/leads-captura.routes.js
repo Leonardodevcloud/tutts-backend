@@ -279,8 +279,10 @@ function createLeadsCapturaRoutes(pool) {
         body: JSON.stringify({
           number: grupoId,
           mediatype: 'image',
-          media: `data:image/png;base64,${imageBase64}`,
+          mimetype: 'image/png',
           caption: caption,
+          media: imageBase64,
+          fileName: 'resumo-diario.png',
         }),
       });
 
