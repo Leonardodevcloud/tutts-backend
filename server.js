@@ -779,6 +779,25 @@ initDatabase().then(async () => {
     cron.schedule('0 7 * * *', withCronLock(pool, 'crmCaptura', executarCapturaCrmLeads), { timezone: 'America/Bahia' });
     cron.schedule('0 20 * * *', withCronLock(pool, 'crmCaptura', executarCapturaCrmLeads), { timezone: 'America/Bahia' });
 
+    // CRM — Resumo diário (imagem WhatsApp): Seg-Sex 18h, Sáb 12:30
+    async function enviarResumoDiarioCRM() {
+      try {
+        console.log('[CRM-Resumo] Disparando resumo diário via cron...');
+        const url = `http://localhost:${PORT}/api/crm/leads-captura/resumo-diario`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-service-key': process.env.CRM_SERVICE_KEY || '' },
+          body: '{}',
+        });
+        const data = await res.json();
+        console.log(`[CRM-Resumo] ${data.enviado ? '✅' : '❌'} Resultado:`, JSON.stringify(data));
+      } catch (err) {
+        console.error('[CRM-Resumo] ❌ Erro cron:', err.message);
+      }
+    }
+    cron.schedule('0 18 * * 1-5', withCronLock(pool, 'crmResumoDiario', enviarResumoDiarioCRM), { timezone: 'America/Bahia' });
+    cron.schedule('30 12 * * 6', withCronLock(pool, 'crmResumoDiario', enviarResumoDiarioCRM), { timezone: 'America/Bahia' });
+
     console.log('⏰ Todos os crons rodando no server');
   }
 });

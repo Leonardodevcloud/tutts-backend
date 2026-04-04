@@ -450,9 +450,6 @@ function createLeadsCapturaRoutes(pool) {
 
       // 📱 Notificar grupo WhatsApp com os novos leads
       await notificarGrupoNovosLeads();
-
-      // 📊 Enviar resumo diário (imagem)
-      await enviarResumoDiario();
     } catch (err) {
       console.error(`[CRM-Captura] ❌ Job #${jobId}: ${err.message}`);
       await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',
