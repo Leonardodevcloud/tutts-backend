@@ -115,7 +115,188 @@ function createLeadsCapturaRoutes(pool) {
     }
   }
 
-  // ═══ HELPER: verificar status via API Tutts ═══
+  // ═══ HELPER: Gerar e enviar resumo diário (imagem + texto) ═══
+  async function enviarResumoDiario() {
+    const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+    const apiKey = process.env.EVOLUTION_API_KEY;
+    const instancia = process.env.EVOLUTION_INSTANCE;
+    const grupoId = process.env.EVOLUTION_GROUP_ID_CRM || process.env.EVOLUTION_GROUP_ID;
+
+    if (!baseUrl || !apiKey || !instancia || !grupoId) {
+      console.log('⚠️ [CRM-Resumo] Vars Evolution não configuradas');
+      return { enviado: false, motivo: 'config_incompleta' };
+    }
+
+    try {
+      const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Bahia' });
+
+      // 1. Ativações do dia
+      const { rows: ativacoes } = await pool.query(
+        `SELECT cod, nome, celular, regiao, estado, quem_ativou
+         FROM crm_leads_capturados
+         WHERE data_ativacao = CURRENT_DATE AND quem_ativou IS NOT NULL AND quem_ativou != ''`
+      );
+
+      const ativPorResponsavel = {};
+      const ativPorRegiao = {};
+      for (const a of ativacoes) {
+        const resp = a.quem_ativou || 'N/I';
+        ativPorResponsavel[resp] = (ativPorResponsavel[resp] || 0) + 1;
+        const reg = a.regiao && a.estado ? `${a.regiao} - ${a.estado}` : a.regiao || a.estado || 'Sem região';
+        ativPorRegiao[reg] = (ativPorRegiao[reg] || 0) + 1;
+      }
+
+      // 2. Alocações do dia
+      const { rows: alocacoes } = await pool.query(
+        `SELECT nome_cliente, quem_alocou FROM crm_alocacoes
+         WHERE created_at::date = CURRENT_DATE AND ativo = true`
+      );
+
+      const alocPorResponsavel = {};
+      const alocPorCliente = {};
+      for (const al of alocacoes) {
+        const resp = al.quem_alocou || 'N/I';
+        alocPorResponsavel[resp] = (alocPorResponsavel[resp] || 0) + 1;
+        const cli = al.nome_cliente || 'Sem cliente';
+        alocPorCliente[cli] = (alocPorCliente[cli] || 0) + 1;
+      }
+
+      const sortDesc = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+
+      // 3. HTML template
+      const renderItems = (items) => items.map(([k, v], i) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:${i % 2 === 0 ? '#f8f8f8' : '#fff'};border-radius:6px;margin-bottom:4px">
+          <span style="font-size:12px;color:#333">${k}</span>
+          <span style="font-size:12px;font-weight:600;color:#7C3AED">${v}</span>
+        </div>
+      `).join('');
+
+      const renderItemsAmber = (items) => items.map(([k, v], i) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:${i % 2 === 0 ? '#f8f8f8' : '#fff'};border-radius:6px;margin-bottom:4px">
+          <span style="font-size:12px;color:#333">${k}</span>
+          <span style="font-size:12px;font-weight:600;color:#B45309">${v}</span>
+        </div>
+      `).join('');
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;width:520px;background:#fff}
+      </style></head><body>
+      <div style="width:520px;overflow:hidden;border-radius:16px;border:1px solid #e5e5e5">
+        <div style="background:linear-gradient(135deg,#7C3AED,#5B21B6);padding:20px 24px;color:#fff">
+          <div style="font-size:11px;opacity:0.7;letter-spacing:1px;text-transform:uppercase">Central Tutts</div>
+          <div style="font-size:20px;font-weight:600;margin-top:4px">Resumo diário</div>
+          <div style="font-size:13px;opacity:0.8;margin-top:2px">${hoje}</div>
+        </div>
+        <div style="padding:20px 24px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#10B981"></div>
+            <span style="font-size:14px;font-weight:600;color:#1a1a1a">Ativações do dia</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:16px">
+            <div style="flex:1;background:#F0FDF4;border-radius:10px;padding:14px;text-align:center">
+              <div style="font-size:28px;font-weight:700;color:#16A34A">${ativacoes.length}</div>
+              <div style="font-size:11px;color:#15803D;margin-top:2px">Total ativados</div>
+            </div>
+            <div style="flex:1;background:#EEF2FF;border-radius:10px;padding:14px;text-align:center">
+              <div style="font-size:28px;font-weight:700;color:#7C3AED">${Object.keys(ativPorResponsavel).length}</div>
+              <div style="font-size:11px;color:#6D28D9;margin-top:2px">Ativadores</div>
+            </div>
+            <div style="flex:1;background:#FFF7ED;border-radius:10px;padding:14px;text-align:center">
+              <div style="font-size:28px;font-weight:700;color:#EA580C">${Object.keys(ativPorRegiao).length}</div>
+              <div style="font-size:11px;color:#C2410C;margin-top:2px">Regiões</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:16px;margin-bottom:20px">
+            <div style="flex:1">
+              <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Por ativador</div>
+              ${renderItems(sortDesc(ativPorResponsavel))}
+              ${ativacoes.length === 0 ? '<div style="font-size:12px;color:#aaa;padding:6px 10px">Nenhuma ativação hoje</div>' : ''}
+            </div>
+            <div style="flex:1">
+              <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Por região</div>
+              ${renderItems(sortDesc(ativPorRegiao))}
+            </div>
+          </div>
+
+          <div style="border-top:1px solid #eee;padding-top:20px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+              <div style="width:8px;height:8px;border-radius:50%;background:#7C3AED"></div>
+              <span style="font-size:14px;font-weight:600;color:#1a1a1a">Alocações realizadas</span>
+            </div>
+            <div style="display:flex;gap:12px;margin-bottom:16px">
+              <div style="flex:1;background:#F5F3FF;border-radius:10px;padding:14px;text-align:center">
+                <div style="font-size:28px;font-weight:700;color:#7C3AED">${alocacoes.length}</div>
+                <div style="font-size:11px;color:#6D28D9;margin-top:2px">Total alocados</div>
+              </div>
+              <div style="flex:1;background:#EEF2FF;border-radius:10px;padding:14px;text-align:center">
+                <div style="font-size:28px;font-weight:700;color:#4F46E5">${Object.keys(alocPorResponsavel).length}</div>
+                <div style="font-size:11px;color:#4338CA;margin-top:2px">Responsáveis</div>
+              </div>
+              <div style="flex:1;background:#FEF3C7;border-radius:10px;padding:14px;text-align:center">
+                <div style="font-size:28px;font-weight:700;color:#B45309">${Object.keys(alocPorCliente).length}</div>
+                <div style="font-size:11px;color:#92400E;margin-top:2px">Clientes</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:16px">
+              <div style="flex:1">
+                <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Por responsável</div>
+                ${renderItems(sortDesc(alocPorResponsavel))}
+                ${alocacoes.length === 0 ? '<div style="font-size:12px;color:#aaa;padding:6px 10px">Nenhuma alocação hoje</div>' : ''}
+              </div>
+              <div style="flex:1">
+                <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Por cliente</div>
+                ${renderItemsAmber(sortDesc(alocPorCliente))}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="background:#f9f9f9;padding:10px 24px;text-align:center;font-size:11px;color:#aaa">
+          centraltutts.online
+        </div>
+      </div>
+      </body></html>`;
+
+      // 4. Playwright screenshot
+      console.log('[CRM-Resumo] Gerando imagem do resumo diário...');
+      const { chromium } = require('playwright');
+      const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+      const page = await browser.newPage({ viewport: { width: 540, height: 800 } });
+      await page.setContent(html, { waitUntil: 'domcontentloaded' });
+      const element = await page.$('body > div');
+      const screenshotBuffer = await element.screenshot({ type: 'png' });
+      await browser.close();
+
+      const imageBase64 = screenshotBuffer.toString('base64');
+      console.log(`[CRM-Resumo] Imagem gerada (${(screenshotBuffer.length / 1024).toFixed(0)}KB)`);
+
+      // 5. Enviar imagem + caption
+      const caption = `*Segue o resumo da operação de hoje (${hoje})*\n\nAtenciosamente,\n\nArgos, o seu melhor agente operacional.`;
+
+      const response = await fetch(`${baseUrl}/message/sendMedia/${instancia}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+        body: JSON.stringify({
+          number: grupoId,
+          mediatype: 'image',
+          media: `data:image/png;base64,${imageBase64}`,
+          caption: caption,
+        }),
+      });
+
+      if (response.ok) {
+        console.log(`✅ [CRM-Resumo] Resumo diário enviado! (${ativacoes.length} ativações, ${alocacoes.length} alocações)`);
+        return { enviado: true, ativacoes: ativacoes.length, alocacoes: alocacoes.length };
+      } else {
+        const err = await response.text();
+        console.error(`❌ [CRM-Resumo] Erro ${response.status}: ${err}`);
+        return { enviado: false, motivo: err };
+      }
+    } catch (err) {
+      console.error('❌ [CRM-Resumo] Exceção:', err.message);
+      return { enviado: false, motivo: err.message };
+    }
+  }
   async function verificarLeadAPI(celular) {
     const TUTTS_TOKEN = process.env.TUTTS_TOKEN_PROF_STATUS || process.env.TUTTS_INTEGRACAO_TOKEN || process.env.TUTTS_TOKEN_PROFISSIONAIS;
     if (!TUTTS_TOKEN) return { status_api: null, erro: 'Token não configurado' };
@@ -267,6 +448,9 @@ function createLeadsCapturaRoutes(pool) {
 
       // 📱 Notificar grupo WhatsApp com os novos leads
       await notificarGrupoNovosLeads();
+
+      // 📊 Enviar resumo diário (imagem)
+      await enviarResumoDiario();
     } catch (err) {
       console.error(`[CRM-Captura] ❌ Job #${jobId}: ${err.message}`);
       await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',
@@ -733,6 +917,18 @@ function createLeadsCapturaRoutes(pool) {
     try {
       const { rowCount } = await pool.query(`DELETE FROM crm_leads_capturados WHERE id = $1`, [req.params.id]);
       res.json({ success: true, removido: rowCount > 0 });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // POST /resumo-diario — Enviar resumo diário manualmente
+  // ══════════════════════════════════════════════════════════════
+  router.post('/resumo-diario', async (req, res) => {
+    try {
+      const resultado = await enviarResumoDiario();
+      res.json({ success: true, ...resultado });
     } catch (err) {
       res.status(500).json({ success: false, error: err.message });
     }
