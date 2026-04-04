@@ -17,15 +17,14 @@ const { logger } = require('../../config/logger');
 function log(msg) { logger.info(`[validar-loc] ${msg}`); }
 
 /**
- * Extrai o nome do estabelecimento da foto via Gemini Vision
+ * Valida o conteúdo da foto E extrai o nome do estabelecimento em UMA chamada ao Gemini
  */
-async function extrairNomeDaFoto(base64Foto) {
+async function analisarFoto(base64Foto) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) { log('⚠️ GEMINI_API_KEY não configurada'); return null; }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
-  // Limpar prefixo se existir
   const puro = base64Foto.replace(/^data:image\/[a-z]+;base64,/, '');
 
   const body = {
@@ -38,28 +37,47 @@ async function extrairNomeDaFoto(base64Foto) {
           }
         },
         {
-          text: `Analise esta foto de uma fachada de estabelecimento comercial.
+          text: `Você é um validador de fotos para um sistema de correção de endereço de entregas.
+O motoboy deve enviar uma foto da FACHADA do local de entrega (estabelecimento comercial, loja, residência, prédio, condomínio, etc).
 
-TAREFA: Extrair o NOME do estabelecimento visível na foto.
+TAREFA DUPLA:
+1. VALIDAR se a foto mostra um local de entrega válido
+2. Se válida, EXTRAIR o nome do estabelecimento visível (se houver)
 
-REGRAS:
-- Leia placas, letreiros, faixadas e qualquer texto visível que identifique o nome do local
-- Se houver múltiplos textos, priorize o nome principal do estabelecimento
-- Ignore números de telefone, endereços, e textos secundários
-- Se não conseguir identificar nenhum nome, retorne "NAO_IDENTIFICADO"
+FOTOS VÁLIDAS (aprovar):
+- Fachada de loja, comércio, empresa (com ou sem letreiro)
+- Fachada de residência, casa, prédio, condomínio
+- Portão, entrada de estabelecimento
+- Placa com nome do local
+- Fachada mesmo que parcialmente visível
+
+FOTOS INVÁLIDAS (rejeitar):
+- Foto borrada, desfocada, escura demais
+- Foto de moto, veículo, capacete, mão, chão
+- Foto de rua/avenida sem foco em nenhum estabelecimento
+- Screenshot de tela de celular
+- Foto de documento, papel, nota fiscal
+- Selfie ou foto de pessoa
+- Foto totalmente preta, branca ou sem conteúdo
 
 Responda APENAS em JSON, sem markdown:
 {
-  "nome_estabelecimento": "NOME AQUI",
+  "foto_valida": true,
+  "motivo_rejeicao": null,
+  "tipo_local": "comercial",
+  "nome_estabelecimento": "NOME AQUI ou NAO_IDENTIFICADO",
   "confianca": 85,
   "textos_visiveis": ["texto1", "texto2"]
-}`
+}
+
+tipo_local: "comercial" | "residencial" | "outro"
+Se foto_valida=false, preencha motivo_rejeicao com feedback claro pro motoboy.`
         }
       ]
     }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 300,
+      maxOutputTokens: 400,
     }
   };
 
@@ -82,7 +100,7 @@ Responda APENAS em JSON, sem markdown:
     const clean = text.replace(/```json|```/g, '').trim();
 
     const parsed = JSON.parse(clean);
-    log(`📸 Gemini: "${parsed.nome_estabelecimento}" (confiança: ${parsed.confianca}%)`);
+    log(`📸 Gemini: valida=${parsed.foto_valida} | tipo=${parsed.tipo_local} | nome="${parsed.nome_estabelecimento}" (${parsed.confianca}%)`);
     return parsed;
   } catch (err) {
     log(`❌ Gemini exceção: ${err.message}`);
@@ -241,43 +259,78 @@ function contemPalavrasChave(nomeFoto, nomeGoogle) {
  */
 async function validarLocalizacao(base64Foto, lat, lng) {
   const RAIO_BUSCA_METROS = 500;
-  const LIMIAR_SIMILARIDADE = 0.35; // 35% — tolerante a abreviações
-  const LIMIAR_PALAVRAS = 0.5; // 50% das palavras-chave
+  const LIMIAR_SIMILARIDADE = 0.35;
+  const LIMIAR_PALAVRAS = 0.5;
 
   log(`🔍 Validando: lat=${lat} lng=${lng}`);
 
-  // 1. Extrair nome da foto via Gemini
-  const gemini = await extrairNomeDaFoto(base64Foto);
-  if (!gemini || gemini.nome_estabelecimento === 'NAO_IDENTIFICADO') {
-    log('⚠️ Não conseguiu identificar nome na foto — aprovando (sem bloqueio)');
+  // 1. Analisar foto via Gemini (validação de conteúdo + extração de nome)
+  const gemini = await analisarFoto(base64Foto);
+
+  // Se Gemini falhou, aprovar (fail-open)
+  if (!gemini) {
+    log('⚠️ Gemini indisponível — aprovando sem validação');
     return {
       valido: true,
+      foto_valida: true,
       nome_foto: null,
       match_google: null,
       confianca: 0,
-      motivo: 'Nome não identificável na foto',
+      motivo: 'Validação indisponível no momento',
+      detalhes: { gemini: null }
+    };
+  }
+
+  // 2. Foto inválida? Bloquear com feedback
+  if (gemini.foto_valida === false) {
+    log(`❌ Foto rejeitada: ${gemini.motivo_rejeicao}`);
+    return {
+      valido: false,
+      foto_valida: false,
+      foto_rejeitada: true,
+      nome_foto: null,
+      match_google: null,
+      confianca: 0,
+      motivo: gemini.motivo_rejeicao || 'A foto enviada não é válida. Envie uma foto da fachada do local de entrega.',
       detalhes: { gemini }
     };
   }
 
   const nomeFoto = gemini.nome_estabelecimento;
 
-  // 2. Buscar estabelecimentos próximos
-  const lugares = await buscarEstabelecimentosProximos(lat, lng, RAIO_BUSCA_METROS);
-  if (lugares.length === 0) {
-    log(`⚠️ Nenhum estabelecimento encontrado em ${RAIO_BUSCA_METROS}m — aprovando`);
+  // 3. Nome não identificado — aprovar (pode ser residência sem placa)
+  if (!nomeFoto || nomeFoto === 'NAO_IDENTIFICADO') {
+    log(`⚠️ Nome não identificável (tipo: ${gemini.tipo_local}) — aprovando`);
     return {
       valido: true,
+      foto_valida: true,
+      nome_foto: null,
+      match_google: null,
+      confianca: 0,
+      tipo_local: gemini.tipo_local,
+      motivo: gemini.tipo_local === 'residencial' ? 'Local residencial identificado' : 'Nome não identificável na foto',
+      detalhes: { gemini }
+    };
+  }
+
+  // 4. Buscar estabelecimentos próximos
+  const lugares = await buscarEstabelecimentosProximos(lat, lng, RAIO_BUSCA_METROS);
+  if (lugares.length === 0) {
+    log(`⚠️ Nenhum estabelecimento em ${RAIO_BUSCA_METROS}m — aprovando`);
+    return {
+      valido: true,
+      foto_valida: true,
       nome_foto: nomeFoto,
       match_google: null,
       confianca: 0,
+      tipo_local: gemini.tipo_local,
       motivo: 'Nenhum estabelecimento encontrado no Google Maps nesta região',
       lugares_proximos: 0,
       detalhes: { gemini }
     };
   }
 
-  // 3. Comparar nomes
+  // 5. Comparar nomes
   let melhorMatch = null;
   let melhorScore = 0;
 
@@ -299,14 +352,16 @@ async function validarLocalizacao(base64Foto, lat, lng) {
     log(`✅ Match! "${nomeFoto}" ≈ "${melhorMatch.nome}" (${confiancaPercent}%) — ${melhorMatch.endereco}`);
   } else {
     log(`❌ Sem match! "${nomeFoto}" vs melhor: "${melhorMatch?.nome || 'nenhum'}" (${confiancaPercent}%)`);
-    log(`   ${lugares.length} lugar(es) próximo(s): ${lugares.slice(0, 5).map(l => l.nome).join(', ')}`);
+    log(`   ${lugares.length} lugar(es): ${lugares.slice(0, 5).map(l => l.nome).join(', ')}`);
   }
 
   return {
     valido,
+    foto_valida: true,
     nome_foto: nomeFoto,
     match_google: melhorMatch ? { nome: melhorMatch.nome, endereco: melhorMatch.endereco } : null,
     confianca: confiancaPercent,
+    tipo_local: gemini.tipo_local,
     lugares_proximos: lugares.length,
     motivo: valido
       ? `Estabelecimento "${melhorMatch.nome}" encontrado próximo (${confiancaPercent}% similaridade)`
@@ -318,4 +373,4 @@ async function validarLocalizacao(base64Foto, lat, lng) {
   };
 }
 
-module.exports = { validarLocalizacao, extrairNomeDaFoto, buscarEstabelecimentosProximos, similaridade };
+module.exports = { validarLocalizacao, analisarFoto, buscarEstabelecimentosProximos, similaridade };

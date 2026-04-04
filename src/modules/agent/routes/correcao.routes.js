@@ -105,6 +105,17 @@ function createCorrecaoRoutes(pool) {
           parseFloat(motoboy_lng)
         );
 
+        if (validacaoLoc && validacaoLoc.foto_rejeitada) {
+          // Foto inválida — BLOQUEAR envio
+          console.log(`[agent] ❌ Foto rejeitada: ${validacaoLoc.motivo}`);
+          return res.status(400).json({
+            sucesso: false,
+            foto_rejeitada: true,
+            motivo_rejeicao: validacaoLoc.motivo,
+            erros: [validacaoLoc.motivo],
+          });
+        }
+
         if (validacaoLoc && validacaoLoc.valido) {
           console.log(`[agent] ✅ Localização validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
         } else if (validacaoLoc) {
