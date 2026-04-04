@@ -79,7 +79,7 @@ function createAlocacaoRoutes(pool) {
   // ══════════════════════════════════════════════════════════════
   router.get('/', async (req, res) => {
     try {
-      const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
+      const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, todos, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
 
       // Busca rápida de profissional por código
       if (lookup_prof) {
@@ -96,13 +96,15 @@ function createAlocacaoRoutes(pool) {
       const params = [];
       let idx = 1;
 
-      // Filtro de mês/ano pela data prevista (default: mês corrente)
-      const mesInt = parseInt(mes) || (new Date().getMonth() + 1);
-      const anoInt = parseInt(ano) || new Date().getFullYear();
-      where.push(`EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
-      params.push(mesInt);
-      where.push(`EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
-      params.push(anoInt);
+      // Filtro de mês/ano (skip se todos=true — usado pelo analytics)
+      if (todos !== 'true') {
+        const mesInt = parseInt(mes) || (new Date().getMonth() + 1);
+        const anoInt = parseInt(ano) || new Date().getFullYear();
+        where.push(`EXTRACT(MONTH FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
+        params.push(mesInt);
+        where.push(`EXTRACT(YEAR FROM COALESCE(data_prevista, created_at)) = $${idx++}`);
+        params.push(anoInt);
+      }
 
       if (cliente)     { where.push(`nome_cliente = $${idx++}`); params.push(cliente); }
       if (status)      { where.push(`status = $${idx++}`);       params.push(status); }
