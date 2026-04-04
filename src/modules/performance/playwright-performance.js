@@ -1,10 +1,7 @@
 /**
- * playwright-performance.js — v9
- * Usa EXATAMENTE o mesmo padrão de navegação do playwright-agent.js
- * que funciona em produção:
- *   - waitUntil: 'domcontentloaded' (NÃO networkidle)
- *   - waitForURL após login (NÃO waitForNavigation)
- *   - page.goto(URL) após login (NÃO window.location.href)
+ * playwright-performance.js — v10 (batch single-tab)
+ * Otimização: abre browser UMA vez, loga UMA vez, e percorre
+ * todos os clientes só trocando o campo cliente/CC.
  */
 
 'use strict';
@@ -16,21 +13,20 @@ const { logger } = require('../../config/logger');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
 const SCREENSHOT_DIR    = '/tmp/screenshots';
-const TIMEOUT           = 30_000;  // mesmo do agente (25s lá, 30s aqui por margem)
+const TIMEOUT           = 30000;
 const EXCEL_URL         = 'https://tutts.com.br/expresso/expressoat/entregasExportarExcel';
 const LOGIN_URL         = () => process.env.SISTEMA_EXTERNO_URL;
 
-function log(msg) { logger.info(`[playwright-perf] ${msg}`); }
-
+function log(msg) { logger.info('[playwright-perf] ' + msg); }
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 ensureDir(SCREENSHOT_DIR);
 
 async function screenshotDebug(page, nome) {
   try {
-    const file = path.join(SCREENSHOT_DIR, `perf-${nome}-${Date.now()}.png`);
+    const file = path.join(SCREENSHOT_DIR, 'perf-' + nome + '-' + Date.now() + '.png');
     await page.screenshot({ path: file, fullPage: false });
-    log(`📸 ${path.basename(file)}`);
-  } catch (e) { log(`⚠️ Screenshot falhou: ${e.message}`); }
+    log('📸 ' + path.basename(file));
+  } catch (e) { log('⚠️ Screenshot falhou: ' + e.message); }
 }
 
 const TABELA_PRAZOS_KM = [
@@ -41,25 +37,22 @@ const TABELA_PRAZOS_KM = [
 const CLIENTES_PRAZO_FIXO = { 767: 120 };
 
 function getPrazoPorKm(km) {
-  for (const [de, ate, min] of TABELA_PRAZOS_KM) {
-    if (km >= de && km < ate) return min;
-  }
+  for (const [de, ate, min] of TABELA_PRAZOS_KM) { if (km >= de && km < ate) return min; }
   return 270 + Math.ceil((km - 80) / 5) * 15;
 }
 
 function parseDataBR(texto) {
   if (!texto) return null;
-  const m = texto.trim().match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  var m = texto.trim().match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
   if (!m) return null;
-  const [, d, mo, a, h, mi, s] = m;
-  return new Date(+a, +mo - 1, +d, +h, +mi, +(s || 0));
+  return new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0));
 }
 
 // ══════════════════════════════════════════════════════════════
-// LOGIN — cópia exata do playwright-agent.js
+// LOGIN
 // ══════════════════════════════════════════════════════════════
 async function isLoggedIn(page) {
-  const url = page.url();
+  var url = page.url();
   return url.includes('/expresso') && !url.includes('loginFuncionarioNovo');
 }
 
@@ -67,358 +60,335 @@ async function fazerLogin(page) {
   log('🔐 Fazendo login...');
   await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
   await page.waitForTimeout(1500);
-
-  const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
-  if (!temEmail) throw new Error(`Página de login não carregou. URL: ${page.url()}`);
-
+  var temEmail = await page.locator('#loginEmail').isVisible().catch(function() { return false; });
+  if (!temEmail) throw new Error('Página de login não carregou. URL: ' + page.url());
   await page.fill('#loginEmail', process.env.SISTEMA_EXTERNO_EMAIL);
   await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
   await page.locator('input[name="logar"]').first().click();
-
-  // Aguardar sair da página de login — EXATO do agente
-  await page.waitForURL(
-    url => !url.toString().includes('loginFuncionarioNovo'),
-    { timeout: TIMEOUT }
-  );
-  log(`✅ Login OK — URL: ${page.url()}`);
+  await page.waitForURL(function(url) { return !url.toString().includes('loginFuncionarioNovo'); }, { timeout: TIMEOUT });
+  log('✅ Login OK — URL: ' + page.url());
 }
 
-// ══════════════════════════════════════════════════════════════
-// NAVEGAÇÃO — mesma lógica do agente: goto → login? → goto
-// ══════════════════════════════════════════════════════════════
 async function navegarParaFiltros(page, context) {
-  log('📌 Passo 1: Navegando para entregasExportarExcel');
-
-  // goto direto — domcontentloaded (NÃO networkidle!)
+  log('📌 Navegando para entregasExportarExcel');
   await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
   await page.waitForTimeout(1000);
 
   if (!(await isLoggedIn(page))) {
-    if (fs.existsSync(SESSION_FILE_PERF)) {
-      fs.unlinkSync(SESSION_FILE_PERF);
-      log('🗑️ Sessão inválida removida');
-    }
+    if (fs.existsSync(SESSION_FILE_PERF)) { fs.unlinkSync(SESSION_FILE_PERF); log('🗑️ Sessão inválida removida'); }
     await fazerLogin(page);
-
-    // Após login, goto de novo — EXATO padrão do agente
     await page.goto(EXCEL_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
     await page.waitForTimeout(1000);
-
     await context.storageState({ path: SESSION_FILE_PERF });
     log('💾 Sessão salva');
   } else {
     log('✅ Já logado');
   }
 
-  const url = page.url();
-  log(`📍 URL: ${url}`);
-
-  // Verificar se chegou na página certa
-  const temData = await page.evaluate(() => !!document.getElementById('data'));
-  if (!temData) {
-    await screenshotDebug(page, 'no-form');
-    throw new Error(`Formulário não encontrado. URL: ${url}`);
-  }
+  var temData = await page.evaluate(function() { return !!document.getElementById('data'); });
+  if (!temData) { await screenshotDebug(page, 'no-form'); throw new Error('Formulário não encontrado. URL: ' + page.url()); }
   log('✅ Formulário detectado');
 }
 
 // ══════════════════════════════════════════════════════════════
-// PREENCHER FILTROS
+// PREENCHER CAMPOS BASE (datas, status, paginação) — SÓ 1 VEZ
 // ══════════════════════════════════════════════════════════════
-async function preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto }) {
-  log('📋 Preenchendo filtros...');
-
-  await page.evaluate(({ di, df }) => {
+async function preencherCamposBase(page, dataInicio, dataFim) {
+  log('📋 Campos base: ' + dataInicio + ' → ' + dataFim);
+  await page.evaluate(function(args) {
+    var di = args.di, df = args.df;
     if (window.jQuery) { jQuery('#data').val(di); jQuery('#dataF').val(df); }
     else { document.getElementById('data').value = di; document.getElementById('dataF').value = df; }
 
-    const radioEnd = document.querySelector('input[name="endereco"][value="CE"]');
+    var radioEnd = document.querySelector('input[name="endereco"][value="CE"]');
     if (radioEnd) { radioEnd.checked = true; radioEnd.click(); }
-
-    const radioProf = document.querySelector('input[name="profissional"][value="CDP"]');
+    var radioProf = document.querySelector('input[name="profissional"][value="CDP"]');
     if (radioProf) { radioProf.checked = true; radioProf.click(); }
 
-    const sel = document.getElementById('status');
-    if (sel) {
-      for (const opt of sel.options) opt.selected = (opt.value === 'F');
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    document.querySelectorAll('input[name="statusOS"]').forEach(cb => {
-      const check = (cb.value === 'F');
-      cb.checked = check;
-      const btn = cb.closest('button.multiselect-option');
+    var sel = document.getElementById('status');
+    if (sel) { for (var i = 0; i < sel.options.length; i++) sel.options[i].selected = (sel.options[i].value === 'F'); sel.dispatchEvent(new Event('change', { bubbles: true })); }
+
+    var cbs = document.querySelectorAll('input[name="statusOS"]');
+    for (var j = 0; j < cbs.length; j++) {
+      var check = (cbs[j].value === 'F');
+      cbs[j].checked = check;
+      var btn = cbs[j].closest('button.multiselect-option');
       if (btn) { if (check) btn.classList.add('active'); else btn.classList.remove('active'); }
-    });
-    const msTxt = document.querySelector('.multiselect-selected-text');
+    }
+    var msTxt = document.querySelector('.multiselect-selected-text');
     if (msTxt) msTxt.textContent = 'Concluídos';
 
-    const quantSel = document.getElementById('quantLimite');
+    var quantSel = document.getElementById('quantLimite');
     if (quantSel) quantSel.value = '10000';
   }, { di: dataInicio, df: dataFim });
+}
 
-  log(`  📅 ${dataInicio} → ${dataFim} | End=CE | Prof=CDP | Status=F | Pag=10000`);
+// ══════════════════════════════════════════════════════════════
+// TROCAR CLIENTE/CC — RÁPIDO
+// ══════════════════════════════════════════════════════════════
+async function trocarCliente(page, codCliente, centroCusto) {
+  if (!codCliente) return;
+  log('🔄 Trocando → cli=' + codCliente + ' cc=' + (centroCusto || 'todos'));
 
-  if (codCliente) {
-    await page.evaluate(() => {
-      const radio = document.querySelector('input[name="cliente"][value="CE"]');
-      if (radio) radio.click();
-    });
-    await page.waitForTimeout(800);
+  await page.evaluate(function() {
+    var radio = document.querySelector('input[name="cliente"][value="CE"]');
+    if (radio) radio.click();
+  });
+  await page.waitForTimeout(500);
 
-    await page.evaluate((cod) => {
+  // Limpar campos antigos
+  await page.evaluate(function() {
+    document.getElementById('codCliente').value = '';
+    document.getElementById('autocomplet-cliente').value = '';
+    var ccSel = document.getElementById('centrocusto-cliente');
+    if (ccSel) ccSel.innerHTML = '<option value="">Selecione</option>';
+  });
+
+  await page.evaluate(function(cod) { document.getElementById('codCliente').value = String(cod); }, codCliente);
+  var input = page.locator('#autocomplet-cliente');
+  await input.click();
+  await input.fill('');
+  await input.type(String(codCliente), { delay: 80 });
+
+  try {
+    await page.waitForSelector('ul.ui-autocomplete li.ui-menu-item', { timeout: 8000 });
+    await page.click('ul.ui-autocomplete li.ui-menu-item:first-child');
+    log('  ✅ Cliente selecionado');
+  } catch (e) {
+    log('  ⚠️ Autocomplete timeout, forçando');
+    await page.evaluate(function(cod) {
       document.getElementById('codCliente').value = String(cod);
+      document.getElementById('autocomplet-cliente').value = String(cod);
     }, codCliente);
-
-    const input = page.locator('#autocomplet-cliente');
-    await input.click();
-    await input.fill('');
-    await input.type(String(codCliente), { delay: 100 });
-    log(`  ⌨️ Digitou "${codCliente}"`);
-
-    try {
-      await page.waitForSelector('ul.ui-autocomplete li.ui-menu-item', { timeout: 10000 });
-      await page.click('ul.ui-autocomplete li.ui-menu-item:first-child');
-      log('  ✅ Cliente selecionado');
-    } catch {
-      log('  ⚠️ Autocomplete timeout, forçando');
-      await page.evaluate((cod) => {
-        document.getElementById('codCliente').value = String(cod);
-        document.getElementById('autocomplet-cliente').value = String(cod);
-      }, codCliente);
-    }
-    await page.waitForTimeout(1000);
-
-    if (centroCusto) {
-      try {
-        await page.waitForFunction(
-          () => document.querySelectorAll('#centrocusto-cliente option').length > 1,
-          { timeout: 10000 }
-        );
-        // Buscar opção pelo TEXTO (não pelo value) — o value pode ser ID numérico
-        const matched = await page.evaluate((cc) => {
-          const s = document.getElementById('centrocusto-cliente');
-          if (!s) return { found: false, options: [] };
-          const ccLower = cc.toLowerCase().trim();
-          const allOptions = Array.from(s.options).map(o => ({ value: o.value, text: o.textContent.trim() }));
-          // 1. Match exato pelo value
-          for (const o of s.options) {
-            if (o.value === cc) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'value_exato', selected: o.value }; }
-          }
-          // 2. Match exato pelo texto
-          for (const o of s.options) {
-            if (o.textContent.trim().toLowerCase() === ccLower) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'texto_exato', selected: o.value }; }
-          }
-          // 3. Match parcial — texto contém o CC ou CC contém o texto
-          for (const o of s.options) {
-            const oText = o.textContent.trim().toLowerCase();
-            if (oText.includes(ccLower) || ccLower.includes(oText)) {
-              if (o.value && o.value !== '' && oText !== '') { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true, match: 'parcial', selected: o.value, texto: o.textContent.trim() }; }
-            }
-          }
-          return { found: false, options: allOptions.slice(0, 15) };
-        }, centroCusto);
-
-        if (matched.found) {
-          log(`  ✅ CC: "${centroCusto}" → match ${matched.match}${matched.texto ? ` (${matched.texto})` : ''} → value="${matched.selected}"`);
-        } else {
-          log(`  ⚠️ CC: "${centroCusto}" NÃO encontrado. Opções disponíveis:`);
-          (matched.options || []).forEach(o => log(`     - value="${o.value}" text="${o.text}"`));
-        }
-      } catch (ccErr) { log(`  ⚠️ CC não carregou: ${ccErr.message}`); }
-      await page.waitForTimeout(1500); // Aguardar sistema externo reagir à mudança de CC
-    }
-    log(`  ✅ Cliente: ${codCliente}`);
   }
+  await page.waitForTimeout(800);
+
+  if (centroCusto) {
+    try {
+      await page.waitForFunction(function() { return document.querySelectorAll('#centrocusto-cliente option').length > 1; }, { timeout: 8000 });
+      var matched = await page.evaluate(function(cc) {
+        var s = document.getElementById('centrocusto-cliente');
+        if (!s) return { found: false };
+        var ccLower = cc.toLowerCase().trim();
+        var allOpts = [];
+        for (var i = 0; i < s.options.length; i++) allOpts.push({ value: s.options[i].value, text: s.options[i].textContent.trim() });
+        for (var i = 0; i < s.options.length; i++) { if (s.options[i].value === cc) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true }; } }
+        for (var i = 0; i < s.options.length; i++) { if (s.options[i].textContent.trim().toLowerCase() === ccLower) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true }; } }
+        for (var i = 0; i < s.options.length; i++) {
+          var oText = s.options[i].textContent.trim().toLowerCase();
+          if ((oText.includes(ccLower) || ccLower.includes(oText)) && s.options[i].value && oText) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); return { found: true }; }
+        }
+        return { found: false, options: allOpts.slice(0, 10) };
+      }, centroCusto);
+
+      if (matched.found) { log('  ✅ CC selecionado'); }
+      else { log('  ⚠️ CC não encontrado'); }
+    } catch (ccErr) { log('  ⚠️ CC não carregou: ' + ccErr.message); }
+    await page.waitForTimeout(1000);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// EXECUTAR BUSCA + AGUARDAR TABELA
+// ══════════════════════════════════════════════════════════════
+async function executarBusca(page) {
+  log('🔍 Executando busca...');
+  await page.evaluate(function() {
+    if (typeof buscaServicoExcel === 'function') buscaServicoExcel(1, 0, '', null);
+    else { var b = document.querySelector('input[name="buscarDados"]'); if (b) b.click(); }
+  });
+
+  try {
+    await page.waitForFunction(function() {
+      var d = document.getElementById('divRetornoTable');
+      return d && d.querySelectorAll('table tbody tr td').length > 0;
+    }, { timeout: 120000 });
+  } catch (e) {
+    await screenshotDebug(page, 'no-table');
+    throw new Error('Tabela não carregou');
+  }
+  await page.waitForTimeout(2000);
+  log('✅ Tabela carregada');
 }
 
 // ══════════════════════════════════════════════════════════════
 // LER TABELA
 // ══════════════════════════════════════════════════════════════
 async function lerTabela(page) {
-  const todasLinhas = [];
-  let pagina = 1;
+  var todasLinhas = [];
+  var pagina = 1;
   while (true) {
-    log(`📄 Página ${pagina}...`);
-    const linhas = await page.evaluate(() => {
-      const ths = Array.from(document.querySelectorAll('#divRetornoTable table thead th'));
-      const idx = {};
-      ths.forEach((th, i) => {
-        const t = (th.textContent || '').trim().toLowerCase()
-          .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    log('📄 Página ' + pagina + '...');
+    var linhas = await page.evaluate(function() {
+      var ths = Array.from(document.querySelectorAll('#divRetornoTable table thead th'));
+      var idx = {};
+      ths.forEach(function(th, i) {
+        var t = (th.textContent || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
         if (t.includes('servic'))     idx.os = i;
         if (t.includes('cliente'))    idx.cliente = i;
         if (t.includes('distanc'))    idx.distancia = i;
         if (t.includes('data'))       idx.data = i;
         if (t.includes('finalizado')) idx.finalizado = i;
       });
-      const rows = document.querySelectorAll('#divRetornoTable table tbody tr');
-      const dados = [];
-      rows.forEach(tr => {
-        const tds = tr.querySelectorAll('td');
+      var rows = document.querySelectorAll('#divRetornoTable table tbody tr');
+      var dados = [];
+      rows.forEach(function(tr) {
+        var tds = tr.querySelectorAll('td');
         if (tds.length < 5) return;
-        const first = (tds[0]?.textContent || '').trim();
+        var first = (tds[0].textContent || '').trim();
         if (first.toLowerCase().startsWith('total')) return;
-        if (tds[0]?.getAttribute('colspan')) return;
+        if (tds[0].getAttribute('colspan')) return;
         dados.push({
           os: first,
-          cliente_txt: idx.cliente != null ? (tds[idx.cliente]?.textContent || '').trim() : '',
-          distancia:   idx.distancia != null ? (tds[idx.distancia]?.textContent || '').trim() : '',
-          data_hora:   idx.data != null ? (tds[idx.data]?.textContent || '').trim() : '',
-          finalizado:  idx.finalizado != null ? (tds[idx.finalizado]?.textContent || '').trim() : '',
+          cliente_txt: idx.cliente != null ? (tds[idx.cliente].textContent || '').trim() : '',
+          distancia:   idx.distancia != null ? (tds[idx.distancia].textContent || '').trim() : '',
+          data_hora:   idx.data != null ? (tds[idx.data].textContent || '').trim() : '',
+          finalizado:  idx.finalizado != null ? (tds[idx.finalizado].textContent || '').trim() : '',
         });
       });
       return dados;
     });
-    todasLinhas.push(...linhas);
-    log(`  → ${linhas.length} linhas`);
-    const temProxima = await page.evaluate(() => {
-      for (const s of ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a']) {
-        const el = document.querySelector(s); if (el && !el.closest('.disabled')) return true;
-      }
+    todasLinhas = todasLinhas.concat(linhas);
+    log('  → ' + linhas.length + ' linhas');
+    var temProxima = await page.evaluate(function() {
+      var sels = ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a'];
+      for (var i = 0; i < sels.length; i++) { var el = document.querySelector(sels[i]); if (el && !el.closest('.disabled')) return true; }
       return false;
     });
     if (!temProxima || linhas.length < 10) break;
-    await page.evaluate(() => {
-      for (const s of ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a']) {
-        const el = document.querySelector(s); if (el) { el.click(); return; }
-      }
+    await page.evaluate(function() {
+      var sels = ['a[data-page][aria-label="Próximo"]', '.pagination li.next:not(.disabled) a'];
+      for (var i = 0; i < sels.length; i++) { var el = document.querySelector(sels[i]); if (el) { el.click(); return; } }
     });
     await page.waitForTimeout(2500);
     pagina++;
     if (pagina > 20) break;
   }
-  log(`📊 Total: ${todasLinhas.length} linhas`);
+  log('📊 Total: ' + todasLinhas.length + ' linhas');
   return todasLinhas;
 }
 
 // ── SLA ─────────────────────────────────────────────────────
 function calcularLinhas(linhas) {
-  return linhas.map(linha => {
-    const mCli = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
-    const codCli = mCli ? parseInt(mCli[1]) : null;
-    const nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
-    const linhasTexto = linha.cliente_txt.split('\n').map(l => l.trim()).filter(Boolean);
-    const profissional = linhasTexto.length >= 2 ? linhasTexto[1] : '';
-    const mKm = linha.distancia.match(/([\d]+[.,][\d]+)/);
-    const km = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
-    const prazo = (codCli !== null && CLIENTES_PRAZO_FIXO[codCli] !== undefined)
-      ? CLIENTES_PRAZO_FIXO[codCli] : (km !== null ? getPrazoPorKm(km) : null);
-    const dtCriacao = parseDataBR(linha.data_hora);
-    const dtFinal = parseDataBR(linha.finalizado);
-    let sla_no_prazo = null, duracao_min = null, delta_min = null;
-    const sem_dados = !prazo || !dtCriacao || !dtFinal;
-    if (!sem_dados) {
-      duracao_min = Math.round((dtFinal - dtCriacao) / 60000);
-      sla_no_prazo = duracao_min <= prazo;
-      delta_min = Math.abs(duracao_min - prazo);
-    }
-    return { os: linha.os, cliente_txt: linha.cliente_txt, cod_cliente: codCli,
-      nome_cliente: nomeCli, profissional, km, prazo_min: prazo,
-      data_criacao: dtCriacao?.toISOString() ?? null,
-      finalizado: dtFinal?.toISOString() ?? null,
-      sla_no_prazo, duracao_min, delta_min, sem_dados };
+  return linhas.map(function(linha) {
+    var mCli = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
+    var codCli = mCli ? parseInt(mCli[1]) : null;
+    var nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
+    var linhasTexto = linha.cliente_txt.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+    var profissional = linhasTexto.length >= 2 ? linhasTexto[1] : '';
+    var mKm = linha.distancia.match(/([\d]+[.,][\d]+)/);
+    var km = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
+    var prazo = (codCli !== null && CLIENTES_PRAZO_FIXO[codCli] !== undefined) ? CLIENTES_PRAZO_FIXO[codCli] : (km !== null ? getPrazoPorKm(km) : null);
+    var dtCriacao = parseDataBR(linha.data_hora);
+    var dtFinal = parseDataBR(linha.finalizado);
+    var sla_no_prazo = null, duracao_min = null, delta_min = null;
+    var sem_dados = !prazo || !dtCriacao || !dtFinal;
+    if (!sem_dados) { duracao_min = Math.round((dtFinal - dtCriacao) / 60000); sla_no_prazo = duracao_min <= prazo; delta_min = Math.abs(duracao_min - prazo); }
+    return { os: linha.os, cliente_txt: linha.cliente_txt, cod_cliente: codCli, nome_cliente: nomeCli, profissional: profissional, km: km, prazo_min: prazo, data_criacao: dtCriacao ? dtCriacao.toISOString() : null, finalizado: dtFinal ? dtFinal.toISOString() : null, sla_no_prazo: sla_no_prazo, duracao_min: duracao_min, delta_min: delta_min, sem_dados: sem_dados };
   });
 }
 
 function agruparPorCliente(registros) {
-  const mapa = {};
-  for (const r of registros) {
-    const key = r.cod_cliente ?? '__sem__';
-    if (!mapa[key]) {
-      mapa[key] = { cod_cliente: r.cod_cliente, nome_cliente: r.nome_cliente,
-        total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0 };
-    }
+  var mapa = {};
+  for (var i = 0; i < registros.length; i++) {
+    var r = registros[i];
+    var key = r.cod_cliente != null ? r.cod_cliente : '__sem__';
+    if (!mapa[key]) { mapa[key] = { cod_cliente: r.cod_cliente, nome_cliente: r.nome_cliente, total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0 }; }
     mapa[key].total++;
     if (r.sem_dados) mapa[key].sem_dados++;
     else if (r.sla_no_prazo) mapa[key].no_prazo++;
     else mapa[key].fora_prazo++;
   }
-  return Object.values(mapa)
-    .map(c => ({ ...c,
-      pct_no_prazo: (c.total - c.sem_dados) > 0
-        ? parseFloat(((c.no_prazo / (c.total - c.sem_dados)) * 100).toFixed(2)) : 0 }))
-    .sort((a, b) => b.total - a.total);
+  return Object.values(mapa).map(function(c) {
+    var analisados = c.total - c.sem_dados;
+    c.pct_no_prazo = analisados > 0 ? parseFloat(((c.no_prazo / analisados) * 100).toFixed(2)) : 0;
+    return c;
+  }).sort(function(a, b) { return b.total - a.total; });
 }
 
 // ══════════════════════════════════════════════════════════════
-// FUNÇÃO PRINCIPAL
+// SINGLE JOB (compatibilidade)
 // ══════════════════════════════════════════════════════════════
-async function buscarPerformance({ dataInicio, dataFim, codCliente, centroCusto }) {
-  if (!process.env.SISTEMA_EXTERNO_URL) throw new Error('SISTEMA_EXTERNO_URL não configurada.');
-  log(`🚀 ${dataInicio}→${dataFim} | cli=${codCliente ?? 'todos'} | cc=${centroCusto ?? '—'}`);
+async function buscarPerformance(opts) {
+  var resultados = await buscarPerformanceBatch([opts]);
+  return resultados[0];
+}
 
-  const browser = await chromium.launch({
+// ══════════════════════════════════════════════════════════════
+// BATCH — ABRE BROWSER 1 VEZ, PERCORRE CLIENTES
+// ══════════════════════════════════════════════════════════════
+async function buscarPerformanceBatch(configs) {
+  if (!process.env.SISTEMA_EXTERNO_URL) throw new Error('SISTEMA_EXTERNO_URL não configurada.');
+  if (!configs || configs.length === 0) throw new Error('Nenhuma config para processar');
+
+  log('🚀 BATCH: ' + configs.length + ' consulta(s) | ' + configs[0].dataInicio + '→' + configs[0].dataFim);
+
+  var browser = await chromium.launch({
     headless: true,
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-gpu', '--disable-extensions', '--disable-background-networking',
-      '--disable-default-apps', '--mute-audio', '--no-first-run',
-    ],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-default-apps', '--mute-audio', '--no-first-run'],
   });
 
-  let contextOptions = {};
-  if (fs.existsSync(SESSION_FILE_PERF)) {
-    contextOptions = { storageState: SESSION_FILE_PERF };
-    log('♻️ Sessão encontrada');
-  }
+  var contextOptions = {};
+  if (fs.existsSync(SESSION_FILE_PERF)) { contextOptions = { storageState: SESSION_FILE_PERF }; log('♻️ Sessão encontrada'); }
 
-  const context = await browser.newContext({
-    ...contextOptions,
+  var context = await browser.newContext(Object.assign({}, contextOptions, {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 900 },
-  });
-  const page = await context.newPage();
+  }));
+  var page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT);
 
+  var resultados = [];
+
   try {
+    // 1. Login + navegação — UMA VEZ
     await navegarParaFiltros(page, context);
-    await preencherFiltros(page, { dataInicio, dataFim, codCliente, centroCusto });
-    await page.waitForTimeout(500);
 
-    log('🔍 Executando busca...');
-    await page.evaluate(() => {
-      if (typeof buscaServicoExcel === 'function') buscaServicoExcel(1, 0, '', null);
-      else { const b = document.querySelector('input[name="buscarDados"]'); if (b) b.click(); }
-    });
+    // 2. Campos base (datas, status, paginação) — UMA VEZ
+    await preencherCamposBase(page, configs[0].dataInicio, configs[0].dataFim);
 
-    log('⏳ Aguardando resultado...');
-    try {
-      await page.waitForFunction(
-        () => { const d = document.getElementById('divRetornoTable');
-          return d && d.querySelectorAll('table tbody tr td').length > 0; },
-        { timeout: 120_000 }
-      );
-    } catch {
-      await screenshotDebug(page, 'no-table');
-      const html = await page.evaluate(() => {
-        const d = document.getElementById('divRetornoTable');
-        return d ? d.innerHTML.slice(0, 300) : 'div não encontrado';
-      });
-      throw new Error(`Tabela não carregou. Content: ${html.slice(0, 200)}`);
+    // 3. Percorrer clientes — SÓ TROCA CLIENTE/CC
+    for (var i = 0; i < configs.length; i++) {
+      var cfg = configs[i];
+      var label = '[' + (i + 1) + '/' + configs.length + '] cli=' + (cfg.codCliente || 'todos') + ' cc=' + (cfg.centroCusto || '—');
+
+      try {
+        log('━━━ ' + label + ' ━━━');
+
+        if (cfg.codCliente) {
+          await trocarCliente(page, cfg.codCliente, cfg.centroCusto);
+        }
+
+        await page.waitForTimeout(300);
+        await executarBusca(page);
+
+        var linhasBrutas = await lerTabela(page);
+        var registros = calcularLinhas(linhasBrutas);
+        var total = registros.length;
+        var no_prazo = registros.filter(function(r) { return r.sla_no_prazo === true; }).length;
+        var fora_prazo = registros.filter(function(r) { return r.sla_no_prazo === false; }).length;
+        var sem_dados = registros.filter(function(r) { return r.sem_dados; }).length;
+        var analisados = total - sem_dados;
+        var pct_no_prazo = analisados > 0 ? parseFloat(((no_prazo / analisados) * 100).toFixed(2)) : 0;
+
+        log('✅ ' + label + ': ' + total + ' OS | ' + no_prazo + '✓ | ' + fora_prazo + '✗ | ' + pct_no_prazo + '%');
+
+        resultados.push({ success: true, codCliente: cfg.codCliente, centroCusto: cfg.centroCusto, total: total, no_prazo: no_prazo, fora_prazo: fora_prazo, sem_dados: sem_dados, pct_no_prazo: pct_no_prazo, por_cliente: agruparPorCliente(registros), registros: registros });
+      } catch (err) {
+        log('❌ ' + label + ': ' + err.message);
+        await screenshotDebug(page, 'error-' + (cfg.codCliente || 'all'));
+        resultados.push({ success: false, codCliente: cfg.codCliente, centroCusto: cfg.centroCusto, error: err.message, total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0, pct_no_prazo: 0, por_cliente: [], registros: [] });
+      }
     }
-    await page.waitForTimeout(2000);
-    log('✅ Tabela carregada');
-
-    const linhasBrutas = await lerTabela(page);
-    const registros = calcularLinhas(linhasBrutas);
-    const total = registros.length;
-    const no_prazo = registros.filter(r => r.sla_no_prazo === true).length;
-    const fora_prazo = registros.filter(r => r.sla_no_prazo === false).length;
-    const sem_dados = registros.filter(r => r.sem_dados).length;
-    const analisados = total - sem_dados;
-    const pct_no_prazo = analisados > 0
-      ? parseFloat(((no_prazo / analisados) * 100).toFixed(2)) : 0;
-    log(`✅ ${total} OS | ${no_prazo}✓ | ${fora_prazo}✗ | ${sem_dados}? | ${pct_no_prazo}%`);
-
-    return { total, no_prazo, fora_prazo, sem_dados, pct_no_prazo,
-      por_cliente: agruparPorCliente(registros), registros };
-
   } catch (err) {
-    await screenshotDebug(page, 'error');
+    await screenshotDebug(page, 'batch-error');
     throw err;
   } finally {
     await browser.close();
+    log('🏁 BATCH finalizado: ' + resultados.filter(function(r) { return r.success; }).length + '/' + configs.length + ' OK');
   }
+
+  return resultados;
 }
 
-module.exports = { buscarPerformance };
+module.exports = { buscarPerformance: buscarPerformance, buscarPerformanceBatch: buscarPerformanceBatch };

@@ -57,7 +57,6 @@ function comTimeout(promise, ms) {
 
 // Processa próximo job pendente
 async function processarProximo() {
-  // Segurança: se executando ficou true por bug, resetar após 6min
   if (executando) {
     if (Date.now() - (executandoDesde || 0) > 6 * 60 * 1000) {
       log('⚠️ Flag executando travada há >6min — resetando');
@@ -67,69 +66,80 @@ async function processarProximo() {
     }
   }
 
-  // Limpar jobs órfãos antes de pegar novo
   await limparJobsTravados();
 
+  // Buscar TODOS os jobs pendentes (batch)
   const { rows } = await _pool.query(`
     SELECT * FROM performance_jobs
     WHERE status = 'pendente'
     ORDER BY iniciado_em ASC
-    LIMIT 1
+    LIMIT 20
   `);
   if (!rows.length) return;
 
-  const job = rows[0];
   executando = true;
   executandoDesde = Date.now();
-  log(`📋 Job #${job.id} | ${job.data_inicio} → ${job.data_fim} | cli=${job.cod_cliente} | cc=${job.centro_custo || 'todos'} | origem=${job.origem}`);
 
-  await _pool.query(`UPDATE performance_jobs SET status = 'executando' WHERE id = $1`, [job.id]);
-
-  try {
-    const resultado = await comTimeout(buscarPerformance({
-      dataInicio:  dataToBR(job.data_inicio),
-      dataFim:     dataToBR(job.data_fim),
-      codCliente:  job.cod_cliente  || null,
-      centroCusto: job.centro_custo || null,
-    }), TIMEOUT_JOB_MS);
-
-    await _pool.query(`
-      INSERT INTO performance_snapshots
-        (job_id, data_inicio, data_fim, cod_cliente, centro_custo,
-         total_os, no_prazo, fora_prazo, sem_dados, pct_no_prazo, registros)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-    `, [
-      job.id,
-      job.data_inicio, job.data_fim,
-      job.cod_cliente  || null,
-      job.centro_custo || null,
-      resultado.total,
-      resultado.no_prazo,
-      resultado.fora_prazo,
-      resultado.sem_dados,
-      resultado.pct_no_prazo,
-      JSON.stringify(resultado.registros),
-    ]);
-
-    await _pool.query(`
-      UPDATE performance_jobs
-      SET status = 'concluido', concluido_em = NOW(), total_os = $1
-      WHERE id = $2
-    `, [resultado.total, job.id]);
-
-    log(`✅ Job #${job.id} concluído — ${resultado.total} OS, ${resultado.pct_no_prazo}% no prazo`);
-
-  } catch (err) {
-    log(`❌ Job #${job.id} falhou: ${err.message}`);
-    await _pool.query(`
-      UPDATE performance_jobs
-      SET status = 'erro', erro = $1, concluido_em = NOW()
-      WHERE id = $2
-    `, [err.message, job.id]);
-  } finally {
-    executando = false;
-    executandoDesde = null;
+  // Agrupar por data (jobs do mesmo dia rodam em batch)
+  const porData = {};
+  for (const job of rows) {
+    const key = `${job.data_inicio}_${job.data_fim}`;
+    if (!porData[key]) porData[key] = [];
+    porData[key].push(job);
   }
+
+  for (const [dateKey, jobs] of Object.entries(porData)) {
+    const ids = jobs.map(j => j.id);
+    log(`📦 BATCH: ${jobs.length} jobs (${dateKey}) — IDs: ${ids.join(',')}`);
+
+    // Marcar todos como executando
+    await _pool.query(`UPDATE performance_jobs SET status = 'executando' WHERE id = ANY($1)`, [ids]);
+
+    try {
+      const configs = jobs.map(j => ({
+        dataInicio:  dataToBR(j.data_inicio),
+        dataFim:     dataToBR(j.data_fim),
+        codCliente:  j.cod_cliente || null,
+        centroCusto: j.centro_custo || null,
+      }));
+
+      const { buscarPerformanceBatch } = require('./playwright-performance');
+      const resultados = await comTimeout(buscarPerformanceBatch(configs), TIMEOUT_JOB_MS * jobs.length);
+
+      // Salvar cada resultado
+      for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        const resultado = resultados[i];
+
+        if (resultado && resultado.success !== false) {
+          await _pool.query(`
+            INSERT INTO performance_snapshots
+              (job_id, data_inicio, data_fim, cod_cliente, centro_custo,
+               total_os, no_prazo, fora_prazo, sem_dados, pct_no_prazo, registros)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          `, [job.id, job.data_inicio, job.data_fim, job.cod_cliente || null,
+              job.centro_custo || null, resultado.total, resultado.no_prazo,
+              resultado.fora_prazo, resultado.sem_dados, resultado.pct_no_prazo,
+              JSON.stringify(resultado.registros)]);
+
+          await _pool.query(`UPDATE performance_jobs SET status = 'concluido', concluido_em = NOW(), total_os = $1 WHERE id = $2`,
+            [resultado.total, job.id]);
+          log(`✅ Job #${job.id} concluído — ${resultado.total} OS`);
+        } else {
+          await _pool.query(`UPDATE performance_jobs SET status = 'erro', erro = $1, concluido_em = NOW() WHERE id = $2`,
+            [resultado?.error || 'Falha desconhecida', job.id]);
+          log(`❌ Job #${job.id} falhou: ${resultado?.error}`);
+        }
+      }
+    } catch (err) {
+      log(`❌ BATCH falhou: ${err.message}`);
+      await _pool.query(`UPDATE performance_jobs SET status = 'erro', erro = $1, concluido_em = NOW() WHERE id = ANY($2)`,
+        [err.message, ids]);
+    }
+  }
+
+  executando = false;
+  executandoDesde = null;
 }
 
 // Inicia o worker
