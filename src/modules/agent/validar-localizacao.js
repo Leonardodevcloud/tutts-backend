@@ -37,16 +37,18 @@ async function analisarFoto(base64Foto) {
           }
         },
         {
-          text: `Você é um validador de fotos para um sistema de correção de endereço de entregas.
-O motoboy deve enviar uma foto da FACHADA do local de entrega (estabelecimento comercial, loja, residência, prédio, condomínio, etc).
+          text: `Você é um validador de fotos para um sistema de entrega de AUTOPEÇAS.
+O motoboy entrega peças automotivas e deve enviar uma foto da FACHADA do local de entrega.
+
+CONTEXTO: Os clientes são lojas de autopeças, oficinas mecânicas, retíficas, distribuidores automotivos, concessionárias, borracharias, centros automotivos, ou residências.
 
 TAREFA DUPLA:
 1. VALIDAR se a foto mostra um local de entrega válido
 2. Se válida, EXTRAIR o nome do estabelecimento visível (se houver)
 
 FOTOS VÁLIDAS (aprovar):
-- Fachada de loja, comércio, empresa (com ou sem letreiro)
-- Fachada de residência, casa, prédio, condomínio
+- Fachada de loja, oficina, mecânica, autopeças, retífica, centro automotivo
+- Fachada de residência, casa, prédio, condomínio (cliente pode ser pessoa física)
 - Portão, entrada de estabelecimento
 - Placa com nome do local
 - Fachada mesmo que parcialmente visível
@@ -65,12 +67,14 @@ Responda APENAS em JSON, sem markdown:
   "foto_valida": true,
   "motivo_rejeicao": null,
   "tipo_local": "comercial",
+  "ramo_automotivo": true,
   "nome_estabelecimento": "NOME AQUI ou NAO_IDENTIFICADO",
   "confianca": 85,
   "textos_visiveis": ["texto1", "texto2"]
 }
 
 tipo_local: "comercial" | "residencial" | "outro"
+ramo_automotivo: true se parece ser autopeças, oficina, mecânica, retífica, centro automotivo, distribuidor. false se outro ramo (farmácia, padaria, etc).
 Se foto_valida=false, preencha motivo_rejeicao com feedback claro pro motoboy.`
         }
       ]
@@ -118,7 +122,7 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
   const url = 'https://places.googleapis.com/v1/places:searchNearby';
 
   const body = {
-    includedTypes: ['store', 'car_repair', 'hardware_store', 'shopping_mall'],
+    includedTypes: ['car_repair', 'car_dealer'],
     maxResultCount: 20,
     locationRestriction: {
       circle: {
@@ -142,13 +146,12 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
 
     if (!resp.ok) {
       const err = await resp.text();
-      log(`❌ Places API erro ${resp.status}: ${err.substring(0, 200)}`);
-      // Fallback: tentar Text Search
+      log(`❌ Places API Nearby erro ${resp.status}: ${err.substring(0, 200)}`);
       return await buscarTextSearch(lat, lng, raioMetros, apiKey);
     }
 
     const data = await resp.json();
-    const places = (data.places || []).map(p => ({
+    let places = (data.places || []).map(p => ({
       nome: p.displayName?.text || '',
       endereco: p.formattedAddress || '',
       lat: p.location?.latitude,
@@ -156,7 +159,17 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
       tipos: p.types || [],
     }));
 
-    log(`📍 Places API: ${places.length} resultado(s) em ${raioMetros}m`);
+    log(`📍 Nearby: ${places.length} resultado(s)`);
+
+    // Sempre complementar com Text Search automotivo
+    const textPlaces = await buscarTextSearch(lat, lng, raioMetros, apiKey);
+    if (textPlaces.length > 0) {
+      const nomesExistentes = new Set(places.map(p => normalizar(p.nome)));
+      const novos = textPlaces.filter(p => !nomesExistentes.has(normalizar(p.nome)));
+      places.push(...novos);
+      log(`📍 +TextSearch: ${novos.length} novo(s), total ${places.length}`);
+    }
+
     return places;
   } catch (err) {
     log(`❌ Places API exceção: ${err.message}`);
@@ -168,41 +181,60 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
  * Fallback: Text Search (caso Nearby Search não retorne resultados)
  */
 async function buscarTextSearch(lat, lng, raioMetros, apiKey) {
-  try {
-    const url = 'https://places.googleapis.com/v1/places:searchText';
-    const body = {
-      textQuery: 'auto peças loja',
-      locationBias: {
-        circle: {
-          center: { latitude: lat, longitude: lng },
-          radius: raioMetros
-        }
-      },
-      maxResultCount: 10,
-    };
+  const queries = [
+    'auto peças autopeças',
+    'oficina mecânica centro automotivo',
+    'retífica distribuidora autopeças',
+    'borracharia concessionária',
+  ];
 
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location'
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
-    });
+  let todosResultados = [];
 
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return (data.places || []).map(p => ({
-      nome: p.displayName?.text || '',
-      endereco: p.formattedAddress || '',
-      lat: p.location?.latitude,
-      lng: p.location?.longitude,
-    }));
-  } catch (err) {
-    return [];
+  for (const textQuery of queries) {
+    try {
+      const url = 'https://places.googleapis.com/v1/places:searchText';
+      const body = {
+        textQuery,
+        locationBias: {
+          circle: {
+            center: { latitude: lat, longitude: lng },
+            radius: raioMetros
+          }
+        },
+        maxResultCount: 10,
+      };
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location'
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const places = (data.places || []).map(p => ({
+        nome: p.displayName?.text || '',
+        endereco: p.formattedAddress || '',
+        lat: p.location?.latitude,
+        lng: p.location?.longitude,
+      }));
+      todosResultados.push(...places);
+    } catch (err) { /* ignora */ }
   }
+
+  // Deduplicar por nome
+  const vistos = new Set();
+  return todosResultados.filter(p => {
+    const chave = normalizar(p.nome);
+    if (vistos.has(chave)) return false;
+    vistos.add(chave);
+    return true;
+  });
 }
 
 /**
@@ -326,7 +358,7 @@ async function validarLocalizacao(base64Foto, lat, lng) {
       match_google: null,
       confianca: 0,
       tipo_local: gemini.tipo_local,
-      motivo: 'Nenhum estabelecimento encontrado no Google Maps nesta região',
+      motivo: 'Nenhum estabelecimento do ramo automotivo encontrado no Google Maps nesta região',
       lugares_proximos: 0,
       detalhes: { gemini }
     };
@@ -367,7 +399,7 @@ async function validarLocalizacao(base64Foto, lat, lng) {
     lugares_proximos: lugares.length,
     motivo: valido
       ? `Estabelecimento "${melhorMatch.nome}" encontrado próximo (${confiancaPercent}% similaridade)`
-      : `Nenhum estabelecimento com nome similar a "${nomeFoto}" encontrado em ${RAIO_BUSCA_METROS}m`,
+      : `Nenhum estabelecimento automotivo com nome similar a "${nomeFoto}" encontrado em ${RAIO_BUSCA_METROS}m`,
     detalhes: {
       gemini,
       lugares_top5: lugares.slice(0, 5).map(l => ({ nome: l.nome, endereco: l.endereco })),
