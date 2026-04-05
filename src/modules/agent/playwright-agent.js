@@ -786,6 +786,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     log('📌 Passo 7: Abrindo página de edição da OS');
 
     let freteRecalculado = false;
+    let valoresDepois = { km: null, valor_servico: null };
     let enderecoParaPreencher = enderecoResolvido || '';
 
     try {
@@ -1126,7 +1127,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         }
 
         // ── Capturar valores DEPOIS do cálculo ──
-        let valoresDepois = { km: null, valor_servico: null };
         try {
           valoresDepois = await page.evaluate(() => {
             const texto = document.body.textContent || '';

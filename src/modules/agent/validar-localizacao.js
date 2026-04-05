@@ -118,7 +118,7 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
   const url = 'https://places.googleapis.com/v1/places:searchNearby';
 
   const body = {
-    includedTypes: ['store', 'car_repair', 'car_parts_store', 'auto_parts_store', 'hardware_store', 'establishment'],
+    includedTypes: ['store', 'car_repair', 'hardware_store', 'shopping_mall'],
     maxResultCount: 20,
     locationRestriction: {
       circle: {
