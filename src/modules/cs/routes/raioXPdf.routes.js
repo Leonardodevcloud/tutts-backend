@@ -202,12 +202,27 @@ function createRaioXPdfRoutes(pool) {
       if (linkMapa) {
         try {
           var chromiumCapture = require('playwright').chromium;
-          var captureBrowser = await chromiumCapture.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+          var captureBrowser = await chromiumCapture.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-web-security'] });
           var capturePage = await captureBrowser.newPage();
           await capturePage.setViewportSize({ width: 1280, height: 720 });
-          await capturePage.goto(linkMapa, { waitUntil: 'networkidle', timeout: 30000 });
-          // Aguardar mapa renderizar (Google Maps precisa de tempo)
-          await capturePage.waitForTimeout(3000);
+          await capturePage.goto(linkMapa, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+          // Aguardar Google Maps renderizar (verifica se o div do mapa tem tiles)
+          for (var mw = 0; mw < 15; mw++) {
+            await capturePage.waitForTimeout(1000);
+            var mapaReady = await capturePage.evaluate(function() {
+              var mapDiv = document.getElementById('map');
+              if (!mapDiv) return false;
+              // Google Maps renderiza tiles como <img> ou <canvas> dentro do div
+              var tiles = mapDiv.querySelectorAll('img, canvas');
+              return tiles.length > 5; // Mapa carregado tem vários tiles
+            }).catch(function() { return false; });
+            if (mapaReady) break;
+          }
+
+          // Espera extra pro heatmap layer renderizar
+          await capturePage.waitForTimeout(2000);
+
           var screenshotBuffer = await capturePage.screenshot({ type: 'jpeg', quality: 85 });
           mapaScreenshotB64 = 'data:image/jpeg;base64,' + screenshotBuffer.toString('base64');
           await captureBrowser.close();
