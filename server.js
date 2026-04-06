@@ -864,7 +864,7 @@ initDatabase().then(async () => {
 
         // 📱 Notificar grupo WhatsApp com novos leads
         try {
-          const notifResp = await fetch(`http://localhost:${PORT}/api/crm/leads-captura/notificar-novos`, {
+          const notifResp = await fetch(`http://localhost:${env.PORT}/api/crm/leads-captura/notificar-novos`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-service-key': process.env.CRM_SERVICE_KEY || '' },
             body: '{}',
@@ -888,7 +888,7 @@ initDatabase().then(async () => {
     async function enviarResumoDiarioCRM() {
       try {
         console.log('[CRM-Resumo] Disparando resumo diário via cron...');
-        const url = `http://localhost:${PORT}/api/crm/leads-captura/resumo-diario`;
+        const url = `http://localhost:${env.PORT}/api/crm/leads-captura/resumo-diario`;
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-service-key': process.env.CRM_SERVICE_KEY || '' },
