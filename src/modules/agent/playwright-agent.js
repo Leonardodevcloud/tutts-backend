@@ -1173,65 +1173,103 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log('📌 Passo 11: Capturando valores atualizados (Resumo Serviço)');
 
       // Voltar para a página de acompanhamento
-      await page.goto('https://tutts.com.br/expresso/expressoat/acompanhamento-servicos', { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(2000);
+      log('📌 [11] Navegando para acompanhamento-servicos...');
+      await page.goto('https://tutts.com.br/expresso/expressoat/acompanhamento-servicos', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(2500);
+      log('📌 [11] Página carregada');
 
-      // Clicar aba Em execução
-      const abaExec = page.locator('#pills-em-execucao-tab, a:has-text("Em execução"), button:has-text("Em execução")').first();
-      const temAba = await abaExec.count().catch(() => 0);
-      if (temAba > 0) {
-        await abaExec.click().catch(() => {});
-        await page.waitForTimeout(1000);
+      // Verificar se sessão expirou (redirecionou pra login)
+      const urlAtual = page.url();
+      if (urlAtual.includes('login') || urlAtual.includes('autenticacao')) {
+        log('⚠️ [11] Sessão expirou — relogando');
+        await page.locator('input[name="login"]').first().fill(process.env.TUTTS_LOGIN || '').catch(() => {});
+        await page.locator('input[name="senha"]').first().fill(process.env.TUTTS_SENHA || '').catch(() => {});
+        await page.locator('input[name="logar"]').first().click().catch(() => {});
+        await page.waitForTimeout(2000);
+        await page.goto('https://tutts.com.br/expresso/expressoat/acompanhamento-servicos', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(2000);
       }
 
-      // Pesquisar a OS
-      const barraPesq = page.locator('#search-type, .search-toggle, button:has(.fa-search)').first();
-      const temBarra = await barraPesq.count().catch(() => 0);
-      if (temBarra > 0) {
-        await barraPesq.click().catch(() => {});
-        await page.waitForTimeout(500);
-        // Selecionar tipo Serviço
-        await page.locator('select#searchType, select[name="searchType"]').first().selectOption('servico').catch(() => {});
-        await page.waitForTimeout(300);
-        // Digitar OS
-        const campoBusca = page.locator('input#searchInput, input[name="searchInput"], input.search-input').first();
-        await campoBusca.fill(os_numero).catch(() => {});
-        await page.waitForTimeout(500);
-        await campoBusca.press('Enter').catch(() => {});
+      // Clicar aba "Em execução" (mesmo seletor do passo 1b)
+      log('📌 [11] Clicando aba Em execução...');
+      try {
+        await page.locator('#pills-em-execucao-tab').first().click({ timeout: 5000 });
         await page.waitForTimeout(1500);
-        // Clicar no resultado do autocomplete se aparecer
-        const autoItem = page.locator('.ui-autocomplete .ui-menu-item, .autocomplete-suggestion, .tt-suggestion').first();
-        const temAuto = await autoItem.count().catch(() => 0);
-        if (temAuto > 0) {
-          await autoItem.click().catch(() => {});
-          await page.waitForTimeout(1500);
-        }
+      } catch (e) { log('⚠️ [11] Falha ao clicar aba: ' + e.message); }
+
+      // Verificar se a OS já está visível na tabela (sem precisar pesquisar)
+      log('📌 [11] Verificando se OS está visível...');
+      let btnEndAfter = page.locator(`button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`).first();
+      let temBtnAfter = await btnEndAfter.count().catch(() => 0);
+      log(`📌 [11] Botão direto na tabela: ${temBtnAfter}`);
+
+      // Se não achou direto, fazer pesquisa
+      if (temBtnAfter === 0) {
+        log('📌 [11] Fazendo pesquisa pela OS...');
+        try {
+          // Expandir barra de pesquisa
+          const barraSearch = page.locator('#search-type, .search-toggle').first();
+          if (await barraSearch.count().catch(() => 0) > 0) {
+            await barraSearch.click({ timeout: 3000 }).catch(() => {});
+            await page.waitForTimeout(800);
+          }
+
+          // Selecionar tipo Serviço
+          const selectTipo = page.locator('select#searchType, select[name="searchType"]').first();
+          if (await selectTipo.count().catch(() => 0) > 0) {
+            await selectTipo.selectOption('servico').catch(() => {});
+            await page.waitForTimeout(500);
+          }
+
+          // Digitar OS
+          const campo = page.locator('input#searchInput, input[name="searchInput"], input.search-input').first();
+          if (await campo.count().catch(() => 0) > 0) {
+            await campo.fill(os_numero, { timeout: 3000 });
+            await page.waitForTimeout(1500);
+            // Tentar autocomplete
+            const autoItem = page.locator('.ui-autocomplete .ui-menu-item, .autocomplete-suggestion, .tt-suggestion').first();
+            if (await autoItem.count().catch(() => 0) > 0) {
+              await autoItem.click().catch(() => {});
+              await page.waitForTimeout(2000);
+            } else {
+              await campo.press('Enter').catch(() => {});
+              await page.waitForTimeout(2000);
+            }
+          }
+        } catch (eSearch) { log('⚠️ [11] Erro pesquisa: ' + eSearch.message); }
+
+        // Tentar localizar de novo
+        btnEndAfter = page.locator(`button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`).first();
+        temBtnAfter = await btnEndAfter.count().catch(() => 0);
+        log(`📌 [11] Botão após pesquisa: ${temBtnAfter}`);
       }
 
-      // Encontrar a row da OS e clicar no dropdown
-      const btnEndAfter = page.locator(`button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`).first();
-      const temBtnAfter = await btnEndAfter.count().catch(() => 0);
+      await screenshot(page, os_numero, 'passo11_busca_os');
 
       if (temBtnAfter > 0) {
         const rowOS = page.locator('tr').filter({ has: btnEndAfter }).first();
         const dropdownBtn = rowOS.locator('button.dropdown-toggle, button#dropdownMenuButton').first();
         const temDrop = await dropdownBtn.count().catch(() => 0);
+        log(`📌 [11] Dropdown encontrado: ${temDrop}`);
 
         if (temDrop > 0) {
           await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
-          await dropdownBtn.click();
-          await page.waitForTimeout(500);
+          await dropdownBtn.click({ force: true });
+          await page.waitForTimeout(800);
+          await screenshot(page, os_numero, 'passo11_dropdown_aberto');
 
           const resumoLink = page.locator('a.dropdown-item[data-action="ajaxModalInformacoesServico"], a.dropdown-item:has-text("Resumo Serviço"), a.dropdown-item:has-text("Resumo do Serviço")').first();
           const temResumo = await resumoLink.count().catch(() => 0);
+          log(`📌 [11] Link Resumo: ${temResumo}`);
 
           if (temResumo > 0) {
-            await resumoLink.click();
-            await page.waitForTimeout(2000);
+            await resumoLink.click({ force: true });
+            await page.waitForTimeout(2500);
+            await screenshot(page, os_numero, 'passo11_modal_aberto');
 
             valoresDepois = await page.evaluate(() => {
               const body = document.querySelector('.modal.show .modal-body, .modal.in .modal-body, #modalPadrao .modal-body');
-              if (!body) return { km: null, valor_servico: null, valor_profissional: null };
+              if (!body) return { km: null, valor_servico: null, valor_profissional: null, _erro: 'modal_nao_encontrado' };
               const texto = body.textContent || '';
 
               const mKm = texto.match(/Dist[aâ]ncia\s*rota[:\s]*(\d+[.,]?\d*)/i);
@@ -1244,26 +1282,29 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
               const valorProf = mProf ? mProf[1].replace(',', '.') : null;
 
               return { km, valor_servico: valorServico, valor_profissional: valorProf };
-            }).catch(() => ({ km: null, valor_servico: null, valor_profissional: null }));
+            }).catch((evalErr) => ({ km: null, valor_servico: null, valor_profissional: null, _erro: evalErr.message }));
 
-            log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}`);
-            await screenshot(page, os_numero, 'passo11_resumo_depois');
+            log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}${valoresDepois._erro ? ' | ERRO: ' + valoresDepois._erro : ''}`);
 
             // Fechar modal
-            await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .btn-primary[onclick*="limpar"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click().catch(() => {});
+            await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click({ force: true }).catch(() => {});
             await page.waitForTimeout(500);
           } else {
-            log('⚠️ Link Resumo Serviço não encontrado no dropdown (passo 11)');
+            log('⚠️ [11] Link Resumo Serviço não encontrado no dropdown');
+            await screenshot(page, os_numero, 'passo11_sem_resumo_link');
             await page.keyboard.press('Escape').catch(() => {});
           }
         } else {
-          log('⚠️ Dropdown não encontrado na row (passo 11)');
+          log('⚠️ [11] Dropdown não encontrado na row');
+          await screenshot(page, os_numero, 'passo11_sem_dropdown');
         }
       } else {
-        log('⚠️ OS não encontrada na página de acompanhamento (passo 11)');
+        log('⚠️ [11] OS não encontrada na página de acompanhamento');
+        await screenshot(page, os_numero, 'passo11_os_nao_encontrada');
       }
     } catch (e) {
-      log(`⚠️ Erro ao capturar valores depois: ${e.message} — prosseguindo`);
+      log(`⚠️ Erro Passo 11: ${e.message} — stack: ${e.stack?.substring(0, 200)}`);
+      await screenshot(page, os_numero, 'passo11_erro').catch(() => null);
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
