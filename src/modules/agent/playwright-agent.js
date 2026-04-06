@@ -1253,17 +1253,57 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         log(`📌 [11] Dropdown encontrado: ${temDrop}`);
 
         if (temDrop > 0) {
-          await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
-          await dropdownBtn.click({ force: true });
-          await page.waitForTimeout(800);
+          try {
+            await dropdownBtn.scrollIntoViewIfNeeded({ timeout: 5000 });
+            log('📌 [11] Scroll OK');
+          } catch (eScroll) { log('⚠️ [11] Erro scroll: ' + eScroll.message); }
+
+          try {
+            await dropdownBtn.click({ force: true, timeout: 5000 });
+            log('📌 [11] Click dropdown OK');
+          } catch (eClick) {
+            log('⚠️ [11] Erro click dropdown: ' + eClick.message);
+            // Fallback: clicar via JS
+            await rowOS.evaluate((row) => {
+              const btn = row.querySelector('button.dropdown-toggle, button#dropdownMenuButton');
+              if (btn) btn.click();
+            }).catch(() => {});
+          }
+          await page.waitForTimeout(1000);
           await screenshot(page, os_numero, 'passo11_dropdown_aberto');
 
-          const resumoLink = page.locator('a.dropdown-item[data-action="ajaxModalInformacoesServico"], a.dropdown-item:has-text("Resumo Serviço"), a.dropdown-item:has-text("Resumo do Serviço")').first();
-          const temResumo = await resumoLink.count().catch(() => 0);
-          log(`📌 [11] Link Resumo: ${temResumo}`);
+          // Buscar o Resumo Serviço NO DROPDOWN ATIVO (página inteira, mas só o show)
+          log('📌 [11] Procurando link Resumo Serviço...');
+          const resumoClicado = await page.evaluate(() => {
+            // Procurar dropdown menu visível
+            const menus = document.querySelectorAll('.dropdown-menu.show, .dropdown.show .dropdown-menu');
+            for (const menu of menus) {
+              const links = menu.querySelectorAll('a.dropdown-item');
+              for (const link of links) {
+                const txt = (link.textContent || '').toLowerCase();
+                const action = (link.getAttribute('data-action') || '').toLowerCase();
+                if (txt.includes('resumo') || action.includes('informacoesservico') || action.includes('informacoesServico')) {
+                  link.click();
+                  return { ok: true, texto: link.textContent.trim(), action: link.getAttribute('data-action') };
+                }
+              }
+            }
+            // Fallback: buscar em qualquer dropdown-item visível
+            const allLinks = document.querySelectorAll('a.dropdown-item');
+            for (const link of allLinks) {
+              if (link.offsetParent === null) continue; // não visível
+              const txt = (link.textContent || '').toLowerCase();
+              if (txt.includes('resumo')) {
+                link.click();
+                return { ok: true, texto: link.textContent.trim(), fallback: true };
+              }
+            }
+            return { ok: false, totalLinks: allLinks.length };
+          }).catch((e) => ({ ok: false, erro: e.message }));
 
-          if (temResumo > 0) {
-            await resumoLink.click({ force: true });
+          log(`📌 [11] Resumo click: ${JSON.stringify(resumoClicado)}`);
+
+          if (resumoClicado.ok) {
             await page.waitForTimeout(2500);
             await screenshot(page, os_numero, 'passo11_modal_aberto');
 
@@ -1290,7 +1330,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
             await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click({ force: true }).catch(() => {});
             await page.waitForTimeout(500);
           } else {
-            log('⚠️ [11] Link Resumo Serviço não encontrado no dropdown');
+            log('⚠️ [11] Resumo Serviço não clicado: ' + JSON.stringify(resumoClicado));
             await screenshot(page, os_numero, 'passo11_sem_resumo_link');
             await page.keyboard.press('Escape').catch(() => {});
           }
