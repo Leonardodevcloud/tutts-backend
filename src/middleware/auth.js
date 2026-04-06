@@ -40,7 +40,8 @@ const PUBLIC_PATHS = [
  * Usa req.path (sem query string) e método HTTP para evitar bypass por substring
  */
 function isPublicRoute(req) {
-  const reqPath = (req.path || '').toLowerCase();
+  // Usar originalUrl pois req.path pode não ter o prefixo /api quando montado via app.use('/api', ...)
+  const reqPath = (req.originalUrl || req.path || '').split('?')[0].toLowerCase();
   const reqMethod = (req.method || '').toUpperCase();
   
   return PUBLIC_PATHS.some(rule => {
