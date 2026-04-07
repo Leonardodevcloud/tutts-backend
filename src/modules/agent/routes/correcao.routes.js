@@ -31,6 +31,8 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     erros.push('os_numero é obrigatório.');
   if (!/^\d+$/.test(String(os_numero || '').trim()))
     erros.push('os_numero deve conter apenas dígitos.');
+  else if (String(os_numero).trim().length !== 7)
+    erros.push(`Número da OS deve ter exatamente 7 dígitos (recebido: ${String(os_numero).trim().length} dígito(s)).`);
 
   const pontoNum = parseInt(ponto, 10);
   if (isNaN(pontoNum))
