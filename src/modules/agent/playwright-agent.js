@@ -1175,6 +1175,30 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           await screenshot(page, os_numero, 'passo9_retry_calcular');
         }
 
+        // ── Passo 9b: Capturar km + valor_servico dos hidden inputs ──
+        // Inputs identificados via DevTools:
+        //   #distanciaRota (value="6.65")
+        //   #valorFrete    (value="22.5")
+        // Valores brutos, sem R$/Km/vírgula brasileira — muito mais robusto
+        // que parsear texto. Capturado AQUI (antes do save) porque depois do
+        // save a página é redirecionada.
+        try {
+          const valoresEdicao = await page.evaluate(() => {
+            const dist = document.getElementById('distanciaRota');
+            const valor = document.getElementById('valorFrete');
+            return {
+              km: dist ? (dist.value || '').toString().replace(',', '.').trim() : null,
+              valor_servico: valor ? (valor.value || '').toString().replace(',', '.').trim() : null,
+            };
+          }).catch(() => ({ km: null, valor_servico: null }));
+
+          if (valoresEdicao.km) valoresDepois.km = valoresEdicao.km;
+          if (valoresEdicao.valor_servico) valoresDepois.valor_servico = valoresEdicao.valor_servico;
+          log(`📊 [9b] Capturado da edição: km=${valoresEdicao.km} | serviço=R$${valoresEdicao.valor_servico}`);
+        } catch (eCap) {
+          log(`⚠️ [9b] Erro capturando hidden inputs: ${eCap.message}`);
+        }
+
         // Passo 10: Salvar alteracoes
         log('\u{1f4cc} Passo 10: Salvando alteracoes');
 
@@ -1217,31 +1241,37 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       await screenshot(page, os_numero, 'passo7_erro_recalculo').catch(() => null);
     }
 
-    // ── Passo 11: Capturar valores DEPOIS via fetch direto (otimizado) ──
-    // Reusa o data-parameters capturado no Passo 2c. Sem navegação, sem
-    // pesquisa, sem dropdown, sem modal — só fetch (~300ms).
-    // O cookie de sessão acompanha automaticamente porque o fetch roda
-    // no contexto da page logada.
+    // ── Passo 11: Capturar valor_profissional via fetch direto ──
+    // km e valor_servico já foram capturados no Passo 9b dos hidden inputs
+    // da página de edição. Aqui só pegamos o valor_profissional, que o
+    // backend AJAX retorna do banco corretamente (já confirmado em produção).
+    // O valor_servico do fetch é IGNORADO porque o backend só ecoa o que
+    // foi passado no parametro (que é o valor antigo).
     try {
-      log('📌 Passo 11: Capturando valores atualizados (fetch direto)');
+      log('📌 Passo 11: Capturando valor_profissional (fetch direto)');
 
       if (parametroResumoOS) {
         // Pequeno delay pra garantir que o backend processou o save
         await page.waitForTimeout(800);
 
-        valoresDepois = await fetchResumoServico(page, parametroResumoOS);
-        log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}${valoresDepois._erro ? ' | ERRO: ' + valoresDepois._erro : ''}`);
+        const respFetch = await fetchResumoServico(page, parametroResumoOS);
+        log(`📊 DEPOIS [fetch]: km=${respFetch.km} | serviço=R$${respFetch.valor_servico} (ignorado) | profissional=R$${respFetch.valor_profissional}${respFetch._erro ? ' | ERRO: ' + respFetch._erro : ''}`);
 
-        // Se o fetch retornou tudo null E o save deu certo, tenta novamente
-        // (pode ser que o backend ainda estivesse comitando)
-        if (freteRecalculado && !valoresDepois.km && !valoresDepois.valor_servico && !valoresDepois.valor_profissional) {
-          log('⚠️ [11] Fetch retornou vazio — retry após 1.5s');
+        // Atribui SÓ o valor_profissional (preserva km e valor_servico do Passo 9b)
+        if (respFetch.valor_profissional) {
+          valoresDepois.valor_profissional = respFetch.valor_profissional;
+        }
+
+        // Retry uma vez se profissional vier null E save deu certo
+        if (freteRecalculado && !valoresDepois.valor_profissional) {
+          log('⚠️ [11] valor_profissional vazio — retry após 1.5s');
           await page.waitForTimeout(1500);
-          valoresDepois = await fetchResumoServico(page, parametroResumoOS);
-          log(`📊 DEPOIS (retry): km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}`);
+          const retry = await fetchResumoServico(page, parametroResumoOS);
+          if (retry.valor_profissional) valoresDepois.valor_profissional = retry.valor_profissional;
+          log(`📊 DEPOIS (retry): profissional=R$${valoresDepois.valor_profissional}`);
         }
       } else {
-        log('⚠️ [11] Sem parametroResumoOS do Passo 2c — não é possível buscar via fetch');
+        log('⚠️ [11] Sem parametroResumoOS do Passo 2c — fallback');
         // Fallback de último caso: tentar pegar o parametro recarregando a página de acompanhamento
         try {
           // Higienizar contexto se houve nova guia
@@ -1277,8 +1307,9 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
           if (parametroFallback) {
             log(`📌 [11] data-parameters via fallback: ${parametroFallback}`);
-            valoresDepois = await fetchResumoServico(page, parametroFallback);
-            log(`📊 DEPOIS (fallback): km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}`);
+            const respFb = await fetchResumoServico(page, parametroFallback);
+            if (respFb.valor_profissional) valoresDepois.valor_profissional = respFb.valor_profissional;
+            log(`📊 DEPOIS (fallback): profissional=R$${valoresDepois.valor_profissional}`);
           } else {
             log('⚠️ [11] Fallback também não encontrou data-parameters');
           }
