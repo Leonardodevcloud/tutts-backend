@@ -222,7 +222,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log('✅ Já logado');
     }
 
-    await screenshot(page, os_numero, 'passo1_acompanhamento');
 
     // ── Passo 1b: Garantir que está na aba "Em execução" ────────────────────
     log('📌 Passo 1b: Clicando na aba "Em execução"');
@@ -233,7 +232,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       await page.waitForTimeout(800);
       log('✅ Aba "Em execução" selecionada');
     }
-    await screenshot(page, os_numero, 'passo1b_aba_em_execucao');
 
     // ── Passo 2: Localizar botão END. da OS ────────────────────────────────
     log(`📌 Passo 2: Localizando OS ${os_numero}`);
@@ -264,7 +262,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
 
       log('🔍 Botão não encontrado no DOM — usando pesquisa...');
-      await screenshot(page, os_numero, 'passo2_antes_pesquisa');
 
       // Clicar na barra "Pesquisar serviços" para expandir
       const barraPesquisa = page.locator('text=Pesquisar serviços').first();
@@ -274,7 +271,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         await page.waitForTimeout(500);
         log('✅ Barra de pesquisa expandida');
       }
-      await screenshot(page, os_numero, 'passo2_pesquisa_expandida');
 
       // Selecionar "Serviço" no select #search-type (classe custom-select)
       const selectPesquisa = page.locator('#search-type');
@@ -284,7 +280,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         await page.waitForTimeout(500);
         log('✅ Tipo de pesquisa: Serviço');
       }
-      await screenshot(page, os_numero, 'passo2_tipo_servico');
 
       // Preencher número da OS no campo de busca
       const inputBusca = page.locator('#search-autocomplete-input, input[placeholder*="número do serviço"]').first();
@@ -301,7 +296,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           fs.unlinkSync(SESSION_FILE);
           log('🗑️  Sessão removida');
         }
-        await screenshot(page, os_numero, 'passo2_relogin_antes');
         await fazerLogin(page);
         await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
         await page.waitForTimeout(2000);
@@ -331,11 +325,9 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
         log('✅ Campo de busca visível após re-login');
       }
-      await screenshot(page, os_numero, 'passo2_campo_busca');
 
       await inputBusca.fill(String(os_numero));
       await page.waitForTimeout(1500); // Aguardar jQuery UI autocomplete carregar
-      await screenshot(page, os_numero, 'passo2_autocomplete');
 
       // Clicar no item do autocomplete (jQuery UI: .ui-menu-item-wrapper)
       const autoItem = page.locator('.ui-menu-item .ui-menu-item-wrapper').filter({ hasText: String(os_numero) }).first();
@@ -358,7 +350,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
 
       await page.waitForTimeout(2000); // Aguardar resultado carregar
-      await screenshot(page, os_numero, 'passo2_resultado_busca');
 
       // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
       await page.waitForSelector(
@@ -371,7 +362,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     const btnEnd = page.locator(btnSelector).first();
     await btnEnd.scrollIntoViewIfNeeded();
     await page.waitForTimeout(500);
-    await screenshot(page, os_numero, 'passo2_botao_encontrado');
 
     // ── Passo 2a: Validar que a OS está Em Execução (não concluída/cancelada) ──
     log('📌 Passo 2a: Verificando status da OS');
@@ -530,7 +520,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     });
 
     await page.waitForTimeout(800);
-    await screenshot(page, os_numero, 'passo3_modal');
 
     // ── Passo 3b: Verificar se o ponto solicitado existe na OS ───────────────
     log(`📌 Passo 3b: Verificando se Ponto ${ponto} existe na OS`);
@@ -643,7 +632,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
     await page.waitForTimeout(800);
-    await screenshot(page, os_numero, `passo4_ponto${ponto}_clicado`);
 
     // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
     const formAbriu = await page.locator('input[placeholder="Latitude"]:visible').count().catch(() => 0);
@@ -717,7 +705,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       if (confirmarVisivel) break;
     }
     
-    await screenshot(page, os_numero, 'passo5_pos_validar');
 
     // Se endereço já foi corrigido anteriormente — abortar com erro específico
     if (jaCorrigidoAntes) {
@@ -785,7 +772,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // Aguardar processamento — verificar que algo mudou
     await page.waitForTimeout(1500);
-    await screenshot(page, os_numero, 'passo6_pos_confirmar');
 
     // Verificar que a confirmação realmente aplicou:
     // 1. O botão btn-confirmar-alteracao deve ter sumido
@@ -828,7 +814,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log('✅ Confirmação aplicada com sucesso');
     }
 
-    await screenshot(page, os_numero, 'passo6_endereco_confirmado');
     log('✅ Endereço confirmado');
 
     // ── Passo 7: Navegar para edição da OS ──────────────────────────────────
@@ -864,7 +849,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log(`📌 URL: ${urlEdicao}`);
       await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page.waitForTimeout(1500);
-      await screenshot(page, os_numero, 'passo7_pagina_edicao');
 
       // ── Passo 8: Atualizar endereço no input do ponto ───────────────────────
       log(`📌 Passo 8: Atualizando endereço do Ponto ${ponto}`);
@@ -917,7 +901,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Verificar que preencheu
       const valorInput = await inputEndereco.inputValue().catch(() => '');
       log(`📍 Input preenchido: "${valorInput}"`);
-      await screenshot(page, os_numero, 'passo8_endereco_preenchido');
 
       // ── Passo 8b: Clicar na lupa (buscar endereço) ──────────────────────────
       log('📌 Passo 8b: Clicando no botão buscar (lupa)');
@@ -978,7 +961,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       if (lupaClicada) {
         // Aguardar busca processar
         await page.waitForTimeout(2000);
-        await screenshot(page, os_numero, 'passo8b_pos_busca');
 
         // ── Passo 8c: Se aparecer validação/confirmação, aceitar ─────────────
         // O dialog handler já está ativo (page.on('dialog')), mas pode haver
@@ -994,7 +976,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
             await btnValidarEndereco.click();
             log('📌 Validação aceita (botão verde)');
             await page.waitForTimeout(1000);
-            await screenshot(page, os_numero, 'passo8c_validacao_aceita');
           }
         }
 
@@ -1156,7 +1137,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           }
         }
 
-        await screenshot(page, os_numero, 'passo9_pos_calcular');
         if (valorEncontrado) {
           log('\u{1f4b0} Valor calculado com sucesso');
         } else {
@@ -1172,7 +1152,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           }).catch(() => ({ temValor: false, salvarVisivel: false }));
           if (retryStatus.temValor) { valorEncontrado = true; log('\u{1f4b0} Valor encontrado no retry!'); }
           if (retryStatus.salvarVisivel) salvarApareceu = true;
-          await screenshot(page, os_numero, 'passo9_retry_calcular');
         }
 
         // ── Passo 9b: Capturar km + valor_servico dos hidden inputs ──
@@ -1219,7 +1198,6 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           log('\u{1f4cc} Botao Salvar clicado');
 
           await page.waitForTimeout(5000);
-          await screenshot(page, os_numero, 'passo10_pos_salvar');
 
           const alertaErro = await page.locator('.alert-danger:visible, .swal2-error:visible').count().catch(() => 0);
           if (alertaErro > 0) {
