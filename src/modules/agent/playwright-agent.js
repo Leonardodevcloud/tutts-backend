@@ -46,6 +46,83 @@ async function screenshot(page, os, etapa) {
   return path.basename(file);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Resumo Serviço — fetch direto no endpoint AJAX (~300ms vs ~25s via UI)
+// URL descoberta via SLA Monitor extension v7.7
+// ─────────────────────────────────────────────────────────────────────────
+const URL_RESUMO_SERVICO = 'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxModalInformacoesServico.php';
+
+function parseResumoHTML(html) {
+  if (!html || typeof html !== 'string') {
+    return { km: null, valor_servico: null, valor_profissional: null };
+  }
+  const mKm = html.match(/Dist[aâ]ncia\s*rota[:\s]*(\d+[.,]?\d*)/i);
+  const km = mKm ? mKm[1].replace(',', '.') : null;
+
+  const mServ = html.match(/Valor\s*(?:deste|do)\s*servi[çc]o[:\s]*(\d+[.,]?\d*)/i);
+  const valorServico = mServ ? mServ[1].replace(',', '.') : null;
+
+  const mProf = html.match(/Valor\s*do\s*profissional[:\s]*(\d+[.,]?\d*)/i);
+  const valorProf = mProf ? mProf[1].replace(',', '.') : null;
+
+  return { km, valor_servico: valorServico, valor_profissional: valorProf };
+}
+
+/**
+ * Captura o atributo data-parameters do botão "Resumo Serviço" da row de uma OS.
+ * Esse parametro é o que o backend PHP precisa pra retornar o HTML do modal.
+ */
+async function capturarParametroResumo(page, btnLocator) {
+  try {
+    const rowOS = page.locator('tr').filter({ has: btnLocator }).first();
+    const parametro = await rowOS.evaluate((row) => {
+      const link = row.querySelector('a.dropdown-item[data-action="ajaxModalInformacoesServico"], [data-action="ajaxModalInformacoesServico"]');
+      if (!link) return null;
+      return link.getAttribute('data-parameters') || link.getAttribute('data-parameter') || null;
+    });
+    return parametro || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Faz fetch direto no endpoint AJAX do MAP usando o cookie de sessão da page.
+ * Retorna { km, valor_servico, valor_profissional } parseados do HTML do modal.
+ */
+async function fetchResumoServico(page, parametro) {
+  if (!parametro) {
+    return { km: null, valor_servico: null, valor_profissional: null, _erro: 'sem_parametro' };
+  }
+  try {
+    const html = await page.evaluate(async ({ url, param }) => {
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: 'parametro=' + encodeURIComponent(param),
+          credentials: 'include',
+        });
+        if (!r.ok) return { __erro: 'http_' + r.status };
+        return { __html: await r.text() };
+      } catch (e) {
+        return { __erro: 'fetch_' + e.message };
+      }
+    }, { url: URL_RESUMO_SERVICO, param: parametro });
+
+    if (html.__erro) {
+      return { km: null, valor_servico: null, valor_profissional: null, _erro: html.__erro };
+    }
+    const parsed = parseResumoHTML(html.__html);
+    return parsed;
+  } catch (e) {
+    return { km: null, valor_servico: null, valor_profissional: null, _erro: 'evaluate_' + e.message };
+  }
+}
+
 async function isLoggedIn(page) {
   const url = page.url();
   if (!url.includes('/expresso') || url.includes('loginFuncionarioNovo')) return false;
@@ -121,7 +198,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     viewport: { width: 1280, height: 900 },
   });
 
-  const page = await context.newPage();
+  let page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT);
 
   try {
@@ -397,77 +474,49 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
     }
 
-    // ── Passo 2c: Capturar valores ANTES da correção (Resumo Serviço) ──
+    // ── Passo 2c: Capturar valores ANTES via fetch direto (otimizado) ──
+    // Usa o endpoint AJAX descoberto na extensão SLA Monitor v7.7 — pula
+    // dropdown/modal/screenshot, fica em ~300ms em vez de ~8s.
     let valoresAntes = { km: null, valor_servico: null, valor_profissional: null };
+    let parametroResumoOS = null;
     try {
-      log('📌 Passo 2c: Capturando valores antigos (Resumo Serviço)');
-      const rowOS = page.locator('tr').filter({ has: btnEnd }).first();
+      log('📌 Passo 2c: Capturando valores antigos (fetch direto)');
+      parametroResumoOS = await capturarParametroResumo(page, btnEnd);
+      log(`📌 [2c] data-parameters: ${parametroResumoOS || '(não encontrado)'}`);
 
-      // Encontrar e clicar no dropdown (engrenagem) na mesma row
-      const dropdownBtn = rowOS.locator('button.dropdown-toggle, button#dropdownMenuButton').first();
-      const temDropdown = await dropdownBtn.count().catch(() => 0);
-
-      if (temDropdown > 0) {
-        await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
-        await dropdownBtn.click();
-        await page.waitForTimeout(500);
-
-        // Clicar em "Resumo Serviço"
-        const resumoLink = page.locator('a.dropdown-item[data-action="ajaxModalInformacoesServico"], a.dropdown-item:has-text("Resumo Serviço"), a.dropdown-item:has-text("Resumo do Serviço")').first();
-        const temResumo = await resumoLink.count().catch(() => 0);
-
-        if (temResumo > 0) {
-          await resumoLink.click();
-          await page.waitForTimeout(2000);
-
-          // Capturar valores do modal
-          valoresAntes = await page.evaluate(() => {
-            const body = document.querySelector('.modal.show .modal-body, .modal.in .modal-body, #modalPadrao .modal-body');
-            if (!body) return { km: null, valor_servico: null, valor_profissional: null };
-            const texto = body.textContent || '';
-
-            // Distância rota: 18.71
-            const mKm = texto.match(/Dist[aâ]ncia\s*rota[:\s]*(\d+[.,]?\d*)/i);
-            const km = mKm ? mKm[1].replace(',', '.') : null;
-
-            // Valor deste serviço: 43,00
-            const mServ = texto.match(/Valor\s*(?:deste|do)\s*servi[çc]o[:\s]*(\d+[.,]?\d*)/i);
-            const valorServico = mServ ? mServ[1].replace(',', '.') : null;
-
-            // Valor do profissional: 30,00
-            const mProf = texto.match(/Valor\s*do\s*profissional[:\s]*(\d+[.,]?\d*)/i);
-            const valorProf = mProf ? mProf[1].replace(',', '.') : null;
-
-            return { km, valor_servico: valorServico, valor_profissional: valorProf };
-          }).catch(() => ({ km: null, valor_servico: null, valor_profissional: null }));
-
-          log(`📊 ANTES: km=${valoresAntes.km} | serviço=R$${valoresAntes.valor_servico} | profissional=R$${valoresAntes.valor_profissional}`);
-          await screenshot(page, os_numero, 'passo2c_resumo_servico');
-
-          // Fechar modal
-          await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .btn-primary[onclick*="limpar"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click().catch(() => {});
-          await page.waitForTimeout(800);
-
-          // Garantir que o modal fechou
-          const modalAindaAberto = await page.locator('.modal.show, .modal.in').isVisible().catch(() => false);
-          if (modalAindaAberto) {
-            await page.keyboard.press('Escape');
-            await page.waitForTimeout(500);
-          }
-        } else {
-          log('⚠️ Link "Resumo Serviço" não encontrado no dropdown');
-          // Fechar dropdown
-          await page.keyboard.press('Escape');
-          await page.waitForTimeout(300);
-        }
+      if (parametroResumoOS) {
+        valoresAntes = await fetchResumoServico(page, parametroResumoOS);
+        log(`📊 ANTES: km=${valoresAntes.km} | serviço=R$${valoresAntes.valor_servico} | profissional=R$${valoresAntes.valor_profissional}${valoresAntes._erro ? ' | ERRO: ' + valoresAntes._erro : ''}`);
       } else {
-        log('⚠️ Dropdown (engrenagem) não encontrado na row da OS');
+        // Fallback: fluxo UI antigo (caso a row não tenha o link de resumo no DOM)
+        log('⚠️ [2c] Sem data-parameters — fallback para fluxo UI');
+        const rowOS = page.locator('tr').filter({ has: btnEnd }).first();
+        const dropdownBtn = rowOS.locator('button.dropdown-toggle, button#dropdownMenuButton').first();
+        const temDropdown = await dropdownBtn.count().catch(() => 0);
+        if (temDropdown > 0) {
+          await dropdownBtn.scrollIntoViewIfNeeded().catch(() => {});
+          await dropdownBtn.click();
+          await page.waitForTimeout(500);
+
+          const resumoLink = page.locator('a.dropdown-item[data-action="ajaxModalInformacoesServico"], a.dropdown-item:has-text("Resumo Serviço"), a.dropdown-item:has-text("Resumo do Serviço")').first();
+          const temResumo = await resumoLink.count().catch(() => 0);
+
+          if (temResumo > 0) {
+            // Re-tentar capturar o parametro agora que o dropdown abriu
+            parametroResumoOS = await resumoLink.getAttribute('data-parameters').catch(() => null);
+            log(`📌 [2c] data-parameters (após dropdown): ${parametroResumoOS || '(ainda não)'}`);
+            await page.keyboard.press('Escape').catch(() => {});
+            await page.waitForTimeout(300);
+
+            if (parametroResumoOS) {
+              valoresAntes = await fetchResumoServico(page, parametroResumoOS);
+              log(`📊 ANTES (fallback): km=${valoresAntes.km} | serviço=R$${valoresAntes.valor_servico} | profissional=R$${valoresAntes.valor_profissional}`);
+            }
+          }
+        }
       }
     } catch (e) {
-      log(`⚠️ Erro ao capturar resumo: ${e.message} — prosseguindo`);
-      // Fechar qualquer modal/dropdown que possa ter ficado aberto
-      await page.keyboard.press('Escape').catch(() => {});
-      await page.waitForTimeout(500);
+      log(`⚠️ Erro Passo 2c: ${e.message} — prosseguindo`);
     }
 
     // ── Passo 3: Abrir modal de endereços ────────────────────────────────────
@@ -1168,183 +1217,77 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       await screenshot(page, os_numero, 'passo7_erro_recalculo').catch(() => null);
     }
 
-    // ── Passo 11: Capturar valores DEPOIS via Resumo Serviço ──
+    // ── Passo 11: Capturar valores DEPOIS via fetch direto (otimizado) ──
+    // Reusa o data-parameters capturado no Passo 2c. Sem navegação, sem
+    // pesquisa, sem dropdown, sem modal — só fetch (~300ms).
+    // O cookie de sessão acompanha automaticamente porque o fetch roda
+    // no contexto da page logada.
     try {
-      log('📌 Passo 11: Capturando valores atualizados (Resumo Serviço)');
+      log('📌 Passo 11: Capturando valores atualizados (fetch direto)');
 
-      // Voltar para a página de acompanhamento
-      log('📌 [11] Navegando para acompanhamento-servicos...');
-      await page.goto('https://tutts.com.br/expresso/expressoat/acompanhamento-servicos', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(2500);
-      log('📌 [11] Página carregada');
+      if (parametroResumoOS) {
+        // Pequeno delay pra garantir que o backend processou o save
+        await page.waitForTimeout(800);
 
-      // Verificar se sessão expirou (redirecionou pra login)
-      const urlAtual = page.url();
-      if (urlAtual.includes('login') || urlAtual.includes('autenticacao')) {
-        log('⚠️ [11] Sessão expirou — relogando');
-        await page.locator('input[name="login"]').first().fill(process.env.TUTTS_LOGIN || '').catch(() => {});
-        await page.locator('input[name="senha"]').first().fill(process.env.TUTTS_SENHA || '').catch(() => {});
-        await page.locator('input[name="logar"]').first().click().catch(() => {});
-        await page.waitForTimeout(2000);
-        await page.goto('https://tutts.com.br/expresso/expressoat/acompanhamento-servicos', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(2000);
-      }
+        valoresDepois = await fetchResumoServico(page, parametroResumoOS);
+        log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}${valoresDepois._erro ? ' | ERRO: ' + valoresDepois._erro : ''}`);
 
-      // Clicar aba "Em execução" (mesmo seletor do passo 1b)
-      log('📌 [11] Clicando aba Em execução...');
-      try {
-        await page.locator('#pills-em-execucao-tab').first().click({ timeout: 5000 });
-        await page.waitForTimeout(1500);
-      } catch (e) { log('⚠️ [11] Falha ao clicar aba: ' + e.message); }
-
-      // Verificar se a OS já está visível na tabela (sem precisar pesquisar)
-      log('📌 [11] Verificando se OS está visível...');
-      let btnEndAfter = page.locator(`button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`).first();
-      let temBtnAfter = await btnEndAfter.count().catch(() => 0);
-      log(`📌 [11] Botão direto na tabela: ${temBtnAfter}`);
-
-      // Se não achou direto, fazer pesquisa
-      if (temBtnAfter === 0) {
-        log('📌 [11] Fazendo pesquisa pela OS...');
-        try {
-          // Expandir barra de pesquisa
-          const barraSearch = page.locator('#search-type, .search-toggle').first();
-          if (await barraSearch.count().catch(() => 0) > 0) {
-            await barraSearch.click({ timeout: 3000 }).catch(() => {});
-            await page.waitForTimeout(800);
-          }
-
-          // Selecionar tipo Serviço
-          const selectTipo = page.locator('select#searchType, select[name="searchType"]').first();
-          if (await selectTipo.count().catch(() => 0) > 0) {
-            await selectTipo.selectOption('servico').catch(() => {});
-            await page.waitForTimeout(500);
-          }
-
-          // Digitar OS
-          const campo = page.locator('input#searchInput, input[name="searchInput"], input.search-input').first();
-          if (await campo.count().catch(() => 0) > 0) {
-            await campo.fill(os_numero, { timeout: 3000 });
-            await page.waitForTimeout(1500);
-            // Tentar autocomplete
-            const autoItem = page.locator('.ui-autocomplete .ui-menu-item, .autocomplete-suggestion, .tt-suggestion').first();
-            if (await autoItem.count().catch(() => 0) > 0) {
-              await autoItem.click().catch(() => {});
-              await page.waitForTimeout(2000);
-            } else {
-              await campo.press('Enter').catch(() => {});
-              await page.waitForTimeout(2000);
-            }
-          }
-        } catch (eSearch) { log('⚠️ [11] Erro pesquisa: ' + eSearch.message); }
-
-        // Tentar localizar de novo
-        btnEndAfter = page.locator(`button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`).first();
-        temBtnAfter = await btnEndAfter.count().catch(() => 0);
-        log(`📌 [11] Botão após pesquisa: ${temBtnAfter}`);
-      }
-
-      await screenshot(page, os_numero, 'passo11_busca_os');
-
-      if (temBtnAfter > 0) {
-        const rowOS = page.locator('tr').filter({ has: btnEndAfter }).first();
-        const dropdownBtn = rowOS.locator('button.dropdown-toggle, button#dropdownMenuButton').first();
-        const temDrop = await dropdownBtn.count().catch(() => 0);
-        log(`📌 [11] Dropdown encontrado: ${temDrop}`);
-
-        if (temDrop > 0) {
-          try {
-            await dropdownBtn.scrollIntoViewIfNeeded({ timeout: 5000 });
-            log('📌 [11] Scroll OK');
-          } catch (eScroll) { log('⚠️ [11] Erro scroll: ' + eScroll.message); }
-
-          try {
-            await dropdownBtn.click({ force: true, timeout: 5000 });
-            log('📌 [11] Click dropdown OK');
-          } catch (eClick) {
-            log('⚠️ [11] Erro click dropdown: ' + eClick.message);
-            // Fallback: clicar via JS
-            await rowOS.evaluate((row) => {
-              const btn = row.querySelector('button.dropdown-toggle, button#dropdownMenuButton');
-              if (btn) btn.click();
-            }).catch(() => {});
-          }
-          await page.waitForTimeout(1000);
-          await screenshot(page, os_numero, 'passo11_dropdown_aberto');
-
-          // Buscar o Resumo Serviço NO DROPDOWN ATIVO (página inteira, mas só o show)
-          log('📌 [11] Procurando link Resumo Serviço...');
-          const resumoClicado = await page.evaluate(() => {
-            // Procurar dropdown menu visível
-            const menus = document.querySelectorAll('.dropdown-menu.show, .dropdown.show .dropdown-menu');
-            for (const menu of menus) {
-              const links = menu.querySelectorAll('a.dropdown-item');
-              for (const link of links) {
-                const txt = (link.textContent || '').toLowerCase();
-                const action = (link.getAttribute('data-action') || '').toLowerCase();
-                if (txt.includes('resumo') || action.includes('informacoesservico') || action.includes('informacoesServico')) {
-                  link.click();
-                  return { ok: true, texto: link.textContent.trim(), action: link.getAttribute('data-action') };
-                }
-              }
-            }
-            // Fallback: buscar em qualquer dropdown-item visível
-            const allLinks = document.querySelectorAll('a.dropdown-item');
-            for (const link of allLinks) {
-              if (link.offsetParent === null) continue; // não visível
-              const txt = (link.textContent || '').toLowerCase();
-              if (txt.includes('resumo')) {
-                link.click();
-                return { ok: true, texto: link.textContent.trim(), fallback: true };
-              }
-            }
-            return { ok: false, totalLinks: allLinks.length };
-          }).catch((e) => ({ ok: false, erro: e.message }));
-
-          log(`📌 [11] Resumo click: ${JSON.stringify(resumoClicado)}`);
-
-          if (resumoClicado.ok) {
-            await page.waitForTimeout(2500);
-            await screenshot(page, os_numero, 'passo11_modal_aberto');
-
-            valoresDepois = await page.evaluate(() => {
-              const body = document.querySelector('.modal.show .modal-body, .modal.in .modal-body, #modalPadrao .modal-body');
-              if (!body) return { km: null, valor_servico: null, valor_profissional: null, _erro: 'modal_nao_encontrado' };
-              const texto = body.textContent || '';
-
-              const mKm = texto.match(/Dist[aâ]ncia\s*rota[:\s]*(\d+[.,]?\d*)/i);
-              const km = mKm ? mKm[1].replace(',', '.') : null;
-
-              const mServ = texto.match(/Valor\s*(?:deste|do)\s*servi[çc]o[:\s]*(\d+[.,]?\d*)/i);
-              const valorServico = mServ ? mServ[1].replace(',', '.') : null;
-
-              const mProf = texto.match(/Valor\s*do\s*profissional[:\s]*(\d+[.,]?\d*)/i);
-              const valorProf = mProf ? mProf[1].replace(',', '.') : null;
-
-              return { km, valor_servico: valorServico, valor_profissional: valorProf };
-            }).catch((evalErr) => ({ km: null, valor_servico: null, valor_profissional: null, _erro: evalErr.message }));
-
-            log(`📊 DEPOIS: km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}${valoresDepois._erro ? ' | ERRO: ' + valoresDepois._erro : ''}`);
-
-            // Fechar modal
-            await page.locator('.modal.show button[data-dismiss="modal"], .modal.show .close, #modalPadrao button[data-dismiss="modal"]').first().click({ force: true }).catch(() => {});
-            await page.waitForTimeout(500);
-          } else {
-            log('⚠️ [11] Resumo Serviço não clicado: ' + JSON.stringify(resumoClicado));
-            await screenshot(page, os_numero, 'passo11_sem_resumo_link');
-            await page.keyboard.press('Escape').catch(() => {});
-          }
-        } else {
-          log('⚠️ [11] Dropdown não encontrado na row');
-          await screenshot(page, os_numero, 'passo11_sem_dropdown');
+        // Se o fetch retornou tudo null E o save deu certo, tenta novamente
+        // (pode ser que o backend ainda estivesse comitando)
+        if (freteRecalculado && !valoresDepois.km && !valoresDepois.valor_servico && !valoresDepois.valor_profissional) {
+          log('⚠️ [11] Fetch retornou vazio — retry após 1.5s');
+          await page.waitForTimeout(1500);
+          valoresDepois = await fetchResumoServico(page, parametroResumoOS);
+          log(`📊 DEPOIS (retry): km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}`);
         }
       } else {
-        log('⚠️ [11] OS não encontrada na página de acompanhamento');
-        await screenshot(page, os_numero, 'passo11_os_nao_encontrada');
+        log('⚠️ [11] Sem parametroResumoOS do Passo 2c — não é possível buscar via fetch');
+        // Fallback de último caso: tentar pegar o parametro recarregando a página de acompanhamento
+        try {
+          // Higienizar contexto se houve nova guia
+          const pages = context.pages();
+          if (pages.length > 1) {
+            for (let i = 1; i < pages.length; i++) {
+              await pages[i].close().catch(() => {});
+            }
+            page = context.pages()[0];
+            await page.bringToFront().catch(() => {});
+          }
+
+          await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+          await page.waitForTimeout(1500);
+
+          const abaExec = page.locator('#pills-em-execucao-tab');
+          if (await abaExec.isVisible().catch(() => false)) {
+            await abaExec.click().catch(() => {});
+            await page.waitForTimeout(1000);
+          }
+
+          // Tentar localizar o data-parameters direto na página atual (sem precisar pesquisar)
+          let parametroFallback = await page.evaluate((osNum) => {
+            const links = document.querySelectorAll('[data-action="ajaxModalInformacoesServico"]');
+            for (const link of links) {
+              const row = link.closest('tr');
+              if (row && (row.textContent || '').includes(osNum)) {
+                return link.getAttribute('data-parameters') || link.getAttribute('data-parameter') || null;
+              }
+            }
+            return null;
+          }, String(os_numero)).catch(() => null);
+
+          if (parametroFallback) {
+            log(`📌 [11] data-parameters via fallback: ${parametroFallback}`);
+            valoresDepois = await fetchResumoServico(page, parametroFallback);
+            log(`📊 DEPOIS (fallback): km=${valoresDepois.km} | serviço=R$${valoresDepois.valor_servico} | profissional=R$${valoresDepois.valor_profissional}`);
+          } else {
+            log('⚠️ [11] Fallback também não encontrou data-parameters');
+          }
+        } catch (eFb) {
+          log(`⚠️ [11] Erro no fallback: ${eFb.message}`);
+        }
       }
     } catch (e) {
       log(`⚠️ Erro Passo 11: ${e.message} — stack: ${e.stack?.substring(0, 200)}`);
-      await screenshot(page, os_numero, 'passo11_erro').catch(() => null);
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
