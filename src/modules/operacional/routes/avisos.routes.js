@@ -1,25 +1,17 @@
 const express = require('express');
+const {
+  listarRegioes: listarRegioesProfissionais,
+  buscarRegiaoProfissional,
+} = require('../../../shared/utils/profissionaisLookup');
+
 function createAvisosRouter(pool) {
   const router = express.Router();
 
-  // Listar todas as regiões (cidades) da planilha
+  // Listar todas as regiões (CRM → planilha fallback)
   router.get('/regioes', async (req, res) => {
     try {
-      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-      const response = await fetch(sheetUrl);
-      const text = await response.text();
-      const lines = text.split('\n').slice(1); // pular header
-      
-      const regioes = new Set();
-      lines.forEach(line => {
-        const cols = line.split(',');
-        const cidade = cols[3]?.trim(); // coluna Cidade
-        if (cidade && cidade.length > 0 && cidade !== '') {
-          regioes.add(cidade);
-        }
-      });
-      
-      res.json([...regioes].sort());
+      const regioes = await listarRegioesProfissionais(pool);
+      res.json(regioes);
     } catch (err) {
       console.error('❌ Erro ao buscar regiões:', err);
       res.json([]);
@@ -98,19 +90,12 @@ function createAvisosRouter(pool) {
     try {
       const { cod } = req.params;
       
-      // Buscar região do usuário na planilha
-      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-      const response = await fetch(sheetUrl);
-      const text = await response.text();
-      const lines = text.split('\n').slice(1);
-      
+      // Buscar região do usuário (CRM → planilha fallback)
       let userRegiao = null;
-      for (const line of lines) {
-        const cols = line.split(',');
-        if (cols[0]?.trim() === cod) {
-          userRegiao = cols[3]?.trim(); // coluna Cidade
-          break;
-        }
+      try {
+        userRegiao = await buscarRegiaoProfissional(pool, cod);
+      } catch (e) {
+        console.warn('[avisos] Erro ao buscar região do usuário:', e.message);
       }
       
       const now = new Date();

@@ -10,6 +10,12 @@ const rateLimit = require('express-rate-limit');
 const { gerarTokenIndicacao } = require('./config.service');
 const { createValidacaoIaRoutes } = require('./routes/validacao-ia.routes');
 const { processarFotos } = require('../../shared/phash');
+const {
+  buscarProfissional,
+  buscarNomeProfissional,
+  buscarRegiaoProfissional,
+  listarRegioes: listarRegioesProfissionais,
+} = require('../../shared/utils/profissionaisLookup');
 
 function createConfigRouter(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
@@ -1839,24 +1845,11 @@ router.get('/indicacao-link/estatisticas/:userCod', verificarToken, async (req, 
 // PROMOÇÕES NOVATOS
 // ============================================
 
-// Listar regiões disponíveis da planilha (para criar promoções)
+// Listar regiões disponíveis (CRM → planilha fallback) para criar promoções
 router.get('/promocoes-novatos/regioes', verificarToken, async (req, res) => {
   try {
-    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-    const response = await fetch(sheetUrl);
-    const text = await response.text();
-    const lines = text.split('\n').slice(1); // pular header
-    
-    const regioes = new Set();
-    lines.forEach(line => {
-      const cols = line.split(',');
-      const cidade = cols[3]?.trim(); // coluna Cidade (índice 3 = coluna D)
-      if (cidade && cidade.length > 0 && cidade !== '') {
-        regioes.add(cidade);
-      }
-    });
-    
-    res.json([...regioes].sort());
+    const regioes = await listarRegioesProfissionais(pool);
+    res.json(regioes);
   } catch (err) {
     console.error('❌ Erro ao buscar regiões para novatos:', err);
     res.json([]);
@@ -1871,19 +1864,12 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', verificarToken, async (r
   try {
     const { userCod } = req.params;
     
-    // Buscar região do usuário na planilha do Google Sheets
-    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-    const sheetResponse = await fetch(sheetUrl);
-    const sheetText = await sheetResponse.text();
-    const sheetLines = sheetText.split('\n').slice(1); // pular header
-    
+    // Buscar região do usuário (CRM → planilha fallback)
     let userRegiao = null;
-    for (const line of sheetLines) {
-      const cols = line.split(',');
-      if (cols[0]?.trim() === userCod.toString()) {
-        userRegiao = cols[3]?.trim(); // coluna Cidade (índice 3 = coluna D)
-        break;
-      }
+    try {
+      userRegiao = await buscarRegiaoProfissional(pool, userCod);
+    } catch (e) {
+      console.warn('[promocoes-novatos] Erro ao buscar região:', e.message);
     }
     
     // Verificar se há promoções ativas
@@ -1967,7 +1953,7 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', verificarToken, async (r
         elegivel: false,
         motivo: userRegiao 
           ? `Não há promoções ativas para sua região (${userRegiao}).` 
-          : 'Você não está cadastrado na planilha de profissionais ou não tem região definida.',
+          : 'Você não está cadastrado no banco de profissionais ou não tem região definida.',
         promocoes: [],
         totalEntregas,
         diasSemEntrega,
@@ -2939,35 +2925,12 @@ router.post('/recrutamento/:id/atribuir', verificarToken, verificarAdmin, async 
       return res.status(400).json({ error: 'Este profissional já está atribuído a esta necessidade' });
     }
     
-    // Buscar nome do profissional na planilha do Google Sheets
+    // Buscar nome do profissional (CRM → planilha → disponibilidade → users)
     let nome_profissional = null;
     try {
-      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-      const response = await fetch(sheetUrl);
-      const text = await response.text();
-      const lines = text.split('\n').slice(1);
-      
-      for (const line of lines) {
-        const cols = line.split(',');
-        if (cols[0]?.trim() === cod_profissional) {
-          nome_profissional = cols[1]?.trim() || null;
-          break;
-        }
-      }
-    } catch (sheetErr) {
-      console.log('Erro ao buscar na planilha, tentando fallback:', sheetErr.message);
-    }
-    
-    // Fallback: buscar na tabela de disponibilidade se não achou na planilha
-    if (!nome_profissional) {
-      const profResult = await pool.query(
-        `SELECT DISTINCT nome_profissional 
-         FROM disponibilidade_linhas 
-         WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
-         LIMIT 1`,
-        [cod_profissional]
-      );
-      nome_profissional = profResult.rows[0]?.nome_profissional || null;
+      nome_profissional = await buscarNomeProfissional(pool, cod_profissional);
+    } catch (lookupErr) {
+      console.log('Erro ao buscar profissional:', lookupErr.message);
     }
     
     // Inserir atribuição
@@ -3050,55 +3013,19 @@ router.delete('/recrutamento/atribuicao/:id', verificarToken, verificarAdmin, as
 router.get('/recrutamento/buscar-profissional/:cod', verificarToken, async (req, res) => {
   try {
     const { cod } = req.params;
-    
-    // Buscar na planilha do Google Sheets (mesma usada no módulo de disponibilidade)
-    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-    const response = await fetch(sheetUrl);
-    const text = await response.text();
-    const lines = text.split('\n').slice(1); // pular header
-    
-    let profissional = null;
-    for (const line of lines) {
-      const cols = line.split(',');
-      const codigo = cols[0]?.trim();
-      if (codigo === cod) {
-        profissional = {
-          cod_profissional: codigo,
-          nome_profissional: cols[1]?.trim() || null,
-          cidade: cols[3]?.trim() || null
-        };
-        break;
-      }
-    }
-    
-    if (!profissional) {
-      // Fallback: tentar buscar na tabela de disponibilidade
-      const dispResult = await pool.query(
-        `SELECT DISTINCT cod_profissional, nome_profissional
-         FROM disponibilidade_linhas 
-         WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
-         LIMIT 1`,
-        [cod]
-      );
-      
-      if (dispResult.rows.length > 0) {
-        return res.json(dispResult.rows[0]);
-      }
-      
-      // Fallback 2: tentar buscar na tabela de usuários
-      const userResult = await pool.query(
-        'SELECT cod_profissional, full_name as nome_profissional FROM users WHERE cod_profissional = $1',
-        [cod]
-      );
-      
-      if (userResult.rows.length > 0) {
-        return res.json(userResult.rows[0]);
-      }
-      
+
+    // Busca unificada: CRM → planilha → disponibilidade → users
+    const p = await buscarProfissional(pool, cod);
+    if (!p) {
       return res.status(404).json({ error: 'Profissional não encontrado' });
     }
-    
-    res.json(profissional);
+
+    res.json({
+      cod_profissional: p.cod,
+      nome_profissional: p.nome,
+      cidade: p.cidade || p.regiao || null,
+      origem: p.origem,
+    });
   } catch (error) {
     console.error('Erro ao buscar profissional:', error);
     res.status(500).json({ error: 'Erro ao buscar profissional' });

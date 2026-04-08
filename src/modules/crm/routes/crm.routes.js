@@ -2,9 +2,97 @@
  * Sub-Router: CRM Integração
  */
 const express = require('express');
+const {
+  buscarProfissional,
+  listarProfissionais,
+  listarRegioes: listarRegioesProfissionais,
+  invalidarCachePlanilha,
+} = require('../../../shared/utils/profissionaisLookup');
 
 function createCrmCoreRoutes(pool) {
   const router = express.Router();
+
+  // ============================================================
+  // PROFISSIONAIS-CADASTRO
+  // Consumido pelo CRM (Next.js / Vercel) como fonte única do
+  // "banco de profissionais". CRM → planilha → fallbacks.
+  // ============================================================
+
+  // GET /profissionais-cadastro/regioes — lista de regiões únicas
+  router.get('/profissionais-cadastro/regioes', async (req, res) => {
+    try {
+      const regioes = await listarRegioesProfissionais(pool);
+      res.json({ success: true, regioes });
+    } catch (err) {
+      console.error('[CRM] Erro /profissionais-cadastro/regioes:', err);
+      res.status(500).json({ success: false, regioes: [], error: err.message });
+    }
+  });
+
+  // POST /profissionais-cadastro/invalidar-cache — força refresh da planilha
+  router.post('/profissionais-cadastro/invalidar-cache', async (req, res) => {
+    try {
+      invalidarCachePlanilha();
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET /profissionais-cadastro/:cod — busca por código
+  router.get('/profissionais-cadastro/:cod', async (req, res) => {
+    try {
+      const p = await buscarProfissional(pool, req.params.cod);
+      if (!p) {
+        return res.status(404).json({ success: false, encontrado: false });
+      }
+      res.json({ success: true, encontrado: true, profissional: p });
+    } catch (err) {
+      console.error('[CRM] Erro /profissionais-cadastro/:cod:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET /profissionais-cadastro — lista completa (merge CRM + planilha)
+  router.get('/profissionais-cadastro', async (req, res) => {
+    try {
+      const dados = await listarProfissionais(pool);
+
+      // Estatísticas para manter compat com o endpoint antigo do CRM Vercel
+      const regioesSet = new Set();
+      const ativadoresSet = new Set();
+      const estatisticas = {
+        total: dados.length,
+        por_origem: { crm: 0, planilha: 0 },
+        porRegiao: {},
+        porAtivador: {},
+      };
+      for (const p of dados) {
+        if (p.origem && estatisticas.por_origem[p.origem] !== undefined) {
+          estatisticas.por_origem[p.origem]++;
+        }
+        if (p.regiao) {
+          regioesSet.add(p.regiao);
+          estatisticas.porRegiao[p.regiao] = (estatisticas.porRegiao[p.regiao] || 0) + 1;
+        }
+        if (p.quemAtivou) {
+          ativadoresSet.add(p.quemAtivou);
+          estatisticas.porAtivador[p.quemAtivou] = (estatisticas.porAtivador[p.quemAtivou] || 0) + 1;
+        }
+      }
+
+      res.json({
+        success: true,
+        data: dados,
+        estatisticas,
+        regioes: Array.from(regioesSet).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+        ativadores: Array.from(ativadoresSet).sort(),
+      });
+    } catch (err) {
+      console.error('[CRM] Erro /profissionais-cadastro:', err);
+      res.status(500).json({ success: false, data: [], error: err.message });
+    }
+  });
 
   router.get('/profissionais-em-operacao', async (req, res) => {
     try {
