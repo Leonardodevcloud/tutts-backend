@@ -1,18 +1,22 @@
 /**
  * playwright-sla-capture.js
- * Captura pontos de uma OS via endpoint AJAX do MAP (sem abrir UI de modal).
+ * Captura pontos de uma OS abrindo o modal de endereços via Playwright headless.
  *
  * ARQUITETURA:
  *   - Sessão ISOLADA do agent-worker (arquivo/credencial separados)
  *   - Login com SISTEMA_EXTERNO_SLA_EMAIL / SISTEMA_EXTERNO_SLA_SENHA
- *   - Navega pra /acompanhamento-servicos (mantém cookie de sessão válido)
- *   - Fetch direto em ajaxModalInformacoesServico.php → HTML do modal
- *   - Parseia texto dos pontos e aplica parser 814 ou 767
+ *   - Navega pra /acompanhamento-servicos, ativa aba "Em execução"
+ *   - Localiza OS via botão END. (com fallback pra busca autocomplete jQuery UI)
+ *   - Clica no botão, aguarda modal abrir, extrai endereços via DOM:
+ *       .btn-corrigir-endereco[data-ponto="N"] + span#end-antigo-{idEndereco}
+ *   - Fecha modal e libera recursos
  *
  * IMPORTANTE:
  *   - Credencial precisa ser diferente da do agent E da do operador,
  *     senão o MAP invalida sessões quando múltiplas abas estão abertas.
  *   - Mutex interno garante 1 captura por vez nesta sessão.
+ *   - Como roda headless no servidor, abrir modal NÃO causa problema
+ *     pro operador (ao contrário da extensão v7.15 que abria no browser dele).
  */
 
 'use strict';
@@ -29,9 +33,6 @@ const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
 const ACOMP_URL = () =>
   process.env.SISTEMA_EXTERNO_ACOMPANHAMENTO_URL ||
   'https://tutts.com.br/expresso/expressoat/acompanhamento-servicos';
-
-const URL_RESUMO_SERVICO =
-  'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxModalInformacoesServico.php';
 
 // ── Mutex interno (serializa capturas nesta sessão) ──────────────────────────
 let _mutexBusy = false;
@@ -105,122 +106,8 @@ async function fazerLogin(page) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// FETCH AJAX — busca HTML do modal sem abrir UI
-// ═════════════════════════════════════════════════════════════════════════════
-
-/**
- * Captura o atributo data-parameters do link "Resumo Serviço" associado à OS.
- * Busca pelo BOTÃO funcaoEnderecoServico (mesmo padrão do playwright-agent),
- * que é mais robusto que buscar por tr[data-order-id] — o botão pode existir
- * no DOM mesmo se a row não estiver visível no viewport.
- */
-async function capturarParametroResumo(page, osNumero) {
-  try {
-    const param = await page.evaluate((os) => {
-      // Procura o botão END. pela OS (data-id ou data-text-id)
-      const btn = document.querySelector(
-        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os}"], ` +
-        `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os}"]`
-      );
-      if (!btn) return null;
-      const row = btn.closest('tr');
-      if (!row) return null;
-      const link = row.querySelector(
-        'a.dropdown-item[data-action="ajaxModalInformacoesServico"], [data-action="ajaxModalInformacoesServico"]'
-      );
-      if (!link) return null;
-      return link.getAttribute('data-parameters') || link.getAttribute('data-parameter') || null;
-    }, osNumero);
-
-    return param;
-  } catch (_) {
-    return null;
-  }
-}
-
-/**
- * Faz fetch direto no endpoint AJAX do MAP usando o cookie de sessão da page.
- * Retorna o HTML bruto do modal.
- */
-async function fetchHtmlModal(page, parametro) {
-  if (!parametro) return null;
-
-  const resposta = await page.evaluate(
-    async ({ url, param }) => {
-      try {
-        const r = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-          body: 'parametro=' + encodeURIComponent(param),
-          credentials: 'include',
-        });
-        if (!r.ok) return { __erro: 'http_' + r.status };
-        return { __html: await r.text() };
-      } catch (e) {
-        return { __erro: 'fetch_' + e.message };
-      }
-    },
-    { url: URL_RESUMO_SERVICO, param: parametro }
-  );
-
-  if (resposta.__erro) {
-    throw new Error(`Fetch modal falhou: ${resposta.__erro}`);
-  }
-  return resposta.__html;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
 // PARSERS — HTML → texto → pontos (portados da extensão v7.15)
 // ═════════════════════════════════════════════════════════════════════════════
-
-/**
- * Converte HTML do modal em texto limpo. Mantém quebras pra separar pontos.
- */
-function htmlToText(html) {
-  if (!html) return '';
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|tr|td|th)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{2,}/g, '\n')
-    .trim();
-}
-
-/**
- * Extrai blocos de pontos do texto do modal.
- * Retorna [{ numero: Number, texto: String }, ...]
- */
-function extrairPontos(textoModal) {
-  if (!textoModal) return [];
-
-  // Normaliza em linha única pra regex global
-  const linha = textoModal.replace(/\s+/g, ' ').trim();
-
-  // Match todos "Ponto N" (até 9 pontos) e captura o texto até o próximo "Ponto M" ou fim
-  const regex = /Ponto\s+(\d+)\s*[-–:]?\s*([\s\S]*?)(?=Ponto\s+\d+\s*[-–:]?|$)/gi;
-  const pontos = [];
-  let m;
-  while ((m = regex.exec(linha)) !== null) {
-    const numero = parseInt(m[1], 10);
-    const texto = (m[2] || '').trim();
-    if (numero >= 1 && numero <= 9 && texto) {
-      pontos.push({ numero, texto });
-    }
-  }
-  return pontos;
-}
 
 /**
  * Parser 814 — endereço até o 1º CEP, nomeCliente após "Nome Cliente:"
@@ -477,29 +364,97 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
       throw new Error(`OS ${os_numero} não encontrada na tela mesmo após pesquisa.`);
     }
 
-    // ── Passo 4: captura o data-parameters e faz fetch do modal ──────────
-    const parametro = await capturarParametroResumo(page, os_numero);
+    // ── Passo 4: scroll + clica no botão END. pra abrir modal de endereços ──
+    const btnEnd = page.locator(btnSelector).first();
+    await btnEnd.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
 
-    if (!parametro) {
-      throw new Error(
-        `OS ${os_numero} encontrada mas sem link "Resumo Serviço" (data-parameters).`
+    log(`📌 Abrindo modal de endereços da OS ${os_numero}`);
+    await btnEnd.click({ force: true });
+
+    // Aguarda modal aparecer
+    try {
+      await page.waitForSelector(
+        '.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in',
+        { state: 'visible', timeout: TIMEOUT }
       );
+    } catch (_) {
+      throw new Error(`Modal de endereços não abriu para OS ${os_numero}`);
     }
+    await page.waitForTimeout(600); // aguarda conteúdo terminar de carregar
 
-    // Fetch direto do HTML do modal (~300ms)
-    const html = await fetchHtmlModal(page, parametro);
-    const texto = htmlToText(html);
-    const pontosBrutos = extrairPontos(texto);
+    // ── Passo 5: extrai pontos via DOM estruturado ────────────────────────
+    // Estrutura esperada (do playwright-agent):
+    //   <button class="btn-corrigir-endereco"
+    //           data-ponto="N"
+    //           data-id-endereco="X"
+    //           data-lat="..." data-lon="...">
+    //   <span id="end-antigo-{X}">{endereço}</span>
+    const pontosBrutos = await page.evaluate(() => {
+      const btns = document.querySelectorAll('.btn-corrigir-endereco[data-ponto]');
+      const resultado = [];
+      btns.forEach((btn) => {
+        const numero = parseInt(btn.getAttribute('data-ponto') || '0', 10);
+        if (!numero || numero < 1 || numero > 9) return;
+
+        const idEnd = btn.getAttribute('data-id-endereco');
+        let texto = '';
+
+        // Estratégia 1: span#end-antigo-{id} (textContent funciona mesmo se display:none)
+        if (idEnd) {
+          const span = document.getElementById('end-antigo-' + idEnd);
+          if (span) {
+            texto = (span.textContent || '').trim();
+          }
+        }
+
+        // Estratégia 2: fallback — pega o container do ponto e extrai texto
+        if (!texto || texto.length < 5) {
+          let container = btn.parentElement;
+          while (container && !container.textContent.includes('Ponto')) {
+            container = container.parentElement;
+            if (container && container.classList.contains('modal-body')) break;
+          }
+          if (container) {
+            const fullText = container.textContent || '';
+            const regex = /Ponto\s*\d+\s*([\s\S]*?)(?:PEC|Corrigir|$)/i;
+            const m = fullText.match(regex);
+            if (m) {
+              texto = m[1].replace(/\s+/g, ' ').trim().substring(0, 500);
+            }
+          }
+        }
+
+        if (texto) {
+          resultado.push({ numero, texto });
+        }
+      });
+      // Garante ordem por número do ponto
+      return resultado.sort((a, b) => a.numero - b.numero);
+    });
+
+    // Fecha o modal (pra não deixar lixo visual em debug/screenshots futuros)
+    try {
+      await page.evaluate(() => {
+        const modal = document.querySelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in');
+        if (modal) {
+          const btnClose = modal.querySelector('button[data-dismiss="modal"], .close, .modal-header .close');
+          if (btnClose) btnClose.click();
+        }
+      });
+      await page.waitForTimeout(300);
+    } catch (_) {}
+
+    log(`📋 OS ${os_numero}: ${pontosBrutos.length} ponto(s) extraído(s) do modal`);
 
     // Metadata de debug retornado junto com o resultado
     const debugInfo = {
       pontosBrutos,
-      htmlSample: (html || '').slice(0, 2000), // primeiros 2KB do HTML
-      textoSample: (texto || '').slice(0, 2000),
+      fonte: 'modal_enderecos_dom',
     };
 
     if (pontosBrutos.length === 0) {
-      const err = new Error(`Nenhum ponto extraído do HTML do modal (OS ${os_numero}).`);
+      const err = new Error(`Nenhum ponto extraído do modal de endereços (OS ${os_numero}).`);
       err.debugInfo = debugInfo;
       throw err;
     }
@@ -540,5 +495,5 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 module.exports = {
   capturarPontosOS,
   // expostos pra testes unitários
-  _internal: { htmlToText, extrairPontos, parseEntrega814, parseEntrega767, ponto1Bate767 },
+  _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
 };
