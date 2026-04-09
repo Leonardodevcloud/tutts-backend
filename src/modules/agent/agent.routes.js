@@ -9,8 +9,9 @@
 const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
-const { createCorrecaoRoutes }  = require('./routes/correcao.routes');
-const { createHistoricoRoutes } = require('./routes/historico.routes');
+const { createCorrecaoRoutes }   = require('./routes/correcao.routes');
+const { createHistoricoRoutes }  = require('./routes/historico.routes');
+const { createSlaCaptureRoutes } = require('./routes/sla-capture.routes');
 
 const SCREENSHOT_DIR = '/tmp/screenshots';
 
@@ -19,6 +20,7 @@ function createAgentRouter(pool, verificarToken, verificarAdmin) {
 
   router.use(createCorrecaoRoutes(pool));
   router.use(createHistoricoRoutes(pool, verificarAdmin));
+  router.use(createSlaCaptureRoutes(pool, verificarToken, verificarAdmin));
 
   // ── Screenshots de debug ────────────────────────────────────────────────────
   router.get('/screenshots', (req, res) => {
@@ -41,7 +43,7 @@ function createAgentRouter(pool, verificarToken, verificarAdmin) {
     }
   });
 
-  console.log('✅ Módulo Agente RPA — rotas montadas (2 sub-routers + screenshots)');
+  console.log('✅ Módulo Agente RPA — rotas montadas (3 sub-routers + screenshots)');
   return router;
 }
 
