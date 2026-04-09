@@ -130,11 +130,25 @@ function createLeadsCapturaRoutes(pool) {
     try {
       const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Bahia' });
 
-      // 1. Ativações do dia
+      // 🔧 BUGFIX TIMEZONE: Postgres roda em UTC, então CURRENT_DATE retorna
+      // a data UTC (3h adiantada em relação a Bahia). Isso fazia o resumo
+      // contar errado: leads ativados após 21h Bahia caíam num CURRENT_DATE
+      // diferente do esperado e ficavam fora do resumo do dia operacional.
+      // Solução: passar a data Bahia explícita como parâmetro e comparar
+      // contra (data_ativacao OU created_at convertido pra timezone Bahia).
+      const hojeBahiaISO = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Bahia',
+        year: 'numeric', month: '2-digit', day: '2-digit'
+      }).format(new Date()); // formato YYYY-MM-DD
+
+      // 1. Ativações do dia (referência: data_ativacao DATE = hoje em Bahia)
+      // data_ativacao é DATE puro, então comparação direta funciona desde
+      // que a gravação também use data Bahia (corrigido em outro fix neste arquivo).
       const { rows: ativacoes } = await pool.query(
         `SELECT cod, nome, celular, regiao, estado, quem_ativou
          FROM crm_leads_capturados
-         WHERE data_ativacao = CURRENT_DATE AND quem_ativou IS NOT NULL AND quem_ativou != ''`
+         WHERE data_ativacao = $1::date AND quem_ativou IS NOT NULL AND quem_ativou != ''`,
+        [hojeBahiaISO]
       );
 
       const ativPorResponsavel = {};
@@ -146,10 +160,16 @@ function createLeadsCapturaRoutes(pool) {
         ativPorRegiao[reg] = (ativPorRegiao[reg] || 0) + 1;
       }
 
-      // 2. Alocações do dia (só manuais, não importadas)
+      // 2. Alocações do dia (created_at é TIMESTAMP, então converte pra data Bahia)
+      // OBS: o filtro `(importado IS NULL OR importado = FALSE)` foi mantido como
+      // estava — se alocações importadas TAMBÉM deveriam entrar no total,
+      // remova esse trecho. Confirmar com Tutts antes de mexer.
       const { rows: alocacoes } = await pool.query(
         `SELECT nome_cliente, quem_alocou FROM crm_alocacoes
-         WHERE created_at::date = CURRENT_DATE AND ativo = true AND (importado IS NULL OR importado = FALSE)`
+         WHERE (created_at AT TIME ZONE 'America/Bahia')::date = $1::date
+           AND ativo = true
+           AND (importado IS NULL OR importado = FALSE)`,
+        [hojeBahiaISO]
       );
 
       const alocPorResponsavel = {};
@@ -749,7 +769,14 @@ function createLeadsCapturaRoutes(pool) {
 
         // Auto-preencher data_ativacao = hoje se quem_ativou preenchido e data_ativacao não veio no body
         if (nomeUpper && data_ativacao === undefined) {
-          const hoje = new Date().toISOString().split('T')[0];
+          // 🔧 BUGFIX TIMEZONE: usa data de Bahia (UTC-3), não UTC.
+          // ANTES: new Date().toISOString().split('T')[0] retornava data UTC,
+          // o que fazia leads ativados após 21h Bahia caírem como "amanhã".
+          // Resultado: resumo diário do dia certo subcontava esses leads.
+          const hoje = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Bahia',
+            year: 'numeric', month: '2-digit', day: '2-digit'
+          }).format(new Date()); // formato YYYY-MM-DD
           sets.push(`data_ativacao = COALESCE(data_ativacao, $${idx++})`);
           params.push(hoje);
         }
