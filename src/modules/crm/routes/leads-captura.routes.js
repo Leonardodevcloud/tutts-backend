@@ -836,9 +836,10 @@ function createLeadsCapturaRoutes(pool) {
 
       res.json({ success: true });
 
-      // 🔄 RECONCILIAÇÃO EM BACKGROUND: confirma o status_api=ativo
-      // consultando a API MAP. Se a API discordar (inativo/nao_encontrado),
-      // corrige o registro. Fire-and-forget — não bloqueia a response.
+      // 🔄 RECONCILIAÇÃO EM BACKGROUND: consulta API MAP apenas para
+      // registrar divergências (logging + timestamp). A verdade é do operador:
+      // o status_api permanece 'ativo' mesmo se a API MAP discordar.
+      // Fire-and-forget — não bloqueia a response.
       if (deveReconciliarStatus) {
         setImmediate(async () => {
           try {
@@ -854,24 +855,20 @@ function createLeadsCapturaRoutes(pool) {
             const { status_api: statusReal, erro } = await verificarLeadAPI(lead.celular);
 
             if (!statusReal || statusReal === 'erro') {
-              console.log(`[CRM-Reconcile] Lead ${req.params.id}: API indisponível (${erro || 'sem status'}), mantendo 'ativo' otimista`);
+              console.log(`[CRM-Reconcile] Lead ${req.params.id}: API indisponível (${erro || 'sem status'})`);
               return;
             }
 
+            // Sempre atualiza o timestamp de verificação (status NÃO é alterado)
+            await pool.query(
+              'UPDATE crm_leads_capturados SET api_verificado_em = NOW() WHERE id = $1',
+              [req.params.id]
+            );
+
             if (statusReal === 'ativo') {
-              // API confirmou — só atualiza o timestamp da verificação
-              await pool.query(
-                'UPDATE crm_leads_capturados SET api_verificado_em = NOW() WHERE id = $1',
-                [req.params.id]
-              );
               console.log(`[CRM-Reconcile] Lead ${req.params.id}: ✅ API confirmou ATIVO`);
             } else {
-              // API discordou (inativo ou nao_encontrado) — corrige o status
-              await pool.query(
-                'UPDATE crm_leads_capturados SET status_api = $1, api_verificado_em = NOW() WHERE id = $2',
-                [statusReal, req.params.id]
-              );
-              console.log(`[CRM-Reconcile] Lead ${req.params.id}: ⚠️ API discordou — corrigido ativo → ${statusReal}`);
+              console.log(`[CRM-Reconcile] Lead ${req.params.id}: ℹ️  API diz '${statusReal}', mas operador marcou ativo — mantendo decisão do operador`);
             }
           } catch (reconcileErr) {
             console.error(`[CRM-Reconcile] Erro lead ${req.params.id}:`, reconcileErr.message);
