@@ -33,6 +33,9 @@ function extractToken(req) {
 // Formato: { path: '/prefixo', method: 'GET', startsWith: true }
 const PUBLIC_PATHS = [
   { path: '/api/cs/mapa-calor/', method: 'GET', startsWith: true },
+  // Trigger da extensão SLA Monitor — validado internamente por Origin do
+  // tutts.com.br + SLA_CAPTURE_TOKEN opcional (ver sla-capture.routes.js).
+  { path: '/api/agent/sla-capture/trigger', method: 'POST', startsWith: false },
 ];
 
 /**

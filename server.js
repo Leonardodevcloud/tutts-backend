@@ -242,14 +242,7 @@ app.get('/api/rpa-screenshots/:filename', verificarToken, verificarAdmin, (req, 
   res.type('image/png').sendFile(file);
 });
 
-// ⚠️ IMPORTANTE: Módulo agent tem verificarToken no mount, MAS o endpoint
-// POST /sla-capture/trigger é público (validado por Origin + token opcional
-// dentro do próprio sub-router). Por isso o wrapper abaixo pula verificarToken
-// só para esse path específico.
-app.use('/api/agent', (req, res, next) => {
-  if (req.method === 'POST' && req.path === '/sla-capture/trigger') return next();
-  return verificarToken(req, res, next);
-}, initAgentRoutes(pool, verificarToken, verificarAdmin));
+app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 
