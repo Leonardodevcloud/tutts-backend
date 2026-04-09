@@ -740,6 +740,7 @@ function createLeadsCapturaRoutes(pool) {
       const params = [];
       let idx = 1;
       let notificarAtivacao = false;
+      let deveReconciliarStatus = false;
 
       if (quem_ativou !== undefined) {
         const nomeUpper = (quem_ativou || '').toUpperCase().trim();
@@ -751,6 +752,16 @@ function createLeadsCapturaRoutes(pool) {
           const hoje = new Date().toISOString().split('T')[0];
           sets.push(`data_ativacao = COALESCE(data_ativacao, $${idx++})`);
           params.push(hoje);
+        }
+
+        // 🆕 AUTO-ATIVO: Quando operador preenche "Quem Ativou", marcar como ativo
+        // imediatamente (UX otimista). Reconciliação contra API MAP roda em background
+        // após a response e corrige se divergir.
+        if (nomeUpper) {
+          sets.push(`status_api = $${idx++}`);
+          params.push('ativo');
+          sets.push(`api_verificado_em = NOW()`);
+          deveReconciliarStatus = true;
         }
 
         // Salvar nome no dropdown (se não vazio)
@@ -824,6 +835,49 @@ function createLeadsCapturaRoutes(pool) {
       }
 
       res.json({ success: true });
+
+      // 🔄 RECONCILIAÇÃO EM BACKGROUND: confirma o status_api=ativo
+      // consultando a API MAP. Se a API discordar (inativo/nao_encontrado),
+      // corrige o registro. Fire-and-forget — não bloqueia a response.
+      if (deveReconciliarStatus) {
+        setImmediate(async () => {
+          try {
+            const { rows: [lead] } = await pool.query(
+              'SELECT celular FROM crm_leads_capturados WHERE id = $1',
+              [req.params.id]
+            );
+            if (!lead?.celular) {
+              console.log(`[CRM-Reconcile] Lead ${req.params.id} sem celular, pulando`);
+              return;
+            }
+
+            const { status_api: statusReal, erro } = await verificarLeadAPI(lead.celular);
+
+            if (!statusReal || statusReal === 'erro') {
+              console.log(`[CRM-Reconcile] Lead ${req.params.id}: API indisponível (${erro || 'sem status'}), mantendo 'ativo' otimista`);
+              return;
+            }
+
+            if (statusReal === 'ativo') {
+              // API confirmou — só atualiza o timestamp da verificação
+              await pool.query(
+                'UPDATE crm_leads_capturados SET api_verificado_em = NOW() WHERE id = $1',
+                [req.params.id]
+              );
+              console.log(`[CRM-Reconcile] Lead ${req.params.id}: ✅ API confirmou ATIVO`);
+            } else {
+              // API discordou (inativo ou nao_encontrado) — corrige o status
+              await pool.query(
+                'UPDATE crm_leads_capturados SET status_api = $1, api_verificado_em = NOW() WHERE id = $2',
+                [statusReal, req.params.id]
+              );
+              console.log(`[CRM-Reconcile] Lead ${req.params.id}: ⚠️ API discordou — corrigido ativo → ${statusReal}`);
+            }
+          } catch (reconcileErr) {
+            console.error(`[CRM-Reconcile] Erro lead ${req.params.id}:`, reconcileErr.message);
+          }
+        });
+      }
     } catch (err) {
       res.status(500).json({ success: false, error: err.message });
     }
