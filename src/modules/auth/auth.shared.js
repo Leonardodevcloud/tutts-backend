@@ -184,10 +184,19 @@ const validarRefreshToken = async (refreshToken, userId) => {
       return { valido: false, erro: 'Token inválido' };
     }
     
-    // Buscar tokens não revogados do usuário
+    // 🔧 BUGFIX F5-DISCONNECT (race na rotação):
+    // Buscar tokens NÃO revogados OU revogados há menos de 10 segundos.
+    // Isso dá uma grace window pra requests concorrentes: se o usuário tem 2 abas
+    // abertas e dá F5 nas duas ao mesmo tempo, a primeira aba rotaciona o refresh
+    // token (revoga o antigo). Sem essa grace window, a segunda aba ainda estaria
+    // mandando o refresh antigo (que acabou de ser revogado) → receberia 401 →
+    // deslogaria o usuário. Com grace window, a segunda aba continua válida por
+    // 10s após a revogação.
     const result = await pool.query(
-      `SELECT id, token_hash FROM refresh_tokens 
-       WHERE user_id = $1 AND revoked = false AND expires_at > NOW()`,
+      `SELECT id, token_hash, revoked, revoked_at FROM refresh_tokens 
+       WHERE user_id = $1 
+         AND expires_at > NOW()
+         AND (revoked = false OR revoked_at > NOW() - INTERVAL '10 seconds')`,
       [userId]
     );
     
@@ -195,7 +204,11 @@ const validarRefreshToken = async (refreshToken, userId) => {
     for (const row of result.rows) {
       const match = await bcrypt.compare(refreshToken, row.token_hash);
       if (match) {
-        return { valido: true, tokenId: row.id };
+        return { 
+          valido: true, 
+          tokenId: row.id,
+          jaRevogado: row.revoked === true  // sinaliza pro caller se já tava revogado (grace window)
+        };
       }
     }
     

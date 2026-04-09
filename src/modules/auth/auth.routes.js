@@ -634,25 +634,43 @@ router.post('/users/refresh-token', async (req, res) => {
     // Gerar novo access token
     const newToken = gerarToken(user);
     
-    // 🔒 Rotação de refresh token (invalida o anterior a cada uso)
-    const newRefreshToken = gerarRefreshToken(user);
-    await revogarRefreshToken(validacao.tokenId);
-    await salvarRefreshToken(user.id, newRefreshToken, req);
+    // 🔧 BUGFIX F5-DISCONNECT (race na rotação):
+    // Se o refresh token JÁ FOI revogado (mas estamos aceitando via grace window
+    // de 10s), NÃO rotaciona de novo — reemite só o access token usando o refresh
+    // atual. Isso impede que 2 requests concorrentes disparem 2 rotações em
+    // cascata, o que invalidaria uma das abas mais cedo.
+    let refreshTokenParaResponse = refreshToken;
+    let renovouRefresh = false;
     
-    console.log('🔄 Token renovado (com rotação) para:', user.cod_profissional);
+    if (validacao.jaRevogado) {
+      console.log('🔄 Access token reemitido via grace window (refresh já rotacionado) para:', user.cod_profissional);
+      // Apenas atualiza o cookie de access token, mantém refresh como está
+      const { ACCESS_COOKIE_NAME, ACCESS_COOKIE_OPTIONS } = require('../../config/cookies');
+      res.cookie(ACCESS_COOKIE_NAME, newToken, ACCESS_COOKIE_OPTIONS);
+    } else {
+      // Rotação normal: gera novo refresh, revoga o antigo
+      const newRefreshToken = gerarRefreshToken(user);
+      await revogarRefreshToken(validacao.tokenId);
+      await salvarRefreshToken(user.id, newRefreshToken, req);
+      refreshTokenParaResponse = newRefreshToken;
+      renovouRefresh = true;
+      
+      console.log('🔄 Token renovado (com rotação) para:', user.cod_profissional);
+      
+      // 🔒 Set cookies (access + novo refresh)
+      setAuthCookies(res, newToken, newRefreshToken);
+    }
     
-    // 🔒 Set cookies (access + novo refresh)
-    setAuthCookies(res, newToken, newRefreshToken);
-    
-    // 🔒 Renovar CSRF token
+    // 🔒 Renovar CSRF token (sempre, independente de ter rotacionado refresh)
     const csrfToken = gerarCsrfToken();
     setCsrfCookie(res, csrfToken);
     
     res.json({ 
       token: newToken,
-      refreshToken: newRefreshToken,
+      refreshToken: refreshTokenParaResponse,
       csrfToken,
       expiresIn: 28800, // 🔧 FIX: 8h em segundos
+      rotacionou: renovouRefresh, // debug: indica se rotacionou ou reemitiu via grace
       user: {
         id: user.id,
         cod_profissional: user.cod_profissional,
