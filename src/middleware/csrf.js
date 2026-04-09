@@ -74,6 +74,7 @@ function verificarCsrf(req, res, next) {
     '/api/indicacao-link/validar',
     '/api/stark/webhook',
     '/api/crm',  // server-to-server do CRM Vercel (autenticado por x-service-key)
+    '/api/agent/sla-capture/trigger',  // extensão SLA Monitor (validado por Origin + token opcional)
   ];
 
   if (rotasExcluidas.some(rota => req.path.startsWith(rota))) {
