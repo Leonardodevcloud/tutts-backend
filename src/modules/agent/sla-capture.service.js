@@ -167,9 +167,15 @@ async function processarCaptura(pool, registro) {
          SET status = 'ignorado',
              erro = $1,
              tentativas = $2,
+             pontos_json = $3,
              atualizado_em = NOW()
-         WHERE id = $3`,
-        [resultado.motivo, tentativaAtual, id]
+         WHERE id = $4`,
+        [
+          resultado.motivo,
+          tentativaAtual,
+          resultado.debugInfo ? JSON.stringify(resultado.debugInfo) : null,
+          id,
+        ]
       );
       return { sucesso: true, ignorado: true };
     }

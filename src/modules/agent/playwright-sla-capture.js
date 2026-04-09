@@ -491,8 +491,17 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     const texto = htmlToText(html);
     const pontosBrutos = extrairPontos(texto);
 
+    // Metadata de debug retornado junto com o resultado
+    const debugInfo = {
+      pontosBrutos,
+      htmlSample: (html || '').slice(0, 2000), // primeiros 2KB do HTML
+      textoSample: (texto || '').slice(0, 2000),
+    };
+
     if (pontosBrutos.length === 0) {
-      throw new Error(`Nenhum ponto extraído do HTML do modal (OS ${os_numero}).`);
+      const err = new Error(`Nenhum ponto extraído do HTML do modal (OS ${os_numero}).`);
+      err.debugInfo = debugInfo;
+      throw err;
     }
 
     // Aplica parser específico do cliente
@@ -505,7 +514,7 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
       // 767: só dispara se Ponto 1 bater com Galba
       const ponto1 = pontosBrutos.find((pt) => pt.numero === 1);
       if (!ponto1 || !ponto1Bate767(ponto1.texto)) {
-        return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767' };
+        return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767', debugInfo };
       }
       pontosParsed = pontosBrutos
         .filter((pt) => pt.numero >= 2)
@@ -513,10 +522,10 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     }
 
     if (pontosParsed.length === 0) {
-      return { pontos: [], skipped: true, motivo: 'sem_pontos_entrega' };
+      return { pontos: [], skipped: true, motivo: 'sem_pontos_entrega', debugInfo };
     }
 
-    return { pontos: pontosParsed, skipped: false };
+    return { pontos: pontosParsed, skipped: false, debugInfo };
   } finally {
     try {
       if (context) await context.close();
