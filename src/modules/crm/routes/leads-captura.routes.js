@@ -161,14 +161,14 @@ function createLeadsCapturaRoutes(pool) {
       }
 
       // 2. Alocações do dia (created_at é TIMESTAMP, então converte pra data Bahia)
-      // OBS: o filtro `(importado IS NULL OR importado = FALSE)` foi mantido como
-      // estava — se alocações importadas TAMBÉM deveriam entrar no total,
-      // remova esse trecho. Confirmar com Tutts antes de mexer.
+      // 🔧 BUGFIX: filtro `(importado IS NULL OR importado = FALSE)` removido —
+      // alocações importadas (CSV/Sheet) agora contam no total, conforme decisão
+      // do Tutts. O resumo deve refletir TODAS as alocações do dia, independente
+      // de origem.
       const { rows: alocacoes } = await pool.query(
         `SELECT nome_cliente, quem_alocou FROM crm_alocacoes
          WHERE (created_at AT TIME ZONE 'America/Bahia')::date = $1::date
-           AND ativo = true
-           AND (importado IS NULL OR importado = FALSE)`,
+           AND ativo = true`,
         [hojeBahiaISO]
       );
 
