@@ -109,14 +109,17 @@ async function fazerLogin(page) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Captura o atributo data-parameters do botão "Resumo Serviço" da row da OS.
- * Esse parâmetro é o que o PHP precisa pra retornar o HTML do modal de info.
+ * Captura o atributo data-parameters do link "Resumo Serviço" associado à OS.
+ * Busca pelo BOTÃO funcaoEnderecoServico (mesmo padrão do playwright-agent),
+ * que é mais robusto que buscar por tr[data-order-id] — o botão pode existir
+ * no DOM mesmo se a row não estiver visível no viewport.
  */
 async function capturarParametroResumo(page, osNumero) {
   try {
-    // Localiza a row pelo botão de endereço (data-text-id = OS)
     const param = await page.evaluate((os) => {
+      // Procura o botão END. pela OS (data-id ou data-text-id)
       const btn = document.querySelector(
+        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os}"], ` +
         `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os}"]`
       );
       if (!btn) return null;
@@ -330,15 +333,15 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
 
-    // Navega pra página de acompanhamento
-    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    // Navega pra página de acompanhamento — timeout maior pro caso de MAP lento
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(1000);
 
     // Confirma sessão — se não, relogin
     if (!(await isLoggedIn(page))) {
       await fazerLogin(page);
-      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(1000);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
     }
 
     // Persiste cookies pra próxima captura reaproveitar
@@ -346,42 +349,141 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
       await context.storageState({ path: SESSION_FILE });
     } catch (_) {}
 
-    // Precisa localizar a row da OS — por segurança ativa a aba Execução se existir
-    try {
-      const tabExec = page.locator('#pills-em-execucao-tab');
-      if (await tabExec.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await tabExec.click();
-        await page.waitForTimeout(800);
-      }
-    } catch (_) {}
-
-    // Busca pela OS — pode precisar aguardar carregamento do tbody
-    await page
-      .waitForSelector(`tr[data-order-id="${os_numero}"]`, { timeout: 10000 })
-      .catch(() => {
-        // Pode não estar na tela atual — tenta buscar via search-type
-      });
-
-    let parametro = await capturarParametroResumo(page, os_numero);
-
-    // Se não achou, tenta re-buscar usando o campo de busca do sistema
-    if (!parametro) {
-      try {
-        // Seleciona tipo "OS" no custom-select e digita o número
-        const searchInput = page.locator('input[type="text"]').first();
-        if (await searchInput.isVisible({ timeout: 2000 })) {
-          await searchInput.fill(String(os_numero));
-          await page.waitForTimeout(1500);
-          await page
-            .waitForSelector(`tr[data-order-id="${os_numero}"]`, { timeout: 8000 })
-            .catch(() => {});
-          parametro = await capturarParametroResumo(page, os_numero);
-        }
-      } catch (_) {}
+    // ── Passo 1: ativa aba "Em execução" ──────────────────────────────────
+    log(`📌 Localizando OS ${os_numero} — ativando aba Em execução`);
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    if (await abaEmExecucao.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await abaEmExecucao.click();
+      await page.waitForTimeout(800);
     }
 
+    // ── Passo 2: tenta achar o botão da OS no DOM direto ─────────────────
+    // (mesmo seletor robusto do playwright-agent: data-id OU data-text-id)
+    const btnSelector =
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], ` +
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
+
+    let btnCount = await page.locator(btnSelector).count();
+
+    // ── Passo 3: se não achou, usa a busca do sistema (barra + autocomplete jQuery UI) ──
+    if (btnCount === 0) {
+      log(`🔍 OS ${os_numero} não está no DOM — usando barra de pesquisa`);
+
+      // Expande a barra "Pesquisar serviços" se estiver recolhida
+      const barraPesquisa = page.locator('text=Pesquisar serviços').first();
+      if (await barraPesquisa.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await barraPesquisa.click();
+        await page.waitForTimeout(500);
+      }
+
+      // Seleciona "Serviço" no dropdown #search-type
+      const selectPesquisa = page.locator('#search-type');
+      if (await selectPesquisa.isVisible({ timeout: 3000 }).catch(() => false)) {
+        try {
+          await selectPesquisa.selectOption({ label: 'Serviço' });
+          await page.waitForTimeout(500);
+        } catch (_) {
+          // Opção pode ter label diferente — ignora e segue
+        }
+      }
+
+      // Preenche o input do autocomplete
+      const inputBusca = page
+        .locator('#search-autocomplete-input, input[placeholder*="número do serviço"]')
+        .first();
+
+      let inputVisivel = false;
+      try {
+        await inputBusca.waitFor({ state: 'visible', timeout: 8000 });
+        inputVisivel = true;
+      } catch {
+        inputVisivel = false;
+      }
+
+      if (!inputVisivel) {
+        // Sessão provavelmente morreu — força re-login e retry
+        log('⚠️ Campo de busca não apareceu — forçando re-login');
+        try {
+          if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+        } catch (_) {}
+        await fazerLogin(page);
+        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(2000);
+        try {
+          await context.storageState({ path: SESSION_FILE });
+        } catch (_) {}
+
+        // Reativa aba execução
+        const abaRetry = page.locator('#pills-em-execucao-tab');
+        if (await abaRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await abaRetry.click();
+          await page.waitForTimeout(800);
+        }
+
+        // Re-expande barra + seleciona tipo
+        const barraRetry = page.locator('text=Pesquisar serviços').first();
+        if (await barraRetry.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await barraRetry.click();
+          await page.waitForTimeout(500);
+        }
+        const selectRetry = page.locator('#search-type');
+        if (await selectRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
+          try {
+            await selectRetry.selectOption({ label: 'Serviço' });
+            await page.waitForTimeout(500);
+          } catch (_) {}
+        }
+
+        await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+      }
+
+      await inputBusca.fill(String(os_numero));
+      await page.waitForTimeout(1500); // aguardar jQuery UI autocomplete
+
+      // Clica no item do autocomplete que bate com a OS
+      const autoItem = page
+        .locator('.ui-menu-item .ui-menu-item-wrapper')
+        .filter({ hasText: String(os_numero) })
+        .first();
+
+      if (await autoItem.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await autoItem.click();
+      } else {
+        // Fallback: primeiro item visível, ou Enter
+        const anyAutoItem = page.locator('.ui-menu-item-wrapper:visible').first();
+        if (await anyAutoItem.isVisible({ timeout: 1500 }).catch(() => false)) {
+          await anyAutoItem.click();
+        } else {
+          await inputBusca.press('Enter');
+        }
+      }
+
+      await page.waitForTimeout(2000);
+
+      // Aguarda o botão aparecer no DOM (não precisa ser visível no viewport)
+      try {
+        await page.waitForSelector(btnSelector, { state: 'attached', timeout: TIMEOUT });
+      } catch (_) {
+        throw new Error(
+          `OS ${os_numero} não encontrada mesmo após pesquisa por autocomplete. ` +
+          `Pode já ter sido finalizada/cancelada no MAP.`
+        );
+      }
+
+      btnCount = await page.locator(btnSelector).count();
+    }
+
+    if (btnCount === 0) {
+      throw new Error(`OS ${os_numero} não encontrada na tela mesmo após pesquisa.`);
+    }
+
+    // ── Passo 4: captura o data-parameters e faz fetch do modal ──────────
+    const parametro = await capturarParametroResumo(page, os_numero);
+
     if (!parametro) {
-      throw new Error(`OS ${os_numero} não encontrada na tela ou sem parâmetro de resumo.`);
+      throw new Error(
+        `OS ${os_numero} encontrada mas sem link "Resumo Serviço" (data-parameters).`
+      );
     }
 
     // Fetch direto do HTML do modal (~300ms)
