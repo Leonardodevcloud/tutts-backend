@@ -18,6 +18,12 @@
 
 const express = require('express');
 
+// 🔧 FIX CADASTRO-CRM: lookup unificado pra resolver nome a partir do código.
+// Cadeia: crm_leads_capturados → planilha → disponibilidade_linhas → users.
+// Antes: alocacao usava bi_entregas direto, então motoboy do CRM sem entregas
+// nunca aparecia (autofill ficava vazio).
+const { buscarProfissional } = require('../../../shared/utils/profissionaisLookup');
+
 // ── Sheet URL ──
 const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv&gid=1573041640';
 
@@ -90,14 +96,37 @@ function createAlocacaoRoutes(pool) {
       const { cliente, status, quem_alocou, search, lookup_prof, mes, ano, todos, importado, page = 1, limit = 50, order = 'created_at', dir = 'DESC' } = req.query;
 
       // Busca rápida de profissional por código
+      // 🔧 FIX CADASTRO-CRM: usa buscarProfissional (cadeia CRM → planilha → disp → users → bi_entregas)
+      // ANTES: SELECT direto em bi_entregas — só achava motoboy que já tinha
+      // entregue alguma coisa. Motoboy novo do CRM ficava sem nome no autofill.
       if (lookup_prof) {
-        const codInt = parseInt(lookup_prof);
-        if (isNaN(codInt)) return res.json({ success: true, nome: null });
-        const { rows } = await pool.query(
-          'SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1',
-          [codInt]
-        );
-        return res.json({ success: true, nome: rows.length > 0 ? rows[0].nome_prof : null });
+        try {
+          const codStr = String(lookup_prof).trim();
+          if (!codStr) return res.json({ success: true, nome: null });
+
+          // 1ª tentativa: lookup unificado (CRM → planilha → disponibilidade → users)
+          const prof = await buscarProfissional(pool, codStr);
+          if (prof && prof.nome) {
+            return res.json({ success: true, nome: prof.nome, origem: prof.origem });
+          }
+
+          // 2ª tentativa: bi_entregas (motoboy que opera mas não está em nenhuma das fontes acima)
+          const codInt = parseInt(codStr);
+          if (!isNaN(codInt)) {
+            const { rows } = await pool.query(
+              'SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1',
+              [codInt]
+            );
+            if (rows.length > 0) {
+              return res.json({ success: true, nome: rows[0].nome_prof, origem: 'bi_entregas' });
+            }
+          }
+
+          return res.json({ success: true, nome: null });
+        } catch (errLookup) {
+          console.error('[alocacao] lookup_prof falhou:', errLookup.message);
+          return res.json({ success: true, nome: null });
+        }
       }
 
       const where = ['ativo = true'];
@@ -285,20 +314,32 @@ function createAlocacaoRoutes(pool) {
   });
 
   // ══════════════════════════════════════════════════════════════
-  // GET /profissional/:cod — Buscar nome pelo código (via bi_entregas)
+  // GET /profissional/:cod — Buscar nome pelo código
+  // 🔧 FIX CADASTRO-CRM: cadeia CRM → planilha → disp → users → bi_entregas
   // ══════════════════════════════════════════════════════════════
   router.get('/profissional/:cod', async (req, res) => {
     try {
+      const codStr = String(req.params.cod || '').trim();
+      if (!codStr) return res.json({ success: true, nome: null });
+
+      // 1ª tentativa: lookup unificado
+      const prof = await buscarProfissional(pool, codStr);
+      if (prof && prof.nome) {
+        return res.json({ success: true, nome: prof.nome, origem: prof.origem });
+      }
+
+      // 2ª tentativa: bi_entregas (motoboy que opera mas só consta em entregas)
       const { rows } = await pool.query(
         `SELECT DISTINCT nome_prof FROM bi_entregas WHERE cod_prof = $1 AND nome_prof IS NOT NULL LIMIT 1`,
-        [req.params.cod]
+        [codStr]
       );
       if (rows.length > 0) {
-        res.json({ success: true, nome: rows[0].nome_prof });
-      } else {
-        res.json({ success: true, nome: null });
+        return res.json({ success: true, nome: rows[0].nome_prof, origem: 'bi_entregas' });
       }
+
+      return res.json({ success: true, nome: null });
     } catch (err) {
+      console.error('[alocacao] /profissional/:cod falhou:', err.message);
       res.status(500).json({ success: false, error: err.message });
     }
   });
