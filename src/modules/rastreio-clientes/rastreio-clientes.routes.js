@@ -95,7 +95,7 @@ function createRastreioClientesRouter(pool, deps = {}) {
       if (cliente) { params.push(String(cliente)); where.push(`cliente_cod = $${params.length}`); }
       if (status)  { params.push(String(status));  where.push(`status = $${params.length}`); }
       const sql = `SELECT id, os_numero, cliente_cod, cod_rastreio, profissional, status,
-                          tentativas, erro_msg, criado_em, enviado_em
+                          tentativas, erro, criado_em, enviado_em
                      FROM sla_capturas
                     WHERE ${where.join(' AND ')}
                     ORDER BY criado_em DESC LIMIT 500`;
@@ -108,7 +108,7 @@ function createRastreioClientesRouter(pool, deps = {}) {
     try {
       const { rows } = await pool.query(
         `UPDATE sla_capturas
-            SET status='pendente', tentativas=0, erro_msg=NULL
+            SET status='pendente', tentativas=0, erro=NULL
           WHERE id=$1 RETURNING os_numero, cliente_cod`,
         [req.params.id]
       );
