@@ -58,6 +58,7 @@ const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 const { initCsRoutes, initCsTables } = require('./src/modules/cs');
 const { initAgentRoutes, initAgentTables, startAgentWorker } = require('./src/modules/agent');
+const { initRastreioClientesRoutes, initRastreioClientesTables } = require('./src/modules/rastreio-clientes');
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
 const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gerencial');
@@ -243,6 +244,7 @@ app.get('/api/rpa-screenshots/:filename', verificarToken, verificarAdmin, (req, 
 });
 
 app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, verificarAdmin));
+app.use('/api/rastreio-clientes', initRastreioClientesRoutes(pool, { verificarToken, verificarAdmin, registrarAuditoria }));
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 
@@ -271,6 +273,7 @@ async function initDatabase() {
     try { await initAuditTables(pool); } catch (e) { console.error('⚠️ Audit tables error:', e.message); }
     try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
     try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
+    try { await initRastreioClientesTables(pool); } catch (e) { console.error('⚠️ RastreioClientes tables error:', e.message); }
     try { await initAntiFraudeTables(pool); } catch (e) { console.error('⚠️ Anti-Fraude tables error:', e.message); }
     try { await initPerformanceTables(pool); } catch (e) { console.error('⚠️ Performance tables error:', e.message); }
     try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
