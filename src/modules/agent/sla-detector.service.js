@@ -25,12 +25,33 @@ const MAP_BASE = 'https://tutts.com.br/expresso/expressoat';
 const ENDPOINT = `${MAP_BASE}/entregasDia/acompanhamento/ajax/viewServicoAcompanhamento`;
 const REFERER = `${MAP_BASE}/acompanhamento-servicos`;
 
-const CLIENTES_MONITORADOS = ['814', '767'];
-const TERMOS_767 = ['GALBA', 'NOVAS DE CASTRO', '57061-510'];
-
 function log(msg) {
   console.log(`[sla-detector] ${msg}`);
 }
+
+// Cache de config (TTL 60s) - lê de rastreio_clientes_config
+let _configCache = null;
+let _configExpira = 0;
+async function carregarConfig(pool) {
+  const agora = Date.now();
+  if (_configCache && agora < _configExpira) return _configCache;
+  try {
+    const { rows } = await pool.query(
+      'SELECT cliente_cod, termos_filtro FROM rastreio_clientes_config WHERE ativo = TRUE'
+    );
+    _configCache = rows.map(r => ({
+      cliente_cod: String(r.cliente_cod),
+      termos_filtro: Array.isArray(r.termos_filtro) ? r.termos_filtro.map(t => String(t).toUpperCase()) : null,
+    }));
+    _configExpira = agora + 60_000;
+    return _configCache;
+  } catch (e) {
+    log('⚠️ Falha lendo config, usando cache antigo: ' + e.message);
+    return _configCache || [];
+  }
+}
+function invalidarCacheConfig() { _configCache = null; _configExpira = 0; }
+
 
 function lerCookiesParaHeader() {
   if (!fs.existsSync(SESSION_FILE)) {
@@ -138,15 +159,14 @@ function parseOsDoHtml(html) {
   return ordens;
 }
 
-function filtrarMonitorados(ordens) {
+function filtrarMonitorados(ordens, config) {
   return ordens.filter(o => {
-    if (!o.cliente_cod || !CLIENTES_MONITORADOS.includes(o.cliente_cod)) return false;
-    if (o.cliente_cod === '814') return true;
-    if (o.cliente_cod === '767') {
-      const balloonUpper = (o._balloon || '').toUpperCase();
-      return TERMOS_767.some(termo => balloonUpper.includes(termo));
-    }
-    return false;
+    if (!o.cliente_cod) return false;
+    const cfg = config.find(c => c.cliente_cod === o.cliente_cod);
+    if (!cfg) return false;
+    if (!cfg.termos_filtro || cfg.termos_filtro.length === 0) return true;
+    const balloonUpper = (o._balloon || '').toUpperCase();
+    return cfg.termos_filtro.some(termo => balloonUpper.includes(termo));
   });
 }
 
@@ -194,7 +214,8 @@ async function detectarOsNovas(pool) {
     }
 
     const ordens = parseOsDoHtml(html);
-    const monitoradas = filtrarMonitorados(ordens);
+    const config = await carregarConfig(pool);
+    const monitoradas = filtrarMonitorados(ordens, config);
     const { inseridas, ignoradas } = await inserirNaFila(pool, monitoradas);
 
     log(`📊 ${ordens.length} OS na tela | ${monitoradas.length} monitoradas | ${inseridas} novas, ${ignoradas} já conhecidas`);
@@ -215,5 +236,6 @@ async function detectarOsNovas(pool) {
 
 module.exports = {
   detectarOsNovas,
+  invalidarCacheConfig,
   _internal: { parseOsDoHtml, filtrarMonitorados, ehTelaLogin, montarPayload },
 };
