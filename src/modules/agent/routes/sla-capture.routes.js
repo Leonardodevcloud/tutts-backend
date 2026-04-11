@@ -58,44 +58,15 @@ function createSlaCaptureRoutes(pool, verificarToken, verificarAdmin) {
   // POST /agent/sla-capture/trigger   (chamado pela extensão)
   // ────────────────────────────────────────────────────────────────────────
   router.post('/sla-capture/trigger', express.json({ limit: '256kb' }), async (req, res) => {
-    try {
-      // 1. Validação de origem
-      if (!validarOrigem(req)) {
-        return res.status(403).json({ sucesso: false, erro: 'origem_nao_permitida' });
-      }
-
-      // 2. Validação de token opcional
-      if (!validarToken(req)) {
-        return res.status(403).json({ sucesso: false, erro: 'token_invalido' });
-      }
-
-      // 3. Valida e enfileira
-      const { os_numero, cliente_cod, cod_rastreio, link_rastreio, profissional } = req.body || {};
-
-      try {
-        const { inserido, registro } = await enfileirarCaptura(pool, {
-          os_numero,
-          cliente_cod,
-          cod_rastreio,
-          link_rastreio,
-          profissional,
-          origem_ip: getClientIP(req),
-        });
-
-        return res.json({
-          sucesso: true,
-          inserido,
-          id: registro?.id || null,
-          status: registro?.status || null,
-          skipped: !inserido, // frontend usa isso pra não tentar de novo
-        });
-      } catch (errValidacao) {
-        return res.status(400).json({ sucesso: false, erro: errValidacao.message });
-      }
-    } catch (err) {
-      console.error('[sla-capture/trigger] erro:', err);
-      return res.status(500).json({ sucesso: false, erro: 'erro_interno' });
-    }
+    // 🔧 DEPRECATED: detector HTTP no backend (sla-detector-worker) assumiu a detecção.
+    // Endpoint mantido como no-op pra não quebrar extensões antigas instaladas.
+    console.log('[sla-capture/trigger] DEPRECATED no-op:', req.body?.os_numero || '?');
+    return res.json({
+      sucesso: true,
+      deprecated: true,
+      skipped: true,
+      message: 'Endpoint descontinuado. Detecção agora é automática via backend.',
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────────

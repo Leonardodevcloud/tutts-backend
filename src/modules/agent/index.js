@@ -21,6 +21,7 @@ const initAgentTablesBase       = require('./agent.migration');
 const initSlaCaptureTables      = require('./sla-capture.migration');
 const { startAgentWorker: startAgentCorrecaoWorker } = require('./agent-worker');
 const { startSlaCaptureWorker } = require('./sla-capture-worker');
+const { startSlaDetectorWorker } = require('./sla-detector-worker');
 
 // Init agregado: cria tabelas do agent + sla-capture numa chamada só
 async function initAgentTables(pool) {
@@ -37,6 +38,7 @@ function startAgentWorker(pool) {
   startAgentCorrecaoWorker(pool);
   try {
     startSlaCaptureWorker(pool);
+    startSlaDetectorWorker(pool);
   } catch (e) {
     console.error('⚠️ SLA Capture worker error:', e.message);
   }
