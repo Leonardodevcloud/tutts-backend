@@ -400,11 +400,30 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
         const idEnd = btn.getAttribute('data-id-endereco');
         let texto = '';
 
-        // Estratégia 1: span#end-antigo-{id} (textContent funciona mesmo se display:none)
+        // Estratégia 1: span#end-antigo-{id} + contexto completo do container
         if (idEnd) {
           const span = document.getElementById('end-antigo-' + idEnd);
           if (span) {
-            texto = (span.textContent || '').trim();
+            // Pega o container do ponto inteiro pra ter NF + nome cliente
+            let container = span.parentElement;
+            // Sobe até achar um elemento que contenha "Ponto"
+            for (let i = 0; i < 5 && container; i++) {
+              if ((container.textContent || '').includes('Ponto')) break;
+              container = container.parentElement;
+            }
+            if (container) {
+              const full = (container.textContent || '').replace(/\s+/g, ' ').trim();
+              // Extrai texto entre "Ponto N" e "Corrigir|Ver ponto|Chegou"
+              const pontoRe = new RegExp('Ponto\\s*' + numero + '\\s+([\\s\\S]*?)(?:Corrigir|Ver ponto|Chegou|$)', 'i');
+              const pm = full.match(pontoRe);
+              if (pm && pm[1].trim().length > 10) {
+                texto = pm[1].replace(/\s+/g, ' ').trim();
+              }
+            }
+            // Fallback: só o span se container não deu certo
+            if (!texto || texto.length < 5) {
+              texto = (span.textContent || '').trim();
+            }
           }
         }
 
