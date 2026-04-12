@@ -126,21 +126,50 @@ router.get('/bi/dashboard', async (req, res) => {
       where += ` AND data_solicitado <= $${paramIndex++}`;
       params.push(data_fim);
     }
+    // 🔧 FIX BI-FILTROS-MULTI: aceitar múltiplos valores via comma-split + ANY()
+    // Antes: `cod_cliente = $1` com "767,853" virava busca literal pelo texto
+    // "767,853" e não encontrava NADA — efetivamente o filtro era ignorado e
+    // retornava TODAS as entregas. Agora split por vírgula e usa ANY($1::text[]).
+    const splitCsv = (v) => String(v).split(',').map(s => s.trim()).filter(Boolean);
     if (cod_cliente) {
-      where += ` AND cod_cliente = $${paramIndex++}`;
-      params.push(cod_cliente);
+      const arr = splitCsv(cod_cliente);
+      if (arr.length === 1) {
+        where += ` AND cod_cliente = $${paramIndex++}`;
+        params.push(arr[0]);
+      } else if (arr.length > 1) {
+        where += ` AND cod_cliente = ANY($${paramIndex++}::text[])`;
+        params.push(arr);
+      }
     }
     if (centro_custo) {
-      where += ` AND centro_custo = $${paramIndex++}`;
-      params.push(centro_custo);
+      const arr = splitCsv(centro_custo);
+      if (arr.length === 1) {
+        where += ` AND centro_custo = $${paramIndex++}`;
+        params.push(arr[0]);
+      } else if (arr.length > 1) {
+        where += ` AND centro_custo = ANY($${paramIndex++}::text[])`;
+        params.push(arr);
+      }
     }
     if (cod_prof) {
-      where += ` AND cod_prof = $${paramIndex++}`;
-      params.push(cod_prof);
+      const arr = splitCsv(cod_prof);
+      if (arr.length === 1) {
+        where += ` AND cod_prof = $${paramIndex++}`;
+        params.push(arr[0]);
+      } else if (arr.length > 1) {
+        where += ` AND cod_prof = ANY($${paramIndex++}::text[])`;
+        params.push(arr);
+      }
     }
     if (categoria) {
-      where += ` AND categoria ILIKE $${paramIndex++}`;
-      params.push(`%${categoria}%`);
+      const arr = splitCsv(categoria);
+      if (arr.length === 1) {
+        where += ` AND categoria ILIKE $${paramIndex++}`;
+        params.push(`%${arr[0]}%`);
+      } else if (arr.length > 1) {
+        where += ` AND categoria = ANY($${paramIndex++}::text[])`;
+        params.push(arr);
+      }
     }
     if (status_prazo === 'dentro') {
       where += ` AND dentro_prazo = true`;
