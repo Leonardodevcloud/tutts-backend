@@ -36,15 +36,34 @@ router.get('/bi/mapa-calor', async (req, res) => {
     if (centro_custo) {
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
       if (centros.length > 0) {
-        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
-        params.push(centros);
-        paramIndex++;
+        // 🔧 FIX BI-CC-LOCAL: aceitar clientes_sem_filtro_cc — clientes que não devem ser
+        // restringidos pelo CC, vão por OR para retornar todas as suas entregas.
+        const semFiltroRaw = req.query.clientes_sem_filtro_cc;
+        const semFiltro = semFiltroRaw ? String(semFiltroRaw).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+        if (semFiltro.length > 0) {
+          whereClause += ` AND (centro_custo = ANY($${paramIndex}::text[]) OR cod_cliente = ANY($${paramIndex+1}::int[]))`;
+          params.push(centros);
+          params.push(semFiltro);
+          paramIndex += 2;
+        } else {
+          whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+          params.push(centros);
+          paramIndex++;
+        }
       }
     }
     if (categoria) {
-      whereClause += ` AND categoria = $${paramIndex}`;
-      params.push(categoria);
-      paramIndex++;
+      // 🔧 FIX BI-CATEGORIA-MULTI
+      const cats = String(categoria).split(',').map(c => c.trim()).filter(Boolean);
+      if (cats.length === 1) {
+        whereClause += ` AND categoria = $${paramIndex}`;
+        params.push(cats[0]);
+        paramIndex++;
+      } else if (cats.length > 1) {
+        whereClause += ` AND categoria = ANY($${paramIndex}::text[])`;
+        params.push(cats);
+        paramIndex++;
+      }
     }
     
     // BUSCAR PONTOS COM COORDENADAS REAIS DO BANCO (apenas ponto >= 2)
@@ -222,15 +241,34 @@ router.get('/bi/acompanhamento-periodico', async (req, res) => {
     if (centro_custo) {
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
       if (centros.length > 0) {
-        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
-        params.push(centros);
-        paramIndex++;
+        // 🔧 FIX BI-CC-LOCAL: aceitar clientes_sem_filtro_cc — clientes que não devem ser
+        // restringidos pelo CC, vão por OR para retornar todas as suas entregas.
+        const semFiltroRaw = req.query.clientes_sem_filtro_cc;
+        const semFiltro = semFiltroRaw ? String(semFiltroRaw).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+        if (semFiltro.length > 0) {
+          whereClause += ` AND (centro_custo = ANY($${paramIndex}::text[]) OR cod_cliente = ANY($${paramIndex+1}::int[]))`;
+          params.push(centros);
+          params.push(semFiltro);
+          paramIndex += 2;
+        } else {
+          whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+          params.push(centros);
+          paramIndex++;
+        }
       }
     }
     if (categoria) {
-      whereClause += ` AND categoria = $${paramIndex}`;
-      params.push(categoria);
-      paramIndex++;
+      // 🔧 FIX BI-CATEGORIA-MULTI
+      const cats = String(categoria).split(',').map(c => c.trim()).filter(Boolean);
+      if (cats.length === 1) {
+        whereClause += ` AND categoria = $${paramIndex}`;
+        params.push(cats[0]);
+        paramIndex++;
+      } else if (cats.length > 1) {
+        whereClause += ` AND categoria = ANY($${paramIndex}::text[])`;
+        params.push(cats);
+        paramIndex++;
+      }
     }
     // Filtro de retorno - usar mesma lógica da função isRetorno
     if (status_retorno === 'com_retorno') {
@@ -437,9 +475,20 @@ router.get('/bi/comparativo-semanal', async (req, res) => {
     if (centro_custo) {
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
       if (centros.length > 0) {
-        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
-        params.push(centros);
-        paramIndex++;
+        // 🔧 FIX BI-CC-LOCAL: aceitar clientes_sem_filtro_cc — clientes que não devem ser
+        // restringidos pelo CC, vão por OR para retornar todas as suas entregas.
+        const semFiltroRaw = req.query.clientes_sem_filtro_cc;
+        const semFiltro = semFiltroRaw ? String(semFiltroRaw).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+        if (semFiltro.length > 0) {
+          whereClause += ` AND (centro_custo = ANY($${paramIndex}::text[]) OR cod_cliente = ANY($${paramIndex+1}::int[]))`;
+          params.push(centros);
+          params.push(semFiltro);
+          paramIndex += 2;
+        } else {
+          whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+          params.push(centros);
+          paramIndex++;
+        }
       }
     }
     
@@ -658,9 +707,20 @@ router.get('/bi/comparativo-semanal-clientes', async (req, res) => {
     if (centro_custo) {
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
       if (centros.length > 0) {
-        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
-        params.push(centros);
-        paramIndex++;
+        // 🔧 FIX BI-CC-LOCAL: aceitar clientes_sem_filtro_cc — clientes que não devem ser
+        // restringidos pelo CC, vão por OR para retornar todas as suas entregas.
+        const semFiltroRaw = req.query.clientes_sem_filtro_cc;
+        const semFiltro = semFiltroRaw ? String(semFiltroRaw).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+        if (semFiltro.length > 0) {
+          whereClause += ` AND (centro_custo = ANY($${paramIndex}::text[]) OR cod_cliente = ANY($${paramIndex+1}::int[]))`;
+          params.push(centros);
+          params.push(semFiltro);
+          paramIndex += 2;
+        } else {
+          whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+          params.push(centros);
+          paramIndex++;
+        }
       }
     }
     
@@ -887,15 +947,34 @@ router.get('/bi/acompanhamento-clientes', async (req, res) => {
     if (centro_custo) {
       const centros = centro_custo.split(',').map(c => c.trim()).filter(c => c);
       if (centros.length > 0) {
-        whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
-        params.push(centros);
-        paramIndex++;
+        // 🔧 FIX BI-CC-LOCAL: aceitar clientes_sem_filtro_cc — clientes que não devem ser
+        // restringidos pelo CC, vão por OR para retornar todas as suas entregas.
+        const semFiltroRaw = req.query.clientes_sem_filtro_cc;
+        const semFiltro = semFiltroRaw ? String(semFiltroRaw).split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+        if (semFiltro.length > 0) {
+          whereClause += ` AND (centro_custo = ANY($${paramIndex}::text[]) OR cod_cliente = ANY($${paramIndex+1}::int[]))`;
+          params.push(centros);
+          params.push(semFiltro);
+          paramIndex += 2;
+        } else {
+          whereClause += ` AND centro_custo = ANY($${paramIndex}::text[])`;
+          params.push(centros);
+          paramIndex++;
+        }
       }
     }
     if (categoria) {
-      whereClause += ` AND categoria = $${paramIndex}`;
-      params.push(categoria);
-      paramIndex++;
+      // 🔧 FIX BI-CATEGORIA-MULTI
+      const cats = String(categoria).split(',').map(c => c.trim()).filter(Boolean);
+      if (cats.length === 1) {
+        whereClause += ` AND categoria = $${paramIndex}`;
+        params.push(cats[0]);
+        paramIndex++;
+      } else if (cats.length > 1) {
+        whereClause += ` AND categoria = ANY($${paramIndex}::text[])`;
+        params.push(cats);
+        paramIndex++;
+      }
     }
     // Filtro de retorno - usar mesma lógica da função isRetorno
     if (status_retorno === 'com_retorno') {
