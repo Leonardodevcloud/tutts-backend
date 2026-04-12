@@ -11,6 +11,7 @@ const AUDIT_CATEGORIES = {
   CONFIG: 'config',
   SCORE: 'score',
   ADMIN: 'admin',
+  UBER: 'uber',
 };
 
 const ERRO_MSGS = {

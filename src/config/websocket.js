@@ -29,6 +29,36 @@ const wsClients = {
 const wsDispClients = new Set();
 let dispWsIdCounter = 0;
 
+// ============================================
+// UBER TRACKING - clientes assinando OS específicas
+// ============================================
+const wsUberClients = new Map(); // Map<codigoOS, Set<ws>>
+
+function broadcastUberTracking(codigoOS, data) {
+  const subs = wsUberClients.get(String(codigoOS));
+  if (!subs || subs.size === 0) return;
+  const message = JSON.stringify({ event: 'UBER_LOCATION_UPDATE', data: { codigoOS, ...data }, timestamp: new Date().toISOString() });
+  let count = 0;
+  subs.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+      count++;
+    }
+  });
+  if (count > 0) {
+    console.log(`📡 [WS-Uber] Tracking OS=${codigoOS} → ${count} cliente(s)`);
+  }
+}
+
+function broadcastUberStatus(codigoOS, data) {
+  const subs = wsUberClients.get(String(codigoOS));
+  if (!subs || subs.size === 0) return;
+  const message = JSON.stringify({ event: 'UBER_STATUS_UPDATE', data: { codigoOS, ...data }, timestamp: new Date().toISOString() });
+  subs.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(message);
+  });
+}
+
 /**
  * Broadcast para todos os clientes conectados ao módulo disponibilidade.
  * Envia para todos EXCETO o remetente (identificado por senderWsId).
@@ -308,15 +338,94 @@ function handleDisponibilidadeConnection(ws) {
 }
 
 // ============================================
+// UBER TRACKING - handler de conexão
+// ============================================
+function handleUberConnection(ws) {
+  console.log('🔌 [WS-Uber] Nova conexão');
+  let authenticated = false;
+  const subscriptions = new Set();
+
+  const authTimeout = setTimeout(() => {
+    if (!authenticated) ws.close(4001, 'Autenticação necessária');
+  }, 30000);
+
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      if (data.type === 'AUTH') {
+        const { token } = data;
+        if (!token) {
+          ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token não fornecido' }));
+          return;
+        }
+        try {
+          jwt.verify(token, env.JWT_SECRET);
+          authenticated = true;
+          clearTimeout(authTimeout);
+          ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', message: 'Autenticado no tracking Uber' }));
+          console.log('✅ [WS-Uber] Cliente autenticado');
+        } catch (jwtError) {
+          ws.send(JSON.stringify({ event: 'AUTH_ERROR', error: 'Token inválido' }));
+          ws.close(4003, 'Token inválido');
+        }
+      }
+
+      if (data.type === 'SUBSCRIBE' && authenticated && data.codigoOS) {
+        const os = String(data.codigoOS);
+        if (!wsUberClients.has(os)) wsUberClients.set(os, new Set());
+        wsUberClients.get(os).add(ws);
+        subscriptions.add(os);
+        ws.send(JSON.stringify({ event: 'SUBSCRIBED', codigoOS: os }));
+        console.log(`📡 [WS-Uber] Cliente assinou OS=${os}`);
+      }
+
+      if (data.type === 'UNSUBSCRIBE' && authenticated && data.codigoOS) {
+        const os = String(data.codigoOS);
+        const subs = wsUberClients.get(os);
+        if (subs) {
+          subs.delete(ws);
+          if (subs.size === 0) wsUberClients.delete(os);
+        }
+        subscriptions.delete(os);
+        ws.send(JSON.stringify({ event: 'UNSUBSCRIBED', codigoOS: os }));
+      }
+
+      if (data.type === 'PING' && authenticated) {
+        ws.send(JSON.stringify({ event: 'PONG', timestamp: new Date().toISOString() }));
+      }
+    } catch (e) {
+      console.error('❌ [WS-Uber] Erro:', e.message);
+    }
+  });
+
+  ws.on('close', () => {
+    clearTimeout(authTimeout);
+    subscriptions.forEach(os => {
+      const subs = wsUberClients.get(os);
+      if (subs) {
+        subs.delete(ws);
+        if (subs.size === 0) wsUberClients.delete(os);
+      }
+    });
+    console.log('🔌 [WS-Uber] Desconectado');
+  });
+
+  ws.send(JSON.stringify({ event: 'CONNECTED', message: 'Conectado ao Uber Tracking - Envie AUTH com token' }));
+}
+
+// ============================================
 // SETUP - roteamento manual via upgrade
 // ============================================
 function setupWebSocket(server) {
-  // Criar dois WSS sem path fixo (noServer: true)
+  // Criar três WSS sem path fixo (noServer: true)
   const wssFinanceiro = new WebSocket.Server({ noServer: true });
   const wssDisp = new WebSocket.Server({ noServer: true });
+  const wssUber = new WebSocket.Server({ noServer: true });
 
   wssFinanceiro.on('connection', handleFinanceiroConnection);
   wssDisp.on('connection', handleDisponibilidadeConnection);
+  wssUber.on('connection', handleUberConnection);
 
   // Interceptar o evento upgrade do HTTP server para rotear por path
   server.on('upgrade', (request, socket, head) => {
@@ -330,13 +439,17 @@ function setupWebSocket(server) {
       wssDisp.handleUpgrade(request, socket, head, (ws) => {
         wssDisp.emit('connection', ws, request);
       });
+    } else if (pathname === '/ws/uber-tracking') {
+      wssUber.handleUpgrade(request, socket, head, (ws) => {
+        wssUber.emit('connection', ws, request);
+      });
     } else {
       console.log(`⚠️ [WS] Path desconhecido: ${pathname}`);
       socket.destroy();
     }
   });
 
-  console.log('🔌 [WS] Servidor WebSocket configurado: /ws/financeiro + /ws/disponibilidade');
+  console.log('🔌 [WS] Servidor WebSocket configurado: /ws/financeiro + /ws/disponibilidade + /ws/uber-tracking');
   return wssFinanceiro;
 }
 
@@ -348,6 +461,8 @@ function registerGlobals() {
   global.sendToUser = sendToUser;
   global.broadcastDisponibilidade = broadcastDisponibilidade;
   global.notifyStarkPayment = notifyStarkPayment;
+  global.broadcastUberTracking = broadcastUberTracking;
+  global.broadcastUberStatus = broadcastUberStatus;
 }
 
-module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate, notifyStarkPayment, broadcastDisponibilidade };
+module.exports = { setupWebSocket, registerGlobals, broadcastToAdmins, sendToUser, notifyNewWithdrawal, notifyWithdrawalUpdate, notifyStarkPayment, broadcastDisponibilidade, broadcastUberTracking, broadcastUberStatus };

@@ -62,6 +62,7 @@ const { initRastreioClientesRoutes, initRastreioClientesTables } = require('./sr
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
 const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gerencial');
+const { initUberRoutes, initUberTables, startUberWorker } = require('./src/modules/uber');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -247,6 +248,7 @@ app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, veri
 app.use('/api/rastreio-clientes', initRastreioClientesRoutes(pool, { verificarToken, verificarAdmin, registrarAuditoria }));
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
+app.use('/api/uber', initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
@@ -278,6 +280,7 @@ async function initDatabase() {
     try { await initPerformanceTables(pool); } catch (e) { console.error('⚠️ Performance tables error:', e.message); }
     try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
     try { await initCrmTables(pool); } catch (e) { console.error('⚠️ CRM tables error:', e.message); }
+    try { await initUberTables(pool); } catch (e) { console.error('⚠️ Uber tables error:', e.message); }
     await createPerformanceIndices(pool);
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
@@ -310,6 +313,7 @@ initDatabase().then(async () => {
   startAgentWorker(pool);
   startAntiFraudeWorker(pool);
   startPerformanceWorker(pool);
+  startUberWorker(pool);
   // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
   if (process.env.WORKER_ENABLED === 'true') {
     console.log('⏰ Crons desativados no server (rodando no worker separado)');

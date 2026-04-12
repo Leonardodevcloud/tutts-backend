@@ -47,6 +47,14 @@ const env = {
   PLIFIC_AMBIENTE: process.env.PLIFIC_AMBIENTE,
   PLIFIC_TOKEN: process.env.PLIFIC_TOKEN,
 
+  // Uber Direct
+  UBER_CLIENT_ID: process.env.UBER_CLIENT_ID,
+  UBER_CLIENT_SECRET: process.env.UBER_CLIENT_SECRET,
+  UBER_CUSTOMER_ID: process.env.UBER_CUSTOMER_ID,
+  UBER_WEBHOOK_SECRET: process.env.UBER_WEBHOOK_SECRET,
+  MAPP_API_URL: process.env.MAPP_API_URL,
+  MAPP_API_TOKEN: process.env.MAPP_API_TOKEN,
+
   // Version
   SERVER_VERSION: '2026-02-07-SECURITY-PATCH-V6',
 };
@@ -62,6 +70,10 @@ if (tuttsNaoConfigurados.length > 0) {
 
 if (!env.ORS_API_KEY) {
   console.warn('⚠️ ORS_API_KEY não configurada - Roteirizador não funcionará');
+}
+
+if (!env.UBER_CLIENT_ID || !env.UBER_CLIENT_SECRET) {
+  console.warn('⚠️ Credenciais Uber Direct não configuradas - Módulo Uber via config no banco');
 }
 
 module.exports = env;
