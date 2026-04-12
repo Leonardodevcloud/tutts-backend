@@ -288,9 +288,21 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     let cod_cliente = req.query.cod_cliente;
     let centro_custo = req.query.centro_custo;
     
-    // Converter para array se necessário
-    if (cod_cliente && !Array.isArray(cod_cliente)) cod_cliente = [cod_cliente];
-    if (centro_custo && !Array.isArray(centro_custo)) centro_custo = [centro_custo];
+    // 🔧 FIX BI-MULTI-PARSE: aceitar 2 formatos:
+    //   1) array (formato antigo: cod_cliente=35&cod_cliente=21)
+    //   2) string comma-joined (formato novo: cod_cliente=35,21,585)
+    // Antes, quando vinha "35,21,585,680,767" como string, fazia parseInt da string
+    // inteira retornando só 35 — todos os outros clientes eram silenciosamente excluídos.
+    const parseMultiParam = (v) => {
+      if (v === undefined || v === null) return undefined;
+      if (Array.isArray(v)) {
+        // pode vir como ['35','21'] OU como ['35,21,585'] (1 elemento com vírgulas)
+        return v.flatMap(s => String(s).split(',')).map(s => s.trim()).filter(Boolean);
+      }
+      return String(v).split(',').map(s => s.trim()).filter(Boolean);
+    };
+    cod_cliente = parseMultiParam(cod_cliente);
+    centro_custo = parseMultiParam(centro_custo);
     
     // Clientes que não devem ter filtro de centro de custo (mostrar todos CC)
     let clientesSemFiltroCC = [];
