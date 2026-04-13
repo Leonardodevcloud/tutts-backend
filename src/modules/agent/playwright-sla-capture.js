@@ -27,7 +27,114 @@ const path = require('path');
 const { logger } = require('../../config/logger');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
+const META_FILE    = '/tmp/tutts-sla-meta.json';     // 🆕 payload AJAX do endpoint alvo
+const NETWORK_LOG_FILE = '/tmp/tutts-sla-network.json'; // 🆕 dump de TODAS as chamadas pro tutts.com.br
 const TIMEOUT      = 25000;
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CAPTURA DE PAYLOAD AJAX (pra alimentar o sla-detector)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Intercepta TODAS as chamadas HTTP do navegador pra tutts.com.br durante a
+ * sessão Playwright e:
+ *
+ *   1. Loga um sumário de cada uma (método + URL + tamanho do body)
+ *   2. Salva as primeiras N chamadas POST num arquivo /tmp/tutts-sla-network.json
+ *      pra inspeção via endpoint admin de debug
+ *   3. Quando reconhece a chamada do endpoint de "acompanhamento" (qualquer
+ *      endpoint que devolva a lista de OS em execução), salva o payload em
+ *      META_FILE pra o sla-detector usar
+ *
+ * Por que: não tenho 100% de certeza qual endpoint exato a página de
+ * acompanhamento usa pra listar as OS — pode ser `viewServicoAcompanhamento`,
+ * pode ser outro. Capturando TUDO eu descubro em runtime e o detector usa o
+ * endpoint certo, sem hardcode.
+ */
+function instalarCapturaPayload(context) {
+  // Padrões de URL que SUSPEITAMOS serem o endpoint da listagem de OS
+  // (ordem importa — o primeiro que matchar vira o META oficial)
+  const PADROES_ALVO = [
+    /viewServicoAcompanhamento/i,
+    /listaServico/i,
+    /servicosEmExecucao/i,
+    /acompanhamento.*ajax/i,
+  ];
+
+  const networkLog = [];
+  const MAX_LOG_ENTRIES = 50;
+  let metaSalvo = false;
+
+  context.on('request', async (request) => {
+    try {
+      const url = request.url();
+      const method = request.method();
+
+      // Só interessa tutts.com.br
+      if (!url.includes('tutts.com.br')) return;
+
+      // Ignora estáticos óbvios
+      if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ico)(\?|$)/i.test(url)) return;
+
+      const postData = method === 'POST' ? request.postData() : null;
+      const headers = request.headers();
+      const contentType = headers['content-type'] || null;
+      const isXhr = headers['x-requested-with'] === 'XMLHttpRequest';
+
+      const entry = {
+        ts: new Date().toISOString(),
+        method,
+        url,
+        contentType,
+        isXhr,
+        bodyBytes: postData ? postData.length : 0,
+        bodyPreview: postData ? postData.slice(0, 200) : null,
+      };
+
+      // Log resumido no console
+      log(`🌐 ${method} ${isXhr ? '(XHR)' : '     '} ${url.replace('https://tutts.com.br/expresso/expressoat/', '...')} ${postData ? `[${postData.length}b]` : ''}`);
+
+      // Adiciona ao network log (cap em MAX_LOG_ENTRIES)
+      if (networkLog.length < MAX_LOG_ENTRIES) {
+        networkLog.push(entry);
+        try {
+          fs.writeFileSync(
+            NETWORK_LOG_FILE,
+            JSON.stringify({ capturedAt: new Date().toISOString(), entries: networkLog }, null, 2),
+            'utf8'
+          );
+        } catch (_) {}
+      }
+
+      // Se for um POST com body que casa com algum padrão alvo, salva como meta
+      if (method === 'POST' && postData && !metaSalvo) {
+        const matchPadrao = PADROES_ALVO.find(re => re.test(url));
+        if (matchPadrao) {
+          let idFuncionario = null;
+          try {
+            const params = new URLSearchParams(postData);
+            idFuncionario = params.get('idFuncionario');
+          } catch (_) {}
+
+          const meta = {
+            capturedAt: new Date().toISOString(),
+            url,
+            method,
+            postData,
+            idFuncionario,
+            contentType,
+            matchedPattern: matchPadrao.source,
+          };
+          fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), 'utf8');
+          metaSalvo = true;
+          log(`📋 Payload AJAX capturado — endpoint=${url.split('/').slice(-2).join('/')} | idFuncionario=${idFuncionario || '(vazio)'} | bytes=${postData.length}`);
+        }
+      }
+    } catch (err) {
+      log(`⚠️ Listener network: ${err.message}`);
+    }
+  });
+}
 
 const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
 const ACOMP_URL = () =>
@@ -216,6 +323,13 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     } else {
       context = await browser.newContext();
     }
+
+    // 🆕 Instala captura de payload AJAX ANTES de qualquer navegação.
+    // O listener vive durante toda a sessão do contexto e atualiza
+    // /tmp/tutts-sla-meta.json toda vez que a página chamar o endpoint
+    // viewServicoAcompanhamento (que acontece automaticamente no load
+    // da página de acompanhamento e no clique da aba "Em execução").
+    instalarCapturaPayload(context);
 
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
