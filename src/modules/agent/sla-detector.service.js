@@ -48,8 +48,12 @@ let _configCacheAt = 0;
  * Carrega config de clientes monitorados + filtros de _balloon.
  * Cache de 1 minuto pra evitar hit no banco a cada tick.
  *
- * Tolerante ao schema: descobre dinamicamente o nome da coluna de filtros
- * (pode ser filtros_balao, filtros_balloon, filtro_balao, filtros, etc).
+ * Schema da tabela rastreio_clientes_config (confirmado 2026-04-13):
+ *   id, cliente_cod, nome_exibicao, ativo, evolution_group_id,
+ *   termos_filtro (ARRAY), observacoes, criado_em, atualizado_em
+ *
+ * Tolerante a variações de schema: se a coluna `termos_filtro` não existir,
+ * tenta descobrir dinamicamente (pode ser filtros_balao, filtros, etc).
  */
 async function carregarConfig(pool) {
   const agora = Date.now();
@@ -64,16 +68,22 @@ async function carregarConfig(pool) {
       WHERE table_name = 'rastreio_clientes_config'`
   );
   const colNames = cols.map(c => c.column_name);
-  const colFiltros = colNames.find(c => /filtr/i.test(c) && /bal/i.test(c))
+
+  // Ordem de preferência: termos_filtro (schema atual) → qualquer filtr+bal → qualquer filtr → qualquer termos
+  const colFiltros =
+    (colNames.includes('termos_filtro') ? 'termos_filtro' : null)
+    || colNames.find(c => /filtr/i.test(c) && /bal/i.test(c))
     || colNames.find(c => /filtr/i.test(c))
+    || colNames.find(c => /termo/i.test(c))
     || null;
 
   if (DEBUG) {
-    log(`⚙️ Colunas da tabela: [${colNames.join(', ')}] | coluna filtros: ${colFiltros || '(nenhuma)'}`);
+    log(`⚙️ Colunas da tabela: [${colNames.join(', ')}] | coluna de filtros: ${colFiltros || '(nenhuma)'}`);
   }
 
-  // Monta a query de acordo com o que existe
+  // Monta a query — inclui nome_exibicao se existir (útil pros logs)
   const selectCols = ['cliente_cod', 'ativo'];
+  if (colNames.includes('nome_exibicao')) selectCols.push('nome_exibicao');
   if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
 
   const { rows } = await pool.query(
@@ -102,6 +112,7 @@ async function carregarConfig(pool) {
     }
     config[cod] = {
       ativo: row.ativo,
+      nomeExibicao: row.nome_exibicao || null,
       filtrosBalao: filtros,
     };
   }
@@ -113,7 +124,8 @@ async function carregarConfig(pool) {
     const codigos = Object.keys(config);
     log(`⚙️ Config carregada: ${codigos.length} cliente(s) ativo(s) — [${codigos.join(', ')}]`);
     for (const [cod, cfg] of Object.entries(config)) {
-      log(`   • ${cod}: filtros=[${cfg.filtrosBalao.join(', ') || '(nenhum)'}]`);
+      const nome = cfg.nomeExibicao ? ` (${cfg.nomeExibicao})` : '';
+      log(`   • ${cod}${nome}: filtros=[${cfg.filtrosBalao.join(', ') || '(nenhum — pega todas)'}]`);
     }
   }
 
@@ -154,15 +166,16 @@ async function inserirNaFila(pool, ordens) {
     try {
       const result = await pool.query(
         `INSERT INTO sla_capturas
-           (os_numero, cliente_cod, cod_rastreio, profissional, status, criado_em)
-         VALUES ($1, $2, $3, $4, 'pendente', NOW())
+           (os_numero, cliente_cod, cod_profissional, cod_rastreio, balloon, status, criado_em)
+         VALUES ($1, $2, $3, $4, $5, 'pendente', NOW())
          ON CONFLICT (os_numero) DO NOTHING
          RETURNING id`,
         [
           ordem.os_numero,
           ordem.cliente_cod,
+          ordem.cod_profissional,
           ordem.cod_rastreio,
-          ordem.cod_profissional, // no schema a coluna se chama `profissional`
+          ordem._balloon,
         ]
       );
       if (result.rowCount > 0) {
