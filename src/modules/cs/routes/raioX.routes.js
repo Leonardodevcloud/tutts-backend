@@ -5,7 +5,7 @@
  */
 const express = require('express');
 const { calcularHealthScore, getClienteConfig } = require('../cs.service');
-const { enviarRaioXEmail } = require('../cs.email');
+const { enviarRaioXEmail, testarConexaoSMTP } = require('../cs.email');
 
 function createRaioXRoutes(pool) {
   const router = express.Router();
@@ -1162,6 +1162,33 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
     } catch (error) {
       console.error('❌ Erro ao excluir Raio-X:', error);
       res.status(500).json({ error: 'Erro ao excluir relatório' });
+    }
+  });
+
+  // ==================== POST /cs/raio-x/testar-smtp ====================
+  // Testa conexão SMTP sem enviar email — útil pra debug de credenciais
+  router.post('/cs/raio-x/testar-smtp', async (req, res) => {
+    try {
+      const resultado = await testarConexaoSMTP();
+      if (resultado.ok) {
+        res.json({
+          success: true,
+          message: '✅ Conexão SMTP OK — credenciais válidas',
+          host: process.env.SMTP_HOST,
+          port: process.env.SMTP_PORT,
+          user: process.env.SMTP_USER,
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          error: resultado.message,
+          code: resultado.code,
+          host: process.env.SMTP_HOST,
+          port: process.env.SMTP_PORT,
+        });
+      }
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 

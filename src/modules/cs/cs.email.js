@@ -1,10 +1,59 @@
 /**
  * CS Email Service — Envio de Raio-X por email
- * Usa Resend API (https://resend.com) para enviar como @tutts.com.br
- * Gratuito até 100 emails/dia — sem bloqueio de IP cloud
+ * Usa SMTP via nodemailer (compatível com cPanel/hoomhost, Office365, Gmail, etc)
+ *
+ * Configuração via .env:
+ *   SMTP_HOST    = mail.tutts.com.br
+ *   SMTP_PORT    = 465
+ *   SMTP_SECURE  = true       (true para 465 SSL/TLS, false para 587 STARTTLS)
+ *   SMTP_USER    = supervisor@tutts.com.br
+ *   SMTP_PASS    = <senha-do-email>
+ *   SMTP_FROM    = supervisor@tutts.com.br   (opcional — default = SMTP_USER)
+ *   SMTP_FROM_NAME = Tutts Logística         (opcional — default = "Tutts Logística")
  */
 
-const RESEND_URL = 'https://api.resend.com/emails';
+const nodemailer = require('nodemailer');
+
+let transporterCache = null;
+
+/**
+ * Cria (ou reusa) o transporter SMTP.
+ * O nodemailer mantém pool de conexões TCP — bom pra throughput.
+ */
+function getTransporter() {
+  if (transporterCache) return transporterCache;
+
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '465', 10);
+  const secure = String(process.env.SMTP_SECURE || 'true').toLowerCase() === 'true';
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  if (!host || !user || !pass) {
+    throw new Error(
+      'SMTP não configurado. Defina SMTP_HOST, SMTP_USER e SMTP_PASS no .env do Railway'
+    );
+  }
+
+  transporterCache = nodemailer.createTransport({
+    host,
+    port,
+    secure, // true = SSL/TLS direto (465); false = STARTTLS upgrade (587)
+    auth: { user, pass },
+    pool: true,
+    maxConnections: 3,
+    maxMessages: 100,
+    // Timeout generoso pra evitar problemas de cold start no Railway
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
+    // hoomhost às vezes apresenta certificado auto-assinado — não derruba conexão
+    tls: { rejectUnauthorized: false },
+  });
+
+  console.log(`📧 [SMTP] Transporter criado: ${user}@${host}:${port} (secure=${secure})`);
+  return transporterCache;
+}
 
 function gerarEmailHTML(raioX, cliente, periodo) {
   const score = raioX.score_saude || raioX.health_score || 0;
@@ -104,42 +153,75 @@ ${conteudo}
 </html>`;
 }
 
+/**
+ * Envia o relatório Raio-X por email via SMTP.
+ *
+ * @param {Object} opts
+ * @param {string|string[]} opts.para  Email(s) destinatário
+ * @param {string|string[]} [opts.cc]  CC
+ * @param {Object} opts.raioX          Objeto do raio-x (analise_texto, score_saude)
+ * @param {Object} opts.cliente        { nome }
+ * @param {Object} opts.periodo        { inicio, fim }
+ * @param {string} [opts.remetente]    Email remetente customizado (fallback: SMTP_FROM ou SMTP_USER)
+ */
 async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) throw new Error('RESEND_API_KEY não configurada. Configure no .env');
+  const transporter = getTransporter();
 
-  const from = remetente || 'contato@tutts.com.br';
+  const fromEmail = remetente || process.env.SMTP_FROM || process.env.SMTP_USER;
+  const fromName = process.env.SMTP_FROM_NAME || 'Tutts Logística';
+
   const html = gerarEmailHTML(raioX, cliente, periodo);
   const nomeCliente = cliente.nome || 'Cliente';
   const subject = `Raio-X Operacional - ${nomeCliente} (${periodo.inicio} a ${periodo.fim})`;
 
-  const payload = {
-    from: `Tutts Logistica <${from}>`,
-    to: Array.isArray(para) ? para : [para],
-    reply_to: from,
+  const mailOptions = {
+    from: `"${fromName}" <${fromEmail}>`,
+    to: Array.isArray(para) ? para.join(', ') : para,
+    replyTo: fromEmail,
     subject,
     html,
   };
-  if (cc) payload.cc = Array.isArray(cc) ? cc : [cc];
-
-  const response = await fetch(RESEND_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error('❌ Resend API error:', data);
-    throw new Error(data.message || `Resend error: ${response.status}`);
+  if (cc) {
+    mailOptions.cc = Array.isArray(cc) ? cc.join(', ') : cc;
   }
 
-  console.log(`📧 Email Raio-X enviado via Resend: ${para} (ID: ${data.id})`);
-  return { messageId: data.id, accepted: [para] };
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`📧 [SMTP] Email Raio-X enviado: ${mailOptions.to} (messageId: ${info.messageId})`);
+    return {
+      messageId: info.messageId,
+      accepted: info.accepted || [para],
+      rejected: info.rejected || [],
+      response: info.response,
+    };
+  } catch (error) {
+    console.error('❌ [SMTP] Erro ao enviar email:', error.message);
+    // Erros mais comuns mapeados pra mensagem amigável
+    if (error.code === 'EAUTH') {
+      throw new Error('Autenticação SMTP falhou — verifique SMTP_USER e SMTP_PASS no Railway');
+    }
+    if (error.code === 'ECONNECTION' || error.code === 'ETIMEDOUT') {
+      throw new Error(`Não foi possível conectar em ${process.env.SMTP_HOST}:${process.env.SMTP_PORT} — verifique se a porta está liberada no Railway`);
+    }
+    if (error.code === 'EENVELOPE') {
+      throw new Error('Endereço de remetente ou destinatário inválido');
+    }
+    throw new Error(`Falha SMTP: ${error.message}`);
+  }
 }
 
-module.exports = { enviarRaioXEmail };
+/**
+ * Testa a conexão SMTP sem enviar email.
+ * Útil pra debugar configuração no startup ou via endpoint.
+ */
+async function testarConexaoSMTP() {
+  try {
+    const transporter = getTransporter();
+    await transporter.verify();
+    return { ok: true, message: 'Conexão SMTP OK' };
+  } catch (error) {
+    return { ok: false, message: error.message, code: error.code };
+  }
+}
+
+module.exports = { enviarRaioXEmail, testarConexaoSMTP };
