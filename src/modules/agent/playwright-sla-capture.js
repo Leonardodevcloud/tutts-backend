@@ -443,50 +443,42 @@ async function garantirSessao() {
 
 /**
  * Abre browser, garante sessão, navega pra acompanhamento, clica na aba
- * "Em execução", e captura TODAS as responses do XHR viewServicoAcompanhamento
- * (página inicial + cliques no paginador da UI).
+ * "Em execução", e EXTRAI as OS diretamente do DOM (tr[data-order-id]).
  *
- * Reúne tudo numa lista deduplicada e retorna.
+ * 🔧 HISTÓRIA DESSA FUNÇÃO (2026-04-13):
+ *   Descobri via instrumentação que o endpoint viewServicoAcompanhamento
+ *   SEMPRE retorna HTML (content-type: text/html), nunca JSON. Eu tinha
+ *   interpretado errado o `instalarCapturaPayload` — ele captura o REQUEST
+ *   (postData), não o RESPONSE. O servidor PHP responde com fragmentos HTML
+ *   pra serem inseridos na página via $.html().
  *
- * 🔧 Por que essa função existe (2026-04-13):
- *   Tentativas de fazer o detector chamar o endpoint diretamente (com node
- *   fetch, playwright.request.newContext, ou page.evaluate(fetch)) sempre
- *   resultaram em HTML em vez de JSON. O servidor PHP do tutts.com.br só
- *   responde JSON quando o request vem de um clique natural na UI dentro
- *   de uma sessão "ativada". Então a única forma robusta é deixar o
- *   navegador fazer naturalmente e interceptar a resposta.
+ *   Então em vez de interceptar rede, a abordagem certa é:
+ *   1. Clicar na aba "Em execução" → JS do MAP carrega a tabela no DOM
+ *   2. Extrair os <tr[data-order-id]> do DOM com page.evaluate
+ *   3. Pra paginar: clicar no link "Próx." do paginador e repetir
  *
- * Esta função usa o MESMO mutex do capturarPontosOS, então não há
- * concorrência por Chromium quando o sla-capture-worker está processando
- * fila ao mesmo tempo.
+ *   Os dados vêm nos atributos HTML:
+ *     tr[data-order-id]                        → os_numero
+ *     button[data-title-os] (dentro do tr)    → cliente_cod
+ *     button[data-motoboy] (dentro do tr)     → cod_profissional
+ *     a[href*="rastreamento?cod="]            → cod_rastreio
+ *     [data-balloon] attributes concatenados  → _balloon (pra filtros)
+ *     div.osEmExecucao.alert text              → total esperado "(149)"
+ *
+ * Usa o mesmo mutex de capturarPontosOS — sem concorrência de Chromium.
  *
  * Retorna:
- *   {
- *     ok: true,
- *     ordens: [{ os_numero, cliente_cod, cod_profissional, _balloon, raw }],
- *     totalEsperado: number | null,
- *     paginas: number,
- *     duracaoMs: number,
- *   }
- *   ou em caso de erro:
- *   { ok: false, motivo: string, sessaoExpirada: boolean }
+ *   { ok, ordens: [...], totalEsperado, paginas, duracaoMs, diag }
+ *   ou: { ok: false, motivo, sessaoExpirada, diag }
  */
 async function coletarOsEmExecucao() {
   const TEMPO_MAX_MS = 90_000;
-  const MAX_PAGINAS_SANITY = 1000;
-  const DEBUG_DUMP_FILE = '/tmp/tutts-coletar-debug.json';
+  const MAX_PAGINAS_SANITY = 100; // 1000 OS com 10/página = 100 páginas
 
   await acquireMutex();
   const t0 = Date.now();
 
-  // 🔬 Diagnóstico completo — tudo isso vai pro retorno pra ver no /debug endpoint
-  const diag = {
-    etapas: [],
-    xhrsVistos: [],      // TODOS os responses do endpoint, mesmo HTML
-    lastResponseText: null,
-    lastResponseHeaders: null,
-    lastResponseUrl: null,
-  };
+  const diag = { etapas: [], paginasColetadas: [] };
   function etapa(nome, extra) {
     const evento = { etapa: nome, t: Date.now() - t0, ...(extra || {}) };
     diag.etapas.push(evento);
@@ -494,7 +486,8 @@ async function coletarOsEmExecucao() {
   }
 
   let browser, context, page;
-  const respostasCapturadas = [];
+  const todasOsMap = new Map(); // dedupe por os_numero
+  let totalEsperado = null;
 
   try {
     etapa('start');
@@ -507,277 +500,185 @@ async function coletarOsEmExecucao() {
     if (fs.existsSync(SESSION_FILE)) {
       try {
         context = await browser.newContext({ storageState: SESSION_FILE });
-        etapa('context_created_with_storage');
+        etapa('context_with_storage');
       } catch (e) {
         etapa('context_storage_failed', { erro: e.message });
         context = await browser.newContext();
       }
     } else {
       context = await browser.newContext();
-      etapa('context_created_no_storage');
+      etapa('context_no_storage');
     }
-
-    // 🎯 Listener de RESPOSTA — captura TODOS os responses do endpoint
-    // (mesmo HTML), pra diagnosticar o que o servidor está retornando
-    context.on('response', async (resp) => {
-      try {
-        if (resp.request().method() !== 'POST') return;
-        if (!/viewServicoAcompanhamento/i.test(resp.url())) return;
-
-        const status = resp.status();
-        const headers = resp.headers();
-        const ct = headers['content-type'] || '';
-        const text = await resp.text();
-        const len = text.length;
-
-        // Sempre registra no diagnóstico
-        const xhrInfo = {
-          url: resp.url(),
-          status,
-          contentType: ct,
-          bytes: len,
-          preview: text.slice(0, 300).replace(/\s+/g, ' ').trim(),
-        };
-        diag.xhrsVistos.push(xhrInfo);
-        diag.lastResponseText = text;
-        diag.lastResponseHeaders = headers;
-        diag.lastResponseUrl = resp.url();
-
-        log(`🔎 [coletarOs] XHR interceptado: HTTP ${status} | bytes=${len} | ct=${ct}`);
-
-        // Tenta parsear como JSON mesmo que content-type não seja JSON
-        let data;
-        try {
-          data = JSON.parse(text);
-        } catch (e) {
-          log(`⚠️ [coletarOs] Response NÃO é JSON parsável: ${e.message}`);
-          log(`⚠️ [coletarOs] Preview: ${xhrInfo.preview}`);
-          return;
-        }
-
-        respostasCapturadas.push(data);
-        const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
-          ? data.retornoMultiplos['5'].length
-          : 0;
-        log(`📨 [coletarOs] XHR #${respostasCapturadas.length} PARSED: ${numOs} OS`);
-      } catch (e) {
-        log(`⚠️ [coletarOs] erro no listener: ${e.message}`);
-      }
-    });
 
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
-
     etapa('page_created');
 
     await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
-    etapa('page_goto_done', { url: page.url() });
+    etapa('goto_done', { url: page.url() });
     await page.waitForTimeout(800);
 
-    const loggedIn = await isLoggedIn(page);
-    etapa('logged_in_check', { loggedIn });
-
-    if (!loggedIn) {
+    if (!(await isLoggedIn(page))) {
+      etapa('login_needed');
       await fazerLogin(page);
-      etapa('login_done');
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
-      etapa('page_goto_after_login', { url: page.url() });
       await page.waitForTimeout(1500);
+      etapa('login_done');
     }
 
-    // Verifica existência da aba ANTES de tentar clicar
+    // Ativa aba "Em execução"
     const abaEmExecucao = page.locator('#pills-em-execucao-tab');
-    const abaCount = await abaEmExecucao.count().catch(() => 0);
-    const abaVisivel = abaCount > 0
-      ? await abaEmExecucao.first().isVisible({ timeout: 3000 }).catch(() => false)
-      : false;
-    etapa('aba_check', { count: abaCount, visivel: abaVisivel });
-
-    if (!abaVisivel) {
-      // Vamos olhar o HTML da página pra diagnosticar
-      const bodyPreview = await page.evaluate(() => {
-        const b = document.body ? document.body.innerText : '';
-        return b.slice(0, 500);
-      }).catch(() => '(falha ao ler body)');
-      diag.bodyPreview = bodyPreview;
-      etapa('aba_nao_visivel_body', { preview: bodyPreview });
+    if (!(await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false))) {
+      etapa('aba_nao_visivel');
       return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, diag };
     }
-
-    // Clica e aguarda QUALQUER response do endpoint
-    await abaEmExecucao.first().click();
+    await abaEmExecucao.click();
     etapa('aba_clicada');
 
+    // Aguarda a tabela de em-execução renderizar (tr com data-order-id)
     try {
-      await page.waitForResponse(
-        (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
-        { timeout: 15_000 }
-      );
-      etapa('waitForResponse_ok');
+      await page.waitForSelector('#pills-em-execucao tr[data-order-id]', { timeout: 15000 });
+      etapa('tabela_renderizada');
     } catch (e) {
-      etapa('waitForResponse_timeout', { erro: e.message });
+      etapa('tabela_timeout', { erro: e.message });
+      // Às vezes a tabela vem vazia (0 OS) — verifica o contador
+      const texto = await page.locator('#pills-em-execucao').innerText().catch(() => '');
+      if (/Serviço.*execução.*\(0\)/i.test(texto)) {
+        etapa('zero_os');
+        return { ok: true, ordens: [], totalEsperado: 0, paginas: 0, duracaoMs: Date.now() - t0, diag };
+      }
+      return { ok: false, motivo: 'tabela_nao_renderizou', sessaoExpirada: true, diag };
     }
 
-    // Dá tempo extra pro listener processar
-    await page.waitForTimeout(2000);
-    etapa('wait_extra_done', {
-      xhrsVistos: diag.xhrsVistos.length,
-      respostasParsed: respostasCapturadas.length,
-    });
+    await page.waitForTimeout(500);
 
-    // Salva contexto atualizado
+    // Salva storageState atualizado
+    try { await context.storageState({ path: SESSION_FILE }); } catch (_) {}
+
+    // Extrai o total esperado do texto "Serviço(s) em execução (149)"
     try {
-      await context.storageState({ path: SESSION_FILE });
+      const totalTexto = await page.locator('#pills-em-execucao .osEmExecucao.alert').first().innerText({ timeout: 2000 });
+      const m = totalTexto.match(/\((\d+)\)/);
+      if (m) totalEsperado = parseInt(m[1], 10);
     } catch (_) {}
+    etapa('total_esperado', { totalEsperado });
 
-    // Dump do último response pra inspeção
-    if (diag.lastResponseText) {
-      try {
-        fs.writeFileSync(DEBUG_DUMP_FILE, JSON.stringify({
-          url: diag.lastResponseUrl,
-          headers: diag.lastResponseHeaders,
-          bodyPreview: diag.lastResponseText.slice(0, 5000),
-        }, null, 2));
-      } catch (_) {}
-    }
+    // Função que extrai OS do DOM atual e acumula no Map
+    async function extrairOsAtuais() {
+      const extraidas = await page.evaluate(() => {
+        const rows = document.querySelectorAll('#pills-em-execucao tr[data-order-id]');
+        return Array.from(rows).map(tr => {
+          const os_numero = tr.getAttribute('data-order-id') || '';
 
-    if (respostasCapturadas.length === 0) {
-      return {
-        ok: false,
-        motivo: 'nenhum_xhr_capturado',
-        sessaoExpirada: true,
-        diag,
-      };
-    }
+          // cliente_cod — button com data-title-os
+          let cliente_cod = null;
+          const clienteBtn = tr.querySelector('button[data-title-os]');
+          if (clienteBtn) cliente_cod = clienteBtn.getAttribute('data-title-os') || null;
 
-    // Total esperado do primeiro XHR
-    let totalEsperado = null;
-    const qtdCampo = respostasCapturadas[0]?.retornoMultiplos?.['4']?.[0]?.quantidade;
-    if (qtdCampo != null) {
-      totalEsperado = parseInt(qtdCampo, 10);
-      etapa('total_esperado', { totalEsperado });
-    }
+          // cod_profissional — button com data-motoboy
+          let cod_profissional = null;
+          const motoboyBtn = tr.querySelector('button[data-motoboy]');
+          if (motoboyBtn) cod_profissional = motoboyBtn.getAttribute('data-motoboy') || null;
 
-    // 📄 PAGINAÇÃO via cliques na UI
-    const seletoresProximo = [
-      'a.proxima:not(.disabled)',
-      'a.next:not(.disabled)',
-      'button.proxima:not([disabled])',
-      'button.next:not([disabled])',
-      '.pagination li:not(.disabled) a[rel="next"]',
-      '.pagination .next:not(.disabled) a',
-      '.pagination .next:not(.disabled)',
-      'a[onclick*="proximaPagina"]',
-      'a[onclick*="pagina+1"]',
-      'a[onclick*="paginar"]',
-      'a[data-action="proxima"]',
-      '#btnProximaPagina:not([disabled])',
-      'li.next:not(.disabled) a',
-      '[aria-label="Próxima"]:not([disabled])',
-      '[aria-label="Next"]:not([disabled])',
-    ];
-
-    let paginasNavegadas = 1;
-    while (paginasNavegadas < MAX_PAGINAS_SANITY) {
-      if (Date.now() - t0 > TEMPO_MAX_MS) {
-        log(`⏱️  [coletarOs] Timeout estourado — abortando com ${respostasCapturadas.length} XHRs`);
-        break;
-      }
-
-      // Conta OS coletadas até agora
-      const totalColetado = respostasCapturadas.reduce((acc, r) => {
-        const lista = Array.isArray(r?.retornoMultiplos?.['5']) ? r.retornoMultiplos['5'] : [];
-        return acc + lista.length;
-      }, 0);
-
-      if (totalEsperado != null && totalColetado >= totalEsperado) {
-        log(`✅ [coletarOs] Coletado ${totalColetado}/${totalEsperado} — fim`);
-        break;
-      }
-
-      // Tenta achar e clicar no botão "próxima"
-      let clicou = false;
-      for (const sel of seletoresProximo) {
-        try {
-          const el = page.locator(sel).first();
-          if (await el.isVisible({ timeout: 300 }).catch(() => false)) {
-            log(`🖱️ [coletarOs] Clicando paginador: ${sel}`);
-            await el.click().catch(() => {});
-            clicou = true;
-            break;
+          // cod_rastreio — href do link de rastreamento
+          let cod_rastreio = null;
+          const rastLink = tr.querySelector('a[href*="rastreamento?cod="]');
+          if (rastLink) {
+            const href = rastLink.getAttribute('href') || '';
+            const m = href.match(/cod=([^&"'\s]+)/);
+            if (m) cod_rastreio = m[1];
           }
-        } catch (_) {}
-      }
 
-      if (!clicou) {
-        log(`⚠️ [coletarOs] Nenhum paginador encontrado — encerrando (coletadas ${totalColetado}${totalEsperado != null ? '/' + totalEsperado : ''})`);
-        break;
-      }
+          // _balloon — concatena TODOS os data-balloon dentro do tr + texto visível
+          const balloons = Array.from(tr.querySelectorAll('[data-balloon]'))
+            .map(el => el.getAttribute('data-balloon') || '')
+            .filter(Boolean);
+          const textoVisivel = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+          const balloon = (balloons.join(' | ') + ' | ' + textoVisivel).toUpperCase();
 
-      // Aguarda novo XHR
-      const xhrCountAntes = respostasCapturadas.length;
-      try {
-        await page.waitForResponse(
-          (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
-          { timeout: 10_000 }
-        );
-      } catch (e) {
-        log(`⚠️ [coletarOs] Timeout esperando XHR pós-clique: ${e.message}`);
-        break;
-      }
-      await page.waitForTimeout(800);
-
-      // Se o número de respostas não aumentou, o clique não disparou nada novo
-      if (respostasCapturadas.length === xhrCountAntes) {
-        log('⚠️ [coletarOs] Clique não disparou novo XHR — encerrando');
-        break;
-      }
-
-      paginasNavegadas++;
-    }
-
-    // Agrega + dedup
-    const todasOsRaw = [];
-    for (const resp of respostasCapturadas) {
-      const lista = Array.isArray(resp?.retornoMultiplos?.['5']) ? resp.retornoMultiplos['5'] : [];
-      todasOsRaw.push(...lista);
-    }
-
-    const vistos = new Set();
-    const todasOs = [];
-    for (const item of todasOsRaw) {
-      const id = String(item['s.id'] || '');
-      if (!id || vistos.has(id)) continue;
-      vistos.add(id);
-
-      // Sintetiza _balloon concatenando valores string do item
-      const balloonParts = [];
-      for (const v of Object.values(item)) {
-        if (v == null) continue;
-        if (typeof v === 'string' || typeof v === 'number') balloonParts.push(String(v));
-      }
-
-      todasOs.push({
-        os_numero: id,
-        cliente_cod: String(item['s.idSolicitante'] || '').trim() || null,
-        cod_profissional: String(item['s.idMotoboy'] || '').trim() || null,
-        cod_rastreio: null,
-        _balloon: balloonParts.join(' | ').toUpperCase(),
-        raw: item,
+          return { os_numero, cliente_cod, cod_profissional, cod_rastreio, _balloon: balloon };
+        });
       });
+
+      let novos = 0;
+      for (const o of extraidas) {
+        if (!o.os_numero) continue;
+        if (!todasOsMap.has(o.os_numero)) {
+          todasOsMap.set(o.os_numero, o);
+          novos++;
+        }
+      }
+      return { extraidas: extraidas.length, novos };
     }
 
-    const duracaoMs = Date.now() - t0;
-    log(`✅ [coletarOs] ${todasOs.length} OS únicas em ${respostasCapturadas.length} XHR(s) (${duracaoMs}ms)`);
+    // Primeira página
+    const r1 = await extrairOsAtuais();
+    diag.paginasColetadas.push({ pagina: 1, ...r1 });
+    etapa('pagina_extraida', { pagina: 1, ...r1, acumulado: todasOsMap.size });
 
-    return {
-      ok: true,
-      ordens: todasOs,
-      totalEsperado,
-      paginas: respostasCapturadas.length,
-      duracaoMs,
-      diag,
-    };
+    // 📄 PAGINAÇÃO via clique no "Próx." do paginador
+    for (let pagina = 2; pagina <= MAX_PAGINAS_SANITY; pagina++) {
+      if (Date.now() - t0 > TEMPO_MAX_MS) {
+        etapa('timeout_estourou', { coletado: todasOsMap.size });
+        break;
+      }
+
+      if (totalEsperado != null && todasOsMap.size >= totalEsperado) {
+        etapa('alcancou_total', { coletado: todasOsMap.size, esperado: totalEsperado });
+        break;
+      }
+
+      // Acha o link "Próx." — link do paginador cujo texto contém "Próx"
+      // (ou ordem alternativa: link do paginador com número da página atual+1)
+      const proximoHandle = await page.evaluateHandle(() => {
+        const paginador = document.querySelector('#em-execucao, #pills-em-execucao .pagination');
+        if (!paginador) return null;
+        // Primeiro tenta "Próx."
+        const links = Array.from(paginador.querySelectorAll('a.page-link'));
+        const proxLink = links.find(a => /pr[oó]x/i.test(a.textContent || ''));
+        if (proxLink) {
+          // Verifica se o <li> pai está disabled
+          const li = proxLink.closest('li');
+          if (li && li.classList.contains('disabled')) return null;
+          return proxLink;
+        }
+        return null;
+      });
+
+      const elemento = proximoHandle.asElement();
+      if (!elemento) {
+        etapa('sem_proximo', { coletado: todasOsMap.size });
+        break;
+      }
+
+      // Clica no "Próx."
+      try {
+        await elemento.click();
+      } catch (e) {
+        etapa('erro_click_proximo', { erro: e.message });
+        break;
+      }
+
+      // Aguarda a tabela renderizar novamente — os tr[data-order-id] antigos
+      // são substituídos, então espera por re-render (timer simples + DOM check)
+      await page.waitForTimeout(1200);
+      // Verifica se ainda tem linhas (se não, a paginação quebrou)
+      const ainda = await page.locator('#pills-em-execucao tr[data-order-id]').count().catch(() => 0);
+      if (ainda === 0) {
+        etapa('tabela_vazia_apos_click', { pagina });
+        break;
+      }
+
+      const rN = await extrairOsAtuais();
+      diag.paginasColetadas.push({ pagina, ...rN });
+      etapa('pagina_extraida', { pagina, ...rN, acumulado: todasOsMap.size });
+
+      // Se a última página não trouxe nada novo, para
+      if (rN.novos === 0) {
+        etapa('pagina_sem_novos', { pagina });
+        break;
+      }
+    }
 
   } catch (err) {
     log(`❌ [coletarOs] Erro: ${err.message}`);
@@ -788,7 +689,22 @@ async function coletarOsEmExecucao() {
     try { if (browser) await browser.close(); } catch (_) {}
     releaseMutex();
   }
+
+  const ordens = Array.from(todasOsMap.values());
+  const duracaoMs = Date.now() - t0;
+  log(`✅ [coletarOs] ${ordens.length} OS extraídas em ${diag.paginasColetadas.length} página(s) (${duracaoMs}ms)`);
+
+  return {
+    ok: true,
+    ordens,
+    totalEsperado,
+    paginas: diag.paginasColetadas.length,
+    duracaoMs,
+    diag,
+  };
 }
+
+
 
 
 async function capturarPontosOS({ os_numero, cliente_cod }) {
