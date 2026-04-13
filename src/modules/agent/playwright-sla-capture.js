@@ -293,6 +293,121 @@ function ponto1Bate767(texto) {
  * @param {String} params.cliente_cod - '814' ou '767'
  * @returns {Promise<{ pontos: Array, textoBrutoModal: String }>}
  */
+// ═════════════════════════════════════════════════════════════════════════════
+// GARANTIR SESSÃO (substitui o hack de capturar OS dummy '0000001')
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Função dedicada a APENAS:
+ *   1. Garantir que existe uma sessão Playwright válida em SESSION_FILE
+ *   2. Garantir que o META_FILE com o payload AJAX está atualizado
+ *
+ * Sem buscar nenhuma OS, sem clicar em nada, sem ruído.
+ *
+ * Fluxo:
+ *   - Abre browser headless
+ *   - Tenta reusar SESSION_FILE; se inválido, faz login completo
+ *   - Visita /acompanhamento-servicos — isso dispara automaticamente o XHR
+ *     pro endpoint viewServicoAcompanhamento, e o listener instalado por
+ *     instalarCapturaPayload(context) escreve o META_FILE
+ *   - Salva storageState atualizado
+ *   - Fecha tudo
+ *
+ * Usado pelo sla-detector-worker no startup e no auto-relogin, em vez do
+ * hack antigo de chamar capturarPontosOS({ os_numero: '0000001' }).
+ *
+ * Retorna: { ok: true, sessaoSalva: bool, payloadCapturado: bool }
+ *          ou throw em caso de falha de login.
+ */
+async function garantirSessao() {
+  await acquireMutex();
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  });
+
+  let context;
+  let payloadAntes = null;
+
+  // Snapshot do mtime do META_FILE pra detectar se a captura efetivamente atualizou
+  try {
+    if (fs.existsSync(META_FILE)) {
+      payloadAntes = fs.statSync(META_FILE).mtimeMs;
+    }
+  } catch (_) {}
+
+  try {
+    if (fs.existsSync(SESSION_FILE)) {
+      try {
+        context = await browser.newContext({ storageState: SESSION_FILE });
+      } catch {
+        context = await browser.newContext();
+      }
+    } else {
+      context = await browser.newContext();
+    }
+
+    // 🔑 Listener de captura de payload — mesma função usada pelo capturarPontosOS
+    instalarCapturaPayload(context);
+
+    const page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
+    log('🔓 garantirSessao: navegando pra acompanhamento-servicos');
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1500);
+
+    if (!(await isLoggedIn(page))) {
+      log('🔓 garantirSessao: sessão inválida, fazendo login completo');
+      await fazerLogin(page);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
+    } else {
+      log('🔓 garantirSessao: sessão reaproveitada do disco');
+    }
+
+    // Tempo extra pra garantir que TODOS os XHRs do load completaram
+    // (incluindo o viewServicoAcompanhamento que precisamos capturar)
+    await page.waitForTimeout(2500);
+
+    // Persiste storageState atualizado
+    try {
+      await context.storageState({ path: SESSION_FILE });
+      log('💾 garantirSessao: storageState salvo');
+    } catch (e) {
+      log(`⚠️ garantirSessao: falha ao salvar storageState: ${e.message}`);
+    }
+
+    // Verifica se o META_FILE foi atualizado pelo listener
+    let payloadCapturado = false;
+    try {
+      if (fs.existsSync(META_FILE)) {
+        const novoMtime = fs.statSync(META_FILE).mtimeMs;
+        payloadCapturado = !payloadAntes || novoMtime > payloadAntes;
+      }
+    } catch (_) {}
+
+    if (payloadCapturado) {
+      log('✅ garantirSessao: payload AJAX capturado com sucesso');
+    } else {
+      log('⚠️ garantirSessao: payload AJAX NÃO foi capturado nesta sessão');
+      log('    A página de acompanhamento talvez não tenha disparado o XHR no load.');
+      log('    Próximo tick do detector vai usar payload antigo (se existir) ou fallback.');
+    }
+
+    return { ok: true, sessaoSalva: true, payloadCapturado };
+
+  } finally {
+    try {
+      if (context) await context.close();
+    } catch (_) {}
+    try { await browser.close(); } catch (_) {}
+    releaseMutex();
+  }
+}
+
+
 async function capturarPontosOS({ os_numero, cliente_cod }) {
   if (!process.env.SISTEMA_EXTERNO_URL) {
     throw new Error('SISTEMA_EXTERNO_URL não configurada.');
@@ -627,6 +742,7 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 
 module.exports = {
   capturarPontosOS,
+  garantirSessao,
   // expostos pra testes unitários
   _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
 };
