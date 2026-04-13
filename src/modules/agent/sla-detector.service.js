@@ -47,6 +47,9 @@ let _configCacheAt = 0;
 /**
  * Carrega config de clientes monitorados + filtros de _balloon.
  * Cache de 1 minuto pra evitar hit no banco a cada tick.
+ *
+ * Tolerante ao schema: descobre dinamicamente o nome da coluna de filtros
+ * (pode ser filtros_balao, filtros_balloon, filtro_balao, filtros, etc).
  */
 async function carregarConfig(pool) {
   const agora = Date.now();
@@ -54,8 +57,27 @@ async function carregarConfig(pool) {
     return _configCache;
   }
 
+  // Descobre o nome real da coluna de filtros
+  const { rows: cols } = await pool.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_name = 'rastreio_clientes_config'`
+  );
+  const colNames = cols.map(c => c.column_name);
+  const colFiltros = colNames.find(c => /filtr/i.test(c) && /bal/i.test(c))
+    || colNames.find(c => /filtr/i.test(c))
+    || null;
+
+  if (DEBUG) {
+    log(`⚙️ Colunas da tabela: [${colNames.join(', ')}] | coluna filtros: ${colFiltros || '(nenhuma)'}`);
+  }
+
+  // Monta a query de acordo com o que existe
+  const selectCols = ['cliente_cod', 'ativo'];
+  if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
+
   const { rows } = await pool.query(
-    `SELECT cliente_cod, ativo, filtros_balao
+    `SELECT ${selectCols.join(', ')}
        FROM rastreio_clientes_config
       WHERE ativo = true`
   );
@@ -64,8 +86,19 @@ async function carregarConfig(pool) {
   for (const row of rows) {
     const cod = String(row.cliente_cod);
     let filtros = [];
-    if (Array.isArray(row.filtros_balao)) {
-      filtros = row.filtros_balao.map(f => String(f).toUpperCase().trim()).filter(Boolean);
+    const raw = row.filtros_balao;
+    if (Array.isArray(raw)) {
+      filtros = raw.map(f => String(f).toUpperCase().trim()).filter(Boolean);
+    } else if (typeof raw === 'string' && raw.length > 0) {
+      // Pode ser JSON stringificado ou CSV
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          filtros = parsed.map(f => String(f).toUpperCase().trim()).filter(Boolean);
+        }
+      } catch {
+        filtros = raw.split(',').map(f => f.toUpperCase().trim()).filter(Boolean);
+      }
     }
     config[cod] = {
       ativo: row.ativo,
@@ -79,6 +112,9 @@ async function carregarConfig(pool) {
   if (DEBUG) {
     const codigos = Object.keys(config);
     log(`⚙️ Config carregada: ${codigos.length} cliente(s) ativo(s) — [${codigos.join(', ')}]`);
+    for (const [cod, cfg] of Object.entries(config)) {
+      log(`   • ${cod}: filtros=[${cfg.filtrosBalao.join(', ') || '(nenhum)'}]`);
+    }
   }
 
   return config;
@@ -118,16 +154,15 @@ async function inserirNaFila(pool, ordens) {
     try {
       const result = await pool.query(
         `INSERT INTO sla_capturas
-           (os_numero, cliente_cod, cod_profissional, cod_rastreio, balloon, status, criado_em)
-         VALUES ($1, $2, $3, $4, $5, 'pendente', NOW())
+           (os_numero, cliente_cod, cod_rastreio, profissional, status, criado_em)
+         VALUES ($1, $2, $3, $4, 'pendente', NOW())
          ON CONFLICT (os_numero) DO NOTHING
          RETURNING id`,
         [
           ordem.os_numero,
           ordem.cliente_cod,
-          ordem.cod_profissional,
           ordem.cod_rastreio,
-          ordem._balloon,
+          ordem.cod_profissional, // no schema a coluna se chama `profissional`
         ]
       );
       if (result.rowCount > 0) {
