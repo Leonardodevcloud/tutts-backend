@@ -409,13 +409,16 @@ async function despacharParaUber(pool, servico) {
     throw new Error(`OS ${codigoOS}: menos de 2 endereços, não é possível despachar`);
   }
 
-  // Verificar se já existe registro
+  // Verificar se já existe registro ativo (não terminal).
+  // Excluímos: cancelado, canceled (compat), delivered, fallback_fila
   const { rows: existente } = await pool.query(
-    'SELECT id FROM uber_entregas WHERE codigo_os = $1 AND status_uber NOT IN ($2, $3)',
-    [codigoOS, 'canceled', 'delivered']
+    `SELECT id, status_uber FROM uber_entregas
+     WHERE codigo_os = $1
+       AND status_uber NOT IN ('cancelado', 'canceled', 'delivered', 'fallback_fila')`,
+    [codigoOS]
   );
   if (existente.length > 0) {
-    console.log(`⚠️ [Uber] OS ${codigoOS} já tem entrega ativa, ignorando`);
+    console.log(`⚠️ [Uber] OS ${codigoOS} já tem entrega ativa (id=${existente[0].id}, status=${existente[0].status_uber}), ignorando`);
     return null;
   }
 
