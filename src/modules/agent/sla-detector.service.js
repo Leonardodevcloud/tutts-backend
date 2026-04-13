@@ -264,27 +264,42 @@ async function fetchPage({ offset = 0, limite = 100 } = {}) {
 /**
  * Fetch paginado — chama fetchPage em loop até esgotar.
  *
- * Critérios de parada:
- *   - Resposta vem com menos OS que o `limite` → última página
- *   - Resposta vem vazia
- *   - Bate MAX_PAGINAS (proteção contra loop infinito)
- *   - Bate totalEsperado (do campo retornoMultiplos["4"][0].quantidade)
+ * Critérios de parada (em ordem):
+ *   1. Página veio com menos OS que o `limite` → última página (natural)
+ *   2. Já coletou >= totalEsperado (sanity do servidor)
+ *   3. Sessão expirada numa página → aborta e sinaliza relogin
+ *   4. HTTP error ou parse error → aborta e retorna o que tem
+ *   5. Runaway protection: página vazia inesperada ou loop infinito (offset
+ *      não avança) → aborta
  *
- * Retorna estrutura compatível com o antigo fetchData:
- *   { ok, data, statusCode, paginas, totalColetado }
+ * Sem teto artificial de páginas: se o servidor disser que tem 500 OS,
+ * paginamos as 5 páginas. Se tiver 2000, paginamos as 20. O único teto
+ * é o tempo total (TEMPO_MAX_MS), que é uma proteção real contra pendurar
+ * o worker por horas em caso de bug do servidor.
+ *
+ * Retorna:
+ *   { ok, data, statusCode, paginas, totalColetado, totalEsperado }
  *   onde data.retornoMultiplos["5"] é o array AGREGADO de todas as páginas.
  */
 async function fetchAllPages() {
-  const LIMITE_POR_PAGINA = 100;
-  const MAX_PAGINAS = 10; // 1000 OS máximo por tick — proteção
+  const LIMITE_POR_PAGINA = 200;       // 200 por página — poucas requisições
+  const TEMPO_MAX_MS = 90_000;          // 1min30s máximo por tick (cron é a cada 2min)
+  const MAX_PAGINAS_SANITY = 1000;      // proteção absoluta contra loop infinito
 
   const todasOs = [];
   let paginas = 0;
   let ultimoStatus = null;
   let ultimaResposta = null;
   let totalEsperado = null;
+  const t0 = Date.now();
 
-  for (let pagina = 0; pagina < MAX_PAGINAS; pagina++) {
+  for (let pagina = 0; pagina < MAX_PAGINAS_SANITY; pagina++) {
+    // Timeout total — se estourou, aborta mesmo que tenha mais pra coletar
+    if (Date.now() - t0 > TEMPO_MAX_MS) {
+      log(`⏱️  Timeout de ${TEMPO_MAX_MS}ms estourado — abortando com ${todasOs.length} OS coletadas`);
+      break;
+    }
+
     const offset = pagina * LIMITE_POR_PAGINA;
     const page = await fetchPage({ offset, limite: LIMITE_POR_PAGINA });
 
@@ -301,7 +316,7 @@ async function fetchAllPages() {
       }
     }
 
-    // Falha HTTP ou parse → aborta paginação, retorna o que tem
+    // Falha HTTP ou parse → aborta paginação
     if (!page.ok && page.statusCode !== 200) {
       log(`⚠️ Página ${pagina + 1}: HTTP ${page.statusCode} — abortando paginação`);
       break;
@@ -329,20 +344,28 @@ async function fetchAllPages() {
       : [];
 
     if (DEBUG_HTTP) {
-      log(`📄 Página ${pagina + 1}: +${lista.length} OS (acumulado: ${todasOs.length + lista.length})`);
+      log(`📄 Página ${pagina + 1}: +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
     }
 
     todasOs.push(...lista);
 
-    // Condição de parada 1: página retornou menos que o limite → última
+    // 🛑 Critério 1 (principal): página retornou menos que o limite → última página
     if (lista.length < LIMITE_POR_PAGINA) break;
 
-    // Condição de parada 2: já temos tudo que o servidor disse que tem
+    // 🛑 Critério 2: sanity do servidor — já temos tudo que ele disse que tem
     if (totalEsperado != null && todasOs.length >= totalEsperado) break;
+
+    // 🛑 Critério 3: runaway protection — página cheia mas sem totalEsperado E
+    // sem progresso (nenhuma OS nova na última página) → evita loop infinito
+    if (lista.length === 0) {
+      log(`⚠️ Página ${pagina + 1} veio vazia inesperadamente — abortando`);
+      break;
+    }
   }
 
-  if (paginas === MAX_PAGINAS && totalEsperado != null && todasOs.length < totalEsperado) {
-    log(`⚠️ Limite de ${MAX_PAGINAS} páginas atingido — ${todasOs.length}/${totalEsperado} OS coletadas`);
+  // Se bateu MAX_PAGINAS_SANITY, é bug. Nunca deveria acontecer em produção.
+  if (paginas >= MAX_PAGINAS_SANITY) {
+    log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito no fetchAllPages`);
   }
 
   // Monta um "data" sintético com o array agregado
@@ -350,8 +373,9 @@ async function fetchAllPages() {
     ? { ...ultimaResposta, retornoMultiplos: { ...ultimaResposta.retornoMultiplos, '5': todasOs } }
     : { retornoMultiplos: { '5': todasOs } };
 
+  const duracaoMs = Date.now() - t0;
   if (DEBUG_HTTP) {
-    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s)`);
+    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s) (${duracaoMs}ms)`);
   }
 
   return {
@@ -361,6 +385,7 @@ async function fetchAllPages() {
     paginas,
     totalColetado: todasOs.length,
     totalEsperado,
+    duracaoMs,
   };
 }
 
