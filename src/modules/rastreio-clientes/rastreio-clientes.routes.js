@@ -5,6 +5,7 @@
  * CRUD config + histórico + reenviar. Todas as rotas exigem admin.
  */
 
+const fs = require('fs');
 const express = require('express');
 
 function createRastreioClientesRouter(pool, deps = {}) {
@@ -116,6 +117,75 @@ function createRastreioClientesRouter(pool, deps = {}) {
       await audit(req, 'reenviar_captura', { id: req.params.id, os_numero: rows[0].os_numero });
       res.json({ ok: true, message: 'Reenfileirado, próximo tick do worker vai processar' });
     } catch (e) { res.status(500).json({ ok: false, erro: e.message }); }
+  });
+
+  // ============ DEBUG ============
+  // Visualiza o último HTML retornado pelo detector (gravado quando
+  // SLA_DETECTOR_DEBUG=true). Útil pra entender por que ehTelaLogin
+  // está dando true sem precisar entrar no container.
+
+  router.get('/debug/ultimo-html', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const path = '/tmp/sla-detector-last.html';
+      if (!fs.existsSync(path)) {
+        return res.status(404).json({
+          ok: false,
+          erro: 'arquivo_nao_encontrado',
+          dica: 'Confira se SLA_DETECTOR_DEBUG=true no Railway e aguarde o próximo tick',
+        });
+      }
+      const stat = fs.statSync(path);
+      const html = fs.readFileSync(path, 'utf8');
+      // Texto puro pra facilitar inspeção no navegador
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(
+        `=== sla-detector-last.html ===\n` +
+        `tamanho: ${stat.size} bytes\n` +
+        `modificado: ${stat.mtime.toISOString()}\n` +
+        `========================================\n\n` +
+        html
+      );
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  router.get('/debug/sessao-info', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const path = '/tmp/tutts-sla-session.json';
+      if (!fs.existsSync(path)) {
+        return res.json({ ok: false, existe: false });
+      }
+      const stat = fs.statSync(path);
+      const raw = JSON.parse(fs.readFileSync(path, 'utf8'));
+      const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
+      const tuttsCookies = cookies.filter(c =>
+        c.domain && c.domain.includes('tutts.com.br')
+      );
+      res.json({
+        ok: true,
+        existe: true,
+        modificado: stat.mtime.toISOString(),
+        idade_segundos: Math.floor((Date.now() - stat.mtime.getTime()) / 1000),
+        total_cookies: cookies.length,
+        cookies_tutts: tuttsCookies.map(c => ({
+          name: c.name,
+          domain: c.domain,
+          path: c.path,
+          httpOnly: c.httpOnly,
+          secure: c.secure,
+          sameSite: c.sameSite,
+          expires: c.expires,
+          value_preview: String(c.value || '').slice(0, 12) + '...',
+        })),
+        origins: (raw.origins || []).map(o => ({
+          origin: o.origin,
+          local_storage_keys: (o.localStorage || []).map(ls => ls.name),
+        })),
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
   });
 
   return router;
