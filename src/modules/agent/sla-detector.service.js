@@ -227,18 +227,25 @@ async function inserirNaFila(pool, ordens) {
 
   for (const ordem of ordens) {
     try {
+      // Schema real da sla_capturas (confirmado 2026-04-13):
+      //   os_numero, cliente_cod, cod_rastreio, link_rastreio, profissional,
+      //   status, tentativas, erro, pontos_json, mensagem_enviada, origem_ip,
+      //   criado_em, atualizado_em, proximo_retry_em, enviado_em
+      //
+      // OBS: `_balloon` é campo interno (só usado pra filtro no service) —
+      // não é persistido. A coluna do banco se chama `profissional`,
+      // não `cod_profissional`.
       const result = await pool.query(
         `INSERT INTO sla_capturas
-           (os_numero, cliente_cod, cod_profissional, cod_rastreio, balloon, status, criado_em)
-         VALUES ($1, $2, $3, $4, $5, 'pendente', NOW())
+           (os_numero, cliente_cod, cod_rastreio, profissional, status, criado_em)
+         VALUES ($1, $2, $3, $4, 'pendente', NOW())
          ON CONFLICT (os_numero) DO NOTHING
          RETURNING id`,
         [
           ordem.os_numero,
           ordem.cliente_cod,
-          ordem.cod_profissional,
           ordem.cod_rastreio,
-          ordem._balloon,
+          ordem.cod_profissional, // nome interno cod_profissional → coluna `profissional`
         ]
       );
       if (result.rowCount > 0) {
