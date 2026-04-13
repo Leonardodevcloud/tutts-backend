@@ -245,14 +245,15 @@ async function inserirNaFila(pool, ordens) {
       // não `cod_profissional`.
       const result = await pool.query(
         `INSERT INTO sla_capturas
-           (os_numero, cliente_cod, cod_rastreio, profissional, status, criado_em)
-         VALUES ($1, $2, $3, $4, 'pendente', NOW())
+           (os_numero, cliente_cod, cod_rastreio, link_rastreio, profissional, status, criado_em)
+         VALUES ($1, $2, $3, $4, $5, 'pendente', NOW())
          ON CONFLICT (os_numero) DO NOTHING
          RETURNING id`,
         [
           ordem.os_numero,
           ordem.cliente_cod,
           ordem.cod_rastreio,
+          ordem.link_rastreio,
           ordem.cod_profissional, // nome interno cod_profissional → coluna `profissional`
         ]
       );
