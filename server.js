@@ -250,6 +250,53 @@ app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 app.use('/api/uber', initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
+// ═══════════════════════════════════════════════════════════════════
+// 🔬 DEBUG SLA — temporário pra diagnóstico do detector (2026-04-13)
+// ═══════════════════════════════════════════════════════════════════
+// GET /_debug/sla-coletar?key=tutts-sla-debug-2026 — chama coletarOsEmExecucao direto
+// GET /_debug/sla-tick?key=tutts-sla-debug-2026    — chama detectarOsNovas (tick completo)
+// REMOVER DEPOIS QUE CONFIRMAR QUE O PIPELINE ESTÁ FUNCIONANDO
+const SLA_DEBUG_KEY = process.env.SLA_DEBUG_KEY || 'tutts-sla-debug-2026';
+
+app.get('/_debug/sla-coletar', async (req, res) => {
+  if (req.query.key !== SLA_DEBUG_KEY) {
+    return res.status(401).json({ erro: 'key inválida' });
+  }
+  try {
+    const { coletarOsEmExecucao } = require('./src/modules/agent/playwright-sla-capture');
+    const t0 = Date.now();
+    const resultado = await coletarOsEmExecucao();
+    return res.json({
+      ok: true,
+      duracaoMs: Date.now() - t0,
+      resumo: {
+        ok: resultado.ok,
+        motivo: resultado.motivo,
+        totalOrdens: resultado.ordens?.length ?? 0,
+        totalEsperado: resultado.totalEsperado,
+        paginas: resultado.paginas,
+        primeirasOrdens: (resultado.ordens || []).slice(0, 3),
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
+  }
+});
+
+app.get('/_debug/sla-tick', async (req, res) => {
+  if (req.query.key !== SLA_DEBUG_KEY) {
+    return res.status(401).json({ erro: 'key inválida' });
+  }
+  try {
+    const { detectarOsNovas } = require('./src/modules/agent/sla-detector.service');
+    const t0 = Date.now();
+    const resultado = await detectarOsNovas(pool);
+    return res.json({ ok: true, duracaoMs: Date.now() - t0, resultado });
+  } catch (e) {
+    return res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
+  }
+});
+
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
