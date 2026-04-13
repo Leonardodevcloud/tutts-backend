@@ -367,9 +367,39 @@ async function garantirSessao() {
       log('🔓 garantirSessao: sessão reaproveitada do disco');
     }
 
-    // Tempo extra pra garantir que TODOS os XHRs do load completaram
-    // (incluindo o viewServicoAcompanhamento que precisamos capturar)
-    await page.waitForTimeout(2500);
+    // 🔧 FIX (2026-04): A página de acompanhamento faz LAZY LOAD do XHR
+    // viewServicoAcompanhamento — só dispara quando o usuário ativa a aba
+    // "Em execução". Sem esse clique, o listener instalarCapturaPayload
+    // nunca pega o body e o META_FILE não é gerado.
+    log('🖱️ garantirSessao: ativando aba "Em execução" pra disparar o XHR');
+    try {
+      const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+      const visivel = await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false);
+      if (visivel) {
+        await abaEmExecucao.click();
+        log('🖱️ garantirSessao: aba clicada, aguardando XHR...');
+        // Espera explícita pelo XHR alvo — até 10s.
+        // Se vier antes disso, segue em frente. Se não vier, loga aviso.
+        try {
+          await page.waitForResponse(
+            (resp) =>
+              /viewServicoAcompanhamento/i.test(resp.url()) &&
+              resp.request().method() === 'POST',
+            { timeout: 10000 }
+          );
+          log('🖱️ garantirSessao: XHR viewServicoAcompanhamento detectado');
+        } catch (e) {
+          log(`⚠️ garantirSessao: XHR não veio em 10s (${e.message})`);
+        }
+      } else {
+        log('⚠️ garantirSessao: aba "Em execução" não visível na página');
+      }
+    } catch (e) {
+      log(`⚠️ garantirSessao: falha ao clicar na aba: ${e.message}`);
+    }
+
+    // Tempo extra pra garantir que o listener.on('request') escreveu o META
+    await page.waitForTimeout(1500);
 
     // Persiste storageState atualizado
     try {
