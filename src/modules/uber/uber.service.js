@@ -101,7 +101,10 @@ async function mappListarServicos(pool, status = 0, ultimoId = 0) {
     throw new Error('Token Mapp inválido ou integração desativada');
   }
 
-  return data.dados?.servicos || [];
+  // FIX: A API Mapp retorna estrutura double-nested { dados: { dados: { servicos: [...] } } }
+  // Aceitamos os dois formatos pra robustez (caso a Mapp normalize no futuro).
+  const servicos = data?.dados?.dados?.servicos || data?.dados?.servicos || [];
+  return Array.isArray(servicos) ? servicos : [];
 }
 
 async function mappAlterarStatus(pool, codigoOS, status) {
@@ -313,16 +316,6 @@ async function uberCriarEntrega(pool, quoteId, pickup, dropoff, externalId) {
   if (dropoff.latitude && dropoff.longitude) {
     body.dropoff_latitude = parseFloat(dropoff.latitude);
     body.dropoff_longitude = parseFloat(dropoff.longitude);
-  }
-
-  // SANDBOX: se a config tiver sandbox_mode=true, injeta o RoboCourier
-  // pra simular o fluxo todo (pending → pickup → pickup_complete → dropoff → delivered)
-  // sem gerar entrega real. Doc: https://developer.uber.com/docs/deliveries/guides/robocourier
-  if (config.sandbox_mode) {
-    body.test_specifications = {
-      robo_courier_specification: { mode: 'auto' },
-    };
-    console.log(`🤖 [Uber] OS ${externalId} despachada em modo SANDBOX (RoboCourier auto)`);
   }
 
   const url = `${UBER_API_BASE}/${config.customer_id}/deliveries`;
