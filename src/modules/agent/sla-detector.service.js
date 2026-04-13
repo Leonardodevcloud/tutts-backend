@@ -230,7 +230,18 @@ async function detectarOsNovas(pool) {
     };
   } catch (err) {
     log(`❌ Erro no detector: ${err.message}`);
-    return { ok: false, sessaoExpirada: false, motivo: err.message };
+    // 🔧 FIX: erro de sessão ausente/inválida no disco também conta como
+    // "sessão expirada" — caso contrário o worker nunca dispara o auto-relogin
+    // e fica preso em loop de erro a cada tick (até 2min).
+    const isSessaoFaltando =
+      err.message.includes('Sessão Playwright não encontrada') ||
+      err.message.includes('Arquivo de sessão sem cookies') ||
+      err.message.includes('ENOENT');
+    return {
+      ok: false,
+      sessaoExpirada: isSessaoFaltando,
+      motivo: err.message,
+    };
   }
 }
 
