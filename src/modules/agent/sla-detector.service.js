@@ -287,28 +287,22 @@ async function fetchPage({ offset = 0 } = {}) {
 }
 
 /**
- * Fetch paginado usando browser real (Chromium) + page.evaluate(fetch).
+ * Fetch paginado capturando os XHRs naturais que o navegador dispara.
  *
- * 🔧 FIX (2026-04-13): A versão anterior usava `playwright.request.newContext`
- * (HTTP puro sem browser). O servidor PHP do tutts.com.br retorna HTML em vez
- * de JSON quando o request não tem os headers Sec-Fetch-* automáticos do
- * browser, e replicar esses headers manualmente é frágil.
+ * 🔧 FIX (2026-04-13): Tentativas anteriores falharam:
+ *   1. node fetch direto → session pinning
+ *   2. playwright.request.newContext → faltam Sec-Fetch headers
+ *   3. browser + page.evaluate(fetch) → mesmo dentro do JS, servidor
+ *      responde HTML porque a sessão precisa estar "ativada" (a aba
+ *      "Em execução" precisa ter sido clicada pra o servidor responder
+ *      JSON pra esse usuário)
  *
- * Solução: abrir Chromium uma vez por tick, navegar pra página de
- * acompanhamento (pro origin/referer ficarem corretos), e fazer todos os
- * fetches via `page.evaluate(fetch(...))`. Assim o request sai literalmente
- * do JavaScript da página com TODOS os headers automáticos.
+ * Solução robusta: deixar o navegador fazer o XHR de forma 100% natural
+ * via clique na aba "Em execução" + cliques no paginador (Próxima/Anterior),
+ * e interceptar as respostas com `page.on('response')`.
  *
- * Custo: ~2s pra abrir browser + ~300ms por página HTTP. Pra 30 páginas =
- * ~12s total. Dentro do budget de 90s e do cron de 2min.
- *
- * Critérios de parada:
- *   1. Página retornou < limite OS → última página
- *   2. Já coletou >= totalEsperado
- *   3. Sessão expirada → aborta e sinaliza relogin
- *   4. HTTP error ou parse error → aborta com o que tem
- *   5. Timeout total de 90s
- *   6. MAX_PAGINAS_SANITY = 1000 (proteção absoluta)
+ * Assim não precisa construir nenhum body — o JS do MAP constrói o que
+ * ele mesmo espera, e a gente só lê a resposta.
  */
 async function fetchAllPages() {
   const TEMPO_MAX_MS = 90_000;
@@ -333,12 +327,8 @@ async function fetchAllPages() {
   }
 
   const todasOs = [];
-  let paginas = 0;
-  let ultimoStatus = null;
-  let ultimaResposta = null;
+  const respostasCapturadas = []; // array de objetos JSON, um por XHR
   let totalEsperado = null;
-  let limiteReal = null;
-  let offsetAtual = 0;
   const t0 = Date.now();
 
   let browser, context, page;
@@ -357,162 +347,189 @@ async function fetchAllPages() {
     page = await context.newPage();
     page.setDefaultTimeout(30_000);
 
-    // Navega pra página de acompanhamento — isso garante:
-    //   - Origin/Referer corretos pra qualquer fetch posterior
-    //   - Sessão PHP "ativa" (algumas versões marcam timestamp no $_SESSION)
-    //   - Cookies de tracking/analytics atualizados
+    // 🎯 Listener de resposta — captura QUALQUER resposta JSON do endpoint
+    // viewServicoAcompanhamento, sem importar quem disparou
+    context.on('response', async (resp) => {
+      try {
+        if (resp.request().method() !== 'POST') return;
+        if (!/viewServicoAcompanhamento/i.test(resp.url())) return;
+        const ct = resp.headers()['content-type'] || '';
+        if (!/json/i.test(ct)) {
+          if (DEBUG_HTTP) log(`🔎 XHR ignorado (ct=${ct})`);
+          return;
+        }
+        const text = await resp.text();
+        const data = JSON.parse(text);
+        respostasCapturadas.push(data);
+        const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
+          ? data.retornoMultiplos['5'].length
+          : 0;
+        if (DEBUG_HTTP) log(`📨 XHR capturado: ${numOs} OS (acumulado: ${respostasCapturadas.length} XHRs)`);
+      } catch (_) {}
+    });
+
+    // Navega pra página de acompanhamento
     if (DEBUG_HTTP) log(`🧭 Navegando pra ${REFERER}`);
     await page.goto(REFERER, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(800);
 
-    // Loop de paginação — cada iteração faz 1 fetch via page.evaluate
-    for (let pagina = 0; pagina < MAX_PAGINAS_SANITY; pagina++) {
-      if (Date.now() - t0 > TEMPO_MAX_MS) {
-        log(`⏱️  Timeout de ${TEMPO_MAX_MS}ms estourado — abortando com ${todasOs.length} OS coletadas`);
-        break;
-      }
-
-      const { bodyJson, limite } = montarPayload({ offset: offsetAtual });
-
-      if (limiteReal == null) {
-        limiteReal = limite;
-        if (DEBUG_HTTP) log(`📏 Limite ditado pelo meta: ${limiteReal} por página`);
-      }
-
-      // 🔑 CHAVE: fetch dentro do JS da página, não via HTTP puro.
-      // Headers Sec-Fetch-* + cookies + credentials são automáticos.
-      const result = await page.evaluate(
-        async ({ url, body }) => {
-          try {
-            const resp = await fetch(url, {
-              method: 'POST',
-              credentials: 'include',
-              headers: {
-                'Content-Type': 'application/json; charset=UTF-8',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'X-Requested-With': 'XMLHttpRequest',
-              },
-              body,
-            });
-            const text = await resp.text();
-            const headers = {};
-            resp.headers.forEach((v, k) => { headers[k] = v; });
-            return { ok: resp.ok, status: resp.status, headers, text };
-          } catch (e) {
-            return { error: e.message };
-          }
-        },
-        { url: ENDPOINT, body: bodyJson }
-      );
-
-      paginas++;
-
-      if (result.error) {
-        log(`⚠️ Página ${pagina + 1}: erro no fetch: ${result.error}`);
-        break;
-      }
-
-      ultimoStatus = result.status;
-
-      // Parse JSON
-      let data = null;
-      let parseErr = null;
+    // 🖱️  Clica na aba "Em execução" — isso dispara o XHR natural
+    if (DEBUG_HTTP) log(`🖱️  Ativando aba "Em execução"`);
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    const abaVisivel = await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!abaVisivel) {
+      log(`⚠️ Aba "Em execução" não visível na página`);
+    } else {
+      await abaEmExecucao.click();
+      // Aguarda o primeiro XHR chegar (até 10s)
       try {
-        data = JSON.parse(result.text);
+        await page.waitForResponse(
+          (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
+          { timeout: 10_000 }
+        );
+        if (DEBUG_HTTP) log(`✅ Primeiro XHR detectado após clique na aba`);
       } catch (e) {
-        parseErr = e.message;
+        log(`⚠️ Timeout esperando XHR inicial: ${e.message}`);
       }
-      ultimaResposta = data;
+      // Tempo extra pra processar a resposta no listener
+      await page.waitForTimeout(1000);
+    }
 
-      // Debug rico se houver erro
-      if (parseErr || (DEBUG_HTTP && pagina === 0)) {
+    // Pega total esperado do primeiro XHR capturado
+    if (respostasCapturadas.length > 0) {
+      const qtdCampo = respostasCapturadas[0]?.retornoMultiplos?.['4']?.[0]?.quantidade;
+      if (qtdCampo != null) {
+        totalEsperado = parseInt(qtdCampo, 10);
+        if (DEBUG_HTTP) log(`📄 Total esperado segundo servidor: ${totalEsperado}`);
+      }
+    }
+
+    // 📄 PAGINAÇÃO via UI: clica no botão "próxima página" até esgotar
+    // Seletores comuns de paginadores Bootstrap/jQuery em sistemas PHP legados
+    const seletoresProximo = [
+      'a.proxima',
+      'a.next',
+      'button.proxima',
+      'button.next',
+      '#pagination .next',
+      '#pagination .proxima',
+      '.pagination .next:not(.disabled)',
+      '.pagination li:not(.disabled) a[rel="next"]',
+      'a[onclick*="proximaPagina"]',
+      'a[onclick*="pagina+1"]',
+      'a[data-action="proxima"]',
+      '.btn-paginacao-prox',
+      '#btnProximaPagina',
+    ];
+
+    let paginasNavegadas = 1;
+    while (paginasNavegadas < MAX_PAGINAS_SANITY) {
+      if (Date.now() - t0 > TEMPO_MAX_MS) {
+        log(`⏱️  Timeout estourado — abortando com ${respostasCapturadas.length} XHRs capturados`);
+        break;
+      }
+
+      // Critério de parada: se já temos totalEsperado, não precisa paginar mais
+      const totalColetadoAteAgora = respostasCapturadas.reduce((acc, r) => {
+        const lista = Array.isArray(r?.retornoMultiplos?.['5']) ? r.retornoMultiplos['5'] : [];
+        return acc + lista.length;
+      }, 0);
+      if (totalEsperado != null && totalColetadoAteAgora >= totalEsperado) {
+        if (DEBUG_HTTP) log(`✅ Já temos ${totalColetadoAteAgora}/${totalEsperado} — fim da paginação`);
+        break;
+      }
+
+      // Tenta achar e clicar no botão "próxima"
+      let clicou = false;
+      for (const sel of seletoresProximo) {
         try {
-          fs.writeFileSync(DEBUG_DUMP_FILE, result.text, 'utf8');
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+            const isDisabled = await el.getAttribute('disabled').catch(() => null);
+            const classList = (await el.getAttribute('class').catch(() => '')) || '';
+            if (!isDisabled && !classList.includes('disabled')) {
+              if (DEBUG_HTTP) log(`🖱️  Clicando em paginador: ${sel}`);
+              await el.click().catch(() => {});
+              clicou = true;
+              break;
+            }
+          }
         } catch (_) {}
       }
-      if (parseErr) {
-        log(`❌ [offset=${offsetAtual}] HTTP ${result.status} | bytes=${result.text.length} | ct=${result.headers['content-type'] || '(none)'}`);
-        log(`❌ parseErr: ${parseErr}`);
-        const preview = result.text.slice(0, 500).replace(/\s+/g, ' ').trim();
-        log(`❌ raw preview: ${preview || '(vazio)'}`);
-        log(`⚠️ Página ${pagina + 1}: JSON parse falhou — abortando`);
+
+      if (!clicou) {
+        if (DEBUG_HTTP) log(`⚠️ Nenhum botão "próxima" encontrado — encerrando paginação UI`);
         break;
       }
 
-      if (!result.ok) {
-        log(`⚠️ Página ${pagina + 1}: HTTP ${result.status} — abortando`);
+      // Aguarda novo XHR
+      try {
+        await page.waitForResponse(
+          (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
+          { timeout: 10_000 }
+        );
+      } catch (e) {
+        log(`⚠️ Timeout esperando XHR após clique: ${e.message}`);
         break;
       }
-
-      // Primeira página: pega totalEsperado
-      if (pagina === 0) {
-        const qtdCampo = data?.retornoMultiplos?.['4']?.[0]?.quantidade;
-        if (qtdCampo != null) {
-          totalEsperado = parseInt(qtdCampo, 10);
-          if (DEBUG_HTTP) log(`📄 Total esperado segundo servidor: ${totalEsperado}`);
-        }
-      }
-
-      if (ehSessaoExpirada(data)) {
-        if (DEBUG_HTTP) log(`🔑 Página ${pagina + 1}: sessão expirada`);
-        return {
-          ok: false,
-          data,
-          statusCode: result.status,
-          paginas,
-          totalColetado: todasOs.length,
-          sessaoExpirada: true,
-        };
-      }
-
-      const lista = Array.isArray(data?.retornoMultiplos?.['5'])
-        ? data.retornoMultiplos['5']
-        : [];
-
-      if (DEBUG_HTTP) {
-        log(`📄 Página ${pagina + 1} (offset=${offsetAtual}): +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
-      }
-
-      todasOs.push(...lista);
-
-      // Critérios de parada
-      if (lista.length < limiteReal) break;
-      if (totalEsperado != null && todasOs.length >= totalEsperado) break;
-      if (lista.length === 0) {
-        log(`⚠️ Página ${pagina + 1} veio vazia inesperadamente — abortando`);
-        break;
-      }
-
-      offsetAtual += limiteReal;
+      await page.waitForTimeout(500);
+      paginasNavegadas++;
     }
 
-    if (paginas >= MAX_PAGINAS_SANITY) {
-      log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito`);
-    }
   } finally {
     try { if (page) await page.close(); } catch (_) {}
     try { if (context) await context.close(); } catch (_) {}
     try { if (browser) await browser.close(); } catch (_) {}
   }
 
-  const dataAgregada = ultimaResposta
-    ? { ...ultimaResposta, retornoMultiplos: { ...ultimaResposta.retornoMultiplos, '5': todasOs } }
-    : { retornoMultiplos: { '5': todasOs } };
+  // Agrega TODAS as OS capturadas em todos os XHRs (pode ter duplicatas
+  // se o paginador refizer a primeira página — o INSERT ON CONFLICT
+  // do inserirNaFila já protege contra isso)
+  for (const resp of respostasCapturadas) {
+    const lista = Array.isArray(resp?.retornoMultiplos?.['5']) ? resp.retornoMultiplos['5'] : [];
+    todasOs.push(...lista);
+  }
+
+  // Dedup por s.id (caso o paginador refaça primeira página)
+  const vistos = new Set();
+  const todasOsDedup = todasOs.filter(o => {
+    const id = String(o['s.id'] || '');
+    if (!id || vistos.has(id)) return false;
+    vistos.add(id);
+    return true;
+  });
+
+  const dataAgregada = respostasCapturadas[0]
+    ? { ...respostasCapturadas[0], retornoMultiplus: { ...respostasCapturadas[0].retornoMultiplos, '5': todasOsDedup } }
+    : { retornoMultiplos: { '5': todasOsDedup } };
+  // Garante o caminho correto também
+  dataAgregada.retornoMultiplos = { ...(respostasCapturadas[0]?.retornoMultiplos || {}), '5': todasOsDedup };
 
   const duracaoMs = Date.now() - t0;
   if (DEBUG_HTTP) {
-    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s) de ${limiteReal || '?'} (${duracaoMs}ms)`);
+    log(`✅ Paginação concluída: ${todasOsDedup.length} OS únicas em ${respostasCapturadas.length} XHR(s) (${duracaoMs}ms)`);
+  }
+
+  // Se zero respostas capturadas, sinaliza problema (provavelmente sessão expirada)
+  if (respostasCapturadas.length === 0) {
+    return {
+      ok: false,
+      data: { retornoMultiplos: { '5': [] } },
+      statusCode: 0,
+      paginas: 0,
+      totalColetado: 0,
+      sessaoExpirada: true,
+    };
   }
 
   return {
     ok: true,
     data: dataAgregada,
-    statusCode: ultimoStatus || 200,
-    paginas,
-    totalColetado: todasOs.length,
+    statusCode: 200,
+    paginas: respostasCapturadas.length,
+    totalColetado: todasOsDedup.length,
     totalEsperado,
     duracaoMs,
-    limiteReal,
   };
 }
 
