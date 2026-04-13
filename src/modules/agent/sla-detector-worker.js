@@ -43,15 +43,23 @@ async function tentarRelogin() {
   _ultimoRelogin = agora;
 
   try {
-    log('🔑 Disparando relogin via playwright-sla-capture...');
+    log('🔑 Disparando relogin via playwright-sla-capture.garantirSessao()...');
     // Importa lazy pra não carregar Playwright na boot do worker
-    const { capturarPontosOS } = require('./playwright-sla-capture');
-    // OS dummy só pra forçar o fluxo de login → o erro ENDERECO_JA_CORRIGIDO
-    // ou OS_NAO_ENCONTRADA é esperado, o que importa é o cookie ser salvo.
-    await capturarPontosOS({ os_numero: '0000001', cliente_cod: '814' }).catch(e => {
-      log(`(esperado) relogin: ${e.message}`);
-    });
-    log('✅ Relogin concluído');
+    const { garantirSessao } = require('./playwright-sla-capture');
+
+    // 🔧 FIX (2026-04): substitui o hack antigo de chamar
+    // capturarPontosOS({ os_numero: '0000001' }) que abria browser, fazia
+    // login, navegava, ativava aba, procurava OS dummy no DOM, falhava,
+    // ativava busca por autocomplete, falhava de novo... só pra ter como
+    // efeito colateral o salvamento dos cookies.
+    //
+    // Agora garantirSessao() faz exatamente o mínimo necessário:
+    //   1. Loga (se preciso)
+    //   2. Navega pra acompanhamento-servicos (já dispara o XHR)
+    //   3. Salva storageState + meta_payload
+    // Mais rápido (~5s vs ~20s), sem ruído de "OS 0000001 não encontrada".
+    const result = await garantirSessao();
+    log(`✅ Relogin concluído — sessao=${result.sessaoSalva} payload=${result.payloadCapturado}`);
     return true;
   } catch (err) {
     log(`❌ Relogin falhou: ${err.message}`);
