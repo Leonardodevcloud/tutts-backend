@@ -144,25 +144,164 @@ const ACOMP_URL = () =>
 // ── Mutex interno (serializa capturas nesta sessão) ──────────────────────────
 let _mutexBusy = false;
 const _mutexQueue = [];
+const MUTEX_ACQUIRE_TIMEOUT_MS = 120_000; // 2min — se travou tanto, algo morreu
+let _mutexHeldSince = null; // timestamp quando o mutex foi adquirido
+let _mutexHeldBy = null;     // string identificando quem tem o mutex (debug)
 
-async function acquireMutex() {
+async function acquireMutex(quem = 'desconhecido') {
   if (!_mutexBusy) {
     _mutexBusy = true;
+    _mutexHeldSince = Date.now();
+    _mutexHeldBy = quem;
     return;
   }
-  await new Promise((resolve) => _mutexQueue.push(resolve));
+
+  // Há quanto tempo o mutex está segurado?
+  const heldFor = _mutexHeldSince ? Date.now() - _mutexHeldSince : 0;
+  log(`⏳ Mutex ocupado por ${_mutexHeldBy || '?'} há ${(heldFor/1000).toFixed(1)}s — ${quem} entra na fila`);
+
+  // Espera com timeout — se passar de MUTEX_ACQUIRE_TIMEOUT, lança erro
+  // pra evitar promises empilhadas pra sempre quando alguém trava
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      // Remove a si mesmo da fila
+      const idx = _mutexQueue.indexOf(entry);
+      if (idx >= 0) _mutexQueue.splice(idx, 1);
+      reject(new Error(
+        `Mutex acquire timeout (${MUTEX_ACQUIRE_TIMEOUT_MS}ms) — ` +
+        `segurado por ${_mutexHeldBy} há ${((Date.now() - _mutexHeldSince)/1000).toFixed(1)}s`
+      ));
+    }, MUTEX_ACQUIRE_TIMEOUT_MS);
+
+    const entry = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    _mutexQueue.push(entry);
+  });
+
   _mutexBusy = true;
+  _mutexHeldSince = Date.now();
+  _mutexHeldBy = quem;
 }
 
 function releaseMutex() {
+  if (_mutexHeldSince) {
+    const heldFor = Date.now() - _mutexHeldSince;
+    if (heldFor > 30_000) {
+      log(`⚠️ Mutex segurado por ${_mutexHeldBy} durante ${(heldFor/1000).toFixed(1)}s (limite saudável: 30s)`);
+    }
+  }
   _mutexBusy = false;
+  _mutexHeldSince = null;
+  _mutexHeldBy = null;
   const next = _mutexQueue.shift();
   if (next) next();
+}
+
+/**
+ * Watchdog — executa uma promise com timeout absoluto. Se a promise não
+ * resolver em `ms` milissegundos, lança erro com a mensagem `nome`.
+ *
+ * Uso: await comTimeout(operacaoQueTalvezTrave(), 60_000, 'capturarPontosOS')
+ *
+ * IMPORTANTE: isso NÃO cancela a promise original (JS não tem cancellation).
+ * Mas como estamos sempre num try/finally que faz browser.close(), a Promise
+ * pendurada vai morrer junto com o browser eventualmente.
+ */
+function comTimeout(promise, ms, nome) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(`${nome}: timeout após ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Mata um browser de forma robusta — primeiro tenta close gracioso (5s),
+ * depois force-kill no processo. Evita Chromium zombie.
+ */
+async function fecharBrowserSeguro(browser) {
+  if (!browser) return;
+  try {
+    // Tenta fechar normalmente com timeout curto
+    await comTimeout(browser.close(), 5_000, 'browser.close');
+  } catch (e) {
+    log(`⚠️ browser.close() falhou ou pendurou: ${e.message} — tentando kill`);
+    try {
+      // Pega o processo subjacente do Chromium e mata
+      const proc = browser.process && browser.process();
+      if (proc && typeof proc.kill === 'function') {
+        proc.kill('SIGKILL');
+        log(`💀 Chromium pid=${proc.pid} morto via SIGKILL`);
+      }
+    } catch (e2) {
+      log(`⚠️ Falha no kill do browser: ${e2.message}`);
+    }
+  }
 }
 
 function log(msg) {
   logger.info(`[sla-capture-playwright] ${msg}`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Args do Chromium pra rodar de forma robusta em container Linux
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Em Docker/Railway, Chromium pode acumular processos zombie e vazar
+// recursos. Esses args reduzem footprint e desabilitam features que
+// frequentemente travam em ambiente headless sem display:
+//
+//   --no-sandbox             roda sem sandbox (Docker já é sandbox)
+//   --disable-dev-shm-usage  não usa /dev/shm (que é só 64MB no Docker)
+//   --disable-gpu            sem GPU em headless
+//   --disable-software-rasterizer
+//   --disable-background-networking  evita XHRs em background
+//   --disable-default-apps
+//   --disable-extensions
+//   --disable-sync
+//   --disable-translate
+//   --hide-scrollbars
+//   --metrics-recording-only
+//   --mute-audio
+//   --no-first-run
+//   --safebrowsing-disable-auto-update
+//   --no-default-browser-check
+//   --disable-ipc-flooding-protection
+//   --disable-renderer-backgrounding
+//   --disable-backgrounding-occluded-windows
+//   --disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process
+//   --single-process          ⚠️ NÃO USAR — instável, mas reduz processos
+//
+// O `timeout` no launch garante que se o próprio launch travar, lança erro
+// em vez de pendurar pra sempre.
+
+const CHROMIUM_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000, // 30s pra subir o browser, senão erro
+  args: [
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--safebrowsing-disable-auto-update',
+    '--no-default-browser-check',
+  ],
+};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // LOGIN
@@ -320,12 +459,9 @@ function ponto1Bate767(texto) {
  *          ou throw em caso de falha de login.
  */
 async function garantirSessao() {
-  await acquireMutex();
+  await acquireMutex('garantirSessao');
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-  });
+  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
 
   let context;
   let payloadAntes = null;
@@ -430,9 +566,9 @@ async function garantirSessao() {
 
   } finally {
     try {
-      if (context) await context.close();
+      if (context) await comTimeout(context.close(), 3_000, 'context.close');
     } catch (_) {}
-    try { await browser.close(); } catch (_) {}
+    await fecharBrowserSeguro(browser);
     releaseMutex();
   }
 }
@@ -475,7 +611,7 @@ async function coletarOsEmExecucao() {
   const TEMPO_MAX_MS = 90_000;
   const MAX_PAGINAS_SANITY = 100; // 1000 OS com 10/página = 100 páginas
 
-  await acquireMutex();
+  await acquireMutex('coletarOsEmExecucao');
   const t0 = Date.now();
 
   const diag = { etapas: [], paginasColetadas: [] };
@@ -491,10 +627,7 @@ async function coletarOsEmExecucao() {
 
   try {
     etapa('start');
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    });
+    browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
     etapa('browser_launched');
 
     if (fs.existsSync(SESSION_FILE)) {
@@ -689,9 +822,9 @@ async function coletarOsEmExecucao() {
     log(`❌ [coletarOs] Erro: ${err.message}`);
     return { ok: false, motivo: err.message, sessaoExpirada: false, diag };
   } finally {
-    try { if (page) await page.close(); } catch (_) {}
-    try { if (context) await context.close(); } catch (_) {}
-    try { if (browser) await browser.close(); } catch (_) {}
+    try { if (page) await comTimeout(page.close(), 3_000, 'page.close'); } catch (_) {}
+    try { if (context) await comTimeout(context.close(), 3_000, 'context.close'); } catch (_) {}
+    await fecharBrowserSeguro(browser);
     releaseMutex();
   }
 
@@ -723,12 +856,9 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     throw new Error(`cliente_cod inválido: ${cliente_cod} (esperado 814 ou 767)`);
   }
 
-  await acquireMutex();
+  await acquireMutex(`capturarPontosOS(${os_numero})`);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-  });
+  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
 
   let context;
   try {
@@ -1035,19 +1165,66 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     return { pontos: pontosParsed, skipped: false, debugInfo };
   } finally {
     try {
-      if (context) await context.close();
+      if (context) await comTimeout(context.close(), 3_000, 'context.close');
     } catch (_) {}
-    try {
-      await browser.close();
-    } catch (_) {}
+    await fecharBrowserSeguro(browser);
     releaseMutex();
   }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// WATCHDOGS — wrappers de timeout absoluto
+// ═════════════════════════════════════════════════════════════════════════════
+// Mesmo com mutex timeout e fecharBrowserSeguro, ainda dá pra alguma operação
+// ficar pendurada DENTRO da função (waitForSelector, click, etc). Esses
+// wrappers garantem que NENHUMA chamada pode demorar mais que o limite,
+// mesmo que isso signifique vazar um Chromium órfão de vez em quando
+// (que será recolhido pelo GC ou OOM-killer eventualmente).
+//
+// Limites generosos pra dar margem a operações lentas mas saudáveis:
+//   - capturarPontosOS:       90s (1 OS, modal + parser)
+//   - coletarOsEmExecucao:   120s (15 páginas)
+//   - garantirSessao:         60s (login + 1 navegação)
+
+const WATCHDOG_CAPTURAR_MS  = 90_000;
+const WATCHDOG_COLETAR_MS   = 120_000;
+const WATCHDOG_SESSAO_MS    = 60_000;
+
+async function capturarPontosOSComWatchdog(args) {
+  return comTimeout(
+    capturarPontosOS(args),
+    WATCHDOG_CAPTURAR_MS,
+    `capturarPontosOS(${args && args.os_numero})`
+  );
+}
+
+async function coletarOsEmExecucaoComWatchdog() {
+  return comTimeout(
+    coletarOsEmExecucao(),
+    WATCHDOG_COLETAR_MS,
+    'coletarOsEmExecucao'
+  );
+}
+
+async function garantirSessaoComWatchdog() {
+  return comTimeout(
+    garantirSessao(),
+    WATCHDOG_SESSAO_MS,
+    'garantirSessao'
+  );
+}
+
 module.exports = {
-  capturarPontosOS,
-  garantirSessao,
-  coletarOsEmExecucao,
+  // Os exports principais agora são as versões com watchdog
+  capturarPontosOS: capturarPontosOSComWatchdog,
+  garantirSessao: garantirSessaoComWatchdog,
+  coletarOsEmExecucao: coletarOsEmExecucaoComWatchdog,
+  // Versões cruas (sem watchdog) pra testes/debug
+  _semWatchdog: {
+    capturarPontosOS,
+    garantirSessao,
+    coletarOsEmExecucao,
+  },
   // expostos pra testes unitários
   _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
 };
