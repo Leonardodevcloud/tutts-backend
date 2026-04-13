@@ -122,11 +122,22 @@ function obterEndpointUrl() {
  * Monta o body JSON do POST pro endpoint viewServicoAcompanhamento.
  *
  * Lê o META_FILE (payload capturado em runtime pelo playwright-sla-capture)
- * e atualiza o campo `sessaoAtual` com o PHPSESSID corrente.
+ * e atualiza:
+ *   - `sessaoAtual` com o PHPSESSID corrente
+ *   - `limite` com o valor desejado (override, o capturado costuma ser 10)
+ *   - `offset` / `pagina` para paginação
  *
- * Retorna: string JSON pronta pra mandar no body.
+ * 🔧 FIX (2026-04-13): O usuário do SLA tem preferência de 10 por página
+ * no MAP, então o payload capturado vem com `limite: "10"`. Sem paginação,
+ * o detector só via as 10 OS mais recentes e perdia tudo que vinha antes.
+ * Agora força limite=100 e o fetch pagina até esgotar.
+ *
+ * @param {Object} opts
+ * @param {number} opts.offset - deslocamento (default 0)
+ * @param {number} opts.limite - tamanho da página (default 100)
+ * @returns {string} JSON pronto pra mandar no body
  */
-function montarPayload() {
+function montarPayload({ offset = 0, limite = 100 } = {}) {
   if (!fs.existsSync(META_FILE)) {
     throw new Error(
       `META_FILE ausente em ${META_FILE} — execute garantirSessao() pelo menos uma vez`
@@ -153,7 +164,7 @@ function montarPayload() {
     }
   }
 
-  // Parse do payload JSON e atualização do sessaoAtual com PHPSESSID atual
+  // Parse do payload JSON
   let payload;
   try {
     payload = JSON.parse(meta.postData);
@@ -161,6 +172,7 @@ function montarPayload() {
     throw new Error(`postData no META_FILE não é JSON válido: ${e.message}`);
   }
 
+  // Atualiza sessaoAtual com PHPSESSID corrente
   const phpSessIdAtual = lerPhpSessIdAtual();
   if (phpSessIdAtual && payload.sessaoAtual !== phpSessIdAtual) {
     if (DEBUG_HTTP) {
@@ -169,6 +181,12 @@ function montarPayload() {
     payload.sessaoAtual = phpSessIdAtual;
   }
 
+  // 🔧 Override de limite e offset — o capturado vem com limite=10
+  // (preferência do usuário no MAP), mas a gente quer paginar completo.
+  payload.limite = String(limite);
+  payload.offset = offset;
+  payload.pagina = Math.floor(offset / limite);
+
   return JSON.stringify(payload);
 }
 
@@ -176,7 +194,11 @@ function montarPayload() {
 // FETCH — POST application/json e parse da resposta
 // ─────────────────────────────────────────────────────────────────────────
 
-async function fetchData() {
+/**
+ * Faz UMA requisição ao endpoint — uma página.
+ * Usado por fetchAllPages em loop.
+ */
+async function fetchPage({ offset = 0, limite = 100 } = {}) {
   if (!fs.existsSync(SESSION_FILE)) {
     throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
   }
@@ -186,16 +208,12 @@ async function fetchData() {
     const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
     const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
     if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
-    if (DEBUG_HTTP) {
-      const tuttsCookies = cookies.filter(c => c.domain && c.domain.includes('tutts.com.br'));
-      log(`🔎 storageState: ${cookies.length} cookies (${tuttsCookies.length} de tutts)`);
-    }
   } catch (e) {
     if (e.message.includes('Arquivo de sessão')) throw e;
     throw new Error(`storageState inválido: ${e.message}`);
   }
 
-  const bodyJson = montarPayload();
+  const bodyJson = montarPayload({ offset, limite });
   const endpointUrl = obterEndpointUrl();
 
   let ctx;
@@ -225,10 +243,8 @@ async function fetchData() {
     });
 
     const statusCode = resp.status();
-    const respHeaders = resp.headers();
     const rawText = await resp.text();
 
-    // Parse JSON
     let data = null;
     let parseErr = null;
     try {
@@ -237,29 +253,122 @@ async function fetchData() {
       parseErr = e.message;
     }
 
-    if (DEBUG_HTTP) {
-      try {
-        fs.writeFileSync(DEBUG_DUMP_FILE, rawText, 'utf8');
-      } catch (_) {}
-      log(`🔎 HTTP ${statusCode} | bytes=${rawText.length} | ct=${respHeaders['content-type'] || '(none)'}`);
-      if (parseErr) {
-        log(`🔎 JSON parse FALHOU: ${parseErr}`);
-        const preview = rawText.slice(0, 300).replace(/\s+/g, ' ').trim();
-        log(`🔎 raw preview: ${preview}`);
-      } else {
-        const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
-          ? data.retornoMultiplos['5'].length
-          : 0;
-        log(`🔎 JSON OK | retornoMultiplos.5 = ${numOs} OS(s)`);
-      }
-    }
-
-    return { ok: resp.ok(), data, statusCode, rawText };
+    return { ok: resp.ok(), data, statusCode, rawText, parseErr };
   } finally {
     if (ctx) {
       try { await ctx.dispose(); } catch (_) {}
     }
   }
+}
+
+/**
+ * Fetch paginado — chama fetchPage em loop até esgotar.
+ *
+ * Critérios de parada:
+ *   - Resposta vem com menos OS que o `limite` → última página
+ *   - Resposta vem vazia
+ *   - Bate MAX_PAGINAS (proteção contra loop infinito)
+ *   - Bate totalEsperado (do campo retornoMultiplos["4"][0].quantidade)
+ *
+ * Retorna estrutura compatível com o antigo fetchData:
+ *   { ok, data, statusCode, paginas, totalColetado }
+ *   onde data.retornoMultiplos["5"] é o array AGREGADO de todas as páginas.
+ */
+async function fetchAllPages() {
+  const LIMITE_POR_PAGINA = 100;
+  const MAX_PAGINAS = 10; // 1000 OS máximo por tick — proteção
+
+  const todasOs = [];
+  let paginas = 0;
+  let ultimoStatus = null;
+  let ultimaResposta = null;
+  let totalEsperado = null;
+
+  for (let pagina = 0; pagina < MAX_PAGINAS; pagina++) {
+    const offset = pagina * LIMITE_POR_PAGINA;
+    const page = await fetchPage({ offset, limite: LIMITE_POR_PAGINA });
+
+    paginas++;
+    ultimoStatus = page.statusCode;
+    ultimaResposta = page.data;
+
+    // Primeira página: pega totalEsperado do campo quantidade
+    if (pagina === 0) {
+      const qtdCampo = page.data?.retornoMultiplos?.['4']?.[0]?.quantidade;
+      if (qtdCampo != null) {
+        totalEsperado = parseInt(qtdCampo, 10);
+        if (DEBUG_HTTP) log(`📄 Total esperado segundo servidor: ${totalEsperado}`);
+      }
+    }
+
+    // Falha HTTP ou parse → aborta paginação, retorna o que tem
+    if (!page.ok && page.statusCode !== 200) {
+      log(`⚠️ Página ${pagina + 1}: HTTP ${page.statusCode} — abortando paginação`);
+      break;
+    }
+    if (page.parseErr) {
+      log(`⚠️ Página ${pagina + 1}: JSON parse falhou — abortando`);
+      break;
+    }
+
+    // Sessão expirada → aborta pra deixar o caller relogar
+    if (ehSessaoExpirada(page.data)) {
+      if (DEBUG_HTTP) log(`🔑 Página ${pagina + 1}: sessão expirada`);
+      return {
+        ok: false,
+        data: page.data,
+        statusCode: page.statusCode,
+        paginas,
+        totalColetado: todasOs.length,
+        sessaoExpirada: true,
+      };
+    }
+
+    const lista = Array.isArray(page.data?.retornoMultiplos?.['5'])
+      ? page.data.retornoMultiplos['5']
+      : [];
+
+    if (DEBUG_HTTP) {
+      log(`📄 Página ${pagina + 1}: +${lista.length} OS (acumulado: ${todasOs.length + lista.length})`);
+    }
+
+    todasOs.push(...lista);
+
+    // Condição de parada 1: página retornou menos que o limite → última
+    if (lista.length < LIMITE_POR_PAGINA) break;
+
+    // Condição de parada 2: já temos tudo que o servidor disse que tem
+    if (totalEsperado != null && todasOs.length >= totalEsperado) break;
+  }
+
+  if (paginas === MAX_PAGINAS && totalEsperado != null && todasOs.length < totalEsperado) {
+    log(`⚠️ Limite de ${MAX_PAGINAS} páginas atingido — ${todasOs.length}/${totalEsperado} OS coletadas`);
+  }
+
+  // Monta um "data" sintético com o array agregado
+  const dataAgregada = ultimaResposta
+    ? { ...ultimaResposta, retornoMultiplos: { ...ultimaResposta.retornoMultiplos, '5': todasOs } }
+    : { retornoMultiplos: { '5': todasOs } };
+
+  if (DEBUG_HTTP) {
+    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s)`);
+  }
+
+  return {
+    ok: true,
+    data: dataAgregada,
+    statusCode: ultimoStatus || 200,
+    paginas,
+    totalColetado: todasOs.length,
+    totalEsperado,
+  };
+}
+
+/**
+ * @deprecated mantido só pra compatibilidade. Use fetchAllPages().
+ */
+async function fetchData() {
+  return fetchAllPages();
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -381,7 +490,15 @@ async function inserirNaFila(pool, ordens) {
 
 async function detectarOsNovas(pool) {
   try {
-    const { ok, data, statusCode } = await fetchData();
+    const result = await fetchAllPages();
+
+    // fetchAllPages pode retornar sessaoExpirada direto
+    if (result.sessaoExpirada) {
+      log('🔑 Sessão expirada detectada durante paginação — relogin necessário');
+      return { ok: false, sessaoExpirada: true, motivo: 'sessao_expirada' };
+    }
+
+    const { ok, data, statusCode, paginas, totalColetado, totalEsperado } = result;
 
     if (!ok && statusCode !== 200) {
       log(`⚠️ HTTP ${statusCode} no fetch`);
@@ -399,20 +516,20 @@ async function detectarOsNovas(pool) {
     const monitoradas = filtrarMonitorados(ordens, config);
     const { inseridas, ignoradas } = await inserirNaFila(pool, monitoradas);
 
-    log(`📊 ${ordens.length} OS na tela | ${monitoradas.length} monitoradas | ${inseridas} novas, ${ignoradas} já conhecidas`);
+    log(`📊 ${ordens.length} OS (${paginas}p${totalEsperado != null ? `, esperado=${totalEsperado}` : ''}) | ${monitoradas.length} monitoradas | ${inseridas} novas, ${ignoradas} já conhecidas`);
 
     return {
       ok: true,
       sessaoExpirada: false,
       total: ordens.length,
+      paginas,
+      totalEsperado,
       monitoradas: monitoradas.length,
       inseridas,
       ignoradas,
     };
   } catch (err) {
     log(`❌ Erro no detector: ${err.message}`);
-    // Erros de sessão/meta ausentes contam como sessaoExpirada pra
-    // disparar relogin no worker
     const isSessaoFaltando =
       err.message.includes('Sessão Playwright não encontrada') ||
       err.message.includes('Arquivo de sessão sem cookies') ||
