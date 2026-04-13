@@ -474,95 +474,180 @@ async function garantirSessao() {
 async function coletarOsEmExecucao() {
   const TEMPO_MAX_MS = 90_000;
   const MAX_PAGINAS_SANITY = 1000;
+  const DEBUG_DUMP_FILE = '/tmp/tutts-coletar-debug.json';
 
   await acquireMutex();
   const t0 = Date.now();
 
+  // 🔬 Diagnóstico completo — tudo isso vai pro retorno pra ver no /debug endpoint
+  const diag = {
+    etapas: [],
+    xhrsVistos: [],      // TODOS os responses do endpoint, mesmo HTML
+    lastResponseText: null,
+    lastResponseHeaders: null,
+    lastResponseUrl: null,
+  };
+  function etapa(nome, extra) {
+    const evento = { etapa: nome, t: Date.now() - t0, ...(extra || {}) };
+    diag.etapas.push(evento);
+    log(`📍 [coletarOs] ${nome}${extra ? ' ' + JSON.stringify(extra) : ''}`);
+  }
+
   let browser, context, page;
-  const respostasCapturadas = []; // array de objetos JSON
+  const respostasCapturadas = [];
 
   try {
-    log('🌐 [coletarOs] Abrindo Chromium...');
+    etapa('start');
     browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     });
+    etapa('browser_launched');
 
     if (fs.existsSync(SESSION_FILE)) {
       try {
         context = await browser.newContext({ storageState: SESSION_FILE });
-      } catch {
+        etapa('context_created_with_storage');
+      } catch (e) {
+        etapa('context_storage_failed', { erro: e.message });
         context = await browser.newContext();
       }
     } else {
       context = await browser.newContext();
+      etapa('context_created_no_storage');
     }
 
-    // 🎯 Listener de RESPOSTA — captura JSON do endpoint
+    // 🎯 Listener de RESPOSTA — captura TODOS os responses do endpoint
+    // (mesmo HTML), pra diagnosticar o que o servidor está retornando
     context.on('response', async (resp) => {
       try {
         if (resp.request().method() !== 'POST') return;
         if (!/viewServicoAcompanhamento/i.test(resp.url())) return;
-        const ct = resp.headers()['content-type'] || '';
-        if (!/json/i.test(ct)) {
-          log(`🔎 [coletarOs] XHR ignorado (ct=${ct})`);
+
+        const status = resp.status();
+        const headers = resp.headers();
+        const ct = headers['content-type'] || '';
+        const text = await resp.text();
+        const len = text.length;
+
+        // Sempre registra no diagnóstico
+        const xhrInfo = {
+          url: resp.url(),
+          status,
+          contentType: ct,
+          bytes: len,
+          preview: text.slice(0, 300).replace(/\s+/g, ' ').trim(),
+        };
+        diag.xhrsVistos.push(xhrInfo);
+        diag.lastResponseText = text;
+        diag.lastResponseHeaders = headers;
+        diag.lastResponseUrl = resp.url();
+
+        log(`🔎 [coletarOs] XHR interceptado: HTTP ${status} | bytes=${len} | ct=${ct}`);
+
+        // Tenta parsear como JSON mesmo que content-type não seja JSON
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          log(`⚠️ [coletarOs] Response NÃO é JSON parsável: ${e.message}`);
+          log(`⚠️ [coletarOs] Preview: ${xhrInfo.preview}`);
           return;
         }
-        const text = await resp.text();
-        const data = JSON.parse(text);
+
         respostasCapturadas.push(data);
         const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
           ? data.retornoMultiplos['5'].length
           : 0;
-        log(`📨 [coletarOs] XHR #${respostasCapturadas.length}: ${numOs} OS`);
+        log(`📨 [coletarOs] XHR #${respostasCapturadas.length} PARSED: ${numOs} OS`);
       } catch (e) {
-        log(`⚠️ [coletarOs] erro ao processar response: ${e.message}`);
+        log(`⚠️ [coletarOs] erro no listener: ${e.message}`);
       }
     });
 
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
 
-    log('🧭 [coletarOs] Navegando pra acompanhamento-servicos');
+    etapa('page_created');
+
     await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    etapa('page_goto_done', { url: page.url() });
     await page.waitForTimeout(800);
 
-    if (!(await isLoggedIn(page))) {
-      log('🔐 [coletarOs] Sessão inválida, fazendo login completo');
+    const loggedIn = await isLoggedIn(page);
+    etapa('logged_in_check', { loggedIn });
+
+    if (!loggedIn) {
       await fazerLogin(page);
+      etapa('login_done');
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      etapa('page_goto_after_login', { url: page.url() });
       await page.waitForTimeout(1500);
     }
 
-    // 🖱️ Ativa aba "Em execução" — dispara XHR natural
-    log('🖱️ [coletarOs] Ativando aba "Em execução"');
+    // Verifica existência da aba ANTES de tentar clicar
     const abaEmExecucao = page.locator('#pills-em-execucao-tab');
-    const abaVisivel = await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false);
+    const abaCount = await abaEmExecucao.count().catch(() => 0);
+    const abaVisivel = abaCount > 0
+      ? await abaEmExecucao.first().isVisible({ timeout: 3000 }).catch(() => false)
+      : false;
+    etapa('aba_check', { count: abaCount, visivel: abaVisivel });
+
     if (!abaVisivel) {
-      log('⚠️ [coletarOs] Aba "Em execução" não visível na página');
-      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false };
+      // Vamos olhar o HTML da página pra diagnosticar
+      const bodyPreview = await page.evaluate(() => {
+        const b = document.body ? document.body.innerText : '';
+        return b.slice(0, 500);
+      }).catch(() => '(falha ao ler body)');
+      diag.bodyPreview = bodyPreview;
+      etapa('aba_nao_visivel_body', { preview: bodyPreview });
+      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, diag };
     }
-    await abaEmExecucao.click();
+
+    // Clica e aguarda QUALQUER response do endpoint
+    await abaEmExecucao.first().click();
+    etapa('aba_clicada');
 
     try {
       await page.waitForResponse(
         (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
-        { timeout: 10_000 }
+        { timeout: 15_000 }
       );
-      log('✅ [coletarOs] Primeiro XHR detectado após clique');
+      etapa('waitForResponse_ok');
     } catch (e) {
-      log(`⚠️ [coletarOs] Timeout esperando XHR inicial: ${e.message}`);
+      etapa('waitForResponse_timeout', { erro: e.message });
     }
-    await page.waitForTimeout(1500);
 
-    // Salva storageState atualizado
+    // Dá tempo extra pro listener processar
+    await page.waitForTimeout(2000);
+    etapa('wait_extra_done', {
+      xhrsVistos: diag.xhrsVistos.length,
+      respostasParsed: respostasCapturadas.length,
+    });
+
+    // Salva contexto atualizado
     try {
       await context.storageState({ path: SESSION_FILE });
     } catch (_) {}
 
+    // Dump do último response pra inspeção
+    if (diag.lastResponseText) {
+      try {
+        fs.writeFileSync(DEBUG_DUMP_FILE, JSON.stringify({
+          url: diag.lastResponseUrl,
+          headers: diag.lastResponseHeaders,
+          bodyPreview: diag.lastResponseText.slice(0, 5000),
+        }, null, 2));
+      } catch (_) {}
+    }
+
     if (respostasCapturadas.length === 0) {
-      log('⚠️ [coletarOs] Nenhum XHR capturado após clique — sessão pode estar inválida');
-      return { ok: false, motivo: 'nenhum_xhr_capturado', sessaoExpirada: true };
+      return {
+        ok: false,
+        motivo: 'nenhum_xhr_capturado',
+        sessaoExpirada: true,
+        diag,
+      };
     }
 
     // Total esperado do primeiro XHR
@@ -570,7 +655,7 @@ async function coletarOsEmExecucao() {
     const qtdCampo = respostasCapturadas[0]?.retornoMultiplos?.['4']?.[0]?.quantidade;
     if (qtdCampo != null) {
       totalEsperado = parseInt(qtdCampo, 10);
-      log(`📄 [coletarOs] Total esperado: ${totalEsperado}`);
+      etapa('total_esperado', { totalEsperado });
     }
 
     // 📄 PAGINAÇÃO via cliques na UI
@@ -691,11 +776,12 @@ async function coletarOsEmExecucao() {
       totalEsperado,
       paginas: respostasCapturadas.length,
       duracaoMs,
+      diag,
     };
 
   } catch (err) {
     log(`❌ [coletarOs] Erro: ${err.message}`);
-    return { ok: false, motivo: err.message, sessaoExpirada: false };
+    return { ok: false, motivo: err.message, sessaoExpirada: false, diag };
   } finally {
     try { if (page) await page.close(); } catch (_) {}
     try { if (context) await context.close(); } catch (_) {}
