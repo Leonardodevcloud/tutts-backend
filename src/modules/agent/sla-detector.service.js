@@ -166,28 +166,36 @@ async function carregarConfig(pool) {
 // ─────────────────────────────────────────────────────────────────────────
 // FILTRO — decide se uma OS deve ser enfileirada
 // ─────────────────────────────────────────────────────────────────────────
+//
+// ⚠️ IMPORTANTE (2026-04-13): O detector NÃO filtra por endereço / termos
+// de balão. Motivo: no painel "Em execução" do MAP, o endereço da OS
+// NÃO aparece no <tr> — só aparece quando o operador clica em "Ver endereços"
+// (modal). Então o innerText do tr nunca contém 'GALBA', 'NOVAS DE CASTRO',
+// etc. Filtrar aqui por `termos_filtro` vazaria TODAS as OS do 767.
+//
+// O filtro de endereço acontece no CAPTURE-WORKER, dentro do
+// `capturarPontosOS`: ele abre o modal de endereços, extrai o ponto 1
+// e chama `ponto1Bate767()` (hardcoded em playwright-sla-capture.js com
+// os termos TERMOS_PONTO1_767). Se não bater, retorna skipped e a
+// mensagem não é enviada.
+//
+// O que o detector filtra:
+//   1. cliente_cod precisa estar ativo na config
+//   2. categoria não pode bater em REGRAS_EXCLUSAO_POR_CLIENTE
+//      (essas regras usam dados que ESTÃO no tr — tipo "Carro Utilitário"
+//       no texto da categoria)
 
 function filtrarMonitorados(ordens, config) {
   const monitoradas = [];
-  const excluidasPorRegra = []; // pra log agregado
-  let contadoresExclusao = {}; // { motivo: count }
+  const contadoresExclusao = {};
 
   for (const ordem of ordens) {
     const clienteCod = String(ordem.cliente_cod || '');
     const cfg = config[clienteCod];
     if (!cfg || !cfg.ativo) continue;
 
+    // Regras de EXCLUSÃO hardcoded (categoria, modalidade, etc)
     const balloon = String(ordem._balloon || '').toUpperCase();
-
-    // 1. Filtros de INCLUSÃO por termo (da config do banco — termos_filtro)
-    //    Se há termos, a OS precisa bater pelo menos UM
-    if (cfg.filtrosBalao && cfg.filtrosBalao.length > 0) {
-      const bate = cfg.filtrosBalao.some(termo => balloon.includes(termo));
-      if (!bate) continue;
-    }
-
-    // 2. Regras de EXCLUSÃO hardcoded por cliente (REGRAS_EXCLUSAO_POR_CLIENTE)
-    //    Se a OS bate em qualquer regra de exclusão, é descartada
     const regrasCliente = REGRAS_EXCLUSAO_POR_CLIENTE[clienteCod] || [];
     let excluida = false;
     for (const regra of regrasCliente) {
@@ -197,7 +205,6 @@ function filtrarMonitorados(ordens, config) {
         if (DEBUG) {
           log(`🚫 OS ${ordem.os_numero} (cliente ${clienteCod}) excluída: ${regra.motivo}`);
         }
-        excluidasPorRegra.push({ os: ordem.os_numero, cliente: clienteCod, motivo: regra.motivo });
         break;
       }
     }
@@ -206,12 +213,13 @@ function filtrarMonitorados(ordens, config) {
     monitoradas.push(ordem);
   }
 
-  // Log agregado das exclusões pra visibilidade (mesmo sem DEBUG)
-  if (excluidasPorRegra.length > 0) {
+  // Log agregado das exclusões (mesmo sem DEBUG)
+  const totalExcluidas = Object.values(contadoresExclusao).reduce((a, b) => a + b, 0);
+  if (totalExcluidas > 0) {
     const resumo = Object.entries(contadoresExclusao)
       .map(([motivo, count]) => `${count}× ${motivo}`)
       .join(', ');
-    log(`🚫 ${excluidasPorRegra.length} OS excluídas por regra: ${resumo}`);
+    log(`🚫 ${totalExcluidas} OS excluídas por regra: ${resumo}`);
   }
 
   return monitoradas;
