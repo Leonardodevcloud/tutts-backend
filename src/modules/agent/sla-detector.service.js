@@ -8,29 +8,38 @@
  *
  * Fluxo:
  *   1. Carrega storageState do Playwright (/tmp/tutts-sla-session.json)
- *   2. POST no endpoint AJAX usando playwright.request (NÃO node fetch) —
- *      isso garante que TODA a sessão Playwright (cookies httpOnly, UA,
- *      session pinning por User-Agent etc.) seja replicada fielmente.
- *   3. Parse regex pra extrair OS + cliente_cod + cod_rastreio
- *   4. Filtra clientes ativos em rastreio_clientes_config
- *   5. INSERT ON CONFLICT DO NOTHING em sla_capturas
- *   6. Worker existente captura pontos via Playwright e envia WhatsApp
+ *   2. Lê payload JSON capturado em runtime do META_FILE
+ *      (/tmp/tutts-sla-meta.json — gerado pelo playwright-sla-capture
+ *      via interceptação de network durante o login).
+ *   3. Atualiza o campo `sessaoAtual` do payload com PHPSESSID corrente
+ *   4. POST application/json no endpoint via playwright.request.newContext
+ *      (não usar node fetch — sessão depende de cookies + UA)
+ *   5. Parse do JSON de resposta — extrai OS de retornoMultiplos["5"]
+ *   6. Filtra clientes ativos em rastreio_clientes_config
+ *   7. INSERT ON CONFLICT DO NOTHING em sla_capturas
+ *   8. Worker existente (sla-capture-worker) captura pontos via Playwright
+ *      e envia WhatsApp
  *
- * Auto-relogin: se a resposta vier como HTML de login OU se o arquivo de
- * sessão estiver ausente/inválido, sinaliza sessaoExpirada=true pra que o
- * caller (worker) dispare relogin via playwright-sla-capture.
+ * 🔧 HISTÓRICO DE FIXES (2026-04-13):
+ *   1. Antes usava node-fetch direto com header Cookie montado manualmente
+ *      e User-Agent "Tutts-Detector/1.0" — não funcionava por session pinning.
+ *      Agora usa playwright.request.newContext({ storageState }).
  *
- * 🔧 FIX (2026-04): Antes usava node-fetch direto com header Cookie montado
- *     manualmente — não funcionava porque o tutts.com.br faz session pinning
- *     por User-Agent e o detector usava UA "Tutts-Detector/1.0". Agora usa
- *     playwright.request.newContext({ storageState }) que preserva tudo.
+ *   2. Antes mandava form-urlencoded com payload hardcoded (idFuncionario=65,
+ *      ~27 campos). O endpoint na verdade espera application/json com ~40+
+ *      campos incluindo dadosQuery, sessaoAtual, HTTP_HOST, timezone, etc.
+ *      Agora o payload completo é capturado em runtime pelo
+ *      playwright-sla-capture interceptando o XHR real do navegador.
+ *
+ *   3. Antes esperava resposta em HTML com regex `<tr data-order-id=>`.
+ *      O endpoint retorna JSON. Agora parseia JSON e itera retornoMultiplos.
  */
 
 const fs = require('fs');
 const { request: playwrightRequest } = require('playwright');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
-const META_FILE = '/tmp/tutts-sla-meta.json';  // 🆕 payload capturado pelo playwright-sla-capture
+const META_FILE = '/tmp/tutts-sla-meta.json';
 const MAP_BASE = 'https://tutts.com.br/expresso/expressoat';
 const ENDPOINT = `${MAP_BASE}/entregasDia/acompanhamento/ajax/viewServicoAcompanhamento`;
 const REFERER = `${MAP_BASE}/acompanhamento-servicos`;
@@ -38,15 +47,18 @@ const REFERER = `${MAP_BASE}/acompanhamento-servicos`;
 // 🔬 Debug — ativado por padrão durante troubleshooting do detector.
 // Pra desativar depois que o pipeline estabilizar, setar SLA_DETECTOR_DEBUG=false
 const DEBUG_HTTP = process.env.SLA_DETECTOR_DEBUG !== 'false';
-const DEBUG_DUMP_FILE = '/tmp/sla-detector-last.html';
+const DEBUG_DUMP_FILE = '/tmp/sla-detector-last.json';
 
 function log(msg) {
   console.log(`[sla-detector] ${msg}`);
 }
 
-// Cache de config (TTL 60s) - lê de rastreio_clientes_config
+// ─────────────────────────────────────────────────────────────────────────
+// Cache de config (TTL 60s) — lê de rastreio_clientes_config
+// ─────────────────────────────────────────────────────────────────────────
 let _configCache = null;
 let _configExpira = 0;
+
 async function carregarConfig(pool) {
   const agora = Date.now();
   if (_configCache && agora < _configExpira) return _configCache;
@@ -56,7 +68,9 @@ async function carregarConfig(pool) {
     );
     _configCache = rows.map(r => ({
       cliente_cod: String(r.cliente_cod),
-      termos_filtro: Array.isArray(r.termos_filtro) ? r.termos_filtro.map(t => String(t).toUpperCase()) : null,
+      termos_filtro: Array.isArray(r.termos_filtro)
+        ? r.termos_filtro.map(t => String(t).toUpperCase())
+        : null,
     }));
     _configExpira = agora + 60_000;
     return _configCache;
@@ -65,70 +79,134 @@ async function carregarConfig(pool) {
     return _configCache || [];
   }
 }
+
 function invalidarCacheConfig() { _configCache = null; _configExpira = 0; }
 
+// ─────────────────────────────────────────────────────────────────────────
+// PAYLOAD JSON — montagem a partir do meta capturado em runtime
+// ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Retorna a URL do endpoint AJAX a usar no fetch.
- * Prefere a URL capturada em runtime (META_FILE) sobre a hardcoded.
+ * Lê o PHPSESSID atual do storageState do Playwright.
+ * Usado pra atualizar o campo `sessaoAtual` do payload JSON em runtime,
+ * porque o valor capturado no META_FILE pode estar stale após relogin.
+ */
+function lerPhpSessIdAtual() {
+  try {
+    if (!fs.existsSync(SESSION_FILE)) return null;
+    const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
+    const phpSess = cookies.find(c => c.name === 'PHPSESSID');
+    return phpSess ? phpSess.value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Lê a URL exata do endpoint capturado em runtime (META_FILE).
+ * Permite que o sistema mude a URL sem precisar deploy.
  */
 function obterEndpointUrl() {
-  if (fs.existsSync(META_FILE)) {
-    try {
-      const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
-      if (meta && typeof meta.url === 'string' && meta.url.includes('tutts.com.br')) {
-        return meta.url;
-      }
-    } catch (_) {}
-  }
+  try {
+    if (!fs.existsSync(META_FILE)) return ENDPOINT;
+    const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+    if (meta && typeof meta.url === 'string' && meta.url.length > 0) {
+      return meta.url;
+    }
+  } catch (_) {}
   return ENDPOINT;
 }
 
-async function fetchHtml() {
-  // 🔧 FIX: usa playwright.request.newContext em vez de node fetch.
-  // Isso carrega o storageState completo (cookies httpOnly, secure, etc.)
-  // E o Playwright internamente usa o mesmo User-Agent que usaria num browser
-  // real, evitando session pinning por UA do tutts.com.br.
+/**
+ * Monta o body JSON do POST pro endpoint viewServicoAcompanhamento.
+ *
+ * Lê o META_FILE (payload capturado em runtime pelo playwright-sla-capture)
+ * e atualiza o campo `sessaoAtual` com o PHPSESSID corrente.
+ *
+ * Retorna: string JSON pronta pra mandar no body.
+ */
+function montarPayload() {
+  if (!fs.existsSync(META_FILE)) {
+    throw new Error(
+      `META_FILE ausente em ${META_FILE} — execute garantirSessao() pelo menos uma vez`
+    );
+  }
 
+  let meta;
+  try {
+    meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+  } catch (e) {
+    throw new Error(`META_FILE corrompido: ${e.message}`);
+  }
+  if (!meta || typeof meta.postData !== 'string' || meta.postData.length === 0) {
+    throw new Error('META_FILE sem postData válido');
+  }
+
+  // Aviso se o meta tá muito velho
+  if (meta.capturedAt) {
+    const idadeHoras = Math.floor(
+      (Date.now() - new Date(meta.capturedAt).getTime()) / 3_600_000
+    );
+    if (idadeHoras > 24) {
+      log(`⚠️ Meta de payload tem ${idadeHoras}h — pode estar desatualizado`);
+    }
+  }
+
+  // Parse do payload JSON e atualização do sessaoAtual com PHPSESSID atual
+  let payload;
+  try {
+    payload = JSON.parse(meta.postData);
+  } catch (e) {
+    throw new Error(`postData no META_FILE não é JSON válido: ${e.message}`);
+  }
+
+  const phpSessIdAtual = lerPhpSessIdAtual();
+  if (phpSessIdAtual && payload.sessaoAtual !== phpSessIdAtual) {
+    if (DEBUG_HTTP) {
+      log(`🔄 Atualizando sessaoAtual: ${payload.sessaoAtual} → ${phpSessIdAtual}`);
+    }
+    payload.sessaoAtual = phpSessIdAtual;
+  }
+
+  return JSON.stringify(payload);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FETCH — POST application/json e parse da resposta
+// ─────────────────────────────────────────────────────────────────────────
+
+async function fetchData() {
   if (!fs.existsSync(SESSION_FILE)) {
     throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
   }
 
-  // Validação rápida do storageState + log de debug dos cookies
-  let cookieNames = [];
+  // Validação rápida do storageState
   try {
     const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
     const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
     if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
-    cookieNames = cookies
-      .filter(c => c.domain && c.domain.includes('tutts.com.br'))
-      .map(c => `${c.name}@${c.domain}`);
     if (DEBUG_HTTP) {
-      log(`🔎 storageState: ${cookies.length} cookies totais, ${cookieNames.length} de tutts`);
-      log(`🔎 cookies tutts: ${cookieNames.join(', ') || '(nenhum!)'}`);
+      const tuttsCookies = cookies.filter(c => c.domain && c.domain.includes('tutts.com.br'));
+      log(`🔎 storageState: ${cookies.length} cookies (${tuttsCookies.length} de tutts)`);
     }
   } catch (e) {
     if (e.message.includes('Arquivo de sessão')) throw e;
     throw new Error(`storageState inválido: ${e.message}`);
   }
 
-  const body = montarPayload();
-  const endpointUrl = obterEndpointUrl();  // 🆕 URL do meta se existir, senão hardcoded
-
-  if (DEBUG_HTTP && endpointUrl !== ENDPOINT) {
-    log(`🔎 usando endpoint do meta: ${endpointUrl}`);
-  }
+  const bodyJson = montarPayload();
+  const endpointUrl = obterEndpointUrl();
 
   let ctx;
   try {
     ctx = await playwrightRequest.newContext({
       storageState: SESSION_FILE,
-      // UA realista de Chrome — bate com o que o playwright-sla-capture usa
       userAgent:
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       extraHTTPHeaders: {
-        'Accept': 'text/html, */*; q=0.01',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': REFERER,
         'Origin': 'https://tutts.com.br',
@@ -138,40 +216,45 @@ async function fetchHtml() {
 
     const resp = await ctx.post(endpointUrl, {
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Content-Type': 'application/json; charset=UTF-8',
       },
-      data: body,
-      maxRedirects: 0, // se redirecionar, é login = sessão morta
+      data: bodyJson,
+      maxRedirects: 0,
       failOnStatusCode: false,
       timeout: 30_000,
     });
 
     const statusCode = resp.status();
-    const html = await resp.text();
     const respHeaders = resp.headers();
+    const rawText = await resp.text();
 
-    // 🔬 DEBUG RICO — dump completo pra disco + sumário no log
-    if (DEBUG_HTTP) {
-      try {
-        fs.writeFileSync(DEBUG_DUMP_FILE, html, 'utf8');
-        log(`💾 HTML salvo em ${DEBUG_DUMP_FILE} (${html.length} bytes)`);
-      } catch (e) {
-        log(`⚠️ Falha ao salvar dump: ${e.message}`);
-      }
-      log(`🔎 HTTP ${statusCode} | bytes=${html.length} | content-type=${respHeaders['content-type'] || '(none)'}`);
-      log(`🔎 location=${respHeaders['location'] || '(none)'}`);
-      const preview = html.slice(0, 500).replace(/\s+/g, ' ').trim();
-      log(`🔎 preview: ${preview}`);
-      // Quais regras de ehTelaLogin matcharam?
-      const motivos = [];
-      if (!html || html.length < 100) motivos.push('html<100bytes');
-      if (/<input[^>]+type=["']password/i.test(html)) motivos.push('temPasswordInput');
-      if (/name=["']senha/i.test(html)) motivos.push('temNomeSenha');
-      if (!/data-order-id=/.test(html)) motivos.push('semDataOrderId');
-      log(`🔎 ehTelaLogin motivos: [${motivos.join(', ') || 'nenhum (não é login)'}]`);
+    // Parse JSON
+    let data = null;
+    let parseErr = null;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      parseErr = e.message;
     }
 
-    return { ok: resp.ok(), html, statusCode };
+    if (DEBUG_HTTP) {
+      try {
+        fs.writeFileSync(DEBUG_DUMP_FILE, rawText, 'utf8');
+      } catch (_) {}
+      log(`🔎 HTTP ${statusCode} | bytes=${rawText.length} | ct=${respHeaders['content-type'] || '(none)'}`);
+      if (parseErr) {
+        log(`🔎 JSON parse FALHOU: ${parseErr}`);
+        const preview = rawText.slice(0, 300).replace(/\s+/g, ' ').trim();
+        log(`🔎 raw preview: ${preview}`);
+      } else {
+        const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
+          ? data.retornoMultiplos['5'].length
+          : 0;
+        log(`🔎 JSON OK | retornoMultiplos.5 = ${numOs} OS(s)`);
+      }
+    }
+
+    return { ok: resp.ok(), data, statusCode, rawText };
   } finally {
     if (ctx) {
       try { await ctx.dispose(); } catch (_) {}
@@ -179,136 +262,73 @@ async function fetchHtml() {
   }
 }
 
-/**
- * @deprecated mantido só pra compatibilidade — não usar.
- * Substituído por playwright.request.newContext em fetchHtml().
- */
-function lerCookiesParaHeader() {
-  if (!fs.existsSync(SESSION_FILE)) {
-    throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
-  }
-  const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
-  const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
-  if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
-  const tuttsCookies = cookies.filter(c =>
-    c.domain && (c.domain.includes('tutts.com.br') || c.domain.includes('.tutts.com.br'))
-  );
-  return tuttsCookies.map(c => `${c.name}=${c.value}`).join('; ');
-}
+// ─────────────────────────────────────────────────────────────────────────
+// PARSER JSON — extrai OS do retornoMultiplos["5"]
+// ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Monta o body do POST pro endpoint viewServicoAcompanhamento.
- *
- * Estratégia em ordem de preferência:
- *
- *   1. 🥇 META_FILE (/tmp/tutts-sla-meta.json) — payload capturado em
- *      runtime pelo playwright-sla-capture interceptando o XHR real do
- *      navegador. É a única forma robusta porque captura o idFuncionario
- *      correto da sessão atual + qualquer campo novo que o sistema adicionar.
- *
- *   2. 🥈 process.env.SLA_DETECTOR_ID_FUNCIONARIO — fallback manual caso o
- *      META_FILE não exista ainda (ex: primeiro tick antes do primeiro
- *      relogin completar). Permite override emergencial sem deploy.
- *
- *   3. 🥉 Hardcoded com idFuncionario vazio — última saída. Vai dar erro
- *      provavelmente, mas não trava o serviço.
+ * Verifica se a resposta indica sessão expirada / não-autenticada.
  */
-function montarPayload() {
-  // 🥇 Prioridade 1: payload capturado em runtime
-  if (fs.existsSync(META_FILE)) {
-    try {
-      const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
-      if (meta && typeof meta.postData === 'string' && meta.postData.length > 0) {
-        // Idade do meta — se for muito velho (>24h), avisa
-        if (meta.capturedAt) {
-          const idadeMs = Date.now() - new Date(meta.capturedAt).getTime();
-          const idadeHoras = Math.floor(idadeMs / 3_600_000);
-          if (idadeHoras > 24) {
-            log(`⚠️ Meta de payload tem ${idadeHoras}h — pode estar desatualizado`);
-          }
-        }
-        return meta.postData;
-      }
-    } catch (e) {
-      log(`⚠️ Falha ao ler ${META_FILE}: ${e.message} — usando fallback`);
-    }
-  }
-
-  // 🥈/🥉 Fallback: payload montado manualmente
-  const idFuncionarioFallback = process.env.SLA_DETECTOR_ID_FUNCIONARIO || '';
-  log(`⚠️ Usando payload fallback (idFuncionario=${idFuncionarioFallback || '(vazio)'}) — META_FILE ausente`);
-
-  const params = new URLSearchParams();
-  // Campos descobertos via Network do MAP — manter como fallback
-  const fields = {
-    aux: '', aux1: '', aux2: '', aux3: '', contrato: '',
-    btnPag: 'N', buscaData: '', calculoCEP: 'N', calculoRegiao: 'N',
-    checkedSostemaRotasPorCod: 'false', codCliente: '', codPlanRotas: '',
-    dataFinal: '', dataInicial: '', erroFaixaCep: 'N',
-    estadoCidadePermissao: 'N', formaPagamento: '',
-    idFuncionario: idFuncionarioFallback,
-    iniciou: '', limite: '150', listaClientes: '',
-    offset: '0', opcao: '', ordenarPor: 'DD',
-    osAgAnali: 'false', osAgPag: 'false', osagaut: 'false',
-  };
-  for (const [k, v] of Object.entries(fields)) params.append(k, v);
-  return params.toString();
-}
-
-// fetchHtml() definida acima — usa playwright.request em vez de node fetch.
-
-function ehTelaLogin(html) {
-  // 🔧 FIX (2026-04): regra `!data-order-id` removida porque dava false
-  // positive quando a resposta era HTML válido sem nenhuma OS na fila
-  // (fila vazia ≠ tela de login). Sinais de login real:
-  //   1. Resposta vazia/cortada (<100 bytes)
-  //   2. Campo de password no HTML
-  //   3. Campo name="senha"
-  //   4. Tag <title> com "login" (defesa adicional)
-  if (!html || html.length < 100) return true;
-  if (/<input[^>]+type=["']password/i.test(html)) return true;
-  if (/name=["']senha/i.test(html)) return true;
-  if (/<title>[^<]*login[^<]*<\/title>/i.test(html)) return true;
+function ehSessaoExpirada(data) {
+  if (!data || typeof data !== 'object') return true;
+  if (data.erro && /sess[aã]o|login|autentic/i.test(String(data.erro))) return true;
+  if (data.redirect && /login/i.test(String(data.redirect))) return true;
+  if (!data.retornoMultiplos || typeof data.retornoMultiplos !== 'object') return true;
   return false;
 }
 
 /**
- * Parse regex das <tr data-order-id="..."> pra extrair OS + cliente + rastreio.
- * Padrão real do MAP (extraído do response):
- *   <tr class="osEmExecucao letra75" data-order-id="1125832">
- *     <td>...>1046 -  O Varej... (cliente_cod no texto)
- *     <a href="../../rastreamento?cod=AAEZMIE-22"> (cod_rastreio)
- *     data-motoboy="15021" (cod_profissional)
+ * Extrai as OS do JSON de resposta.
+ *
+ * Estrutura observada:
+ *   data.retornoMultiplos["5"] = [
+ *     {
+ *       "s.id": "1126214",            ← os_numero
+ *       "s.idSolicitante": "767",     ← cliente_cod
+ *       "s.idMotoboy": "9055",        ← cod_profissional
+ *       "cc.descricao": "BR Autoparts Goiânia",
+ *       "so.empresa": "Pellegrino/...",
+ *       "m.nome": "Leonardo Vaz...",
+ *       "s.numeroPedido": "211048",
+ *       ...
+ *     },
+ *     ...
+ *   ]
+ *
+ * Para o filtro `_balloon`, sintetiza uma string concatenando todos os
+ * valores string do objeto da OS — assim `termos_filtro` continua
+ * funcionando para qualquer termo que apareça em qualquer campo.
  */
-function parseOsDoHtml(html) {
+function parseOsDoJson(data) {
   const ordens = [];
-  const trRegex = /<tr[^>]+class="[^"]*osEmExecucao[^"]*"[^>]+data-order-id="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
-  let match;
+  const lista = Array.isArray(data?.retornoMultiplos?.['5'])
+    ? data.retornoMultiplos['5']
+    : [];
 
-  while ((match = trRegex.exec(html)) !== null) {
-    const osNumero = match[1];
-    const trConteudo = match[2];
+  for (const item of lista) {
+    if (!item || typeof item !== 'object') continue;
 
-    // cliente_cod: texto do botão "1046 -  O Varej..." ou "814 -  Cobra r..."
-    const clienteMatch = trConteudo.match(/>\s*(\d{2,5})\s*-\s+[A-Za-z(]/);
-    const clienteCod = clienteMatch ? clienteMatch[1] : null;
+    const osNumero = String(item['s.id'] || '').trim();
+    if (!osNumero) continue;
 
-    // cod_rastreio do href
-    const rastreioMatch = trConteudo.match(/rastreamento\?cod=([A-Za-z0-9_-]+)/);
-    const codRastreio = rastreioMatch ? rastreioMatch[1] : null;
+    const clienteCod = String(item['s.idSolicitante'] || '').trim() || null;
+    const codProfissional = String(item['s.idMotoboy'] || '').trim() || null;
 
-    // cod_profissional (motoboy)
-    const profMatch = trConteudo.match(/data-motoboy=["'](\d+)["']/);
-    const codProfissional = profMatch ? profMatch[1] : null;
-
-    // Pega TODOS os data-balloon do bloco (vai usar pro filtro 767)
-    const balloonMatches = trConteudo.match(/data-balloon="[^"]+"/g) || [];
-    const balloonText = balloonMatches.join(' ');
+    // Sintetiza um "_balloon" concatenando todos os valores string do item
+    // pra que o filtro por termos continue funcionando
+    const balloonParts = [];
+    for (const v of Object.values(item)) {
+      if (v == null) continue;
+      if (typeof v === 'string' || typeof v === 'number') {
+        balloonParts.push(String(v));
+      }
+    }
+    const balloonText = balloonParts.join(' | ').toUpperCase();
 
     ordens.push({
       os_numero: osNumero,
       cliente_cod: clienteCod,
-      cod_rastreio: codRastreio,
+      cod_rastreio: null, // não vem nesse endpoint, capture worker pega depois
       cod_profissional: codProfissional,
       _balloon: balloonText,
     });
@@ -355,23 +375,26 @@ async function inserirNaFila(pool, ordens) {
   return { inseridas, ignoradas };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Função principal
+// ─────────────────────────────────────────────────────────────────────────
+
 async function detectarOsNovas(pool) {
   try {
-    const { ok, html, statusCode } = await fetchHtml();
+    const { ok, data, statusCode } = await fetchData();
 
     if (!ok && statusCode !== 200) {
       log(`⚠️ HTTP ${statusCode} no fetch`);
-      // Considera relogin se 401/403/302
       const sessaoExpirada = [401, 403, 302].includes(statusCode);
       return { ok: false, sessaoExpirada, motivo: `http_${statusCode}` };
     }
 
-    if (ehTelaLogin(html)) {
-      log('🔑 Sessão expirada — relogin necessário');
+    if (ehSessaoExpirada(data)) {
+      log('🔑 Sessão expirada (ou resposta inválida) — relogin necessário');
       return { ok: false, sessaoExpirada: true, motivo: 'sessao_expirada' };
     }
 
-    const ordens = parseOsDoHtml(html);
+    const ordens = parseOsDoJson(data);
     const config = await carregarConfig(pool);
     const monitoradas = filtrarMonitorados(ordens, config);
     const { inseridas, ignoradas } = await inserirNaFila(pool, monitoradas);
@@ -388,12 +411,15 @@ async function detectarOsNovas(pool) {
     };
   } catch (err) {
     log(`❌ Erro no detector: ${err.message}`);
-    // 🔧 FIX: erro de sessão ausente/inválida no disco também conta como
-    // "sessão expirada" — caso contrário o worker nunca dispara o auto-relogin
-    // e fica preso em loop de erro a cada tick (até 2min).
+    // Erros de sessão/meta ausentes contam como sessaoExpirada pra
+    // disparar relogin no worker
     const isSessaoFaltando =
       err.message.includes('Sessão Playwright não encontrada') ||
       err.message.includes('Arquivo de sessão sem cookies') ||
+      err.message.includes('META_FILE ausente') ||
+      err.message.includes('META_FILE corrompido') ||
+      err.message.includes('META_FILE sem postData') ||
+      err.message.includes('postData no META_FILE não é JSON') ||
       err.message.includes('ENOENT');
     return {
       ok: false,
@@ -406,5 +432,13 @@ async function detectarOsNovas(pool) {
 module.exports = {
   detectarOsNovas,
   invalidarCacheConfig,
-  _internal: { parseOsDoHtml, filtrarMonitorados, ehTelaLogin, montarPayload },
+  // expostos pra testes unitários
+  _internal: {
+    parseOsDoJson,
+    filtrarMonitorados,
+    ehSessaoExpirada,
+    montarPayload,
+    obterEndpointUrl,
+    lerPhpSessIdAtual,
+  },
 };
