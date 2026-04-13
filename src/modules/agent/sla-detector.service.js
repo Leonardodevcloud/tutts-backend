@@ -3,22 +3,31 @@
 /**
  * sla-detector.service.js
  *
- * Detector HTTP-only de OS novas no MAP via endpoint viewServicoAcompanhamento.
+ * Detector de OS novas no MAP via endpoint viewServicoAcompanhamento.
  * Substitui a extensão Chrome SLA Monitor v8.0 (que dependia do operador).
  *
  * Fluxo:
- *   1. Lê cookies da sessão Playwright existente (/tmp/tutts-sla-session.json)
- *   2. POST no endpoint AJAX que devolve HTML com <tr data-order-id="...">
+ *   1. Carrega storageState do Playwright (/tmp/tutts-sla-session.json)
+ *   2. POST no endpoint AJAX usando playwright.request (NÃO node fetch) —
+ *      isso garante que TODA a sessão Playwright (cookies httpOnly, UA,
+ *      session pinning por User-Agent etc.) seja replicada fielmente.
  *   3. Parse regex pra extrair OS + cliente_cod + cod_rastreio
- *   4. Filtra 814 e 767 (configurável)
+ *   4. Filtra clientes ativos em rastreio_clientes_config
  *   5. INSERT ON CONFLICT DO NOTHING em sla_capturas
  *   6. Worker existente captura pontos via Playwright e envia WhatsApp
  *
- * Auto-relogin: se a resposta vier como HTML de login, sinaliza sessaoExpirada
- * pra que o caller (worker) dispare relogin via playwright-sla-capture.
+ * Auto-relogin: se a resposta vier como HTML de login OU se o arquivo de
+ * sessão estiver ausente/inválido, sinaliza sessaoExpirada=true pra que o
+ * caller (worker) dispare relogin via playwright-sla-capture.
+ *
+ * 🔧 FIX (2026-04): Antes usava node-fetch direto com header Cookie montado
+ *     manualmente — não funcionava porque o tutts.com.br faz session pinning
+ *     por User-Agent e o detector usava UA "Tutts-Detector/1.0". Agora usa
+ *     playwright.request.newContext({ storageState }) que preserva tudo.
  */
 
 const fs = require('fs');
+const { request: playwrightRequest } = require('playwright');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
 const MAP_BASE = 'https://tutts.com.br/expresso/expressoat';
@@ -53,6 +62,68 @@ async function carregarConfig(pool) {
 function invalidarCacheConfig() { _configCache = null; _configExpira = 0; }
 
 
+async function fetchHtml() {
+  // 🔧 FIX: usa playwright.request.newContext em vez de node fetch.
+  // Isso carrega o storageState completo (cookies httpOnly, secure, etc.)
+  // E o Playwright internamente usa o mesmo User-Agent que usaria num browser
+  // real, evitando session pinning por UA do tutts.com.br.
+
+  if (!fs.existsSync(SESSION_FILE)) {
+    throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
+  }
+
+  // Validação rápida do storageState (evita criar contexto se estiver vazio)
+  try {
+    const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
+    if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
+  } catch (e) {
+    if (e.message.includes('Arquivo de sessão')) throw e;
+    throw new Error(`storageState inválido: ${e.message}`);
+  }
+
+  const body = montarPayload();
+  let ctx;
+  try {
+    ctx = await playwrightRequest.newContext({
+      storageState: SESSION_FILE,
+      // UA realista de Chrome — bate com o que o playwright-sla-capture usa
+      userAgent:
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      extraHTTPHeaders: {
+        'Accept': 'text/html, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': REFERER,
+        'Origin': 'https://tutts.com.br',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+      },
+    });
+
+    const resp = await ctx.post(ENDPOINT, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      },
+      data: body,
+      maxRedirects: 0, // se redirecionar, é login = sessão morta
+      failOnStatusCode: false,
+      timeout: 30_000,
+    });
+
+    const statusCode = resp.status();
+    const html = await resp.text();
+    return { ok: resp.ok(), html, statusCode };
+  } finally {
+    if (ctx) {
+      try { await ctx.dispose(); } catch (_) {}
+    }
+  }
+}
+
+/**
+ * @deprecated mantido só pra compatibilidade — não usar.
+ * Substituído por playwright.request.newContext em fetchHtml().
+ */
 function lerCookiesParaHeader() {
   if (!fs.existsSync(SESSION_FILE)) {
     throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
@@ -83,28 +154,7 @@ function montarPayload() {
   return params.toString();
 }
 
-async function fetchHtml() {
-  const cookieHeader = lerCookiesParaHeader();
-  const body = montarPayload();
-
-  const resp = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'Accept': 'text/html, */*; q=0.01',
-      'X-Requested-With': 'XMLHttpRequest',
-      'Referer': REFERER,
-      'Origin': 'https://tutts.com.br',
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Tutts-Detector/1.0',
-      'Cookie': cookieHeader,
-    },
-    body,
-    redirect: 'manual',
-  });
-
-  const html = await resp.text();
-  return { ok: resp.ok, html, statusCode: resp.status };
-}
+// fetchHtml() definida acima — usa playwright.request em vez de node fetch.
 
 function ehTelaLogin(html) {
   if (!html || html.length < 100) return true;
