@@ -30,13 +30,14 @@ const fs = require('fs');
 const { request: playwrightRequest } = require('playwright');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
+const META_FILE = '/tmp/tutts-sla-meta.json';  // 🆕 payload capturado pelo playwright-sla-capture
 const MAP_BASE = 'https://tutts.com.br/expresso/expressoat';
 const ENDPOINT = `${MAP_BASE}/entregasDia/acompanhamento/ajax/viewServicoAcompanhamento`;
 const REFERER = `${MAP_BASE}/acompanhamento-servicos`;
 
-// 🔬 Debug — ativar via env SLA_DETECTOR_DEBUG=true pra logar HTTP detalhado
-// e dumpar o HTML retornado em /tmp/sla-detector-last.html
-const DEBUG_HTTP = process.env.SLA_DETECTOR_DEBUG === 'true';
+// 🔬 Debug — ativado por padrão durante troubleshooting do detector.
+// Pra desativar depois que o pipeline estabilizar, setar SLA_DETECTOR_DEBUG=false
+const DEBUG_HTTP = process.env.SLA_DETECTOR_DEBUG !== 'false';
 const DEBUG_DUMP_FILE = '/tmp/sla-detector-last.html';
 
 function log(msg) {
@@ -67,6 +68,22 @@ async function carregarConfig(pool) {
 function invalidarCacheConfig() { _configCache = null; _configExpira = 0; }
 
 
+/**
+ * Retorna a URL do endpoint AJAX a usar no fetch.
+ * Prefere a URL capturada em runtime (META_FILE) sobre a hardcoded.
+ */
+function obterEndpointUrl() {
+  if (fs.existsSync(META_FILE)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+      if (meta && typeof meta.url === 'string' && meta.url.includes('tutts.com.br')) {
+        return meta.url;
+      }
+    } catch (_) {}
+  }
+  return ENDPOINT;
+}
+
 async function fetchHtml() {
   // 🔧 FIX: usa playwright.request.newContext em vez de node fetch.
   // Isso carrega o storageState completo (cookies httpOnly, secure, etc.)
@@ -96,6 +113,12 @@ async function fetchHtml() {
   }
 
   const body = montarPayload();
+  const endpointUrl = obterEndpointUrl();  // 🆕 URL do meta se existir, senão hardcoded
+
+  if (DEBUG_HTTP && endpointUrl !== ENDPOINT) {
+    log(`🔎 usando endpoint do meta: ${endpointUrl}`);
+  }
+
   let ctx;
   try {
     ctx = await playwrightRequest.newContext({
@@ -113,7 +136,7 @@ async function fetchHtml() {
       },
     });
 
-    const resp = await ctx.post(ENDPOINT, {
+    const resp = await ctx.post(endpointUrl, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       },
@@ -173,16 +196,58 @@ function lerCookiesParaHeader() {
   return tuttsCookies.map(c => `${c.name}=${c.value}`).join('; ');
 }
 
+/**
+ * Monta o body do POST pro endpoint viewServicoAcompanhamento.
+ *
+ * Estratégia em ordem de preferência:
+ *
+ *   1. 🥇 META_FILE (/tmp/tutts-sla-meta.json) — payload capturado em
+ *      runtime pelo playwright-sla-capture interceptando o XHR real do
+ *      navegador. É a única forma robusta porque captura o idFuncionario
+ *      correto da sessão atual + qualquer campo novo que o sistema adicionar.
+ *
+ *   2. 🥈 process.env.SLA_DETECTOR_ID_FUNCIONARIO — fallback manual caso o
+ *      META_FILE não exista ainda (ex: primeiro tick antes do primeiro
+ *      relogin completar). Permite override emergencial sem deploy.
+ *
+ *   3. 🥉 Hardcoded com idFuncionario vazio — última saída. Vai dar erro
+ *      provavelmente, mas não trava o serviço.
+ */
 function montarPayload() {
+  // 🥇 Prioridade 1: payload capturado em runtime
+  if (fs.existsSync(META_FILE)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+      if (meta && typeof meta.postData === 'string' && meta.postData.length > 0) {
+        // Idade do meta — se for muito velho (>24h), avisa
+        if (meta.capturedAt) {
+          const idadeMs = Date.now() - new Date(meta.capturedAt).getTime();
+          const idadeHoras = Math.floor(idadeMs / 3_600_000);
+          if (idadeHoras > 24) {
+            log(`⚠️ Meta de payload tem ${idadeHoras}h — pode estar desatualizado`);
+          }
+        }
+        return meta.postData;
+      }
+    } catch (e) {
+      log(`⚠️ Falha ao ler ${META_FILE}: ${e.message} — usando fallback`);
+    }
+  }
+
+  // 🥈/🥉 Fallback: payload montado manualmente
+  const idFuncionarioFallback = process.env.SLA_DETECTOR_ID_FUNCIONARIO || '';
+  log(`⚠️ Usando payload fallback (idFuncionario=${idFuncionarioFallback || '(vazio)'}) — META_FILE ausente`);
+
   const params = new URLSearchParams();
-  // Campos descobertos via Network do MAP
+  // Campos descobertos via Network do MAP — manter como fallback
   const fields = {
     aux: '', aux1: '', aux2: '', aux3: '', contrato: '',
     btnPag: 'N', buscaData: '', calculoCEP: 'N', calculoRegiao: 'N',
     checkedSostemaRotasPorCod: 'false', codCliente: '', codPlanRotas: '',
     dataFinal: '', dataInicial: '', erroFaixaCep: 'N',
     estadoCidadePermissao: 'N', formaPagamento: '',
-    idFuncionario: '65', iniciou: '', limite: '150', listaClientes: '',
+    idFuncionario: idFuncionarioFallback,
+    iniciou: '', limite: '150', listaClientes: '',
     offset: '0', opcao: '', ordenarPor: 'DD',
     osAgAnali: 'false', osAgPag: 'false', osagaut: 'false',
   };
