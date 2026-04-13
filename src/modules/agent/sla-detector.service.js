@@ -258,10 +258,17 @@ function montarPayload() {
 // fetchHtml() definida acima — usa playwright.request em vez de node fetch.
 
 function ehTelaLogin(html) {
+  // 🔧 FIX (2026-04): regra `!data-order-id` removida porque dava false
+  // positive quando a resposta era HTML válido sem nenhuma OS na fila
+  // (fila vazia ≠ tela de login). Sinais de login real:
+  //   1. Resposta vazia/cortada (<100 bytes)
+  //   2. Campo de password no HTML
+  //   3. Campo name="senha"
+  //   4. Tag <title> com "login" (defesa adicional)
   if (!html || html.length < 100) return true;
   if (/<input[^>]+type=["']password/i.test(html)) return true;
   if (/name=["']senha/i.test(html)) return true;
-  if (!/data-order-id=/.test(html)) return true;
+  if (/<title>[^<]*login[^<]*<\/title>/i.test(html)) return true;
   return false;
 }
 
