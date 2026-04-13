@@ -188,6 +188,67 @@ function createRastreioClientesRouter(pool, deps = {}) {
     }
   });
 
+  router.get('/debug/meta-payload', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const path = '/tmp/tutts-sla-meta.json';
+      if (!fs.existsSync(path)) {
+        return res.status(404).json({
+          ok: false,
+          existe: false,
+          dica: 'O meta é gerado pelo playwright-sla-capture quando intercepta o XHR. Force um relogin disparando uma captura.',
+        });
+      }
+      const stat = fs.statSync(path);
+      const meta = JSON.parse(fs.readFileSync(path, 'utf8'));
+
+      // Decodifica o postData pra leitura humana
+      let postDataDecoded = null;
+      try {
+        const params = new URLSearchParams(meta.postData || '');
+        postDataDecoded = {};
+        for (const [k, v] of params.entries()) postDataDecoded[k] = v;
+      } catch (_) {}
+
+      res.json({
+        ok: true,
+        existe: true,
+        modificado: stat.mtime.toISOString(),
+        idade_segundos: Math.floor((Date.now() - stat.mtime.getTime()) / 1000),
+        meta: {
+          ...meta,
+          postDataDecoded,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  router.get('/debug/network-log', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const path = '/tmp/tutts-sla-network.json';
+      if (!fs.existsSync(path)) {
+        return res.status(404).json({
+          ok: false,
+          existe: false,
+          dica: 'Aguarde o próximo ciclo do playwright-sla-capture — ele dumpa as chamadas de rede do browser.',
+        });
+      }
+      const stat = fs.statSync(path);
+      const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+      res.json({
+        ok: true,
+        existe: true,
+        modificado: stat.mtime.toISOString(),
+        idade_segundos: Math.floor((Date.now() - stat.mtime.getTime()) / 1000),
+        total_entries: (data.entries || []).length,
+        ...data,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
   return router;
 }
 
