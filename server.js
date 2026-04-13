@@ -298,6 +298,66 @@ app.get('/_debug/sla-tick', async (req, res) => {
   }
 });
 
+// 🔬 Health do container — pra diagnosticar travamentos de Chromium
+app.get('/_debug/health', async (req, res) => {
+  if (req.query.key !== SLA_DEBUG_KEY) {
+    return res.status(401).json({ erro: 'key inválida' });
+  }
+
+  const { exec } = require('child_process');
+  const util = require('util');
+  const execAsync = util.promisify(exec);
+
+  const resultado = {
+    timestamp: new Date().toISOString(),
+    node: {
+      uptime_s: Math.floor(process.uptime()),
+      memory_mb: {
+        rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
+        heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        heapTotal: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+        external: Math.round(process.memoryUsage().external / 1024 / 1024),
+      },
+      pid: process.pid,
+    },
+  };
+
+  try {
+    const { stdout } = await execAsync('ps -eo pid,ppid,rss,comm 2>/dev/null | grep -iE "chrom|head" | grep -v grep || true');
+    const lines = stdout.trim().split('\n').filter(Boolean);
+    resultado.chromium_count = lines.length;
+    resultado.chromium_total_rss_mb = lines.reduce((sum, l) => {
+      const parts = l.trim().split(/\s+/);
+      return sum + (parseInt(parts[2], 10) || 0);
+    }, 0) / 1024;
+    resultado.chromium_processes = lines.slice(0, 20); // só os 20 primeiros
+  } catch (e) {
+    resultado.chromium_error = e.message;
+  }
+
+  try {
+    const { stdout } = await execAsync('df -h /dev/shm 2>/dev/null | tail -1');
+    resultado.dev_shm = stdout.trim();
+  } catch (e) {}
+
+  try {
+    const { stdout } = await execAsync(`ls /proc/${process.pid}/fd 2>/dev/null | wc -l`);
+    resultado.open_fds = parseInt(stdout.trim(), 10);
+  } catch (e) {}
+
+  try {
+    const { stdout } = await execAsync('cat /proc/self/limits 2>/dev/null | grep -E "open files|processes" || echo ""');
+    resultado.limits = stdout.trim();
+  } catch (e) {}
+
+  try {
+    const { stdout } = await execAsync('cat /proc/meminfo 2>/dev/null | head -5');
+    resultado.meminfo = stdout.trim();
+  } catch (e) {}
+
+  res.json(resultado);
+});
+
 // ─── Error handlers (MUST be last) ───────────────────────
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
