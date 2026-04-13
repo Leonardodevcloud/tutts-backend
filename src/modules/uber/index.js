@@ -26,20 +26,29 @@ function initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria
  * 2. Aplica regras de decisão
  * 3. Despacha pro Uber Direct
  * 4. Verifica timeouts (entregador não encontrado)
+ *
+ * Usa setTimeout recursivo (não setInterval) para que mudanças no
+ * polling_intervalo_seg da config peguem em runtime sem precisar restart.
  */
 function startUberWorker(pool) {
   let ultimoId = 0;
-  let intervaloRef = null;
+  let timeoutRef = null;
   let rodando = false;
+  let parado = false;
 
   async function executarCiclo() {
-    if (rodando) return; // Evitar sobreposição
+    if (rodando || parado) return;
     rodando = true;
+
+    let intervaloProximo = 30; // default
 
     try {
       const config = await obterConfig(pool);
+      intervaloProximo = config?.polling_intervalo_seg || 30;
+
       if (!config || !config.ativo) {
         rodando = false;
+        agendarProximo(intervaloProximo);
         return;
       }
 
@@ -47,6 +56,7 @@ function startUberWorker(pool) {
         // Só verificar timeouts quando auto_despacho está desligado
         await verificarTimeouts(pool);
         rodando = false;
+        agendarProximo(intervaloProximo);
         return;
       }
 
@@ -63,7 +73,7 @@ function startUberWorker(pool) {
               ultimoId = servico.codigoOS;
             }
 
-            // 2. Verificar regras (simplificado — pode ser expandido)
+            // 2. Verificar regras
             const deveEnviarUber = await verificarRegras(pool, servico);
             if (!deveEnviarUber) continue;
 
@@ -84,6 +94,12 @@ function startUberWorker(pool) {
     }
 
     rodando = false;
+    agendarProximo(intervaloProximo);
+  }
+
+  function agendarProximo(seg) {
+    if (parado) return;
+    timeoutRef = setTimeout(executarCiclo, seg * 1000);
   }
 
   async function verificarRegras(pool, servico) {
@@ -137,11 +153,8 @@ function startUberWorker(pool) {
 
       console.log(`🚀 [Uber Worker] Iniciando polling a cada ${intervaloSeg}s (ativo=${config?.ativo}, auto=${config?.auto_despacho})`);
 
-      // Executar imediatamente
+      // Primeiro ciclo imediato — agendarProximo é chamado dentro do executarCiclo
       await executarCiclo();
-
-      // Agendar próximos ciclos
-      intervaloRef = setInterval(executarCiclo, intervaloSeg * 1000);
     } catch (error) {
       console.error('❌ [Uber Worker] Erro ao iniciar:', error.message);
       // Tentar novamente em 60s
@@ -154,7 +167,8 @@ function startUberWorker(pool) {
   // Retornar handle para poder parar se necessário
   return {
     parar: () => {
-      if (intervaloRef) clearInterval(intervaloRef);
+      parado = true;
+      if (timeoutRef) clearTimeout(timeoutRef);
       console.log('🛑 [Uber Worker] Polling parado');
     },
   };

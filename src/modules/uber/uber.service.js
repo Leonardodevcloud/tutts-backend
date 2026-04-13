@@ -4,7 +4,16 @@
  */
 
 const httpRequest = require('../../shared/utils/httpRequest');
-const { UBER_API_BASE, UBER_AUTH_URL, UBER_STATUS_MAP, UBER_FLOW_STATUS } = require('./uber.shared');
+const {
+  UBER_API_BASE,
+  UBER_AUTH_URL,
+  UBER_SCOPE,
+  UBER_STATUS_MAP,
+  UBER_FLOW_STATUS,
+  montarEnderecoUber,
+  formatarTelefoneE164,
+  truncarTexto,
+} = require('./uber.shared');
 
 // ════════════════════════════════════════════════════════════
 // CONFIGURAÇÃO - buscar config do banco
@@ -41,7 +50,7 @@ async function obterTokenUber(pool) {
     client_id: config.client_id,
     client_secret: config.client_secret,
     grant_type: 'client_credentials',
-    scope: 'eats.deliveries',
+    scope: UBER_SCOPE,
   }).toString();
 
   const resp = await httpRequest(UBER_AUTH_URL, {
@@ -180,93 +189,156 @@ async function mappFinalizarServico(pool, codigoOS) {
 // UBER DIRECT API - Cotação + Criar Entrega + Cancelar
 // ════════════════════════════════════════════════════════════
 
+/**
+ * Cria uma cotação no Uber Direct.
+ *
+ * IMPORTANTE: pickup_address e dropoff_address são STRINGS contendo JSON
+ * estruturado, não objetos. lat/lng vão como CAMPOS DE PRIMEIRO NÍVEL
+ * (pickup_latitude, dropoff_longitude, etc) — não aninhados.
+ *
+ * Doc oficial:
+ * https://developer.uber.com/docs/deliveries/get-started
+ */
 async function uberCriarCotacao(pool, pickup, dropoff) {
   const token = await obterTokenUber(pool);
   const config = await obterConfig(pool);
 
   const url = `${UBER_API_BASE}/${config.customer_id}/delivery_quotes`;
   const body = {
-    pickup_address: pickup.endereco,
-    dropoff_address: dropoff.endereco,
+    pickup_address: montarEnderecoUber(pickup.endereco),
+    dropoff_address: montarEnderecoUber(dropoff.endereco),
   };
 
-  // Se tiver coordenadas, envia place_id do Google
+  // Coordenadas (campos de primeiro nível!) — fortemente recomendado pra Brasil
   if (pickup.latitude && pickup.longitude) {
-    body.pickup = { latitude: parseFloat(pickup.latitude), longitude: parseFloat(pickup.longitude) };
+    body.pickup_latitude = parseFloat(pickup.latitude);
+    body.pickup_longitude = parseFloat(pickup.longitude);
   }
   if (dropoff.latitude && dropoff.longitude) {
-    body.dropoff = { latitude: parseFloat(dropoff.latitude), longitude: parseFloat(dropoff.longitude) };
+    body.dropoff_latitude = parseFloat(dropoff.latitude);
+    body.dropoff_longitude = parseFloat(dropoff.longitude);
   }
 
   const resp = await httpRequest(url, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}` },
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 
   const data = resp.json();
   if (!resp.ok) {
-    console.error('❌ [Uber] Erro ao criar cotação:', data);
-    throw new Error(`Erro cotação Uber: ${data.message || JSON.stringify(data)}`);
+    console.error('❌ [Uber] Erro ao criar cotação:', JSON.stringify(data));
+    throw new Error(`Erro cotação Uber: ${data.message || data.code || JSON.stringify(data)}`);
   }
 
-  console.log(`✅ [Uber] Cotação criada: R$${(data.fee / 100).toFixed(2)}, ETA ${data.duration}min`);
+  console.log(`✅ [Uber] Cotação criada: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min`);
   return {
     quote_id: data.id,
     valor: data.fee / 100,  // Uber retorna em centavos
     eta_minutos: data.duration,
-    expira_em: data.expires_at,
+    expira_em: data.expires,
   };
 }
 
+/**
+ * Cria uma entrega no Uber Direct.
+ *
+ * Campos OBRIGATÓRIOS confirmados pela doc:
+ * - quote_id
+ * - pickup_address (JSON string)
+ * - pickup_name
+ * - pickup_phone_number (E.164)
+ * - dropoff_address (JSON string)
+ * - dropoff_name
+ * - dropoff_phone_number (E.164)
+ * - manifest_items (array, mínimo 1 item)
+ *
+ * Telefones são forçados pra E.164. Se nenhum telefone for fornecido
+ * (caso comum: a Mapp não envia telefones), usa o telefone de suporte
+ * configurado em uber_config.telefone_suporte.
+ */
 async function uberCriarEntrega(pool, quoteId, pickup, dropoff, externalId) {
   const token = await obterTokenUber(pool);
   const config = await obterConfig(pool);
 
-  const url = `${UBER_API_BASE}/${config.customer_id}/deliveries`;
+  // Telefone padrão do suporte como fallback
+  const telSuporte = formatarTelefoneE164(config.telefone_suporte);
+
+  const pickupPhone = formatarTelefoneE164(pickup.telefone) || telSuporte;
+  const dropoffPhone = formatarTelefoneE164(dropoff.telefone) || telSuporte;
+
+  if (!pickupPhone || !dropoffPhone) {
+    throw new Error('Telefone de coleta/entrega ausente e telefone_suporte não configurado em uber_config');
+  }
+
+  // Manifest obrigatório — pelo menos 1 item
+  const manifestValueCents = parseInt(config.manifest_total_value_centavos || 10000, 10);
+  const manifestItems = [{
+    name: truncarTexto(pickup.descricao_item || 'Encomenda', 100),
+    quantity: 1,
+    size: 'small',
+  }];
+
   const body = {
     quote_id: quoteId,
-    external_order_id: `OS-${externalId}`,
-    pickup: {
-      address: pickup.endereco,
-      contact: {
-        first_name: pickup.nome || 'Coleta',
-      },
-      instructions: pickup.complemento || null,
-    },
-    dropoff: {
-      address: dropoff.endereco,
-      contact: {
-        first_name: dropoff.nome || 'Entrega',
-      },
-      instructions: dropoff.complemento || null,
-      type: 'DOOR',
-    },
+    external_id: `OS-${externalId}`,
+
+    // PICKUP — campos de primeiro nível
+    pickup_address: montarEnderecoUber(pickup.endereco),
+    pickup_name: truncarTexto(pickup.nome || 'Loja', 100),
+    pickup_phone_number: pickupPhone,
+    pickup_business_name: truncarTexto(pickup.nome || 'Loja', 100),
+    pickup_notes: truncarTexto(pickup.complemento, 280),
+
+    // DROPOFF — campos de primeiro nível
+    dropoff_address: montarEnderecoUber(dropoff.endereco),
+    dropoff_name: truncarTexto(dropoff.nome || 'Cliente', 100),
+    dropoff_phone_number: dropoffPhone,
+    dropoff_notes: truncarTexto(dropoff.complemento, 280),
+
+    // Manifest obrigatório
+    manifest_items: manifestItems,
+    manifest_total_value: manifestValueCents,
+
+    // Comportamento padrão
+    deliverable_action: 'deliverable_action_meet_at_door',
+    undeliverable_action: 'return',
   };
 
-  // Coordenadas se disponíveis
+  // Coordenadas (campos de primeiro nível, não aninhadas em pickup/dropoff)
   if (pickup.latitude && pickup.longitude) {
-    body.pickup.latitude = parseFloat(pickup.latitude);
-    body.pickup.longitude = parseFloat(pickup.longitude);
+    body.pickup_latitude = parseFloat(pickup.latitude);
+    body.pickup_longitude = parseFloat(pickup.longitude);
   }
   if (dropoff.latitude && dropoff.longitude) {
-    body.dropoff.latitude = parseFloat(dropoff.latitude);
-    body.dropoff.longitude = parseFloat(dropoff.longitude);
+    body.dropoff_latitude = parseFloat(dropoff.latitude);
+    body.dropoff_longitude = parseFloat(dropoff.longitude);
   }
 
+  // SANDBOX: se a config tiver sandbox_mode=true, injeta o RoboCourier
+  // pra simular o fluxo todo (pending → pickup → pickup_complete → dropoff → delivered)
+  // sem gerar entrega real. Doc: https://developer.uber.com/docs/deliveries/guides/robocourier
+  if (config.sandbox_mode) {
+    body.test_specifications = {
+      robo_courier_specification: { mode: 'auto' },
+    };
+    console.log(`🤖 [Uber] OS ${externalId} despachada em modo SANDBOX (RoboCourier auto)`);
+  }
+
+  const url = `${UBER_API_BASE}/${config.customer_id}/deliveries`;
   const resp = await httpRequest(url, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}` },
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 
   const data = resp.json();
   if (!resp.ok) {
-    console.error('❌ [Uber] Erro ao criar entrega:', data);
-    throw new Error(`Erro criar entrega Uber: ${data.message || JSON.stringify(data)}`);
+    console.error('❌ [Uber] Erro ao criar entrega:', JSON.stringify(data));
+    throw new Error(`Erro criar entrega Uber: ${data.message || data.code || JSON.stringify(data)}`);
   }
 
-  console.log(`✅ [Uber] Entrega criada: ${data.id}, status=${data.status}`);
+  console.log(`✅ [Uber] Entrega criada: ${data.id} | status=${data.status}`);
   return {
     delivery_id: data.id,
     status: data.status,
@@ -384,12 +456,15 @@ async function despacharParaUber(pool, servico) {
     const entregaUber = await uberCriarEntrega(pool, cotacao.quote_id, {
       endereco: coleta.rua,
       nome: coleta.nome,
+      telefone: coleta.telefone || coleta.fone,
       complemento: coleta.complemento,
+      descricao_item: servico.obs || `OS ${codigoOS}`,
       latitude: coleta.latitude,
       longitude: coleta.longitude,
     }, {
       endereco: entrega.rua,
       nome: entrega.nome,
+      telefone: entrega.telefone || entrega.fone,
       complemento: entrega.complemento,
       latitude: entrega.latitude,
       longitude: entrega.longitude,

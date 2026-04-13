@@ -6,6 +6,7 @@ const express = require('express');
 const {
   obterConfig, despacharParaUber, mappListarServicos,
   mappAlterarStatus, uberCancelarEntrega, uberConsultarEntrega,
+  uberCriarCotacao,
 } = require('../uber.service');
 
 function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -37,6 +38,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         ativo, client_id, client_secret, customer_id, webhook_secret,
         mapp_api_url, mapp_api_token, polling_intervalo_seg,
         auto_despacho, timeout_sem_entregador_min,
+        telefone_suporte, manifest_total_value_centavos, sandbox_mode,
       } = req.body;
 
       // Montar SET dinâmico (só atualiza campos enviados)
@@ -61,6 +63,9 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       addCampo('polling_intervalo_seg', polling_intervalo_seg);
       addCampo('auto_despacho', auto_despacho);
       addCampo('timeout_sem_entregador_min', timeout_sem_entregador_min);
+      addCampo('telefone_suporte', telefone_suporte);
+      addCampo('manifest_total_value_centavos', manifest_total_value_centavos);
+      addCampo('sandbox_mode', sandbox_mode);
 
       if (campos.length === 0) {
         return res.status(400).json({ error: 'Nenhum campo para atualizar' });
@@ -90,6 +95,47 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Testar cotação no Uber Direct sem criar entrega
+   * Útil pra debugar credenciais e formato de payload sem efeitos colaterais
+   * (não mexe na Mapp, não cria registro em uber_entregas)
+   *
+   * Body esperado:
+   * {
+   *   coleta:  { endereco: "Rua X, ...", latitude: -12.9, longitude: -38.5 },
+   *   entrega: { endereco: "Av Y, ...", latitude: -12.97, longitude: -38.51 }
+   * }
+   */
+  router.post('/teste-cotacao', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { coleta, entrega } = req.body;
+
+      if (!coleta?.endereco || !entrega?.endereco) {
+        return res.status(400).json({
+          error: 'Body deve conter coleta.endereco e entrega.endereco',
+        });
+      }
+
+      const inicio = Date.now();
+      const cotacao = await uberCriarCotacao(pool, coleta, entrega);
+      const duracaoMs = Date.now() - inicio;
+
+      res.json({
+        success: true,
+        cotacao,
+        duracao_ms: duracaoMs,
+        observacao: 'Cotação criada com sucesso. Nenhuma entrega foi criada.',
+      });
+    } catch (error) {
+      console.error('❌ [Uber] Erro no teste de cotação:', error.message);
+      res.status(400).json({
+        success: false,
+        error: error.message,
+        dica: 'Verifique credenciais Uber, customer_id, e formato dos endereços',
+      });
     }
   });
 

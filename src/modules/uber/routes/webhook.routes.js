@@ -12,6 +12,22 @@ function createUberWebhookRoutes(pool) {
 
   /**
    * Middleware: validar assinatura HMAC-SHA256 da Uber
+   *
+   * Doc oficial:
+   *   "Each webhook request has a X-Postmates-Signature header which is
+   *    generated using a shared secret and the payload of the webhook request.
+   *    To verify that the request came from Postmates, pass the secret and
+   *    payload through the SHA-256 hashing algorithm, and make sure it's equal
+   *    to X-Postmates-Signature."
+   *
+   *   Headers aceitos: x-uber-signature OU x-postmates-signature.
+   *
+   * IMPORTANTE: precisa do RAW BODY (string original recebida na request),
+   * não do JSON parseado e re-stringificado — caracteres unicode escapados
+   * (\uXXXX) podem reordenar e a assinatura nunca bate.
+   *
+   * O server.js já captura req.rawBody no middleware express.json
+   * (linha ~91) para todas as rotas /api/uber/webhook.
    */
   async function verificarAssinaturaUber(req, res, next) {
     try {
@@ -36,14 +52,20 @@ function createUberWebhookRoutes(pool) {
         return res.status(401).json({ error: 'Assinatura ausente' });
       }
 
-      const rawBody = JSON.stringify(req.body);
+      // Usar raw body capturado no express.json verify (server.js)
+      const rawBody = req.rawBody;
+      if (!rawBody) {
+        console.error('❌ [Uber Webhook] req.rawBody não disponível — verificar middleware express.json no server.js');
+        return res.status(500).json({ error: 'Raw body não capturado' });
+      }
+
       const expected = crypto
         .createHmac('sha256', secret)
         .update(rawBody, 'utf8')
         .digest('hex');
 
-      const sigBuf = Buffer.from(signature);
-      const expBuf = Buffer.from(expected);
+      const sigBuf = Buffer.from(String(signature), 'utf8');
+      const expBuf = Buffer.from(expected, 'utf8');
 
       if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
         console.warn(`⚠️ [Uber Webhook] Assinatura inválida de ${req.ip}`);

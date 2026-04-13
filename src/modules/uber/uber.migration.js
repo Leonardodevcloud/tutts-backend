@@ -19,11 +19,19 @@ async function initUberTables(pool) {
       polling_intervalo_seg INTEGER DEFAULT 30,
       auto_despacho BOOLEAN DEFAULT false,
       timeout_sem_entregador_min INTEGER DEFAULT 10,
+      telefone_suporte VARCHAR(20),
+      manifest_total_value_centavos INTEGER DEFAULT 10000,
+      sandbox_mode BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `);
   console.log('✅ Tabela uber_config verificada');
+
+  // Migrations idempotentes — adiciona colunas se não existirem (instalações antigas)
+  await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS telefone_suporte VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS manifest_total_value_centavos INTEGER DEFAULT 10000`).catch(() => {});
+  await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS sandbox_mode BOOLEAN DEFAULT false`).catch(() => {});
 
   // Garantir que existe pelo menos uma linha de config
   await pool.query(`

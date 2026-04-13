@@ -21,6 +21,9 @@ const { withCronLock, liberarLocksOrfaos } = require('./src/shared/utils/cronMut
 // ─── Score ────────────────────────────────────────────────
 const { aplicarGratuidadeProfissional } = require('./src/modules/score/score.service');
 
+// ─── Uber Direct Worker ───────────────────────────────────
+const { startUberWorker } = require('./src/modules/uber');
+
 // ─── Auth cleanup ─────────────────────────────────────────
 const bcrypt = require('bcrypt');
 const { REFRESH_SECRET } = require('./src/modules/auth/auth.service');
@@ -603,6 +606,16 @@ cron.schedule('0 9-13 * * 1-5', withCronLock(pool, 'alertaDisp', alertarDisponib
     // 🧹 Limpar advisory locks órfãos de deploys anteriores
     await liberarLocksOrfaos(pool);
 
+    // 🛵 Uber Direct: polling worker (substitui o setInterval que rodava no server.js)
+    if (process.env.WORKER_ENABLED === 'true') {
+      try {
+        startUberWorker(pool);
+        console.log('🛵 [Worker] Uber Direct polling iniciado');
+      } catch (err) {
+        console.error('❌ [Worker] Falha ao iniciar Uber polling:', err.message);
+      }
+    }
+
     console.log('');
     console.log('══════════════════════════════════════════');
     console.log('  🔧 Tutts Worker ONLINE');
@@ -615,6 +628,7 @@ cron.schedule('0 9-13 * * 1-5', withCronLock(pool, 'alertaDisp', alertarDisponib
     console.log('     ⏰ Resumo diário     — Seg-Sex 19h | Sáb 13h 🔒');
     console.log('     ⏰ Filas reset       — Seg-Sáb 19h 🔒');
     console.log('     ⏰ Disp alerta WA   — Seg-Sex 9h-13h (1h) 🔒');
+    console.log('     🛵 Uber polling      — a cada N seg (config no banco)');
     console.log('  🔒 = protegido por CronMutex (xact lock)');
     console.log('══════════════════════════════════════════');
     console.log('');
