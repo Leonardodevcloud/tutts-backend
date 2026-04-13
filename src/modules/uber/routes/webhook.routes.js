@@ -13,40 +13,56 @@ function createUberWebhookRoutes(pool) {
   /**
    * Middleware: validar assinatura HMAC-SHA256 da Uber
    *
-   * Doc oficial:
-   *   "Each webhook request has a X-Postmates-Signature header which is
-   *    generated using a shared secret and the payload of the webhook request.
-   *    To verify that the request came from Postmates, pass the secret and
-   *    payload through the SHA-256 hashing algorithm, and make sure it's equal
-   *    to X-Postmates-Signature."
-   *
-   *   Headers aceitos: x-uber-signature OU x-postmates-signature.
+   * COMPORTAMENTO:
+   * 1. Em modo SANDBOX: ACEITA tudo (loga headers/body pra debug)
+   * 2. Em produção sem secret: rejeita 503
+   * 3. Em produção com secret: tenta validar com 5 nomes de header conhecidos
+   *    Se nenhum bater, loga TODOS os headers recebidos pra a gente descobrir
+   *    qual nome o Uber realmente usa nessa versão da API.
    *
    * IMPORTANTE: precisa do RAW BODY (string original recebida na request),
    * não do JSON parseado e re-stringificado — caracteres unicode escapados
    * (\uXXXX) podem reordenar e a assinatura nunca bate.
    *
    * O server.js já captura req.rawBody no middleware express.json
-   * (linha ~91) para todas as rotas /api/uber/webhook.
+   * para todas as rotas /api/uber/webhook.
    */
   async function verificarAssinaturaUber(req, res, next) {
     try {
       const config = await obterConfig(pool);
       const secret = config?.webhook_secret;
+      const sandboxMode = config?.sandbox_mode === true;
 
-      // Em dev sem secret configurado, aceitar (com log)
-      if (!secret) {
-        const isProd = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
-        if (isProd) {
-          console.error('❌ [Uber Webhook] REJEITADO — webhook_secret não configurado em produção');
-          return res.status(503).json({ error: 'Webhook não configurado' });
-        }
-        console.warn('⚠️ [Uber Webhook] Sem validação de assinatura (dev mode)');
+      // ════════════════════════════════════════════════════════
+      // DEBUG TOTAL: loga tudo que chegou (não interfere no fluxo)
+      // ════════════════════════════════════════════════════════
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`🪝 [Uber Webhook] RECEBIDO em ${req.path}`);
+      console.log(`🪝 [Uber Webhook] IP: ${req.ip}`);
+      console.log(`🪝 [Uber Webhook] sandbox_mode=${sandboxMode}, secret_configurado=${!!secret}`);
+      console.log(`🪝 [Uber Webhook] HEADERS:`, JSON.stringify(req.headers, null, 2));
+      console.log(`🪝 [Uber Webhook] BODY (primeiros 500 chars):`, JSON.stringify(req.body).substring(0, 500));
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      // ════════════════════════════════════════════════════════
+      // MODO SANDBOX: aceita tudo
+      // ════════════════════════════════════════════════════════
+      if (sandboxMode) {
+        console.log('🤖 [Uber Webhook] SANDBOX ATIVO — aceitando webhook sem validar assinatura');
         return next();
       }
 
-      // Tenta múltiplos nomes de header — o Uber Direct varia conforme versão da API
-      // Headers conhecidos: x-uber-signature, x-postmates-signature, x-uber-signature-v2, webhook-signature
+      // ════════════════════════════════════════════════════════
+      // PRODUÇÃO sem secret: rejeita
+      // ════════════════════════════════════════════════════════
+      if (!secret) {
+        console.error('❌ [Uber Webhook] REJEITADO — webhook_secret não configurado em produção');
+        return res.status(503).json({ error: 'Webhook não configurado' });
+      }
+
+      // ════════════════════════════════════════════════════════
+      // PRODUÇÃO com secret: tenta validar com 5 variantes de header
+      // ════════════════════════════════════════════════════════
       const signature =
         req.headers['x-uber-signature'] ||
         req.headers['x-uber-signature-v2'] ||
@@ -55,19 +71,17 @@ function createUberWebhookRoutes(pool) {
         req.headers['x-webhook-signature'];
 
       if (!signature) {
-        // Loga TODOS os headers recebidos pra a gente descobrir o nome certo
-        const headersDebug = JSON.stringify(req.headers, null, 2);
-        console.warn(`⚠️ [Uber Webhook] Rejeitado - sem header de assinatura de ${req.ip}`);
-        console.warn(`⚠️ [Uber Webhook] HEADERS RECEBIDOS:\n${headersDebug}`);
-        return res.status(401).json({ error: 'Assinatura ausente', received_headers: Object.keys(req.headers) });
+        console.warn(`⚠️ [Uber Webhook] Header de assinatura ausente — REJEITANDO em modo produção`);
+        return res.status(401).json({
+          error: 'Assinatura ausente',
+          received_headers: Object.keys(req.headers),
+          hint: 'Verifique nos logs quais headers o Uber realmente envia. Ative sandbox_mode pra aceitar sem validar.'
+        });
       }
 
-      console.log(`✅ [Uber Webhook] Header de assinatura encontrado (${signature.substring(0, 12)}...)`);
-
-      // Usar raw body capturado no express.json verify (server.js)
       const rawBody = req.rawBody;
       if (!rawBody) {
-        console.error('❌ [Uber Webhook] req.rawBody não disponível — verificar middleware express.json no server.js');
+        console.error('❌ [Uber Webhook] req.rawBody não disponível — middleware express.json não capturou');
         return res.status(500).json({ error: 'Raw body não capturado' });
       }
 
@@ -80,10 +94,11 @@ function createUberWebhookRoutes(pool) {
       const expBuf = Buffer.from(expected, 'utf8');
 
       if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-        console.warn(`⚠️ [Uber Webhook] Assinatura inválida de ${req.ip}`);
+        console.warn(`⚠️ [Uber Webhook] Assinatura HMAC inválida (recebida: ${String(signature).substring(0, 20)}..., esperada: ${expected.substring(0, 20)}...)`);
         return res.status(403).json({ error: 'Assinatura inválida' });
       }
 
+      console.log('✅ [Uber Webhook] Assinatura HMAC validada com sucesso');
       next();
     } catch (error) {
       console.error('❌ [Uber Webhook] Erro na validação:', error.message);

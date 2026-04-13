@@ -6,7 +6,7 @@ const express = require('express');
 const {
   obterConfig, despacharParaUber, mappListarServicos,
   mappAlterarStatus, uberCancelarEntrega, uberConsultarEntrega,
-  uberCriarCotacao,
+  mappInformarChegada, mappFinalizarEndereco, mappFinalizarServico,
 } = require('../uber.service');
 
 function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -38,7 +38,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         ativo, client_id, client_secret, customer_id, webhook_secret,
         mapp_api_url, mapp_api_token, polling_intervalo_seg,
         auto_despacho, timeout_sem_entregador_min,
-        telefone_suporte, manifest_total_value_centavos, sandbox_mode,
+        telefone_suporte, manifest_total_value_centavos,
       } = req.body;
 
       // Montar SET dinâmico (só atualiza campos enviados)
@@ -65,7 +65,6 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       addCampo('timeout_sem_entregador_min', timeout_sem_entregador_min);
       addCampo('telefone_suporte', telefone_suporte);
       addCampo('manifest_total_value_centavos', manifest_total_value_centavos);
-      addCampo('sandbox_mode', sandbox_mode);
 
       if (campos.length === 0) {
         return res.status(400).json({ error: 'Nenhum campo para atualizar' });
@@ -95,47 +94,6 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
-    }
-  });
-
-  /**
-   * Testar cotação no Uber Direct sem criar entrega
-   * Útil pra debugar credenciais e formato de payload sem efeitos colaterais
-   * (não mexe na Mapp, não cria registro em uber_entregas)
-   *
-   * Body esperado:
-   * {
-   *   coleta:  { endereco: "Rua X, ...", latitude: -12.9, longitude: -38.5 },
-   *   entrega: { endereco: "Av Y, ...", latitude: -12.97, longitude: -38.51 }
-   * }
-   */
-  router.post('/teste-cotacao', verificarToken, verificarAdmin, async (req, res) => {
-    try {
-      const { coleta, entrega } = req.body;
-
-      if (!coleta?.endereco || !entrega?.endereco) {
-        return res.status(400).json({
-          error: 'Body deve conter coleta.endereco e entrega.endereco',
-        });
-      }
-
-      const inicio = Date.now();
-      const cotacao = await uberCriarCotacao(pool, coleta, entrega);
-      const duracaoMs = Date.now() - inicio;
-
-      res.json({
-        success: true,
-        cotacao,
-        duracao_ms: duracaoMs,
-        observacao: 'Cotação criada com sucesso. Nenhuma entrega foi criada.',
-      });
-    } catch (error) {
-      console.error('❌ [Uber] Erro no teste de cotação:', error.message);
-      res.status(400).json({
-        success: false,
-        error: error.message,
-        dica: 'Verifique credenciais Uber, customer_id, e formato dos endereços',
-      });
     }
   });
 
@@ -348,6 +306,86 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     } catch (error) {
       console.error('❌ Erro ao cancelar:', error);
       res.status(500).json({ error: 'Erro ao cancelar entrega' });
+    }
+  });
+
+  /**
+   * POST /entregas/:id/finalizar-manual
+   * Finaliza uma entrega manualmente: chama informarChegada + finalizarEndereco
+   * para todos os pontos e finalizarServico no fim. Útil quando os webhooks
+   * do Uber não chegam (sandbox, debug, ou problema de assinatura).
+   */
+  router.post('/entregas/:id/finalizar-manual', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { rows } = await pool.query('SELECT * FROM uber_entregas WHERE id = $1', [id]);
+      if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
+
+      const entrega = rows[0];
+      const codigoOS = entrega.codigo_os;
+      const passos = [];
+
+      console.log(`🛠️ [Uber] Finalização MANUAL iniciada — OS=${codigoOS}, entrega.id=${id}`);
+
+      // Determinar quantos pontos a OS tem (baseado nos endereços salvos)
+      let pontos = [];
+      try {
+        pontos = entrega.pontos ? JSON.parse(entrega.pontos) : [];
+      } catch (e) {
+        pontos = [];
+      }
+      const totalPontos = Math.max(pontos.length, 2); // pelo menos coleta + entrega
+
+      // 1. informarChegada + finalizarEndereco para cada ponto
+      for (let i = 1; i <= totalPontos; i++) {
+        const ponto = pontos[i - 1] || {};
+        const lat = ponto.latitude || null;
+        const lng = ponto.longitude || null;
+
+        try {
+          const r1 = await mappInformarChegada(pool, codigoOS, i, lat, lng);
+          passos.push({ acao: `informarChegada ponto ${i}`, ok: true, msg: r1?.msgUsuario });
+        } catch (e) {
+          passos.push({ acao: `informarChegada ponto ${i}`, ok: false, erro: e.message });
+        }
+
+        try {
+          const r2 = await mappFinalizarEndereco(pool, codigoOS, i, lat, lng);
+          passos.push({ acao: `finalizarEndereco ponto ${i}`, ok: true, msg: r2?.msgUsuario });
+        } catch (e) {
+          passos.push({ acao: `finalizarEndereco ponto ${i}`, ok: false, erro: e.message });
+        }
+      }
+
+      // 2. finalizarServico
+      try {
+        const r3 = await mappFinalizarServico(pool, codigoOS);
+        passos.push({ acao: 'finalizarServico', ok: true, msg: r3?.msgUsuario });
+      } catch (e) {
+        passos.push({ acao: 'finalizarServico', ok: false, erro: e.message });
+      }
+
+      // 3. Atualizar status local pra delivered
+      await pool.query(`
+        UPDATE uber_entregas
+        SET status_uber = 'delivered', updated_at = NOW()
+        WHERE id = $1
+      `, [id]);
+
+      await registrarAuditoria(req, 'FINALIZAR_MANUAL_UBER', 'admin', 'uber_entregas', id, {
+        codigo_os: codigoOS, total_pontos: totalPontos, passos
+      });
+
+      console.log(`✅ [Uber] Finalização MANUAL concluída — OS=${codigoOS}`);
+
+      res.json({
+        success: true,
+        message: `Entrega OS ${codigoOS} finalizada manualmente em ${totalPontos} ponto(s)`,
+        passos,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao finalizar manual:', error);
+      res.status(500).json({ error: error.message || 'Erro ao finalizar manualmente' });
     }
   });
 
