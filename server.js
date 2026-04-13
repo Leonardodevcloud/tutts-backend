@@ -94,7 +94,7 @@ app.use(express.json({
     // Preservar raw body apenas para rotas de webhook (performance)
     if (req.originalUrl && (
       req.originalUrl.includes('/stark/webhook') ||
-      req.originalUrl.includes('/api/uber/webhook')
+      req.originalUrl.includes('/uber/webhook')
     )) {
       req.rawBody = buf.toString('utf8');
     }
@@ -424,12 +424,7 @@ initDatabase().then(async () => {
   startAgentWorker(pool);
   startAntiFraudeWorker(pool);
   startPerformanceWorker(pool);
-  // Uber worker: roda no worker.js quando WORKER_ENABLED=true (evita race em múltiplas instâncias)
-  if (process.env.WORKER_ENABLED !== 'true') {
-    startUberWorker(pool);
-  } else {
-    console.log('🛵 Uber worker desativado no server (rodando no worker separado)');
-  }
+  startUberWorker(pool);
   // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
   if (process.env.WORKER_ENABLED === 'true') {
     console.log('⏰ Crons desativados no server (rodando no worker separado)');
