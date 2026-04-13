@@ -580,12 +580,17 @@ async function coletarOsEmExecucao() {
           const motoboyBtn = tr.querySelector('button[data-motoboy]');
           if (motoboyBtn) cod_profissional = motoboyBtn.getAttribute('data-motoboy') || null;
 
-          // cod_rastreio — href do link de rastreamento
+          // cod_rastreio + link_rastreio — do link de rastreamento
+          // rastLink.href (propriedade) retorna o URL ABSOLUTO resolvido
+          // pelo browser. Ex: '../../rastreamento?cod=AAEKJIK-23'
+          //              →  'https://tutts.com.br/expresso/rastreamento?cod=AAEKJIK-23'
           let cod_rastreio = null;
+          let link_rastreio = null;
           const rastLink = tr.querySelector('a[href*="rastreamento?cod="]');
           if (rastLink) {
-            const href = rastLink.getAttribute('href') || '';
-            const m = href.match(/cod=([^&"'\s]+)/);
+            link_rastreio = rastLink.href || null; // URL absoluto resolvido
+            const hrefAttr = rastLink.getAttribute('href') || '';
+            const m = hrefAttr.match(/cod=([^&"'\s]+)/);
             if (m) cod_rastreio = m[1];
           }
 
@@ -596,7 +601,7 @@ async function coletarOsEmExecucao() {
           const textoVisivel = (tr.innerText || '').replace(/\s+/g, ' ').trim();
           const balloon = (balloons.join(' | ') + ' | ' + textoVisivel).toUpperCase();
 
-          return { os_numero, cliente_cod, cod_profissional, cod_rastreio, _balloon: balloon };
+          return { os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio, _balloon: balloon };
         });
       });
 
