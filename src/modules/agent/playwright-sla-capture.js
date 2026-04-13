@@ -437,6 +437,273 @@ async function garantirSessao() {
   }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// COLETAR OS EM EXECUÇÃO — retorna lista pronta de OS pra alimentar o detector
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Abre browser, garante sessão, navega pra acompanhamento, clica na aba
+ * "Em execução", e captura TODAS as responses do XHR viewServicoAcompanhamento
+ * (página inicial + cliques no paginador da UI).
+ *
+ * Reúne tudo numa lista deduplicada e retorna.
+ *
+ * 🔧 Por que essa função existe (2026-04-13):
+ *   Tentativas de fazer o detector chamar o endpoint diretamente (com node
+ *   fetch, playwright.request.newContext, ou page.evaluate(fetch)) sempre
+ *   resultaram em HTML em vez de JSON. O servidor PHP do tutts.com.br só
+ *   responde JSON quando o request vem de um clique natural na UI dentro
+ *   de uma sessão "ativada". Então a única forma robusta é deixar o
+ *   navegador fazer naturalmente e interceptar a resposta.
+ *
+ * Esta função usa o MESMO mutex do capturarPontosOS, então não há
+ * concorrência por Chromium quando o sla-capture-worker está processando
+ * fila ao mesmo tempo.
+ *
+ * Retorna:
+ *   {
+ *     ok: true,
+ *     ordens: [{ os_numero, cliente_cod, cod_profissional, _balloon, raw }],
+ *     totalEsperado: number | null,
+ *     paginas: number,
+ *     duracaoMs: number,
+ *   }
+ *   ou em caso de erro:
+ *   { ok: false, motivo: string, sessaoExpirada: boolean }
+ */
+async function coletarOsEmExecucao() {
+  const TEMPO_MAX_MS = 90_000;
+  const MAX_PAGINAS_SANITY = 1000;
+
+  await acquireMutex();
+  const t0 = Date.now();
+
+  let browser, context, page;
+  const respostasCapturadas = []; // array de objetos JSON
+
+  try {
+    log('🌐 [coletarOs] Abrindo Chromium...');
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+
+    if (fs.existsSync(SESSION_FILE)) {
+      try {
+        context = await browser.newContext({ storageState: SESSION_FILE });
+      } catch {
+        context = await browser.newContext();
+      }
+    } else {
+      context = await browser.newContext();
+    }
+
+    // 🎯 Listener de RESPOSTA — captura JSON do endpoint
+    context.on('response', async (resp) => {
+      try {
+        if (resp.request().method() !== 'POST') return;
+        if (!/viewServicoAcompanhamento/i.test(resp.url())) return;
+        const ct = resp.headers()['content-type'] || '';
+        if (!/json/i.test(ct)) {
+          log(`🔎 [coletarOs] XHR ignorado (ct=${ct})`);
+          return;
+        }
+        const text = await resp.text();
+        const data = JSON.parse(text);
+        respostasCapturadas.push(data);
+        const numOs = Array.isArray(data?.retornoMultiplos?.['5'])
+          ? data.retornoMultiplos['5'].length
+          : 0;
+        log(`📨 [coletarOs] XHR #${respostasCapturadas.length}: ${numOs} OS`);
+      } catch (e) {
+        log(`⚠️ [coletarOs] erro ao processar response: ${e.message}`);
+      }
+    });
+
+    page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
+    log('🧭 [coletarOs] Navegando pra acompanhamento-servicos');
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(800);
+
+    if (!(await isLoggedIn(page))) {
+      log('🔐 [coletarOs] Sessão inválida, fazendo login completo');
+      await fazerLogin(page);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
+    }
+
+    // 🖱️ Ativa aba "Em execução" — dispara XHR natural
+    log('🖱️ [coletarOs] Ativando aba "Em execução"');
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    const abaVisivel = await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!abaVisivel) {
+      log('⚠️ [coletarOs] Aba "Em execução" não visível na página');
+      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false };
+    }
+    await abaEmExecucao.click();
+
+    try {
+      await page.waitForResponse(
+        (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
+        { timeout: 10_000 }
+      );
+      log('✅ [coletarOs] Primeiro XHR detectado após clique');
+    } catch (e) {
+      log(`⚠️ [coletarOs] Timeout esperando XHR inicial: ${e.message}`);
+    }
+    await page.waitForTimeout(1500);
+
+    // Salva storageState atualizado
+    try {
+      await context.storageState({ path: SESSION_FILE });
+    } catch (_) {}
+
+    if (respostasCapturadas.length === 0) {
+      log('⚠️ [coletarOs] Nenhum XHR capturado após clique — sessão pode estar inválida');
+      return { ok: false, motivo: 'nenhum_xhr_capturado', sessaoExpirada: true };
+    }
+
+    // Total esperado do primeiro XHR
+    let totalEsperado = null;
+    const qtdCampo = respostasCapturadas[0]?.retornoMultiplos?.['4']?.[0]?.quantidade;
+    if (qtdCampo != null) {
+      totalEsperado = parseInt(qtdCampo, 10);
+      log(`📄 [coletarOs] Total esperado: ${totalEsperado}`);
+    }
+
+    // 📄 PAGINAÇÃO via cliques na UI
+    const seletoresProximo = [
+      'a.proxima:not(.disabled)',
+      'a.next:not(.disabled)',
+      'button.proxima:not([disabled])',
+      'button.next:not([disabled])',
+      '.pagination li:not(.disabled) a[rel="next"]',
+      '.pagination .next:not(.disabled) a',
+      '.pagination .next:not(.disabled)',
+      'a[onclick*="proximaPagina"]',
+      'a[onclick*="pagina+1"]',
+      'a[onclick*="paginar"]',
+      'a[data-action="proxima"]',
+      '#btnProximaPagina:not([disabled])',
+      'li.next:not(.disabled) a',
+      '[aria-label="Próxima"]:not([disabled])',
+      '[aria-label="Next"]:not([disabled])',
+    ];
+
+    let paginasNavegadas = 1;
+    while (paginasNavegadas < MAX_PAGINAS_SANITY) {
+      if (Date.now() - t0 > TEMPO_MAX_MS) {
+        log(`⏱️  [coletarOs] Timeout estourado — abortando com ${respostasCapturadas.length} XHRs`);
+        break;
+      }
+
+      // Conta OS coletadas até agora
+      const totalColetado = respostasCapturadas.reduce((acc, r) => {
+        const lista = Array.isArray(r?.retornoMultiplos?.['5']) ? r.retornoMultiplos['5'] : [];
+        return acc + lista.length;
+      }, 0);
+
+      if (totalEsperado != null && totalColetado >= totalEsperado) {
+        log(`✅ [coletarOs] Coletado ${totalColetado}/${totalEsperado} — fim`);
+        break;
+      }
+
+      // Tenta achar e clicar no botão "próxima"
+      let clicou = false;
+      for (const sel of seletoresProximo) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 300 }).catch(() => false)) {
+            log(`🖱️ [coletarOs] Clicando paginador: ${sel}`);
+            await el.click().catch(() => {});
+            clicou = true;
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!clicou) {
+        log(`⚠️ [coletarOs] Nenhum paginador encontrado — encerrando (coletadas ${totalColetado}${totalEsperado != null ? '/' + totalEsperado : ''})`);
+        break;
+      }
+
+      // Aguarda novo XHR
+      const xhrCountAntes = respostasCapturadas.length;
+      try {
+        await page.waitForResponse(
+          (r) => /viewServicoAcompanhamento/i.test(r.url()) && r.request().method() === 'POST',
+          { timeout: 10_000 }
+        );
+      } catch (e) {
+        log(`⚠️ [coletarOs] Timeout esperando XHR pós-clique: ${e.message}`);
+        break;
+      }
+      await page.waitForTimeout(800);
+
+      // Se o número de respostas não aumentou, o clique não disparou nada novo
+      if (respostasCapturadas.length === xhrCountAntes) {
+        log('⚠️ [coletarOs] Clique não disparou novo XHR — encerrando');
+        break;
+      }
+
+      paginasNavegadas++;
+    }
+
+    // Agrega + dedup
+    const todasOsRaw = [];
+    for (const resp of respostasCapturadas) {
+      const lista = Array.isArray(resp?.retornoMultiplos?.['5']) ? resp.retornoMultiplos['5'] : [];
+      todasOsRaw.push(...lista);
+    }
+
+    const vistos = new Set();
+    const todasOs = [];
+    for (const item of todasOsRaw) {
+      const id = String(item['s.id'] || '');
+      if (!id || vistos.has(id)) continue;
+      vistos.add(id);
+
+      // Sintetiza _balloon concatenando valores string do item
+      const balloonParts = [];
+      for (const v of Object.values(item)) {
+        if (v == null) continue;
+        if (typeof v === 'string' || typeof v === 'number') balloonParts.push(String(v));
+      }
+
+      todasOs.push({
+        os_numero: id,
+        cliente_cod: String(item['s.idSolicitante'] || '').trim() || null,
+        cod_profissional: String(item['s.idMotoboy'] || '').trim() || null,
+        cod_rastreio: null,
+        _balloon: balloonParts.join(' | ').toUpperCase(),
+        raw: item,
+      });
+    }
+
+    const duracaoMs = Date.now() - t0;
+    log(`✅ [coletarOs] ${todasOs.length} OS únicas em ${respostasCapturadas.length} XHR(s) (${duracaoMs}ms)`);
+
+    return {
+      ok: true,
+      ordens: todasOs,
+      totalEsperado,
+      paginas: respostasCapturadas.length,
+      duracaoMs,
+    };
+
+  } catch (err) {
+    log(`❌ [coletarOs] Erro: ${err.message}`);
+    return { ok: false, motivo: err.message, sessaoExpirada: false };
+  } finally {
+    try { if (page) await page.close(); } catch (_) {}
+    try { if (context) await context.close(); } catch (_) {}
+    try { if (browser) await browser.close(); } catch (_) {}
+    releaseMutex();
+  }
+}
+
 
 async function capturarPontosOS({ os_numero, cliente_cod }) {
   if (!process.env.SISTEMA_EXTERNO_URL) {
@@ -773,6 +1040,7 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 module.exports = {
   capturarPontosOS,
   garantirSessao,
+  coletarOsEmExecucao,
   // expostos pra testes unitários
   _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
 };
