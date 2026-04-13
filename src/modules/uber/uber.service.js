@@ -84,6 +84,28 @@ async function obterTokenUber(pool) {
 // MAPP API - Chamadas ao sistema Tutts/Mapp
 // ════════════════════════════════════════════════════════════
 
+/**
+ * Verifica se uma resposta da API Mapp foi sucesso.
+ * A Mapp sempre retorna { status: '200', dados: { status: true|false, dados: {...} }, msgUsuario }
+ * O verdadeiro indicador é o boolean dados.status (interno).
+ */
+function mappRespostaOK(resp) {
+  if (!resp || typeof resp !== 'object') return false;
+  if (String(resp.status) !== '200') return false;
+  // O envelope interno tem o boolean status === true quando deu certo
+  if (resp.dados?.status === true) return true;
+  if (resp.dados?.status === 'true') return true;
+  return false;
+}
+
+/**
+ * Extrai o payload "real" de uma resposta Mapp (lida com double-nesting).
+ * Ex: { dados: { dados: { codigoOS: 123 } } } → { codigoOS: 123 }
+ */
+function mappPayload(resp) {
+  return resp?.dados?.dados || resp?.dados || {};
+}
+
 async function mappListarServicos(pool, status = 0, ultimoId = 0) {
   const config = await obterConfig(pool);
   if (!config || !config.mapp_api_url || !config.mapp_api_token) {
@@ -402,11 +424,12 @@ async function despacharParaUber(pool, servico) {
 
   // 1. Reservar na Mapp (status 1 = app externo)
   const respReserva = await mappAlterarStatus(pool, codigoOS, 1);
-  if (respReserva.status !== '200' || !respReserva.dados?.codigoOS) {
+  if (!mappRespostaOK(respReserva)) {
     // Se já tiver profissional vinculado ou outro erro, abortar
-    console.warn(`⚠️ [Uber] Não foi possível reservar OS ${codigoOS}: ${respReserva.msgUsuario}`);
+    console.warn(`⚠️ [Uber] Não foi possível reservar OS ${codigoOS}: ${respReserva?.msgUsuario || 'resposta inválida'}`);
     return null;
   }
+  console.log(`✅ [Uber] OS ${codigoOS} reservada na Mapp (status 0 → 1)`);
 
   // 2. Criar registro no banco
   const { rows: [registro] } = await pool.query(`
@@ -626,13 +649,18 @@ async function processarWebhookCourier(pool, payload) {
 
     try {
       const respMapp = await mappVincularMotorista(pool, codigoOS, profissional);
-      if (respMapp.dados?.idMotoboy) {
-        await pool.query(
-          'UPDATE uber_entregas SET id_motoboy_mapp = $1, updated_at = NOW() WHERE id = $2',
-          [respMapp.dados.idMotoboy, entrega.id]
-        );
+      if (mappRespostaOK(respMapp)) {
+        const payload = mappPayload(respMapp);
+        if (payload.idMotoboy) {
+          await pool.query(
+            'UPDATE uber_entregas SET id_motoboy_mapp = $1, updated_at = NOW() WHERE id = $2',
+            [payload.idMotoboy, entrega.id]
+          );
+        }
+        console.log(`✅ [Uber] Entregador vinculado na Mapp: OS=${codigoOS}, nome=${courier.name}`);
+      } else {
+        console.warn(`⚠️ [Uber] vincularMotorista falhou OS=${codigoOS}: ${respMapp?.msgUsuario || 'resposta inválida'}`);
       }
-      console.log(`✅ [Uber] Entregador vinculado na Mapp: OS=${codigoOS}, nome=${courier.name}`);
     } catch (err) {
       console.error(`❌ [Uber] Erro ao vincular na Mapp OS=${codigoOS}:`, err.message);
     }
@@ -709,6 +737,8 @@ module.exports = {
   mappInformarChegada,
   mappFinalizarEndereco,
   mappFinalizarServico,
+  mappRespostaOK,
+  mappPayload,
   // Uber
   obterTokenUber,
   uberCriarCotacao,
