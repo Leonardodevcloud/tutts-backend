@@ -36,7 +36,7 @@
  */
 
 const fs = require('fs');
-const { request: playwrightRequest } = require('playwright');
+const { chromium, request: playwrightRequest } = require('playwright');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
 const META_FILE = '/tmp/tutts-sla-meta.json';
@@ -287,25 +287,50 @@ async function fetchPage({ offset = 0 } = {}) {
 }
 
 /**
- * Fetch paginado — chama fetchPage em loop até esgotar.
+ * Fetch paginado usando browser real (Chromium) + page.evaluate(fetch).
  *
- * O `limite` é ditado pelo META_FILE (valor que o servidor aceita pra essa
- * sessão). Tipicamente 10. Pra 300 OS vai dar ~30 requisições — chato mas
- * funciona. Se quiser reduzir requisições, o caminho é capturar o meta com
- * limite maior alterando a preferência no DOM via page.evaluate antes do
- * clique na aba "Em execução" — TODO próximo.
+ * 🔧 FIX (2026-04-13): A versão anterior usava `playwright.request.newContext`
+ * (HTTP puro sem browser). O servidor PHP do tutts.com.br retorna HTML em vez
+ * de JSON quando o request não tem os headers Sec-Fetch-* automáticos do
+ * browser, e replicar esses headers manualmente é frágil.
  *
- * Critérios de parada (em ordem):
- *   1. Página veio com menos OS que o `limite` → última página (natural)
- *   2. Já coletou >= totalEsperado (sanity do servidor)
- *   3. Sessão expirada numa página → aborta e sinaliza relogin
- *   4. HTTP error ou parse error → aborta e retorna o que tem
- *   5. Timeout total de 90s → aborta com o que tem
- *   6. Runaway protection: 1000 páginas sanity (nunca atingido normal)
+ * Solução: abrir Chromium uma vez por tick, navegar pra página de
+ * acompanhamento (pro origin/referer ficarem corretos), e fazer todos os
+ * fetches via `page.evaluate(fetch(...))`. Assim o request sai literalmente
+ * do JavaScript da página com TODOS os headers automáticos.
+ *
+ * Custo: ~2s pra abrir browser + ~300ms por página HTTP. Pra 30 páginas =
+ * ~12s total. Dentro do budget de 90s e do cron de 2min.
+ *
+ * Critérios de parada:
+ *   1. Página retornou < limite OS → última página
+ *   2. Já coletou >= totalEsperado
+ *   3. Sessão expirada → aborta e sinaliza relogin
+ *   4. HTTP error ou parse error → aborta com o que tem
+ *   5. Timeout total de 90s
+ *   6. MAX_PAGINAS_SANITY = 1000 (proteção absoluta)
  */
 async function fetchAllPages() {
   const TEMPO_MAX_MS = 90_000;
   const MAX_PAGINAS_SANITY = 1000;
+
+  if (!fs.existsSync(SESSION_FILE)) {
+    throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
+  }
+
+  // Validação rápida do storageState
+  try {
+    const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
+    if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
+    if (DEBUG_HTTP) {
+      const tuttsCookies = cookies.filter(c => c.domain && c.domain.includes('tutts.com.br'));
+      log(`🔎 storageState: ${cookies.length} cookies (${tuttsCookies.length} de tutts)`);
+    }
+  } catch (e) {
+    if (e.message.includes('Arquivo de sessão')) throw e;
+    throw new Error(`storageState inválido: ${e.message}`);
+  }
 
   const todasOs = [];
   let paginas = 0;
@@ -313,83 +338,161 @@ async function fetchAllPages() {
   let ultimaResposta = null;
   let totalEsperado = null;
   let limiteReal = null;
+  let offsetAtual = 0;
   const t0 = Date.now();
 
-  // Offset acumulado — começa em 0 e avança pelo `limite` real do meta
-  let offsetAtual = 0;
+  let browser, context, page;
+  try {
+    if (DEBUG_HTTP) log(`🌐 Abrindo Chromium pra fetchAllPages...`);
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+    context = await browser.newContext({
+      storageState: SESSION_FILE,
+      userAgent:
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(30_000);
 
-  for (let pagina = 0; pagina < MAX_PAGINAS_SANITY; pagina++) {
-    if (Date.now() - t0 > TEMPO_MAX_MS) {
-      log(`⏱️  Timeout de ${TEMPO_MAX_MS}ms estourado — abortando com ${todasOs.length} OS coletadas`);
-      break;
-    }
+    // Navega pra página de acompanhamento — isso garante:
+    //   - Origin/Referer corretos pra qualquer fetch posterior
+    //   - Sessão PHP "ativa" (algumas versões marcam timestamp no $_SESSION)
+    //   - Cookies de tracking/analytics atualizados
+    if (DEBUG_HTTP) log(`🧭 Navegando pra ${REFERER}`);
+    await page.goto(REFERER, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(500);
 
-    const page = await fetchPage({ offset: offsetAtual });
-
-    paginas++;
-    ultimoStatus = page.statusCode;
-    ultimaResposta = page.data;
-    // Atualiza o limite real a partir da primeira página (meta-dictated)
-    if (limiteReal == null) {
-      limiteReal = page.limite;
-      if (DEBUG_HTTP) log(`📏 Limite ditado pelo meta: ${limiteReal} por página`);
-    }
-
-    if (pagina === 0) {
-      const qtdCampo = page.data?.retornoMultiplos?.['4']?.[0]?.quantidade;
-      if (qtdCampo != null) {
-        totalEsperado = parseInt(qtdCampo, 10);
-        if (DEBUG_HTTP) log(`📄 Total esperado segundo servidor: ${totalEsperado}`);
+    // Loop de paginação — cada iteração faz 1 fetch via page.evaluate
+    for (let pagina = 0; pagina < MAX_PAGINAS_SANITY; pagina++) {
+      if (Date.now() - t0 > TEMPO_MAX_MS) {
+        log(`⏱️  Timeout de ${TEMPO_MAX_MS}ms estourado — abortando com ${todasOs.length} OS coletadas`);
+        break;
       }
+
+      const { bodyJson, limite } = montarPayload({ offset: offsetAtual });
+
+      if (limiteReal == null) {
+        limiteReal = limite;
+        if (DEBUG_HTTP) log(`📏 Limite ditado pelo meta: ${limiteReal} por página`);
+      }
+
+      // 🔑 CHAVE: fetch dentro do JS da página, não via HTTP puro.
+      // Headers Sec-Fetch-* + cookies + credentials são automáticos.
+      const result = await page.evaluate(
+        async ({ url, body }) => {
+          try {
+            const resp = await fetch(url, {
+              method: 'POST',
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json; charset=UTF-8',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'X-Requested-With': 'XMLHttpRequest',
+              },
+              body,
+            });
+            const text = await resp.text();
+            const headers = {};
+            resp.headers.forEach((v, k) => { headers[k] = v; });
+            return { ok: resp.ok, status: resp.status, headers, text };
+          } catch (e) {
+            return { error: e.message };
+          }
+        },
+        { url: ENDPOINT, body: bodyJson }
+      );
+
+      paginas++;
+
+      if (result.error) {
+        log(`⚠️ Página ${pagina + 1}: erro no fetch: ${result.error}`);
+        break;
+      }
+
+      ultimoStatus = result.status;
+
+      // Parse JSON
+      let data = null;
+      let parseErr = null;
+      try {
+        data = JSON.parse(result.text);
+      } catch (e) {
+        parseErr = e.message;
+      }
+      ultimaResposta = data;
+
+      // Debug rico se houver erro
+      if (parseErr || (DEBUG_HTTP && pagina === 0)) {
+        try {
+          fs.writeFileSync(DEBUG_DUMP_FILE, result.text, 'utf8');
+        } catch (_) {}
+      }
+      if (parseErr) {
+        log(`❌ [offset=${offsetAtual}] HTTP ${result.status} | bytes=${result.text.length} | ct=${result.headers['content-type'] || '(none)'}`);
+        log(`❌ parseErr: ${parseErr}`);
+        const preview = result.text.slice(0, 500).replace(/\s+/g, ' ').trim();
+        log(`❌ raw preview: ${preview || '(vazio)'}`);
+        log(`⚠️ Página ${pagina + 1}: JSON parse falhou — abortando`);
+        break;
+      }
+
+      if (!result.ok) {
+        log(`⚠️ Página ${pagina + 1}: HTTP ${result.status} — abortando`);
+        break;
+      }
+
+      // Primeira página: pega totalEsperado
+      if (pagina === 0) {
+        const qtdCampo = data?.retornoMultiplos?.['4']?.[0]?.quantidade;
+        if (qtdCampo != null) {
+          totalEsperado = parseInt(qtdCampo, 10);
+          if (DEBUG_HTTP) log(`📄 Total esperado segundo servidor: ${totalEsperado}`);
+        }
+      }
+
+      if (ehSessaoExpirada(data)) {
+        if (DEBUG_HTTP) log(`🔑 Página ${pagina + 1}: sessão expirada`);
+        return {
+          ok: false,
+          data,
+          statusCode: result.status,
+          paginas,
+          totalColetado: todasOs.length,
+          sessaoExpirada: true,
+        };
+      }
+
+      const lista = Array.isArray(data?.retornoMultiplos?.['5'])
+        ? data.retornoMultiplos['5']
+        : [];
+
+      if (DEBUG_HTTP) {
+        log(`📄 Página ${pagina + 1} (offset=${offsetAtual}): +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
+      }
+
+      todasOs.push(...lista);
+
+      // Critérios de parada
+      if (lista.length < limiteReal) break;
+      if (totalEsperado != null && todasOs.length >= totalEsperado) break;
+      if (lista.length === 0) {
+        log(`⚠️ Página ${pagina + 1} veio vazia inesperadamente — abortando`);
+        break;
+      }
+
+      offsetAtual += limiteReal;
     }
 
-    if (!page.ok && page.statusCode !== 200) {
-      log(`⚠️ Página ${pagina + 1}: HTTP ${page.statusCode} — abortando paginação`);
-      break;
+    if (paginas >= MAX_PAGINAS_SANITY) {
+      log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito`);
     }
-    if (page.parseErr) {
-      log(`⚠️ Página ${pagina + 1}: JSON parse falhou — abortando`);
-      break;
-    }
-
-    if (ehSessaoExpirada(page.data)) {
-      if (DEBUG_HTTP) log(`🔑 Página ${pagina + 1}: sessão expirada`);
-      return {
-        ok: false,
-        data: page.data,
-        statusCode: page.statusCode,
-        paginas,
-        totalColetado: todasOs.length,
-        sessaoExpirada: true,
-      };
-    }
-
-    const lista = Array.isArray(page.data?.retornoMultiplos?.['5'])
-      ? page.data.retornoMultiplos['5']
-      : [];
-
-    if (DEBUG_HTTP) {
-      log(`📄 Página ${pagina + 1} (offset=${offsetAtual}): +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
-    }
-
-    todasOs.push(...lista);
-
-    // Critério 1: página retornou menos que o limite → última
-    if (lista.length < limiteReal) break;
-    // Critério 2: já temos tudo que o servidor disse que tem
-    if (totalEsperado != null && todasOs.length >= totalEsperado) break;
-    // Critério 3: página vazia inesperada
-    if (lista.length === 0) {
-      log(`⚠️ Página ${pagina + 1} veio vazia inesperadamente — abortando`);
-      break;
-    }
-
-    // Avança offset pelo limite real do meta
-    offsetAtual += limiteReal;
-  }
-
-  if (paginas >= MAX_PAGINAS_SANITY) {
-    log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito`);
+  } finally {
+    try { if (page) await page.close(); } catch (_) {}
+    try { if (context) await context.close(); } catch (_) {}
+    try { if (browser) await browser.close(); } catch (_) {}
   }
 
   const dataAgregada = ultimaResposta
