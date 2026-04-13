@@ -124,20 +124,20 @@ function obterEndpointUrl() {
  * Lê o META_FILE (payload capturado em runtime pelo playwright-sla-capture)
  * e atualiza:
  *   - `sessaoAtual` com o PHPSESSID corrente
- *   - `limite` com o valor desejado (override, o capturado costuma ser 10)
- *   - `offset` / `pagina` para paginação
+ *   - `offset` / `pagina` para paginação (limite preservado do meta)
  *
- * 🔧 FIX (2026-04-13): O usuário do SLA tem preferência de 10 por página
- * no MAP, então o payload capturado vem com `limite: "10"`. Sem paginação,
- * o detector só via as 10 OS mais recentes e perdia tudo que vinha antes.
- * Agora força limite=100 e o fetch pagina até esgotar.
+ * 🔧 FIX (2026-04-13): Inicialmente eu sobrescrevia `limite` pra 200 tentando
+ * reduzir requisições, mas o servidor PHP do tutts.com.br parece validar que
+ * o `limite` no body bate com o que a sessão "autorizou" quando o usuário
+ * clicou na aba — qualquer valor diferente faz o parse JSON falhar (servidor
+ * retorna HTML de erro). Então agora preservamos o `limite` original (tipicamente
+ * 10) e paginamos só por offset. É mais requisições mas funciona.
  *
  * @param {Object} opts
  * @param {number} opts.offset - deslocamento (default 0)
- * @param {number} opts.limite - tamanho da página (default 100)
- * @returns {string} JSON pronto pra mandar no body
+ * @returns {Object} { bodyJson: string, limite: number }
  */
-function montarPayload({ offset = 0, limite = 100 } = {}) {
+function montarPayload({ offset = 0 } = {}) {
   if (!fs.existsSync(META_FILE)) {
     throw new Error(
       `META_FILE ausente em ${META_FILE} — execute garantirSessao() pelo menos uma vez`
@@ -181,13 +181,14 @@ function montarPayload({ offset = 0, limite = 100 } = {}) {
     payload.sessaoAtual = phpSessIdAtual;
   }
 
-  // 🔧 Override de limite e offset — o capturado vem com limite=10
-  // (preferência do usuário no MAP), mas a gente quer paginar completo.
-  payload.limite = String(limite);
+  // Preserva o limite original do meta (não sobrescrever — o servidor valida)
+  const limite = parseInt(payload.limite, 10) || 10;
+
+  // Atualiza só offset e pagina pra navegar entre páginas
   payload.offset = offset;
   payload.pagina = Math.floor(offset / limite);
 
-  return JSON.stringify(payload);
+  return { bodyJson: JSON.stringify(payload), limite };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -197,8 +198,11 @@ function montarPayload({ offset = 0, limite = 100 } = {}) {
 /**
  * Faz UMA requisição ao endpoint — uma página.
  * Usado por fetchAllPages em loop.
+ *
+ * Retorna também o `limite` efetivamente usado (lido do meta),
+ * pra que fetchAllPages saiba quanto avançar no offset.
  */
-async function fetchPage({ offset = 0, limite = 100 } = {}) {
+async function fetchPage({ offset = 0 } = {}) {
   if (!fs.existsSync(SESSION_FILE)) {
     throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
   }
@@ -213,7 +217,7 @@ async function fetchPage({ offset = 0, limite = 100 } = {}) {
     throw new Error(`storageState inválido: ${e.message}`);
   }
 
-  const bodyJson = montarPayload({ offset, limite });
+  const { bodyJson, limite } = montarPayload({ offset });
   const endpointUrl = obterEndpointUrl();
 
   let ctx;
@@ -243,6 +247,7 @@ async function fetchPage({ offset = 0, limite = 100 } = {}) {
     });
 
     const statusCode = resp.status();
+    const respHeaders = resp.headers();
     const rawText = await resp.text();
 
     let data = null;
@@ -253,7 +258,27 @@ async function fetchPage({ offset = 0, limite = 100 } = {}) {
       parseErr = e.message;
     }
 
-    return { ok: resp.ok(), data, statusCode, rawText, parseErr };
+    // 🔬 Debug rico — loga header + body raw quando parse falha
+    // Também dumpa em arquivo pra inspecionar via /debug/ultimo-html
+    if (parseErr || DEBUG_HTTP) {
+      try {
+        const dumpPath = parseErr ? DEBUG_DUMP_FILE : DEBUG_DUMP_FILE;
+        fs.writeFileSync(dumpPath, rawText, 'utf8');
+      } catch (_) {}
+    }
+    if (parseErr) {
+      log(`❌ [offset=${offset}] HTTP ${statusCode} | bytes=${rawText.length} | ct=${respHeaders['content-type'] || '(none)'}`);
+      log(`❌ parseErr: ${parseErr}`);
+      const preview = rawText.slice(0, 500).replace(/\s+/g, ' ').trim();
+      log(`❌ raw preview: ${preview || '(vazio)'}`);
+      // Dumpa headers completos pra ajudar no diagnóstico
+      const headerList = Object.entries(respHeaders)
+        .map(([k, v]) => `${k}=${String(v).slice(0, 80)}`)
+        .join(' | ');
+      log(`❌ headers: ${headerList}`);
+    }
+
+    return { ok: resp.ok(), data, statusCode, rawText, parseErr, limite };
   } finally {
     if (ctx) {
       try { await ctx.dispose(); } catch (_) {}
@@ -264,50 +289,52 @@ async function fetchPage({ offset = 0, limite = 100 } = {}) {
 /**
  * Fetch paginado — chama fetchPage em loop até esgotar.
  *
+ * O `limite` é ditado pelo META_FILE (valor que o servidor aceita pra essa
+ * sessão). Tipicamente 10. Pra 300 OS vai dar ~30 requisições — chato mas
+ * funciona. Se quiser reduzir requisições, o caminho é capturar o meta com
+ * limite maior alterando a preferência no DOM via page.evaluate antes do
+ * clique na aba "Em execução" — TODO próximo.
+ *
  * Critérios de parada (em ordem):
  *   1. Página veio com menos OS que o `limite` → última página (natural)
  *   2. Já coletou >= totalEsperado (sanity do servidor)
  *   3. Sessão expirada numa página → aborta e sinaliza relogin
  *   4. HTTP error ou parse error → aborta e retorna o que tem
- *   5. Runaway protection: página vazia inesperada ou loop infinito (offset
- *      não avança) → aborta
- *
- * Sem teto artificial de páginas: se o servidor disser que tem 500 OS,
- * paginamos as 5 páginas. Se tiver 2000, paginamos as 20. O único teto
- * é o tempo total (TEMPO_MAX_MS), que é uma proteção real contra pendurar
- * o worker por horas em caso de bug do servidor.
- *
- * Retorna:
- *   { ok, data, statusCode, paginas, totalColetado, totalEsperado }
- *   onde data.retornoMultiplos["5"] é o array AGREGADO de todas as páginas.
+ *   5. Timeout total de 90s → aborta com o que tem
+ *   6. Runaway protection: 1000 páginas sanity (nunca atingido normal)
  */
 async function fetchAllPages() {
-  const LIMITE_POR_PAGINA = 200;       // 200 por página — poucas requisições
-  const TEMPO_MAX_MS = 90_000;          // 1min30s máximo por tick (cron é a cada 2min)
-  const MAX_PAGINAS_SANITY = 1000;      // proteção absoluta contra loop infinito
+  const TEMPO_MAX_MS = 90_000;
+  const MAX_PAGINAS_SANITY = 1000;
 
   const todasOs = [];
   let paginas = 0;
   let ultimoStatus = null;
   let ultimaResposta = null;
   let totalEsperado = null;
+  let limiteReal = null;
   const t0 = Date.now();
 
+  // Offset acumulado — começa em 0 e avança pelo `limite` real do meta
+  let offsetAtual = 0;
+
   for (let pagina = 0; pagina < MAX_PAGINAS_SANITY; pagina++) {
-    // Timeout total — se estourou, aborta mesmo que tenha mais pra coletar
     if (Date.now() - t0 > TEMPO_MAX_MS) {
       log(`⏱️  Timeout de ${TEMPO_MAX_MS}ms estourado — abortando com ${todasOs.length} OS coletadas`);
       break;
     }
 
-    const offset = pagina * LIMITE_POR_PAGINA;
-    const page = await fetchPage({ offset, limite: LIMITE_POR_PAGINA });
+    const page = await fetchPage({ offset: offsetAtual });
 
     paginas++;
     ultimoStatus = page.statusCode;
     ultimaResposta = page.data;
+    // Atualiza o limite real a partir da primeira página (meta-dictated)
+    if (limiteReal == null) {
+      limiteReal = page.limite;
+      if (DEBUG_HTTP) log(`📏 Limite ditado pelo meta: ${limiteReal} por página`);
+    }
 
-    // Primeira página: pega totalEsperado do campo quantidade
     if (pagina === 0) {
       const qtdCampo = page.data?.retornoMultiplos?.['4']?.[0]?.quantidade;
       if (qtdCampo != null) {
@@ -316,7 +343,6 @@ async function fetchAllPages() {
       }
     }
 
-    // Falha HTTP ou parse → aborta paginação
     if (!page.ok && page.statusCode !== 200) {
       log(`⚠️ Página ${pagina + 1}: HTTP ${page.statusCode} — abortando paginação`);
       break;
@@ -326,7 +352,6 @@ async function fetchAllPages() {
       break;
     }
 
-    // Sessão expirada → aborta pra deixar o caller relogar
     if (ehSessaoExpirada(page.data)) {
       if (DEBUG_HTTP) log(`🔑 Página ${pagina + 1}: sessão expirada`);
       return {
@@ -344,38 +369,36 @@ async function fetchAllPages() {
       : [];
 
     if (DEBUG_HTTP) {
-      log(`📄 Página ${pagina + 1}: +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
+      log(`📄 Página ${pagina + 1} (offset=${offsetAtual}): +${lista.length} OS (acumulado: ${todasOs.length + lista.length}${totalEsperado != null ? `/${totalEsperado}` : ''})`);
     }
 
     todasOs.push(...lista);
 
-    // 🛑 Critério 1 (principal): página retornou menos que o limite → última página
-    if (lista.length < LIMITE_POR_PAGINA) break;
-
-    // 🛑 Critério 2: sanity do servidor — já temos tudo que ele disse que tem
+    // Critério 1: página retornou menos que o limite → última
+    if (lista.length < limiteReal) break;
+    // Critério 2: já temos tudo que o servidor disse que tem
     if (totalEsperado != null && todasOs.length >= totalEsperado) break;
-
-    // 🛑 Critério 3: runaway protection — página cheia mas sem totalEsperado E
-    // sem progresso (nenhuma OS nova na última página) → evita loop infinito
+    // Critério 3: página vazia inesperada
     if (lista.length === 0) {
       log(`⚠️ Página ${pagina + 1} veio vazia inesperadamente — abortando`);
       break;
     }
+
+    // Avança offset pelo limite real do meta
+    offsetAtual += limiteReal;
   }
 
-  // Se bateu MAX_PAGINAS_SANITY, é bug. Nunca deveria acontecer em produção.
   if (paginas >= MAX_PAGINAS_SANITY) {
-    log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito no fetchAllPages`);
+    log(`🚨 BUG: bateu ${MAX_PAGINAS_SANITY} páginas — provável loop infinito`);
   }
 
-  // Monta um "data" sintético com o array agregado
   const dataAgregada = ultimaResposta
     ? { ...ultimaResposta, retornoMultiplos: { ...ultimaResposta.retornoMultiplos, '5': todasOs } }
     : { retornoMultiplos: { '5': todasOs } };
 
   const duracaoMs = Date.now() - t0;
   if (DEBUG_HTTP) {
-    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s) (${duracaoMs}ms)`);
+    log(`✅ Paginação concluída: ${todasOs.length} OS em ${paginas} página(s) de ${limiteReal || '?'} (${duracaoMs}ms)`);
   }
 
   return {
@@ -386,6 +409,7 @@ async function fetchAllPages() {
     totalColetado: todasOs.length,
     totalEsperado,
     duracaoMs,
+    limiteReal,
   };
 }
 
