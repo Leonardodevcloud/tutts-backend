@@ -45,12 +45,24 @@ function createUberWebhookRoutes(pool) {
         return next();
       }
 
-      const signature = req.headers['x-uber-signature'] || req.headers['x-postmates-signature'];
+      // Tenta múltiplos nomes de header — o Uber Direct varia conforme versão da API
+      // Headers conhecidos: x-uber-signature, x-postmates-signature, x-uber-signature-v2, webhook-signature
+      const signature =
+        req.headers['x-uber-signature'] ||
+        req.headers['x-uber-signature-v2'] ||
+        req.headers['x-postmates-signature'] ||
+        req.headers['webhook-signature'] ||
+        req.headers['x-webhook-signature'];
 
       if (!signature) {
+        // Loga TODOS os headers recebidos pra a gente descobrir o nome certo
+        const headersDebug = JSON.stringify(req.headers, null, 2);
         console.warn(`⚠️ [Uber Webhook] Rejeitado - sem header de assinatura de ${req.ip}`);
-        return res.status(401).json({ error: 'Assinatura ausente' });
+        console.warn(`⚠️ [Uber Webhook] HEADERS RECEBIDOS:\n${headersDebug}`);
+        return res.status(401).json({ error: 'Assinatura ausente', received_headers: Object.keys(req.headers) });
       }
+
+      console.log(`✅ [Uber Webhook] Header de assinatura encontrado (${signature.substring(0, 12)}...)`);
 
       // Usar raw body capturado no express.json verify (server.js)
       const rawBody = req.rawBody;
