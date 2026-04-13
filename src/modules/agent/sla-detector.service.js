@@ -34,6 +34,11 @@ const MAP_BASE = 'https://tutts.com.br/expresso/expressoat';
 const ENDPOINT = `${MAP_BASE}/entregasDia/acompanhamento/ajax/viewServicoAcompanhamento`;
 const REFERER = `${MAP_BASE}/acompanhamento-servicos`;
 
+// 🔬 Debug — ativar via env SLA_DETECTOR_DEBUG=true pra logar HTTP detalhado
+// e dumpar o HTML retornado em /tmp/sla-detector-last.html
+const DEBUG_HTTP = process.env.SLA_DETECTOR_DEBUG === 'true';
+const DEBUG_DUMP_FILE = '/tmp/sla-detector-last.html';
+
 function log(msg) {
   console.log(`[sla-detector] ${msg}`);
 }
@@ -72,11 +77,19 @@ async function fetchHtml() {
     throw new Error(`Sessão Playwright não encontrada em ${SESSION_FILE}`);
   }
 
-  // Validação rápida do storageState (evita criar contexto se estiver vazio)
+  // Validação rápida do storageState + log de debug dos cookies
+  let cookieNames = [];
   try {
     const raw = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
     const cookies = Array.isArray(raw.cookies) ? raw.cookies : [];
     if (cookies.length === 0) throw new Error('Arquivo de sessão sem cookies');
+    cookieNames = cookies
+      .filter(c => c.domain && c.domain.includes('tutts.com.br'))
+      .map(c => `${c.name}@${c.domain}`);
+    if (DEBUG_HTTP) {
+      log(`🔎 storageState: ${cookies.length} cookies totais, ${cookieNames.length} de tutts`);
+      log(`🔎 cookies tutts: ${cookieNames.join(', ') || '(nenhum!)'}`);
+    }
   } catch (e) {
     if (e.message.includes('Arquivo de sessão')) throw e;
     throw new Error(`storageState inválido: ${e.message}`);
@@ -112,6 +125,29 @@ async function fetchHtml() {
 
     const statusCode = resp.status();
     const html = await resp.text();
+    const respHeaders = resp.headers();
+
+    // 🔬 DEBUG RICO — dump completo pra disco + sumário no log
+    if (DEBUG_HTTP) {
+      try {
+        fs.writeFileSync(DEBUG_DUMP_FILE, html, 'utf8');
+        log(`💾 HTML salvo em ${DEBUG_DUMP_FILE} (${html.length} bytes)`);
+      } catch (e) {
+        log(`⚠️ Falha ao salvar dump: ${e.message}`);
+      }
+      log(`🔎 HTTP ${statusCode} | bytes=${html.length} | content-type=${respHeaders['content-type'] || '(none)'}`);
+      log(`🔎 location=${respHeaders['location'] || '(none)'}`);
+      const preview = html.slice(0, 500).replace(/\s+/g, ' ').trim();
+      log(`🔎 preview: ${preview}`);
+      // Quais regras de ehTelaLogin matcharam?
+      const motivos = [];
+      if (!html || html.length < 100) motivos.push('html<100bytes');
+      if (/<input[^>]+type=["']password/i.test(html)) motivos.push('temPasswordInput');
+      if (/name=["']senha/i.test(html)) motivos.push('temNomeSenha');
+      if (!/data-order-id=/.test(html)) motivos.push('semDataOrderId');
+      log(`🔎 ehTelaLogin motivos: [${motivos.join(', ') || 'nenhum (não é login)'}]`);
+    }
+
     return { ok: resp.ok(), html, statusCode };
   } finally {
     if (ctx) {
