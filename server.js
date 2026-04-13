@@ -277,6 +277,7 @@ app.get('/_debug/sla-coletar', async (req, res) => {
         paginas: resultado.paginas,
         primeirasOrdens: (resultado.ordens || []).slice(0, 3),
       },
+      diag: resultado.diag, // 🔬 diagnóstico completo: etapas + xhrs vistos
     });
   } catch (e) {
     return res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
