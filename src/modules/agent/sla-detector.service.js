@@ -37,6 +37,37 @@ function log(msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// REGRAS DE EXCLUSÃO POR CLIENTE
+// ─────────────────────────────────────────────────────────────────────────
+// Regras que o detector aplica ANTES de enfileirar OS. Se uma OS bater em
+// qualquer padrão aqui, é ignorada com log de motivo.
+//
+// Formato:
+//   '<cliente_cod>': [
+//     { regex: /PADRAO/i, motivo: 'descrição legível' },
+//     ...
+//   ]
+//
+// Matching: o regex é testado contra o `_balloon` da OS (que é o innerText
+// do <tr> inteiro concatenado com todos os data-balloon, em maiúsculas).
+//
+// Adicionar nova regra aqui é o caminho mais rápido. Se a regra virar complexa
+// ou específica por cliente de forma dinâmica, migrar pra coluna nova no
+// rastreio_clientes_config.
+// ─────────────────────────────────────────────────────────────────────────
+
+const REGRAS_EXCLUSAO_POR_CLIENTE = {
+  // Cliente 814 (Cobra Center) — não rastreia corridas de carro utilitário
+  // (regra histórica que veio da extensão Chrome SLA Monitor v8)
+  '814': [
+    {
+      regex: /CARRO[\s\-]*UTILIT/i,
+      motivo: 'carro utilitário / carro utilitário expresso',
+    },
+  ],
+};
+
+// ─────────────────────────────────────────────────────────────────────────
 // CONFIG — carregada do banco
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -138,19 +169,51 @@ async function carregarConfig(pool) {
 
 function filtrarMonitorados(ordens, config) {
   const monitoradas = [];
+  const excluidasPorRegra = []; // pra log agregado
+  let contadoresExclusao = {}; // { motivo: count }
+
   for (const ordem of ordens) {
-    const cfg = config[String(ordem.cliente_cod || '')];
+    const clienteCod = String(ordem.cliente_cod || '');
+    const cfg = config[clienteCod];
     if (!cfg || !cfg.ativo) continue;
 
-    // Se há filtros de _balloon, a OS precisa bater pelo menos UM termo
+    const balloon = String(ordem._balloon || '').toUpperCase();
+
+    // 1. Filtros de INCLUSÃO por termo (da config do banco — termos_filtro)
+    //    Se há termos, a OS precisa bater pelo menos UM
     if (cfg.filtrosBalao && cfg.filtrosBalao.length > 0) {
-      const balloon = String(ordem._balloon || '').toUpperCase();
       const bate = cfg.filtrosBalao.some(termo => balloon.includes(termo));
       if (!bate) continue;
     }
 
+    // 2. Regras de EXCLUSÃO hardcoded por cliente (REGRAS_EXCLUSAO_POR_CLIENTE)
+    //    Se a OS bate em qualquer regra de exclusão, é descartada
+    const regrasCliente = REGRAS_EXCLUSAO_POR_CLIENTE[clienteCod] || [];
+    let excluida = false;
+    for (const regra of regrasCliente) {
+      if (regra.regex.test(balloon)) {
+        excluida = true;
+        contadoresExclusao[regra.motivo] = (contadoresExclusao[regra.motivo] || 0) + 1;
+        if (DEBUG) {
+          log(`🚫 OS ${ordem.os_numero} (cliente ${clienteCod}) excluída: ${regra.motivo}`);
+        }
+        excluidasPorRegra.push({ os: ordem.os_numero, cliente: clienteCod, motivo: regra.motivo });
+        break;
+      }
+    }
+    if (excluida) continue;
+
     monitoradas.push(ordem);
   }
+
+  // Log agregado das exclusões pra visibilidade (mesmo sem DEBUG)
+  if (excluidasPorRegra.length > 0) {
+    const resumo = Object.entries(contadoresExclusao)
+      .map(([motivo, count]) => `${count}× ${motivo}`)
+      .join(', ');
+    log(`🚫 ${excluidasPorRegra.length} OS excluídas por regra: ${resumo}`);
+  }
+
   return monitoradas;
 }
 
