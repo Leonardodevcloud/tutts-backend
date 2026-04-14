@@ -1195,7 +1195,7 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
   // ==================== POST /cs/raio-x/enviar-email ====================
   router.post('/cs/raio-x/enviar-email', async (req, res) => {
     try {
-      const { raio_x_id, para, cc, remetente } = req.body;
+      const { raio_x_id, para, cc, assunto, remetente } = req.body;
       if (!para) return res.status(400).json({ error: 'Email destinatário é obrigatório' });
 
       // Buscar raio-x do banco
@@ -1218,7 +1218,7 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
         return res.status(400).json({ error: 'Informe raio_x_id ou analise' });
       }
 
-      const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente });
+      const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente });
       console.log(`📧 Raio-X enviado por email: ${para} (${result.messageId})`);
       res.json({ success: true, messageId: result.messageId });
     } catch (error) {
