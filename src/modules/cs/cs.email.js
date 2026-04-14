@@ -5,6 +5,7 @@
  *  - Provider Resend (HTTP API, sem SMTP)
  *  - Converte <svg> do relatório em PNG inline via sharp (librsvg) — resolve o
  *    problema de clientes de email (Gmail, Outlook) que strippam tags SVG
+ *  - Proteção de blocos HTML com contagem de profundidade (respeita <div> aninhados)
  *  - Formata datas para DD/MM/YYYY automaticamente
  *  - Aceita assunto customizado vindo do frontend
  *
@@ -32,10 +33,6 @@ function getResendConfig() {
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Formata uma data para DD/MM/YYYY.
- * Aceita: Date (driver pg), string ISO, string DD/MM/YYYY (retorna como veio).
- */
 function formatarData(valor) {
   if (!valor) return '';
   if (typeof valor === 'string' && /^\d{2}\/\d{2}\/\d{4}/.test(valor)) return valor.slice(0, 10);
@@ -47,10 +44,6 @@ function formatarData(valor) {
   return `${dia}/${mes}/${ano}`;
 }
 
-/**
- * Converte um bloco SVG (string) para um data URI PNG base64 usando sharp.
- * Retorna null em caso de erro (o chamador decide fallback).
- */
 async function svgParaDataURI(svgString) {
   try {
     const pngBuffer = await sharp(Buffer.from(svgString), { density: 144 })
@@ -64,9 +57,6 @@ async function svgParaDataURI(svgString) {
   }
 }
 
-/**
- * Extrai largura/altura de um SVG string para calcular max-width da <img>.
- */
 function extrairDimensoesSVG(svgString) {
   const wMatch = svgString.match(/\bwidth="(\d+)"/);
   const hMatch = svgString.match(/\bheight="(\d+)"/);
@@ -76,10 +66,6 @@ function extrairDimensoesSVG(svgString) {
   return { width, height };
 }
 
-/**
- * Encontra todos os blocos <svg>...</svg> no conteúdo HTML e os substitui
- * por <img src="data:image/png;base64,..."> de modo compatível com email.
- */
 async function substituirSVGsPorPNGs(html) {
   const svgRegex = /<svg[\s\S]*?<\/svg>/g;
   const matches = html.match(svgRegex) || [];
@@ -100,6 +86,76 @@ async function substituirSVGsPorPNGs(html) {
   return html.replace(svgRegex, () => substituicoes[i++]);
 }
 
+/**
+ * Protege blocos <div style="margin:...">...</div> usando contagem de profundidade.
+ * Respeita <div> aninhados (título, legenda, etc) e encontra o </div> correto do wrapper.
+ *
+ * Retorna { texto, blocks } — o texto tem placeholders __HTMLBLOCK_N__ e blocks contém os HTMLs originais.
+ */
+function protegerBlocosHTML(texto) {
+  const blocks = [];
+  const startMarker = '<div style="margin:';
+  let result = '';
+  let i = 0;
+
+  while (i < texto.length) {
+    const startIdx = texto.indexOf(startMarker, i);
+    if (startIdx === -1) {
+      result += texto.substring(i);
+      break;
+    }
+    // Copia tudo antes do início do bloco
+    result += texto.substring(i, startIdx);
+
+    // Scan com contagem de profundidade pra achar o </div> correto do wrapper
+    let depth = 0;
+    let j = startIdx;
+    let foundClose = false;
+
+    while (j < texto.length) {
+      if (texto.charCodeAt(j) === 60 /* '<' */) {
+        // Abertura de <div ...>
+        if (texto.substring(j, j + 4) === '<div') {
+          const nextChar = texto[j + 4];
+          if (nextChar === ' ' || nextChar === '>' || nextChar === '\t' || nextChar === '\n' || nextChar === '\r') {
+            depth++;
+            const tagEnd = texto.indexOf('>', j);
+            if (tagEnd === -1) break;
+            j = tagEnd + 1;
+            continue;
+          }
+        }
+        // Fechamento </div>
+        if (texto.substring(j, j + 6) === '</div>') {
+          depth--;
+          j += 6;
+          if (depth === 0) {
+            foundClose = true;
+            break;
+          }
+          continue;
+        }
+      }
+      j++;
+    }
+
+    if (!foundClose) {
+      // Não achou fechamento — protege do startIdx até o fim pra não corromper
+      blocks.push(texto.substring(startIdx));
+      result += `__HTMLBLOCK_${blocks.length - 1}__`;
+      i = texto.length;
+      break;
+    }
+
+    const block = texto.substring(startIdx, j);
+    blocks.push(block);
+    result += `__HTMLBLOCK_${blocks.length - 1}__`;
+    i = j;
+  }
+
+  return { texto: result, blocks };
+}
+
 // ─────────────────────────────────────────────────────────────
 // Geração do HTML do email
 // ─────────────────────────────────────────────────────────────
@@ -111,15 +167,10 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
 
   let conteudo = raioX.analise_texto || raioX.analise || '';
 
-  // 1) Proteger blocos HTML/SVG antes do markdown
-  const htmlBlocks = [];
-  conteudo = conteudo.replace(
-    /<div\s+style="margin:[^"]*"[^>]*>[\s\S]*?<\/div>/g,
-    (match) => {
-      htmlBlocks.push(match);
-      return `__HTMLBLOCK_${htmlBlocks.length - 1}__`;
-    }
-  );
+  // 1) Proteger blocos HTML/SVG com depth-counter
+  const protegido = protegerBlocosHTML(conteudo);
+  conteudo = protegido.texto;
+  const htmlBlocks = protegido.blocks;
 
   // 2) Markdown → HTML (inline styles para email)
   conteudo = conteudo
@@ -140,12 +191,12 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n/g, '<br>');
 
-  // 3) Restaurar blocos HTML protegidos
-  htmlBlocks.forEach((block, i) => {
-    conteudo = conteudo.replace(`__HTMLBLOCK_${i}__`, block);
+  // 3) Restaurar blocos HTML protegidos (ainda contêm SVGs nativos)
+  htmlBlocks.forEach((block, idx) => {
+    conteudo = conteudo.replace(`__HTMLBLOCK_${idx}__`, block);
   });
 
-  // 4) Converter todos os <svg> em <img> PNG inline
+  // 4) Converter <svg> dentro dos blocos restaurados em <img> PNG inline
   conteudo = await substituirSVGsPorPNGs(conteudo);
 
   const periodoInicio = formatarData(periodo.inicio);
@@ -211,18 +262,6 @@ function normalizarDestinatarios(valor) {
     .filter(Boolean);
 }
 
-/**
- * Envia o relatório Raio-X por email via Resend.
- *
- * @param {Object} opts
- * @param {string|string[]} opts.para       Email(s) destinatário
- * @param {string|string[]} [opts.cc]       CC
- * @param {Object}          opts.raioX      Objeto do raio-x (analise_texto, score_saude)
- * @param {Object}          opts.cliente    { nome }
- * @param {Object}          opts.periodo    { inicio, fim }
- * @param {string}          [opts.assunto]  Assunto customizado (sobrescreve o padrão)
- * @param {string}          [opts.remetente] Email remetente (precisa estar no domínio verificado)
- */
 async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente }) {
   const { apiKey, from, fromName } = getResendConfig();
 
@@ -293,9 +332,6 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
   };
 }
 
-/**
- * Testa a API do Resend sem enviar email.
- */
 async function testarConexaoSMTP() {
   try {
     const apiKey = process.env.RESEND_API_KEY;
