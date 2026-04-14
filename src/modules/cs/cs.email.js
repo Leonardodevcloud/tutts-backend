@@ -1,15 +1,20 @@
 /**
  * CS Email Service — Envio de Raio-X por email via Resend
  *
- * Usa a API HTTP do Resend (https://resend.com/docs/api-reference/emails/send-email)
- * em vez de SMTP, o que elimina problemas de porta bloqueada no Railway e latência
- * de cold start na negociação TLS.
+ * Recursos:
+ *  - Provider Resend (HTTP API, sem SMTP)
+ *  - Converte <svg> do relatório em PNG inline via sharp (librsvg) — resolve o
+ *    problema de clientes de email (Gmail, Outlook) que strippam tags SVG
+ *  - Formata datas para DD/MM/YYYY automaticamente
+ *  - Aceita assunto customizado vindo do frontend
  *
  * Configuração via .env (Railway):
  *   RESEND_API_KEY    = re_xxxxxxxxxxxxxxxx   (obrigatório)
- *   RESEND_FROM       = supervisor@tutts.com.br  (precisa estar no domínio verificado no Resend)
+ *   RESEND_FROM       = supervisor@tutts.com.br  (domínio verificado no Resend)
  *   RESEND_FROM_NAME  = Tutts Logística       (opcional — default "Tutts Logística")
  */
+
+const sharp = require('sharp');
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 
@@ -18,44 +23,105 @@ function getResendConfig() {
   const from = process.env.RESEND_FROM;
   const fromName = process.env.RESEND_FROM_NAME || 'Tutts Logística';
 
-  if (!apiKey) {
-    throw new Error('Resend não configurado: defina RESEND_API_KEY no Railway');
-  }
-  if (!from) {
-    throw new Error('Resend não configurado: defina RESEND_FROM (email do domínio verificado)');
-  }
+  if (!apiKey) throw new Error('Resend não configurado: defina RESEND_API_KEY no Railway');
+  if (!from) throw new Error('Resend não configurado: defina RESEND_FROM (email do domínio verificado)');
   return { apiKey, from, fromName };
 }
 
-function gerarEmailHTML(raioX, cliente, periodo) {
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Formata uma data para DD/MM/YYYY.
+ * Aceita: Date (driver pg), string ISO, string DD/MM/YYYY (retorna como veio).
+ */
+function formatarData(valor) {
+  if (!valor) return '';
+  if (typeof valor === 'string' && /^\d{2}\/\d{2}\/\d{4}/.test(valor)) return valor.slice(0, 10);
+  const d = valor instanceof Date ? valor : new Date(valor);
+  if (isNaN(d.getTime())) return String(valor);
+  const dia = String(d.getUTCDate()).padStart(2, '0');
+  const mes = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const ano = d.getUTCFullYear();
+  return `${dia}/${mes}/${ano}`;
+}
+
+/**
+ * Converte um bloco SVG (string) para um data URI PNG base64 usando sharp.
+ * Retorna null em caso de erro (o chamador decide fallback).
+ */
+async function svgParaDataURI(svgString) {
+  try {
+    const pngBuffer = await sharp(Buffer.from(svgString), { density: 144 })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+    const base64 = pngBuffer.toString('base64');
+    return `data:image/png;base64,${base64}`;
+  } catch (error) {
+    console.error('❌ [Email] Falha ao converter SVG para PNG:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Extrai largura/altura de um SVG string para calcular max-width da <img>.
+ */
+function extrairDimensoesSVG(svgString) {
+  const wMatch = svgString.match(/\bwidth="(\d+)"/);
+  const hMatch = svgString.match(/\bheight="(\d+)"/);
+  const vbMatch = svgString.match(/viewBox="0 0 (\d+) (\d+)"/);
+  const width = wMatch ? parseInt(wMatch[1], 10) : (vbMatch ? parseInt(vbMatch[1], 10) : 600);
+  const height = hMatch ? parseInt(hMatch[1], 10) : (vbMatch ? parseInt(vbMatch[2], 10) : 300);
+  return { width, height };
+}
+
+/**
+ * Encontra todos os blocos <svg>...</svg> no conteúdo HTML e os substitui
+ * por <img src="data:image/png;base64,..."> de modo compatível com email.
+ */
+async function substituirSVGsPorPNGs(html) {
+  const svgRegex = /<svg[\s\S]*?<\/svg>/g;
+  const matches = html.match(svgRegex) || [];
+  if (matches.length === 0) return html;
+
+  const substituicoes = await Promise.all(
+    matches.map(async (svg) => {
+      const dataUri = await svgParaDataURI(svg);
+      if (!dataUri) {
+        return '<div style="padding:12px;background:#fef3c7;border:1px dashed #f59e0b;border-radius:8px;font-size:12px;color:#92400e;text-align:center">📊 Gráfico indisponível neste email — veja a versão em PDF</div>';
+      }
+      const { width } = extrairDimensoesSVG(svg);
+      return `<img src="${dataUri}" alt="Gráfico" width="${width}" style="display:block;max-width:100%;height:auto;margin:8px auto;border-radius:8px" />`;
+    })
+  );
+
+  let i = 0;
+  return html.replace(svgRegex, () => substituicoes[i++]);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Geração do HTML do email
+// ─────────────────────────────────────────────────────────────
+
+async function gerarEmailHTML(raioX, cliente, periodo) {
   const score = raioX.score_saude || raioX.health_score || 0;
   const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
   const scoreLabel = score >= 80 ? 'Excelente' : score >= 60 ? 'Bom' : 'Atenção';
 
   let conteudo = raioX.analise_texto || raioX.analise || '';
 
-  // Proteger blocos SVG/HTML inline antes do processamento markdown
+  // 1) Proteger blocos HTML/SVG antes do markdown
   const htmlBlocks = [];
-  let safetyCounter = 0;
-  while (safetyCounter < 20) {
-    const startIdx = conteudo.indexOf('<div style="margin:');
-    if (startIdx === -1) break;
-    let depth = 0, endIdx = -1;
-    for (let i = startIdx; i < conteudo.length - 5; i++) {
-      if (conteudo.substring(i, i + 4) === '<div') depth++;
-      if (conteudo.substring(i, i + 6) === '</div>') {
-        depth--;
-        if (depth === 0) { endIdx = i + 6; break; }
-      }
+  conteudo = conteudo.replace(
+    /<div\s+style="margin:[^"]*"[^>]*>[\s\S]*?<\/div>/g,
+    (match) => {
+      htmlBlocks.push(match);
+      return `__HTMLBLOCK_${htmlBlocks.length - 1}__`;
     }
-    if (endIdx === -1) break;
-    const block = conteudo.substring(startIdx, endIdx);
-    htmlBlocks.push(block);
-    conteudo = conteudo.substring(0, startIdx) + `__HTMLBLOCK_${htmlBlocks.length - 1}__` + conteudo.substring(endIdx);
-    safetyCounter++;
-  }
+  );
 
-  // Markdown → HTML (inline styles para compatibilidade com clientes de email)
+  // 2) Markdown → HTML (inline styles para email)
   conteudo = conteudo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/^### (.+)$/gm, '<h3 style="font-size:16px;color:#4f46e5;margin-top:28px;margin-bottom:8px;border-bottom:2px solid #e0e7ff;padding-bottom:4px">$1</h3>')
@@ -74,10 +140,17 @@ function gerarEmailHTML(raioX, cliente, periodo) {
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n/g, '<br>');
 
-  // Restaurar blocos SVG/HTML protegidos
+  // 3) Restaurar blocos HTML protegidos
   htmlBlocks.forEach((block, i) => {
     conteudo = conteudo.replace(`__HTMLBLOCK_${i}__`, block);
   });
+
+  // 4) Converter todos os <svg> em <img> PNG inline
+  conteudo = await substituirSVGsPorPNGs(conteudo);
+
+  const periodoInicio = formatarData(periodo.inicio);
+  const periodoFim = formatarData(periodo.fim);
+  const nomeCliente = cliente.nome || 'Cliente';
 
   return `<!DOCTYPE html>
 <html>
@@ -90,8 +163,8 @@ function gerarEmailHTML(raioX, cliente, periodo) {
 <!-- Header -->
 <tr><td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center">
   <h1 style="color:white;font-size:24px;margin:0 0 4px;font-family:'Segoe UI',sans-serif">🔬 Raio-X Operacional</h1>
-  <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0">${cliente.nome || 'Cliente'}</p>
-  <p style="color:rgba(255,255,255,0.65);font-size:12px;margin:8px 0 0">Período: ${periodo.inicio} a ${periodo.fim}</p>
+  <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0">${nomeCliente}</p>
+  <p style="color:rgba(255,255,255,0.65);font-size:12px;margin:8px 0 0">Período: ${periodoInicio} a ${periodoFim}</p>
 </td></tr>
 
 <!-- Score Badge -->
@@ -125,9 +198,10 @@ ${conteudo}
 </html>`;
 }
 
-/**
- * Normaliza destinatários para array de strings (formato esperado pelo Resend).
- */
+// ─────────────────────────────────────────────────────────────
+// Envio
+// ─────────────────────────────────────────────────────────────
+
 function normalizarDestinatarios(valor) {
   if (!valor) return undefined;
   if (Array.isArray(valor)) return valor.map((v) => String(v).trim()).filter(Boolean);
@@ -141,20 +215,27 @@ function normalizarDestinatarios(valor) {
  * Envia o relatório Raio-X por email via Resend.
  *
  * @param {Object} opts
- * @param {string|string[]} opts.para  Email(s) destinatário
- * @param {string|string[]} [opts.cc]  CC
- * @param {Object} opts.raioX          Objeto do raio-x (analise_texto, score_saude)
- * @param {Object} opts.cliente        { nome }
- * @param {Object} opts.periodo        { inicio, fim }
- * @param {string} [opts.remetente]    Email remetente customizado (precisa estar no domínio verificado)
+ * @param {string|string[]} opts.para       Email(s) destinatário
+ * @param {string|string[]} [opts.cc]       CC
+ * @param {Object}          opts.raioX      Objeto do raio-x (analise_texto, score_saude)
+ * @param {Object}          opts.cliente    { nome }
+ * @param {Object}          opts.periodo    { inicio, fim }
+ * @param {string}          [opts.assunto]  Assunto customizado (sobrescreve o padrão)
+ * @param {string}          [opts.remetente] Email remetente (precisa estar no domínio verificado)
  */
-async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }) {
+async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente }) {
   const { apiKey, from, fromName } = getResendConfig();
 
   const fromEmail = remetente || from;
-  const html = gerarEmailHTML(raioX, cliente, periodo);
   const nomeCliente = cliente.nome || 'Cliente';
-  const subject = `Raio-X Operacional - ${nomeCliente} (${periodo.inicio} a ${periodo.fim})`;
+  const periodoInicio = formatarData(periodo.inicio);
+  const periodoFim = formatarData(periodo.fim);
+
+  const html = await gerarEmailHTML(raioX, cliente, periodo);
+
+  const subject =
+    (assunto && String(assunto).trim()) ||
+    `Raio-X Operacional - ${nomeCliente} (${periodoInicio} a ${periodoFim})`;
 
   const destinatarios = normalizarDestinatarios(para);
   if (!destinatarios || destinatarios.length === 0) {
@@ -180,7 +261,6 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
-      // timeout implícito — Resend responde em <2s normalmente
     });
   } catch (error) {
     console.error('❌ [Resend] Erro de rede:', error.message);
@@ -191,7 +271,6 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }
 
   if (!response.ok) {
     console.error('❌ [Resend] Erro HTTP', response.status, data);
-    // Mensagens amigáveis para os erros mais comuns do Resend
     const msg = data.message || data.error || response.statusText;
     if (response.status === 401 || response.status === 403) {
       throw new Error('API key do Resend inválida ou sem permissão — verifique RESEND_API_KEY');
@@ -215,18 +294,13 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }
 }
 
 /**
- * Testa a API do Resend sem enviar email — valida a API key chamando o endpoint
- * de listagem de domínios (read-only, não consome cota de envio).
+ * Testa a API do Resend sem enviar email.
  */
 async function testarConexaoSMTP() {
   try {
     const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      return { ok: false, message: 'RESEND_API_KEY não configurada no Railway', code: 'NO_KEY' };
-    }
-    if (!process.env.RESEND_FROM) {
-      return { ok: false, message: 'RESEND_FROM não configurada no Railway', code: 'NO_FROM' };
-    }
+    if (!apiKey) return { ok: false, message: 'RESEND_API_KEY não configurada no Railway', code: 'NO_KEY' };
+    if (!process.env.RESEND_FROM) return { ok: false, message: 'RESEND_FROM não configurada no Railway', code: 'NO_FROM' };
 
     const response = await fetch('https://api.resend.com/domains', {
       method: 'GET',
@@ -246,18 +320,10 @@ async function testarConexaoSMTP() {
     const match = domains.find((d) => d.name === fromDomain);
 
     if (!match) {
-      return {
-        ok: false,
-        message: `Domínio "${fromDomain}" não encontrado na conta Resend — verifique RESEND_FROM`,
-        code: 'NO_DOMAIN',
-      };
+      return { ok: false, message: `Domínio "${fromDomain}" não encontrado na conta Resend — verifique RESEND_FROM`, code: 'NO_DOMAIN' };
     }
     if (match.status !== 'verified') {
-      return {
-        ok: false,
-        message: `Domínio "${fromDomain}" não está verificado no Resend (status: ${match.status})`,
-        code: 'NOT_VERIFIED',
-      };
+      return { ok: false, message: `Domínio "${fromDomain}" não está verificado no Resend (status: ${match.status})`, code: 'NOT_VERIFIED' };
     }
 
     return { ok: true, message: `Conexão Resend OK — domínio ${fromDomain} verificado` };
@@ -266,4 +332,4 @@ async function testarConexaoSMTP() {
   }
 }
 
-module.exports = { enviarRaioXEmail, testarConexaoSMTP };
+module.exports = { enviarRaioXEmail, testarConexaoSMTP, formatarData };
