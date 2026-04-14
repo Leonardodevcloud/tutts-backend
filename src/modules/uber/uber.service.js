@@ -405,6 +405,183 @@ async function uberConsultarEntrega(pool, deliveryId) {
   return resp.json();
 }
 
+/**
+ * Geocoding simples via Google Maps API.
+ * Usado quando o operador altera manualmente o endereço de uma entrega:
+ * o front manda só a string do endereço, o backend resolve lat/lng.
+ *
+ * Requer GOOGLE_API_KEY na env. Se não houver, retorna { lat: null, lng: null }
+ * e o caller decide se aborta ou segue sem coords (Uber aceita pedido só com
+ * endereço string em alguns casos, mas é menos preciso).
+ */
+async function geocodarEndereco(endereco) {
+  const apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) {
+    console.warn('⚠️ [Uber] GOOGLE_API_KEY ausente — geocoding desativado');
+    return { lat: null, lng: null, formatted: endereco };
+  }
+  if (!endereco || endereco.trim().length < 5) {
+    return { lat: null, lng: null, formatted: endereco };
+  }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${apiKey}&region=br&language=pt-BR`;
+    const resp = await httpRequest(url, { method: 'GET' });
+    const data = resp.json();
+
+    if (data.status === 'OK' && data.results?.[0]) {
+      const r = data.results[0];
+      return {
+        lat: r.geometry.location.lat,
+        lng: r.geometry.location.lng,
+        formatted: r.formatted_address,
+      };
+    }
+    console.warn(`⚠️ [Uber] Geocode falhou pra "${endereco}": ${data.status}`);
+    return { lat: null, lng: null, formatted: endereco };
+  } catch (err) {
+    console.error('❌ [Uber] Erro no geocode:', err.message);
+    return { lat: null, lng: null, formatted: endereco };
+  }
+}
+
+/**
+ * Cancela uma entrega ativa no Uber e cria uma nova com novo endereço de entrega.
+ * Usado quando o lojista percebe que digitou endereço errado e precisa corrigir
+ * depois que a delivery já foi criada na Uber.
+ *
+ * Fluxo:
+ *   1. Geocoda o novo endereço pra ter lat/lng
+ *   2. Cancela a delivery atual no Uber
+ *   3. Marca a entrega antiga como 'cancelado_redespacho' no banco (auditoria)
+ *   4. Cria nova cotação Uber com o novo dropoff (mesma coleta)
+ *   5. Cria nova delivery
+ *   6. Cria NOVO registro em uber_entregas vinculado à mesma codigo_os
+ *   7. Retorna o novo registro
+ *
+ * Se qualquer passo após (2) falhar, o registro antigo fica como cancelado mas
+ * não é redespachado — operador precisa intervir manualmente. NÃO reabrimos na
+ * Mapp porque a OS continua "reservada" pelo app externo.
+ */
+async function cancelarERedespacharEntrega(pool, entregaId, novoEnderecoEntrega, novosDados = {}) {
+  // 1. Buscar registro original
+  const { rows } = await pool.query(
+    'SELECT * FROM uber_entregas WHERE id = $1',
+    [entregaId]
+  );
+  if (rows.length === 0) {
+    throw new Error(`Entrega id=${entregaId} não encontrada`);
+  }
+  const original = rows[0];
+
+  if (['delivered', 'cancelado', 'canceled', 'fallback_fila'].includes(original.status_uber)) {
+    throw new Error(`Não é possível redespachar entrega em status "${original.status_uber}"`);
+  }
+
+  console.log(`🔄 [Uber] Iniciando cancelar+redespachar OS=${original.codigo_os} id=${entregaId}`);
+
+  // 2. Geocodar novo endereço de entrega
+  const geocoded = await geocodarEndereco(novoEnderecoEntrega);
+  console.log(`🗺️ [Uber] Geocode "${novoEnderecoEntrega}" → ${geocoded.lat},${geocoded.lng}`);
+
+  // 3. Cancelar delivery atual no Uber (best effort — se falhar, log mas segue)
+  if (original.uber_delivery_id) {
+    try {
+      await uberCancelarEntrega(pool, original.uber_delivery_id);
+      console.log(`✅ [Uber] Delivery antiga ${original.uber_delivery_id} cancelada`);
+    } catch (err) {
+      console.error(`❌ [Uber] Falha ao cancelar delivery antiga: ${err.message}`);
+      // Segue mesmo assim — pode ser que já estivesse num estado inválido
+    }
+  }
+
+  // 4. Marca registro original como cancelado por redespacho
+  await pool.query(`
+    UPDATE uber_entregas
+    SET status_uber = 'cancelado',
+        cancelado_por = 'operador_redespacho',
+        cancelado_motivo = $1,
+        updated_at = NOW()
+    WHERE id = $2
+  `, [`Redespachado com novo endereço: ${novoEnderecoEntrega}`, entregaId]);
+
+  // 5. Reusa coleta original + novo dropoff
+  const novoDropoff = {
+    endereco: geocoded.formatted || novoEnderecoEntrega,
+    nome: novosDados.nome_destinatario || 'Cliente',
+    telefone: novosDados.telefone_destinatario || null,
+    complemento: novosDados.complemento || null,
+    latitude: geocoded.lat,
+    longitude: geocoded.lng,
+  };
+
+  const coleta = {
+    endereco: original.endereco_coleta,
+    nome: 'Loja',
+    telefone: null,
+    complemento: null,
+    latitude: parseFloat(original.latitude_coleta) || null,
+    longitude: parseFloat(original.longitude_coleta) || null,
+  };
+
+  // 6. Nova cotação
+  let cotacao;
+  try {
+    cotacao = await uberCriarCotacao(pool, coleta, novoDropoff);
+  } catch (err) {
+    throw new Error(`Falha ao cotar redespacho: ${err.message}`);
+  }
+
+  // 7. Cria NOVO registro em uber_entregas (mesma codigo_os, novo id)
+  const { rows: [novoRegistro] } = await pool.query(`
+    INSERT INTO uber_entregas (
+      codigo_os, status_uber,
+      valor_servico, valor_profissional, valor_uber, eta_minutos,
+      uber_quote_id, regra_id,
+      endereco_coleta, endereco_entrega,
+      latitude_coleta, longitude_coleta,
+      latitude_entrega, longitude_entrega,
+      obs, pontos
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    RETURNING *
+  `, [
+    original.codigo_os, 'cotacao_recebida',
+    original.valor_servico, original.valor_profissional, cotacao.valor, cotacao.eta_minutos,
+    cotacao.quote_id, original.regra_id,
+    original.endereco_coleta, geocoded.formatted || novoEnderecoEntrega,
+    original.latitude_coleta, original.longitude_coleta,
+    geocoded.lat, geocoded.lng,
+    original.obs, original.pontos,
+  ]);
+
+  // 8. Cria nova delivery no Uber
+  let entregaUber;
+  try {
+    entregaUber = await uberCriarEntrega(pool, cotacao.quote_id, coleta, novoDropoff, original.codigo_os);
+  } catch (err) {
+    await pool.query(`
+      UPDATE uber_entregas SET status_uber = 'erro', erro_ultimo = $1, updated_at = NOW() WHERE id = $2
+    `, [`Redespacho falhou no create: ${err.message}`, novoRegistro.id]);
+    throw new Error(`Falha ao criar nova delivery: ${err.message}`);
+  }
+
+  // 9. Atualiza com delivery_id + tracking_url
+  await pool.query(`
+    UPDATE uber_entregas
+    SET uber_delivery_id = $1, status_uber = $2, tracking_url = $3, updated_at = NOW()
+    WHERE id = $4
+  `, [entregaUber.delivery_id, 'enviado_uber', entregaUber.tracking_url || null, novoRegistro.id]);
+
+  console.log(`✅ [Uber] Redespacho concluído: OS=${original.codigo_os} novo_id=${novoRegistro.id} delivery=${entregaUber.delivery_id}`);
+
+  return {
+    entrega_antiga_id: entregaId,
+    entrega_nova_id: novoRegistro.id,
+    delivery_id: entregaUber.delivery_id,
+    tracking_url: entregaUber.tracking_url,
+  };
+}
+
 // ════════════════════════════════════════════════════════════
 // ORQUESTRAÇÃO - Fluxo completo: Mapp → Uber → Mapp
 // ════════════════════════════════════════════════════════════
@@ -413,9 +590,10 @@ async function uberConsultarEntrega(pool, deliveryId) {
  * Processar um serviço da Mapp e enviar pro Uber Direct
  * Retorna o registro criado em uber_entregas
  */
-async function despacharParaUber(pool, servico) {
+async function despacharParaUber(pool, servico, opts = {}) {
   const codigoOS = servico.codigoOS;
   const enderecos = servico.endereco || [];
+  const regraId = opts.regraId || null;
 
   if (enderecos.length < 2) {
     throw new Error(`OS ${codigoOS}: menos de 2 endereços, não é possível despachar`);
@@ -446,15 +624,15 @@ async function despacharParaUber(pool, servico) {
   }
   console.log(`✅ [Uber] OS ${codigoOS} reservada na Mapp (status 0 → 1)`);
 
-  // 2. Criar registro no banco
+  // 2. Criar registro no banco (com regra_id se for despacho automático que casou)
   const { rows: [registro] } = await pool.query(`
     INSERT INTO uber_entregas (
       codigo_os, status_uber, valor_servico, valor_profissional,
       endereco_coleta, endereco_entrega,
       latitude_coleta, longitude_coleta,
       latitude_entrega, longitude_entrega,
-      obs, pontos
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      obs, pontos, regra_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING *
   `, [
     codigoOS, 'aguardando_cotacao',
@@ -462,7 +640,7 @@ async function despacharParaUber(pool, servico) {
     coleta.rua, entrega.rua,
     coleta.latitude || null, coleta.longitude || null,
     entrega.latitude || null, entrega.longitude || null,
-    servico.obs, JSON.stringify(enderecos),
+    servico.obs, JSON.stringify(enderecos), regraId,
   ]);
 
   try {
@@ -783,6 +961,8 @@ module.exports = {
   uberCriarEntrega,
   uberCancelarEntrega,
   uberConsultarEntrega,
+  cancelarERedespacharEntrega,
+  geocodarEndereco,
   // Orquestração
   despacharParaUber,
   processarWebhookStatus,
