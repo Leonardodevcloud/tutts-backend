@@ -177,21 +177,32 @@ function startUberWorker(pool) {
   }
 
   /**
-   * verificarRegras — OPT-IN ESTRITO
+   * verificarRegras — OPT-IN ESTRITO POR ENDEREÇO DE COLETA
+   *
+   * IMPORTANTE: A API "Integração App Externos" da Mapp NÃO retorna identificação
+   * de cliente em nenhum campo (`endereco[].nome` vem sempre vazio, não há
+   * `cliente_nome` no payload). Por isso o match é feito contra o ENDEREÇO da
+   * coleta — cada cliente real tem endereços fixos e únicos, então um trecho
+   * distintivo do endereço (ex: "rua pernambuco, 1500") identifica o cliente
+   * com segurança.
+   *
+   * Como cadastrar a regra:
+   *   - Campo `cliente_nome` da regra deve conter um TRECHO ÚNICO do endereço
+   *     de coleta do cliente, em lowercase, com pelo menos 5 caracteres.
+   *   - Exemplos: "pernambuco, 1500", "av paralela 9000", "shopping prêmio".
+   *   - Quanto mais específico, melhor (evita falso-positivo com outros clientes
+   *     do mesmo bairro/avenida).
    *
    * Retorna { despachar: boolean, motivo: string }:
    *   - despachar=true SE e SOMENTE SE:
    *     a) Existe pelo menos uma regra ativa em uber_regras_cliente
-   *     b) O nome/identificador da regra casa com o nome do ponto de coleta
+   *     b) O trecho da regra (cliente_nome) é encontrado em endereco[0].rua
    *     c) A regra tem usar_uber = true
    *     d) A OS cumpre horário, valor min/max (se definidos)
    *     e) O endereço de coleta OU entrega casa com pelo menos uma das regiões
    *        listadas em regioes_permitidas (se definidas)
    *
    *   - despachar=false em qualquer outro caso (SEM FALLBACK PERMISSIVO)
-   *
-   * Isso garante que o worker NUNCA despacha OS de cliente não cadastrado,
-   * e NUNCA manda OS pra Uber numa cidade onde ela não pode operar.
    */
   async function verificarRegras(pool, servico) {
     const { rows: regras } = await pool.query(
@@ -203,25 +214,31 @@ function startUberWorker(pool) {
       return { despachar: false, motivo: 'sem_regras_cadastradas' };
     }
 
-    const nomeColeta = (servico.endereco?.[0]?.nome || '').toLowerCase();
+    // ⚠ Match é feito contra o ENDEREÇO de coleta (rua), não contra o nome
+    // — a Mapp não preenche endereco[].nome, então usamos rua que é o único
+    // campo distintivo que vem confiável.
     const enderecoColeta = (servico.endereco?.[0]?.rua || '').toLowerCase();
     const enderecoEntrega = (servico.endereco?.[1]?.rua || '').toLowerCase();
 
-    // Tentar casar cliente por identificador (match exato) OU nome (contém)
+    if (!enderecoColeta) {
+      return { despachar: false, motivo: 'endereco_coleta_vazio' };
+    }
+
+    // Tentar casar cliente: o campo cliente_nome (ou cliente_identificador) da
+    // regra deve aparecer como substring no endereço de coleta da OS.
     let regraCasada = null;
     for (const regra of regras) {
-      const nomeRegra = (regra.cliente_nome || '').toLowerCase().trim();
-      const identRegra = (regra.cliente_identificador || '').toLowerCase().trim();
+      const trechoNome = (regra.cliente_nome || '').toLowerCase().trim();
+      const trechoIdent = (regra.cliente_identificador || '').toLowerCase().trim();
 
-      // Match 1: identificador exato
-      if (identRegra && nomeColeta.includes(identRegra)) {
+      // Match 1: identificador exato (mais preciso, se cadastrado)
+      if (trechoIdent && trechoIdent.length >= 4 && enderecoColeta.includes(trechoIdent)) {
         regraCasada = regra;
         break;
       }
 
-      // Match 2: nome do cliente contém/está contido
-      if (nomeRegra && nomeRegra.length >= 3 &&
-          (nomeColeta.includes(nomeRegra) || nomeRegra.includes(nomeColeta))) {
+      // Match 2: trecho do endereço (mínimo 5 chars pra evitar match acidental)
+      if (trechoNome && trechoNome.length >= 5 && enderecoColeta.includes(trechoNome)) {
         regraCasada = regra;
         break;
       }
@@ -256,11 +273,12 @@ function startUberWorker(pool) {
         return enderecoColeta.includes(r) || enderecoEntrega.includes(r);
       });
       if (!casouRegiao) {
-        console.log(`🗺️ [Uber Worker] OS ${servico.codigoOS} — cliente "${regraCasada.cliente_nome}" mas endereço fora das regiões permitidas`);
+        console.log(`🗺️ [Uber Worker] OS ${servico.codigoOS} — regra "${regraCasada.cliente_nome}" casou mas endereço fora das regiões permitidas`);
         return { despachar: false, motivo: 'regiao' };
       }
     }
 
+    console.log(`✅ [Uber Worker] OS ${servico.codigoOS} casou com regra "${regraCasada.cliente_nome}" (id=${regraCasada.id})`);
     return { despachar: true, motivo: 'ok' };
   }
 
