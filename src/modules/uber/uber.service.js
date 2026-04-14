@@ -330,6 +330,18 @@ async function uberCriarEntrega(pool, quoteId, pickup, dropoff, externalId) {
     undeliverable_action: 'return',
   };
 
+  // 🤖 SANDBOX: Ativar Robo Courier pra simular o fluxo completo
+  // (assignment → pickup → pickup_complete → dropoff → delivered).
+  // Sem isto a delivery fica travada em "pending" pra sempre, nenhum webhook
+  // dispara e o nome do courier nunca chega na Mapp.
+  // Doc: https://developer.uber.com/docs/deliveries/guides/robocourier
+  if (config.sandbox_mode === true) {
+    body.test_specifications = {
+      robo_courier_specification: { mode: 'auto' },
+    };
+    console.log('🤖 [Uber] Sandbox ativo — incluindo test_specifications (Robo Courier mode=auto)');
+  }
+
   // Coordenadas (campos de primeiro nível, não aninhadas em pickup/dropoff)
   if (pickup.latitude && pickup.longitude) {
     body.pickup_latitude = parseFloat(pickup.latitude);
