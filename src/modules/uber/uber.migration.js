@@ -60,6 +60,24 @@ async function initUberTables(pool) {
   `);
   console.log('✅ Tabela uber_regras_cliente verificada');
 
+  // ─── trecho_endereco: separa o "matching string" do "nome de exibição" ──
+  // Antes: cliente_nome era usado tanto pra exibição quanto pro match (que na
+  // prática era um trecho do endereço de coleta, porque a Mapp não retorna
+  // nome de cliente). Agora: cliente_nome = nome bonito (texto livre, ex:
+  // "Auto Peças Pereira") e trecho_endereco = string de match (5+ chars).
+  await pool.query(`
+    ALTER TABLE uber_regras_cliente ADD COLUMN IF NOT EXISTS trecho_endereco TEXT
+  `).catch(() => {});
+
+  // Backfill defensivo: nas regras antigas, copia cliente_nome → trecho_endereco
+  // (porque na época cliente_nome era o trecho). Só faz update se trecho_endereco
+  // ainda está vazio, então é idempotente.
+  await pool.query(`
+    UPDATE uber_regras_cliente
+    SET trecho_endereco = cliente_nome
+    WHERE trecho_endereco IS NULL AND cliente_nome IS NOT NULL
+  `).catch(() => {});
+
   // ─── De-para: codigoOS (Mapp) ↔ delivery_id (Uber) ───────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS uber_entregas (
@@ -104,6 +122,12 @@ async function initUberTables(pool) {
   // tracking_url: link público de rastreio do Uber Direct
   await pool.query(`
     ALTER TABLE uber_entregas ADD COLUMN IF NOT EXISTS tracking_url TEXT
+  `).catch(() => {});
+
+  // regra_id: FK pra uber_regras_cliente — qual regra casou no despacho automático.
+  // Nullable porque despachos manuais (botão "+ Despachar OS") não casam com regra.
+  await pool.query(`
+    ALTER TABLE uber_entregas ADD COLUMN IF NOT EXISTS regra_id INTEGER
   `).catch(() => {});
 
   // Índices para consultas frequentes
