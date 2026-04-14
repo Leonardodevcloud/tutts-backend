@@ -7,7 +7,7 @@ const {
   obterConfig, despacharParaUber, mappListarServicos,
   mappAlterarStatus, uberCancelarEntrega, uberConsultarEntrega,
   mappInformarChegada, mappFinalizarEndereco, mappFinalizarServico,
-  cancelarERedespacharEntrega,
+  cancelarERedespacharEntrega, cotarParaUber, pegarCotacaoCache,
 } = require('../uber.service');
 
 function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -170,6 +170,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
+        margem_minima_aceita, margem_pct_minima,
       } = req.body;
 
       if (!cliente_nome || !cliente_nome.trim()) {
@@ -187,13 +188,20 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         regioesArray = regioes_permitidas.split(',').map(r => r.trim().toLowerCase()).filter(Boolean);
       }
 
+      // Margens: aceita number ou string vazia/null
+      const margemAbs = (margem_minima_aceita === '' || margem_minima_aceita == null)
+        ? null : parseFloat(margem_minima_aceita);
+      const margemPct = (margem_pct_minima === '' || margem_pct_minima == null)
+        ? null : parseFloat(margem_pct_minima);
+
       const { rows: [regra] } = await pool.query(`
         INSERT INTO uber_regras_cliente (
           cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
           horario_inicio, horario_fim, valor_minimo, valor_maximo,
-          regioes_permitidas, ativo
+          regioes_permitidas, ativo,
+          margem_minima_aceita, margem_pct_minima
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING *
       `, [
         cliente_nome.trim(), trecho_endereco.trim().toLowerCase(),
@@ -201,6 +209,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         prioridade || 'uber_primeiro', horario_inicio || null, horario_fim || null,
         valor_minimo || null, valor_maximo || null,
         regioesArray, ativo ?? true,
+        margemAbs, margemPct,
       ]);
 
       await registrarAuditoria(req, 'CRIAR_REGRA_UBER', 'config', 'uber_regras_cliente', regra.id, { cliente_nome });
@@ -219,6 +228,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
+        margem_minima_aceita, margem_pct_minima,
       } = req.body;
 
       // Validações apenas se os campos foram enviados
@@ -238,6 +248,14 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         regioesArray = null;
       }
 
+      // Margens: undefined = não atualiza, '' ou null = limpa, número = atualiza
+      const margemAbsParsed = margem_minima_aceita === undefined
+        ? undefined
+        : (margem_minima_aceita === '' || margem_minima_aceita == null ? null : parseFloat(margem_minima_aceita));
+      const margemPctParsed = margem_pct_minima === undefined
+        ? undefined
+        : (margem_pct_minima === '' || margem_pct_minima == null ? null : parseFloat(margem_pct_minima));
+
       const { rows: [regra] } = await pool.query(`
         UPDATE uber_regras_cliente SET
           cliente_nome = COALESCE($1, cliente_nome),
@@ -251,14 +269,21 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
           valor_maximo = $9,
           regioes_permitidas = COALESCE($10::text[], regioes_permitidas),
           ativo = COALESCE($11, ativo),
+          margem_minima_aceita = CASE WHEN $13::boolean THEN $12 ELSE margem_minima_aceita END,
+          margem_pct_minima = CASE WHEN $15::boolean THEN $14 ELSE margem_pct_minima END,
           updated_at = NOW()
-        WHERE id = $12 RETURNING *
+        WHERE id = $16 RETURNING *
       `, [
         cliente_nome ? cliente_nome.trim() : null,
         trecho_endereco ? trecho_endereco.trim().toLowerCase() : null,
         cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
-        regioesArray, ativo, id,
+        regioesArray, ativo,
+        margemAbsParsed === undefined ? null : margemAbsParsed,
+        margemAbsParsed !== undefined,
+        margemPctParsed === undefined ? null : margemPctParsed,
+        margemPctParsed !== undefined,
+        id,
       ]);
 
       if (!regra) return res.status(404).json({ error: 'Regra não encontrada' });
@@ -361,21 +386,65 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     }
   });
 
-  // Despachar manualmente uma OS para Uber
-  router.post('/entregas/despachar', verificarToken, verificarAdmin, async (req, res) => {
+  // 💰 Cotar OS na Uber (sem criar delivery) — usado pelo modal de pré-cotação manual
+  // Body: { codigoOS }
+  // Retorna: { quote_id, valor_uber, valor_cliente, valor_profissional, margem,
+  //           margem_pct, eta_minutos, expires_at, endereco_coleta, endereco_entrega }
+  router.post('/entregas/cotar', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { codigoOS } = req.body;
       if (!codigoOS) return res.status(400).json({ error: 'codigoOS obrigatório' });
 
-      // Buscar serviço na Mapp
-      const servicos = await mappListarServicos(pool, 0, codigoOS - 1);
-      const servico = servicos.find(s => s.codigoOS === parseInt(codigoOS));
+      const r = await cotarParaUber(pool, parseInt(codigoOS));
 
-      if (!servico) {
-        return res.status(404).json({ error: `Serviço OS ${codigoOS} não encontrado na Mapp ou não está aberto` });
+      res.json({
+        success: true,
+        quote_id: r.cotacao.quote_id,
+        valor_uber: r.valor_uber,
+        valor_cliente: r.valor_cliente,
+        valor_profissional: r.valor_profissional,
+        margem: r.margem,
+        margem_pct: r.margem_pct,
+        eta_minutos: r.eta_minutos,
+        expires_at: r.expires_at,
+        endereco_coleta: r.coleta?.rua || null,
+        endereco_entrega: r.entrega?.rua || null,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao cotar:', error);
+      res.status(400).json({ error: error.message || 'Erro ao cotar entrega' });
+    }
+  });
+
+  // Despachar manualmente uma OS para Uber.
+  // Aceita opcionalmente quote_id pré-cotado pelo modal de cotação — nesse caso
+  // não cota de novo, reusa a quote já no cache em memória do service.
+  // Body: { codigoOS, quote_id? }
+  router.post('/entregas/despachar', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { codigoOS, quote_id } = req.body;
+      if (!codigoOS) return res.status(400).json({ error: 'codigoOS obrigatório' });
+
+      // Se veio quote_id, tenta reusar a cotação cacheada
+      let servicoUsado = null;
+      let quotePreCotada = null;
+      if (quote_id) {
+        const cache = pegarCotacaoCache(codigoOS, quote_id);
+        if (!cache) {
+          return res.status(410).json({ error: 'Cotação expirada ou inválida — cote novamente' });
+        }
+        servicoUsado = cache.servico;
+        quotePreCotada = cache.cotacao;
+      } else {
+        // Fluxo antigo (sem cotação prévia): busca serviço na Mapp
+        const servicos = await mappListarServicos(pool, 0, parseInt(codigoOS) - 1);
+        servicoUsado = servicos.find(s => s.codigoOS === parseInt(codigoOS));
+        if (!servicoUsado) {
+          return res.status(404).json({ error: `Serviço OS ${codigoOS} não encontrado na Mapp ou não está aberto` });
+        }
       }
 
-      const resultado = await despacharParaUber(pool, servico);
+      const resultado = await despacharParaUber(pool, servicoUsado, { quotePreCotada });
 
       if (!resultado) {
         return res.status(400).json({ error: 'Não foi possível despachar para Uber. Verifique logs.' });
