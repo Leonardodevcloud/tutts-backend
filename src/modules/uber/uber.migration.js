@@ -32,6 +32,10 @@ async function initUberTables(pool) {
   await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS telefone_suporte VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS manifest_total_value_centavos INTEGER DEFAULT 10000`).catch(() => {});
   await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS sandbox_mode BOOLEAN DEFAULT false`).catch(() => {});
+  // 🔒 Checkpoint do worker — persiste o último codigoOS processado pra não retroagir em restart
+  await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS worker_ultimo_id BIGINT DEFAULT 0`).catch(() => {});
+  // 🔒 Janela temporal — só considera OS criadas há menos de N minutos (evita pegar lixo histórico)
+  await pool.query(`ALTER TABLE uber_config ADD COLUMN IF NOT EXISTS worker_janela_minutos INTEGER DEFAULT 30`).catch(() => {});
 
   // Garantir que existe pelo menos uma linha de config
   await pool.query(`
