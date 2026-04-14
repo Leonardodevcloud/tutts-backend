@@ -7,7 +7,8 @@ const {
   obterConfig, despacharParaUber, mappListarServicos,
   mappAlterarStatus, uberCancelarEntrega, uberConsultarEntrega,
   mappInformarChegada, mappFinalizarEndereco, mappFinalizarServico,
-  cancelarERedespacharEntrega, cotarParaUber, pegarCotacaoCache,
+  cancelarERedespacharEntrega, cotarParaUber, cotarMultiplosVeiculos,
+  pegarCotacaoCache, pegarCotacaoCachePorQuoteId,
 } = require('../uber.service');
 
 function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -386,30 +387,32 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     }
   });
 
-  // 💰 Cotar OS na Uber (sem criar delivery) — usado pelo modal de pré-cotação manual
-  // Body: { codigoOS }
-  // Retorna: { quote_id, valor_uber, valor_cliente, valor_profissional, margem,
-  //           margem_pct, eta_minutos, expires_at, endereco_coleta, endereco_entrega }
+  // 💰 Cotar OS na Uber em múltiplos tipos de veículo (sem criar delivery).
+  // Usado pelo modal de cotação manual: cota moto + carro em paralelo.
+  // Body: { codigoOS, vehicle_types?: ['motorcycle', 'car'] }
+  // Retorna: { success, cotacoes: [{vehicle_type, available, ...}] }
   router.post('/entregas/cotar', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const { codigoOS } = req.body;
+      const { codigoOS, vehicle_types } = req.body;
       if (!codigoOS) return res.status(400).json({ error: 'codigoOS obrigatório' });
 
-      const r = await cotarParaUber(pool, parseInt(codigoOS));
+      const tipos = Array.isArray(vehicle_types) && vehicle_types.length > 0
+        ? vehicle_types
+        : ['motorcycle', 'car'];
 
-      res.json({
-        success: true,
-        quote_id: r.cotacao.quote_id,
-        valor_uber: r.valor_uber,
-        valor_cliente: r.valor_cliente,
-        valor_profissional: r.valor_profissional,
-        margem: r.margem,
-        margem_pct: r.margem_pct,
-        eta_minutos: r.eta_minutos,
-        expires_at: r.expires_at,
-        endereco_coleta: r.coleta?.rua || null,
-        endereco_entrega: r.entrega?.rua || null,
-      });
+      const cotacoes = await cotarMultiplosVeiculos(pool, parseInt(codigoOS), tipos);
+
+      // Verifica se pelo menos uma cotação foi bem-sucedida
+      const algumaDisponivel = cotacoes.some(c => c.available);
+      if (!algumaDisponivel) {
+        // Todas falharam — retorna 400 com array detalhado dos erros pra UI mostrar
+        return res.status(400).json({
+          error: 'Nenhum tipo de veículo disponível pra essa OS',
+          cotacoes,
+        });
+      }
+
+      res.json({ success: true, cotacoes });
     } catch (error) {
       console.error('❌ Erro ao cotar:', error);
       res.status(400).json({ error: error.message || 'Erro ao cotar entrega' });
@@ -425,11 +428,12 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       const { codigoOS, quote_id } = req.body;
       if (!codigoOS) return res.status(400).json({ error: 'codigoOS obrigatório' });
 
-      // Se veio quote_id, tenta reusar a cotação cacheada
+      // Se veio quote_id, tenta reusar a cotação cacheada (busca por quote_id puro,
+      // sem precisar saber qual vehicle_type foi)
       let servicoUsado = null;
       let quotePreCotada = null;
       if (quote_id) {
-        const cache = pegarCotacaoCache(codigoOS, quote_id);
+        const cache = pegarCotacaoCachePorQuoteId(quote_id);
         if (!cache) {
           return res.status(410).json({ error: 'Cotação expirada ou inválida — cote novamente' });
         }
@@ -450,7 +454,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(400).json({ error: 'Não foi possível despachar para Uber. Verifique logs.' });
       }
 
-      await registrarAuditoria(req, 'DESPACHAR_UBER_MANUAL', 'admin', 'uber_entregas', resultado.id, { codigoOS });
+      await registrarAuditoria(req, 'DESPACHAR_UBER_MANUAL', 'admin', 'uber_entregas', resultado.id, { codigoOS, vehicle_type: quotePreCotada?.vehicle_type });
 
       res.json({ success: true, entrega: resultado });
     } catch (error) {
