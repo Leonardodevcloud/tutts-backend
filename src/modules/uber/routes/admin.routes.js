@@ -20,11 +20,16 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
   router.get('/config', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const config = await obterConfig(pool);
-      // Mascarar segredos
+      // Segredos NUNCA são devolvidos pro frontend, nem mesmo mascarados.
+      // Em vez disso, devolvemos uma flag _setado pra UI mostrar placeholder apropriado.
+      // Isso evita o bug de "salvar bolinhas sobrescrevendo o token bom".
       if (config) {
-        config.client_secret = config.client_secret ? '••••••••' : null;
-        config.mapp_api_token = config.mapp_api_token ? '••••••••' : null;
-        config.webhook_secret = config.webhook_secret ? '••••••••' : null;
+        config.client_secret_setado = !!config.client_secret;
+        config.mapp_api_token_setado = !!config.mapp_api_token;
+        config.webhook_secret_setado = !!config.webhook_secret;
+        config.client_secret = '';
+        config.mapp_api_token = '';
+        config.webhook_secret = '';
       }
       res.json({ success: true, config });
     } catch (error) {
@@ -44,6 +49,23 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         sandbox_mode, worker_janela_minutos,
       } = req.body;
 
+      // Detector defensivo: identifica strings que são SÓ caracteres mascarados
+      // (bolinhas, asteriscos, traços), pra ignorar tentativas de salvar placeholder.
+      // Aceita qualquer quantidade de qualquer um desses caracteres.
+      const ehMascara = (v) => {
+        if (typeof v !== 'string') return false;
+        return /^[•·●○*–\-\u2022\u00b7]+$/.test(v.trim());
+      };
+
+      // Atualiza segredo SOMENTE se: (a) veio definido, (b) não é vazio, (c) não é máscara
+      const valorSecretoValido = (v) => {
+        if (v === undefined || v === null) return false;
+        if (typeof v !== 'string') return false;
+        if (v.trim() === '') return false;
+        if (ehMascara(v)) return false;
+        return true;
+      };
+
       // Montar SET dinâmico (só atualiza campos enviados)
       const campos = [];
       const valores = [];
@@ -58,11 +80,11 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
       addCampo('ativo', ativo);
       addCampo('client_id', client_id);
-      if (client_secret && client_secret !== '••••••••') addCampo('client_secret', client_secret);
+      if (valorSecretoValido(client_secret)) addCampo('client_secret', client_secret.trim());
       addCampo('customer_id', customer_id);
-      if (webhook_secret && webhook_secret !== '••••••••') addCampo('webhook_secret', webhook_secret);
+      if (valorSecretoValido(webhook_secret)) addCampo('webhook_secret', webhook_secret.trim());
       addCampo('mapp_api_url', mapp_api_url);
-      if (mapp_api_token && mapp_api_token !== '••••••••') addCampo('mapp_api_token', mapp_api_token);
+      if (valorSecretoValido(mapp_api_token)) addCampo('mapp_api_token', mapp_api_token.trim());
       addCampo('polling_intervalo_seg', polling_intervalo_seg);
       addCampo('auto_despacho', auto_despacho);
       addCampo('timeout_sem_entregador_min', timeout_sem_entregador_min);
