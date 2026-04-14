@@ -224,7 +224,7 @@ async function mappFinalizarServico(pool, codigoOS) {
  * Doc oficial:
  * https://developer.uber.com/docs/deliveries/get-started
  */
-async function uberCriarCotacao(pool, pickup, dropoff) {
+async function uberCriarCotacao(pool, pickup, dropoff, vehicleType = null) {
   const token = await obterTokenUber(pool);
   const config = await obterConfig(pool);
 
@@ -244,6 +244,12 @@ async function uberCriarCotacao(pool, pickup, dropoff) {
     body.dropoff_longitude = parseFloat(dropoff.longitude);
   }
 
+  // Tipo de veículo (Opção C). Valores válidos: motorcycle, car, bicycle, scooter, walker, van.
+  // Se null/undefined, a Uber escolhe o mais barato disponível (geralmente moto).
+  if (vehicleType) {
+    body.vehicle_type = vehicleType;
+  }
+
   const resp = await httpRequest(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -252,16 +258,17 @@ async function uberCriarCotacao(pool, pickup, dropoff) {
 
   const data = resp.json();
   if (!resp.ok) {
-    console.error('❌ [Uber] Erro ao criar cotação:', JSON.stringify(data));
+    console.error(`❌ [Uber] Erro ao criar cotação${vehicleType ? ' (' + vehicleType + ')' : ''}:`, JSON.stringify(data));
     throw new Error(`Erro cotação Uber: ${data.message || data.code || JSON.stringify(data)}`);
   }
 
-  console.log(`✅ [Uber] Cotação criada: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min`);
+  console.log(`✅ [Uber] Cotação criada${vehicleType ? ' (' + vehicleType + ')' : ''}: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min`);
   return {
     quote_id: data.id,
-    valor: data.fee / 100,  // Uber retorna em centavos
+    valor: data.fee / 100,
     eta_minutos: data.duration,
     expira_em: data.expires,
+    vehicle_type: vehicleType || 'auto',
   };
 }
 
@@ -593,24 +600,29 @@ async function cancelarERedespacharEntrega(pool, entregaId, novoEnderecoEntrega,
 // ════════════════════════════════════════════════════════════
 // CACHE DE COTAÇÕES (Opção C — pré-cotação manual)
 // ════════════════════════════════════════════════════════════
-// Mapa em memória: codigo_os → { cotacao, expires_at, servico }
-// Usado pra evitar cotar 2x quando o usuário abre o modal e depois confirma.
+// Mapa em memória: "{codigo_os}:{vehicleType}" → { cotacao, expires_at, servico, ... }
+// A chave inclui o tipo de veículo porque cotações de moto vs carro geram
+// quote_ids diferentes — precisamos guardar as duas em paralelo.
 // As cotações da Uber Direct expiram em 5 minutos — guardamos só por 4:30 pra
 // margem de segurança. Limpa automaticamente entradas expiradas a cada minuto.
 const _quoteCache = new Map();
 const QUOTE_CACHE_TTL_MS = 4 * 60 * 1000 + 30 * 1000; // 4:30
 
-function cacheCotacao(codigoOS, dados) {
+function _cacheKey(codigoOS, vehicleType) {
+  return `${codigoOS}:${vehicleType || 'auto'}`;
+}
+
+function cacheCotacao(codigoOS, vehicleType, dados) {
   const expires_at = Date.now() + QUOTE_CACHE_TTL_MS;
-  _quoteCache.set(String(codigoOS), { ...dados, expires_at });
+  _quoteCache.set(_cacheKey(codigoOS, vehicleType), { ...dados, expires_at });
   return expires_at;
 }
 
-function pegarCotacaoCache(codigoOS, quoteId) {
-  const entrada = _quoteCache.get(String(codigoOS));
+function pegarCotacaoCache(codigoOS, vehicleType, quoteId) {
+  const entrada = _quoteCache.get(_cacheKey(codigoOS, vehicleType));
   if (!entrada) return null;
   if (Date.now() > entrada.expires_at) {
-    _quoteCache.delete(String(codigoOS));
+    _quoteCache.delete(_cacheKey(codigoOS, vehicleType));
     return null;
   }
   // Se o cliente passou um quote_id específico, valida que bate
@@ -618,8 +630,24 @@ function pegarCotacaoCache(codigoOS, quoteId) {
   return entrada;
 }
 
-function limparCotacaoCache(codigoOS) {
-  _quoteCache.delete(String(codigoOS));
+// Busca por quote_id sem saber o vehicleType (escaneia o cache).
+// Útil quando o frontend só nos passa o quote_id e a gente precisa achar o resto.
+function pegarCotacaoCachePorQuoteId(quoteId) {
+  for (const [k, v] of _quoteCache.entries()) {
+    if (Date.now() > v.expires_at) {
+      _quoteCache.delete(k);
+      continue;
+    }
+    if (v.cotacao?.quote_id === quoteId) return v;
+  }
+  return null;
+}
+
+function limparCotacaoCacheOS(codigoOS) {
+  // Remove todas as variantes de veículo dessa OS
+  for (const k of _quoteCache.keys()) {
+    if (k.startsWith(`${codigoOS}:`)) _quoteCache.delete(k);
+  }
 }
 
 // Limpeza periódica de entradas expiradas (a cada 60s)
@@ -631,28 +659,13 @@ setInterval(() => {
 }, 60_000).unref?.();
 
 /**
- * cotarParaUber — Etapa 1 do despacho em 2 etapas.
+ * cotarParaUber — Etapa 1 do despacho em 2 etapas (single vehicle).
  *
- * Busca o serviço na Mapp, pega coleta+entrega, faz cotação na Uber Direct,
- * calcula margem, e retorna tudo SEM mexer no banco e SEM criar delivery.
- *
- * O resultado é cacheado em memória por ~4:30 pra que o cliente possa abrir
- * um modal de confirmação, hesitar uns segundos, e ao confirmar reusar a
- * mesma quote_id (despacharParaUber via opts.quotePreCotada) sem cotar 2x.
- *
- * Retorna:
- *   {
- *     cotacao: { quote_id, valor, eta_minutos },
- *     servico: { codigoOS, valorServico, valorProfissional, ... },
- *     coleta, entrega,
- *     margem: number,
- *     margem_pct: number,
- *     expires_at: timestamp (ms)
- *   }
- *
- * Lança erro se: serviço não encontrado, sem 2 endereços, ou cotação Uber falhou.
+ * Mantida pra compatibilidade com fluxos automáticos (worker) e quando
+ * só queremos cotar UM tipo de veículo. Pra cotação manual com múltiplos
+ * veículos, usar cotarMultiplosVeiculos abaixo.
  */
-async function cotarParaUber(pool, codigoOS) {
+async function cotarParaUber(pool, codigoOS, vehicleType = null) {
   // Buscar o serviço na Mapp
   const servicos = await mappListarServicos(pool, 0, 0);
   const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
@@ -677,7 +690,7 @@ async function cotarParaUber(pool, codigoOS) {
     endereco: entrega.rua,
     latitude: entrega.latitude,
     longitude: entrega.longitude,
-  });
+  }, vehicleType);
 
   // Calcula margem
   const valorCliente = parseFloat(servico.valorServico) || 0;
@@ -685,9 +698,9 @@ async function cotarParaUber(pool, codigoOS) {
   const margem = valorCliente - valorUber;
   const margem_pct = valorCliente > 0 ? (margem / valorCliente) * 100 : 0;
 
-  const expires_at = cacheCotacao(codigoOS, { cotacao, servico, coleta, entrega });
+  const expires_at = cacheCotacao(codigoOS, vehicleType, { cotacao, servico, coleta, entrega });
 
-  console.log(`💰 [Uber] Cotação OS ${codigoOS}: cliente=R$${valorCliente.toFixed(2)} uber=R$${valorUber.toFixed(2)} margem=R$${margem.toFixed(2)} (${margem_pct.toFixed(1)}%)`);
+  console.log(`💰 [Uber] Cotação OS ${codigoOS} (${vehicleType || 'auto'}): cliente=R$${valorCliente.toFixed(2)} uber=R$${valorUber.toFixed(2)} margem=R$${margem.toFixed(2)} (${margem_pct.toFixed(1)}%)`);
 
   return {
     cotacao,
@@ -701,7 +714,100 @@ async function cotarParaUber(pool, codigoOS) {
     margem_pct,
     eta_minutos: cotacao.eta_minutos,
     expires_at,
+    vehicle_type: vehicleType || 'auto',
   };
+}
+
+/**
+ * cotarMultiplosVeiculos — cota a mesma OS em N tipos de veículo em paralelo.
+ *
+ * Usado pelo modal de cotação manual: o frontend chama uma vez e recebe um
+ * array com 1 entrada por veículo, cada uma com sucesso/falha individual.
+ *
+ * Veículos que falharem (ex: 'car' indisponível em horário sem carros) entram
+ * no resultado com `{ vehicle_type, error: '...' }` em vez de cotação completa,
+ * pra que o frontend mostre o card como "indisponível" sem quebrar o modal todo.
+ *
+ * Retorna: array de
+ *   sucesso: { vehicle_type, available: true, quote_id, valor_uber, valor_cliente,
+ *              margem, margem_pct, eta_minutos, expires_at, endereco_coleta, endereco_entrega }
+ *   falha:   { vehicle_type, available: false, error }
+ *
+ * Lança erro APENAS se a OS não for encontrada na Mapp ou tiver < 2 endereços
+ * (situações onde nenhum veículo poderia funcionar).
+ */
+async function cotarMultiplosVeiculos(pool, codigoOS, vehicleTypes = ['motorcycle', 'car']) {
+  // Busca o serviço UMA vez (compartilhado entre cotações)
+  const servicos = await mappListarServicos(pool, 0, 0);
+  const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+  if (!servico) {
+    throw new Error(`OS ${codigoOS} não encontrada na Mapp ou já despachada`);
+  }
+
+  const enderecos = servico.endereco || [];
+  if (enderecos.length < 2) {
+    throw new Error(`OS ${codigoOS}: menos de 2 endereços, não é possível cotar`);
+  }
+
+  const coleta = enderecos[0];
+  const entrega = enderecos[enderecos.length - 1];
+  const valorCliente = parseFloat(servico.valorServico) || 0;
+  const valorProfissional = parseFloat(servico.valorProfissional) || 0;
+
+  // Cotações em paralelo (Promise.allSettled pra que falha de um não derrube o outro)
+  const promessas = vehicleTypes.map(vt =>
+    uberCriarCotacao(pool, {
+      endereco: coleta.rua,
+      latitude: coleta.latitude,
+      longitude: coleta.longitude,
+    }, {
+      endereco: entrega.rua,
+      latitude: entrega.latitude,
+      longitude: entrega.longitude,
+    }, vt)
+  );
+  const resultados = await Promise.allSettled(promessas);
+
+  const cotacoes = resultados.map((r, i) => {
+    const vt = vehicleTypes[i];
+    if (r.status === 'fulfilled') {
+      const cotacao = r.value;
+      const valorUber = parseFloat(cotacao.valor) || 0;
+      const margem = valorCliente - valorUber;
+      const margem_pct = valorCliente > 0 ? (margem / valorCliente) * 100 : 0;
+
+      // Salva no cache com chave que inclui o vehicleType
+      const expires_at = cacheCotacao(codigoOS, vt, { cotacao, servico, coleta, entrega });
+
+      console.log(`💰 [Uber] Cotação OS ${codigoOS} (${vt}): cliente=R$${valorCliente.toFixed(2)} uber=R$${valorUber.toFixed(2)} margem=R$${margem.toFixed(2)}`);
+
+      return {
+        vehicle_type: vt,
+        available: true,
+        quote_id: cotacao.quote_id,
+        valor_uber: valorUber,
+        valor_cliente: valorCliente,
+        valor_profissional: valorProfissional,
+        margem,
+        margem_pct,
+        eta_minutos: cotacao.eta_minutos,
+        expires_at,
+        endereco_coleta: coleta.rua,
+        endereco_entrega: entrega.rua,
+      };
+    } else {
+      // Falha — extrai mensagem mais útil possível
+      const errMsg = r.reason?.message || String(r.reason) || 'Erro desconhecido';
+      console.warn(`⚠️ [Uber] Cotação OS ${codigoOS} (${vt}) falhou: ${errMsg}`);
+      return {
+        vehicle_type: vt,
+        available: false,
+        error: errMsg,
+      };
+    }
+  });
+
+  return cotacoes;
 }
 
 async function despacharParaUber(pool, servico, opts = {}) {
@@ -710,6 +816,8 @@ async function despacharParaUber(pool, servico, opts = {}) {
   const regraId = opts.regraId || null;
   // Se veio quote pré-cotada (do modal), reusa em vez de cotar de novo
   const quotePreCotada = opts.quotePreCotada || null;
+  // Tipo de veículo pra esse despacho (vem da regra ou da escolha do modal)
+  const vehicleType = opts.vehicleType || null;
 
   if (enderecos.length < 2) {
     throw new Error(`OS ${codigoOS}: menos de 2 endereços, não é possível despachar`);
@@ -762,7 +870,7 @@ async function despacharParaUber(pool, servico, opts = {}) {
     let cotacao;
     if (quotePreCotada) {
       cotacao = quotePreCotada;
-      console.log(`♻️ [Uber] OS ${codigoOS}: reusando quote pré-cotada ${cotacao.quote_id}`);
+      console.log(`♻️ [Uber] OS ${codigoOS}: reusando quote pré-cotada ${cotacao.quote_id} (${cotacao.vehicle_type || 'auto'})`);
     } else {
       cotacao = await uberCriarCotacao(pool, {
         endereco: coleta.rua,
@@ -772,7 +880,7 @@ async function despacharParaUber(pool, servico, opts = {}) {
         endereco: entrega.rua,
         latitude: entrega.latitude,
         longitude: entrega.longitude,
-      });
+      }, vehicleType);
     }
 
     await pool.query(`
@@ -805,15 +913,14 @@ async function despacharParaUber(pool, servico, opts = {}) {
       WHERE id = $4
     `, [entregaUber.delivery_id, 'enviado_uber', entregaUber.tracking_url || null, registro.id]);
 
-    // Limpa cache de cotação dessa OS — não precisamos mais
-    limparCotacaoCache(codigoOS);
+    // Limpa cache de cotações dessa OS — todas as variantes de veículo
+    limparCotacaoCacheOS(codigoOS);
 
     console.log(`✅ [Uber] OS ${codigoOS} despachada → delivery_id=${entregaUber.delivery_id} | tracking=${entregaUber.tracking_url ? 'OK' : 'sem url'}`);
 
     return { ...registro, uber_delivery_id: entregaUber.delivery_id, cotacao };
 
   } catch (erro) {
-    // Se falhar em qualquer passo, reabrir na Mapp
     console.error(`❌ [Uber] Erro ao despachar OS ${codigoOS}:`, erro.message);
 
     await pool.query(`
@@ -822,7 +929,6 @@ async function despacharParaUber(pool, servico, opts = {}) {
       WHERE id = $3
     `, ['erro', erro.message, registro.id]);
 
-    // Reabrir na Mapp (status 0)
     await mappAlterarStatus(pool, codigoOS, 0).catch(e =>
       console.error(`❌ [Uber] Falha ao reabrir OS ${codigoOS} na Mapp:`, e.message)
     );
@@ -1087,7 +1193,9 @@ module.exports = {
   cancelarERedespacharEntrega,
   geocodarEndereco,
   cotarParaUber,
+  cotarMultiplosVeiculos,
   pegarCotacaoCache,
+  pegarCotacaoCachePorQuoteId,
   // Orquestração
   despacharParaUber,
   processarWebhookStatus,
