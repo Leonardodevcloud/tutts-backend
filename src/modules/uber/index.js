@@ -140,8 +140,8 @@ function startUberWorker(pool) {
               continue;
             }
 
-            // 3. Despachar pro Uber
-            await despacharParaUber(pool, servico);
+            // 3. Despachar pro Uber, passando a regra que casou pra ser registrada
+            await despacharParaUber(pool, servico, { regraId: decisao.regra?.id || null });
             despachadas++;
 
           } catch (err) {
@@ -224,21 +224,22 @@ function startUberWorker(pool) {
       return { despachar: false, motivo: 'endereco_coleta_vazio' };
     }
 
-    // Tentar casar cliente: o campo cliente_nome (ou cliente_identificador) da
-    // regra deve aparecer como substring no endereço de coleta da OS.
+    // Tentar casar regra: o campo trecho_endereco da regra (ou cliente_identificador
+    // como segunda opção) deve aparecer como substring no endereço de coleta da OS.
+    // Fallback de compatibilidade: se trecho_endereco for null (regra antiga), usa cliente_nome.
     let regraCasada = null;
     for (const regra of regras) {
-      const trechoNome = (regra.cliente_nome || '').toLowerCase().trim();
+      const trechoEnd = (regra.trecho_endereco || regra.cliente_nome || '').toLowerCase().trim();
       const trechoIdent = (regra.cliente_identificador || '').toLowerCase().trim();
 
-      // Match 1: identificador exato (mais preciso, se cadastrado)
+      // Match 1: identificador alternativo (mín 4 chars)
       if (trechoIdent && trechoIdent.length >= 4 && enderecoColeta.includes(trechoIdent)) {
         regraCasada = regra;
         break;
       }
 
-      // Match 2: trecho do endereço (mínimo 5 chars pra evitar match acidental)
-      if (trechoNome && trechoNome.length >= 5 && enderecoColeta.includes(trechoNome)) {
+      // Match 2: trecho do endereço (mín 5 chars pra evitar match acidental)
+      if (trechoEnd && trechoEnd.length >= 5 && enderecoColeta.includes(trechoEnd)) {
         regraCasada = regra;
         break;
       }
@@ -279,7 +280,7 @@ function startUberWorker(pool) {
     }
 
     console.log(`✅ [Uber Worker] OS ${servico.codigoOS} casou com regra "${regraCasada.cliente_nome}" (id=${regraCasada.id})`);
-    return { despachar: true, motivo: 'ok' };
+    return { despachar: true, motivo: 'ok', regra: regraCasada };
   }
 
   // Iniciar polling
