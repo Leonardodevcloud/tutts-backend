@@ -14,6 +14,7 @@ const { initUberTables } = require('./uber.migration');
 const { createUberRouter } = require('./uber.routes');
 const {
   obterConfig, mappListarServicos, despacharParaUber, verificarTimeouts,
+  uberCriarCotacao, mappAlterarStatus,
 } = require('./uber.service');
 
 function initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -140,8 +141,67 @@ function startUberWorker(pool) {
               continue;
             }
 
-            // 3. Despachar pro Uber, passando a regra que casou pra ser registrada
-            await despacharParaUber(pool, servico, { regraId: decisao.regra?.id || null });
+            // 🔒 Filtro 3: Margem mínima da regra (Opção C)
+            // Cota a Uber ANTES de criar a delivery e valida margem absoluta + percentual.
+            // Se rejeitar, libera a OS na Mapp pros motoboys internos pegarem.
+            const regra = decisao.regra;
+            const exigeMargemAbs = regra.margem_minima_aceita != null;
+            const exigeMargemPct = regra.margem_pct_minima != null;
+
+            if (exigeMargemAbs || exigeMargemPct) {
+              const enderecos = servico.endereco || [];
+              const coleta = enderecos[0];
+              const entrega = enderecos[enderecos.length - 1];
+
+              let cotacaoPreview;
+              try {
+                cotacaoPreview = await uberCriarCotacao(pool, {
+                  endereco: coleta.rua,
+                  latitude: coleta.latitude,
+                  longitude: coleta.longitude,
+                }, {
+                  endereco: entrega.rua,
+                  latitude: entrega.latitude,
+                  longitude: entrega.longitude,
+                });
+              } catch (errCotacao) {
+                console.warn(`⚠️ [Uber Worker] OS ${servico.codigoOS}: cotação falhou (${errCotacao.message}) — pulando, mantém na Mapp`);
+                puladas_regra++;
+                continue;
+              }
+
+              const valorCliente = parseFloat(servico.valorServico) || 0;
+              const valorUber = parseFloat(cotacaoPreview.valor) || 0;
+              const margem = valorCliente - valorUber;
+              const margem_pct = valorCliente > 0 ? (margem / valorCliente) * 100 : 0;
+
+              const margemAbsMin = parseFloat(regra.margem_minima_aceita);
+              const margemPctMin = parseFloat(regra.margem_pct_minima);
+
+              if (exigeMargemAbs && margem < margemAbsMin) {
+                console.log(`💸 [Uber Worker] OS ${servico.codigoOS} REJEITADA por margem absoluta — cliente=R$${valorCliente.toFixed(2)} uber=R$${valorUber.toFixed(2)} margem=R$${margem.toFixed(2)} (mínimo=R$${margemAbsMin.toFixed(2)}) regra="${regra.cliente_nome}"`);
+                puladas_regra++;
+                continue;
+              }
+              if (exigeMargemPct && margem_pct < margemPctMin) {
+                console.log(`💸 [Uber Worker] OS ${servico.codigoOS} REJEITADA por margem percentual — ${margem_pct.toFixed(1)}% (mínimo=${margemPctMin}%) regra="${regra.cliente_nome}"`);
+                puladas_regra++;
+                continue;
+              }
+
+              console.log(`✅ [Uber Worker] OS ${servico.codigoOS} aprovada na validação de margem — margem=R$${margem.toFixed(2)} (${margem_pct.toFixed(1)}%)`);
+
+              // Despacha REUSANDO a quote já cotada (não cota 2x)
+              await despacharParaUber(pool, servico, {
+                regraId: regra.id,
+                quotePreCotada: cotacaoPreview,
+              });
+              despachadas++;
+              continue;
+            }
+
+            // Sem filtro de margem na regra: despacho normal (cotação dentro do despachar)
+            await despacharParaUber(pool, servico, { regraId: regra.id });
             despachadas++;
 
           } catch (err) {
