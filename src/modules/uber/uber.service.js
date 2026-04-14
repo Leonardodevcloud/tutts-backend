@@ -546,6 +546,13 @@ async function processarWebhookStatus(pool, payload) {
   const codigoOS = entrega.codigo_os;
   const statusInfo = UBER_STATUS_MAP[novoStatus];
 
+  // 🔒 Idempotência: Uber pode reentregar o mesmo webhook (timeout, retry, etc).
+  // Se o status já foi processado, ignoramos pra não disparar 2x as ações na Mapp.
+  if (entrega.status_uber === novoStatus) {
+    console.log(`⊘ [Uber] Status duplicado ignorado OS=${codigoOS}: ${novoStatus} (já processado)`);
+    return;
+  }
+
   console.log(`📡 [Uber] Status OS=${codigoOS}: ${entrega.status_uber} → ${novoStatus} (${statusInfo?.descricao || '?'})`);
 
   // Atualizar status local
@@ -643,9 +650,17 @@ async function processarWebhookCourier(pool, payload) {
     ]);
 
     // Vincular motorista na Mapp
+    // Telefone vem da Uber em E.164 (+5571999999999). A Mapp espera só DDD+número
+    // (10 ou 11 dígitos), então removemos o DDI 55 antes de enviar.
+    const telE164 = courier.phone_number || courier.public_phone_info?.formatted_phone_number || '';
+    const telDigits = telE164.replace(/\D/g, '');
+    const telBR = telDigits.startsWith('55') && telDigits.length >= 12
+      ? telDigits.slice(2)
+      : telDigits;
+
     const profissional = {
       nome: courier.name,
-      telefone: (courier.phone_number || '').replace(/\D/g, ''),
+      telefone: telBR,
       placa: courier.vehicle_license_plate || '',
       veiculo: [courier.vehicle_make, courier.vehicle_model].filter(Boolean).join(' '),
     };
