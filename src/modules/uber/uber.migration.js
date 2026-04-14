@@ -78,6 +78,17 @@ async function initUberTables(pool) {
     WHERE trecho_endereco IS NULL AND cliente_nome IS NOT NULL
   `).catch(() => {});
 
+  // ─── Filtros de margem por regra (Opção C) ────────────────
+  // margem_minima_aceita: valor absoluto em R$ — só despacha se margem >= esse valor
+  // margem_pct_minima: percentual da receita — só despacha se margem_pct >= esse valor
+  // Ambos nullable: regra sem limite = não filtra por margem.
+  await pool.query(`
+    ALTER TABLE uber_regras_cliente ADD COLUMN IF NOT EXISTS margem_minima_aceita NUMERIC(10,2)
+  `).catch(() => {});
+  await pool.query(`
+    ALTER TABLE uber_regras_cliente ADD COLUMN IF NOT EXISTS margem_pct_minima NUMERIC(5,2)
+  `).catch(() => {});
+
   // ─── De-para: codigoOS (Mapp) ↔ delivery_id (Uber) ───────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS uber_entregas (
