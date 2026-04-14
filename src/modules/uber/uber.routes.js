@@ -1,10 +1,14 @@
 /**
  * MÓDULO UBER - Router Principal
- * Monta sub-routers: admin (JWT), webhook (público), tracking (JWT)
+ * Monta sub-routers: admin (JWT), tracking (JWT)
+ *
+ * ⚠️ O sub-router de webhook NÃO é montado aqui — ele é montado direto
+ * em server.js (em /api/uber/webhook) ANTES dos middlewares globais de
+ * auth, porque webhooks da Uber são públicos (validados via HMAC) e
+ * morreriam num verificarToken global se passassem por aqui.
  */
 const express = require('express');
 const { createUberAdminRoutes } = require('./routes/admin.routes');
-const { createUberWebhookRoutes } = require('./routes/webhook.routes');
 const { createUberTrackingRoutes } = require('./routes/tracking.routes');
 
 function createUberRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -16,8 +20,7 @@ function createUberRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   // Tracking: posição em tempo real (requer JWT)
   router.use('/tracking', createUberTrackingRoutes(pool, verificarToken));
 
-  // Webhook: recebe eventos da Uber (PÚBLICO - sem JWT, validação HMAC própria)
-  router.use('/webhook', createUberWebhookRoutes(pool));
+  // Webhook: NÃO montado aqui (vide nota acima — montado em server.js)
 
   return router;
 }
