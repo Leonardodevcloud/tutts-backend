@@ -3,8 +3,8 @@
  *
  * Recursos:
  *  - Provider Resend (HTTP API, sem SMTP)
- *  - Converte <svg> do relatório em PNG inline via sharp (librsvg) — resolve o
- *    problema de clientes de email (Gmail, Outlook) que strippam tags SVG
+ *  - Converte <svg> do relatório em PNG anexado via CID (Content-ID) —
+ *    padrão universal que renderiza em Roundcube, Gmail, Outlook, etc.
  *  - Proteção de blocos HTML com contagem de profundidade (respeita <div> aninhados)
  *  - Formata datas para DD/MM/YYYY automaticamente
  *  - Aceita assunto customizado vindo do frontend
@@ -44,13 +44,14 @@ function formatarData(valor) {
   return `${dia}/${mes}/${ano}`;
 }
 
-async function svgParaDataURI(svgString) {
+/**
+ * Converte um bloco SVG (string) para um buffer PNG usando sharp.
+ */
+async function svgParaPngBuffer(svgString) {
   try {
-    const pngBuffer = await sharp(Buffer.from(svgString), { density: 144 })
+    return await sharp(Buffer.from(svgString), { density: 144 })
       .png({ compressionLevel: 9, adaptiveFiltering: true })
       .toBuffer();
-    const base64 = pngBuffer.toString('base64');
-    return `data:image/png;base64,${base64}`;
   } catch (error) {
     console.error('❌ [Email] Falha ao converter SVG para PNG:', error.message);
     return null;
@@ -66,31 +67,51 @@ function extrairDimensoesSVG(svgString) {
   return { width, height };
 }
 
-async function substituirSVGsPorPNGs(html) {
+/**
+ * Varre o HTML atrás de blocos <svg>...</svg>, converte cada um em PNG,
+ * substitui a tag SVG por <img src="cid:chart-N"> e retorna a lista de
+ * attachments prontos para o payload do Resend (com content_id).
+ *
+ * @param {string} html
+ * @returns {Promise<{html: string, attachments: Array}>}
+ */
+async function prepararImagensInline(html) {
   const svgRegex = /<svg[\s\S]*?<\/svg>/g;
   const matches = html.match(svgRegex) || [];
-  if (matches.length === 0) return html;
+  if (matches.length === 0) return { html, attachments: [] };
+
+  const attachments = [];
+  const timestamp = Date.now();
 
   const substituicoes = await Promise.all(
-    matches.map(async (svg) => {
-      const dataUri = await svgParaDataURI(svg);
-      if (!dataUri) {
+    matches.map(async (svg, idx) => {
+      const pngBuffer = await svgParaPngBuffer(svg);
+      if (!pngBuffer) {
+        // Fallback: placeholder amarelo
         return '<div style="padding:12px;background:#fef3c7;border:1px dashed #f59e0b;border-radius:8px;font-size:12px;color:#92400e;text-align:center">📊 Gráfico indisponível neste email — veja a versão em PDF</div>';
       }
+      // CID único por gráfico dessa mensagem (evita colisão se o mesmo email for reenviado)
+      const cid = `chart-${timestamp}-${idx}`;
+      const filename = `grafico-${idx + 1}.png`;
+      attachments.push({
+        filename,
+        content: pngBuffer.toString('base64'),
+        content_id: cid,
+        content_type: 'image/png',
+      });
       const { width } = extrairDimensoesSVG(svg);
-      return `<img src="${dataUri}" alt="Gráfico" width="${width}" style="display:block;max-width:100%;height:auto;margin:8px auto;border-radius:8px" />`;
+      return `<img src="cid:${cid}" alt="Gráfico ${idx + 1}" width="${width}" style="display:block;max-width:100%;height:auto;margin:8px auto;border-radius:8px" />`;
     })
   );
 
   let i = 0;
-  return html.replace(svgRegex, () => substituicoes[i++]);
+  const htmlProcessado = html.replace(svgRegex, () => substituicoes[i++]);
+  return { html: htmlProcessado, attachments };
 }
 
 /**
  * Protege blocos <div style="margin:...">...</div> usando contagem de profundidade.
- * Respeita <div> aninhados (título, legenda, etc) e encontra o </div> correto do wrapper.
- *
- * Retorna { texto, blocks } — o texto tem placeholders __HTMLBLOCK_N__ e blocks contém os HTMLs originais.
+ * Respeita <div> aninhados (título, legenda) e acha o </div> correto do wrapper.
  */
 function protegerBlocosHTML(texto) {
   const blocks = [];
@@ -104,17 +125,14 @@ function protegerBlocosHTML(texto) {
       result += texto.substring(i);
       break;
     }
-    // Copia tudo antes do início do bloco
     result += texto.substring(i, startIdx);
 
-    // Scan com contagem de profundidade pra achar o </div> correto do wrapper
     let depth = 0;
     let j = startIdx;
     let foundClose = false;
 
     while (j < texto.length) {
       if (texto.charCodeAt(j) === 60 /* '<' */) {
-        // Abertura de <div ...>
         if (texto.substring(j, j + 4) === '<div') {
           const nextChar = texto[j + 4];
           if (nextChar === ' ' || nextChar === '>' || nextChar === '\t' || nextChar === '\n' || nextChar === '\r') {
@@ -125,7 +143,6 @@ function protegerBlocosHTML(texto) {
             continue;
           }
         }
-        // Fechamento </div>
         if (texto.substring(j, j + 6) === '</div>') {
           depth--;
           j += 6;
@@ -140,7 +157,6 @@ function protegerBlocosHTML(texto) {
     }
 
     if (!foundClose) {
-      // Não achou fechamento — protege do startIdx até o fim pra não corromper
       blocks.push(texto.substring(startIdx));
       result += `__HTMLBLOCK_${blocks.length - 1}__`;
       i = texto.length;
@@ -157,9 +173,13 @@ function protegerBlocosHTML(texto) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Geração do HTML do email
+// Geração do HTML do email + attachments
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Gera { html, attachments } finais para enviar via Resend.
+ * O HTML já tem os <img src="cid:..."> no lugar dos SVGs originais.
+ */
 async function gerarEmailHTML(raioX, cliente, periodo) {
   const score = raioX.score_saude || raioX.health_score || 0;
   const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
@@ -196,14 +216,15 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
     conteudo = conteudo.replace(`__HTMLBLOCK_${idx}__`, block);
   });
 
-  // 4) Converter <svg> dentro dos blocos restaurados em <img> PNG inline
-  conteudo = await substituirSVGsPorPNGs(conteudo);
+  // 4) Converter <svg> em <img cid:> + gerar attachments
+  const { html: conteudoProcessado, attachments } = await prepararImagensInline(conteudo);
+  conteudo = conteudoProcessado;
 
   const periodoInicio = formatarData(periodo.inicio);
   const periodoFim = formatarData(periodo.fim);
   const nomeCliente = cliente.nome || 'Cliente';
 
-  return `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,Arial,sans-serif">
@@ -247,6 +268,8 @@ ${conteudo}
 </table>
 </body>
 </html>`;
+
+  return { html, attachments };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -270,7 +293,7 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
   const periodoInicio = formatarData(periodo.inicio);
   const periodoFim = formatarData(periodo.fim);
 
-  const html = await gerarEmailHTML(raioX, cliente, periodo);
+  const { html, attachments } = await gerarEmailHTML(raioX, cliente, periodo);
 
   const subject =
     (assunto && String(assunto).trim()) ||
@@ -290,6 +313,10 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
   };
   const ccList = normalizarDestinatarios(cc);
   if (ccList && ccList.length > 0) payload.cc = ccList;
+  if (attachments && attachments.length > 0) {
+    payload.attachments = attachments;
+    console.log(`📎 [Resend] ${attachments.length} gráfico(s) anexado(s) via CID`);
+  }
 
   let response;
   try {
@@ -319,6 +346,9 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
     }
     if (response.status === 429) {
       throw new Error('Limite de envio do Resend atingido — aguarde alguns segundos e tente novamente');
+    }
+    if (response.status === 413) {
+      throw new Error('Email muito grande — reduza o número de gráficos ou imagens');
     }
     throw new Error(`Resend ${response.status}: ${msg}`);
   }
