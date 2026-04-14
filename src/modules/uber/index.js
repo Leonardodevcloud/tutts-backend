@@ -23,18 +23,60 @@ function initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria
 /**
  * Worker de polling: roda a cada N segundos (configurável)
  * 1. Busca serviços abertos na Mapp (status 0)
- * 2. Aplica regras de decisão
+ * 2. Aplica regras de decisão (OPT-IN ESTRITO — só despacha clientes cadastrados)
  * 3. Despacha pro Uber Direct
  * 4. Verifica timeouts (entregador não encontrado)
  *
  * Usa setTimeout recursivo (não setInterval) para que mudanças no
  * polling_intervalo_seg da config peguem em runtime sem precisar restart.
+ *
+ * 🔒 SEGURANÇA (redesign 2026-04-14):
+ *   - ultimoId é PERSISTIDO em uber_config.worker_ultimo_id pra não retroagir
+ *     em restart do worker (bug anterior: começava em 0 e pegava lixo histórico)
+ *   - OS com dataHora mais antiga que worker_janela_minutos é IGNORADA
+ *   - verificarRegras é OPT-IN ESTRITO: sem regra casando = NÃO despacha
+ *   - Pré-validação de região ANTES de chamar mappAlterarStatus(1),
+ *     pra não travar OS na Mapp em cidade fora da cobertura Uber
  */
 function startUberWorker(pool) {
   let ultimoId = 0;
+  let ultimoIdCarregado = false;
   let timeoutRef = null;
   let rodando = false;
   let parado = false;
+
+  async function carregarUltimoId() {
+    try {
+      const { rows } = await pool.query('SELECT worker_ultimo_id FROM uber_config WHERE id = 1');
+      ultimoId = parseInt(rows[0]?.worker_ultimo_id || 0, 10);
+      ultimoIdCarregado = true;
+      console.log(`🔖 [Uber Worker] Checkpoint carregado: ultimoId=${ultimoId}`);
+    } catch (err) {
+      console.error('❌ [Uber Worker] Erro ao carregar checkpoint:', err.message);
+      ultimoId = 0;
+    }
+  }
+
+  async function salvarUltimoId() {
+    try {
+      await pool.query('UPDATE uber_config SET worker_ultimo_id = $1 WHERE id = 1', [ultimoId]);
+    } catch (err) {
+      console.error('❌ [Uber Worker] Erro ao salvar checkpoint:', err.message);
+    }
+  }
+
+  /**
+   * Filtra serviços que ainda estão dentro da janela temporal aceitável.
+   * Descartar OS antigas é crucial pra não pegar lixo histórico (OS que ficaram
+   * abandonadas com status 0 na Mapp há semanas/meses).
+   */
+  function dentroDaJanela(servico, janelaMinutos) {
+    if (!servico?.dataHora) return false;  // sem data, rejeita por segurança
+    const dataOS = new Date(servico.dataHora.replace(' ', 'T'));  // "2026-04-14 14:30:00" → Date
+    if (isNaN(dataOS.getTime())) return false;
+    const idadeMin = (Date.now() - dataOS.getTime()) / 60000;
+    return idadeMin >= 0 && idadeMin <= janelaMinutos;
+  }
 
   async function executarCiclo() {
     if (rodando || parado) return;
@@ -60,29 +102,61 @@ function startUberWorker(pool) {
         return;
       }
 
+      // Carregar checkpoint persistido na primeira execução
+      if (!ultimoIdCarregado) {
+        await carregarUltimoId();
+      }
+
+      const janelaMin = config.worker_janela_minutos || 30;
+
       // 1. Buscar serviços abertos
       const servicos = await mappListarServicos(pool, 0, ultimoId);
 
       if (servicos.length > 0) {
-        console.log(`🔍 [Uber Worker] ${servicos.length} serviço(s) aberto(s) encontrado(s)`);
+        console.log(`🔍 [Uber Worker] ${servicos.length} serviço(s) retornado(s) da Mapp (ultimoId=${ultimoId}, janela=${janelaMin}min)`);
+
+        let maiorIdProcessado = ultimoId;
+        let despachadas = 0, puladas_janela = 0, puladas_regra = 0, puladas_regiao = 0;
 
         for (const servico of servicos) {
           try {
-            // Atualizar ultimoId
-            if (servico.codigoOS > ultimoId) {
-              ultimoId = servico.codigoOS;
+            // Sempre atualiza o ponteiro pro maior id visto, mesmo se a OS for rejeitada
+            // (assim não voltamos a processar as mesmas OS em ciclos seguintes)
+            if (servico.codigoOS > maiorIdProcessado) {
+              maiorIdProcessado = servico.codigoOS;
             }
 
-            // 2. Verificar regras
-            const deveEnviarUber = await verificarRegras(pool, servico);
-            if (!deveEnviarUber) continue;
+            // 🔒 Filtro 1: Janela temporal — descarta OS antigas
+            if (!dentroDaJanela(servico, janelaMin)) {
+              puladas_janela++;
+              continue;
+            }
+
+            // 🔒 Filtro 2: Regras de cliente (opt-in estrito)
+            const decisao = await verificarRegras(pool, servico);
+            if (!decisao.despachar) {
+              if (decisao.motivo === 'regiao') puladas_regiao++;
+              else puladas_regra++;
+              continue;
+            }
 
             // 3. Despachar pro Uber
             await despacharParaUber(pool, servico);
+            despachadas++;
 
           } catch (err) {
             console.error(`❌ [Uber Worker] Erro processando OS ${servico.codigoOS}:`, err.message);
           }
+        }
+
+        // Persiste o checkpoint atualizado
+        if (maiorIdProcessado > ultimoId) {
+          ultimoId = maiorIdProcessado;
+          await salvarUltimoId();
+        }
+
+        if (despachadas > 0 || puladas_janela > 0 || puladas_regra > 0 || puladas_regiao > 0) {
+          console.log(`📊 [Uber Worker] Ciclo: ${despachadas} despachada(s), ${puladas_janela} fora da janela, ${puladas_regra} sem regra casando, ${puladas_regiao} fora da região`);
         }
       }
 
@@ -102,47 +176,92 @@ function startUberWorker(pool) {
     timeoutRef = setTimeout(executarCiclo, seg * 1000);
   }
 
+  /**
+   * verificarRegras — OPT-IN ESTRITO
+   *
+   * Retorna { despachar: boolean, motivo: string }:
+   *   - despachar=true SE e SOMENTE SE:
+   *     a) Existe pelo menos uma regra ativa em uber_regras_cliente
+   *     b) O nome/identificador da regra casa com o nome do ponto de coleta
+   *     c) A regra tem usar_uber = true
+   *     d) A OS cumpre horário, valor min/max (se definidos)
+   *     e) O endereço de coleta OU entrega casa com pelo menos uma das regiões
+   *        listadas em regioes_permitidas (se definidas)
+   *
+   *   - despachar=false em qualquer outro caso (SEM FALLBACK PERMISSIVO)
+   *
+   * Isso garante que o worker NUNCA despacha OS de cliente não cadastrado,
+   * e NUNCA manda OS pra Uber numa cidade onde ela não pode operar.
+   */
   async function verificarRegras(pool, servico) {
-    // Buscar regras ativas
     const { rows: regras } = await pool.query(
-      'SELECT * FROM uber_regras_cliente WHERE ativo = true'
+      'SELECT * FROM uber_regras_cliente WHERE ativo = true AND usar_uber = true'
     );
 
-    // Se não tem regras, envia tudo pro Uber (comportamento padrão quando auto_despacho ligado)
-    if (regras.length === 0) return true;
+    // 🔒 Sem regras cadastradas = não despacha NADA
+    if (regras.length === 0) {
+      return { despachar: false, motivo: 'sem_regras_cadastradas' };
+    }
 
-    // Tentar casar com alguma regra pelo nome do ponto de coleta
     const nomeColeta = (servico.endereco?.[0]?.nome || '').toLowerCase();
+    const enderecoColeta = (servico.endereco?.[0]?.rua || '').toLowerCase();
+    const enderecoEntrega = (servico.endereco?.[1]?.rua || '').toLowerCase();
 
+    // Tentar casar cliente por identificador (match exato) OU nome (contém)
+    let regraCasada = null;
     for (const regra of regras) {
-      const nomeRegra = (regra.cliente_nome || '').toLowerCase();
+      const nomeRegra = (regra.cliente_nome || '').toLowerCase().trim();
+      const identRegra = (regra.cliente_identificador || '').toLowerCase().trim();
 
-      // Match por nome (contém)
-      if (nomeColeta.includes(nomeRegra) || nomeRegra.includes(nomeColeta)) {
-        if (!regra.usar_uber) {
-          console.log(`🚫 [Uber Worker] OS ${servico.codigoOS} — regra "${regra.cliente_nome}": usar_uber=false`);
-          return false;
-        }
+      // Match 1: identificador exato
+      if (identRegra && nomeColeta.includes(identRegra)) {
+        regraCasada = regra;
+        break;
+      }
 
-        // Verificar horário
-        if (regra.horario_inicio && regra.horario_fim) {
-          const agora = new Date().toTimeString().slice(0, 5);
-          if (agora < regra.horario_inicio || agora > regra.horario_fim) {
-            console.log(`🕐 [Uber Worker] OS ${servico.codigoOS} — fora do horário ${regra.horario_inicio}-${regra.horario_fim}`);
-            return false;
-          }
-        }
-
-        // Verificar valor
-        if (regra.valor_minimo && servico.valorServico < parseFloat(regra.valor_minimo)) return false;
-        if (regra.valor_maximo && servico.valorServico > parseFloat(regra.valor_maximo)) return false;
-
-        return true;
+      // Match 2: nome do cliente contém/está contido
+      if (nomeRegra && nomeRegra.length >= 3 &&
+          (nomeColeta.includes(nomeRegra) || nomeRegra.includes(nomeColeta))) {
+        regraCasada = regra;
+        break;
       }
     }
 
-    // Nenhuma regra casou — comportamento padrão: enviar
-    return true;
+    if (!regraCasada) {
+      return { despachar: false, motivo: 'nenhuma_regra_casou' };
+    }
+
+    // Verificar horário
+    if (regraCasada.horario_inicio && regraCasada.horario_fim) {
+      const agora = new Date().toTimeString().slice(0, 5);
+      if (agora < regraCasada.horario_inicio || agora > regraCasada.horario_fim) {
+        console.log(`🕐 [Uber Worker] OS ${servico.codigoOS} — fora do horário ${regraCasada.horario_inicio}-${regraCasada.horario_fim}`);
+        return { despachar: false, motivo: 'fora_horario' };
+      }
+    }
+
+    // Verificar valor
+    if (regraCasada.valor_minimo && parseFloat(servico.valorServico) < parseFloat(regraCasada.valor_minimo)) {
+      return { despachar: false, motivo: 'valor_abaixo_minimo' };
+    }
+    if (regraCasada.valor_maximo && parseFloat(servico.valorServico) > parseFloat(regraCasada.valor_maximo)) {
+      return { despachar: false, motivo: 'valor_acima_maximo' };
+    }
+
+    // 🔒 Validar região — se a regra tem regiões definidas, o endereço precisa casar
+    if (Array.isArray(regraCasada.regioes_permitidas) && regraCasada.regioes_permitidas.length > 0) {
+      const casouRegiao = regraCasada.regioes_permitidas.some(reg => {
+        const r = (reg || '').toLowerCase().trim();
+        if (!r) return false;
+        return enderecoColeta.includes(r) || enderecoEntrega.includes(r);
+      });
+      if (!casouRegiao) {
+        console.log(`🗺️ [Uber Worker] OS ${servico.codigoOS} — cliente "${regraCasada.cliente_nome}" mas endereço fora das regiões permitidas`);
+        return { despachar: false, motivo: 'regiao' };
+      }
+    }
+
+    return { despachar: true, motivo: 'ok' };
   }
 
   // Iniciar polling
