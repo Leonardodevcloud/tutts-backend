@@ -107,84 +107,112 @@ function createUberWebhookRoutes(pool) {
   }
 
   /**
-   * POST /webhook/status — Receber atualizações de status da entrega
-   * Tipos: event.delivery_status
+   * Handler universal de webhook Uber Direct
+   *
+   * A Uber manda TODOS os eventos (delivery_status, courier_update, refund_request)
+   * para a MESMA URL cadastrada no painel. O tipo é distinguido pelo campo `kind`
+   * do payload. Por isso temos um único handler que detecta o tipo e roteia
+   * pro processador correto.
+   *
+   * Campo `kind` esperado no payload (documentação Uber):
+   *   - "event.delivery_status"  → processarWebhookStatus
+   *   - "event.courier_update"   → processarWebhookCourier
+   *   - "event.refund_request"   → apenas log (não tratado)
+   *
+   * Fallback: se `kind` ausente/desconhecido, usa heurística:
+   *   - tem data.courier.location mas data.status inalterado → courier_update
+   *   - tem data.status → delivery_status
    */
-  router.post('/status', verificarAssinaturaUber, async (req, res) => {
+  async function handleWebhookUniversal(req, res) {
     const payload = req.body;
 
     // Responder 200 imediatamente (Uber espera resposta rápida)
     res.status(200).json({ received: true });
 
-    try {
-      const deliveryId = payload.data?.id || payload.data?.delivery_id;
-      const status = payload.data?.status;
+    // Detectar tipo do evento
+    const kind = (payload?.kind || payload?.event_type || '').toLowerCase();
+    const deliveryId = payload?.data?.id || payload?.data?.delivery_id;
+    const status = payload?.data?.status;
+    const hasCourierLoc = !!(payload?.data?.courier?.location?.lat);
 
-      // Buscar codigoOS para log
-      let codigoOS = null;
-      if (deliveryId) {
-        const { rows } = await pool.query(
-          'SELECT codigo_os FROM uber_entregas WHERE uber_delivery_id = $1',
-          [deliveryId]
-        );
-        codigoOS = rows[0]?.codigo_os;
+    let tipo;
+    if (kind.includes('courier_update')) {
+      tipo = 'courier_update';
+    } else if (kind.includes('delivery_status')) {
+      tipo = 'delivery_status';
+    } else if (kind.includes('refund')) {
+      tipo = 'refund_request';
+    } else {
+      // Fallback heurístico: se vem com courier.location mas sem transição,
+      // provavelmente é courier_update; senão, trata como delivery_status
+      tipo = (hasCourierLoc && !status) ? 'courier_update' : 'delivery_status';
+    }
+
+    console.log(`📨 [Uber Webhook] kind="${kind || '(vazio)'}" → tipo=${tipo} | delivery=${deliveryId} | status=${status || '-'}`);
+
+    try {
+      if (tipo === 'delivery_status') {
+        // Buscar codigoOS para log
+        let codigoOS = null;
+        if (deliveryId) {
+          const { rows } = await pool.query(
+            'SELECT codigo_os FROM uber_entregas WHERE uber_delivery_id = $1',
+            [deliveryId]
+          );
+          codigoOS = rows[0]?.codigo_os;
+        }
+
+        await pool.query(`
+          INSERT INTO uber_webhooks_log (tipo, delivery_id, codigo_os, payload, processado)
+          VALUES ($1, $2, $3, $4, $5)
+        `, ['delivery_status', deliveryId, codigoOS, JSON.stringify(payload), false]);
+
+        await processarWebhookStatus(pool, payload);
+
+        await pool.query(`
+          UPDATE uber_webhooks_log SET processado = true
+          WHERE delivery_id = $1 AND tipo = 'delivery_status'
+          AND created_at = (SELECT MAX(created_at) FROM uber_webhooks_log WHERE delivery_id = $1 AND tipo = 'delivery_status')
+        `, [deliveryId]);
+
+      } else if (tipo === 'courier_update') {
+        await pool.query(`
+          INSERT INTO uber_webhooks_log (tipo, delivery_id, payload, processado)
+          VALUES ($1, $2, $3, $4)
+        `, ['courier_update', deliveryId, JSON.stringify({
+          status: payload?.data?.status,
+          has_courier: !!payload?.data?.courier,
+          courier_name: payload?.data?.courier?.name,
+        }), true]);
+
+        await processarWebhookCourier(pool, payload);
+
+      } else if (tipo === 'refund_request') {
+        await pool.query(`
+          INSERT INTO uber_webhooks_log (tipo, delivery_id, payload, processado)
+          VALUES ($1, $2, $3, $4)
+        `, ['refund_request', deliveryId, JSON.stringify(payload), true]);
+        console.log(`💰 [Uber Webhook] refund_request recebido — apenas logado (não tratado)`);
       }
 
-      // Registrar no log
-      await pool.query(`
-        INSERT INTO uber_webhooks_log (tipo, delivery_id, codigo_os, payload, processado)
-        VALUES ($1, $2, $3, $4, $5)
-      `, ['delivery_status', deliveryId, codigoOS, JSON.stringify(payload), false]);
-
-      console.log(`📨 [Uber Webhook] Status: delivery=${deliveryId}, status=${status}, OS=${codigoOS}`);
-
-      // Processar
-      await processarWebhookStatus(pool, payload);
-
-      // Marcar como processado
-      await pool.query(`
-        UPDATE uber_webhooks_log SET processado = true
-        WHERE delivery_id = $1 AND tipo = 'delivery_status'
-        AND created_at = (SELECT MAX(created_at) FROM uber_webhooks_log WHERE delivery_id = $1 AND tipo = 'delivery_status')
-      `, [deliveryId]);
-
     } catch (error) {
-      console.error('❌ [Uber Webhook] Erro ao processar status:', error.message);
-      // Registrar erro no log
+      console.error(`❌ [Uber Webhook] Erro ao processar ${tipo}:`, error.message);
       await pool.query(`
         UPDATE uber_webhooks_log SET erro = $1
-        WHERE delivery_id = $2 AND tipo = 'delivery_status'
-        AND created_at = (SELECT MAX(created_at) FROM uber_webhooks_log WHERE delivery_id = $2 AND tipo = 'delivery_status')
-      `, [error.message, req.body?.data?.id]).catch(() => {});
+        WHERE delivery_id = $2 AND tipo = $3
+        AND created_at = (SELECT MAX(created_at) FROM uber_webhooks_log WHERE delivery_id = $2 AND tipo = $3)
+      `, [error.message, deliveryId, tipo]).catch(() => {});
     }
-  });
+  }
 
-  /**
-   * POST /webhook/courier — Receber atualizações do entregador (lat/lng a cada 20s)
-   * Tipos: event.courier_update
-   */
-  router.post('/courier', verificarAssinaturaUber, async (req, res) => {
-    const payload = req.body;
+  // Rota raiz — aceita POST /api/uber/webhook (sem subpath)
+  router.post('/', verificarAssinaturaUber, handleWebhookUniversal);
 
-    // Responder 200 imediatamente
-    res.status(200).json({ received: true });
-
-    try {
-      const deliveryId = payload.data?.id || payload.data?.delivery_id;
-
-      // Log (sem salvar payload completo do courier update — é muito frequente)
-      await pool.query(`
-        INSERT INTO uber_webhooks_log (tipo, delivery_id, payload, processado)
-        VALUES ($1, $2, $3, $4)
-      `, ['courier_update', deliveryId, JSON.stringify({ status: payload.data?.status, has_courier: !!payload.data?.courier }), true]);
-
-      // Processar
-      await processarWebhookCourier(pool, payload);
-
-    } catch (error) {
-      console.error('❌ [Uber Webhook] Erro ao processar courier update:', error.message);
-    }
-  });
+  // Rotas legadas — mantidas por compatibilidade com URLs já cadastradas no painel Uber.
+  // Todas apontam pro mesmo handler universal, que detecta o tipo pelo payload.
+  router.post('/status',  verificarAssinaturaUber, handleWebhookUniversal);
+  router.post('/courier', verificarAssinaturaUber, handleWebhookUniversal);
+  router.post('/refund',  verificarAssinaturaUber, handleWebhookUniversal);
 
   return router;
 }
