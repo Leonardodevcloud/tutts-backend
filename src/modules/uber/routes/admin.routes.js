@@ -86,17 +86,68 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     }
   });
 
-  // Testar conexão com Mapp
+  // Testar conexão com Mapp — agora também retorna amostra dos serviços abertos
+  // pra facilitar descoberta dos campos reais que a Mapp retorna.
   router.post('/config/testar-mapp', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const servicos = await mappListarServicos(pool, 0, 0);
+
+      // Monta amostra enxuta com os campos que podem servir pra identificar o cliente
+      const amostra = servicos.slice(0, 20).map(s => ({
+        codigoOS: s.codigoOS,
+        dataHora: s.dataHora,
+        valorServico: s.valorServico,
+        // Tenta pegar vários campos candidatos pra identificação de cliente
+        coleta_nome: s.endereco?.[0]?.nome || null,
+        coleta_rua:  s.endereco?.[0]?.rua  || null,
+        coleta_bairro: s.endereco?.[0]?.bairro || null,
+        coleta_cidade: s.endereco?.[0]?.cidade || null,
+        entrega_nome: s.endereco?.[1]?.nome || null,
+        entrega_rua:  s.endereco?.[1]?.rua  || null,
+        // Campos top-level que podem conter cliente
+        obs: s.obs,
+        // Força listagem de TODAS as chaves presentes no serviço pra debug
+        _todas_chaves: Object.keys(s),
+      }));
+
       res.json({
         success: true,
         message: `Conexão OK! ${servicos.length} serviço(s) aberto(s) encontrado(s)`,
         total: servicos.length,
+        amostra,
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  // 🔬 DEBUG: Retorna o JSON CRU da Mapp (primeiro serviço aberto) sem processar nada.
+  // Uso: pra descobrir quais campos a Mapp realmente devolve além dos documentados.
+  router.get('/debug/mapp-raw', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const servicos = await mappListarServicos(pool, 0, 0);
+
+      if (!servicos || servicos.length === 0) {
+        return res.json({
+          success: true,
+          message: 'Nenhum serviço aberto na Mapp agora',
+          total: 0,
+          primeiro: null,
+        });
+      }
+
+      // Retorna o primeiro serviço INTEIRO, sem tocar em nada
+      res.json({
+        success: true,
+        total: servicos.length,
+        primeiro: servicos[0],
+        todas_chaves_primeiro: Object.keys(servicos[0]),
+        endereco_0_chaves: servicos[0].endereco?.[0] ? Object.keys(servicos[0].endereco[0]) : null,
+        endereco_1_chaves: servicos[0].endereco?.[1] ? Object.keys(servicos[0].endereco[1]) : null,
+      });
+    } catch (error) {
+      console.error('❌ [Debug Mapp] Erro:', error);
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 
@@ -122,7 +173,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
       if (!cliente_nome) return res.status(400).json({ error: 'Nome do cliente obrigatório' });
 
-      // Normaliza regioes_permitidas: aceita array ou string CSV, salva sempre como array
+      // Normaliza regioes_permitidas: aceita array ou string CSV, salva sempre como array lowercase
       let regioesArray = null;
       if (Array.isArray(regioes_permitidas)) {
         regioesArray = regioes_permitidas.map(r => String(r).trim().toLowerCase()).filter(Boolean);
