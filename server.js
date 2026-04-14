@@ -133,6 +133,14 @@ app.get('/api/version', (req, res) => {
 app.use("/api/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
 app.use("/api/solicitacao/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
 
+// 🪝 Webhooks Uber Direct — montados ANTES de qualquer auth global
+// 🔒 SECURITY FIX: middlewares globais como `app.use('/api', verificarToken, ...)`
+// (linhas mais abaixo) interceptam TODA request /api/* e abortam com 401 antes de
+// chegar no router /api/uber. Por isso o sub-router de webhook (público, validado
+// por HMAC dentro dele mesmo) precisa ser montado AQUI, antes desses middlewares.
+const { createUberWebhookRoutes } = require('./src/modules/uber/routes/webhook.routes');
+app.use('/api/uber/webhook', createUberWebhookRoutes(pool));
+
 // 🔒 SECURITY FIX (AUDIT-10): Rotas de init/overrides extraídas para módulo próprio
 const { createBootstrapRoutes } = require('./src/modules/bootstrap/bootstrap.routes');
 app.use('/api', createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAdminOuFinanceiro));
