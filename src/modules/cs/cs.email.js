@@ -1,58 +1,30 @@
 /**
- * CS Email Service — Envio de Raio-X por email
- * Usa SMTP via nodemailer (compatível com cPanel/hoomhost, Office365, Gmail, etc)
+ * CS Email Service — Envio de Raio-X por email via Resend
  *
- * Configuração via .env:
- *   SMTP_HOST    = mail.tutts.com.br
- *   SMTP_PORT    = 465
- *   SMTP_SECURE  = true       (true para 465 SSL/TLS, false para 587 STARTTLS)
- *   SMTP_USER    = supervisor@tutts.com.br
- *   SMTP_PASS    = <senha-do-email>
- *   SMTP_FROM    = supervisor@tutts.com.br   (opcional — default = SMTP_USER)
- *   SMTP_FROM_NAME = Tutts Logística         (opcional — default = "Tutts Logística")
+ * Usa a API HTTP do Resend (https://resend.com/docs/api-reference/emails/send-email)
+ * em vez de SMTP, o que elimina problemas de porta bloqueada no Railway e latência
+ * de cold start na negociação TLS.
+ *
+ * Configuração via .env (Railway):
+ *   RESEND_API_KEY    = re_xxxxxxxxxxxxxxxx   (obrigatório)
+ *   RESEND_FROM       = supervisor@tutts.com.br  (precisa estar no domínio verificado no Resend)
+ *   RESEND_FROM_NAME  = Tutts Logística       (opcional — default "Tutts Logística")
  */
 
-const nodemailer = require('nodemailer');
+const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 
-let transporterCache = null;
+function getResendConfig() {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM;
+  const fromName = process.env.RESEND_FROM_NAME || 'Tutts Logística';
 
-/**
- * Cria (ou reusa) o transporter SMTP.
- * O nodemailer mantém pool de conexões TCP — bom pra throughput.
- */
-function getTransporter() {
-  if (transporterCache) return transporterCache;
-
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT || '465', 10);
-  const secure = String(process.env.SMTP_SECURE || 'true').toLowerCase() === 'true';
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!host || !user || !pass) {
-    throw new Error(
-      'SMTP não configurado. Defina SMTP_HOST, SMTP_USER e SMTP_PASS no .env do Railway'
-    );
+  if (!apiKey) {
+    throw new Error('Resend não configurado: defina RESEND_API_KEY no Railway');
   }
-
-  transporterCache = nodemailer.createTransport({
-    host,
-    port,
-    secure, // true = SSL/TLS direto (465); false = STARTTLS upgrade (587)
-    auth: { user, pass },
-    pool: true,
-    maxConnections: 3,
-    maxMessages: 100,
-    // Timeout generoso pra evitar problemas de cold start no Railway
-    connectionTimeout: 15000,
-    greetingTimeout: 10000,
-    socketTimeout: 20000,
-    // hoomhost às vezes apresenta certificado auto-assinado — não derruba conexão
-    tls: { rejectUnauthorized: false },
-  });
-
-  console.log(`📧 [SMTP] Transporter criado: ${user}@${host}:${port} (secure=${secure})`);
-  return transporterCache;
+  if (!from) {
+    throw new Error('Resend não configurado: defina RESEND_FROM (email do domínio verificado)');
+  }
+  return { apiKey, from, fromName };
 }
 
 function gerarEmailHTML(raioX, cliente, periodo) {
@@ -62,7 +34,7 @@ function gerarEmailHTML(raioX, cliente, periodo) {
 
   let conteudo = raioX.analise_texto || raioX.analise || '';
 
-  // Proteger blocos SVG/HTML inline antes do processamento
+  // Proteger blocos SVG/HTML inline antes do processamento markdown
   const htmlBlocks = [];
   let safetyCounter = 0;
   while (safetyCounter < 20) {
@@ -83,7 +55,7 @@ function gerarEmailHTML(raioX, cliente, periodo) {
     safetyCounter++;
   }
 
-  // Markdown → HTML (inline styles para compatibilidade com email)
+  // Markdown → HTML (inline styles para compatibilidade com clientes de email)
   conteudo = conteudo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/^### (.+)$/gm, '<h3 style="font-size:16px;color:#4f46e5;margin-top:28px;margin-bottom:8px;border-bottom:2px solid #e0e7ff;padding-bottom:4px">$1</h3>')
@@ -102,7 +74,7 @@ function gerarEmailHTML(raioX, cliente, periodo) {
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n/g, '<br>');
 
-  // Restaurar blocos SVG
+  // Restaurar blocos SVG/HTML protegidos
   htmlBlocks.forEach((block, i) => {
     conteudo = conteudo.replace(`__HTMLBLOCK_${i}__`, block);
   });
@@ -154,7 +126,19 @@ ${conteudo}
 }
 
 /**
- * Envia o relatório Raio-X por email via SMTP.
+ * Normaliza destinatários para array de strings (formato esperado pelo Resend).
+ */
+function normalizarDestinatarios(valor) {
+  if (!valor) return undefined;
+  if (Array.isArray(valor)) return valor.map((v) => String(v).trim()).filter(Boolean);
+  return String(valor)
+    .split(/[;,]/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Envia o relatório Raio-X por email via Resend.
  *
  * @param {Object} opts
  * @param {string|string[]} opts.para  Email(s) destinatário
@@ -162,65 +146,123 @@ ${conteudo}
  * @param {Object} opts.raioX          Objeto do raio-x (analise_texto, score_saude)
  * @param {Object} opts.cliente        { nome }
  * @param {Object} opts.periodo        { inicio, fim }
- * @param {string} [opts.remetente]    Email remetente customizado (fallback: SMTP_FROM ou SMTP_USER)
+ * @param {string} [opts.remetente]    Email remetente customizado (precisa estar no domínio verificado)
  */
 async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente }) {
-  const transporter = getTransporter();
+  const { apiKey, from, fromName } = getResendConfig();
 
-  const fromEmail = remetente || process.env.SMTP_FROM || process.env.SMTP_USER;
-  const fromName = process.env.SMTP_FROM_NAME || 'Tutts Logística';
-
+  const fromEmail = remetente || from;
   const html = gerarEmailHTML(raioX, cliente, periodo);
   const nomeCliente = cliente.nome || 'Cliente';
   const subject = `Raio-X Operacional - ${nomeCliente} (${periodo.inicio} a ${periodo.fim})`;
 
-  const mailOptions = {
-    from: `"${fromName}" <${fromEmail}>`,
-    to: Array.isArray(para) ? para.join(', ') : para,
-    replyTo: fromEmail,
+  const destinatarios = normalizarDestinatarios(para);
+  if (!destinatarios || destinatarios.length === 0) {
+    throw new Error('Nenhum destinatário válido informado');
+  }
+
+  const payload = {
+    from: `${fromName} <${fromEmail}>`,
+    to: destinatarios,
+    reply_to: fromEmail,
     subject,
     html,
   };
-  if (cc) {
-    mailOptions.cc = Array.isArray(cc) ? cc.join(', ') : cc;
+  const ccList = normalizarDestinatarios(cc);
+  if (ccList && ccList.length > 0) payload.cc = ccList;
+
+  let response;
+  try {
+    response = await fetch(RESEND_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      // timeout implícito — Resend responde em <2s normalmente
+    });
+  } catch (error) {
+    console.error('❌ [Resend] Erro de rede:', error.message);
+    throw new Error(`Falha de rede ao chamar Resend: ${error.message}`);
   }
 
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`📧 [SMTP] Email Raio-X enviado: ${mailOptions.to} (messageId: ${info.messageId})`);
-    return {
-      messageId: info.messageId,
-      accepted: info.accepted || [para],
-      rejected: info.rejected || [],
-      response: info.response,
-    };
-  } catch (error) {
-    console.error('❌ [SMTP] Erro ao enviar email:', error.message);
-    // Erros mais comuns mapeados pra mensagem amigável
-    if (error.code === 'EAUTH') {
-      throw new Error('Autenticação SMTP falhou — verifique SMTP_USER e SMTP_PASS no Railway');
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    console.error('❌ [Resend] Erro HTTP', response.status, data);
+    // Mensagens amigáveis para os erros mais comuns do Resend
+    const msg = data.message || data.error || response.statusText;
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('API key do Resend inválida ou sem permissão — verifique RESEND_API_KEY');
     }
-    if (error.code === 'ECONNECTION' || error.code === 'ETIMEDOUT') {
-      throw new Error(`Não foi possível conectar em ${process.env.SMTP_HOST}:${process.env.SMTP_PORT} — verifique se a porta está liberada no Railway`);
+    if (response.status === 422) {
+      throw new Error(`Dados inválidos para Resend: ${msg} (verifique se ${fromEmail} está no domínio verificado)`);
     }
-    if (error.code === 'EENVELOPE') {
-      throw new Error('Endereço de remetente ou destinatário inválido');
+    if (response.status === 429) {
+      throw new Error('Limite de envio do Resend atingido — aguarde alguns segundos e tente novamente');
     }
-    throw new Error(`Falha SMTP: ${error.message}`);
+    throw new Error(`Resend ${response.status}: ${msg}`);
   }
+
+  console.log(`📧 [Resend] Email Raio-X enviado: ${destinatarios.join(', ')} (id: ${data.id})`);
+  return {
+    messageId: data.id,
+    accepted: destinatarios,
+    rejected: [],
+    response: `Resend ${response.status}`,
+  };
 }
 
 /**
- * Testa a conexão SMTP sem enviar email.
- * Útil pra debugar configuração no startup ou via endpoint.
+ * Testa a API do Resend sem enviar email — valida a API key chamando o endpoint
+ * de listagem de domínios (read-only, não consome cota de envio).
  */
 async function testarConexaoSMTP() {
   try {
-    const transporter = getTransporter();
-    await transporter.verify();
-    return { ok: true, message: 'Conexão SMTP OK' };
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) {
+      return { ok: false, message: 'RESEND_API_KEY não configurada no Railway', code: 'NO_KEY' };
+    }
+    if (!process.env.RESEND_FROM) {
+      return { ok: false, message: 'RESEND_FROM não configurada no Railway', code: 'NO_FROM' };
+    }
+
+    const response = await fetch('https://api.resend.com/domains', {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, message: 'API key do Resend inválida ou sem permissão', code: 'EAUTH' };
+    }
+    if (!response.ok) {
+      return { ok: false, message: `Resend respondeu ${response.status}`, code: 'HTTP_' + response.status };
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const domains = Array.isArray(data.data) ? data.data : [];
+    const fromDomain = process.env.RESEND_FROM.split('@')[1];
+    const match = domains.find((d) => d.name === fromDomain);
+
+    if (!match) {
+      return {
+        ok: false,
+        message: `Domínio "${fromDomain}" não encontrado na conta Resend — verifique RESEND_FROM`,
+        code: 'NO_DOMAIN',
+      };
+    }
+    if (match.status !== 'verified') {
+      return {
+        ok: false,
+        message: `Domínio "${fromDomain}" não está verificado no Resend (status: ${match.status})`,
+        code: 'NOT_VERIFIED',
+      };
+    }
+
+    return { ok: true, message: `Conexão Resend OK — domínio ${fromDomain} verificado` };
   } catch (error) {
-    return { ok: false, message: error.message, code: error.code };
+    return { ok: false, message: error.message, code: error.code || 'UNKNOWN' };
   }
 }
 
