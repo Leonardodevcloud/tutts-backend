@@ -39,6 +39,7 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
         mapp_api_url, mapp_api_token, polling_intervalo_seg,
         auto_despacho, timeout_sem_entregador_min,
         telefone_suporte, manifest_total_value_centavos,
+        sandbox_mode, worker_janela_minutos,
       } = req.body;
 
       // Montar SET dinâmico (só atualiza campos enviados)
@@ -65,6 +66,8 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       addCampo('timeout_sem_entregador_min', timeout_sem_entregador_min);
       addCampo('telefone_suporte', telefone_suporte);
       addCampo('manifest_total_value_centavos', manifest_total_value_centavos);
+      addCampo('sandbox_mode', sandbox_mode);
+      addCampo('worker_janela_minutos', worker_janela_minutos);
 
       if (campos.length === 0) {
         return res.status(400).json({ error: 'Nenhum campo para atualizar' });
@@ -111,15 +114,36 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
   router.post('/regras', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const { cliente_nome, cliente_identificador, usar_uber, prioridade, horario_inicio, horario_fim, valor_minimo, valor_maximo } = req.body;
+      const {
+        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        horario_inicio, horario_fim, valor_minimo, valor_maximo,
+        regioes_permitidas, ativo,
+      } = req.body;
 
       if (!cliente_nome) return res.status(400).json({ error: 'Nome do cliente obrigatório' });
 
+      // Normaliza regioes_permitidas: aceita array ou string CSV, salva sempre como array
+      let regioesArray = null;
+      if (Array.isArray(regioes_permitidas)) {
+        regioesArray = regioes_permitidas.map(r => String(r).trim().toLowerCase()).filter(Boolean);
+      } else if (typeof regioes_permitidas === 'string' && regioes_permitidas.trim()) {
+        regioesArray = regioes_permitidas.split(',').map(r => r.trim().toLowerCase()).filter(Boolean);
+      }
+
       const { rows: [regra] } = await pool.query(`
-        INSERT INTO uber_regras_cliente (cliente_nome, cliente_identificador, usar_uber, prioridade, horario_inicio, horario_fim, valor_minimo, valor_maximo)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO uber_regras_cliente (
+          cliente_nome, cliente_identificador, usar_uber, prioridade,
+          horario_inicio, horario_fim, valor_minimo, valor_maximo,
+          regioes_permitidas, ativo
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
-      `, [cliente_nome, cliente_identificador, usar_uber ?? true, prioridade || 'uber_primeiro', horario_inicio, horario_fim, valor_minimo, valor_maximo]);
+      `, [
+        cliente_nome, cliente_identificador || null, usar_uber ?? true,
+        prioridade || 'uber_primeiro', horario_inicio || null, horario_fim || null,
+        valor_minimo || null, valor_maximo || null,
+        regioesArray, ativo ?? true,
+      ]);
 
       await registrarAuditoria(req, 'CRIAR_REGRA_UBER', 'config', 'uber_regras_cliente', regra.id, { cliente_nome });
 
@@ -133,23 +157,47 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
   router.put('/regras/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const { cliente_nome, usar_uber, prioridade, horario_inicio, horario_fim, valor_minimo, valor_maximo, ativo } = req.body;
+      const {
+        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        horario_inicio, horario_fim, valor_minimo, valor_maximo,
+        regioes_permitidas, ativo,
+      } = req.body;
+
+      // Normaliza regioes_permitidas como no POST
+      let regioesArray;
+      if (regioes_permitidas === undefined) {
+        regioesArray = undefined;  // não atualiza
+      } else if (Array.isArray(regioes_permitidas)) {
+        regioesArray = regioes_permitidas.map(r => String(r).trim().toLowerCase()).filter(Boolean);
+      } else if (typeof regioes_permitidas === 'string') {
+        regioesArray = regioes_permitidas.split(',').map(r => r.trim().toLowerCase()).filter(Boolean);
+      } else {
+        regioesArray = null;
+      }
 
       const { rows: [regra] } = await pool.query(`
         UPDATE uber_regras_cliente SET
           cliente_nome = COALESCE($1, cliente_nome),
-          usar_uber = COALESCE($2, usar_uber),
-          prioridade = COALESCE($3, prioridade),
-          horario_inicio = $4,
-          horario_fim = $5,
-          valor_minimo = $6,
-          valor_maximo = $7,
-          ativo = COALESCE($8, ativo),
+          cliente_identificador = COALESCE($2, cliente_identificador),
+          usar_uber = COALESCE($3, usar_uber),
+          prioridade = COALESCE($4, prioridade),
+          horario_inicio = $5,
+          horario_fim = $6,
+          valor_minimo = $7,
+          valor_maximo = $8,
+          regioes_permitidas = COALESCE($9::text[], regioes_permitidas),
+          ativo = COALESCE($10, ativo),
           updated_at = NOW()
-        WHERE id = $9 RETURNING *
-      `, [cliente_nome, usar_uber, prioridade, horario_inicio, horario_fim, valor_minimo, valor_maximo, ativo, id]);
+        WHERE id = $11 RETURNING *
+      `, [
+        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        horario_inicio, horario_fim, valor_minimo, valor_maximo,
+        regioesArray, ativo, id,
+      ]);
 
       if (!regra) return res.status(404).json({ error: 'Regra não encontrada' });
+
+      await registrarAuditoria(req, 'ATUALIZAR_REGRA_UBER', 'config', 'uber_regras_cliente', regra.id, { cliente_nome: regra.cliente_nome });
 
       res.json({ success: true, regra });
     } catch (error) {
