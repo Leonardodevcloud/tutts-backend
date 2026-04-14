@@ -7,6 +7,7 @@ const {
   obterConfig, despacharParaUber, mappListarServicos,
   mappAlterarStatus, uberCancelarEntrega, uberConsultarEntrega,
   mappInformarChegada, mappFinalizarEndereco, mappFinalizarServico,
+  cancelarERedespacharEntrega,
 } = require('../uber.service');
 
 function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
@@ -166,12 +167,17 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
   router.post('/regras', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const {
-        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
       } = req.body;
 
-      if (!cliente_nome) return res.status(400).json({ error: 'Nome do cliente obrigatório' });
+      if (!cliente_nome || !cliente_nome.trim()) {
+        return res.status(400).json({ error: 'Nome do cliente é obrigatório' });
+      }
+      if (!trecho_endereco || trecho_endereco.trim().length < 5) {
+        return res.status(400).json({ error: 'Trecho do endereço deve ter pelo menos 5 caracteres' });
+      }
 
       // Normaliza regioes_permitidas: aceita array ou string CSV, salva sempre como array lowercase
       let regioesArray = null;
@@ -183,14 +189,15 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
       const { rows: [regra] } = await pool.query(`
         INSERT INTO uber_regras_cliente (
-          cliente_nome, cliente_identificador, usar_uber, prioridade,
+          cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
           horario_inicio, horario_fim, valor_minimo, valor_maximo,
           regioes_permitidas, ativo
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `, [
-        cliente_nome, cliente_identificador || null, usar_uber ?? true,
+        cliente_nome.trim(), trecho_endereco.trim().toLowerCase(),
+        cliente_identificador || null, usar_uber ?? true,
         prioridade || 'uber_primeiro', horario_inicio || null, horario_fim || null,
         valor_minimo || null, valor_maximo || null,
         regioesArray, ativo ?? true,
@@ -209,10 +216,15 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     try {
       const { id } = req.params;
       const {
-        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        cliente_nome, trecho_endereco, cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
       } = req.body;
+
+      // Validações apenas se os campos foram enviados
+      if (trecho_endereco !== undefined && (!trecho_endereco || trecho_endereco.trim().length < 5)) {
+        return res.status(400).json({ error: 'Trecho do endereço deve ter pelo menos 5 caracteres' });
+      }
 
       // Normaliza regioes_permitidas como no POST
       let regioesArray;
@@ -229,19 +241,22 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       const { rows: [regra] } = await pool.query(`
         UPDATE uber_regras_cliente SET
           cliente_nome = COALESCE($1, cliente_nome),
-          cliente_identificador = COALESCE($2, cliente_identificador),
-          usar_uber = COALESCE($3, usar_uber),
-          prioridade = COALESCE($4, prioridade),
-          horario_inicio = $5,
-          horario_fim = $6,
-          valor_minimo = $7,
-          valor_maximo = $8,
-          regioes_permitidas = COALESCE($9::text[], regioes_permitidas),
-          ativo = COALESCE($10, ativo),
+          trecho_endereco = COALESCE($2, trecho_endereco),
+          cliente_identificador = COALESCE($3, cliente_identificador),
+          usar_uber = COALESCE($4, usar_uber),
+          prioridade = COALESCE($5, prioridade),
+          horario_inicio = $6,
+          horario_fim = $7,
+          valor_minimo = $8,
+          valor_maximo = $9,
+          regioes_permitidas = COALESCE($10::text[], regioes_permitidas),
+          ativo = COALESCE($11, ativo),
           updated_at = NOW()
-        WHERE id = $11 RETURNING *
+        WHERE id = $12 RETURNING *
       `, [
-        cliente_nome, cliente_identificador, usar_uber, prioridade,
+        cliente_nome ? cliente_nome.trim() : null,
+        trecho_endereco ? trecho_endereco.trim().toLowerCase() : null,
+        cliente_identificador, usar_uber, prioridade,
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioesArray, ativo, id,
       ]);
@@ -294,9 +309,11 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
       }
 
       const { rows: entregas } = await pool.query(`
-        SELECT e.*, 
+        SELECT e.*,
+          r.cliente_nome AS cliente_nome_regra,
           (SELECT COUNT(*) FROM uber_tracking t WHERE t.codigo_os = e.codigo_os) as total_tracking
         FROM uber_entregas e
+        LEFT JOIN uber_regras_cliente r ON r.id = e.regra_id
         ${where}
         ORDER BY e.created_at DESC
         LIMIT $${idx++} OFFSET $${idx++}
@@ -405,6 +422,128 @@ function createUberAdminRoutes(pool, verificarToken, verificarAdmin, registrarAu
     } catch (error) {
       console.error('❌ Erro ao cancelar:', error);
       res.status(500).json({ error: 'Erro ao cancelar entrega' });
+    }
+  });
+
+  // 🔄 Cancelar a entrega ATUAL e redespachar no Uber com novo endereço de entrega.
+  // Usado quando o operador percebe que o endereço de entrega estava errado
+  // depois que a delivery já foi criada na Uber.
+  // Body: { novo_endereco: "string", nome_destinatario?, telefone_destinatario?, complemento? }
+  router.post('/entregas/:id/redespachar', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { novo_endereco, nome_destinatario, telefone_destinatario, complemento } = req.body;
+
+      if (!novo_endereco || novo_endereco.trim().length < 8) {
+        return res.status(400).json({ error: 'Novo endereço de entrega obrigatório (mínimo 8 caracteres)' });
+      }
+
+      const resultado = await cancelarERedespacharEntrega(pool, parseInt(id), novo_endereco.trim(), {
+        nome_destinatario,
+        telefone_destinatario,
+        complemento,
+      });
+
+      await registrarAuditoria(
+        req, 'REDESPACHAR_UBER', 'admin', 'uber_entregas', id,
+        { entrega_nova_id: resultado.entrega_nova_id, novo_endereco }
+      );
+
+      res.json({
+        success: true,
+        message: 'Entrega cancelada e redespachada com sucesso',
+        ...resultado,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao redespachar:', error);
+      res.status(500).json({ error: error.message || 'Erro ao redespachar entrega' });
+    }
+  });
+
+  // 📊 Dashboard de margem por cliente / período
+  // Query params: periodo=1d|7d|30d|custom, inicio=YYYY-MM-DD, fim=YYYY-MM-DD
+  router.get('/dashboard/margem-clientes', verificarToken, async (req, res) => {
+    try {
+      const { periodo = '7d', inicio, fim } = req.query;
+
+      // Calcula janela de datas
+      let dataInicio;
+      const dataFim = fim ? new Date(fim + ' 23:59:59') : new Date();
+      if (periodo === '1d') {
+        dataInicio = new Date(); dataInicio.setHours(0, 0, 0, 0);
+      } else if (periodo === '7d') {
+        dataInicio = new Date(); dataInicio.setDate(dataInicio.getDate() - 7);
+      } else if (periodo === '30d') {
+        dataInicio = new Date(); dataInicio.setDate(dataInicio.getDate() - 30);
+      } else if (periodo === 'custom' && inicio) {
+        dataInicio = new Date(inicio + ' 00:00:00');
+      } else {
+        dataInicio = new Date(); dataInicio.setDate(dataInicio.getDate() - 7);
+      }
+
+      // Agregação por cliente: usa LEFT JOIN com regras pra trazer cliente_nome.
+      // Despachos manuais (regra_id NULL) caem no bucket "Manual / sem regra".
+      const { rows: porCliente } = await pool.query(`
+        SELECT
+          COALESCE(r.cliente_nome, 'Manual / sem regra') AS cliente,
+          e.regra_id,
+          COUNT(*) AS qtd,
+          COUNT(*) FILTER (WHERE e.status_uber IN ('cancelado', 'canceled')) AS cancelados,
+          COALESCE(SUM(e.valor_servico), 0)::numeric AS receita_total,
+          COALESCE(SUM(e.valor_uber), 0)::numeric AS custo_uber_total,
+          COALESCE(SUM(e.valor_servico - e.valor_uber), 0)::numeric AS margem_total,
+          COALESCE(AVG(e.valor_servico - e.valor_uber), 0)::numeric AS margem_media
+        FROM uber_entregas e
+        LEFT JOIN uber_regras_cliente r ON r.id = e.regra_id
+        WHERE e.created_at BETWEEN $1 AND $2
+          AND e.valor_uber IS NOT NULL
+        GROUP BY r.cliente_nome, e.regra_id
+        ORDER BY margem_total DESC
+      `, [dataInicio, dataFim]);
+
+      // Margem por dia (pra gráfico)
+      const { rows: porDia } = await pool.query(`
+        SELECT
+          DATE(e.created_at) AS dia,
+          COUNT(*) AS qtd,
+          COALESCE(SUM(e.valor_servico - e.valor_uber), 0)::numeric AS margem
+        FROM uber_entregas e
+        WHERE e.created_at BETWEEN $1 AND $2
+          AND e.valor_uber IS NOT NULL
+        GROUP BY DATE(e.created_at)
+        ORDER BY dia ASC
+      `, [dataInicio, dataFim]);
+
+      // Totais gerais
+      const { rows: [totais] } = await pool.query(`
+        SELECT
+          COUNT(*)::int AS qtd_total,
+          COALESCE(SUM(valor_servico), 0)::numeric AS receita,
+          COALESCE(SUM(valor_uber), 0)::numeric AS custo,
+          COALESCE(SUM(valor_servico - valor_uber), 0)::numeric AS margem
+        FROM uber_entregas
+        WHERE created_at BETWEEN $1 AND $2
+          AND valor_uber IS NOT NULL
+      `, [dataInicio, dataFim]);
+
+      res.json({
+        success: true,
+        periodo: { tipo: periodo, inicio: dataInicio, fim: dataFim },
+        totais,
+        por_cliente: porCliente.map(r => ({
+          ...r,
+          margem_pct: r.receita_total > 0
+            ? (parseFloat(r.margem_total) / parseFloat(r.receita_total)) * 100
+            : 0,
+          taxa_cancelamento: r.qtd > 0
+            ? (parseFloat(r.cancelados) / parseFloat(r.qtd)) * 100
+            : 0,
+        })),
+        por_dia: porDia,
+      });
+    } catch (error) {
+      console.error('❌ Erro dashboard margem:', error);
+      res.status(500).json({ error: 'Erro ao buscar dashboard de margem' });
     }
   });
 
