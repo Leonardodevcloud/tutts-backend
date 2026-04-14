@@ -503,11 +503,11 @@ async function despacharParaUber(pool, servico) {
 
     await pool.query(`
       UPDATE uber_entregas
-      SET uber_delivery_id = $1, status_uber = $2, updated_at = NOW()
-      WHERE id = $3
-    `, [entregaUber.delivery_id, 'enviado_uber', registro.id]);
+      SET uber_delivery_id = $1, status_uber = $2, tracking_url = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [entregaUber.delivery_id, 'enviado_uber', entregaUber.tracking_url || null, registro.id]);
 
-    console.log(`✅ [Uber] OS ${codigoOS} despachada → delivery_id=${entregaUber.delivery_id}`);
+    console.log(`✅ [Uber] OS ${codigoOS} despachada → delivery_id=${entregaUber.delivery_id} | tracking=${entregaUber.tracking_url ? 'OK' : 'sem url'}`);
 
     return { ...registro, uber_delivery_id: entregaUber.delivery_id, cotacao };
 
@@ -567,10 +567,18 @@ async function processarWebhookStatus(pool, payload) {
 
   console.log(`📡 [Uber] Status OS=${codigoOS}: ${entrega.status_uber} → ${novoStatus} (${statusInfo?.descricao || '?'})`);
 
-  // Atualizar status local
-  await pool.query(`
-    UPDATE uber_entregas SET status_uber = $1, updated_at = NOW() WHERE id = $2
-  `, [novoStatus, entrega.id]);
+  // Atualizar status local + backfill tracking_url se ainda não foi salvo
+  // (defensivo — pode acontecer de uma entrega antiga não ter tracking_url salvo)
+  const trackingUrlPayload = payload.data?.tracking_url;
+  if (trackingUrlPayload && !entrega.tracking_url) {
+    await pool.query(`
+      UPDATE uber_entregas SET status_uber = $1, tracking_url = $2, updated_at = NOW() WHERE id = $3
+    `, [novoStatus, trackingUrlPayload, entrega.id]);
+  } else {
+    await pool.query(`
+      UPDATE uber_entregas SET status_uber = $1, updated_at = NOW() WHERE id = $2
+    `, [novoStatus, entrega.id]);
+  }
 
   // Executar ação na Mapp conforme mapeamento
   if (!statusInfo || !statusInfo.acao_mapp) return;
