@@ -72,7 +72,9 @@ function createRaioXClienteRoutes(pool) {
     if (!items.length) return '<div style="color:#94a3b8;text-align:center;padding:20px;font-size:12px">Sem dados</div>';
 
     const maxVal = Math.max.apply(null, items.map((i) => parseFloat(i[valKey]) || 0).concat([1]));
-    const leftPad = 50, rightPad = 20, bottomY = chartH + 30, topPad = 20;
+    // topPad generoso pra caber label da barra + badge da linha + folga
+    const leftPad = 50, rightPad = 20, topPad = 44;
+    const bottomY = chartH + topPad;
     const totalW = width - leftPad - rightPad;
     const barW = Math.max(14, Math.min(52, Math.floor(totalW / items.length) - 8));
     const usedW = items.length * (barW + 8);
@@ -86,8 +88,9 @@ function createRaioXClienteRoutes(pool) {
       svg += `<text x="${leftPad - 8}" y="${gy + 4}" text-anchor="end" font-size="10" fill="${TEXTO_CLARO}" font-family="Segoe UI,sans-serif">${gv}</text>`;
     }
 
-    // Barras
+    // Desenha as barras + guarda posições dos topos
     const barTops = [];
+    const barLabelPositions = [];  // onde cada label "233" foi desenhado
     items.forEach((item, idx) => {
       const x = leftPad + idx * (barW + 8) + 4;
       const val = parseFloat(item[valKey]) || 0;
@@ -96,13 +99,18 @@ function createRaioXClienteRoutes(pool) {
       barTops.push(y);
       svg += `<rect x="${x}" y="${y}" width="${barW}" height="${bh}" rx="3" fill="${ROXO}"/>`;
       if (barW >= 18) {
-        svg += `<text x="${x + barW / 2}" y="${y - 6}" text-anchor="middle" font-size="10" font-weight="700" fill="${TEXTO}" font-family="Segoe UI,sans-serif">${Math.round(val)}</text>`;
+        // Label do valor da barra fica 6px acima do topo da barra
+        const barLabelY = y - 6;
+        barLabelPositions.push(barLabelY);
+        svg += `<text x="${x + barW / 2}" y="${barLabelY}" text-anchor="middle" font-size="10" font-weight="700" fill="${TEXTO}" font-family="Segoe UI,sans-serif">${Math.round(val)}</text>`;
+      } else {
+        barLabelPositions.push(y - 6);
       }
       const labelTxt = (item[labelKey] || '').toString().substring(0, 10);
       svg += `<text x="${x + barW / 2}" y="${bottomY + 14}" text-anchor="middle" font-size="${barW >= 22 ? 10 : 8}" fill="${TEXTO_CLARO}" font-family="Segoe UI,sans-serif">${labelTxt}</text>`;
     });
 
-    // Linha sobreposta (taxa de prazo)
+    // Linha sobreposta (taxa de prazo) + badges sem colisão
     if (val2Key) {
       const points = items.map((item, idx) => {
         const x = leftPad + idx * (barW + 8) + 4 + barW / 2;
@@ -110,18 +118,36 @@ function createRaioXClienteRoutes(pool) {
         return x + ',' + (bottomY - (v2 / 100) * chartH);
       }).join(' ');
       svg += `<polyline points="${points}" fill="none" stroke="${LARANJA}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+      const BADGE_H = 16;            // altura do badge "92%"
+      const BAR_LABEL_FONT_H = 12;   // altura visual do label "233"
+      const GAP = 6;                 // folga entre badge e label da barra
+
       items.forEach((item, idx) => {
         const x = leftPad + idx * (barW + 8) + 4 + barW / 2;
         const v2 = parseFloat(item[val2Key]) || 0;
         const ly = bottomY - (v2 / 100) * chartH;
+        const barLabelY = barLabelPositions[idx];  // y do texto do label da barra
+
+        // Posição padrão: centro do badge 14px acima da linha
+        let badgeCenterY = ly - 14;
+        // Colisão: se o badge iria cair em cima do label da barra, empurra pra cima
+        // Label da barra ocupa de barLabelY-8 até barLabelY+4 (aprox)
+        // Badge ocupa de badgeCenterY-8 até badgeCenterY+8
+        const labelTop = barLabelY - BAR_LABEL_FONT_H + 2;
+        if (badgeCenterY + BADGE_H / 2 + GAP > labelTop && badgeCenterY < barLabelY + GAP) {
+          // Conflito: move o badge pra FICAR acima do label da barra
+          badgeCenterY = labelTop - BADGE_H / 2 - GAP;
+        }
+        // Se ficou muito alto (saiu do SVG), joga pra baixo da linha
+        if (badgeCenterY - BADGE_H / 2 < 4) {
+          badgeCenterY = ly + 18;
+        }
+
         svg += `<circle cx="${x}" cy="${ly}" r="4" fill="${LARANJA}" stroke="white" stroke-width="1.5"/>`;
         if (barW >= 16) {
-          const barLabelY = (barTops[idx] || 0) - 16;
-          let labelY = ly - 22;
-          if (labelY > barLabelY - 14 && labelY < barLabelY + 14) labelY = barLabelY - 18;
-          if (labelY < topPad) labelY = ly + 18;
-          svg += `<rect x="${x - 20}" y="${labelY - 10}" width="40" height="16" rx="3" fill="white" stroke="${LARANJA}" stroke-width="1"/>`;
-          svg += `<text x="${x}" y="${labelY + 2}" text-anchor="middle" font-size="10" font-weight="700" fill="${LARANJA}" font-family="Segoe UI,sans-serif">${v2.toFixed(0)}%</text>`;
+          svg += `<rect x="${x - 18}" y="${badgeCenterY - BADGE_H / 2}" width="36" height="${BADGE_H}" rx="3" fill="white" stroke="${LARANJA}" stroke-width="1"/>`;
+          svg += `<text x="${x}" y="${badgeCenterY + 3}" text-anchor="middle" font-size="10" font-weight="700" fill="${LARANJA}" font-family="Segoe UI,sans-serif">${v2.toFixed(0)}%</text>`;
         }
       });
     }
@@ -202,6 +228,53 @@ function createRaioXClienteRoutes(pool) {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // SCREENSHOT DO MAPA DE CALOR via Playwright
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * Captura um screenshot JPEG do link do mapa de calor usando Playwright headless.
+   * Retorna data URI (data:image/jpeg;base64,...) ou null em caso de falha.
+   * Usa as mesmas configurações do PDF gerador (funciona no Railway com Chromium já instalado).
+   */
+  async function capturarScreenshotMapa(linkMapa) {
+    if (!linkMapa) return null;
+    let browser = null;
+    try {
+      const chromium = require('playwright').chromium;
+      browser = await chromium.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-web-security']
+      });
+      const page = await browser.newPage();
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.goto(linkMapa, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      // Aguarda tiles do Google Maps carregarem
+      for (let mw = 0; mw < 15; mw++) {
+        await page.waitForTimeout(1000);
+        const ready = await page.evaluate(() => {
+          const mapDiv = document.getElementById('map');
+          if (!mapDiv) return false;
+          const tiles = mapDiv.querySelectorAll('img, canvas');
+          return tiles.length > 5;
+        }).catch(() => false);
+        if (ready) break;
+      }
+      // Folga extra pra renderizar layer de heatmap
+      await page.waitForTimeout(2000);
+
+      const buf = await page.screenshot({ type: 'jpeg', quality: 82 });
+      await browser.close();
+      browser = null;
+      console.log(`🗺️ [RaioX Cliente] Screenshot mapa capturado (${(buf.length / 1024).toFixed(0)}KB)`);
+      return 'data:image/jpeg;base64,' + buf.toString('base64');
+    } catch (error) {
+      console.warn('⚠️ [RaioX Cliente] Falha ao capturar mapa:', error.message);
+      if (browser) try { await browser.close(); } catch (e) {}
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // HTML BUILDER — monta o relatório completo
   // ═══════════════════════════════════════════════════════════
 
@@ -259,7 +332,7 @@ function createRaioXClienteRoutes(pool) {
     } catch (e) { return String(d); }
   }
 
-  function montarHTMLRelatorio(dados, textos, nomeCliente, periodo, healthScore) {
+  function montarHTMLRelatorio(dados, textos, nomeCliente, periodo, healthScore, mapaScreenshotDataURI) {
     const ma = dados.metricas_atuais || {};
     const mp = dados.metricas_periodo_anterior || {};
     const faixasKm = dados.faixas_km || [];
@@ -350,11 +423,6 @@ function createRaioXClienteRoutes(pool) {
   <div style="font-size:11px;letter-spacing:3px;color:rgba(255,255,255,0.75);text-transform:uppercase;font-weight:700;margin-bottom:6px">Relatório Operacional</div>
   <h1 style="color:white;font-size:28px;margin:0;font-weight:800;letter-spacing:-0.5px">${nomeCliente}</h1>
   <div style="color:rgba(255,255,255,0.85);font-size:13px;margin-top:10px">Período analisado: ${dtInicio} a ${dtFim}</div>
-  <div style="display:inline-block;margin-top:18px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:20px;padding:6px 18px">
-    <span style="color:white;font-size:12px;font-weight:600">Health Score</span>
-    <span style="color:white;font-size:15px;font-weight:800;margin-left:8px">${healthScore}/100</span>
-    <span style="color:white;font-size:11px;margin-left:6px;opacity:0.85">· ${scoreLabel}</span>
-  </div>
 </td></tr>
 
 <!-- Abertura (IA) -->
@@ -400,7 +468,26 @@ ${seccaoHTML('Cobertura Geográfica', 'Distribuição das entregas por faixa de 
     ${svgFaixas}
     <div style="font-size:10px;color:${TEXTO_CLARO};margin-top:8px;text-align:center">Cor = % No Prazo (verde ≥ 90% · amarelo ≥ 75% · vermelho &lt; 75%)</div>
   </div>
-  ${paragrafoHTML(textos.cobertura)}`
+  ${paragrafoHTML(textos.cobertura)}
+  ${mapaScreenshotDataURI ? `
+  <div style="background:${FUNDO_CARD};border:1px solid ${GRID};border-radius:10px;padding:14px;margin-top:14px">
+    <div style="font-size:11px;font-weight:700;color:${TEXTO};margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Mapa de Calor — Distribuição Geográfica</div>
+    <div style="border-radius:8px;overflow:hidden;border:1px solid ${GRID}">
+      <img src="${mapaScreenshotDataURI}" alt="Mapa de Calor" style="display:block;width:100%;height:auto;max-width:100%" />
+    </div>
+    ${dados.link_mapa_calor ? `
+    <div style="margin-top:12px;text-align:center">
+      <a href="${dados.link_mapa_calor}" style="display:inline-block;background:linear-gradient(135deg,${ROXO},${ROXO_ESC});color:white;padding:12px 28px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px;letter-spacing:0.3px;border:2px solid ${ROXO};box-shadow:0 2px 8px rgba(124,58,237,0.25)">
+        🗺️ Abrir Mapa de Calor Interativo →
+      </a>
+    </div>` : ''}
+  </div>` : (dados.link_mapa_calor ? `
+  <div style="background:${FUNDO_CARD};border:1px dashed ${GRID};border-radius:10px;padding:18px;margin-top:14px;text-align:center">
+    <div style="font-size:12px;color:${TEXTO_CLARO};margin-bottom:10px">Visualização geográfica interativa disponível</div>
+    <a href="${dados.link_mapa_calor}" style="display:inline-block;background:linear-gradient(135deg,${ROXO},${ROXO_ESC});color:white;padding:12px 28px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px;letter-spacing:0.3px">
+      🗺️ Abrir Mapa de Calor Interativo →
+    </a>
+  </div>` : '')}`
 )}
 
 <!-- ═══ Seção 4: Profissionais e Frota ═══ -->
@@ -497,7 +584,9 @@ TOM, ESTILO E VOCABULÁRIO (REGRAS ABSOLUTAS)
 ⛔ NUNCA use títulos, headers ou markdown além de **negrito** pontual.
 ⛔ NUNCA mencione valores financeiros, custos, faturamento ou preços.
 ⛔ NUNCA sugira mudanças nos processos internos do cliente.
-⛔ NUNCA cite nomes de profissionais específicos (apenas "nossa equipe", "o time alocado").
+⛔ NUNCA cite nomes de profissionais, motoboys ou entregadores específicos — refira-se sempre coletivamente ("nossa equipe", "o pool de profissionais", "o time alocado", "nosso corpo operacional").
+⛔ NUNCA destaque o profissional que fez mais entregas, não faça ranking individual, não cite quantidades por pessoa.
+⛔ NUNCA mencione "health score", "score de saúde", "nota da operação" ou qualquer pontuação agregada — essa é métrica interna e não faz parte do relatório cliente.
 ⛔ NUNCA sugira aumentar frequência de contato ou reuniões.
 ⛔ NUNCA faça promessas com prazo (não diga "em duas semanas", "até o mês que vem").
 
@@ -507,11 +596,11 @@ FORMATO DE RESPOSTA (CRÍTICO)
 Responda EXCLUSIVAMENTE com um objeto JSON válido, sem blocos de código markdown (sem \`\`\`), sem comentários, sem texto antes ou depois. O JSON DEVE ter EXATAMENTE estas chaves, todas obrigatórias:
 
 {
-  "abertura": "Parágrafo de abertura (2 a 3 linhas). Saudação formal dirigida ao cliente, apresentação do propósito do relatório e introdução do período analisado. Ex: 'Prezados, cumpre-nos apresentar o relatório operacional consolidado referente ao período de X a Y...'",
-  "visao_geral": "2 parágrafos densos analisando os KPIs totais (volume, taxa de prazo, tempo médio, profissionais, motos/dia, km médio). Cite comparativos com o período anterior quando os dados permitirem. Use linguagem técnica de SLA e aderência.",
+  "abertura": "Parágrafo único de abertura (2 a 3 linhas). Saudação formal dirigida ao cliente, apresentação do propósito do relatório e introdução do período analisado. Ex: 'Prezados, cumpre-nos apresentar o relatório operacional consolidado referente ao período de X a Y...'",
+  "visao_geral": "APENAS UM parágrafo denso (4 a 6 linhas), analisando os KPIs totais (volume de entregas, taxa de prazo, tempo médio, profissionais únicos, motos/dia, km médio, km percorrido). Cite comparativos com o período anterior quando os dados permitirem. Use linguagem técnica de SLA e aderência. NÃO é permitido segundo parágrafo.",
   "evolucao": "2 parágrafos sobre a evolução temporal (semana a semana). Destaque picos, vales, estabilidade ou volatilidade do volume e da aderência ao prazo. Interprete a tendência, não apenas descreva.",
-  "cobertura": "2 parágrafos sobre a cobertura geográfica — distribuição por faixa de distância. Identifique onde se concentra o volume (curta/média/longa distância), comente o desempenho de prazo em cada faixa e o que isso revela sobre o perfil operacional da rota.",
-  "profissionais": "2 parágrafos sobre a força de trabalho (profissionais únicos e motos/dia). Analise a densidade operacional, a uniformidade do efetivo ao longo dos dias do período, e o desempenho consolidado do pool de profissionais.",
+  "cobertura": "APENAS UM parágrafo denso (4 a 6 linhas) sobre cobertura geográfica — distribuição por faixa de distância. Identifique onde se concentra o volume (curta/média/longa distância), comente o desempenho de prazo em cada faixa e o que isso revela sobre o perfil operacional da rota. NÃO é permitido segundo parágrafo.",
+  "profissionais": "APENAS UM parágrafo denso (4 a 6 linhas) sobre a força de trabalho coletiva. Analise a densidade operacional (média de motos/dia, profissionais únicos) e a uniformidade do efetivo ao longo dos dias do período. NÃO cite nomes. NÃO destaque quem fez mais entregas. NÃO mencione health score nem qualquer pontuação. NÃO é permitido segundo parágrafo.",
   "janela": "2 parágrafos sobre a janela operacional (comportamento por horário) e o perfil de retornos (motivos e taxa). Contextualize a taxa de retorno (≤2% é saudável para autopeças). NÃO alarme o cliente se estiver na faixa saudável.",
   "fechamento": "Parágrafo de fechamento (3 a 4 linhas). Reitere compromisso com a qualidade, coloque a equipe à disposição para esclarecimentos, e encerre com saudação formal. Ex: 'Reafirmamos nosso compromisso com a excelência operacional... Permanecemos à inteira disposição de V. Sas. Cordialmente, Equipe Tutts.'"
 }
@@ -605,11 +694,15 @@ Lembre-se: APENAS o JSON, nada mais.`;
 
       console.log(`👔 Gerando Raio-X Cliente: raio_x_id=${raio_x_id}, cliente=${nomeCliente}`);
 
-      // 3. Chama Gemini
-      const { textos, tokens } = await gerarTextosIA(dados, nomeCliente, periodo);
+      // 3a. Captura screenshot do mapa de calor em paralelo com o Gemini (ganha tempo)
+      const [resIA, mapaURI] = await Promise.all([
+        gerarTextosIA(dados, nomeCliente, periodo),
+        capturarScreenshotMapa(dados.link_mapa_calor),
+      ]);
+      const { textos, tokens } = resIA;
 
-      // 4. Monta HTML
-      const htmlRelatorio = montarHTMLRelatorio(dados, textos, nomeCliente, periodo, healthScore);
+      // 4. Monta HTML (com ou sem mapa, se falhou fica só o botão)
+      const htmlRelatorio = montarHTMLRelatorio(dados, textos, nomeCliente, periodo, healthScore, mapaURI);
 
       // 5. Salva no histórico com tipo_analise='cliente'
       const saveResult = await pool.query(
