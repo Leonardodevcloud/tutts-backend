@@ -94,7 +94,8 @@ app.use(express.json({
     // Preservar raw body apenas para rotas de webhook (performance)
     if (req.originalUrl && (
       req.originalUrl.includes('/stark/webhook') ||
-      req.originalUrl.includes('/uber/webhook')
+      req.originalUrl.includes('/uber/webhook') ||
+      req.originalUrl.includes('/cs/webhook')
     )) {
       req.rawBody = buf.toString('utf8');
     }
