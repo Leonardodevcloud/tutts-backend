@@ -15,6 +15,7 @@ const { createRaioXRoutes } = require('./routes/raioX.routes');
 const { createRaioXPdfRoutes } = require('./routes/raioXPdf.routes');
 const { createRaioXClienteRoutes } = require('./routes/raioXCliente.routes');
 const { createEmailsRoutes } = require('./routes/emails.routes');
+const { createEmailAutomacaoRoutes } = require('./routes/email-automacao.routes');
 
 function createCsRouter(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
@@ -28,8 +29,9 @@ function createCsRouter(pool, verificarToken, verificarAdmin) {
   router.use(createRaioXClienteRoutes(pool));  // Cliente ANTES do raioX (rota específica /cs/raio-x/cliente)
   router.use(createRaioXRoutes(pool));
   router.use(createEmailsRoutes(pool));        // Emails enviados + webhook Resend
+  router.use(createEmailAutomacaoRoutes(pool));// Automação mensal de envio de email
 
-  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (8 sub-routers)');
+  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (9 sub-routers)');
 
   return router;
 }
