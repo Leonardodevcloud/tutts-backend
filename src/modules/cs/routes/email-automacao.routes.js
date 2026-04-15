@@ -98,17 +98,21 @@ function createEmailAutomacaoRoutes(pool) {
   // ════════════════════════════════════════════════════════════
   router.get('/cs/email-automacao', async (req, res) => {
     try {
-      // Pega configs + nome do cliente em uma query só (LEFT JOIN com cs_clientes)
+      // nome_cliente vem salvo da criação (consistente com BI no momento do INSERT).
+      // Se vier NULL (config antiga), fallback pra busca no bi_entregas mais recente.
       const r = await pool.query(`
         SELECT a.*,
-               COALESCE(c.nome_fantasia, c.razao_social, 'Cliente #' || a.cod_cliente) AS nome_cliente
+               COALESCE(
+                 a.nome_cliente,
+                 (SELECT COALESCE(nome_fantasia, nome_cliente)
+                    FROM bi_entregas
+                   WHERE cod_cliente = a.cod_cliente
+                     AND COALESCE(nome_fantasia, nome_cliente) IS NOT NULL
+                   ORDER BY data_solicitado DESC NULLS LAST
+                   LIMIT 1),
+                 'Cliente #' || a.cod_cliente
+               ) AS nome_cliente_resolvido
           FROM cs_email_automacao a
-          LEFT JOIN LATERAL (
-            SELECT nome_fantasia, razao_social
-              FROM cs_clientes
-             WHERE cod_cliente = a.cod_cliente
-             LIMIT 1
-          ) c ON true
          ORDER BY a.cod_cliente ASC, a.centro_custo NULLS FIRST
       `);
 
@@ -119,7 +123,7 @@ function createEmailAutomacaoRoutes(pool) {
         if (!grupos[key]) {
           grupos[key] = {
             cod_cliente: row.cod_cliente,
-            nome_cliente: row.nome_cliente,
+            nome_cliente: row.nome_cliente_resolvido,
             configs: [],
           };
         }
@@ -168,37 +172,49 @@ function createEmailAutomacaoRoutes(pool) {
 
   // ════════════════════════════════════════════════════════════
   // GET /cs/email-automacao/clientes-disponiveis
-  // Lista clientes (com seus centros) pra modal de "Configurar cliente".
-  // Fonte: bi_entregas (centros conhecidos da operação) + cs_clientes
+  // Lista clientes operacionais (vindos de bi_entregas — fonte de truth do BI).
+  // Usa nome_fantasia do BI (com fallback nome_cliente), dedup por cod_cliente.
+  // Centros vêm dos centros_custo distintos vistos nas entregas dos últimos 90d.
   // ════════════════════════════════════════════════════════════
   router.get('/cs/email-automacao/clientes-disponiveis', async (req, res) => {
     try {
       const q = (req.query.q || '').toString().trim().toLowerCase();
       const params = [];
-      let where = '';
+      let extraWhere = '';
       if (q) {
-        // Busca por código exato OU substring no nome
         params.push(`%${q}%`);
         params.push(parseInt(q, 10) || 0);
-        where = `WHERE LOWER(COALESCE(c.nome_fantasia, c.razao_social, '')) LIKE $1
-                    OR c.cod_cliente = $2`;
+        extraWhere = ` AND (LOWER(COALESCE(nome_fantasia, nome_cliente, '')) LIKE $1 OR cod_cliente = $2)`;
       }
 
-      // Pega cs_clientes (todos) + busca centros distintos da operação
-      const clientes = await pool.query(`
-        SELECT c.cod_cliente,
-               COALESCE(c.nome_fantasia, c.razao_social, 'Cliente #' || c.cod_cliente) AS nome,
-               (SELECT COALESCE(json_agg(DISTINCT centro_custo) FILTER (WHERE centro_custo IS NOT NULL AND centro_custo <> ''), '[]'::json)
-                  FROM bi_entregas e
-                 WHERE e.cod_cliente = c.cod_cliente
-                   AND e.data_solicitado >= NOW() - INTERVAL '90 days') AS centros
-          FROM cs_clientes c
-          ${where}
+      // CTE: dedup por cod_cliente, pegando o nome mais recente do BI
+      // + centros distintos vistos nos últimos 90 dias
+      const sql = `
+        WITH clientes_bi AS (
+          SELECT cod_cliente,
+                 (array_agg(COALESCE(nome_fantasia, nome_cliente) ORDER BY data_solicitado DESC NULLS LAST))[1] AS nome,
+                 COUNT(*)::int AS total_entregas_90d,
+                 COALESCE(
+                   json_agg(DISTINCT centro_custo) FILTER (WHERE centro_custo IS NOT NULL AND centro_custo <> ''),
+                   '[]'::json
+                 ) AS centros
+            FROM bi_entregas
+           WHERE data_solicitado >= NOW() - INTERVAL '90 days'
+             AND cod_cliente IS NOT NULL
+             ${extraWhere}
+           GROUP BY cod_cliente
+        )
+        SELECT cod_cliente,
+               COALESCE(nome, 'Cliente #' || cod_cliente) AS nome,
+               total_entregas_90d,
+               centros
+          FROM clientes_bi
          ORDER BY nome ASC
          LIMIT 50
-      `, params);
+      `;
 
-      res.json({ success: true, clientes: clientes.rows });
+      const r = await pool.query(sql, params);
+      res.json({ success: true, clientes: r.rows });
     } catch (err) {
       console.error('[CS Automação] Erro GET clientes-disponiveis:', err.message);
       res.status(500).json({ success: false, error: err.message });
@@ -224,6 +240,17 @@ function createEmailAutomacaoRoutes(pool) {
       }
 
       const userCod = req.user?.codProfissional || req.user?.cod || null;
+
+      // Resolve nome_cliente do BI (mesma fonte de truth) — uma vez só pra todos os centros
+      const nomeRes = await pool.query(`
+        SELECT (array_agg(COALESCE(nome_fantasia, nome_cliente) ORDER BY data_solicitado DESC NULLS LAST))[1] AS nome
+          FROM bi_entregas
+         WHERE cod_cliente = $1
+           AND COALESCE(nome_fantasia, nome_cliente) IS NOT NULL
+           AND data_solicitado >= NOW() - INTERVAL '180 days'
+      `, [codCliente]);
+      const nomeCliente = nomeRes.rows[0]?.nome || null;
+
       const criados = [];
       const erros = [];
 
@@ -241,10 +268,10 @@ function createEmailAutomacaoRoutes(pool) {
         try {
           const ins = await pool.query(
             `INSERT INTO cs_email_automacao
-               (cod_cliente, centro_custo, ativa, destinatarios, criada_por)
-             VALUES ($1, $2, true, $3, $4)
+               (cod_cliente, centro_custo, nome_cliente, ativa, destinatarios, criada_por)
+             VALUES ($1, $2, $3, true, $4, $5)
              RETURNING id`,
-            [codCliente, centro, JSON.stringify(norm.destinatarios), userCod ? String(userCod) : null]
+            [codCliente, centro, nomeCliente, JSON.stringify(norm.destinatarios), userCod ? String(userCod) : null]
           );
           criados.push({ id: ins.rows[0].id, centro_custo: centro, destinatarios: norm.destinatarios });
         } catch (e) {
