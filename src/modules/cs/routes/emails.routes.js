@@ -125,22 +125,31 @@ function createEmailsRoutes(pool) {
   router.post(
     '/cs/webhook/resend',
     async (req, res) => {
+      const t0 = Date.now();
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('[Resend Webhook] 📨 RECEBIDO', new Date().toISOString());
+
       const secret = process.env.RESEND_WEBHOOK_SECRET;
       const rawBody = req.rawBody || '';
+
+      console.log('[Resend Webhook] secret presente?', !!secret, '| len:', secret ? secret.length : 0);
+      console.log('[Resend Webhook] rawBody len:', rawBody.length);
+      console.log('[Resend Webhook] svix-id:', req.headers['svix-id']);
+      console.log('[Resend Webhook] svix-timestamp:', req.headers['svix-timestamp']);
 
       // Headers em lower-case (express normaliza)
       const verif = verificarAssinaturaSvix(rawBody, req.headers, secret);
       if (!verif.ok) {
-        console.warn(`[Resend Webhook] Assinatura inválida: ${verif.reason}`);
-        // 401 — Resend retenta automaticamente em caso de erro
+        console.warn(`[Resend Webhook] ❌ Assinatura inválida: ${verif.reason}`);
         return res.status(401).json({ ok: false, error: verif.reason });
       }
+      console.log('[Resend Webhook] ✅ Assinatura válida');
 
       let evento;
       try {
         evento = JSON.parse(rawBody);
       } catch (e) {
-        console.warn('[Resend Webhook] Body não é JSON válido');
+        console.warn('[Resend Webhook] ❌ Body não é JSON válido');
         return res.status(400).json({ ok: false, error: 'invalid-json' });
       }
 
@@ -148,6 +157,10 @@ function createEmailsRoutes(pool) {
       const tipo = evento.type || null;
       const data = evento.data || {};
       const resendEmailId = data.email_id || null;
+
+      console.log('[Resend Webhook] tipo:', tipo);
+      console.log('[Resend Webhook] resend_email_id:', resendEmailId);
+      console.log('[Resend Webhook] svix_id:', svixId);
 
       try {
         // Buscar o cs_emails_enviados associado (se existir)
@@ -157,7 +170,13 @@ function createEmailsRoutes(pool) {
             'SELECT id FROM cs_emails_enviados WHERE resend_email_id = $1 LIMIT 1',
             [resendEmailId]
           );
-          if (r.rows.length > 0) emailEnviadoId = r.rows[0].id;
+          console.log('[Resend Webhook] lookup cs_emails_enviados — rows:', r.rows.length);
+          if (r.rows.length > 0) {
+            emailEnviadoId = r.rows[0].id;
+            console.log('[Resend Webhook] ✅ email_enviado_id encontrado:', emailEnviadoId);
+          } else {
+            console.warn('[Resend Webhook] ⚠️ Nenhum cs_emails_enviados com resend_email_id=' + resendEmailId);
+          }
         }
 
         // INSERT idempotente — ON CONFLICT(svix_id) DO NOTHING
@@ -180,17 +199,31 @@ function createEmailsRoutes(pool) {
             evento.created_at ? new Date(evento.created_at) : new Date(),
           ]
         );
+        console.log('[Resend Webhook] INSERT cs_email_eventos — rows retornadas:', ins.rows.length, '| id:', ins.rows[0]?.id || 'null (deduped)');
+
+        // CONFIRMAÇÃO PÓS-INSERT — query independente pra eliminar dúvida sobre estado real
+        if (ins.rows[0]?.id) {
+          const confirm = await pool.query(
+            'SELECT id, current_database() AS db, current_schema() AS schema FROM cs_email_eventos WHERE id = $1',
+            [ins.rows[0].id]
+          );
+          console.log('[Resend Webhook] 🔍 Confirmação pós-INSERT:', JSON.stringify(confirm.rows[0] || {}));
+        }
 
         // Se foi inserido (não duplicado) e temos email_enviado_id, atualiza agregados
         if (ins.rows.length > 0 && emailEnviadoId) {
           await atualizarAgregados(pool, emailEnviadoId, tipo);
+          console.log('[Resend Webhook] ✅ atualizarAgregados executado');
+        } else {
+          console.log('[Resend Webhook] ⏭️ atualizarAgregados pulado — ins.rows=' + ins.rows.length + ' email_enviado_id=' + emailEnviadoId);
         }
 
-        // 200 — Resend para de retentar
+        const elapsed = Date.now() - t0;
+        console.log(`[Resend Webhook] ✅ DONE em ${elapsed}ms — deduped=${ins.rows.length === 0}`);
         return res.status(200).json({ ok: true, deduped: ins.rows.length === 0 });
       } catch (err) {
-        console.error('[Resend Webhook] Erro ao processar:', err.message);
-        // 500 — Resend retenta. Não vazar detalhes.
+        console.error('[Resend Webhook] ❌ Erro ao processar:', err.message);
+        console.error('[Resend Webhook] Stack:', err.stack);
         return res.status(500).json({ ok: false });
       }
     }
