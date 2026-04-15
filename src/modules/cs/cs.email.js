@@ -91,6 +91,41 @@ async function prepararImagensInline(html) {
 }
 
 /**
+ * Substitui <img src="data:image/...;base64,..."> por <img src="cid:imgembed-N">
+ * e gera attachments Resend. Resolve o problema de clientes de email (Roundcube,
+ * Outlook corporativo) que strippam data URIs em img src por razões de segurança.
+ *
+ * Detecta qualquer <img> com src data URI, preservando os outros atributos (width, style, alt).
+ */
+function prepararDataURIsInline(html, timestamp) {
+  // Regex captura: ([prefixo])src="data:image/TIPO;base64,DADOS"([sufixo]) dentro de <img ...>
+  // Usa captura de grupos pra reconstruir o <img> mantendo todos os outros atributos
+  const imgDataUriRegex = /<img\b([^>]*?)\bsrc\s*=\s*["']data:image\/([a-z]+);base64,([^"']+)["']([^>]*)\/?>/gi;
+  const attachments = [];
+  let idx = 0;
+
+  const htmlProcessado = html.replace(imgDataUriRegex, (match, antes, mimeExt, base64Data, depois) => {
+    const cid = `imgembed-${timestamp}-${idx}`;
+    const ext = mimeExt.toLowerCase();
+    const contentType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+    const filename = `imagem-${idx + 1}.${ext === 'jpeg' ? 'jpg' : ext}`;
+    attachments.push({
+      filename,
+      content: base64Data,
+      content_id: cid,
+      content_type: contentType,
+    });
+    idx++;
+    // Reconstroi a tag <img> mantendo atributos originais (width, style, alt), trocando só o src.
+    // Remove barra "/" final que o regex pode ter capturado em "depois" pra não duplicar.
+    const depoisLimpo = depois.replace(/\s*\/\s*$/, '');
+    return `<img${antes} src="cid:${cid}"${depoisLimpo} />`;
+  });
+
+  return { html: htmlProcessado, attachments };
+}
+
+/**
  * Protege blocos <div style="margin:...">...</div> usando depth counter.
  */
 function protegerBlocosHTML(texto) {
@@ -277,7 +312,13 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
   }
 
   // ─── Converter SVGs → PNG + CID attachments (em ambos os modos) ───
-  const { html, attachments } = await prepararImagensInline(htmlBruto);
+  const svgResult = await prepararImagensInline(htmlBruto);
+  // ─── Converter data URIs de imagens (ex: screenshot do mapa) → CID attachments ───
+  // Roda SEMPRE, independente do modo, porque o relatório cliente embed mapa como data URI JPEG
+  const dataUriResult = prepararDataURIsInline(svgResult.html, Date.now());
+
+  const html = dataUriResult.html;
+  const attachments = [...svgResult.attachments, ...dataUriResult.attachments];
 
   const subject =
     (assunto && String(assunto).trim()) ||
