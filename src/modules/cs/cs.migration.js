@@ -308,6 +308,34 @@ async function initCsTables(pool) {
   try {
     await pool.query(`ALTER TABLE cs_email_automacao ADD COLUMN IF NOT EXISTS nome_cliente VARCHAR(255)`);
   } catch (e) { /* já existe */ }
+
+  // Migração defensiva: corrige nomes salvos que estão divergentes do nome
+  // canônico do BI (acontecia em versões antigas que pegavam o nome da
+  // entrega mais recente em vez do mais frequente, fazendo o nome "dançar"
+  // entre centros pra clientes com múltiplos centros).
+  try {
+    const fix = await pool.query(`
+      UPDATE cs_email_automacao a
+         SET nome_cliente = canonico.nome,
+             atualizada_em = NOW()
+        FROM (
+          SELECT cod_cliente,
+                 MODE() WITHIN GROUP (ORDER BY COALESCE(nome_cliente, nome_fantasia)) AS nome
+            FROM bi_entregas
+           WHERE COALESCE(nome_cliente, nome_fantasia) IS NOT NULL
+             AND data_solicitado >= NOW() - INTERVAL '180 days'
+           GROUP BY cod_cliente
+        ) canonico
+       WHERE a.cod_cliente = canonico.cod_cliente
+         AND (a.nome_cliente IS NULL OR a.nome_cliente <> canonico.nome)
+      RETURNING a.id
+    `);
+    if (fix.rowCount > 0) {
+      console.log(`🔧 CS Migration: ${fix.rowCount} nomes de cliente corrigidos em cs_email_automacao`);
+    }
+  } catch (e) {
+    console.warn('⚠️ CS Migration: backfill de nomes falhou (não crítico):', e.message);
+  }
   // UNIQUE composto tratando NULL como '' (cliente sem CC = string vazia na key)
   // Garante 1 config por (cod_cliente, centro_custo). Sem isso, INSERTs duplicados
   // entrariam silenciosamente porque PostgreSQL trata NULL como sempre distinto.
