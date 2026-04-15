@@ -5,7 +5,7 @@
  */
 const express = require('express');
 const { calcularHealthScore, getClienteConfig } = require('../cs.service');
-const { enviarRaioXEmail } = require('../cs.email');
+const { enviarRaioXEmail, testarConexaoSMTP } = require('../cs.email');
 
 function createRaioXRoutes(pool) {
   const router = express.Router();
@@ -1165,34 +1165,117 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
     }
   });
 
+  // ==================== POST /cs/raio-x/testar-smtp ====================
+  // Testa conexão SMTP sem enviar email — útil pra debug de credenciais
+  router.post('/cs/raio-x/testar-smtp', async (req, res) => {
+    try {
+      const resultado = await testarConexaoSMTP();
+      if (resultado.ok) {
+        res.json({
+          success: true,
+          message: '✅ Conexão SMTP OK — credenciais válidas',
+          host: process.env.SMTP_HOST,
+          port: process.env.SMTP_PORT,
+          user: process.env.SMTP_USER,
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          error: resultado.message,
+          code: resultado.code,
+          host: process.env.SMTP_HOST,
+          port: process.env.SMTP_PORT,
+        });
+      }
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // ==================== POST /cs/raio-x/enviar-email ====================
   router.post('/cs/raio-x/enviar-email', async (req, res) => {
     try {
-      const { raio_x_id, para, cc, remetente } = req.body;
+      const { raio_x_id, para, cc, assunto, remetente } = req.body;
       if (!para) return res.status(400).json({ error: 'Email destinatário é obrigatório' });
 
       // Buscar raio-x do banco
       let raioX, cliente, periodo;
 
       if (raio_x_id) {
-        // Enviar de um relatório salvo
+        // Enviar de um relatório salvo (interno OU cliente)
         const rxResult = await pool.query('SELECT * FROM cs_raio_x_historico WHERE id = $1', [raio_x_id]);
         if (rxResult.rows.length === 0) return res.status(404).json({ error: 'Relatório não encontrado' });
         const rx = rxResult.rows[0];
+        // Passa o objeto INTEIRO pro service (inclui tipo_analise, que define se é HTML pronto ou não)
         raioX = rx;
         cliente = { nome: rx.nome_cliente };
         periodo = { inicio: rx.data_inicio, fim: rx.data_fim };
       } else if (req.body.analise) {
-        // Enviar da sessão atual (relatório acabou de ser gerado)
-        raioX = { analise_texto: req.body.analise, score_saude: req.body.health_score };
+        // Enviar da sessão atual (relatório acabou de ser gerado, ainda não salvo)
+        raioX = {
+          analise_texto: req.body.analise,
+          score_saude: req.body.health_score,
+          tipo_analise: req.body.tipo_analise || 'completo',
+        };
         cliente = { nome: req.body.nome_cliente || 'Cliente' };
         periodo = { inicio: req.body.data_inicio, fim: req.body.data_fim };
       } else {
         return res.status(400).json({ error: 'Informe raio_x_id ou analise' });
       }
 
-      const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, remetente });
-      console.log(`📧 Raio-X enviado por email: ${para} (${result.messageId})`);
+      // Idempotency-key: previne reenvio duplicado em retry/restart de cron
+      // Mesmo raio_x_id + mesmo destinatário primário = mesmo envio
+      const destinoPrimario = Array.isArray(para) ? para[0] : String(para).split(/[;,]/)[0].trim();
+      const idempotencyKey = raio_x_id
+        ? `cs-raiox-${raio_x_id}-${destinoPrimario}`.replace(/[^a-zA-Z0-9_\-:.@]/g, '_').slice(0, 256)
+        : null;
+
+      // Tags pro Resend (aparecem no dashboard + vêm no payload do webhook)
+      const tags = [
+        { name: 'tipo', value: raioX.tipo_analise === 'cliente' ? 'raio_x_cliente' : 'raio_x_interno' },
+      ];
+      if (raio_x_id) tags.push({ name: 'raio_x_id', value: String(raio_x_id) });
+      if (raioX.cod_cliente) tags.push({ name: 'cod_cliente', value: String(raioX.cod_cliente) });
+
+      const result = await enviarRaioXEmail({
+        para, cc, raioX, cliente, periodo, assunto, remetente,
+        tags, idempotencyKey,
+      });
+      console.log(`📧 Raio-X (${raioX.tipo_analise || 'completo'}) enviado por email: ${para} (${result.messageId})`);
+
+      // Persistir registro do envio em cs_emails_enviados (não bloqueia o response)
+      try {
+        await pool.query(
+          `INSERT INTO cs_emails_enviados
+             (raio_x_id, cod_cliente, nome_cliente, tipo, assunto,
+              para, cc, remetente, data_inicio, data_fim,
+              resend_email_id, html_armazenado, tags, status_atual,
+              enviado_por, enviado_por_nome)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'sent', $14, $15)
+           ON CONFLICT (resend_email_id) DO NOTHING`,
+          [
+            raio_x_id || null,
+            raioX.cod_cliente || null,
+            cliente.nome || null,
+            result.tipoEnvio,
+            result.assuntoFinal,
+            JSON.stringify(result.destinatariosFinal),
+            JSON.stringify(result.ccFinal),
+            result.remetenteFinal,
+            periodo.inicio || null,
+            periodo.fim || null,
+            result.messageId,
+            result.htmlGerado,
+            JSON.stringify(result.tagsFinal),
+            req.user && req.user.cod ? String(req.user.cod) : null,
+            req.user && req.user.nome ? req.user.nome : null,
+          ]
+        );
+      } catch (persistErr) {
+        // Email já foi enviado com sucesso — só logamos a falha de persistência
+        console.error('⚠️ [CS] Falha ao persistir cs_emails_enviados:', persistErr.message);
+      }
+
       res.json({ success: true, messageId: result.messageId });
     } catch (error) {
       console.error('❌ Erro ao enviar email Raio-X:', error.message);

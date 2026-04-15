@@ -203,6 +203,65 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_raio_x_data ON cs_raio_x_historico(created_at DESC)`).catch(() => {});
   console.log('✅ Tabela cs_raio_x_historico verificada');
 
+  // ========== EMAILS ENVIADOS (rastreamento de envios) ==========
+  // Cada linha = 1 envio efetivo via Resend (1 raio-x pode ser enviado várias vezes)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cs_emails_enviados (
+      id SERIAL PRIMARY KEY,
+      raio_x_id INTEGER REFERENCES cs_raio_x_historico(id) ON DELETE SET NULL,
+      cod_cliente INTEGER,
+      nome_cliente VARCHAR(255),
+      tipo VARCHAR(50) DEFAULT 'raio_x_interno',
+      assunto VARCHAR(500),
+      para JSONB NOT NULL DEFAULT '[]',
+      cc JSONB DEFAULT '[]',
+      remetente VARCHAR(255),
+      data_inicio DATE,
+      data_fim DATE,
+      resend_email_id VARCHAR(100) UNIQUE,
+      html_armazenado TEXT,
+      tags JSONB DEFAULT '[]',
+      status_atual VARCHAR(30) DEFAULT 'sent',
+      ultima_atividade_em TIMESTAMP,
+      total_aberturas INTEGER DEFAULT 0,
+      total_cliques INTEGER DEFAULT 0,
+      bounce_msg TEXT,
+      enviado_por VARCHAR(50),
+      enviado_por_nome VARCHAR(255),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_emails_cliente ON cs_emails_enviados(cod_cliente)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_emails_status ON cs_emails_enviados(status_atual)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_emails_created ON cs_emails_enviados(created_at DESC)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_emails_resend ON cs_emails_enviados(resend_email_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_emails_raioX ON cs_emails_enviados(raio_x_id)`).catch(() => {});
+  console.log('✅ Tabela cs_emails_enviados verificada');
+
+  // ========== EVENTOS WEBHOOK RESEND ==========
+  // Cada linha = 1 evento (sent/delivered/opened/clicked/bounced/complained...)
+  // svix_id UNIQUE garante dedup mesmo com retries do Resend (at-least-once)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cs_email_eventos (
+      id SERIAL PRIMARY KEY,
+      email_enviado_id INTEGER REFERENCES cs_emails_enviados(id) ON DELETE CASCADE,
+      resend_email_id VARCHAR(100),
+      svix_id VARCHAR(100) UNIQUE,
+      tipo VARCHAR(50) NOT NULL,
+      payload JSONB,
+      ip VARCHAR(50),
+      user_agent TEXT,
+      link_clicado TEXT,
+      evento_em TIMESTAMP NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_eventos_email ON cs_email_eventos(email_enviado_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_eventos_resend ON cs_email_eventos(resend_email_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_eventos_tipo ON cs_email_eventos(tipo)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_eventos_data ON cs_email_eventos(evento_em DESC)`).catch(() => {});
+  console.log('✅ Tabela cs_email_eventos verificada');
+
   console.log('✅ Módulo Sucesso do Cliente — todas as tabelas verificadas');
 }
 
