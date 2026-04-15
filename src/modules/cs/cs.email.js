@@ -287,7 +287,7 @@ function normalizarDestinatarios(valor) {
  * Se raioX.tipo_analise === 'cliente', usa raioX.analise_texto como HTML pronto
  * (não aplica markdown nem wrapper). Em ambos os modos converte SVGs → CID PNG.
  */
-async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente }) {
+async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente, tags, idempotencyKey }) {
   const { apiKey, from, fromName } = getResendConfig();
 
   const fromEmail = remetente || from;
@@ -344,15 +344,29 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
     payload.attachments = attachments;
     console.log(`📎 [Resend] ${attachments.length} gráfico(s) anexado(s) via CID`);
   }
+  // Tags do Resend — vem como [{name, value}], só ASCII sem espaços
+  if (Array.isArray(tags) && tags.length > 0) {
+    payload.tags = tags
+      .filter((t) => t && t.name && t.value !== undefined && t.value !== null)
+      .map((t) => ({
+        name: String(t.name).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 256),
+        value: String(t.value).replace(/[^a-zA-Z0-9_\-:.@]/g, '_').slice(0, 256),
+      }));
+  }
 
   let response;
   try {
+    const headers = {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    };
+    // Idempotency-Key: mesma key = mesmo email_id retornado, sem reenvio (24h TTL)
+    if (idempotencyKey) {
+      headers['Idempotency-Key'] = String(idempotencyKey).slice(0, 256);
+    }
     response = await fetch(RESEND_ENDPOINT, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch (error) {
@@ -386,6 +400,14 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
     accepted: destinatarios,
     rejected: [],
     response: `Resend ${response.status}`,
+    // Metadados pra quem chamou persistir em cs_emails_enviados
+    htmlGerado: html,
+    assuntoFinal: subject,
+    tagsFinal: payload.tags || [],
+    destinatariosFinal: destinatarios,
+    ccFinal: ccList || [],
+    remetenteFinal: fromEmail,
+    tipoEnvio: isCliente ? 'raio_x_cliente' : 'raio_x_interno',
   };
 }
 

@@ -14,6 +14,7 @@ const { createDashboardRoutes } = require('./routes/dashboard.routes');
 const { createRaioXRoutes } = require('./routes/raioX.routes');
 const { createRaioXPdfRoutes } = require('./routes/raioXPdf.routes');
 const { createRaioXClienteRoutes } = require('./routes/raioXCliente.routes');
+const { createEmailsRoutes } = require('./routes/emails.routes');
 
 function createCsRouter(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
@@ -26,8 +27,9 @@ function createCsRouter(pool, verificarToken, verificarAdmin) {
   router.use(createRaioXPdfRoutes(pool));      // PDF ANTES do raioX (rotas mais específicas primeiro)
   router.use(createRaioXClienteRoutes(pool));  // Cliente ANTES do raioX (rota específica /cs/raio-x/cliente)
   router.use(createRaioXRoutes(pool));
+  router.use(createEmailsRoutes(pool));        // Emails enviados + webhook Resend
 
-  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (7 sub-routers)');
+  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (8 sub-routers)');
 
   return router;
 }
