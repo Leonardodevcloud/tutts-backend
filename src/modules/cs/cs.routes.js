@@ -1,6 +1,6 @@
 /**
  * MÓDULO SUCESSO DO CLIENTE (CS) - Route Orchestrator
- * Monta 6 sub-routers por domínio lógico
+ * Monta 7 sub-routers por domínio lógico
  * 0 lógica de negócio aqui — só wiring
  */
 
@@ -13,6 +13,7 @@ const { createOcorrenciasRoutes } = require('./routes/ocorrencias.routes');
 const { createDashboardRoutes } = require('./routes/dashboard.routes');
 const { createRaioXRoutes } = require('./routes/raioX.routes');
 const { createRaioXPdfRoutes } = require('./routes/raioXPdf.routes');
+const { createRaioXClienteRoutes } = require('./routes/raioXCliente.routes');
 
 function createCsRouter(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
@@ -22,10 +23,11 @@ function createCsRouter(pool, verificarToken, verificarAdmin) {
   router.use(createInteracoesRoutes(pool));
   router.use(createOcorrenciasRoutes(pool));
   router.use(createDashboardRoutes(pool));
-  router.use(createRaioXPdfRoutes(pool)); // PDF ANTES do raioX (rotas mais específicas primeiro)
+  router.use(createRaioXPdfRoutes(pool));      // PDF ANTES do raioX (rotas mais específicas primeiro)
+  router.use(createRaioXClienteRoutes(pool));  // Cliente ANTES do raioX (rota específica /cs/raio-x/cliente)
   router.use(createRaioXRoutes(pool));
 
-  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (6 sub-routers)');
+  console.log('✅ Módulo Sucesso do Cliente — rotas montadas (7 sub-routers)');
 
   return router;
 }

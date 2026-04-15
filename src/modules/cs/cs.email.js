@@ -1,18 +1,10 @@
 /**
  * CS Email Service — Envio de Raio-X por email via Resend
  *
- * Recursos:
- *  - Provider Resend (HTTP API, sem SMTP)
- *  - Converte <svg> do relatório em PNG anexado via CID (Content-ID) —
- *    padrão universal que renderiza em Roundcube, Gmail, Outlook, etc.
- *  - Proteção de blocos HTML com contagem de profundidade (respeita <div> aninhados)
- *  - Formata datas para DD/MM/YYYY automaticamente
- *  - Aceita assunto customizado vindo do frontend
- *
- * Configuração via .env (Railway):
- *   RESEND_API_KEY    = re_xxxxxxxxxxxxxxxx   (obrigatório)
- *   RESEND_FROM       = supervisor@tutts.com.br  (domínio verificado no Resend)
- *   RESEND_FROM_NAME  = Tutts Logística       (opcional — default "Tutts Logística")
+ * Modos:
+ *  - Raio-X Interno: aplica protegerBlocosHTML + markdown → HTML
+ *  - Raio-X Cliente: usa o analise_texto como HTML pronto (tipo_analise='cliente')
+ *  Em ambos os modos, converte <svg> em PNG anexado via CID (funciona em Roundcube, Gmail, Outlook)
  */
 
 const sharp = require('sharp');
@@ -23,7 +15,6 @@ function getResendConfig() {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM;
   const fromName = process.env.RESEND_FROM_NAME || 'Tutts Logística';
-
   if (!apiKey) throw new Error('Resend não configurado: defina RESEND_API_KEY no Railway');
   if (!from) throw new Error('Resend não configurado: defina RESEND_FROM (email do domínio verificado)');
   return { apiKey, from, fromName };
@@ -44,9 +35,6 @@ function formatarData(valor) {
   return `${dia}/${mes}/${ano}`;
 }
 
-/**
- * Converte um bloco SVG (string) para um buffer PNG usando sharp.
- */
 async function svgParaPngBuffer(svgString) {
   try {
     return await sharp(Buffer.from(svgString), { density: 144 })
@@ -68,12 +56,7 @@ function extrairDimensoesSVG(svgString) {
 }
 
 /**
- * Varre o HTML atrás de blocos <svg>...</svg>, converte cada um em PNG,
- * substitui a tag SVG por <img src="cid:chart-N"> e retorna a lista de
- * attachments prontos para o payload do Resend (com content_id).
- *
- * @param {string} html
- * @returns {Promise<{html: string, attachments: Array}>}
+ * Substitui cada <svg>...</svg> por <img src="cid:chart-N"> e gera attachments Resend.
  */
 async function prepararImagensInline(html) {
   const svgRegex = /<svg[\s\S]*?<\/svg>/g;
@@ -87,10 +70,8 @@ async function prepararImagensInline(html) {
     matches.map(async (svg, idx) => {
       const pngBuffer = await svgParaPngBuffer(svg);
       if (!pngBuffer) {
-        // Fallback: placeholder amarelo
         return '<div style="padding:12px;background:#fef3c7;border:1px dashed #f59e0b;border-radius:8px;font-size:12px;color:#92400e;text-align:center">📊 Gráfico indisponível neste email — veja a versão em PDF</div>';
       }
-      // CID único por gráfico dessa mensagem (evita colisão se o mesmo email for reenviado)
       const cid = `chart-${timestamp}-${idx}`;
       const filename = `grafico-${idx + 1}.png`;
       attachments.push({
@@ -110,8 +91,7 @@ async function prepararImagensInline(html) {
 }
 
 /**
- * Protege blocos <div style="margin:...">...</div> usando contagem de profundidade.
- * Respeita <div> aninhados (título, legenda) e acha o </div> correto do wrapper.
+ * Protege blocos <div style="margin:...">...</div> usando depth counter.
  */
 function protegerBlocosHTML(texto) {
   const blocks = [];
@@ -173,14 +153,13 @@ function protegerBlocosHTML(texto) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Geração do HTML do email + attachments
+// Geração do HTML do email
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Gera { html, attachments } finais para enviar via Resend.
- * O HTML já tem os <img src="cid:..."> no lugar dos SVGs originais.
+ * Modo INTERNO: monta HTML do raio-x técnico (wrapper + markdown processing).
  */
-async function gerarEmailHTML(raioX, cliente, periodo) {
+async function gerarEmailHTMLInterno(raioX, cliente, periodo) {
   const score = raioX.score_saude || raioX.health_score || 0;
   const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
   const scoreLabel = score >= 80 ? 'Excelente' : score >= 60 ? 'Bom' : 'Atenção';
@@ -192,7 +171,7 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
   conteudo = protegido.texto;
   const htmlBlocks = protegido.blocks;
 
-  // 2) Markdown → HTML (inline styles para email)
+  // 2) Markdown → HTML
   conteudo = conteudo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/^### (.+)$/gm, '<h3 style="font-size:16px;color:#4f46e5;margin-top:28px;margin-bottom:8px;border-bottom:2px solid #e0e7ff;padding-bottom:4px">$1</h3>')
@@ -211,35 +190,27 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n/g, '<br>');
 
-  // 3) Restaurar blocos HTML protegidos (ainda contêm SVGs nativos)
+  // 3) Restaurar blocos
   htmlBlocks.forEach((block, idx) => {
     conteudo = conteudo.replace(`__HTMLBLOCK_${idx}__`, block);
   });
-
-  // 4) Converter <svg> em <img cid:> + gerar attachments
-  const { html: conteudoProcessado, attachments } = await prepararImagensInline(conteudo);
-  conteudo = conteudoProcessado;
 
   const periodoInicio = formatarData(periodo.inicio);
   const periodoFim = formatarData(periodo.fim);
   const nomeCliente = cliente.nome || 'Cliente';
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Roboto,Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:20px 0">
 <tr><td align="center">
 <table width="640" cellpadding="0" cellspacing="0" style="background:white;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)">
-
-<!-- Header -->
 <tr><td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center">
   <h1 style="color:white;font-size:24px;margin:0 0 4px;font-family:'Segoe UI',sans-serif">🔬 Raio-X Operacional</h1>
   <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0">${nomeCliente}</p>
   <p style="color:rgba(255,255,255,0.65);font-size:12px;margin:8px 0 0">Período: ${periodoInicio} a ${periodoFim}</p>
 </td></tr>
-
-<!-- Score Badge -->
 <tr><td style="padding:24px 40px 0;text-align:center">
   <table cellpadding="0" cellspacing="0" style="margin:0 auto">
   <tr>
@@ -251,25 +222,18 @@ async function gerarEmailHTML(raioX, cliente, periodo) {
   </tr>
   </table>
 </td></tr>
-
-<!-- Content -->
 <tr><td style="padding:24px 40px 40px;font-size:13px;line-height:1.7;color:#334155">
 ${conteudo}
 </td></tr>
-
-<!-- Footer -->
 <tr><td style="background:#f8fafc;padding:24px 40px;border-top:1px solid #e2e8f0;text-align:center">
   <p style="font-size:12px;color:#94a3b8;margin:0">Relatório gerado automaticamente pela plataforma Tutts</p>
   <p style="font-size:12px;color:#94a3b8;margin:4px 0 0">© ${new Date().getFullYear()} Tutts — Logística Inteligente para Autopeças</p>
 </td></tr>
-
 </table>
 </td></tr>
 </table>
 </body>
 </html>`;
-
-  return { html, attachments };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -279,12 +243,15 @@ ${conteudo}
 function normalizarDestinatarios(valor) {
   if (!valor) return undefined;
   if (Array.isArray(valor)) return valor.map((v) => String(v).trim()).filter(Boolean);
-  return String(valor)
-    .split(/[;,]/)
-    .map((v) => v.trim())
-    .filter(Boolean);
+  return String(valor).split(/[;,]/).map((v) => v.trim()).filter(Boolean);
 }
 
+/**
+ * Envia o relatório Raio-X por email via Resend.
+ *
+ * Se raioX.tipo_analise === 'cliente', usa raioX.analise_texto como HTML pronto
+ * (não aplica markdown nem wrapper). Em ambos os modos converte SVGs → CID PNG.
+ */
 async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente }) {
   const { apiKey, from, fromName } = getResendConfig();
 
@@ -293,11 +260,30 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
   const periodoInicio = formatarData(periodo.inicio);
   const periodoFim = formatarData(periodo.fim);
 
-  const { html, attachments } = await gerarEmailHTML(raioX, cliente, periodo);
+  // ─── Modo de geração do HTML ───
+  let htmlBruto;
+  const isCliente = raioX.tipo_analise === 'cliente';
+  if (isCliente) {
+    // Relatório Cliente: o analise_texto JÁ É um HTML completo montado pelo raioXCliente.routes.js.
+    // Não re-processa markdown, apenas converte SVGs em CIDs.
+    htmlBruto = raioX.analise_texto || '';
+    if (!htmlBruto.trim()) {
+      throw new Error('Relatório cliente sem conteúdo HTML — regenere o relatório');
+    }
+    console.log(`📧 [Email] Modo CLIENTE — usando HTML pré-montado (${htmlBruto.length} chars)`);
+  } else {
+    // Modo interno (padrão): monta HTML com wrapper + processamento de markdown
+    htmlBruto = await gerarEmailHTMLInterno(raioX, cliente, periodo);
+  }
+
+  // ─── Converter SVGs → PNG + CID attachments (em ambos os modos) ───
+  const { html, attachments } = await prepararImagensInline(htmlBruto);
 
   const subject =
     (assunto && String(assunto).trim()) ||
-    `Raio-X Operacional - ${nomeCliente} (${periodoInicio} a ${periodoFim})`;
+    (isCliente
+      ? `Relatório Operacional - ${nomeCliente} (${periodoInicio} a ${periodoFim})`
+      : `Raio-X Operacional - ${nomeCliente} (${periodoInicio} a ${periodoFim})`);
 
   const destinatarios = normalizarDestinatarios(para);
   if (!destinatarios || destinatarios.length === 0) {
@@ -353,7 +339,7 @@ async function enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, re
     throw new Error(`Resend ${response.status}: ${msg}`);
   }
 
-  console.log(`📧 [Resend] Email Raio-X enviado: ${destinatarios.join(', ')} (id: ${data.id})`);
+  console.log(`📧 [Resend] Email ${isCliente ? 'CLIENTE' : 'interno'} enviado: ${destinatarios.join(', ')} (id: ${data.id})`);
   return {
     messageId: data.id,
     accepted: destinatarios,

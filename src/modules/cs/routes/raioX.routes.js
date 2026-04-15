@@ -1202,16 +1202,21 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
       let raioX, cliente, periodo;
 
       if (raio_x_id) {
-        // Enviar de um relatório salvo
+        // Enviar de um relatório salvo (interno OU cliente)
         const rxResult = await pool.query('SELECT * FROM cs_raio_x_historico WHERE id = $1', [raio_x_id]);
         if (rxResult.rows.length === 0) return res.status(404).json({ error: 'Relatório não encontrado' });
         const rx = rxResult.rows[0];
+        // Passa o objeto INTEIRO pro service (inclui tipo_analise, que define se é HTML pronto ou não)
         raioX = rx;
         cliente = { nome: rx.nome_cliente };
         periodo = { inicio: rx.data_inicio, fim: rx.data_fim };
       } else if (req.body.analise) {
-        // Enviar da sessão atual (relatório acabou de ser gerado)
-        raioX = { analise_texto: req.body.analise, score_saude: req.body.health_score };
+        // Enviar da sessão atual (relatório acabou de ser gerado, ainda não salvo)
+        raioX = {
+          analise_texto: req.body.analise,
+          score_saude: req.body.health_score,
+          tipo_analise: req.body.tipo_analise || 'completo',
+        };
         cliente = { nome: req.body.nome_cliente || 'Cliente' };
         periodo = { inicio: req.body.data_inicio, fim: req.body.data_fim };
       } else {
@@ -1219,7 +1224,7 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
       }
 
       const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente });
-      console.log(`📧 Raio-X enviado por email: ${para} (${result.messageId})`);
+      console.log(`📧 Raio-X (${raioX.tipo_analise || 'completo'}) enviado por email: ${para} (${result.messageId})`);
       res.json({ success: true, messageId: result.messageId });
     } catch (error) {
       console.error('❌ Erro ao enviar email Raio-X:', error.message);
