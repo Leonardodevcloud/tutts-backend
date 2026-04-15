@@ -290,6 +290,7 @@ async function initCsTables(pool) {
       id SERIAL PRIMARY KEY,
       cod_cliente INTEGER NOT NULL,
       centro_custo VARCHAR(255),
+      nome_cliente VARCHAR(255),
       ativa BOOLEAN DEFAULT true,
       destinatarios JSONB NOT NULL DEFAULT '[]',
       ultimo_envio_em TIMESTAMP,
@@ -303,6 +304,10 @@ async function initCsTables(pool) {
       atualizada_em TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Migração defensiva: se tabela já existia sem a coluna nome_cliente, adiciona
+  try {
+    await pool.query(`ALTER TABLE cs_email_automacao ADD COLUMN IF NOT EXISTS nome_cliente VARCHAR(255)`);
+  } catch (e) { /* já existe */ }
   // UNIQUE composto tratando NULL como '' (cliente sem CC = string vazia na key)
   // Garante 1 config por (cod_cliente, centro_custo). Sem isso, INSERTs duplicados
   // entrariam silenciosamente porque PostgreSQL trata NULL como sempre distinto.
