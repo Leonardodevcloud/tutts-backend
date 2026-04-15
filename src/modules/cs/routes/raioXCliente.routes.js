@@ -619,7 +619,25 @@ Lembre-se: APENAS o JSON, nada mais.`;
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.65, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+          generationConfig: {
+            temperature: 0.65,
+            maxOutputTokens: 4096,
+            responseMimeType: 'application/json',
+            // Schema forçado — Gemini 2.0 garante estrutura exata, elimina JSON quebrado
+            responseSchema: {
+              type: 'object',
+              properties: {
+                abertura:      { type: 'string' },
+                visao_geral:   { type: 'string' },
+                evolucao:      { type: 'string' },
+                cobertura:     { type: 'string' },
+                profissionais: { type: 'string' },
+                janela:        { type: 'string' },
+                fechamento:    { type: 'string' },
+              },
+              required: ['abertura', 'visao_geral', 'evolucao', 'cobertura', 'profissionais', 'janela', 'fechamento'],
+            },
+          },
         }),
       }
     );
@@ -633,26 +651,73 @@ Lembre-se: APENAS o JSON, nada mais.`;
     const texto = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const tokens = data.usageMetadata?.candidatesTokenCount || 0;
 
-    // Parse do JSON — tolerante a ```json ... ``` se o modelo adicionar
-    let parsed;
-    try {
-      let clean = texto.trim();
-      if (clean.startsWith('```')) {
-        clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
-      }
-      parsed = JSON.parse(clean);
-    } catch (e) {
-      console.error('❌ JSON inválido do Gemini:', texto.substring(0, 200));
-      throw new Error('Resposta da IA não é JSON válido: ' + e.message);
+    // Parser robusto — tenta múltiplas estratégias em caso de JSON sujo
+    const parsed = parseIAResponse(texto);
+    if (!parsed) {
+      console.error('❌ JSON inválido do Gemini — texto completo:\n', texto);
+      throw new Error('Resposta da IA não é JSON válido após múltiplas tentativas de parse');
     }
 
-    // Validação mínima
+    // Validação: garante que todas as chaves existem (preenche com string vazia se faltar)
     const chavesObrig = ['abertura', 'visao_geral', 'evolucao', 'cobertura', 'profissionais', 'janela', 'fechamento'];
     for (const k of chavesObrig) {
       if (!parsed[k]) parsed[k] = '';
     }
 
     return { textos: parsed, tokens };
+  }
+
+  /**
+   * Parser tolerante pra resposta do Gemini — tenta 4 estratégias em sequência:
+   * 1. JSON.parse direto
+   * 2. Remove markdown fences (```json ... ```)
+   * 3. Extrai o primeiro objeto { ... } do texto via regex
+   * 4. Tenta corrigir aspas internas não-escapadas (fallback final)
+   */
+  function parseIAResponse(texto) {
+    if (!texto || typeof texto !== 'string') return null;
+
+    // Estratégia 1: parse direto
+    try {
+      return JSON.parse(texto);
+    } catch (e) { /* continua */ }
+
+    // Estratégia 2: remover markdown fences
+    try {
+      let limpo = texto.trim();
+      if (limpo.startsWith('```')) {
+        limpo = limpo.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+      }
+      return JSON.parse(limpo);
+    } catch (e) { /* continua */ }
+
+    // Estratégia 3: extrair primeiro objeto JSON do texto
+    try {
+      const match = texto.match(/\{[\s\S]*\}/);
+      if (match) return JSON.parse(match[0]);
+    } catch (e) { /* continua */ }
+
+    // Estratégia 4: tentar reparar aspas internas não-escapadas em valores string
+    // Exemplo problemático: "texto": "frase com "aspas" dentro" → vira "texto": "frase com \"aspas\" dentro"
+    try {
+      const match = texto.match(/\{[\s\S]*\}/);
+      if (match) {
+        let raw = match[0];
+        // Dentro de cada valor "chave": "valor", escapa aspas duplas internas que não estejam no final
+        // Heurística: aspas duplas entre ": " e ("," ou "}") no final da linha
+        raw = raw.replace(
+          /"([a-z_]+)"\s*:\s*"((?:[^"\\]|\\.)*(?:"(?:[^"\\]|\\.)*)*)"\s*([,}])/g,
+          (full, chave, valor, fim) => {
+            // Escapa aspas internas que não estejam já escapadas
+            const escaped = valor.replace(/(?<!\\)"/g, '\\"');
+            return `"${chave}": "${escaped}"${fim}`;
+          }
+        );
+        return JSON.parse(raw);
+      }
+    } catch (e) { /* desiste */ }
+
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════
