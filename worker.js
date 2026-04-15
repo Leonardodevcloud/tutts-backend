@@ -650,3 +650,32 @@ process.on('SIGINT', async () => {
   await pool.end();
   process.exit(0);
 });
+
+// ════════════════════════════════════════════════════════════
+// JOB: CS Automação de Email (cron diário às 06:00 horário Bahia)
+// O job só efetivamente processa se HOJE for o dia configurado em
+// cs_config.automacao_email_dia (default: 1). Nos outros dias sai
+// em <50ms — custo praticamente zero.
+//
+// Por que diário e não mensal:
+//   - admin pode trocar o dia configurado a qualquer momento sem
+//     reagendamento do cron
+//   - se servidor cair em deploy/restart no minuto exato do disparo,
+//     o cron do dia seguinte não vai compensar — com diário fica
+//     mais simples adicionar retry-guard depois se precisar
+// ════════════════════════════════════════════════════════════
+const { executarAutomacaoEmLote } = require('./src/modules/cs/cs.email-automacao.worker');
+cron.schedule('0 6 * * *', withCronLock(pool, 'csAutomacaoEmail', async () => {
+  console.log('📧 [CRON] Verificando automação de email do CS...');
+  try {
+    const r = await executarAutomacaoEmLote(pool);
+    if (r.skipped) {
+      console.log(`📧 [CRON] CS Automação pulada — hoje=${r.hoje}, dia configurado=${r.dia_configurado}`);
+    } else {
+      console.log(`📧 [CRON] CS Automação concluída — ${r.sucessos}/${r.total} sucessos, ${r.falhas} falhas`);
+    }
+  } catch (err) {
+    console.error('❌ [CRON] Erro CS Automação:', err.message);
+  }
+}), { timezone: 'America/Bahia' });
+console.log('✅ [Worker] Cron CS Automação Email registrado (06:00 diário, processa no dia configurado)');
