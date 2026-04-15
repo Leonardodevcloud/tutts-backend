@@ -118,14 +118,15 @@ function createEmailsRoutes(pool) {
   // ============================================================
   // POST /cs/webhook/resend  (PÚBLICO — adicionar a PUBLIC_PATHS)
   // ============================================================
-  // Importante: usa express.raw() pra preservar o body bruto que
-  // foi assinado. NÃO usar express.json() antes desse handler.
+  // O rawBody é preservado pelo hook `verify` do express.json() global
+  // em server.js (mesma estratégia usada pra Stark Bank e Uber Direct).
+  // Tentar usar express.raw() aqui NÃO funciona — o stream do body já foi
+  // consumido pelo express.json() global antes desta rota ser atingida.
   router.post(
     '/cs/webhook/resend',
-    express.raw({ type: '*/*', limit: '1mb' }),
     async (req, res) => {
       const secret = process.env.RESEND_WEBHOOK_SECRET;
-      const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : '';
+      const rawBody = req.rawBody || '';
 
       // Headers em lower-case (express normaliza)
       const verif = verificarAssinaturaSvix(rawBody, req.headers, secret);
