@@ -262,6 +262,56 @@ async function initCsTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_eventos_data ON cs_email_eventos(evento_em DESC)`).catch(() => {});
   console.log('✅ Tabela cs_email_eventos verificada');
 
+  // ========== CONFIGURAÇÕES GLOBAIS DO MÓDULO CS ==========
+  // Key-value pra config global (dia da automação, etc)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cs_config (
+      chave VARCHAR(100) PRIMARY KEY,
+      valor TEXT,
+      descricao TEXT,
+      atualizada_em TIMESTAMP DEFAULT NOW(),
+      atualizada_por VARCHAR(50)
+    )
+  `);
+  // Bootstrap do registro de dia da automação (se não existir)
+  await pool.query(`
+    INSERT INTO cs_config (chave, valor, descricao)
+    VALUES ('automacao_email_dia', '1', 'Dia do mês (1-28) em que a automação de envio mensal de email roda')
+    ON CONFLICT (chave) DO NOTHING
+  `);
+  console.log('✅ Tabela cs_config verificada');
+
+  // ========== AUTOMAÇÃO DE ENVIO MENSAL DE EMAIL ==========
+  // 1 linha = 1 cliente OU (cliente + centro de custo). Quando cliente
+  // tem múltiplos centros, vira N linhas — cada uma com seus próprios
+  // destinatários e seu próprio toggle ativa.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cs_email_automacao (
+      id SERIAL PRIMARY KEY,
+      cod_cliente INTEGER NOT NULL,
+      centro_custo VARCHAR(255),
+      ativa BOOLEAN DEFAULT true,
+      destinatarios JSONB NOT NULL DEFAULT '[]',
+      ultimo_envio_em TIMESTAMP,
+      ultimo_envio_status VARCHAR(30),
+      ultimo_envio_resend_id VARCHAR(100),
+      ultimo_envio_erro TEXT,
+      pausada_desde TIMESTAMP,
+      pausada_motivo TEXT,
+      criada_por VARCHAR(50),
+      criada_em TIMESTAMP DEFAULT NOW(),
+      atualizada_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  // UNIQUE composto tratando NULL como '' (cliente sem CC = string vazia na key)
+  // Garante 1 config por (cod_cliente, centro_custo). Sem isso, INSERTs duplicados
+  // entrariam silenciosamente porque PostgreSQL trata NULL como sempre distinto.
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_email_automacao_cliente_centro
+    ON cs_email_automacao(cod_cliente, COALESCE(centro_custo, ''))`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_automacao_ativa ON cs_email_automacao(ativa)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cs_email_automacao_cod ON cs_email_automacao(cod_cliente)`).catch(() => {});
+  console.log('✅ Tabela cs_email_automacao verificada');
+
   console.log('✅ Módulo Sucesso do Cliente — todas as tabelas verificadas');
 }
 
