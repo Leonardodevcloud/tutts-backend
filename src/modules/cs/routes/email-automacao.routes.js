@@ -99,17 +99,17 @@ function createEmailAutomacaoRoutes(pool) {
   router.get('/cs/email-automacao', async (req, res) => {
     try {
       // nome_cliente vem salvo da criação (consistente com BI no momento do INSERT).
-      // Se vier NULL (config antiga), fallback pra busca no bi_entregas mais recente.
+      // Se vier NULL (config antiga), fallback pra busca no bi_entregas usando MODE()
+      // — pega o nome MAIS COMUM, não o mais recente, pra evitar nome dançando.
       const r = await pool.query(`
         SELECT a.*,
                COALESCE(
                  a.nome_cliente,
-                 (SELECT COALESCE(nome_fantasia, nome_cliente)
+                 (SELECT MODE() WITHIN GROUP (ORDER BY COALESCE(nome_cliente, nome_fantasia))
                     FROM bi_entregas
                    WHERE cod_cliente = a.cod_cliente
-                     AND COALESCE(nome_fantasia, nome_cliente) IS NOT NULL
-                   ORDER BY data_solicitado DESC NULLS LAST
-                   LIMIT 1),
+                     AND COALESCE(nome_cliente, nome_fantasia) IS NOT NULL
+                     AND data_solicitado >= NOW() - INTERVAL '180 days'),
                  'Cliente #' || a.cod_cliente
                ) AS nome_cliente_resolvido
           FROM cs_email_automacao a
@@ -187,12 +187,15 @@ function createEmailAutomacaoRoutes(pool) {
         extraWhere = ` AND (LOWER(COALESCE(nome_fantasia, nome_cliente, '')) LIKE $1 OR cod_cliente = $2)`;
       }
 
-      // CTE: dedup por cod_cliente, pegando o nome mais recente do BI
-      // + centros distintos vistos nos últimos 90 dias
+      // CTE: dedup por cod_cliente, pegando o nome MAIS FREQUENTE do BI
+      // (cliente com vários centros tem nome_fantasia diferente por centro —
+      // usar MODE() pega o mais comum e evita o nome "dançar" entre queries).
+      // COALESCE prioriza nome_cliente (nome corporativo, estável) sobre
+      // nome_fantasia (nome da loja, varia por centro).
       const sql = `
         WITH clientes_bi AS (
           SELECT cod_cliente,
-                 (array_agg(COALESCE(nome_fantasia, nome_cliente) ORDER BY data_solicitado DESC NULLS LAST))[1] AS nome,
+                 MODE() WITHIN GROUP (ORDER BY COALESCE(nome_cliente, nome_fantasia)) AS nome,
                  COUNT(*)::int AS total_entregas_90d,
                  COALESCE(
                    json_agg(DISTINCT centro_custo) FILTER (WHERE centro_custo IS NOT NULL AND centro_custo <> ''),
@@ -201,6 +204,7 @@ function createEmailAutomacaoRoutes(pool) {
             FROM bi_entregas
            WHERE data_solicitado >= NOW() - INTERVAL '90 days'
              AND cod_cliente IS NOT NULL
+             AND COALESCE(nome_cliente, nome_fantasia) IS NOT NULL
              ${extraWhere}
            GROUP BY cod_cliente
         )
@@ -242,11 +246,13 @@ function createEmailAutomacaoRoutes(pool) {
       const userCod = req.user?.codProfissional || req.user?.cod || null;
 
       // Resolve nome_cliente do BI (mesma fonte de truth) — uma vez só pra todos os centros
+      // MODE() pega o nome MAIS FREQUENTE entre as entregas (não o mais recente),
+      // garantindo que seja o nome canônico mesmo pra clientes com vários centros.
       const nomeRes = await pool.query(`
-        SELECT (array_agg(COALESCE(nome_fantasia, nome_cliente) ORDER BY data_solicitado DESC NULLS LAST))[1] AS nome
+        SELECT MODE() WITHIN GROUP (ORDER BY COALESCE(nome_cliente, nome_fantasia)) AS nome
           FROM bi_entregas
          WHERE cod_cliente = $1
-           AND COALESCE(nome_fantasia, nome_cliente) IS NOT NULL
+           AND COALESCE(nome_cliente, nome_fantasia) IS NOT NULL
            AND data_solicitado >= NOW() - INTERVAL '180 days'
       `, [codCliente]);
       const nomeCliente = nomeRes.rows[0]?.nome || null;
