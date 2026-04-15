@@ -169,6 +169,38 @@ const verificarCrmAuth = (req, res, next) => {
     verificarAdmin(req, res, next);
   });
 };
+// ============================================================
+// 🌐 ROTA PÚBLICA: lista mínima de profissionais para a tela de
+// auto-cadastro (Central do Entregador). NÃO requer auth, pois o
+// motoboy ainda não tem conta nesse momento. Retorna apenas
+// codigo+nome+cidade — não expõe telefone, ativador ou data de
+// ativação.
+//
+// Substitui a antiga planilha Google Sheets que o frontend lia
+// diretamente. Fonte agora é crm_leads_capturados (via
+// listarProfissionais), com fallback automático pra planilha
+// legada se o CRM falhar.
+// ============================================================
+const { listarProfissionais: _listarProfissionaisPublico } =
+  require('./src/shared/utils/profissionaisLookup');
+app.get('/api/public/profissionais-cadastro', async (req, res) => {
+  try {
+    const dados = await _listarProfissionaisPublico(pool);
+    const enxuto = dados
+      .filter(p => p.codigo && p.nome)
+      .map(p => ({
+        codigo: p.codigo,
+        nome:   p.nome,
+        cidade: p.cidade || p.regiao || '',
+        origem: p.origem,
+      }));
+    res.json({ success: true, data: enxuto, total: enxuto.length });
+  } catch (err) {
+    console.error('[PUBLIC] Erro /profissionais-cadastro:', err);
+    res.status(500).json({ success: false, data: [], error: err.message });
+  }
+});
+
 app.use('/api/crm', verificarCrmAuth, initCrmRoutes(pool));
 
 // Social (2 routers) — usado por TODOS os usuários (motoboys + admin)
