@@ -36,6 +36,8 @@ const PUBLIC_PATHS = [
   // Trigger da extensão SLA Monitor — validado internamente por Origin do
   // tutts.com.br + SLA_CAPTURE_TOKEN opcional (ver sla-capture.routes.js).
   { path: '/api/agent/sla-capture/trigger', method: 'POST', startsWith: false },
+  // Webhook do Resend — autenticado via assinatura Svix dentro do handler
+  { path: '/api/cs/webhook/resend', method: 'POST', startsWith: false },
 ];
 
 /**

@@ -1223,8 +1223,59 @@ function toggleMarkers(){showMarkers=!showMarkers;markers.forEach(function(m){m.
         return res.status(400).json({ error: 'Informe raio_x_id ou analise' });
       }
 
-      const result = await enviarRaioXEmail({ para, cc, raioX, cliente, periodo, assunto, remetente });
+      // Idempotency-key: previne reenvio duplicado em retry/restart de cron
+      // Mesmo raio_x_id + mesmo destinatário primário = mesmo envio
+      const destinoPrimario = Array.isArray(para) ? para[0] : String(para).split(/[;,]/)[0].trim();
+      const idempotencyKey = raio_x_id
+        ? `cs-raiox-${raio_x_id}-${destinoPrimario}`.replace(/[^a-zA-Z0-9_\-:.@]/g, '_').slice(0, 256)
+        : null;
+
+      // Tags pro Resend (aparecem no dashboard + vêm no payload do webhook)
+      const tags = [
+        { name: 'tipo', value: raioX.tipo_analise === 'cliente' ? 'raio_x_cliente' : 'raio_x_interno' },
+      ];
+      if (raio_x_id) tags.push({ name: 'raio_x_id', value: String(raio_x_id) });
+      if (raioX.cod_cliente) tags.push({ name: 'cod_cliente', value: String(raioX.cod_cliente) });
+
+      const result = await enviarRaioXEmail({
+        para, cc, raioX, cliente, periodo, assunto, remetente,
+        tags, idempotencyKey,
+      });
       console.log(`📧 Raio-X (${raioX.tipo_analise || 'completo'}) enviado por email: ${para} (${result.messageId})`);
+
+      // Persistir registro do envio em cs_emails_enviados (não bloqueia o response)
+      try {
+        await pool.query(
+          `INSERT INTO cs_emails_enviados
+             (raio_x_id, cod_cliente, nome_cliente, tipo, assunto,
+              para, cc, remetente, data_inicio, data_fim,
+              resend_email_id, html_armazenado, tags, status_atual,
+              enviado_por, enviado_por_nome)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'sent', $14, $15)
+           ON CONFLICT (resend_email_id) DO NOTHING`,
+          [
+            raio_x_id || null,
+            raioX.cod_cliente || null,
+            cliente.nome || null,
+            result.tipoEnvio,
+            result.assuntoFinal,
+            JSON.stringify(result.destinatariosFinal),
+            JSON.stringify(result.ccFinal),
+            result.remetenteFinal,
+            periodo.inicio || null,
+            periodo.fim || null,
+            result.messageId,
+            result.htmlGerado,
+            JSON.stringify(result.tagsFinal),
+            req.user && req.user.cod ? String(req.user.cod) : null,
+            req.user && req.user.nome ? req.user.nome : null,
+          ]
+        );
+      } catch (persistErr) {
+        // Email já foi enviado com sucesso — só logamos a falha de persistência
+        console.error('⚠️ [CS] Falha ao persistir cs_emails_enviados:', persistErr.message);
+      }
+
       res.json({ success: true, messageId: result.messageId });
     } catch (error) {
       console.error('❌ Erro ao enviar email Raio-X:', error.message);
