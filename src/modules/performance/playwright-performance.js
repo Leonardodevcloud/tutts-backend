@@ -269,10 +269,21 @@ async function lerTabela(page) {
 }
 
 // ── SLA ─────────────────────────────────────────────────────
-function calcularLinhas(linhas) {
+// codClienteFiltro: quando o job está filtrando por um cliente específico,
+// passamos o código aqui — assim garantimos a aplicação da métrica correta
+// (ex.: 767 = 120min fixo) mesmo se o regex do cliente_txt falhar por variação
+// de formato retornado pelo sistema externo.
+function calcularLinhas(linhas, codClienteFiltro) {
+  var codFiltro = (codClienteFiltro !== null && codClienteFiltro !== undefined && !isNaN(parseInt(codClienteFiltro)))
+    ? parseInt(codClienteFiltro)
+    : null;
   return linhas.map(function(linha) {
     var mCli = linha.cliente_txt.match(/^\s*(\d+)\s*[-–]/);
-    var codCli = mCli ? parseInt(mCli[1]) : null;
+    var codCliRegex = mCli ? parseInt(mCli[1]) : null;
+    // Prioridade: código do filtro do job > regex do texto.
+    // Isso garante que a métrica por cod_cliente (CLIENTES_PRAZO_FIXO) seja
+    // aplicada mesmo quando o texto do cliente vem em formato diferente.
+    var codCli = codFiltro != null ? codFiltro : codCliRegex;
     var nomeCli = linha.cliente_txt.replace(/^\s*\d+\s*[-–]\s*/, '').split('\n')[0].trim();
     var linhasTexto = linha.cliente_txt.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
     var profissional = linhasTexto.length >= 2 ? linhasTexto[1] : '';
@@ -363,7 +374,7 @@ async function buscarPerformanceBatch(configs) {
         await executarBusca(page);
 
         var linhasBrutas = await lerTabela(page);
-        var registros = calcularLinhas(linhasBrutas);
+        var registros = calcularLinhas(linhasBrutas, cfg.codCliente);
         var total = registros.length;
         var no_prazo = registros.filter(function(r) { return r.sla_no_prazo === true; }).length;
         var fora_prazo = registros.filter(function(r) { return r.sla_no_prazo === false; }).length;
