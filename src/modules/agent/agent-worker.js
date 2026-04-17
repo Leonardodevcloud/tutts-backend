@@ -20,6 +20,10 @@ const MAX_FALHAS_SEGUIDAS  = 3;       // após 3 falhas de DB, ativa back-off
 const BACKOFF_BASE_MS      = 30_000;  // 30s inicial no back-off
 const BACKOFF_MAX_MS       = 5 * 60_000; // teto: 5 minutos
 
+// Watchdog absoluto: se um único job Playwright passar disso, mata e segue.
+// Cobre o caso do Chromium pendurar indefinidamente sem lançar erro.
+const JOB_WATCHDOG_MS      = 4 * 60_000; // 4 min (sistema externo + rede margem)
+
 // ── Estado do circuit breaker ───────────────────────────────────
 let workerAtivo       = false;
 let falhasConsecutivas = 0;
@@ -27,6 +31,19 @@ let proximoTick       = null;
 
 function log(msg) {
   logger.info(`[agent-worker] ${msg}`);
+}
+
+/**
+ * Watchdog: promise com timeout absoluto. Não cancela a promise original
+ * (JS não tem cancellation), mas o finally do Playwright fecha o browser
+ * dentro de poucos segundos depois via fecharBrowserSeguro.
+ */
+function comTimeout(promise, ms, nome) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(`${nome}: watchdog ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -134,15 +151,19 @@ async function processarProximoPendente(pool) {
       }
     }
 
-    // Executar Playwright
+    // Executar Playwright (com watchdog absoluto para evitar travas infinitas)
     log(`🤖 Acionando Playwright para OS ${registro.os_numero}...`);
-    const resultado = await executarCorrecaoEndereco({
-      os_numero:        registro.os_numero,
-      ponto:            registro.ponto,
-      latitude:         coords.latitude,
-      longitude:        coords.longitude,
-      cod_profissional: registro.cod_profissional || null,
-    });
+    const resultado = await comTimeout(
+      executarCorrecaoEndereco({
+        os_numero:        registro.os_numero,
+        ponto:            registro.ponto,
+        latitude:         coords.latitude,
+        longitude:        coords.longitude,
+        cod_profissional: registro.cod_profissional || null,
+      }),
+      JOB_WATCHDOG_MS,
+      `playwright_os_${registro.os_numero}`
+    );
 
     if (resultado.sucesso) {
       const endAntigo = resultado.endereco_antigo || null;
@@ -221,18 +242,26 @@ async function processarProximoPendente(pool) {
     }
 
   } catch (err) {
-    // ── Circuit breaker: incrementar falhas se for erro de conexão ──
-    const isDbError = err.message?.includes('Connection terminated')
-      || err.message?.includes('timeout')
-      || err.message?.includes('ECONNREFUSED')
-      || err.message?.includes('too many clients');
+    // ── Circuit breaker: incrementar falhas SÓ se for erro de conexão de DB ──
+    // Cuidado: "timeout" genérico captura errors do Playwright tb (page.goto
+    // timeout, waitForSelector timeout). Esses NÃO são erro de DB — não devem
+    // acionar o back-off do pool.
+    const msg = err.message || '';
+    const isDbError =
+         msg.includes('Connection terminated')
+      || msg.includes('ECONNREFUSED')
+      || msg.includes('ECONNRESET')
+      || msg.includes('too many clients')
+      || msg.includes('Client has encountered a connection error')
+      || /pool.*timeout/i.test(msg)
+      || /timeout exceeded when trying to connect/i.test(msg);
 
     if (isDbError) {
       falhasConsecutivas++;
       const delay = calcularDelay();
       log(`💥 Erro DB (${falhasConsecutivas}x seguidas): ${err.message} — próximo tick em ${Math.round(delay / 1000)}s`);
     } else {
-      log(`💥 Erro crítico: ${err.message}`);
+      log(`💥 Erro no job: ${err.message}`);
     }
 
     if (registro?.id) {
@@ -247,14 +276,27 @@ async function processarProximoPendente(pool) {
 }
 
 function agendarProximoTick(pool) {
-  const delay = calcularDelay();
+  let delay = INTERVALO_NORMAL_MS;
+  try {
+    delay = calcularDelay();
+  } catch (_) { /* fallback pro padrão */ }
+
   proximoTick = setTimeout(async () => {
     try {
       await processarProximoPendente(pool);
     } catch (err) {
-      log(`💥 Exceção no ciclo: ${err.message}`);
+      // Nunca propagar — se lançar aqui, interrompe o worker pra sempre
+      try { log(`💥 Exceção no ciclo: ${err.message}`); } catch (_) {}
+    } finally {
+      // Re-agendamento DEVE acontecer mesmo se tudo acima falhou.
+      // Se não chegar aqui, o worker morre silenciosamente (era o bug).
+      try {
+        agendarProximoTick(pool);
+      } catch (e) {
+        // Último recurso: setTimeout raw direto, sem log, sem delay dinâmico
+        setTimeout(() => agendarProximoTick(pool), INTERVALO_NORMAL_MS);
+      }
     }
-    agendarProximoTick(pool);
   }, delay);
 }
 
