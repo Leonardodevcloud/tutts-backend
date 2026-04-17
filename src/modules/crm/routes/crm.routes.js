@@ -128,9 +128,13 @@ function createCrmCoreRoutes(pool) {
 
   // ==================== POST /verificar-operacao ====================
   // Recebe lista de códigos e retorna status de cada um
+  // Aceita 2 modos:
+  //   - { codigos, dias }                      → janela móvel últimos N dias (padrão)
+  //   - { codigos, data_inicio, data_fim }     → intervalo fixo (YYYY-MM-DD)
+  // Se data_inicio+data_fim vierem, TEM PRIORIDADE sobre `dias`.
   router.post('/verificar-operacao', async (req, res) => {
     try {
-      const { codigos, dias = 30 } = req.body;
+      const { codigos, dias = 30, data_inicio, data_fim } = req.body;
 
       if (!codigos || !Array.isArray(codigos) || codigos.length === 0) {
         return res.status(400).json({ error: 'Lista de códigos é obrigatória' });
@@ -145,19 +149,31 @@ function createCrmCoreRoutes(pool) {
         return res.status(400).json({ error: 'Nenhum código válido fornecido' });
       }
 
-      console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais...`);
+      // Decidir modo: intervalo fixo tem prioridade
+      const usarIntervalo = Boolean(data_inicio && data_fim);
+      let whereData;
+      let paramsExtras = [];
+      if (usarIntervalo) {
+        whereData = `AND data_solicitado >= $2::date AND data_solicitado <= $3::date`;
+        paramsExtras = [data_inicio, data_fim];
+        console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais (intervalo ${data_inicio} → ${data_fim})...`);
+      } else {
+        const diasInt = parseInt(dias) || 30;
+        whereData = `AND data_solicitado >= CURRENT_DATE - INTERVAL '${diasInt} days'`;
+        console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais (últimos ${diasInt} dias)...`);
+      }
 
       const result = await pool.query(`
-        SELECT 
+        SELECT
           cod_prof,
           nome_prof,
           COUNT(*) as total_entregas,
           MAX(data_solicitado) as ultima_entrega
         FROM bi_entregas
         WHERE cod_prof = ANY($1::int[])
-          AND data_solicitado >= CURRENT_DATE - INTERVAL '${dias} days'
+          ${whereData}
         GROUP BY cod_prof, nome_prof
-      `, [codigosInt]);
+      `, [codigosInt, ...paramsExtras]);
 
       // Mapear resultados
       const emOperacao = new Map(result.rows.map(r => [r.cod_prof, r]));
@@ -172,7 +188,10 @@ function createCrmCoreRoutes(pool) {
 
       res.json({
         success: true,
-        periodo_dias: dias,
+        // Resposta carrega o filtro usado pra debug/auditoria
+        ...(usarIntervalo
+          ? { data_inicio, data_fim }
+          : { periodo_dias: parseInt(dias) || 30 }),
         total_verificados: codigosInt.length,
         em_operacao: result.rows.length,
         nao_operando: codigosInt.length - result.rows.length,
