@@ -25,6 +25,9 @@ const { logger } = require('../../config/logger');
 const SESSION_FILE   = '/tmp/tutts-rpa-session.json';
 const SCREENSHOT_DIR = '/tmp/screenshots';
 const TIMEOUT        = 25000;
+// Timeout mais largo só para page.goto() — navegação pro sistema externo
+// pode ter picos de latência e 25s sem margem derrubava jobs
+const NAV_TIMEOUT    = 45000;
 
 const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
 const ACOMP_URL = () =>
@@ -37,6 +40,85 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 function log(msg) {
   logger.info(`[playwright-agent] ${msg}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Gestão de recursos: watchdog de promises + fechamento seguro de browser
+// Mesmo padrão usado em playwright-sla-capture.js — evita Chromium zombie
+// que leva a "pthread_create: Resource temporarily unavailable" em containers
+// ─────────────────────────────────────────────────────────────────────────
+function comTimeout(promise, ms, nome) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(`${nome}: timeout após ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Fecha browser de forma robusta: tenta close() gracioso com timeout curto,
+ * e se pendurar, mata o processo subjacente via SIGKILL.
+ * Nunca lança — sempre retorna, para não mascarar o erro original.
+ */
+async function fecharBrowserSeguro(browser) {
+  if (!browser) return;
+  try {
+    await comTimeout(browser.close(), 5_000, 'browser.close');
+  } catch (e) {
+    log(`⚠️ browser.close() pendurou: ${e.message} — SIGKILL`);
+    try {
+      const proc = browser.process && browser.process();
+      if (proc && typeof proc.kill === 'function') {
+        proc.kill('SIGKILL');
+        log(`💀 Chromium pid=${proc.pid} morto via SIGKILL`);
+      }
+    } catch (e2) {
+      log(`⚠️ Falha no kill: ${e2.message}`);
+    }
+  }
+}
+
+/**
+ * Limpa screenshots antigos em /tmp/screenshots (> SCREENSHOT_MAX_AGE_MS).
+ * Roda best-effort; não bloqueia o fluxo principal se falhar.
+ */
+const SCREENSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+const SCREENSHOT_MAX_FILES  = 200; // teto absoluto por segurança
+
+function limparScreenshotsAntigos() {
+  try {
+    if (!fs.existsSync(SCREENSHOT_DIR)) return;
+    const agora = Date.now();
+    const arquivos = fs.readdirSync(SCREENSHOT_DIR)
+      .map(nome => {
+        const full = path.join(SCREENSHOT_DIR, nome);
+        try {
+          const st = fs.statSync(full);
+          return { nome, full, mtime: st.mtimeMs, size: st.size };
+        } catch { return null; }
+      })
+      .filter(Boolean);
+
+    let removidos = 0;
+    // 1. Remove por idade
+    for (const f of arquivos) {
+      if (agora - f.mtime > SCREENSHOT_MAX_AGE_MS) {
+        try { fs.unlinkSync(f.full); removidos++; } catch {}
+      }
+    }
+    // 2. Se ainda sobrar muito arquivo, remove os mais antigos
+    const restantes = arquivos.filter(f => agora - f.mtime <= SCREENSHOT_MAX_AGE_MS)
+      .sort((a, b) => a.mtime - b.mtime);
+    if (restantes.length > SCREENSHOT_MAX_FILES) {
+      const excesso = restantes.slice(0, restantes.length - SCREENSHOT_MAX_FILES);
+      for (const f of excesso) {
+        try { fs.unlinkSync(f.full); removidos++; } catch {}
+      }
+    }
+    if (removidos > 0) log(`🧹 ${removidos} screenshot(s) antigo(s) removido(s)`);
+  } catch (e) {
+    log(`⚠️ Falha ao limpar screenshots: ${e.message}`);
+  }
 }
 
 async function screenshot(page, os, etapa) {
@@ -138,7 +220,7 @@ async function isLoggedIn(page) {
 async function fazerLogin(page) {
   log('🔐 Fazendo login...');
 
-  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   await page.waitForTimeout(1500);
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
@@ -168,6 +250,9 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
   if (ponto === 1) {
     return { sucesso: false, erro: 'Segurança: Ponto 1 nunca pode ser alterado.' };
   }
+
+  // Limpeza de screenshots antigos a cada execução (fire-and-forget, não bloqueia)
+  setImmediate(limparScreenshotsAntigos);
 
   log(`🚀 OS ${os_numero} | Ponto ${ponto} | ${latitude}, ${longitude}`);
 
@@ -205,7 +290,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     // ── Passo 1: Autenticação + ir para acompanhamento ───────────────────────
     log('📌 Passo 1: Autenticação');
 
-    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     await page.waitForTimeout(2000);
 
     if (!(await isLoggedIn(page))) {
@@ -214,7 +299,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         log('🗑️  Sessão inválida removida');
       }
       await fazerLogin(page);
-      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
       await page.waitForTimeout(2000);
       await context.storageState({ path: SESSION_FILE });
       log('💾 Sessão salva');
@@ -297,7 +382,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           log('🗑️  Sessão removida');
         }
         await fazerLogin(page);
-        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
         await page.waitForTimeout(2000);
         await context.storageState({ path: SESSION_FILE });
         log('💾 Sessão renovada');
@@ -400,7 +485,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       if (statusOS === 'concluida') {
         const ss = await screenshot(page, os_numero, 'passo2a_os_concluida');
-        await browser.close();
+        // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
         return {
           sucesso: false,
           erro: `[Validação] A OS ${os_numero} já está concluída/finalizada no sistema. Apenas OS em execução podem ter o endereço corrigido.`,
@@ -410,7 +495,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       if (statusOS === 'cancelada') {
         const ss = await screenshot(page, os_numero, 'passo2a_os_cancelada');
-        await browser.close();
+        // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
         return {
           sucesso: false,
           erro: `[Validação] A OS ${os_numero} está cancelada. Não é possível corrigir endereço de OS cancelada.`,
@@ -448,7 +533,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           const codLimpo = String(cod_profissional).trim();
           if (!motoboyNaOS.includes(codLimpo)) {
             const ss = await screenshot(page, os_numero, 'passo2b_motoboy_divergente');
-            await browser.close();
+            // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
             return {
               sucesso: false,
               erro: `[Segurança] O profissional que solicitou (cód. ${codLimpo}) não corresponde ao profissional vinculado à OS ${os_numero} (cód. ${motoboyNaOS}). Correção não autorizada.`,
@@ -533,7 +618,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       ).catch(() => []);
       
       const ss = await screenshot(page, os_numero, 'passo3b_ponto_inexistente');
-      await browser.close();
+      // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
       return {
         sucesso: false,
         erro: `[Validação] O Ponto ${ponto} não existe nesta OS. A OS ${os_numero} possui apenas ${totalPontos} ponto(s) corrigível(is)${pontosDisponiveis.length > 0 ? ` (pontos: ${pontosDisponiveis.join(', ')})` : ''}. Verifique o ponto correto e tente novamente.`,
@@ -667,7 +752,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     if (!latPreenchido || !lonPreenchido) {
       const ss = await screenshot(page, os_numero, 'passo5_inputs_vazios');
-      await browser.close();
+      // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
       return {
         sucesso: false,
         erro: `Falha ao preencher coordenadas. Lat: "${latPreenchido}", Lon: "${lonPreenchido}"`,
@@ -710,7 +795,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     if (jaCorrigidoAntes) {
       const ss = await screenshot(page, os_numero, 'passo5_ja_corrigido');
       log('⚠️ Endereço já foi corrigido anteriormente no sistema externo');
-      await browser.close();
+      // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
       return {
         sucesso: false,
         erro: 'ENDERECO_JA_CORRIGIDO',
@@ -721,7 +806,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     if (!confirmarVisivel) {
       const ss = await screenshot(page, os_numero, 'passo5_geocoder_vazio');
-      await browser.close();
+      // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
       return {
         sucesso: false,
         erro: `Coordenadas (${latitude}, ${longitude}) não reconhecidas pelo geocoder. Botão Confirmar não apareceu após 10s.`,
@@ -788,7 +873,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       const aindaVisivel2 = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
       if (aindaVisivel2) {
         const ss = await screenshot(page, os_numero, 'passo6_confirmar_falhou');
-        await browser.close();
+        // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
         return {
           sucesso: false,
           erro: `Falha ao confirmar alteração. O botão "Confirmar" permanece visível após 2 tentativas. O endereço pode não ter sido alterado.`,
@@ -1262,7 +1347,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
             await page.bringToFront().catch(() => {});
           }
 
-          await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+          await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
           await page.waitForTimeout(1500);
 
           const abaExec = page.locator('#pills-em-execucao-tab');
@@ -1304,10 +1389,20 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
   } catch (err) {
     log(`❌ Erro: ${err.message}`);
-    const ss = await screenshot(page, os_numero, 'erro_inesperado');
+    // Screenshot com timeout — se a página estiver morta não queremos pendurar aqui
+    let ss = null;
+    try {
+      ss = await comTimeout(
+        screenshot(page, os_numero, 'erro_inesperado'),
+        5_000,
+        'screenshot_erro'
+      );
+    } catch (e) {
+      log(`⚠️ Screenshot de erro falhou: ${e.message}`);
+    }
     return { sucesso: false, erro: `Erro inesperado: ${err.message}`, screenshot: ss };
   } finally {
-    await browser.close();
+    await fecharBrowserSeguro(browser);
   }
 }
 
