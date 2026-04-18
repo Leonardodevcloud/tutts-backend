@@ -128,13 +128,15 @@ function createCrmCoreRoutes(pool) {
 
   // ==================== POST /verificar-operacao ====================
   // Recebe lista de códigos e retorna status de cada um
-  // Aceita 2 modos:
-  //   - { codigos, dias }                      → janela móvel últimos N dias (padrão)
-  //   - { codigos, data_inicio, data_fim }     → intervalo fixo (YYYY-MM-DD)
-  // Se data_inicio+data_fim vierem, TEM PRIORIDADE sobre `dias`.
+  //
+  // Aceita 2 modos de intervalo:
+  //   1) { codigos, data_inicio: 'YYYY-MM-DD', data_fim: 'YYYY-MM-DD' }  ← preferido
+  //   2) { codigos, dias: 30 }                                           ← retrocompat (últimos N dias)
+  //
+  // Se data_inicio/data_fim forem passados, têm PRIORIDADE sobre `dias`.
   router.post('/verificar-operacao', async (req, res) => {
     try {
-      const { codigos, dias = 30, data_inicio, data_fim } = req.body;
+      const { codigos, dias: diasRaw, data_inicio, data_fim } = req.body;
 
       if (!codigos || !Array.isArray(codigos) || codigos.length === 0) {
         return res.status(400).json({ error: 'Lista de códigos é obrigatória' });
@@ -149,31 +151,40 @@ function createCrmCoreRoutes(pool) {
         return res.status(400).json({ error: 'Nenhum código válido fornecido' });
       }
 
-      // Decidir modo: intervalo fixo tem prioridade
-      const usarIntervalo = Boolean(data_inicio && data_fim);
-      let whereData;
-      let paramsExtras = [];
-      if (usarIntervalo) {
-        whereData = `AND data_solicitado >= $2::date AND data_solicitado <= $3::date`;
-        paramsExtras = [data_inicio, data_fim];
-        console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais (intervalo ${data_inicio} → ${data_fim})...`);
+      // Montar cláusula de data conforme modo recebido
+      let clausulaData = '';
+      let params = [codigosInt];
+      let periodoDesc = '';
+
+      if (data_inicio && data_fim) {
+        // Modo preferido: intervalo fixo
+        const reData = /^\d{4}-\d{2}-\d{2}$/;
+        if (!reData.test(String(data_inicio)) || !reData.test(String(data_fim))) {
+          return res.status(400).json({ error: 'data_inicio e data_fim devem estar no formato YYYY-MM-DD' });
+        }
+        clausulaData = `AND data_solicitado >= $2::date AND data_solicitado <= $3::date`;
+        params = [codigosInt, data_inicio, data_fim];
+        periodoDesc = `${data_inicio} → ${data_fim}`;
       } else {
-        const diasInt = parseInt(dias) || 30;
-        whereData = `AND data_solicitado >= CURRENT_DATE - INTERVAL '${diasInt} days'`;
-        console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais (últimos ${diasInt} dias)...`);
+        // Retrocompat: últimos N dias
+        const dias = parseInt(diasRaw) || 30;
+        clausulaData = `AND data_solicitado >= CURRENT_DATE - INTERVAL '${dias} days'`;
+        periodoDesc = `últimos ${dias} dias`;
       }
 
+      console.log(`[CRM] Verificando operação de ${codigosInt.length} profissionais | período: ${periodoDesc}`);
+
       const result = await pool.query(`
-        SELECT
+        SELECT 
           cod_prof,
           nome_prof,
           COUNT(*) as total_entregas,
           MAX(data_solicitado) as ultima_entrega
         FROM bi_entregas
         WHERE cod_prof = ANY($1::int[])
-          ${whereData}
+          ${clausulaData}
         GROUP BY cod_prof, nome_prof
-      `, [codigosInt, ...paramsExtras]);
+      `, params);
 
       // Mapear resultados
       const emOperacao = new Map(result.rows.map(r => [r.cod_prof, r]));
@@ -188,10 +199,9 @@ function createCrmCoreRoutes(pool) {
 
       res.json({
         success: true,
-        // Resposta carrega o filtro usado pra debug/auditoria
-        ...(usarIntervalo
-          ? { data_inicio, data_fim }
-          : { periodo_dias: parseInt(dias) || 30 }),
+        periodo: periodoDesc,
+        data_inicio: data_inicio || null,
+        data_fim: data_fim || null,
         total_verificados: codigosInt.length,
         em_operacao: result.rows.length,
         nao_operando: codigosInt.length - result.rows.length,
