@@ -84,6 +84,18 @@ router.get('/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
   });
 });
 
+// Retorna a chave do Google Maps JS pro frontend carregar o mapa dinamicamente.
+// Protegido pelo token de solicitação — não expõe a chave publicamente.
+// Observação: uma vez carregada no browser, a chave estará visível em DevTools,
+// então é recomendado restringir a chave por HTTP Referrer no Google Cloud Console.
+router.get('/solicitacao/maps-key', verificarTokenSolicitacao, (req, res) => {
+  const chave = process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!chave) {
+    return res.status(500).json({ error: 'Chave do Google Maps não configurada no servidor' });
+  }
+  res.json({ key: chave });
+});
+
 // Atualizar configurações do cliente (partida padrão, etc)
 router.patch('/solicitacao/configuracoes', verificarTokenSolicitacao, async (req, res) => {
   try {
