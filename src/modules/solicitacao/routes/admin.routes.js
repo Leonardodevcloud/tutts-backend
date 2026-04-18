@@ -511,6 +511,37 @@ router.post('/webhook/tutts', async (req, res) => {
         console.log(`📸 [WEBHOOK] Fotos de protocolo do ponto ${pontoNumero}:`, JSON.stringify(statusEndereco.endereco.protocolo));
       }
       
+      // NOVO: atualizar também a tabela solicitacoes_pontos (source of truth do status)
+      // Antes, só o JSONB dados_pontos era atualizado, causando pontos ficarem como "pendente" na UI
+      try {
+        await pool.query(`
+          UPDATE solicitacoes_pontos SET
+            status = $1,
+            status_atualizado_em = CURRENT_TIMESTAMP,
+            data_chegada = CASE WHEN $1 = 'chegou' THEN CURRENT_TIMESTAMP ELSE data_chegada END,
+            data_coletado = CASE WHEN $1 = 'coletado' THEN CURRENT_TIMESTAMP ELSE data_coletado END,
+            data_finalizado = CASE WHEN $1 = 'finalizado' THEN CURRENT_TIMESTAMP ELSE data_finalizado END,
+            motivo_finalizacao = COALESCE($2, motivo_finalizacao),
+            motivo_descricao = COALESCE($3, motivo_descricao),
+            tempo_espera = COALESCE($4, tempo_espera),
+            fotos = COALESCE($5::jsonb, fotos),
+            assinatura = COALESCE($6::jsonb, assinatura)
+          WHERE solicitacao_id = $7 AND ordem = $8
+        `, [
+          pontoStatus,
+          statusEndereco.endereco.motivo?.tipo || null,
+          statusEndereco.endereco.motivo?.descricao || null,
+          statusEndereco.endereco.tempoEspera || null,
+          statusEndereco.endereco.protocolo ? JSON.stringify(statusEndereco.endereco.protocolo) : null,
+          statusEndereco.endereco.assinatura ? JSON.stringify(statusEndereco.endereco.assinatura) : null,
+          solicitacaoId,
+          pontoNumero
+        ]);
+        console.log(`✅ [WEBHOOK] Tabela solicitacoes_pontos atualizada: ponto ${pontoNumero} → ${pontoStatus}`);
+      } catch (errPonto) {
+        console.error(`⚠️ [WEBHOOK] Erro ao atualizar tabela solicitacoes_pontos (não crítico, JSONB foi salvo):`, errPonto.message);
+      }
+      
       console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} atualizado: ${pontoStatus} - ${statusEndereco.descricao || ''}`);
     }
     
