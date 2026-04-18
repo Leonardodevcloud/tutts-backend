@@ -1188,6 +1188,47 @@ router.patch('/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao
   }
 });
 
+// Editar endereço salvo (apelido, complemento, observação, telefone)
+// O endereço em si (rua, cep, coords) não é editável — pra mudar deve excluir e recriar
+router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { apelido, complemento, observacao_padrao, telefone_padrao, procurar_por_padrao } = req.body;
+    
+    // Verificar se é do cliente
+    const existe = await pool.query(
+      'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
+      [id, req.clienteSolicitacao.id]
+    );
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ error: 'Endereço não encontrado' });
+    }
+    
+    await pool.query(`
+      UPDATE solicitacao_favoritos SET
+        apelido = COALESCE($1, apelido),
+        complemento = COALESCE($2, complemento),
+        observacao_padrao = COALESCE($3, observacao_padrao),
+        telefone_padrao = COALESCE($4, telefone_padrao),
+        procurar_por_padrao = COALESCE($5, procurar_por_padrao)
+      WHERE id = $6 AND cliente_id = $7
+    `, [
+      apelido?.trim() || null,
+      complemento?.trim() || null,
+      observacao_padrao?.trim() || null,
+      telefone_padrao?.trim() || null,
+      procurar_por_padrao?.trim() || null,
+      id,
+      req.clienteSolicitacao.id
+    ]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao editar endereço:', err);
+    res.status(500).json({ error: 'Erro ao editar endereço' });
+  }
+});
+
 // Deletar endereço salvo
 router.delete('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
