@@ -297,6 +297,50 @@ router.patch('/admin/solicitacao/clientes/:id/senha', verificarToken, async (req
   }
 });
 
+// Editar dados gerais do cliente (nome, email, empresa)
+router.patch('/admin/solicitacao/clientes/:id', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, email, empresa } = req.body;
+    
+    // Validações básicas
+    if (nome !== undefined && (!nome || !nome.trim())) {
+      return res.status(400).json({ error: 'Nome não pode ser vazio' });
+    }
+    if (email !== undefined) {
+      if (!email || !email.trim()) {
+        return res.status(400).json({ error: 'Email não pode ser vazio' });
+      }
+      // Verificar se o email já está em uso por outro cliente
+      const existente = await pool.query(
+        'SELECT id FROM clientes_solicitacao WHERE email = $1 AND id != $2',
+        [email.trim().toLowerCase(), id]
+      );
+      if (existente.rows.length > 0) {
+        return res.status(400).json({ error: 'Email já cadastrado em outro cliente' });
+      }
+    }
+    
+    await pool.query(`
+      UPDATE clientes_solicitacao 
+      SET nome = COALESCE($1, nome),
+          email = COALESCE($2, email),
+          empresa = COALESCE($3, empresa)
+      WHERE id = $4
+    `, [
+      nome?.trim() || null,
+      email?.trim().toLowerCase() || null,
+      empresa !== undefined ? (empresa?.trim() || null) : null,  // permite limpar empresa
+      id
+    ]);
+    
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao atualizar cliente:', err);
+    res.status(500).json({ error: 'Erro ao atualizar cliente' });
+  }
+});
+
 // Atualizar credenciais Tutts do cliente
 router.patch('/admin/solicitacao/clientes/:id/credenciais', verificarToken, async (req, res) => {
   try {
