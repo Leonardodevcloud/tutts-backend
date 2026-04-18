@@ -747,6 +747,48 @@ router.post('/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, r
       const corrida = corridasAtivas.rows.find(c => c.tutts_os_numero === os || c.tutts_os_numero === os.toString());
       if (!corrida) continue;
       
+      // NOVO: atualizar também a tabela solicitacoes_pontos (source of truth do status dos pontos)
+      // A Tutts retorna os pontos no formato { codigo: "CHE"|"COL"|"FIN", statusPonto: {...} }
+      if (Array.isArray(dadosOS.pontos)) {
+        for (const ponto of dadosOS.pontos) {
+          const pontoNumero = parseInt(ponto.ponto);
+          if (!pontoNumero) continue;
+          
+          let pontoStatus = null;
+          const codigo = (ponto.codigo || '').toUpperCase();
+          if (codigo === 'CHE') pontoStatus = 'chegou';
+          else if (codigo === 'COL') pontoStatus = 'coletado';
+          else if (codigo === 'FIN') pontoStatus = 'finalizado';
+          else continue; // pendente ou desconhecido — não atualiza
+          
+          const sp = ponto.statusPonto || {};
+          try {
+            await pool.query(`
+              UPDATE solicitacoes_pontos SET
+                status = $1,
+                status_atualizado_em = CURRENT_TIMESTAMP,
+                data_chegada = COALESCE($2::timestamp, data_chegada),
+                data_finalizado = COALESCE($3::timestamp, data_finalizado),
+                motivo_descricao = COALESCE($4, motivo_descricao),
+                fotos = COALESCE($5::jsonb, fotos),
+                assinatura = COALESCE($6::jsonb, assinatura)
+              WHERE solicitacao_id = $7 AND ordem = $8
+            `, [
+              pontoStatus,
+              sp.chegada || null,
+              pontoStatus === 'finalizado' ? (sp.saida || null) : null,
+              sp.motivo || sp.ocorrencia || null,
+              sp.protocolo?.length ? JSON.stringify(sp.protocolo) : null,
+              sp.assinatura?.length ? JSON.stringify(sp.assinatura) : null,
+              corrida.id,
+              pontoNumero
+            ]);
+          } catch (errPonto) {
+            console.error(`⚠️ [SINCRONIZAR] Erro ao atualizar ponto ${pontoNumero} da OS ${os}:`, errPonto.message);
+          }
+        }
+      }
+      
       // Só atualizar se status mudou
       if (corrida.status !== novoStatus) {
         // Extrair dados do profissional
