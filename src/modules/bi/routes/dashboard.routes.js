@@ -1892,12 +1892,32 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       FROM bi_entregas 
       ${where}
     `, params);
+
+    // Distribuição por hora — Acompanhamento Hora a Hora
+    const porHoraQuery = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM data_hora)::int as hora,
+        COUNT(DISTINCT os) as total_os
+      FROM bi_entregas 
+      ${where}
+      AND data_hora IS NOT NULL
+      GROUP BY EXTRACT(HOUR FROM data_hora)
+      ORDER BY hora
+    `, params);
+    
+    // Preencher todas as 24 horas (0-23), mesmo as sem dados
+    const porHora = [];
+    for (let h = 0; h < 24; h++) {
+      const found = porHoraQuery.rows.find(r => parseInt(r.hora) === h);
+      porHora.push({ hora: h, total: found ? parseInt(found.total_os) : 0 });
+    }
     
     const responseData = { 
       metricas, 
       porCliente, 
       porProfissional, 
-      dadosGraficos: dadosGraficos.rows 
+      dadosGraficos: dadosGraficos.rows,
+      porHora
     };
     
     // === CACHE STORE ===
