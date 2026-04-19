@@ -72,9 +72,14 @@ function createChatIaRoutes(pool) {
           user_id VARCHAR(100) NOT NULL,
           conteudo TEXT NOT NULL,
           ativo BOOLEAN DEFAULT true,
+          origem VARCHAR(20) DEFAULT 'auto',
+          prompt_origem TEXT,
           created_at TIMESTAMP DEFAULT NOW()
         )
       `);
+      // Migration: adicionar colunas se tabela já existia sem elas
+      await pool.query(`ALTER TABLE bi_chat_memorias ADD COLUMN IF NOT EXISTS origem VARCHAR(20) DEFAULT 'auto'`).catch(() => {});
+      await pool.query(`ALTER TABLE bi_chat_memorias ADD COLUMN IF NOT EXISTS prompt_origem TEXT`).catch(() => {});
       console.log('✅ [Chat IA v6] Tabelas verificadas/criadas');
     } catch (e) {
       console.error('⚠️ [Chat IA v6] Erro init tables:', e.message);
@@ -468,8 +473,8 @@ Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
       const memoria = extractData.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 
       if (memoria && memoria !== 'NENHUMA' && memoria.length > 5 && memoria.length < 200) {
-        await pool.query(`INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2)`, [userId, memoria]);
-        console.log(`🧠 [Chat IA v6] Nova memória salva: "${memoria}"`);
+        await pool.query(`INSERT INTO bi_chat_memorias (user_id, conteudo, origem, prompt_origem) VALUES ($1, $2, 'auto', $3)`, [userId, memoria, prompt]);
+        console.log(`🧠 [Chat IA v6] Nova memória AUTO salva: "${memoria}"`);
       }
     } catch (e) {
       console.error('⚠️ [Chat IA v6] Erro detectar memória:', e.message);
@@ -1046,7 +1051,7 @@ Formatação de texto:
     try {
       const userId = req.user?.id || req.user?.userId || 'anonymous';
       const result = await pool.query(
-        `SELECT id, conteudo, created_at FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true ORDER BY created_at ASC`,
+        `SELECT id, conteudo, origem, prompt_origem, created_at FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true ORDER BY created_at DESC`,
         [userId]
       );
       res.json({ success: true, memorias: result.rows });
@@ -1059,7 +1064,7 @@ Formatação de texto:
       const { conteudo } = req.body;
       if (!conteudo || conteudo.trim().length < 3) return res.status(400).json({ error: 'Conteúdo muito curto' });
       const result = await pool.query(
-        `INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2) RETURNING *`,
+        `INSERT INTO bi_chat_memorias (user_id, conteudo, origem) VALUES ($1, $2, 'manual') RETURNING *`,
         [userId, conteudo.trim()]
       );
       res.json({ success: true, memoria: result.rows[0] });
