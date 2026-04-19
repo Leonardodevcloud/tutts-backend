@@ -1036,12 +1036,18 @@ router.post('/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res
 // Listar favoritos
 router.get('/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT * FROM solicitacao_favoritos 
-      WHERE cliente_id = $1 
-      ORDER BY vezes_usado DESC, ultimo_uso DESC
-      LIMIT 50
-    `, [req.clienteSolicitacao.id]);
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
+    const result = grupoId
+      ? await pool.query(`
+          SELECT * FROM solicitacao_favoritos 
+          WHERE grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL)
+          ORDER BY vezes_usado DESC, ultimo_uso DESC LIMIT 50
+        `, [grupoId, req.clienteSolicitacao.id])
+      : await pool.query(`
+          SELECT * FROM solicitacao_favoritos 
+          WHERE cliente_id = $1 AND grupo_enderecos_id IS NULL
+          ORDER BY vezes_usado DESC, ultimo_uso DESC LIMIT 50
+        `, [req.clienteSolicitacao.id]);
     
     res.json(result.rows);
   } catch (err) {
@@ -1050,13 +1056,23 @@ router.get('/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res)
   }
 });
 
-// Deletar favorito
+// Deletar favorito (legado — qualquer membro do grupo pode deletar)
 router.delete('/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
-    await pool.query(
-      'DELETE FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
-      [req.params.id, req.clienteSolicitacao.id]
-    );
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
+    if (grupoId) {
+      await pool.query(
+        `DELETE FROM solicitacao_favoritos 
+         WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))`,
+        [req.params.id, grupoId, req.clienteSolicitacao.id]
+      );
+    } else {
+      await pool.query(
+        `DELETE FROM solicitacao_favoritos 
+         WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL`,
+        [req.params.id, req.clienteSolicitacao.id]
+      );
+    }
     res.json({ sucesso: true });
   } catch (err) {
     console.error('❌ Erro ao deletar favorito:', err);
@@ -1070,21 +1086,25 @@ router.delete('/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (re
 router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao } = req.body;
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;  // null se não está em grupo
     
-    console.log('📍 Salvando endereço:', { apelido, endereco_completo, rua, cidade });
+    console.log('📍 Salvando endereço:', { apelido, endereco_completo, rua, cidade, grupoId });
     
     if (!endereco_completo && !rua) {
       return res.status(400).json({ error: 'Endereço é obrigatório' });
     }
     
-    // Verificar se já existe pelo endereço completo ou rua+numero+cidade
+    // Verificar duplicatas: se tem grupo, busca no grupo inteiro; senão só no cliente
+    const scopeClausula = grupoId 
+      ? '(grupo_enderecos_id = $1 OR cliente_id = $6)' 
+      : '(cliente_id = $6 AND grupo_enderecos_id IS NULL)';
     const existe = await pool.query(
       `SELECT id FROM solicitacao_favoritos 
-       WHERE cliente_id = $1 AND (
+       WHERE ${scopeClausula} AND (
          (endereco_completo = $2 AND $2 IS NOT NULL) OR 
          (rua = $3 AND numero = $4 AND cidade = $5)
        )`,
-      [req.clienteSolicitacao.id, endereco_completo, rua, numero, cidade]
+      [grupoId, endereco_completo, rua, numero, cidade, req.clienteSolicitacao.id]
     );
     
     if (existe.rows.length > 0) {
@@ -1103,16 +1123,16 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     
     const result = await pool.query(`
       INSERT INTO solicitacao_favoritos (
-        cliente_id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
+        cliente_id, grupo_enderecos_id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
         latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING id
     `, [
-      req.clienteSolicitacao.id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
+      req.clienteSolicitacao.id, grupoId, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
       latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
     ]);
     
-    console.log('✅ Endereço salvo com ID:', result.rows[0].id);
+    console.log('✅ Endereço salvo com ID:', result.rows[0].id, 'grupo:', grupoId || 'individual');
     res.json({ sucesso: true, id: result.rows[0].id });
   } catch (err) {
     console.error('❌ Erro ao salvar endereço:', err);
@@ -1120,24 +1140,37 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
   }
 });
 
-// Buscar endereços salvos
+// Buscar endereços salvos (inclui endereços do grupo se o cliente pertencer a um)
 router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { q } = req.query;
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     
-    let query = `
-      SELECT * FROM solicitacao_favoritos 
-      WHERE cliente_id = $1
-    `;
-    let params = [req.clienteSolicitacao.id];
+    // Scope: se está em grupo, vê todos do grupo + individuais próprios (legado sem grupo)
+    //        se não está em grupo, vê só os individuais próprios
+    let query, params;
+    if (grupoId) {
+      query = `
+        SELECT * FROM solicitacao_favoritos 
+        WHERE grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL)
+      `;
+      params = [grupoId, req.clienteSolicitacao.id];
+    } else {
+      query = `
+        SELECT * FROM solicitacao_favoritos 
+        WHERE cliente_id = $1 AND grupo_enderecos_id IS NULL
+      `;
+      params = [req.clienteSolicitacao.id];
+    }
     
     if (q && q.trim()) {
+      const paramIdx = params.length + 1;
       query += ` AND (
-        apelido ILIKE $2 OR 
-        endereco_completo ILIKE $2 OR 
-        rua ILIKE $2 OR 
-        bairro ILIKE $2 OR 
-        cidade ILIKE $2
+        apelido ILIKE $${paramIdx} OR 
+        endereco_completo ILIKE $${paramIdx} OR 
+        rua ILIKE $${paramIdx} OR 
+        bairro ILIKE $${paramIdx} OR 
+        cidade ILIKE $${paramIdx}
       )`;
       params.push(`%${q.trim()}%`);
     }
@@ -1156,12 +1189,23 @@ router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, as
 router.post('/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     
-    await pool.query(`
-      UPDATE solicitacao_favoritos 
-      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
-      WHERE id = $1 AND cliente_id = $2
-    `, [id, req.clienteSolicitacao.id]);
+    // Se está em grupo, pode marcar uso em qualquer endereço do grupo + próprios individuais
+    // Se não está em grupo, só nos próprios individuais
+    if (grupoId) {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+        WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))
+      `, [id, grupoId, req.clienteSolicitacao.id]);
+    } else {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+        WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL
+      `, [id, req.clienteSolicitacao.id]);
+    }
     
     res.json({ sucesso: true });
   } catch (err) {
@@ -1174,12 +1218,21 @@ router.post('/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao,
 router.patch('/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     
-    await pool.query(`
-      UPDATE solicitacao_favoritos 
-      SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
-      WHERE id = $1 AND cliente_id = $2
-    `, [id, req.clienteSolicitacao.id]);
+    if (grupoId) {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+        WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))
+      `, [id, grupoId, req.clienteSolicitacao.id]);
+    } else {
+      await pool.query(`
+        UPDATE solicitacao_favoritos 
+        SET vezes_usado = vezes_usado + 1, ultimo_uso = CURRENT_TIMESTAMP
+        WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL
+      `, [id, req.clienteSolicitacao.id]);
+    }
     
     res.json({ sucesso: true });
   } catch (err) {
@@ -1189,17 +1242,20 @@ router.patch('/solicitacao/enderecos-salvos/:id/usar', verificarTokenSolicitacao
 });
 
 // Editar endereço salvo (apelido, complemento, observação, telefone)
-// O endereço em si (rua, cep, coords) não é editável — pra mudar deve excluir e recriar
+// Qualquer membro do grupo pode editar endereços do grupo.
 router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { id } = req.params;
     const { apelido, complemento, observacao_padrao, telefone_padrao, procurar_por_padrao } = req.body;
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     
-    // Verificar se é do cliente
-    const existe = await pool.query(
-      'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
-      [id, req.clienteSolicitacao.id]
-    );
+    // Verificar autorização: próprio ou mesmo grupo
+    const autoCheck = grupoId
+      ? 'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))'
+      : 'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL';
+    const autoParams = grupoId ? [id, grupoId, req.clienteSolicitacao.id] : [id, req.clienteSolicitacao.id];
+    
+    const existe = await pool.query(autoCheck, autoParams);
     if (existe.rows.length === 0) {
       return res.status(404).json({ error: 'Endereço não encontrado' });
     }
@@ -1211,15 +1267,14 @@ router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, asy
         observacao_padrao = COALESCE($3, observacao_padrao),
         telefone_padrao = COALESCE($4, telefone_padrao),
         procurar_por_padrao = COALESCE($5, procurar_por_padrao)
-      WHERE id = $6 AND cliente_id = $7
+      WHERE id = $6
     `, [
       apelido?.trim() || null,
       complemento?.trim() || null,
       observacao_padrao?.trim() || null,
       telefone_padrao?.trim() || null,
       procurar_por_padrao?.trim() || null,
-      id,
-      req.clienteSolicitacao.id
+      id
     ]);
     
     res.json({ sucesso: true });
@@ -1229,13 +1284,24 @@ router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, asy
   }
 });
 
-// Deletar endereço salvo
+// Deletar endereço salvo (qualquer membro do grupo pode deletar endereços do grupo)
 router.delete('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
-    await pool.query(
-      'DELETE FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2',
-      [req.params.id, req.clienteSolicitacao.id]
-    );
+    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
+    
+    if (grupoId) {
+      await pool.query(
+        `DELETE FROM solicitacao_favoritos 
+         WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))`,
+        [req.params.id, grupoId, req.clienteSolicitacao.id]
+      );
+    } else {
+      await pool.query(
+        `DELETE FROM solicitacao_favoritos 
+         WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL`,
+        [req.params.id, req.clienteSolicitacao.id]
+      );
+    }
     res.json({ sucesso: true });
   } catch (err) {
     console.error('❌ Erro ao deletar endereço:', err);
