@@ -93,6 +93,16 @@ async function initColetaEnderecosTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_ganhos_status ON coleta_motoboy_ganhos(status)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_regioes_nome_upper ON coleta_regioes(UPPER(nome))`).catch(() => {});
   console.log('✅ Índices coletaEnderecos criados');
+
+  // ALTER em solicitacao_favoritos.cliente_id pra aceitar NULL.
+  // Originalmente cliente_id era NOT NULL (favorito sempre pertencia a um cliente).
+  // Com o módulo de Coleta colaborativa, endereços aprovados são compartilhados
+  // por grupo (sem dono), então cliente_id deve permitir NULL.
+  // Idempotente — se já permite NULL, ALTER é no-op.
+  await pool.query(`
+    ALTER TABLE solicitacao_favoritos ALTER COLUMN cliente_id DROP NOT NULL
+  `).catch(e => console.log('⚠️ ALTER cliente_id DROP NOT NULL:', e.message));
+  console.log('✅ solicitacao_favoritos.cliente_id agora aceita NULL (endereços de grupo)');
 }
 
 module.exports = { initColetaEnderecosTables };
