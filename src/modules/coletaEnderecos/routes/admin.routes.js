@@ -16,6 +16,47 @@ const express = require('express');
 const { listarProfissionais, listarRegioes } = require('../../../shared/utils/profissionaisLookup');
 
 /**
+ * Reverse geocoding via Google Maps — converte lat/lng em endereço formatado.
+ * Consulta cache `enderecos_geocodificados` primeiro, depois Google se miss.
+ * Retorna string ou null se falhar.
+ */
+async function reverseGeocode(pool, latitude, longitude) {
+  const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!GOOGLE_API_KEY) return null;
+
+  const lat = parseFloat(latitude);
+  const lng = parseFloat(longitude);
+  if (isNaN(lat) || isNaN(lng)) return null;
+
+  try {
+    const cache = await pool.query(
+      `SELECT endereco_formatado FROM enderecos_geocodificados
+         WHERE latitude BETWEEN $1 - 0.0002 AND $1 + 0.0002
+           AND longitude BETWEEN $2 - 0.0002 AND $2 + 0.0002
+         LIMIT 1`,
+      [lat, lng]
+    );
+    if (cache.rows.length > 0) return cache.rows[0].endereco_formatado;
+  } catch (e) { /* ignore */ }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results && data.results.length > 0) {
+      const endereco = data.results[0].formatted_address;
+      pool.query(
+        `INSERT INTO enderecos_geocodificados (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
+         VALUES ($1, $1, $2, $3, $4, 'google-reverse-coleta') ON CONFLICT DO NOTHING`,
+        [`${lat},${lng}`, endereco, lat, lng]
+      ).catch(() => {});
+      return endereco;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+/**
  * Normaliza texto pra match: UPPER + TRIM.
  * Retorna string vazia se null/undefined.
  */
@@ -190,6 +231,82 @@ function createColetaAdminRoutes(pool, verificarToken) {
     }
   });
 
+  // DEBUG: Inspeciona o match de uma região específica.
+  // Retorna TODAS as regiões únicas que aparecem na base (CRM + Planilha) com
+  // contagem por região, separadas por origem. Útil pra entender por que o
+  // match não está encontrando motoboys.
+  router.get('/admin/coleta/debug/:regiao_id', verificarToken, async (req, res) => {
+    try {
+      const regiao = await pool.query('SELECT nome FROM coleta_regioes WHERE id = $1', [req.params.regiao_id]);
+      if (regiao.rows.length === 0) return res.status(404).json({ error: 'Região não encontrada' });
+
+      const nomeBuscado = regiao.rows[0].nome;
+      const nomeNormalizado = normalizar(nomeBuscado);
+
+      const profissionais = await listarProfissionais(pool);
+
+      // Agrupa por valor único de regiao/cidade (normalizado) com contagem e exemplos
+      const stats = new Map();
+      for (const p of profissionais) {
+        const valor = (p.regiao || p.cidade || '').trim();
+        const chave = valor.toUpperCase();
+        if (!chave) continue;
+        if (!stats.has(chave)) stats.set(chave, { valor_original: valor, total: 0, crm: 0, planilha: 0, exemplos: [] });
+        const s = stats.get(chave);
+        s.total++;
+        s[p.origem] = (s[p.origem] || 0) + 1;
+        if (s.exemplos.length < 3) {
+          s.exemplos.push({ codigo: p.codigo, nome: p.nome, origem: p.origem });
+        }
+      }
+
+      const todasRegioesUnicas = Array.from(stats.entries())
+        .map(([chave, s]) => ({ chave_normalizada: chave, ...s, bate_com_busca: chave === nomeNormalizado }))
+        .sort((a, b) => b.total - a.total);
+
+      // Match exato + matches parciais (contém a palavra)
+      const matchExato = todasRegioesUnicas.find(r => r.chave_normalizada === nomeNormalizado);
+      const matchesParciais = todasRegioesUnicas
+        .filter(r => r.chave_normalizada !== nomeNormalizado && (
+          r.chave_normalizada.includes(nomeNormalizado) ||
+          nomeNormalizado.includes(r.chave_normalizada)
+        ))
+        .slice(0, 10);
+
+      res.json({
+        regiao_buscada: {
+          id: parseInt(req.params.regiao_id),
+          nome_original: nomeBuscado,
+          nome_normalizado: nomeNormalizado
+        },
+        total_profissionais_no_sistema: profissionais.length,
+        match_exato: matchExato || null,
+        matches_parciais_possiveis: matchesParciais,
+        todas_regioes_distintas: todasRegioesUnicas.slice(0, 50),
+        dica: matchExato
+          ? `✅ Match exato encontrado: ${matchExato.total} motoboy(s)`
+          : matchesParciais.length > 0
+            ? `⚠️ Sem match exato. Talvez a região devesse se chamar "${matchesParciais[0].valor_original}"?`
+            : '❌ Nenhuma região parecida. Verifique se existem motoboys cadastrados com cidade/região preenchida.'
+      });
+    } catch (err) {
+      console.error('❌ Erro debug:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // DEBUG: força invalidação do cache da planilha (5min TTL).
+  // Use quando você acabou de atualizar a planilha e quer ver o efeito imediato.
+  router.post('/admin/coleta/debug/invalidar-cache', verificarToken, async (req, res) => {
+    try {
+      const { invalidarCachePlanilha } = require('../../../shared/utils/profissionaisLookup');
+      invalidarCachePlanilha();
+      res.json({ sucesso: true, mensagem: 'Cache da planilha invalidado. Próximo request busca dados frescos.' });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ==================== FILA DE VALIDAÇÃO MANUAL ====================
 
   // Lista pendentes com filtros (status, região)
@@ -224,7 +341,29 @@ function createColetaAdminRoutes(pool, verificarToken) {
         ORDER BY p.criado_em DESC
         LIMIT 100
       `, params);
-      res.json(result.rows);
+
+      // Backfill: itens antigos criados sem endereco_formatado → resolve agora.
+      // Rodado em paralelo, fire & forget pra não travar a resposta — no próximo
+      // reload já aparece populado no DB. Mas já devolvemos pro frontend o valor
+      // resolvido nesta resposta.
+      const linhas = result.rows;
+      const semEndereco = linhas.filter(l => !l.endereco_formatado);
+      if (semEndereco.length > 0) {
+        await Promise.all(semEndereco.map(async (l) => {
+          try {
+            const end = await reverseGeocode(pool, l.latitude, l.longitude);
+            if (end) {
+              l.endereco_formatado = end;
+              pool.query(
+                `UPDATE coleta_enderecos_pendentes SET endereco_formatado = $1 WHERE id = $2`,
+                [end, l.id]
+              ).catch(() => {});
+            }
+          } catch (e) { /* silent */ }
+        }));
+      }
+
+      res.json(linhas);
     } catch (err) {
       console.error('❌ Erro ao listar fila:', err);
       res.status(500).json({ error: 'Erro ao listar fila' });
