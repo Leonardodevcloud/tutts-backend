@@ -1,8 +1,12 @@
 /**
  * Sub-Router: Coleta de Endereços - ADMIN
  *
- * Endpoints pra gerenciar regiões, vincular motoboys e revisar a fila de
- * endereços que caíram em validação manual (IA não teve confiança suficiente).
+ * Endpoints pra gerenciar regiões e revisar a fila de endereços em validação
+ * manual (IA não teve confiança suficiente).
+ *
+ * VÍNCULO AUTOMÁTICO: motoboys são associados à região pelo match de nome —
+ * o campo `regiao` (ou `cidade`) do profissional no CRM é comparado com o
+ * campo `nome` das regiões cadastradas aqui (case-insensitive).
  *
  * Todos os endpoints exigem JWT válido via `verificarToken`.
  */
@@ -13,18 +17,23 @@ function createColetaAdminRoutes(pool, verificarToken) {
 
   // ==================== REGIÕES ====================
 
-  // Lista regiões com contadores de motoboys vinculados e endereços já cadastrados
+  // Lista regiões com contadores de motoboys (do CRM) e endereços.
+  // O total_motoboys é calculado via JOIN com crm_leads_capturados usando
+  // match de nome (UPPER, TRIM). Se o CRM falhar, cai pra 0.
   router.get('/admin/coleta/regioes', verificarToken, async (req, res) => {
     try {
       const result = await pool.query(`
         SELECT r.*,
           g.nome AS grupo_nome,
-          COUNT(DISTINCT mr.cod_profissional) FILTER (WHERE mr.ativo = true) AS total_motoboys,
           COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'aprovado') AS total_aprovados,
-          COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'validacao_manual') AS total_pendentes
+          COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'validacao_manual') AS total_pendentes,
+          (
+            SELECT COUNT(DISTINCT crm.cod)
+            FROM crm_leads_capturados crm
+            WHERE UPPER(TRIM(COALESCE(NULLIF(TRIM(crm.regiao), ''), crm.cidade))) = UPPER(TRIM(r.nome))
+          ) AS total_motoboys
         FROM coleta_regioes r
         LEFT JOIN grupos_enderecos g ON g.id = r.grupo_enderecos_id
-        LEFT JOIN coleta_motoboy_regioes mr ON mr.regiao_id = r.id
         LEFT JOIN coleta_enderecos_pendentes p ON p.regiao_id = r.id
         GROUP BY r.id, g.nome
         ORDER BY r.nome
@@ -87,79 +96,49 @@ function createColetaAdminRoutes(pool, verificarToken) {
     }
   });
 
-  // ==================== VÍNCULO MOTOBOY × REGIÃO ====================
+  // ==================== MOTOBOYS (vinculação automática via CRM) ====================
 
-  // Lista motoboys vinculados a uma região
+  // Lista motoboys que AUTOMATICAMENTE estão vinculados a esta região
+  // (match do campo regiao/cidade do CRM com o nome da região).
+  // Resultado é read-only — não há como adicionar/remover manualmente.
   router.get('/admin/coleta/regioes/:id/motoboys', verificarToken, async (req, res) => {
     try {
+      const regiao = await pool.query('SELECT nome FROM coleta_regioes WHERE id = $1', [req.params.id]);
+      if (regiao.rows.length === 0) return res.status(404).json({ error: 'Região não encontrada' });
+
+      const nomeRegiao = regiao.rows[0].nome;
+
+      // Match case-insensitive: pega motoboys cuja regiao OU cidade bate com o nome
       const result = await pool.query(`
-        SELECT mr.*, u.full_name
-        FROM coleta_motoboy_regioes mr
-        LEFT JOIN users u ON u.cod_profissional = mr.cod_profissional
-        WHERE mr.regiao_id = $1
-        ORDER BY u.full_name NULLS LAST, mr.cod_profissional
-      `, [req.params.id]);
+        SELECT
+          crm.cod AS cod_profissional,
+          crm.nome AS full_name,
+          crm.cidade,
+          crm.regiao,
+          crm.celular
+        FROM crm_leads_capturados crm
+        WHERE UPPER(TRIM(COALESCE(NULLIF(TRIM(crm.regiao), ''), crm.cidade))) = UPPER(TRIM($1))
+        ORDER BY crm.nome NULLS LAST
+        LIMIT 500
+      `, [nomeRegiao]);
+
       res.json(result.rows);
     } catch (err) {
-      console.error('❌ Erro ao listar vínculos:', err);
-      res.status(500).json({ error: 'Erro ao listar vínculos' });
+      console.error('❌ Erro ao listar motoboys da região:', err);
+      res.status(500).json({ error: 'Erro ao listar motoboys' });
     }
   });
 
-  // Adicionar motoboy à região (idempotente)
-  router.post('/admin/coleta/regioes/:id/motoboys', verificarToken, async (req, res) => {
+  // Lista regiões disponíveis no CRM (pra autocomplete no modal de criar/editar)
+  // Usa a mesma função listarRegioes já existente no shared.
+  router.get('/admin/coleta/regioes-crm', verificarToken, async (req, res) => {
     try {
-      const { id } = req.params;
-      const { cod_profissional } = req.body;
-      if (!cod_profissional) return res.status(400).json({ error: 'cod_profissional é obrigatório' });
-
-      // Valida se o motoboy existe
-      const user = await pool.query('SELECT id FROM users WHERE LOWER(cod_profissional) = LOWER($1)', [cod_profissional]);
-      if (user.rows.length === 0) return res.status(404).json({ error: 'Motoboy não encontrado' });
-
-      await pool.query(`
-        INSERT INTO coleta_motoboy_regioes (cod_profissional, regiao_id, ativo)
-        VALUES ($1, $2, true)
-        ON CONFLICT (cod_profissional, regiao_id) DO UPDATE SET ativo = true
-      `, [cod_profissional.trim(), id]);
-      res.json({ sucesso: true });
+      const { listarRegioes } = require('../../../shared/utils/profissionaisLookup');
+      const regioes = await listarRegioes(pool);
+      res.json(regioes);
     } catch (err) {
-      console.error('❌ Erro ao vincular motoboy:', err);
-      res.status(500).json({ error: 'Erro ao vincular motoboy' });
-    }
-  });
-
-  // Remover motoboy da região (desvincula fisicamente)
-  router.delete('/admin/coleta/regioes/:regiao_id/motoboys/:cod', verificarToken, async (req, res) => {
-    try {
-      await pool.query(
-        'DELETE FROM coleta_motoboy_regioes WHERE regiao_id = $1 AND cod_profissional = $2',
-        [req.params.regiao_id, req.params.cod]
-      );
-      res.json({ sucesso: true });
-    } catch (err) {
-      console.error('❌ Erro ao desvincular motoboy:', err);
-      res.status(500).json({ error: 'Erro ao desvincular motoboy' });
-    }
-  });
-
-  // Busca motoboys pra autocomplete no modal de vínculo (role = 'user')
-  router.get('/admin/coleta/motoboys-disponiveis', verificarToken, async (req, res) => {
-    try {
-      const { q } = req.query;
-      const termo = `%${(q || '').trim()}%`;
-      const result = await pool.query(`
-        SELECT cod_profissional, full_name, role
-        FROM users
-        WHERE role = 'user'
-          AND ($1 = '%%' OR cod_profissional ILIKE $1 OR full_name ILIKE $1)
-        ORDER BY full_name NULLS LAST
-        LIMIT 30
-      `, [termo]);
-      res.json(result.rows);
-    } catch (err) {
-      console.error('❌ Erro ao buscar motoboys:', err);
-      res.status(500).json({ error: 'Erro ao buscar motoboys' });
+      console.error('❌ Erro ao listar regiões CRM:', err);
+      res.status(500).json({ error: 'Erro ao listar regiões do CRM' });
     }
   });
 
