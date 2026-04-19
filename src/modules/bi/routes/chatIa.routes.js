@@ -1,6 +1,7 @@
 /**
  * BI Sub-Router: Chat IA — Analista de Dados Conversacional
- * v5.0 — Gemini API (Google)
+ * v6.0 — Filtros obrigatórios reforçados, campo de contexto/treinamento,
+ *         gráficos interativos expandidos, IA mais inteligente
  */
 const express = require('express');
 
@@ -14,8 +15,6 @@ function createChatIaRoutes(pool) {
   const SAMPLES_CACHE_TTL = 30 * 60 * 1000;
 
   // ==================== TABELAS PERMITIDAS ====================
-  // 🔒 SECURITY FIX (CRIT-03): Tabelas financeiras sensíveis REMOVIDAS (CPF, Pix, valores de saque)
-  // Removidos: withdrawal_requests, gratuities, restricted_professionals, indicacoes, indicacao_links
   const TABELAS_PERMITIDAS = [
     'bi_entregas', 'bi_upload_historico', 'bi_relatorios_ia',
     'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_prazo_padrao',
@@ -31,13 +30,64 @@ function createChatIaRoutes(pool) {
     'bi_garantido_cache', 'garantido_status'
   ];
 
+  // ==================== MIGRATION: TABELA DE CONTEXTO ====================
+  async function initChatIaTables() {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bi_chat_contexto (
+          id SERIAL PRIMARY KEY,
+          titulo VARCHAR(200) NOT NULL,
+          conteudo TEXT NOT NULL,
+          categoria VARCHAR(50) DEFAULT 'geral',
+          ativo BOOLEAN DEFAULT true,
+          prioridade INT DEFAULT 0,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bi_chat_conversas (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(100) NOT NULL,
+          titulo VARCHAR(200),
+          filtros TEXT,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bi_chat_mensagens (
+          id SERIAL PRIMARY KEY,
+          conversa_id INT REFERENCES bi_chat_conversas(id),
+          role VARCHAR(20) NOT NULL,
+          content TEXT,
+          sql_executado TEXT,
+          dados_resumo TEXT,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bi_chat_memorias (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(100) NOT NULL,
+          conteudo TEXT NOT NULL,
+          ativo BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      console.log('✅ [Chat IA v6] Tabelas verificadas/criadas');
+    } catch (e) {
+      console.error('⚠️ [Chat IA v6] Erro init tables:', e.message);
+    }
+  }
+  initChatIaTables();
+
   // ==================== CHAMAR GEMINI ====================
   async function chamarGemini(messages, systemPrompt, opts = {}) {
-    const { temperature = 0.4, maxTokens = 4096 } = opts;
+    const { temperature = 0.4, maxTokens = 8192 } = opts;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY não configurada');
 
-    // Converter formato messages[] → formato Gemini (contents[])
     const contents = messages.map(function(m) {
       return {
         role: m.role === 'assistant' ? 'model' : 'user',
@@ -55,7 +105,7 @@ function createChatIaRoutes(pool) {
       }
     };
 
-    console.log(`📡 [Chat IA] Chamando Gemini (${messages.length} msgs, temp=${temperature})...`);
+    console.log(`📡 [Chat IA v6] Chamando Gemini (${messages.length} msgs, temp=${temperature})...`);
 
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
@@ -68,20 +118,20 @@ function createChatIaRoutes(pool) {
 
     if (!resp.ok) {
       const errText = await resp.text();
-      console.error(`❌ [Chat IA] Gemini HTTP ${resp.status}:`, errText);
+      console.error(`❌ [Chat IA v6] Gemini HTTP ${resp.status}:`, errText);
       throw new Error(`Gemini API HTTP ${resp.status}: ${errText.substring(0, 200)}`);
     }
 
     const data = await resp.json();
     if (data.error) {
-      console.error(`❌ [Chat IA] Gemini error:`, data.error);
+      console.error(`❌ [Chat IA v6] Gemini error:`, data.error);
       throw new Error(`Gemini API: ${data.error.message}`);
     }
 
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const tokensUsados = data.usageMetadata?.totalTokenCount || 0;
 
-    console.log(`✅ [Chat IA] Gemini respondeu (${text.length} chars, ${tokensUsados} tokens)`);
+    console.log(`✅ [Chat IA v6] Gemini respondeu (${text.length} chars, ${tokensUsados} tokens)`);
     return text;
   }
 
@@ -144,7 +194,7 @@ function createChatIaRoutes(pool) {
       samples.periodo = datas.rows[0];
       samples.clientes = clientes.rows;
       samples.profissionais = profs.rows;
-    } catch (e) { console.error('⚠️ [Chat IA] Erro amostras:', e.message); }
+    } catch (e) { console.error('⚠️ [Chat IA v6] Erro amostras:', e.message); }
     samplesCache = { data: samples, timestamp: Date.now() };
     return samples;
   }
@@ -181,7 +231,6 @@ function createChatIaRoutes(pool) {
       if (queries.length > 0) sqlLimpo = queries[0].trim();
     }
 
-    // 🔒 SECURITY FIX (CRIT-03): Validar subqueries — extrair TODAS as tabelas incluindo subselects
     const sqlSemExtract = sqlLimpo.replace(/EXTRACT\s*\([^)]*\)/gi, '').replace(/DATE_PART\s*\([^)]*\)/gi, '').replace(/DATE_TRUNC\s*\([^)]*\)/gi, '');
     const tabelasUsadas = sqlSemExtract.toUpperCase().match(/(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi) || [];
     for (const match of tabelasUsadas) {
@@ -190,8 +239,7 @@ function createChatIaRoutes(pool) {
         return { valido: false, erro: `Tabela "${tabela}" não autorizada.` };
     }
 
-    // 🔒 SECURITY FIX (CRIT-03): Bloquear tabelas sensíveis mesmo em subqueries
-    const tabelasSensiveis = ['users', 'user_financial_data', 'financial_logs', 'withdrawal_requests', 
+    const tabelasSensiveis = ['users', 'user_financial_data', 'financial_logs', 'withdrawal_requests',
       'withdrawal_idempotency', 'gratuities', 'restricted_professionals', 'indicacoes', 'indicacao_links',
       'login_attempts', 'user_sessions', 'stark_lotes', 'stark_lote_itens'];
     const sqlLower = sqlLimpo.toLowerCase();
@@ -201,7 +249,6 @@ function createChatIaRoutes(pool) {
       }
     }
 
-    // 🔒 SECURITY FIX: Bloquear pg_catalog, information_schema, pg_*
     if (/\bpg_\w+/i.test(sqlLimpo) || /\binformation_schema\b/i.test(sqlLimpo)) {
       return { valido: false, erro: 'Acesso a tabelas do sistema não permitido.' };
     }
@@ -210,19 +257,107 @@ function createChatIaRoutes(pool) {
     return { valido: true, sql: sqlLimpo };
   }
 
-  // 🔒 SECURITY FIX (CRIT-03): Usar client dedicado para isolar statement_timeout
-  async function executarSQL(sql) {
+  // ==================== INJEÇÃO DE FILTROS NO SQL ====================
+  /**
+   * v6.0 FIX CRÍTICO: Após a IA gerar o SQL, verificamos se os filtros obrigatórios
+   * estão presentes. Se não estiverem, injetamos automaticamente.
+   */
+  function injetarFiltrosNoSQL(sql, filtrosObrigatorios) {
+    if (!filtrosObrigatorios || !filtrosObrigatorios.clausulas || filtrosObrigatorios.clausulas.length === 0) return sql;
+
+    const sqlUpper = sql.toUpperCase();
+
+    // Para cada cláusula obrigatória, verificar se já está presente
+    const clausulasFaltantes = [];
+    for (const clausula of filtrosObrigatorios.clausulas) {
+      // Verificar por cod_cliente
+      if (clausula.tipo === 'cod_cliente') {
+        const codsStr = clausula.valores.join(',');
+        // Checa variações: cod_cliente = X, cod_cliente IN (X,Y), e.cod_cliente, etc.
+        const temFiltro = sqlUpper.includes('COD_CLIENTE') && (
+          sqlUpper.includes(String(clausula.valores[0])) ||
+          sqlUpper.includes('COD_CLIENTE = ') ||
+          sqlUpper.includes('COD_CLIENTE IN')
+        );
+        if (!temFiltro) {
+          if (clausula.valores.length === 1) {
+            clausulasFaltantes.push(`cod_cliente = ${clausula.valores[0]}`);
+          } else {
+            clausulasFaltantes.push(`cod_cliente IN (${codsStr})`);
+          }
+        }
+      }
+      // Verificar por centro_custo
+      if (clausula.tipo === 'centro_custo') {
+        const temFiltro = sqlUpper.includes('CENTRO_CUSTO');
+        if (!temFiltro) {
+          if (clausula.valores.length === 1) {
+            clausulasFaltantes.push(`centro_custo = '${clausula.valores[0].replace(/'/g, "''")}'`);
+          } else {
+            clausulasFaltantes.push(`centro_custo IN (${clausula.valores.map(c => `'${c.replace(/'/g, "''")}'`).join(',')})`);
+          }
+        }
+      }
+      // Verificar por data
+      if (clausula.tipo === 'periodo') {
+        const temData = sqlUpper.includes('DATA_SOLICITADO') && (
+          sqlUpper.includes('BETWEEN') || sqlUpper.includes(clausula.inicio) || sqlUpper.includes('>') 
+        );
+        if (!temData) {
+          clausulasFaltantes.push(`data_solicitado BETWEEN '${clausula.inicio}' AND '${clausula.fim}'`);
+        }
+      }
+    }
+
+    if (clausulasFaltantes.length === 0) return sql;
+
+    console.log(`⚠️ [Chat IA v6] Injetando ${clausulasFaltantes.length} filtro(s) faltante(s) no SQL`);
+
+    // Estratégia de injeção: encontrar WHERE e adicionar, ou encontrar o primeiro FROM e adicionar WHERE
+    const injecao = clausulasFaltantes.join(' AND ');
+
+    // Se tem CTE (WITH), precisamos injetar em cada SELECT que referencia bi_entregas
+    if (sql.toUpperCase().trimStart().startsWith('WITH')) {
+      // Injetar em cada bloco que tenha bi_entregas
+      return sql.replace(/(FROM\s+bi_entregas\b(?:\s+\w+)?)(\s+WHERE\s+)/gi, `$1$2${injecao} AND `)
+                .replace(/(FROM\s+bi_entregas\b(?:\s+\w+)?)(\s+(?:GROUP|ORDER|LIMIT|HAVING|\)|$))/gi, `$1 WHERE ${injecao} $2`);
+    }
+
+    // SQL simples
+    if (sqlUpper.includes('WHERE')) {
+      // Adicionar após o primeiro WHERE
+      return sql.replace(/WHERE\s+/i, `WHERE ${injecao} AND `);
+    } else {
+      // Adicionar WHERE antes de GROUP BY, ORDER BY, LIMIT, ou no final
+      const insertPoint = sql.search(/\b(GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING)\b/i);
+      if (insertPoint > -1) {
+        return sql.substring(0, insertPoint) + ` WHERE ${injecao} ` + sql.substring(insertPoint);
+      }
+      // Antes do LIMIT final se existir
+      return sql.replace(/(\s+LIMIT\s+\d+)/i, ` WHERE ${injecao} $1`);
+    }
+  }
+
+  // ==================== EXECUTAR SQL COM INJEÇÃO DE FILTROS ====================
+  async function executarSQL(sql, filtrosObrigatorios) {
     const validacao = validarSQL(sql);
     if (!validacao.valido) return { success: false, erro: validacao.erro, sql };
+
+    // v6.0: Injetar filtros faltantes
+    let sqlFinal = validacao.sql;
+    if (filtrosObrigatorios) {
+      sqlFinal = injetarFiltrosNoSQL(sqlFinal, filtrosObrigatorios);
+    }
+
     const client = await pool.connect();
     try {
       await client.query('SET statement_timeout = 15000');
-      const result = await client.query(validacao.sql);
+      const result = await client.query(sqlFinal);
       await client.query('SET statement_timeout = 0');
-      return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: validacao.sql };
+      return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: sqlFinal };
     } catch (sqlError) {
       await client.query('SET statement_timeout = 0').catch(() => {});
-      return { success: false, erro: sqlError.message, sql: validacao.sql };
+      return { success: false, erro: sqlError.message, sql: sqlFinal };
     } finally {
       client.release();
     }
@@ -285,14 +420,13 @@ Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
       );
       return result.rows.map(r => r.conteudo);
     } catch (e) {
-      console.error('⚠️ [Chat IA] Erro buscar memórias:', e.message);
+      console.error('⚠️ [Chat IA v6] Erro buscar memórias:', e.message);
       return [];
     }
   }
 
   async function detectarESalvarMemorias(userId, prompt, resposta) {
     try {
-      // Detectar se o prompt contém instrução/preferência
       const promptLower = prompt.toLowerCase();
       const indicadores = [
         'sempre que', 'quando eu pedir', 'prefiro', 'quero que', 'lembra que',
@@ -305,24 +439,17 @@ Taxa: até 2% SAUDÁVEL | 2-5% ATENÇÃO | >5% PREOCUPANTE
       const temInstrucao = indicadores.some(i => promptLower.includes(i));
       if (!temInstrucao) return;
 
-      // Verificar se já existe memória similar
       const existentes = await pool.query(
         `SELECT conteudo FROM bi_chat_memorias WHERE user_id = $1 AND ativo = true`,
         [userId]
       );
 
-      // Usar Gemini pra extrair a memória de forma inteligente
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
       if (!GEMINI_API_KEY) return;
 
       const memoriasAtuais = existentes.rows.map(r => r.conteudo).join('\n');
 
-      const systemText = `Você extrai preferências e instruções de conversas. Responda APENAS com a memória a ser salva, em uma frase curta e direta. Se não houver preferência/instrução clara, responda exatamente "NENHUMA".
-
-Memórias já salvas deste usuário:
-${memoriasAtuais || '(nenhuma)'}
-
-Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHUMA" para evitar duplicatas.`;
+      const systemText = `Você extrai preferências e instruções de conversas. Responda APENAS com a memória a ser salva, em uma frase curta e direta. Se não houver preferência/instrução clara, responda exatamente "NENHUMA".\n\nMemórias já salvas deste usuário:\n${memoriasAtuais || '(nenhuma)'}\n\nSe a nova instrução é igual ou parecida com alguma já salva, responda "NENHUMA" para evitar duplicatas.`;
 
       const extractResp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
@@ -330,10 +457,7 @@ Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHU
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{
-              role: 'user',
-              parts: [{ text: `O gestor disse: "${prompt}"\n\nExtraia a preferência/instrução em uma frase curta (máx 100 chars). Ex: "Prefere faturamento separado por centro de custo" ou "Chama motoboys de motos".` }]
-            }],
+            contents: [{ role: 'user', parts: [{ text: `O gestor disse: "${prompt}"\n\nExtraia a preferência/instrução em uma frase curta (máx 100 chars).` }] }],
             systemInstruction: { parts: [{ text: systemText }] },
             generationConfig: { temperature: 0, maxOutputTokens: 300 }
           })
@@ -344,69 +468,148 @@ Se a nova instrução é igual ou parecida com alguma já salva, responda "NENHU
       const memoria = extractData.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 
       if (memoria && memoria !== 'NENHUMA' && memoria.length > 5 && memoria.length < 200) {
-        await pool.query(
-          `INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2)`,
-          [userId, memoria]
-        );
-        console.log(`🧠 [Chat IA] Nova memória salva: "${memoria}"`);
+        await pool.query(`INSERT INTO bi_chat_memorias (user_id, conteudo) VALUES ($1, $2)`, [userId, memoria]);
+        console.log(`🧠 [Chat IA v6] Nova memória salva: "${memoria}"`);
       }
     } catch (e) {
-      console.error('⚠️ [Chat IA] Erro detectar memória:', e.message);
+      console.error('⚠️ [Chat IA v6] Erro detectar memória:', e.message);
+    }
+  }
+
+  // ==================== CONTEXTO CUSTOMIZADO ====================
+  async function getContextoCustomizado() {
+    try {
+      const result = await pool.query(
+        `SELECT titulo, conteudo, categoria FROM bi_chat_contexto WHERE ativo = true ORDER BY prioridade DESC, created_at ASC`
+      );
+      if (result.rows.length === 0) return '';
+      let texto = '\n# INSTRUÇÕES CUSTOMIZADAS DO GESTOR (seguir OBRIGATORIAMENTE):\n';
+      for (const row of result.rows) {
+        texto += `\n### ${row.titulo}${row.categoria !== 'geral' ? ` [${row.categoria}]` : ''}\n${row.conteudo}\n`;
+      }
+      return texto;
+    } catch (e) {
+      console.error('⚠️ [Chat IA v6] Erro contexto custom:', e.message);
+      return '';
     }
   }
 
   // ==================== SYSTEM PROMPT ====================
-  function buildSystemPrompt(schemaTexto, samplesTexto, contextoFiltros, memorias) {
+  function buildSystemPrompt(schemaTexto, samplesTexto, contextoFiltros, memorias, contextoCustom, filtrosObrigatorios) {
     const memoriasTexto = memorias && memorias.length > 0
       ? `\nVocê já conhece esse gestor. Coisas que ele já te disse em conversas anteriores:\n${memorias.map(m => `- ${m}`).join('\n')}\nLeve isso em conta nas suas respostas.\n`
       : '';
 
-    return `Você é um analista de dados que trabalha na Tutts, uma empresa de logística de entregas com motoboys em Salvador/BA. Você faz parte do time. O cara que está conversando com você é o gestor da operação — seu colega.
+    // v6.0: Bloco de filtros muito mais explícito e agressivo
+    let blocoFiltros = '';
+    if (contextoFiltros && filtrosObrigatorios?.clausulas?.length > 0) {
+      const sqlParts = [];
+      for (const c of filtrosObrigatorios.clausulas) {
+        if (c.tipo === 'cod_cliente') {
+          sqlParts.push(c.valores.length === 1 ? `cod_cliente = ${c.valores[0]}` : `cod_cliente IN (${c.valores.join(',')})`);
+        }
+        if (c.tipo === 'centro_custo') {
+          sqlParts.push(c.valores.length === 1 ? `centro_custo = '${c.valores[0]}'` : `centro_custo IN (${c.valores.map(v => `'${v}'`).join(',')})`);
+        }
+        if (c.tipo === 'periodo') {
+          sqlParts.push(`data_solicitado BETWEEN '${c.inicio}' AND '${c.fim}'`);
+        }
+      }
+      const whereCompleto = `WHERE COALESCE(ponto, 1) >= 2 AND ${sqlParts.join(' AND ')}`;
+
+      blocoFiltros = `
+╔══════════════════════════════════════════════════════════════════╗
+║                    ⚠️ FILTROS OBRIGATÓRIOS ⚠️                    ║
+║                                                                  ║
+║  O gestor está vendo dados FILTRADOS. Toda SQL gerada            ║
+║  DEVE conter TODAS as condições abaixo, sem exceção:             ║
+║                                                                  ║
+║  ${whereCompleto.padEnd(62)}║
+║                                                                  ║
+║  Se você gerar SQL sem esses filtros, os dados estarão           ║
+║  INCORRETOS e o gestor verá informações de OUTROS clientes.      ║
+║                                                                  ║
+║  ❌ ERRADO: SELECT ... FROM bi_entregas WHERE ponto >= 2         ║
+║  ✅ CERTO:  SELECT ... FROM bi_entregas ${whereCompleto.substring(0, 40)}...    ║
+║                                                                  ║
+║  Em CTEs (WITH), CADA subconsulta que acessa bi_entregas         ║
+║  DEVE ter esses filtros.                                         ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Contexto do filtro ativo:
+${contextoFiltros}`;
+    } else {
+      blocoFiltros = 'Sem filtros ativos — consulta TODOS os dados.';
+    }
+
+    return `Você é um analista de dados sênior da Tutts, uma empresa de logística de entregas com motoboys em Salvador/BA. O cara que tá falando com você é o gestor da operação — seu colega de trabalho.
 ${memoriasTexto}
-Conversa com ele do jeito mais natural possível. Como se vocês estivessem lado a lado olhando os dados juntos. Se ele perguntar "quanto a gente faturou?", responde "Faturamos R$ 45 mil líquido no período" — direto assim. Se ele disser "tira o cliente X dessa conta", você ajusta. Se algo não ficou claro, pergunta. Se ele te corrigir, aprende.
+PERSONALIDADE:
+- Fale como colega do dia a dia. "A gente", "nossos motoboys", "essa semana foi puxada".
+- Dados PRIMEIRO. Número na frente, contexto depois.
+- Se ele perguntar conceito, explica em linguagem de negócio. Sem termos técnicos de banco.
+- Se não tem certeza, pergunta. "Tu quer finalizadas ou inclui canceladas?"
+- Mantém o fio da conversa. Se ele pediu faturamento e depois diz "agora por motoboy", sabe do que ele tá falando.
+- NUNCA mostre SQL, nomes de colunas, ou termos de programação. Isso é bastidor.
+- NUNCA invente dados. Se não achou, diz "não encontrei dados pra isso no período".
+- NUNCA termine com "posso ajudar?" ou sugestões genéricas. Responde e pronto.
 
-Você tem acesso ao banco de dados da empresa. Quando precisar de dados, gere um SQL dentro de \`\`\`sql ... \`\`\` — o sistema executa e te devolve o resultado pra você analisar e responder.
+COMO FUNCIONA — Fluxo Técnico (interno):
+1. Gestor pergunta algo → Você gera SQL dentro de \`\`\`sql ... \`\`\`
+2. O sistema executa e te devolve o resultado em JSON
+3. Você analisa os dados e responde ao gestor de forma natural
+4. Se precisar de GRÁFICO, use o formato [CHART]...[/CHART] (detalhes abaixo)
 
-Algumas coisas importantes sobre como se portar:
-- Fale como colega, não como robô. "A gente", "nossos motoboys", "essa semana foi puxada".
-- Responda com os DADOS primeiro. Número na frente, explicação se precisar.
-- Se ele perguntar como algo funciona, explica em linguagem de negócio. "Faturamento líquido é o que sobra pra gente depois de pagar o motoboy." Sem termos técnicos de banco.
-- Se não tem certeza de algo, pergunta. "Você quer que eu olhe só as entregas finalizadas ou incluo as canceladas também?"
-- Mantém o fio da conversa. Se ele pediu faturamento e depois diz "agora por motoboy", você sabe do que ele tá falando.
-- Nunca mostre SQL, nomes de colunas, ou termos de programação pro usuário. Isso é bastidor.
-- Nunca invente dados. Se não achou, diz "não encontrei dados pra isso no período selecionado".
-- Nunca termine com "posso ajudar com mais alguma coisa?" ou sugestões. Responde e pronto, igual colega faz.
-
-Regras técnicas do SQL (interno, nunca exponha):
+REGRAS SQL (interno — nunca exponha):
 - Só entregas: WHERE COALESCE(ponto, 1) >= 2
 - Sempre LIMIT (máx 500)
 - Divisões: NULLIF(x, 0)
 - Taxa prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-- FATURAMENTO: SEMPRE use CTE com DISTINCT ON (os) ORDER BY ponto ASC para somar valores. Exemplo: WITH eu_fat AS (SELECT DISTINCT ON (os) os, valor, valor_prof FROM bi_entregas WHERE COALESCE(ponto,1) >= 2 AND os IS NOT NULL ORDER BY os, ponto ASC) SELECT SUM(valor) - COALESCE(SUM(valor_prof), 0) FROM eu_fat WHERE ...
-- NUNCA faça SUM(valor) direto da bi_entregas — duplica valores porque cada OS tem múltiplos pontos
+- FATURAMENTO: SEMPRE use CTE com DISTINCT ON (os) ORDER BY ponto ASC
+- NUNCA faça SUM(valor) direto sem DISTINCT ON
 - Retornos: LOWER(ocorrencia) LIKE '%cliente fechado%' OR '%clienteaus%' OR '%cliente ausente%' OR '%loja fechada%' OR '%retorno%'
 - Clientes: nome_fantasia. Profissionais: nome_prof
 - Só tabelas do schema abaixo
 
-${contextoFiltros ? `ATENÇÃO — FILTROS OBRIGATÓRIOS:
-O gestor está olhando dados filtrados. TODA query SQL que você gerar DEVE incluir estes filtros no WHERE, sem exceção:
-${contextoFiltros}
-Se você gerar uma query sem estes filtros, os dados vão estar errados.` : 'Sem filtros ativos — todos os dados.'}
+${blocoFiltros}
+${contextoCustom || ''}
 
-Schema e dados de referência (interno — nunca mencione pro gestor):
+Schema e dados de referência (interno):
 ${schemaTexto}
 ${samplesTexto}
 
-IMPORTANTE: Acima você tem uma AMOSTRA REAL dos dados com o filtro ativo. USE ela pra entender os nomes exatos das colunas, os formatos dos valores, e como os dados se parecem. Quando gerar SQL, use APENAS colunas que você VÊ nessa amostra ou no schema.
-
-Regras de negócio que você precisa saber:
+Regras de negócio:
 ${KNOWLEDGE_BASE}
 
-Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra classificar. Valores em R$ 1.234,56. Se fizer sentido, mande um gráfico:
+GRÁFICOS — Formato [CHART]...[/CHART]:
+Quando os dados se beneficiarem de visualização, gere gráficos usando o formato abaixo. USE BASTANTE quando fizer sentido — o gestor gosta de ver os dados visualmente.
 
+Tipos suportados: bar, horizontalBar, line, pie, doughnut, area, radar, stackedBar, combo
+
+FORMATO:
 [CHART]
-{"type":"bar","title":"Título","labels":["A","B"],"datasets":[{"label":"Série","data":[10,20],"color":"#10b981"}]}
-[/CHART]`;
+{"type":"bar","title":"Título do Gráfico","labels":["Label1","Label2"],"datasets":[{"label":"Série 1","data":[10,20],"color":"#10b981"}],"options":{"showValues":true,"stacked":false,"legend":true}}
+[/CHART]
+
+Cores sugeridas: #10b981 (verde), #3b82f6 (azul), #f59e0b (amarelo), #ef4444 (vermelho), #8b5cf6 (roxo), #14b8a6 (teal), #f97316 (laranja), #ec4899 (rosa)
+
+Dicas de gráficos:
+- Use bar/horizontalBar pra comparações (ranking de motoboys, clientes)
+- Use line pra evolução temporal (prazo dia a dia, entregas por semana)
+- Use doughnut/pie pra proporções (% dentro/fora prazo, distribuição de categorias)
+- Use stackedBar pra composição (entregas dentro/fora prazo por motoboy)
+- Use combo pra eixo duplo (ex: entregas em barras + taxa prazo em linha)
+- Use radar pra comparar múltiplas métricas de um profissional
+- showValues: true mostra o valor em cima de cada barra
+- SEMPRE gere gráfico quando tiver dados temporais, rankings, ou distribuições
+- Para combos: datasets com type diferente: [{"label":"Entregas","data":[...],"color":"#3b82f6","type":"bar"},{"label":"Taxa","data":[...],"color":"#ef4444","type":"line","yAxisID":"y1"}]
+
+Formatação de texto:
+- **negrito** pra destacar números
+- 🟢 acima da meta | 🟡 marginal | 🔴 abaixo da meta
+- Valores: R$ 1.234,56 (formato brasileiro)
+- Use tabelas markdown quando comparar 3+ itens
+- Use emojis com moderação pra destacar status`;
   }
 
   // ==================== AMOSTRA REAL DOS DADOS ====================
@@ -451,9 +654,9 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
 
       if (result.rows.length === 0) return '';
 
-      return `\n# AMOSTRA REAL DOS DADOS (${result.rows.length} registros recentes do filtro ativo — use como referência dos nomes de colunas e valores reais):\n\`\`\`json\n${JSON.stringify(result.rows, null, 2)}\n\`\`\`\n`;
+      return `\n# AMOSTRA REAL DOS DADOS (${result.rows.length} registros recentes do filtro ativo):\n\`\`\`json\n${JSON.stringify(result.rows, null, 2)}\n\`\`\`\n`;
     } catch (e) {
-      console.error('⚠️ [Chat IA] Erro amostra:', e.message);
+      console.error('⚠️ [Chat IA v6] Erro amostra:', e.message);
       return '';
     }
   }
@@ -475,40 +678,53 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       : [];
 
     let contexto = '';
-    let filtroSQL = '';
 
-    // Se filtro veio de uma região, informar a IA
-    if (nomeRegiao) {
-      contexto += `Região selecionada: ${nomeRegiao}\n`;
-    }
+    if (nomeRegiao) contexto += `Região selecionada: ${nomeRegiao}\n`;
 
     if (codClientes.length === 1) {
       contexto += `Cliente: ${nomeCliente || 'cod ' + codClientes[0]} (cod_cliente = ${codClientes[0]})\n`;
-      filtroSQL += ` AND cod_cliente = ${codClientes[0]}`;
     } else if (codClientes.length > 1) {
       const nomes = filtros?.nomes_clientes || codClientes.map(c => 'cod ' + c).join(', ');
       contexto += `Clientes (${codClientes.length}): ${nomes} — cod_cliente IN (${codClientes.join(',')})\n`;
-      filtroSQL += ` AND cod_cliente IN (${codClientes.join(',')})`;
     }
 
     if (centrosCusto.length === 1) {
       contexto += `Centro de custo: ${centrosCusto[0]}\n`;
-      filtroSQL += ` AND centro_custo = '${centrosCusto[0].replace(/'/g, "''")}'`;
     } else if (centrosCusto.length > 1) {
       contexto += `Centros de custo (${centrosCusto.length}): ${centrosCusto.join(', ')}\n`;
-      filtroSQL += ` AND centro_custo IN (${centrosCusto.map(c => `'${c.replace(/'/g, "''")}'`).join(',')})`;
     }
 
     if (dataInicio && dataFim) {
       contexto += `Período: ${dataInicio} até ${dataFim}\n`;
-      filtroSQL += ` AND data_solicitado BETWEEN '${dataInicio}' AND '${dataFim}'`;
-    }
-
-    if (filtroSQL) {
-      contexto += `\nSQL obrigatório: WHERE COALESCE(ponto, 1) >= 2${filtroSQL}`;
     }
 
     return contexto;
+  }
+
+  /**
+   * v6.0: Gera estrutura de filtros obrigatórios para injeção automática em SQL
+   */
+  function montarFiltrosObrigatorios(filtros) {
+    const clausulas = [];
+
+    const codClientes = filtros?.cod_cliente
+      ? (Array.isArray(filtros.cod_cliente) ? filtros.cod_cliente : [filtros.cod_cliente]).map(c => parseInt(c)).filter(c => !isNaN(c))
+      : [];
+    const centrosCusto = filtros?.centro_custo
+      ? (Array.isArray(filtros.centro_custo) ? filtros.centro_custo : [filtros.centro_custo]).filter(c => c && c.trim())
+      : [];
+
+    if (codClientes.length > 0) {
+      clausulas.push({ tipo: 'cod_cliente', valores: codClientes });
+    }
+    if (centrosCusto.length > 0) {
+      clausulas.push({ tipo: 'centro_custo', valores: centrosCusto });
+    }
+    if (filtros?.data_inicio && filtros?.data_fim) {
+      clausulas.push({ tipo: 'periodo', inicio: filtros.data_inicio, fim: filtros.data_fim });
+    }
+
+    return { clausulas };
   }
 
   // ========================================================================
@@ -518,10 +734,9 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
     try {
       const { prompt, historico, filtros, conversa_id } = req.body;
       if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
-      if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada. Adicione nas variáveis de ambiente do Railway.' });
+      if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada.' });
 
       // ═══ Expansão de Região → Clientes ═══
-      // Se filtros.regiao está definido, buscar bi_regioes e expandir para cod_cliente
       if (filtros && filtros.regiao && !filtros._regiao_expandida) {
         try {
           const regiaoResult = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
@@ -531,51 +746,51 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
             if (Array.isArray(itens) && itens.length > 0) {
               const codClientes = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
               const centros = itens.filter(i => i.centro_custo).map(i => i.centro_custo);
-              
               filtros.cod_cliente = codClientes;
               filtros.nome_regiao = regiao.nome;
-              if (centros.length > 0 && centros.length < codClientes.length * 3) {
-                filtros.centro_custo = centros;
-              }
-              // Buscar nomes dos clientes
+              if (centros.length > 0 && centros.length < codClientes.length * 3) filtros.centro_custo = centros;
               try {
                 const nomesResult = await pool.query(
                   `SELECT DISTINCT cod_cliente, nome_fantasia FROM bi_entregas WHERE cod_cliente = ANY($1) AND nome_fantasia IS NOT NULL`,
                   [codClientes]
                 );
                 filtros.nomes_clientes = nomesResult.rows.map(r => r.nome_fantasia || ('cod ' + r.cod_cliente)).join(', ');
-              } catch (e) {
-                filtros.nomes_clientes = codClientes.map(c => 'cod ' + c).join(', ');
-              }
+              } catch (e) { filtros.nomes_clientes = codClientes.map(c => 'cod ' + c).join(', '); }
               filtros._regiao_expandida = true;
-              console.log(`🗺️ [Chat IA] Região "${regiao.nome}" expandida para ${codClientes.length} clientes`);
+              console.log(`🗺️ [Chat IA v6] Região "${regiao.nome}" expandida para ${codClientes.length} clientes`);
             }
           }
         } catch (errRegiao) {
-          console.warn('⚠️ [Chat IA] Erro ao expandir região:', errRegiao.message);
+          console.warn('⚠️ [Chat IA v6] Erro ao expandir região:', errRegiao.message);
         }
       }
 
-      console.log(`\n🤖 [Chat IA v4] Prompt: "${prompt.substring(0, 100)}"`);
+      console.log(`\n🤖 [Chat IA v6] Prompt: "${prompt.substring(0, 100)}"`);
       console.log(`   Filtros: ${JSON.stringify(filtros || {}).substring(0, 200)}`);
       console.log(`   Histórico: ${historico?.length || 0} msgs`);
 
       const contextoFiltros = montarContextoFiltros(filtros);
+      const filtrosObrigatorios = montarFiltrosObrigatorios(filtros || {});
       const userId = req.user?.id || req.user?.userId || 'anonymous';
 
-      let schema, samples, amostra, memorias;
+      let schema, samples, amostra, memorias, contextoCustom;
       try {
-        [schema, samples, amostra, memorias] = await Promise.all([
-          getSchema(), getSamples(), getAmostraReal(filtros), getMemoriasUsuario(userId)
+        [schema, samples, amostra, memorias, contextoCustom] = await Promise.all([
+          getSchema(), getSamples(), getAmostraReal(filtros), getMemoriasUsuario(userId), getContextoCustomizado()
         ]);
       } catch (dbErr) {
-        console.error('❌ [Chat IA] Erro schema/samples:', dbErr.message);
+        console.error('❌ [Chat IA v6] Erro schema/samples:', dbErr.message);
         return res.status(500).json({ error: 'Erro banco: ' + dbErr.message });
       }
 
-      if (memorias.length > 0) console.log(`🧠 [Chat IA] ${memorias.length} memória(s) do usuário carregadas`);
+      if (memorias.length > 0) console.log(`🧠 [Chat IA v6] ${memorias.length} memória(s) do usuário carregadas`);
+      if (contextoCustom) console.log(`📋 [Chat IA v6] Contexto customizado carregado`);
 
-      const systemPrompt = buildSystemPrompt(formatarSchema(schema), formatarSamples(samples) + amostra, contextoFiltros, memorias);
+      const systemPrompt = buildSystemPrompt(
+        formatarSchema(schema), formatarSamples(samples) + amostra,
+        contextoFiltros, memorias, contextoCustom, filtrosObrigatorios
+      );
+
       const messages = [];
       if (historico?.length > 0) {
         for (const h of historico) {
@@ -583,18 +798,19 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
           if (h.resposta) messages.push({ role: 'assistant', content: h.resposta });
         }
       }
-      // Injetar filtros no prompt do usuário para reforçar
-      const promptComFiltros = contextoFiltros 
-        ? `[Contexto: ${contextoFiltros.split('\n').filter(l => !l.startsWith('SQL')).join(', ').trim()}]\n\n${prompt}`
+
+      // v6.0: Injetar filtros no prompt do usuário de forma mais clara
+      const promptComFiltros = contextoFiltros
+        ? `[FILTROS ATIVOS: ${contextoFiltros.split('\n').filter(l => !l.startsWith('SQL')).join(' | ').trim()}]\n\n${prompt}`
         : prompt;
       messages.push({ role: 'user', content: promptComFiltros });
 
-      // ETAPA 1
+      // ETAPA 1: Gerar SQL (temperatura baixa para precisão)
       let resposta1;
       try {
-        resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.8, maxTokens: 4096 });
+        resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.3, maxTokens: 8192 });
       } catch (iaErr) {
-        console.error('❌ [Chat IA] Erro Gemini:', iaErr.message);
+        console.error('❌ [Chat IA v6] Erro Gemini:', iaErr.message);
         return res.status(500).json({ error: 'Erro IA: ' + iaErr.message });
       }
 
@@ -604,15 +820,14 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       while ((match = sqlRegex.exec(resposta1)) !== null) sqlBlocks.push(match[1].trim());
 
       if (sqlBlocks.length === 0) {
-        console.log('✅ [Chat IA v4] Resposta direta');
+        console.log('✅ [Chat IA v6] Resposta direta');
         if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
-        // Detectar memórias em background (não bloqueia a resposta)
         detectarESalvarMemorias(userId, prompt, resposta1).catch(() => {});
         return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
       }
 
-      // ETAPA 2
-      console.log(`🔄 [Chat IA v4] ${sqlBlocks.length} SQL(s)...`);
+      // ETAPA 2: Executar SQLs (com injeção de filtros)
+      console.log(`🔄 [Chat IA v6] ${sqlBlocks.length} SQL(s)...`);
       const todosResultados = [];
       const todasColunas = new Set();
       const sqlsExecutadas = [];
@@ -621,7 +836,7 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
       for (const bloco of sqlBlocks) {
         const queries = bloco.split(/;\s*/).filter(q => { const t = q.trim().toUpperCase(); return t.startsWith('SELECT') || t.startsWith('WITH'); });
         for (const sql of queries) {
-          const resultado = await executarSQL(sql.trim());
+          const resultado = await executarSQL(sql.trim(), filtrosObrigatorios);
           if (resultado.success) {
             resultado.rows.forEach(row => todosResultados.push(row));
             resultado.fields.forEach(f => todasColunas.add(f));
@@ -634,47 +849,57 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
         }
       }
 
-      // Retry
+      // Retry se todas falharam
       if (todosResultados.length === 0 && erros.length > 0) {
-        console.log('🔄 [Chat IA v4] Retry...');
+        console.log('🔄 [Chat IA v6] Retry...');
         try {
-          const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nProvavelmente você usou colunas que não existem. Consulte o schema fornecido no system prompt e gere queries usando APENAS as colunas que existem. A tabela principal é bi_entregas.` }];
-          const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.3, maxTokens: 4096 });
+          const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
+            role: 'user',
+            content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nConsulte o schema no system prompt e gere queries usando APENAS colunas que existem. Tabela principal: bi_entregas.\n${filtrosObrigatorios.clausulas.length > 0 ? `\n⚠️ LEMBRETE: Inclua OBRIGATORIAMENTE os filtros: ${filtrosObrigatorios.clausulas.map(c => c.tipo + '=' + (c.valores || [c.inicio]).join(',')).join(', ')}` : ''}`
+          }];
+          const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 8192 });
           const r2 = /```sql\n?([\s\S]*?)\n?```/g;
           let m2;
           while ((m2 = r2.exec(resp2)) !== null) {
-            const res2 = await executarSQL(m2[1].trim());
+            const res2 = await executarSQL(m2[1].trim(), filtrosObrigatorios);
             if (res2.success) { res2.rows.forEach(r => todosResultados.push(r)); res2.fields.forEach(f => todasColunas.add(f)); sqlsExecutadas.push(res2.sql); }
           }
           if (todosResultados.length === 0) {
-            return res.json({ success: true, resposta: resp2.replace(/```sql[\s\S]*?```/g, '').trim() || '⚠️ Não consegui. Reformule.', sql: null, dados: null });
+            return res.json({ success: true, resposta: resp2.replace(/```sql[\s\S]*?```/g, '').trim() || '⚠️ Não consegui consultar. Reformula aí.', sql: null, dados: null });
           }
         } catch (e) {
-          return res.json({ success: true, resposta: '⚠️ Erro na consulta. Reformule.', sql: null, dados: null });
+          return res.json({ success: true, resposta: '⚠️ Erro na consulta. Tenta reformular.', sql: null, dados: null });
         }
       }
 
-      // ETAPA 3
-      const dadosParaAnalise = todosResultados.slice(0, 150);
-      console.log(`🧠 [Chat IA v4] Analisando ${todosResultados.length} registros...`);
+      // ETAPA 3: Analisar resultados (temperatura mais alta para texto natural)
+      const dadosParaAnalise = todosResultados.slice(0, 200);
+      console.log(`🧠 [Chat IA v6] Analisando ${todosResultados.length} registros...`);
 
       let respostaFinal;
       try {
-        const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, { role: 'user', content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 150 ? ', mostrando 150' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 30000)}\n\`\`\`\n\nAnalise e responda. NÃO inclua SQL.` }];
-        respostaFinal = await chamarGemini(analiseMsgs, systemPrompt, { temperature: 1, maxTokens: 4096 });
+        const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
+          role: 'user',
+          content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 200 ? ', mostrando 200' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 40000)}\n\`\`\`\n\nAnalise e responda ao gestor. NÃO inclua SQL. Se fizer sentido, inclua gráfico(s) com [CHART]...[/CHART]. Use gráficos generosamente quando os dados se beneficiarem de visualização.`
+        }];
+        respostaFinal = await chamarGemini(analiseMsgs, systemPrompt, { temperature: 0.7, maxTokens: 8192 });
       } catch (e) {
-        respostaFinal = `Dados encontrados (${todosResultados.length} registros), mas houve erro na análise.`;
+        respostaFinal = `Encontrei ${todosResultados.length} registros, mas tive um problema na análise. Os dados estão aí embaixo.`;
       }
 
       const sqlFinal = sqlsExecutadas.join(';\n\n');
       if (conversa_id) await salvarMensagem(conversa_id, prompt, respostaFinal, sqlFinal, { total: todosResultados.length });
-      // Detectar memórias em background
       detectarESalvarMemorias(userId, prompt, respostaFinal).catch(() => {});
 
-      console.log('✅ [Chat IA v4] OK');
-      return res.json({ success: true, resposta: respostaFinal, sql: sqlFinal, dados: { colunas: [...todasColunas], linhas: dadosParaAnalise, total: todosResultados.length } });
+      console.log('✅ [Chat IA v6] OK');
+      return res.json({
+        success: true,
+        resposta: respostaFinal,
+        sql: sqlFinal,
+        dados: { colunas: [...todasColunas], linhas: dadosParaAnalise, total: todosResultados.length }
+      });
     } catch (err) {
-      console.error('❌ [Chat IA v4] ERRO:', err);
+      console.error('❌ [Chat IA v6] ERRO:', err);
       res.status(500).json({ error: 'Erro interno: ' + err.message });
     }
   });
@@ -844,6 +1069,50 @@ Sobre formatação: use **negrito** pra destacar números. 🟢 🟡 🔴 pra cl
   router.delete('/bi/chat-ia/memorias/:id', async (req, res) => {
     try {
       await pool.query(`UPDATE bi_chat_memorias SET ativo = false WHERE id = $1`, [req.params.id]);
+      res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ========================================================================
+  //  CONTEXTO CUSTOMIZADO (TREINAMENTO DA IA) — v6.0 NEW
+  // ========================================================================
+  router.get('/bi/chat-ia/contexto', async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT id, titulo, conteudo, categoria, ativo, prioridade, created_at, updated_at FROM bi_chat_contexto ORDER BY prioridade DESC, created_at ASC`
+      );
+      res.json({ success: true, contextos: result.rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.post('/bi/chat-ia/contexto', async (req, res) => {
+    try {
+      const { titulo, conteudo, categoria, prioridade } = req.body;
+      if (!titulo || titulo.trim().length < 3) return res.status(400).json({ error: 'Título muito curto' });
+      if (!conteudo || conteudo.trim().length < 5) return res.status(400).json({ error: 'Conteúdo muito curto' });
+      const result = await pool.query(
+        `INSERT INTO bi_chat_contexto (titulo, conteudo, categoria, prioridade) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [titulo.trim(), conteudo.trim(), categoria || 'geral', prioridade || 0]
+      );
+      res.json({ success: true, contexto: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.put('/bi/chat-ia/contexto/:id', async (req, res) => {
+    try {
+      const { titulo, conteudo, categoria, prioridade, ativo } = req.body;
+      const result = await pool.query(
+        `UPDATE bi_chat_contexto SET titulo = COALESCE($1, titulo), conteudo = COALESCE($2, conteudo), categoria = COALESCE($3, categoria), prioridade = COALESCE($4, prioridade), ativo = COALESCE($5, ativo), updated_at = NOW() WHERE id = $6 RETURNING *`,
+        [titulo, conteudo, categoria, prioridade, ativo, req.params.id]
+      );
+      if (result.rows.length === 0) return res.status(404).json({ error: 'Não encontrado' });
+      res.json({ success: true, contexto: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.delete('/bi/chat-ia/contexto/:id', async (req, res) => {
+    try {
+      await pool.query(`DELETE FROM bi_chat_contexto WHERE id = $1`, [req.params.id]);
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
