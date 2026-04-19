@@ -135,12 +135,42 @@ async function initSolicitacaoTables(pool) {
     `);
     console.log('✅ Tabela solicitacao_webhooks_log verificada');
 
+    // === GRUPOS DE ENDEREÇOS COMPARTILHADOS ===
+    // Permite que múltiplos clientes_solicitacao compartilhem o mesmo pool de endereços salvos.
+    // Cliente sem grupo = silo individual (comportamento original). Cliente com grupo = compartilha
+    // tudo (visualiza, edita e exclui endereços de qualquer membro do mesmo grupo).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS grupos_enderecos (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(255) NOT NULL,
+        descricao TEXT,
+        ativo BOOLEAN DEFAULT true,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela grupos_enderecos verificada');
+
+    // Adicionar coluna grupo_enderecos_id em clientes_solicitacao (idempotente)
+    await pool.query(`
+      ALTER TABLE clientes_solicitacao 
+      ADD COLUMN IF NOT EXISTS grupo_enderecos_id INT REFERENCES grupos_enderecos(id) ON DELETE SET NULL
+    `).catch(e => console.log('⚠️ grupo_enderecos_id em clientes_solicitacao:', e.message));
+
+    // Adicionar coluna grupo_enderecos_id em solicitacao_favoritos (idempotente)
+    await pool.query(`
+      ALTER TABLE solicitacao_favoritos 
+      ADD COLUMN IF NOT EXISTS grupo_enderecos_id INT REFERENCES grupos_enderecos(id) ON DELETE SET NULL
+    `).catch(e => console.log('⚠️ grupo_enderecos_id em solicitacao_favoritos:', e.message));
+
     // Índices
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_cliente ON solicitacoes_corrida(cliente_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_status ON solicitacoes_corrida(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_os ON solicitacoes_corrida(tutts_os_numero)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_pontos_corrida ON solicitacoes_pontos(solicitacao_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_favoritos_cliente ON solicitacao_favoritos(cliente_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_favoritos_grupo ON solicitacao_favoritos(grupo_enderecos_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_clientes_solic_grupo ON clientes_solicitacao(grupo_enderecos_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_webhook_os ON solicitacao_webhooks_log(tutts_os_numero)`).catch(() => {});
     console.log('✅ Índices solicitação criados');
 }
