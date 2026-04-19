@@ -103,6 +103,34 @@ async function initColetaEnderecosTables(pool) {
     ALTER TABLE solicitacao_favoritos ALTER COLUMN cliente_id DROP NOT NULL
   `).catch(e => console.log('⚠️ ALTER cliente_id DROP NOT NULL:', e.message));
   console.log('✅ solicitacao_favoritos.cliente_id agora aceita NULL (endereços de grupo)');
+
+  // ===== NOTA FISCAL: novas colunas em coleta_enderecos_pendentes =====
+  // Foto da NF (obrigatória) — base64 jpeg ~150-300KB tipicamente
+  // CNPJ/razão social/nome fantasia/nº NF — extraídos pela IA via OCR
+  // Idempotente — ADD COLUMN IF NOT EXISTS
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS foto_nf_base64 TEXT`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS cnpj VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS razao_social VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS nome_fantasia VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS numero_nf VARCHAR(50)`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS endereco_nf TEXT`).catch(() => {});
+  await pool.query(`ALTER TABLE coleta_enderecos_pendentes ADD COLUMN IF NOT EXISTS cidade_nf VARCHAR(100)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_pendentes_cnpj ON coleta_enderecos_pendentes(cnpj)`).catch(() => {});
+  console.log('✅ Colunas NF (CNPJ, razão social, foto NF, etc.) adicionadas');
+
+  // ===== NOTA FISCAL: novas colunas em solicitacao_favoritos =====
+  // Quando endereço é aprovado, persiste o CNPJ (pra dedup futura) e razão social
+  await pool.query(`ALTER TABLE solicitacao_favoritos ADD COLUMN IF NOT EXISTS cnpj VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE solicitacao_favoritos ADD COLUMN IF NOT EXISTS razao_social VARCHAR(255)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_favoritos_cnpj ON solicitacao_favoritos(cnpj)`).catch(() => {});
+  // UNIQUE composto: um CNPJ não pode ser cadastrado duas vezes no MESMO grupo.
+  // Em grupos diferentes pode (ex: 2 clientes diferentes com o mesmo fornecedor).
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_solic_favoritos_cnpj_grupo
+      ON solicitacao_favoritos(cnpj, grupo_enderecos_id)
+      WHERE cnpj IS NOT NULL
+  `).catch(e => console.log('⚠️ UNIQUE cnpj+grupo:', e.message));
+  console.log('✅ Colunas NF em solicitacao_favoritos + UNIQUE (cnpj, grupo)');
 }
 
 module.exports = { initColetaEnderecosTables };
