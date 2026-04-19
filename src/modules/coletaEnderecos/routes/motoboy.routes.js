@@ -20,12 +20,67 @@
  */
 const express = require('express');
 const { validarLocalizacao, similaridade } = require('../../agent/validar-localizacao');
+const { validarNotaFiscal } = require('../../agent/validar-nota-fiscal');
 const { buscarRegiaoProfissional } = require('../../../shared/utils/profissionaisLookup');
 
 const TAMANHO_MAX_FOTO_KB = 800;
 const LIMIAR_AUTO_APROVACAO = 90;          // % de confiança pra auto-aprovar
 const RAIO_DUPLICATA_METROS = 20;          // pontos dentro desse raio + nome similar = duplicata
 const LIMIAR_NOME_DUPLICATA = 0.80;        // similaridade mínima pra considerar mesmo nome
+
+/**
+ * Parser do endereço Google: "Rua X, 123 - Bairro, Cidade - UF, CEP, País"
+ * Retorna { rua, numero, bairro, cidade, uf, cep }. Espelha a função do admin.routes.
+ */
+function parsearEnderecoGoogle(s) {
+  const out = { rua: '', numero: '', bairro: '', cidade: '', uf: '', cep: '' };
+  if (!s) return out;
+  const partes = s.split(',').map(x => x.trim());
+  out.rua = partes[0] || '';
+  if (partes[1]) {
+    const m = partes[1].match(/^(.+?)\s*-\s*(.+)$/);
+    if (m) {
+      out.numero = m[1].trim();
+      out.bairro = m[2].trim();
+    } else if (/^[\d\w\/]+$/.test(partes[1])) {
+      out.numero = partes[1];
+    } else {
+      out.bairro = partes[1];
+    }
+  }
+  if (partes[2]) {
+    const m = partes[2].match(/^(.+?)\s*-\s*([A-Z]{2})$/);
+    if (m) { out.cidade = m[1].trim(); out.uf = m[2].trim(); }
+    else { out.cidade = partes[2]; }
+  }
+  for (let i = 3; i < partes.length; i++) {
+    const cepMatch = partes[i].match(/(\d{5}-?\d{3})/);
+    if (cepMatch && !out.cep) out.cep = cepMatch[1];
+  }
+  return out;
+}
+
+/**
+ * Forward geocoding: endereço (texto) → { lat, lng } via Google Maps.
+ * Usado pra geocodar o endereço impresso na NF e comparar com GPS do motoboy.
+ * Retorna null se a key não tá configurada ou Google não achou.
+ */
+async function forwardGeocode(endereco) {
+  const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!GOOGLE_API_KEY || !endereco) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR&components=country:br`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results?.[0]?.geometry?.location) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Haversine simples (m). Só pra filtro grosso de duplicatas.
@@ -206,6 +261,15 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
   });
 
   // ==================== CADASTRAR ENDEREÇO ====================
+  //
+  // Fluxo:
+  //   1. Motoboy envia: regiao_id, lat, lng, foto_nf_base64 (OBRIGATÓRIA), foto_base64 (fachada, OPCIONAL)
+  //   2. IA analisa NF — extrai CNPJ, razão social, nome fantasia, endereço NF, número NF
+  //      - Se foto não é NF / ilegível / CNPJ inválido → bloqueia direto
+  //   3. Reverse geocode do GPS → endereço Google (fonte da verdade pra localização)
+  //   4. Dedup por CNPJ no mesmo grupo (UNIQUE constraint)
+  //   5. Se foto da fachada veio, IA também analisa fachada (bonus de confiança)
+  //   6. Decide auto-aprovar (≥90% confiança IA) ou jogar pra fila admin
 
   router.post('/motoboy/coleta', verificarToken, async (req, res) => {
     const client = await pool.connect();
@@ -213,7 +277,7 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
       const cod = req.user?.codProfissional;
       if (!cod) return res.status(401).json({ error: 'Identificação de motoboy não encontrada' });
 
-      const { regiao_id, nome_cliente, latitude, longitude, foto_base64 } = req.body || {};
+      const { regiao_id, nome_cliente, latitude, longitude, foto_nf_base64, foto_base64 } = req.body || {};
 
       // --- Validações básicas ---
       if (!regiao_id) return res.status(400).json({ error: 'Região é obrigatória' });
@@ -224,12 +288,20 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
       if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
         return res.status(400).json({ error: 'Coordenadas inválidas' });
       }
+      if (!foto_nf_base64) {
+        return res.status(400).json({ error: '📄 Foto da Nota Fiscal é obrigatória pra cadastrar' });
+      }
+      // Tamanho da NF (mais permissivo: 1.5MB) — fotos de NF tendem a ser maiores
+      const bytesNF = Math.floor((foto_nf_base64.length * 3) / 4);
+      if (bytesNF > 1500 * 1024) {
+        return res.status(400).json({ error: 'Foto da NF muito grande (máx 1.5MB). Reduza a qualidade.' });
+      }
+      // Tamanho da fachada (opcional)
       if (foto_base64) {
-        // Aproxima tamanho: cada char base64 ≈ 0.75 bytes
         const bytesAprox = Math.floor((foto_base64.length * 3) / 4);
         if (bytesAprox > TAMANHO_MAX_FOTO_KB * 1024) {
           return res.status(400).json({
-            error: `Foto muito grande (máx ${TAMANHO_MAX_FOTO_KB}KB). Reduza a qualidade antes de enviar.`
+            error: `Foto da fachada muito grande (máx ${TAMANHO_MAX_FOTO_KB}KB). Reduza a qualidade.`
           });
         }
       }
@@ -249,77 +321,167 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
 
       const nomeNormalizado = nome_cliente.trim().toUpperCase();
 
-      // --- Verifica duplicata: mesmo grupo, raio 20m, nome similar ≥ 80% ---
-      const vizinhos = await client.query(`
-        SELECT id, apelido, latitude, longitude
-        FROM solicitacao_favoritos
-        WHERE grupo_enderecos_id = $1
-          AND latitude BETWEEN $2 - 0.0005 AND $2 + 0.0005
-          AND longitude BETWEEN $3 - 0.0005 AND $3 + 0.0005
-      `, [grupo_enderecos_id, latitude, longitude]);
+      // --- Reverse geocode do GPS (sempre — fonte da verdade pra localização) ---
+      const enderecoFormatadoGoogle = await reverseGeocode(pool, latitude, longitude);
 
-      for (const v of vizinhos.rows) {
-        const dist = distanciaMetros(latitude, longitude, parseFloat(v.latitude), parseFloat(v.longitude));
-        if (dist > RAIO_DUPLICATA_METROS) continue;
-        const sim = similaridade(nomeNormalizado, v.apelido || '');
-        if (sim >= LIMIAR_NOME_DUPLICATA) {
-          return res.status(409).json({
-            error: 'Endereço já cadastrado neste grupo',
-            duplicata: { id: v.id, apelido: v.apelido, distancia_m: Math.round(dist) }
-          });
-        }
+      // --- Valida NF via IA (Gemini OCR) ---
+      let resultadoNF;
+      try {
+        resultadoNF = await validarNotaFiscal(foto_nf_base64, {
+          latitude, longitude, enderecoGoogle: enderecoFormatadoGoogle
+        });
+      } catch (errNF) {
+        console.error('⚠️ Falha na análise da NF:', errNF.message);
+        // IA fora do ar — joga pra fila com 0% e admin decide
+        resultadoNF = { nf_rejeitada: false, motivo: 'IA indisponível', confianca: 0, dados: null };
       }
 
-      // --- Chama IA pra validar (só se tiver foto) ---
-      let resultadoIA = null;
-      if (foto_base64) {
-        try {
-          resultadoIA = await validarLocalizacao(foto_base64, latitude, longitude);
-        } catch (errIA) {
-          console.error('⚠️ Falha na validação IA:', errIA.message);
-          resultadoIA = null;
-        }
-      }
-
-      // Foto foi rejeitada pela IA (borrada, irrelevante, etc.) → bloqueia direto
-      if (resultadoIA && resultadoIA.foto_rejeitada) {
+      // NF foi rejeitada (não é NF, ilegível, CNPJ inválido) → bloqueia
+      if (resultadoNF.nf_rejeitada) {
         return res.status(400).json({
-          error: 'Foto inválida',
-          motivo: resultadoIA.motivo || 'A foto não parece ser uma fachada de estabelecimento'
+          error: '📄 Nota fiscal inválida',
+          motivo: resultadoNF.motivo
         });
       }
 
-      const confianca = resultadoIA?.confianca || 0;
-      const matchGoogle = resultadoIA?.match_google || null;
+      const dadosNF = resultadoNF.dados || {};
 
-      // Endereço formatado: prioriza o do match da IA, senão faz reverse geocoding
-      // do Google diretamente. Assim o admin sempre vê o endereço, mesmo sem foto.
-      let enderecoFormatado = matchGoogle?.endereco || null;
-      if (!enderecoFormatado) {
-        enderecoFormatado = await reverseGeocode(pool, latitude, longitude);
+      // --- Dedup por CNPJ no mesmo grupo ---
+      if (dadosNF.cnpj) {
+        const dup = await client.query(
+          `SELECT id, apelido, endereco_completo
+             FROM solicitacao_favoritos
+            WHERE cnpj = $1 AND grupo_enderecos_id = $2
+            LIMIT 1`,
+          [dadosNF.cnpj, grupo_enderecos_id]
+        );
+        if (dup.rows.length > 0) {
+          return res.status(409).json({
+            error: '🔁 Endereço já cadastrado neste grupo',
+            motivo: `O CNPJ ${dadosNF.cnpj_formatado} (${dup.rows[0].apelido}) já existe na base.`,
+            duplicata: dup.rows[0]
+          });
+        }
+      } else {
+        // Fallback: dedup por proximidade + similaridade de nome (caso CNPJ falte)
+        const vizinhos = await client.query(`
+          SELECT id, apelido, latitude, longitude
+            FROM solicitacao_favoritos
+            WHERE grupo_enderecos_id = $1
+              AND latitude BETWEEN $2 - 0.0005 AND $2 + 0.0005
+              AND longitude BETWEEN $3 - 0.0005 AND $3 + 0.0005
+        `, [grupo_enderecos_id, latitude, longitude]);
+        for (const v of vizinhos.rows) {
+          const dist = distanciaMetros(latitude, longitude, parseFloat(v.latitude), parseFloat(v.longitude));
+          if (dist > RAIO_DUPLICATA_METROS) continue;
+          const sim = similaridade(nomeNormalizado, v.apelido || '');
+          if (sim >= LIMIAR_NOME_DUPLICATA) {
+            return res.status(409).json({
+              error: 'Endereço já cadastrado neste grupo (proximidade + nome)',
+              duplicata: { id: v.id, apelido: v.apelido, distancia_m: Math.round(dist) }
+            });
+          }
+        }
       }
 
-      // Sem foto → confiança máxima 0, sempre vai pra fila
-      const autoAprovar = !!foto_base64 && confianca >= LIMIAR_AUTO_APROVACAO;
+      // --- Análise da foto da fachada (opcional) — só pra somar confiança ---
+      let resultadoFachada = null;
+      if (foto_base64) {
+        try {
+          resultadoFachada = await validarLocalizacao(foto_base64, latitude, longitude);
+        } catch (errF) {
+          console.warn('⚠️ Fachada IA falhou (ignorando):', errF.message);
+        }
+        // Se a fachada foi explicitamente rejeitada, ignora ela mas não bloqueia
+        // (a NF é a obrigatória)
+        if (resultadoFachada && resultadoFachada.foto_rejeitada) {
+          console.log(`[coleta-fachada] rejeitada: ${resultadoFachada.motivo}`);
+          resultadoFachada = null;
+        }
+      }
+
+      // --- Score combinado: 3 caminhos INDEPENDENTES, basta um dar ≥90% pra aprovar ---
+      // Auto-aprova quando QUALQUER UM dos critérios atinge 90+:
+      //   A) Match da fachada com Google Places                  → confiança da fachada
+      //   B) Endereço da NF geocodado bate com GPS (≤15m)        → 90-100 conforme distância
+      //   C) Nome/razão social da NF bate com nome lido na fachada → 95 fixo
+      // Score final = MAX(A, B, C). Se nenhum passa, vai pra fila admin.
+
+      // === Caminho A: Fachada validada via Google Places ===
+      const scoreFachada = resultadoFachada?.confianca || 0;
+
+      // === Caminho B: Endereço da NF é o mesmo lugar que o GPS ===
+      // Forward-geocode o endereço impresso na NF e mede distância até o GPS.
+      let scoreEnderecoNF = 0;
+      let distanciaMetrosNF = null;
+      let coordsEnderecoNF = null;
+      if (dadosNF.endereco_nf) {
+        try {
+          coordsEnderecoNF = await forwardGeocode(dadosNF.endereco_nf);
+          if (coordsEnderecoNF) {
+            distanciaMetrosNF = distanciaMetros(
+              latitude, longitude,
+              coordsEnderecoNF.lat, coordsEnderecoNF.lng
+            );
+            // ≤15m: bate (95-100). 15-50m: razoável (70-90). >50m: divergente (≤50)
+            if (distanciaMetrosNF <= 15) scoreEnderecoNF = 100;
+            else if (distanciaMetrosNF <= 30) scoreEnderecoNF = 90;
+            else if (distanciaMetrosNF <= 50) scoreEnderecoNF = 75;
+            else if (distanciaMetrosNF <= 200) scoreEnderecoNF = 50;
+            else scoreEnderecoNF = 20;
+            console.log(`[coleta-score] B endereco_nf=${distanciaMetrosNF.toFixed(0)}m → ${scoreEnderecoNF}`);
+          }
+        } catch (e) {
+          console.warn('[coleta-score] forwardGeocode NF falhou:', e.message);
+        }
+      }
+
+      // === Caminho C: Nome da NF bate com nome lido na fachada ===
+      let scoreNomeMatch = 0;
+      const nomeFachada = resultadoFachada?.nome_foto || resultadoFachada?.match_google?.nome || '';
+      const nomeNF = dadosNF.nome_fantasia || dadosNF.razao_social || '';
+      if (nomeFachada && nomeNF) {
+        const sim = similaridade(
+          nomeFachada.toUpperCase().trim(),
+          nomeNF.toUpperCase().trim()
+        );
+        if (sim >= 0.80) scoreNomeMatch = 95;
+        else if (sim >= 0.60) scoreNomeMatch = 75;
+        console.log(`[coleta-score] C nome match: "${nomeFachada}" ↔ "${nomeNF}" sim=${sim.toFixed(2)} → ${scoreNomeMatch}`);
+      }
+
+      // Score final = melhor dos 3 caminhos
+      const scoreFinal = Math.max(scoreFachada, scoreEnderecoNF, scoreNomeMatch);
+      console.log(`[coleta-score] A=${scoreFachada} B=${scoreEnderecoNF} C=${scoreNomeMatch} → final=${scoreFinal}`);
+
+      const matchGoogle = resultadoFachada?.match_google || null;
+
+      // Endereço final: do match da IA fachada se disponível, senão do reverse geocode
+      const enderecoFormatado = matchGoogle?.endereco || enderecoFormatadoGoogle;
+
+      const autoAprovar = scoreFinal >= LIMIAR_AUTO_APROVACAO;
       const statusInicial = autoAprovar ? 'aprovado' : 'validacao_manual';
 
       await client.query('BEGIN');
 
-      // Criar pendente
+      // Criar pendente — agora com dados da NF
       const pendenteIns = await client.query(`
         INSERT INTO coleta_enderecos_pendentes (
           cod_profissional, regiao_id, nome_cliente,
-          latitude, longitude, foto_base64,
+          latitude, longitude, foto_base64, foto_nf_base64,
           status, confianca_ia, match_google, endereco_formatado,
+          cnpj, razao_social, nome_fantasia, numero_nf, endereco_nf, cidade_nf,
           analisado_em
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP)
         RETURNING id
       `, [
         cod, regiao_id, nomeNormalizado,
-        latitude, longitude, foto_base64 || null,
-        statusInicial, confianca,
+        latitude, longitude, foto_base64 || null, foto_nf_base64,
+        statusInicial, scoreFinal,
         matchGoogle ? JSON.stringify(matchGoogle) : null,
-        enderecoFormatado
+        enderecoFormatado,
+        dadosNF.cnpj, dadosNF.razao_social, dadosNF.nome_fantasia,
+        dadosNF.numero_nf, dadosNF.endereco_nf, dadosNF.cidade_nf
       ]);
       const pendenteId = pendenteIns.rows[0].id;
 
@@ -327,23 +489,36 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
 
       if (autoAprovar) {
         // Buscar metadados da região (cidade, uf) pra gravar no favorito
-        const regiao = await client.query(
+        const regiaoRow = await client.query(
           'SELECT cidade, uf FROM coleta_regioes WHERE id = $1',
           [regiao_id]
         );
-        const { cidade, uf } = regiao.rows[0] || {};
+        const { cidade, uf } = regiaoRow.rows[0] || {};
 
-        // Criar em solicitacao_favoritos (cliente_id = NULL, é da base colaborativa)
+        // Parse do endereço Google pra preencher rua/numero/bairro/cep
+        const parsed = parsearEnderecoGoogle(enderecoFormatado || '');
+
+        // Cria em solicitacao_favoritos com CNPJ (pra dedup futura)
         const fav = await client.query(`
           INSERT INTO solicitacao_favoritos (
             cliente_id, grupo_enderecos_id, apelido, endereco_completo,
-            cidade, uf, latitude, longitude
-          ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7)
+            rua, numero, bairro, cidade, uf, cep,
+            latitude, longitude, cnpj, razao_social
+          ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           RETURNING id
-        `, [grupo_enderecos_id, nomeNormalizado, enderecoFormatado || '', cidade, uf, latitude, longitude]);
+        `, [
+          grupo_enderecos_id, nomeNormalizado, enderecoFormatado || '',
+          parsed.rua || enderecoFormatado || `Lat ${latitude}, Lng ${longitude}`,
+          parsed.numero || 'S/N',
+          parsed.bairro || null,
+          parsed.cidade || cidade || dadosNF.cidade_nf || null,
+          parsed.uf || uf || dadosNF.uf_nf || null,
+          parsed.cep || dadosNF.cep_nf || null,
+          latitude, longitude,
+          dadosNF.cnpj || null, dadosNF.razao_social || null
+        ]);
         favoritoId = fav.rows[0].id;
 
-        // Marca pendente como aprovado e limpa foto
         await client.query(`
           UPDATE coleta_enderecos_pendentes SET
             endereco_gerado_id = $1,
@@ -352,41 +527,59 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
           WHERE id = $2
         `, [favoritoId, pendenteId]);
 
-        // Ganho confirmado imediato
         await client.query(`
           INSERT INTO coleta_motoboy_ganhos (
             cod_profissional, endereco_pendente_id, valor, status, descricao
           ) VALUES ($1, $2, 1.00, 'confirmado', $3)
-        `, [cod, pendenteId, `Auto-aprovado com ${confianca}% de confiança`]);
+        `, [cod, pendenteId, `Auto-aprovado com ${scoreFinal}% de confiança (NF: ${dadosNF.cnpj_formatado || 'sem CNPJ'})`]);
       } else {
-        // Ganho previsto (aguarda admin)
         await client.query(`
           INSERT INTO coleta_motoboy_ganhos (
             cod_profissional, endereco_pendente_id, valor, status, descricao
           ) VALUES ($1, $2, 1.00, 'previsto', $3)
-        `, [cod, pendenteId, foto_base64
-              ? `Aguardando validação manual (${confianca}% de confiança IA)`
-              : 'Aguardando validação manual (sem foto)']);
+        `, [cod, pendenteId, `Aguardando validação manual (${scoreFinal}% NF: ${dadosNF.cnpj_formatado || 'sem CNPJ'})`]);
       }
 
       await client.query('COMMIT');
+
+      // Identifica qual caminho deu o melhor score (pro feedback ao motoboy)
+      let caminhoAprovacao = null;
+      if (autoAprovar) {
+        if (scoreFachada >= LIMIAR_AUTO_APROVACAO && scoreFachada === scoreFinal) caminhoAprovacao = 'fachada';
+        else if (scoreEnderecoNF >= LIMIAR_AUTO_APROVACAO && scoreEnderecoNF === scoreFinal) caminhoAprovacao = 'endereco_nf';
+        else if (scoreNomeMatch >= LIMIAR_AUTO_APROVACAO && scoreNomeMatch === scoreFinal) caminhoAprovacao = 'nome_match';
+      }
 
       return res.json({
         sucesso: true,
         id: pendenteId,
         status: statusInicial,
-        confianca,
+        confianca: scoreFinal,
+        scores: {
+          fachada: scoreFachada,
+          endereco_nf: scoreEnderecoNF,
+          nome_match: scoreNomeMatch,
+          distancia_nf_metros: distanciaMetrosNF !== null ? Math.round(distanciaMetrosNF) : null
+        },
+        caminho_aprovacao: caminhoAprovacao,
         auto_aprovado: autoAprovar,
         favorito_id: favoritoId,
-        match_google: matchGoogle,
+        dados_nf: dadosNF,
         mensagem: autoAprovar
           ? `✅ Endereço aprovado automaticamente! R$ 1,00 confirmado.`
           : `⏳ Em análise. Admin vai revisar em breve. R$ 1,00 previsto.`
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      // Bate na UNIQUE (cnpj, grupo) → 409
+      if (err.code === '23505' && /cnpj/i.test(err.constraint || '')) {
+        return res.status(409).json({
+          error: '🔁 CNPJ já cadastrado neste grupo (race condition)',
+          details: err.detail
+        });
+      }
       console.error('❌ Erro ao cadastrar endereço motoboy:', err);
-      res.status(500).json({ error: 'Erro ao cadastrar endereço' });
+      res.status(500).json({ error: 'Erro ao cadastrar endereço', details: err.message });
     } finally {
       client.release();
     }
@@ -498,6 +691,24 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
     } catch (err) {
       console.error('❌ Erro ao buscar foto motoboy:', err);
       res.status(500).json({ error: 'Erro ao buscar foto' });
+    }
+  });
+
+  // Foto da NF (acesso só ao próprio motoboy — auditoria)
+  router.get('/motoboy/coleta/enderecos/:pendente_id/foto-nf', verificarToken, async (req, res) => {
+    try {
+      const cod = req.user?.codProfissional;
+      const r = await pool.query(
+        `SELECT foto_nf_base64 FROM coleta_enderecos_pendentes
+           WHERE id = $1 AND cod_profissional = $2`,
+        [req.params.pendente_id, cod]
+      );
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Não encontrado' });
+      if (!r.rows[0].foto_nf_base64) return res.status(404).json({ error: 'Sem foto da NF' });
+      res.json({ foto: r.rows[0].foto_nf_base64 });
+    } catch (err) {
+      console.error('❌ Erro ao buscar foto NF motoboy:', err);
+      res.status(500).json({ error: 'Erro ao buscar foto NF' });
     }
   });
 
