@@ -22,7 +22,10 @@ const { listarProfissionais, listarRegioes } = require('../../../shared/utils/pr
  */
 async function reverseGeocode(pool, latitude, longitude) {
   const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!GOOGLE_API_KEY) return null;
+  if (!GOOGLE_API_KEY) {
+    console.warn('[coleta-reverse] ⚠️ GOOGLE_MAPS_API_KEY e GOOGLE_API_KEY não configuradas');
+    return null;
+  }
 
   const lat = parseFloat(latitude);
   const lng = parseFloat(longitude);
@@ -36,13 +39,19 @@ async function reverseGeocode(pool, latitude, longitude) {
          LIMIT 1`,
       [lat, lng]
     );
-    if (cache.rows.length > 0) return cache.rows[0].endereco_formatado;
-  } catch (e) { /* ignore */ }
+    if (cache.rows.length > 0) {
+      console.log(`[coleta-reverse] cache HIT ${lat},${lng}`);
+      return cache.rows[0].endereco_formatado;
+    }
+  } catch (e) {
+    console.warn('[coleta-reverse] cache falhou:', e.message);
+  }
 
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}&language=pt-BR`;
     const resp = await fetch(url);
     const data = await resp.json();
+    console.log(`[coleta-reverse] Google ${lat},${lng} → status=${data.status} results=${data.results?.length || 0}`);
     if (data.status === 'OK' && data.results && data.results.length > 0) {
       const endereco = data.results[0].formatted_address;
       pool.query(
@@ -52,7 +61,12 @@ async function reverseGeocode(pool, latitude, longitude) {
       ).catch(() => {});
       return endereco;
     }
-  } catch (e) { /* ignore */ }
+    if (data.status !== 'OK') {
+      console.warn(`[coleta-reverse] Google não OK: ${data.status} ${data.error_message || ''}`);
+    }
+  } catch (e) {
+    console.warn('[coleta-reverse] Google fetch falhou:', e.message);
+  }
   return null;
 }
 
@@ -393,6 +407,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
     try {
       const { id } = req.params;
       const { nome_cliente_editado, latitude_editada, longitude_editada } = req.body || {};
+      console.log(`[coleta-aprovar] id=${id} admin=${req.user?.codProfissional || 'sem-cod'}`);
       await client.query('BEGIN');
 
       // Buscar pendente + região + grupo
@@ -404,9 +419,11 @@ function createColetaAdminRoutes(pool, verificarToken) {
       `, [id]);
       if (pendente.rows.length === 0) {
         await client.query('ROLLBACK');
+        console.log(`[coleta-aprovar] pendente ${id} não encontrado`);
         return res.status(404).json({ error: 'Pendente não encontrado' });
       }
       const p = pendente.rows[0];
+      console.log(`[coleta-aprovar] pendente encontrado: status=${p.status} grupo=${p.grupo_enderecos_id} cidade=${p.cidade}`);
       if (p.status === 'aprovado') {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Já aprovado' });
@@ -420,6 +437,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
       const latFinal = latitude_editada || p.latitude;
       const lngFinal = longitude_editada || p.longitude;
       const enderecoFinal = p.endereco_formatado || '';
+      console.log(`[coleta-aprovar] insert fav: nome=${nomeFinal} lat=${latFinal} lng=${lngFinal} end=${enderecoFinal?.slice(0,50)}`);
 
       // Criar registro em solicitacao_favoritos com grupo_enderecos_id da região.
       // cliente_id fica null (é da base colaborativa, não pertence a um cliente específico).
@@ -431,6 +449,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
         RETURNING id
       `, [p.grupo_enderecos_id, nomeFinal, enderecoFinal, p.cidade, p.uf, latFinal, lngFinal]);
       const favoritoId = favorito.rows[0].id;
+      console.log(`[coleta-aprovar] favorito criado: id=${favoritoId}`);
 
       // Atualizar pendente
       await client.query(`
@@ -455,7 +474,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('❌ Erro ao aprovar:', err);
-      res.status(500).json({ error: 'Erro ao aprovar' });
+      res.status(500).json({ error: 'Erro ao aprovar', details: err.message, code: err.code });
     } finally {
       client.release();
     }
