@@ -6,12 +6,13 @@
  */
 const express = require('express');
 const { createColetaAdminRoutes } = require('./routes/admin.routes');
+const { createColetaMotoboyRoutes } = require('./routes/motoboy.routes');
 
 function createColetaEnderecosRouter(pool, verificarToken) {
   const router = express.Router();
 
   router.use(createColetaAdminRoutes(pool, verificarToken));
-  // router.use(createColetaMotoboyRoutes(pool, verificarToken));  // Parte 2
+  router.use(createColetaMotoboyRoutes(pool, verificarToken));
 
   return router;
 }
