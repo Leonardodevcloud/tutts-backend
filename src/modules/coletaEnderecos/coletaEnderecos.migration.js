@@ -2,24 +2,23 @@
  * MÓDULO COLETA DE ENDEREÇOS - Migration
  *
  * Base colaborativa de endereços alimentada por motoboys.
- * Cada motoboy vinculado a uma ou mais regiões pode cadastrar endereços
- * (nome do cliente + GPS + foto opcional). Se a validação IA (Gemini + Google
- * Places) devolver ≥90% de confiança, aprova automaticamente e grava em
- * `solicitacao_favoritos` com o `grupo_enderecos_id` da região. Caso contrário,
- * fica numa fila pra admin revisar. Cada aprovação gera R$ 1,00 ao motoboy,
- * contabilizado em ledger (pagamento real decidido depois).
  *
- * 4 tabelas:
+ * VÍNCULO MOTOBOY × REGIÃO: automático por match de nome.
+ * O campo `regiao` (ou `cidade`) do motoboy no CRM é comparado com o campo
+ * `nome` das regiões cadastradas aqui (case-insensitive, via
+ * buscarRegiaoProfissional do profissionaisLookup). Não há tabela de vínculo
+ * manual — se o motoboy é de "Salvador" no CRM e existe uma região "Salvador"
+ * ativa, ele automaticamente enxerga e pode cadastrar nela.
+ *
+ * 3 tabelas:
  *  - coleta_regioes                       → regiões (ex: Salvador → Grupo Bahia)
- *  - coleta_motoboy_regioes               → pivô motoboy × região
  *  - coleta_enderecos_pendentes           → cadastros aguardando aprovação
  *  - coleta_motoboy_ganhos                → ledger de créditos (R$ 1,00 por endereço)
  */
 
 async function initColetaEnderecosTables(pool) {
-  // Regiões definidas pelo admin.
-  // Cada região aponta pra um grupo de endereços compartilhados já existente
-  // (criado no módulo solicitação) — os aprovados caem nesse grupo.
+  // Regiões definidas pelo admin. O `nome` DEVE bater com a região do motoboy
+  // no CRM (coluna `regiao` ou fallback `cidade` de crm_leads_capturados).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS coleta_regioes (
       id SERIAL PRIMARY KEY,
@@ -34,19 +33,9 @@ async function initColetaEnderecosTables(pool) {
   `);
   console.log('✅ Tabela coleta_regioes verificada');
 
-  // Vínculo motoboy × região (1 motoboy pode atuar em N regiões).
-  // cod_profissional é o identificador do motoboy em `users`.
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS coleta_motoboy_regioes (
-      id SERIAL PRIMARY KEY,
-      cod_profissional VARCHAR(50) NOT NULL,
-      regiao_id INT NOT NULL REFERENCES coleta_regioes(id) ON DELETE CASCADE,
-      ativo BOOLEAN DEFAULT true,
-      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(cod_profissional, regiao_id)
-    )
-  `);
-  console.log('✅ Tabela coleta_motoboy_regioes verificada');
+  // Cleanup: se houver a antiga tabela de vínculo manual de versões anteriores,
+  // ela pode ser descartada (o vínculo agora é automático por match de nome).
+  await pool.query(`DROP TABLE IF EXISTS coleta_motoboy_regioes CASCADE`).catch(() => {});
 
   // Fila de endereços em análise.
   // - status='aprovado': já virou registro em solicitacao_favoritos (endereco_gerado_id)
@@ -97,13 +86,12 @@ async function initColetaEnderecosTables(pool) {
   console.log('✅ Tabela coleta_motoboy_ganhos verificada');
 
   // Índices
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_motoboy_regioes_cod ON coleta_motoboy_regioes(cod_profissional)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_motoboy_regioes_regiao ON coleta_motoboy_regioes(regiao_id)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_pendentes_cod ON coleta_enderecos_pendentes(cod_profissional)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_pendentes_regiao ON coleta_enderecos_pendentes(regiao_id)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_pendentes_status ON coleta_enderecos_pendentes(status)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_ganhos_cod ON coleta_motoboy_ganhos(cod_profissional)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_ganhos_status ON coleta_motoboy_ganhos(status)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_coleta_regioes_nome_upper ON coleta_regioes(UPPER(nome))`).catch(() => {});
   console.log('✅ Índices coletaEnderecos criados');
 }
 
