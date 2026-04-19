@@ -53,6 +53,7 @@ const { initAuthRoutes, initAuthTables } = require('./src/modules/auth');
 const { initDisponibilidadeRoutes, initDisponibilidadeTables } = require('./src/modules/disponibilidade');
 const { initFinancialRoutes, initFinancialTables } = require('./src/modules/financial');
 const { initSolicitacaoRoutes, initSolicitacaoTables } = require('./src/modules/solicitacao');
+const { initColetaEnderecosRoutes, initColetaEnderecosTables } = require('./src/modules/coletaEnderecos');
 const { initBiRoutes, initBiTables } = require('./src/modules/bi');
 const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
@@ -241,6 +242,7 @@ app.use('/api', initAuthRoutes(pool, verificarToken, verificarAdmin, registrarAu
 app.use('/api', initDisponibilidadeRoutes(pool, verificarToken));
 app.use('/api', initFinancialRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP));
 app.use('/api', initSolicitacaoRoutes(pool, verificarToken));
+app.use('/api', initColetaEnderecosRoutes(pool, verificarToken));
 app.use('/api', initBiRoutes(pool, verificarToken));
 app.use('/api', initGerencialRoutes(pool, verificarToken));
 app.use('/api', initTodoRoutes(pool, verificarToken));
@@ -414,6 +416,7 @@ async function initDatabase() {
   try {
     await initFinancialTables(pool);
     await initSolicitacaoTables(pool);
+    await initColetaEnderecosTables(pool);
     await initAuthTables(pool);
     await initConfigTables(pool);
     await initDisponibilidadeTables(pool);
