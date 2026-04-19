@@ -1,0 +1,19 @@
+/**
+ * MÓDULO COLETA DE ENDEREÇOS - Routes
+ *
+ * Entry point que monta os sub-routers (admin e motoboy).
+ * As rotas do motoboy serão adicionadas na Parte 2.
+ */
+const express = require('express');
+const { createColetaAdminRoutes } = require('./routes/admin.routes');
+
+function createColetaEnderecosRouter(pool, verificarToken) {
+  const router = express.Router();
+
+  router.use(createColetaAdminRoutes(pool, verificarToken));
+  // router.use(createColetaMotoboyRoutes(pool, verificarToken));  // Parte 2
+
+  return router;
+}
+
+module.exports = { createColetaEnderecosRouter };
