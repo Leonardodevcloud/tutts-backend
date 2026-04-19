@@ -104,6 +104,12 @@ async function initColetaEnderecosTables(pool) {
   `).catch(e => console.log('⚠️ ALTER cliente_id DROP NOT NULL:', e.message));
   console.log('✅ solicitacao_favoritos.cliente_id agora aceita NULL (endereços de grupo)');
 
+  // Garante que created_at existe (em bases antigas a tabela foi criada sem).
+  // Sem isso, ORDER BY created_at quebra com "column does not exist".
+  await pool.query(`
+    ALTER TABLE solicitacao_favoritos ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  `).catch(e => console.log('⚠️ ADD created_at:', e.message));
+
   // ===== NOTA FISCAL: novas colunas em coleta_enderecos_pendentes =====
   // Foto da NF (obrigatória) — base64 jpeg ~150-300KB tipicamente
   // CNPJ/razão social/nome fantasia/nº NF — extraídos pela IA via OCR
