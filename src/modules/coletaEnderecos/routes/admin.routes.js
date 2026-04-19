@@ -410,19 +410,29 @@ function createColetaAdminRoutes(pool, verificarToken) {
       console.log(`[coleta-aprovar] id=${id} admin=${req.user?.codProfissional || 'sem-cod'}`);
       await client.query('BEGIN');
 
-      // Buscar pendente + região + grupo
-      const pendente = await client.query(`
-        SELECT p.*, r.grupo_enderecos_id, r.cidade, r.uf
-        FROM coleta_enderecos_pendentes p
-        LEFT JOIN coleta_regioes r ON r.id = p.regiao_id
-        WHERE p.id = $1 FOR UPDATE
-      `, [id]);
+      // Buscar pendente (com lock) — separado da região porque PostgreSQL
+      // não aceita FOR UPDATE em queries com LEFT JOIN (lado nullable).
+      const pendente = await client.query(
+        `SELECT * FROM coleta_enderecos_pendentes WHERE id = $1 FOR UPDATE`,
+        [id]
+      );
       if (pendente.rows.length === 0) {
         await client.query('ROLLBACK');
         console.log(`[coleta-aprovar] pendente ${id} não encontrado`);
         return res.status(404).json({ error: 'Pendente não encontrado' });
       }
       const p = pendente.rows[0];
+
+      // Busca dados da região separadamente (sem lock, é só leitura)
+      const regiaoRow = await client.query(
+        `SELECT grupo_enderecos_id, cidade, uf FROM coleta_regioes WHERE id = $1`,
+        [p.regiao_id]
+      );
+      if (regiaoRow.rows.length > 0) {
+        p.grupo_enderecos_id = regiaoRow.rows[0].grupo_enderecos_id;
+        p.cidade = regiaoRow.rows[0].cidade;
+        p.uf = regiaoRow.rows[0].uf;
+      }
       console.log(`[coleta-aprovar] pendente encontrado: status=${p.status} grupo=${p.grupo_enderecos_id} cidade=${p.cidade}`);
       if (p.status === 'aprovado') {
         await client.query('ROLLBACK');
