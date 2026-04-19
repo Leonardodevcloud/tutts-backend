@@ -41,6 +41,57 @@ function distanciaMetros(lat1, lng1, lat2, lng2) {
 }
 
 /**
+ * Reverse geocoding via Google Maps — converte lat/lng em endereço formatado.
+ * Consulta cache `enderecos_geocodificados` primeiro, depois Google se miss.
+ * Retorna string ou null se falhar.
+ */
+async function reverseGeocode(pool, latitude, longitude) {
+  const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!GOOGLE_API_KEY) {
+    console.warn('[coleta] GOOGLE_MAPS_API_KEY não configurada — sem reverse geocoding');
+    return null;
+  }
+
+  const lat = parseFloat(latitude);
+  const lng = parseFloat(longitude);
+  if (isNaN(lat) || isNaN(lng)) return null;
+
+  // 1) Cache (raio ~22m — 0.0002 grau)
+  try {
+    const cache = await pool.query(
+      `SELECT endereco_formatado FROM enderecos_geocodificados
+         WHERE latitude BETWEEN $1 - 0.0002 AND $1 + 0.0002
+           AND longitude BETWEEN $2 - 0.0002 AND $2 + 0.0002
+         LIMIT 1`,
+      [lat, lng]
+    );
+    if (cache.rows.length > 0) return cache.rows[0].endereco_formatado;
+  } catch (e) {
+    console.warn('[coleta] reverse cache falhou:', e.message);
+  }
+
+  // 2) Google
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results && data.results.length > 0) {
+      const endereco = data.results[0].formatted_address;
+      // Salva no cache (fire & forget)
+      pool.query(
+        `INSERT INTO enderecos_geocodificados (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
+         VALUES ($1, $1, $2, $3, $4, 'google-reverse-coleta') ON CONFLICT DO NOTHING`,
+        [`${lat},${lng}`, endereco, lat, lng]
+      ).catch(() => {});
+      return endereco;
+    }
+  } catch (e) {
+    console.warn('[coleta] reverseGeocode Google falhou:', e.message);
+  }
+  return null;
+}
+
+/**
  * Retorna as regiões ativas do módulo Coleta que batem com a região do motoboy no CRM.
  * Retorna array vazio se o motoboy não tem região cadastrada ou nenhuma região bate.
  */
@@ -147,7 +198,7 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
         }
       }
 
-      // --- Chama IA pra validar ---
+      // --- Chama IA pra validar (só se tiver foto) ---
       let resultadoIA = null;
       if (foto_base64) {
         try {
@@ -168,7 +219,13 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
 
       const confianca = resultadoIA?.confianca || 0;
       const matchGoogle = resultadoIA?.match_google || null;
-      const enderecoFormatado = matchGoogle?.endereco || null;
+
+      // Endereço formatado: prioriza o do match da IA, senão faz reverse geocoding
+      // do Google diretamente. Assim o admin sempre vê o endereço, mesmo sem foto.
+      let enderecoFormatado = matchGoogle?.endereco || null;
+      if (!enderecoFormatado) {
+        enderecoFormatado = await reverseGeocode(pool, latitude, longitude);
+      }
 
       // Sem foto → confiança máxima 0, sempre vai pra fila
       const autoAprovar = !!foto_base64 && confianca >= LIMIAR_AUTO_APROVACAO;
