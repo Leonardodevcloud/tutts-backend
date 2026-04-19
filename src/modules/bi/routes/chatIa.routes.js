@@ -89,7 +89,7 @@ function createChatIaRoutes(pool) {
 
   // ==================== CHAMAR GEMINI ====================
   async function chamarGemini(messages, systemPrompt, opts = {}) {
-    const { temperature = 0.4, maxTokens = 8192 } = opts;
+    const { temperature = 0.4, maxTokens = 65536 } = opts;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY não configurada');
 
@@ -258,7 +258,7 @@ function createChatIaRoutes(pool) {
       return { valido: false, erro: 'Acesso a tabelas do sistema não permitido.' };
     }
 
-    if (!sqlLimpo.toUpperCase().includes('LIMIT')) sqlLimpo += ' LIMIT 500';
+    if (!sqlLimpo.toUpperCase().includes('LIMIT')) sqlLimpo += ' LIMIT 1000';
     return { valido: true, sql: sqlLimpo };
   }
 
@@ -356,7 +356,7 @@ function createChatIaRoutes(pool) {
 
     const client = await pool.connect();
     try {
-      await client.query('SET statement_timeout = 15000');
+      await client.query('SET statement_timeout = 30000');
       const result = await client.query(sqlFinal);
       await client.query('SET statement_timeout = 0');
       return { success: true, rows: result.rows, fields: result.fields?.map(f => f.name) || [], rowCount: result.rowCount, sql: sqlFinal };
@@ -813,7 +813,7 @@ Formatação de texto:
       // ETAPA 1: Gerar SQL (temperatura baixa para precisão)
       let resposta1;
       try {
-        resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.3, maxTokens: 8192 });
+        resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.3, maxTokens: 65536 });
       } catch (iaErr) {
         console.error('❌ [Chat IA v6] Erro Gemini:', iaErr.message);
         return res.status(500).json({ error: 'Erro IA: ' + iaErr.message });
@@ -862,7 +862,7 @@ Formatação de texto:
             role: 'user',
             content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nConsulte o schema no system prompt e gere queries usando APENAS colunas que existem. Tabela principal: bi_entregas.\n${filtrosObrigatorios.clausulas.length > 0 ? `\n⚠️ LEMBRETE: Inclua OBRIGATORIAMENTE os filtros: ${filtrosObrigatorios.clausulas.map(c => c.tipo + '=' + (c.valores || [c.inicio]).join(',')).join(', ')}` : ''}`
           }];
-          const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 8192 });
+          const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 65536 });
           const r2 = /```sql\n?([\s\S]*?)\n?```/g;
           let m2;
           while ((m2 = r2.exec(resp2)) !== null) {
@@ -878,16 +878,16 @@ Formatação de texto:
       }
 
       // ETAPA 3: Analisar resultados (temperatura mais alta para texto natural)
-      const dadosParaAnalise = todosResultados.slice(0, 200);
+      const dadosParaAnalise = todosResultados.slice(0, 500);
       console.log(`🧠 [Chat IA v6] Analisando ${todosResultados.length} registros...`);
 
       let respostaFinal;
       try {
         const analiseMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
           role: 'user',
-          content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 200 ? ', mostrando 200' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 40000)}\n\`\`\`\n\nAnalise e responda ao gestor. NÃO inclua SQL. Se fizer sentido, inclua gráfico(s) com [CHART]...[/CHART]. Use gráficos generosamente quando os dados se beneficiarem de visualização.`
+          content: `Resultado SQL (${todosResultados.length} registros${todosResultados.length > 500 ? ', mostrando 500' : ''}):\n\n\`\`\`json\n${JSON.stringify(dadosParaAnalise, null, 2).substring(0, 100000)}\n\`\`\`\n\nAnalise e responda ao gestor. NÃO inclua SQL. Se fizer sentido, inclua gráfico(s) com [CHART]...[/CHART]. Use gráficos generosamente quando os dados se beneficiarem de visualização.`
         }];
-        respostaFinal = await chamarGemini(analiseMsgs, systemPrompt, { temperature: 0.7, maxTokens: 8192 });
+        respostaFinal = await chamarGemini(analiseMsgs, systemPrompt, { temperature: 0.7, maxTokens: 65536 });
       } catch (e) {
         respostaFinal = `Encontrei ${todosResultados.length} registros, mas tive um problema na análise. Os dados estão aí embaixo.`;
       }
