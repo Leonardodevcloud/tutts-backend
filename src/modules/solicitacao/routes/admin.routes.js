@@ -672,6 +672,147 @@ router.get('/webhook/tutts/status', (req, res) => {
 });
 
 
+// ==================== GRUPOS DE ENDEREÇOS COMPARTILHADOS ====================
+// Permite agrupar clientes_solicitacao que compartilham o mesmo pool de endereços salvos.
+
+// Listar grupos
+router.get('/admin/grupos-enderecos', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT g.*,
+        COUNT(DISTINCT c.id) AS total_clientes,
+        COUNT(DISTINCT f.id) AS total_enderecos
+      FROM grupos_enderecos g
+      LEFT JOIN clientes_solicitacao c ON c.grupo_enderecos_id = g.id
+      LEFT JOIN solicitacao_favoritos f ON f.grupo_enderecos_id = g.id
+      GROUP BY g.id
+      ORDER BY g.nome
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Erro ao listar grupos:', err);
+    res.status(500).json({ error: 'Erro ao listar grupos' });
+  }
+});
+
+// Buscar um grupo específico com lista de clientes
+router.get('/admin/grupos-enderecos/:id', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const grupo = await pool.query('SELECT * FROM grupos_enderecos WHERE id = $1', [id]);
+    if (grupo.rows.length === 0) return res.status(404).json({ error: 'Grupo não encontrado' });
+    const clientes = await pool.query(
+      'SELECT id, nome, email, empresa FROM clientes_solicitacao WHERE grupo_enderecos_id = $1 ORDER BY nome',
+      [id]
+    );
+    const totalEnderecos = await pool.query(
+      'SELECT COUNT(*) AS total FROM solicitacao_favoritos WHERE grupo_enderecos_id = $1',
+      [id]
+    );
+    res.json({ ...grupo.rows[0], clientes: clientes.rows, total_enderecos: parseInt(totalEnderecos.rows[0].total) });
+  } catch (err) {
+    console.error('❌ Erro ao buscar grupo:', err);
+    res.status(500).json({ error: 'Erro ao buscar grupo' });
+  }
+});
+
+// Criar grupo
+router.post('/admin/grupos-enderecos', verificarToken, async (req, res) => {
+  try {
+    const { nome, descricao } = req.body;
+    if (!nome || !nome.trim()) return res.status(400).json({ error: 'Nome é obrigatório' });
+    const result = await pool.query(
+      'INSERT INTO grupos_enderecos (nome, descricao) VALUES ($1, $2) RETURNING *',
+      [nome.trim(), descricao?.trim() || null]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('❌ Erro ao criar grupo:', err);
+    res.status(500).json({ error: 'Erro ao criar grupo' });
+  }
+});
+
+// Editar grupo
+router.patch('/admin/grupos-enderecos/:id', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, descricao, ativo } = req.body;
+    await pool.query(`
+      UPDATE grupos_enderecos SET
+        nome = COALESCE($1, nome),
+        descricao = COALESCE($2, descricao),
+        ativo = COALESCE($3, ativo),
+        atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = $4
+    `, [nome?.trim() || null, descricao?.trim() || null, ativo, id]);
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao editar grupo:', err);
+    res.status(500).json({ error: 'Erro ao editar grupo' });
+  }
+});
+
+// Excluir grupo (clientes ficam sem grupo; endereços ficam sem grupo mas continuam no cliente que criou)
+router.delete('/admin/grupos-enderecos/:id', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Os SET NULL das FKs cuidam de desvincular clientes e endereços automaticamente
+    await pool.query('DELETE FROM grupos_enderecos WHERE id = $1', [id]);
+    res.json({ sucesso: true });
+  } catch (err) {
+    console.error('❌ Erro ao excluir grupo:', err);
+    res.status(500).json({ error: 'Erro ao excluir grupo' });
+  }
+});
+
+// Atribuir cliente a um grupo (ou remover do grupo passando null)
+// Ao atribuir, MIGRA automaticamente todos os endereços individuais desse cliente pro grupo.
+router.patch('/admin/solicitacao/clientes/:id/grupo', verificarToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { grupo_enderecos_id } = req.body; // pode ser null
+    
+    await client.query('BEGIN');
+    
+    // Atualizar o cliente
+    await client.query(
+      'UPDATE clientes_solicitacao SET grupo_enderecos_id = $1 WHERE id = $2',
+      [grupo_enderecos_id || null, id]
+    );
+    
+    if (grupo_enderecos_id) {
+      // Migrar endereços individuais (sem grupo) desse cliente pro grupo
+      const migracao = await client.query(
+        `UPDATE solicitacao_favoritos 
+         SET grupo_enderecos_id = $1 
+         WHERE cliente_id = $2 AND grupo_enderecos_id IS NULL
+         RETURNING id`,
+        [grupo_enderecos_id, id]
+      );
+      await client.query('COMMIT');
+      return res.json({ sucesso: true, enderecos_migrados: migracao.rows.length });
+    } else {
+      // Removendo do grupo: endereços ficam "órfãos" (sem grupo), mas como cliente_id
+      // continua sendo desse cliente, ainda serão visíveis apenas pra ele.
+      // Desvincula todos os endereços que ESSE cliente criou e que estão no grupo
+      await client.query(
+        'UPDATE solicitacao_favoritos SET grupo_enderecos_id = NULL WHERE cliente_id = $1',
+        [id]
+      );
+      await client.query('COMMIT');
+      return res.json({ sucesso: true });
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('❌ Erro ao atribuir grupo:', err);
+    res.status(500).json({ error: 'Erro ao atribuir grupo' });
+  } finally {
+    client.release();
+  }
+});
+
+
 // ==================== ERROR HANDLER GLOBAL COM CORS ====================
 // Este handler DEVE ser o último middleware antes de app.listen
 
