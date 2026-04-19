@@ -705,11 +705,12 @@ function createColetaAdminRoutes(pool, verificarToken) {
           f.endereco_completo, f.rua, f.numero, f.bairro,
           f.cidade, f.uf, f.cep, f.latitude, f.longitude,
           f.cnpj, f.razao_social,
-          f.vezes_usado, f.ultimo_uso, f.created_at,
+          f.vezes_usado, f.ultimo_uso,
           COALESCE(c.empresa, c.nome) AS cliente_nome,
           g.nome AS grupo_nome,
           p.id AS pendente_id,
           p.cod_profissional AS motoboy_cod,
+          p.criado_em AS pendente_criado_em,
           u.full_name AS motoboy_nome,
           CASE WHEN p.id IS NOT NULL THEN 'motoboy' ELSE 'cliente' END AS origem
         FROM solicitacao_favoritos f
@@ -718,7 +719,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
         LEFT JOIN coleta_enderecos_pendentes p ON p.endereco_gerado_id = f.id
         LEFT JOIN users u ON u.cod_profissional = p.cod_profissional
         WHERE ${where}
-        ORDER BY f.created_at DESC
+        ORDER BY COALESCE(p.criado_em, f.ultimo_uso) DESC NULLS LAST, f.id DESC
         LIMIT 200
       `, params);
 
