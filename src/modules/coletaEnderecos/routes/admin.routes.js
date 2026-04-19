@@ -5,40 +5,87 @@
  * manual (IA não teve confiança suficiente).
  *
  * VÍNCULO AUTOMÁTICO: motoboys são associados à região pelo match de nome —
- * o campo `regiao` (ou `cidade`) do profissional no CRM é comparado com o
- * campo `nome` das regiões cadastradas aqui (case-insensitive).
+ * o campo `regiao` (ou `cidade`) do profissional é comparado com o `nome` da
+ * região aqui (case-insensitive). A fonte dos motoboys é `listarProfissionais()`
+ * do shared — que consulta CRM + Planilha Google Sheets (merge). Isso garante
+ * que motoboys legados (só na planilha) também sejam contabilizados.
  *
  * Todos os endpoints exigem JWT válido via `verificarToken`.
  */
 const express = require('express');
+const { listarProfissionais, listarRegioes } = require('../../../shared/utils/profissionaisLookup');
+
+/**
+ * Normaliza texto pra match: UPPER + TRIM.
+ * Retorna string vazia se null/undefined.
+ */
+function normalizar(str) {
+  return String(str || '').trim().toUpperCase();
+}
+
+/**
+ * Dada uma lista de regiões (coleta_regioes) e a lista completa de profissionais
+ * (CRM + planilha), retorna um Map<regiao_id, Array<profissionais>>.
+ * Match: UPPER(TRIM(prof.regiao || prof.cidade)) === UPPER(TRIM(regiao.nome))
+ */
+function agruparProfissionaisPorRegiao(regioes, profissionais) {
+  const mapa = new Map(); // regiao_id → [profs]
+  for (const r of regioes) mapa.set(r.id, []);
+
+  const indiceNome = new Map(); // nome normalizado → regiao_id
+  for (const r of regioes) {
+    indiceNome.set(normalizar(r.nome), r.id);
+  }
+
+  for (const p of profissionais) {
+    const chave = normalizar(p.regiao || p.cidade);
+    if (!chave) continue;
+    const regiaoId = indiceNome.get(chave);
+    if (regiaoId) {
+      mapa.get(regiaoId).push(p);
+    }
+  }
+  return mapa;
+}
 
 function createColetaAdminRoutes(pool, verificarToken) {
   const router = express.Router();
 
   // ==================== REGIÕES ====================
 
-  // Lista regiões com contadores de motoboys (do CRM) e endereços.
-  // O total_motoboys é calculado via JOIN com crm_leads_capturados usando
-  // match de nome (UPPER, TRIM). Se o CRM falhar, cai pra 0.
+  // Lista regiões com contadores de motoboys (CRM + Planilha) e endereços.
+  // Usa listarProfissionais() pra pegar TODOS os motoboys (não só os do CRM).
   router.get('/admin/coleta/regioes', verificarToken, async (req, res) => {
     try {
+      // Consulta base: regiões + grupo + contadores de pendentes/aprovados
       const result = await pool.query(`
         SELECT r.*,
           g.nome AS grupo_nome,
           COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'aprovado') AS total_aprovados,
-          COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'validacao_manual') AS total_pendentes,
-          (
-            SELECT COUNT(DISTINCT crm.cod)
-            FROM crm_leads_capturados crm
-            WHERE UPPER(TRIM(COALESCE(NULLIF(TRIM(crm.regiao), ''), crm.cidade))) = UPPER(TRIM(r.nome))
-          ) AS total_motoboys
+          COUNT(DISTINCT p.id) FILTER (WHERE p.status = 'validacao_manual') AS total_pendentes
         FROM coleta_regioes r
         LEFT JOIN grupos_enderecos g ON g.id = r.grupo_enderecos_id
         LEFT JOIN coleta_enderecos_pendentes p ON p.regiao_id = r.id
         GROUP BY r.id, g.nome
         ORDER BY r.nome
       `);
-      res.json(result.rows);
+
+      // Enriquece com total_motoboys vindo do merge CRM+Planilha
+      let profissionais = [];
+      try {
+        profissionais = await listarProfissionais(pool);
+      } catch (err) {
+        console.warn('⚠️ Falha ao listar profissionais (CRM+Planilha):', err.message);
+      }
+
+      const profPorRegiao = agruparProfissionaisPorRegiao(result.rows, profissionais);
+
+      const enriquecido = result.rows.map(r => ({
+        ...r,
+        total_motoboys: (profPorRegiao.get(r.id) || []).length
+      }));
+
+      res.json(enriquecido);
     } catch (err) {
       console.error('❌ Erro ao listar regiões:', err);
       res.status(500).json({ error: 'Erro ao listar regiões' });
@@ -99,41 +146,42 @@ function createColetaAdminRoutes(pool, verificarToken) {
   // ==================== MOTOBOYS (vinculação automática via CRM) ====================
 
   // Lista motoboys que AUTOMATICAMENTE estão vinculados a esta região
-  // (match do campo regiao/cidade do CRM com o nome da região).
+  // (match do campo regiao/cidade do profissional com o nome da região).
+  // Usa listarProfissionais() → CRM + Planilha (merge).
   // Resultado é read-only — não há como adicionar/remover manualmente.
   router.get('/admin/coleta/regioes/:id/motoboys', verificarToken, async (req, res) => {
     try {
       const regiao = await pool.query('SELECT nome FROM coleta_regioes WHERE id = $1', [req.params.id]);
       if (regiao.rows.length === 0) return res.status(404).json({ error: 'Região não encontrada' });
 
-      const nomeRegiao = regiao.rows[0].nome;
+      const nomeRegiao = normalizar(regiao.rows[0].nome);
+
+      const profissionais = await listarProfissionais(pool);
 
       // Match case-insensitive: pega motoboys cuja regiao OU cidade bate com o nome
-      const result = await pool.query(`
-        SELECT
-          crm.cod AS cod_profissional,
-          crm.nome AS full_name,
-          crm.cidade,
-          crm.regiao,
-          crm.celular
-        FROM crm_leads_capturados crm
-        WHERE UPPER(TRIM(COALESCE(NULLIF(TRIM(crm.regiao), ''), crm.cidade))) = UPPER(TRIM($1))
-        ORDER BY crm.nome NULLS LAST
-        LIMIT 500
-      `, [nomeRegiao]);
+      const motoboys = profissionais
+        .filter(p => normalizar(p.regiao || p.cidade) === nomeRegiao)
+        .map(p => ({
+          cod_profissional: p.codigo,
+          full_name: p.nome,
+          cidade: p.cidade,
+          regiao: p.regiao,
+          celular: p.telefone,
+          origem: p.origem  // 'crm' ou 'planilha' — útil pra debug
+        }))
+        .sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'pt-BR'))
+        .slice(0, 500);
 
-      res.json(result.rows);
+      res.json(motoboys);
     } catch (err) {
       console.error('❌ Erro ao listar motoboys da região:', err);
       res.status(500).json({ error: 'Erro ao listar motoboys' });
     }
   });
 
-  // Lista regiões disponíveis no CRM (pra autocomplete no modal de criar/editar)
-  // Usa a mesma função listarRegioes já existente no shared.
+  // Lista regiões disponíveis (CRM + Planilha) pra autocomplete do modal.
   router.get('/admin/coleta/regioes-crm', verificarToken, async (req, res) => {
     try {
-      const { listarRegioes } = require('../../../shared/utils/profissionaisLookup');
       const regioes = await listarRegioes(pool);
       res.json(regioes);
     } catch (err) {
