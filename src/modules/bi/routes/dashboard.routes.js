@@ -7,7 +7,7 @@ const crypto = require('crypto');
 
 // Cache in-memory para dashboard-completo (TTL 2 min)
 const dashboardCache = new Map();
-const DASHBOARD_CACHE_TTL = 2 * 60 * 1000; // 2 minutos
+const DASHBOARD_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
 function getDashboardCacheKey(query) {
   const sorted = JSON.stringify(query, Object.keys(query).sort());
@@ -372,40 +372,31 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     console.log('📊 WHERE:', where, 'Params:', params);
     
     // Buscar regras de contagem
-    const regrasContagem = await pool.query('SELECT cod_cliente FROM bi_regras_contagem');
+    // Buscar configurações em paralelo
+    const [regrasContagem, mascarasQuery, prazosProfResult, prazoProfPadraoResult] = await Promise.all([
+      pool.query('SELECT cod_cliente FROM bi_regras_contagem'),
+      pool.query('SELECT cod_cliente, mascara FROM bi_mascaras'),
+      pool.query('SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos FROM bi_prazos_prof_cliente pc JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id').catch(() => ({rows:[]})),
+      pool.query('SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min').catch(() => ({rows:[]}))
+    ]);
     const clientesComRegra = new Set(regrasContagem.rows.map(r => String(r.cod_cliente)));
     console.log('📊 Clientes COM regra de contagem:', [...clientesComRegra]);
     console.log('📊 Total de clientes com regra:', clientesComRegra.size);
     
-    // Buscar máscaras
-    const mascaras = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
     const mapMascaras = {};
-    mascaras.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
+    mascarasQuery.rows.forEach(m => { mapMascaras[String(m.cod_cliente)] = m.mascara; });
     
     // ============================================
-    // BUSCAR CONFIGURAÇÕES DE PRAZO PROFISSIONAL
+    // CONFIGURAÇÕES DE PRAZO PROFISSIONAL
     // ============================================
-    let prazosProfCliente = [];
-    let prazoProfPadrao = [];
-    try {
-      const prazosProfQuery = await pool.query(`
-        SELECT pc.tipo, pc.codigo, fp.km_min, fp.km_max, fp.prazo_minutos
-        FROM bi_prazos_prof_cliente pc
-        JOIN bi_faixas_prazo_prof fp ON pc.id = fp.prazo_prof_cliente_id
-      `);
-      prazosProfCliente = prazosProfQuery.rows;
+    let prazosProfCliente = prazosProfResult.rows;
+    let prazoProfPadrao = prazoProfPadraoResult.rows;
       
-      const prazoProfPadraoQuery = await pool.query(`SELECT * FROM bi_prazo_prof_padrao ORDER BY km_min`);
-      prazoProfPadrao = prazoProfPadraoQuery.rows;
-      
-      console.log('📊 Prazos Prof carregados:', { 
+    console.log('📊 Prazos Prof carregados:', { 
         especificos: prazosProfCliente.length, 
         padrao: prazoProfPadrao.length,
         faixasPadrao: prazoProfPadrao.map(f => `${f.km_min}-${f.km_max || '∞'}km=${f.prazo_minutos}min`).join(', ')
-      });
-    } catch (err) {
-      console.log('⚠️ Tabelas de prazo profissional não encontradas, usando fallback hardcoded');
-    }
+    });
     
     // Função para encontrar prazo profissional baseado no cliente/centro e distância
     const encontrarPrazoProfissional = (codCliente, centroCusto, distancia) => {
@@ -462,19 +453,10 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     // ============================================
     // BUSCAR TODOS OS CLIENTES EXISTENTES NO SISTEMA
     // ============================================
-    const todosClientesQuery = await pool.query(`
-      SELECT DISTINCT cod_cliente, nome_cliente 
-      FROM bi_entregas 
-      WHERE cod_cliente IS NOT NULL
-      ORDER BY cod_cliente
-    `);
+    const todosClientesQuery = await pool.query('SELECT DISTINCT cod_cliente, nome_cliente FROM bi_entregas WHERE cod_cliente IS NOT NULL ORDER BY cod_cliente');
     const todosClientes = todosClientesQuery.rows;
     console.log('📊 Total de clientes no sistema:', todosClientes.length);
     
-    // ============================================
-    // QUERY SQL PARA TEMPOS MÉDIOS 
-    // LÓGICA IDÊNTICA AO ACOMPANHAMENTO-CLIENTES
-    // ============================================
     const temposQuery = await pool.query(`
       SELECT 
         -- TEMPO MÉDIO ENTREGA (Ponto >= 2): Solicitado -> Chegada
@@ -1884,26 +1866,11 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       });
     }
     
-    // Gráficos - retorna dados brutos para o frontend agrupar nas faixas que quiser
-    const dadosGraficos = await pool.query(`
-      SELECT 
-        tempo_execucao_minutos as tempo,
-        distancia as km
-      FROM bi_entregas 
-      ${where}
-    `, params);
-
-    // Distribuição por hora — Acompanhamento Hora a Hora
-    const porHoraQuery = await pool.query(`
-      SELECT 
-        EXTRACT(HOUR FROM data_hora)::int as hora,
-        COUNT(DISTINCT os) as total_os
-      FROM bi_entregas 
-      ${where}
-      AND data_hora IS NOT NULL
-      GROUP BY EXTRACT(HOUR FROM data_hora)
-      ORDER BY hora
-    `, params);
+    // Gráficos + Hora a Hora — rodar em paralelo
+    const [dadosGraficos, porHoraQuery] = await Promise.all([
+      pool.query(`SELECT tempo_execucao_minutos as tempo, distancia as km FROM bi_entregas ${where}`, params),
+      pool.query(`SELECT EXTRACT(HOUR FROM data_hora)::int as hora, COUNT(DISTINCT os) as total_os FROM bi_entregas ${where} AND data_hora IS NOT NULL GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, params)
+    ]);
     
     // Preencher todas as 24 horas (0-23), mesmo as sem dados
     const porHora = [];
