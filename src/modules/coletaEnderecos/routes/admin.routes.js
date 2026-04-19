@@ -344,8 +344,11 @@ function createColetaAdminRoutes(pool, verificarToken) {
         SELECT p.id, p.cod_profissional, p.regiao_id, p.nome_cliente,
                p.latitude, p.longitude, p.status, p.confianca_ia,
                p.match_google, p.endereco_formatado, p.motivo_rejeicao,
+               p.cnpj, p.razao_social, p.nome_fantasia,
+               p.numero_nf, p.endereco_nf, p.cidade_nf,
                p.analisado_em, p.criado_em,
                CASE WHEN p.foto_base64 IS NOT NULL THEN true ELSE false END AS tem_foto,
+               CASE WHEN p.foto_nf_base64 IS NOT NULL THEN true ELSE false END AS tem_foto_nf,
                r.nome AS regiao_nome,
                u.full_name AS motoboy_nome
         FROM coleta_enderecos_pendentes p
@@ -398,6 +401,23 @@ function createColetaAdminRoutes(pool, verificarToken) {
     } catch (err) {
       console.error('❌ Erro ao buscar foto:', err);
       res.status(500).json({ error: 'Erro ao buscar foto' });
+    }
+  });
+
+  // Foto da NF (separada porque é maior e auditada)
+  router.get('/admin/coleta/fila/:id/foto-nf', verificarToken, async (req, res) => {
+    try {
+      const result = await pool.query(
+        'SELECT foto_nf_base64 FROM coleta_enderecos_pendentes WHERE id = $1',
+        [req.params.id]
+      );
+      if (result.rows.length === 0 || !result.rows[0].foto_nf_base64) {
+        return res.status(404).json({ error: 'Sem foto da NF' });
+      }
+      res.json({ foto: result.rows[0].foto_nf_base64 });
+    } catch (err) {
+      console.error('❌ Erro ao buscar foto NF:', err);
+      res.status(500).json({ error: 'Erro ao buscar foto NF' });
     }
   });
 
@@ -500,29 +520,32 @@ function createColetaAdminRoutes(pool, verificarToken) {
 
       // Criar registro em solicitacao_favoritos com grupo_enderecos_id da região.
       // cliente_id fica null (é da base colaborativa, não pertence a um cliente específico).
+      // CNPJ vem do pendente (extraído da NF) — preserva pra dedup futura.
       const favorito = await client.query(`
         INSERT INTO solicitacao_favoritos (
           cliente_id, grupo_enderecos_id, apelido, endereco_completo,
           rua, numero, bairro, cidade, uf, cep,
-          latitude, longitude
-        ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          latitude, longitude, cnpj, razao_social
+        ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING id
       `, [
         p.grupo_enderecos_id, nomeFinal, enderecoFinal,
         ruaFinal, numeroFinal, bairroFinal, cidadeFinal, ufFinal, cepFinal,
-        latFinal, lngFinal
+        latFinal, lngFinal,
+        p.cnpj || null, p.razao_social || null
       ]);
       const favoritoId = favorito.rows[0].id;
-      console.log(`[coleta-aprovar] favorito criado: id=${favoritoId}`);
+      console.log(`[coleta-aprovar] favorito criado: id=${favoritoId} cnpj=${p.cnpj || 'sem'}`);
 
-      // Atualizar pendente
+      // Atualizar pendente — limpa fotos (NF e fachada) pra não pesar o banco
       await client.query(`
         UPDATE coleta_enderecos_pendentes SET
           status = 'aprovado',
           endereco_gerado_id = $1,
           finalizado_em = CURRENT_TIMESTAMP,
           finalizado_por_admin = $2,
-          foto_base64 = NULL
+          foto_base64 = NULL,
+          foto_nf_base64 = NULL
         WHERE id = $3
       `, [favoritoId, req.user?.codProfissional || 'admin', id]);
 
@@ -617,6 +640,167 @@ function createColetaAdminRoutes(pool, verificarToken) {
     } catch (err) {
       console.error('❌ Erro ao buscar stats:', err);
       res.status(500).json({ error: 'Erro ao buscar estatísticas' });
+    }
+  });
+
+  // ==================== ENDEREÇOS CADASTRADOS (CRUD ADMIN) ====================
+
+  // Lista todos os endereços cadastrados (favoritos), com filtros e origem.
+  // Mostra:
+  //   - origem: "motoboy" (cadastrado pela coleta) ou "cliente" (favorito de cliente API)
+  //   - quem cadastrou (motoboy ou cliente)
+  //   - vinculação (grupo + clientes que veem)
+  router.get('/admin/coleta/enderecos-cadastrados', verificarToken, async (req, res) => {
+    try {
+      const { q, grupo_id, origem, cliente_id } = req.query;
+      const params = [];
+      let where = '1=1';
+
+      if (q && q.trim()) {
+        params.push(`%${q.trim()}%`);
+        const i = params.length;
+        where += ` AND (f.apelido ILIKE $${i} OR f.endereco_completo ILIKE $${i} OR f.rua ILIKE $${i} OR f.bairro ILIKE $${i})`;
+      }
+      if (grupo_id) {
+        params.push(parseInt(grupo_id));
+        where += ` AND f.grupo_enderecos_id = $${params.length}`;
+      }
+      if (cliente_id) {
+        params.push(parseInt(cliente_id));
+        where += ` AND f.cliente_id = $${params.length}`;
+      }
+      if (origem === 'motoboy') {
+        where += ` AND p.id IS NOT NULL`;
+      } else if (origem === 'cliente') {
+        where += ` AND p.id IS NULL`;
+      }
+
+      const result = await pool.query(`
+        SELECT
+          f.id, f.cliente_id, f.grupo_enderecos_id, f.apelido,
+          f.endereco_completo, f.rua, f.numero, f.bairro,
+          f.cidade, f.uf, f.cep, f.latitude, f.longitude,
+          f.cnpj, f.razao_social,
+          f.vezes_usado, f.ultimo_uso, f.created_at,
+          c.nome_fantasia AS cliente_nome,
+          g.nome AS grupo_nome,
+          p.id AS pendente_id,
+          p.cod_profissional AS motoboy_cod,
+          u.full_name AS motoboy_nome,
+          CASE WHEN p.id IS NOT NULL THEN 'motoboy' ELSE 'cliente' END AS origem
+        FROM solicitacao_favoritos f
+        LEFT JOIN clientes_solicitacao c ON c.id = f.cliente_id
+        LEFT JOIN grupos_enderecos g ON g.id = f.grupo_enderecos_id
+        LEFT JOIN coleta_enderecos_pendentes p ON p.endereco_gerado_id = f.id
+        LEFT JOIN users u ON u.cod_profissional = p.cod_profissional
+        WHERE ${where}
+        ORDER BY f.created_at DESC
+        LIMIT 200
+      `, params);
+
+      // Quantos clientes veem cada grupo (pra mostrar no card)
+      const gruposIds = [...new Set(result.rows.map(r => r.grupo_enderecos_id).filter(Boolean))];
+      let clientesPorGrupo = new Map();
+      if (gruposIds.length > 0) {
+        const placeholders = gruposIds.map((_, i) => `$${i + 1}`).join(',');
+        const r = await pool.query(`
+          SELECT grupo_enderecos_id, COUNT(*) AS total
+          FROM clientes_solicitacao
+          WHERE grupo_enderecos_id IN (${placeholders})
+          GROUP BY grupo_enderecos_id
+        `, gruposIds);
+        clientesPorGrupo = new Map(r.rows.map(x => [x.grupo_enderecos_id, parseInt(x.total)]));
+      }
+
+      const enriquecido = result.rows.map(r => ({
+        ...r,
+        clientes_no_grupo: clientesPorGrupo.get(r.grupo_enderecos_id) || 0
+      }));
+
+      res.json(enriquecido);
+    } catch (err) {
+      console.error('❌ Erro ao listar endereços cadastrados:', err);
+      res.status(500).json({ error: 'Erro ao listar endereços', details: err.message });
+    }
+  });
+
+  // Edita um endereço cadastrado
+  router.patch('/admin/coleta/enderecos-cadastrados/:id', verificarToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id } = req.body || {};
+
+      const result = await pool.query(`
+        UPDATE solicitacao_favoritos SET
+          apelido = COALESCE($1, apelido),
+          endereco_completo = COALESCE($2, endereco_completo),
+          rua = COALESCE($3, rua),
+          numero = COALESCE($4, numero),
+          bairro = COALESCE($5, bairro),
+          cidade = COALESCE($6, cidade),
+          uf = COALESCE($7, uf),
+          cep = COALESCE($8, cep),
+          latitude = COALESCE($9, latitude),
+          longitude = COALESCE($10, longitude),
+          grupo_enderecos_id = COALESCE($11, grupo_enderecos_id)
+        WHERE id = $12
+        RETURNING id, apelido
+      `, [apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id, id]);
+
+      if (result.rows.length === 0) return res.status(404).json({ error: 'Endereço não encontrado' });
+      res.json({ sucesso: true, endereco: result.rows[0] });
+    } catch (err) {
+      console.error('❌ Erro ao editar endereço:', err);
+      res.status(500).json({ error: 'Erro ao editar', details: err.message });
+    }
+  });
+
+  // Exclui um endereço cadastrado.
+  // Se veio de coleta (origem motoboy), também limpa o vínculo do pendente.
+  router.delete('/admin/coleta/enderecos-cadastrados/:id', verificarToken, async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const { id } = req.params;
+      await client.query('BEGIN');
+
+      // Limpa vínculo do pendente original (se existir) — não deleta o pendente,
+      // só zera o endereco_gerado_id pra não ficar FK quebrada.
+      await client.query(`
+        UPDATE coleta_enderecos_pendentes SET endereco_gerado_id = NULL
+        WHERE endereco_gerado_id = $1
+      `, [id]);
+
+      const del = await client.query(`DELETE FROM solicitacao_favoritos WHERE id = $1 RETURNING id`, [id]);
+      if (del.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Endereço não encontrado' });
+      }
+
+      await client.query('COMMIT');
+      res.json({ sucesso: true, removido_id: del.rows[0].id });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('❌ Erro ao excluir endereço:', err);
+      res.status(500).json({ error: 'Erro ao excluir', details: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // Lista grupos de endereços (pra dropdown no filtro/edição)
+  router.get('/admin/coleta/grupos-enderecos', verificarToken, async (req, res) => {
+    try {
+      const r = await pool.query(`
+        SELECT g.id, g.nome,
+          (SELECT COUNT(*) FROM clientes_solicitacao WHERE grupo_enderecos_id = g.id) AS total_clientes,
+          (SELECT COUNT(*) FROM solicitacao_favoritos WHERE grupo_enderecos_id = g.id) AS total_enderecos
+        FROM grupos_enderecos g
+        ORDER BY g.nome
+      `);
+      res.json(r.rows);
+    } catch (err) {
+      console.error('❌ Erro ao listar grupos:', err);
+      res.status(500).json({ error: 'Erro', details: err.message });
     }
   });
 
