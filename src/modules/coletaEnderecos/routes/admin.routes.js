@@ -70,32 +70,57 @@ async function reverseGeocode(pool, latitude, longitude) {
   return null;
 }
 
+const { normalizarRegiao, regioesBate } = require('../../../shared/utils/normalizarRegiao');
+
 /**
- * Normaliza texto pra match: UPPER + TRIM.
- * Retorna string vazia se null/undefined.
+ * Normaliza texto pra match: UPPER + TRIM + sem acento. Usada pra criar chaves
+ * de índice. Pra comparação tolerante, use `regioesBate(a, b)` do shared util.
  */
 function normalizar(str) {
-  return String(str || '').trim().toUpperCase();
+  return normalizarRegiao(str);
 }
 
 /**
  * Dada uma lista de regiões (coleta_regioes) e a lista completa de profissionais
  * (CRM + planilha), retorna um Map<regiao_id, Array<profissionais>>.
- * Match: UPPER(TRIM(prof.regiao || prof.cidade)) === UPPER(TRIM(regiao.nome))
+ *
+ * Match usa `regioesBate(profRegiao, regiaoNome)` — tolerante a acentos,
+ * caixa, UF no final, stopwords e letras faltando (fuzzy ≥ 85%).
  */
 function agruparProfissionaisPorRegiao(regioes, profissionais) {
   const mapa = new Map(); // regiao_id → [profs]
   for (const r of regioes) mapa.set(r.id, []);
 
-  const indiceNome = new Map(); // nome normalizado → regiao_id
-  for (const r of regioes) {
-    indiceNome.set(normalizar(r.nome), r.id);
+  // Pre-normaliza nomes das regiões uma vez só
+  const regioesNormalizadas = regioes.map(r => ({
+    id: r.id,
+    nome: r.nome,
+    normalizado: normalizarRegiao(r.nome)
+  }));
+
+  // Índice rápido pro caminho comum (match exato normalizado)
+  const indiceExato = new Map();
+  for (const r of regioesNormalizadas) {
+    if (r.normalizado) indiceExato.set(r.normalizado, r.id);
   }
 
   for (const p of profissionais) {
-    const chave = normalizar(p.regiao || p.cidade);
-    if (!chave) continue;
-    const regiaoId = indiceNome.get(chave);
+    const chaveProf = normalizarRegiao(p.regiao || p.cidade);
+    if (!chaveProf) continue;
+
+    // 1) Tenta match exato normalizado (rápido)
+    let regiaoId = indiceExato.get(chaveProf);
+
+    // 2) Se não bateu, tenta fuzzy (mais lento, mas tolera letras faltando/trocadas)
+    if (!regiaoId) {
+      for (const r of regioesNormalizadas) {
+        if (regioesBate(p.regiao || p.cidade, r.nome)) {
+          regiaoId = r.id;
+          break;
+        }
+      }
+    }
+
     if (regiaoId) {
       mapa.get(regiaoId).push(p);
     }
@@ -209,20 +234,19 @@ function createColetaAdminRoutes(pool, verificarToken) {
       const regiao = await pool.query('SELECT nome FROM coleta_regioes WHERE id = $1', [req.params.id]);
       if (regiao.rows.length === 0) return res.status(404).json({ error: 'Região não encontrada' });
 
-      const nomeRegiao = normalizar(regiao.rows[0].nome);
-
+      const nomeRegiao = regiao.rows[0].nome;
       const profissionais = await listarProfissionais(pool);
 
-      // Match case-insensitive: pega motoboys cuja regiao OU cidade bate com o nome
+      // Match tolerante (acentos, caixa, stopwords, fuzzy ≥85%)
       const motoboys = profissionais
-        .filter(p => normalizar(p.regiao || p.cidade) === nomeRegiao)
+        .filter(p => regioesBate(p.regiao || p.cidade, nomeRegiao))
         .map(p => ({
           cod_profissional: p.codigo,
           full_name: p.nome,
           cidade: p.cidade,
           regiao: p.regiao,
           celular: p.telefone,
-          origem: p.origem  // 'crm' ou 'planilha' — útil pra debug
+          origem: p.origem
         }))
         .sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'pt-BR'))
         .slice(0, 500);
@@ -682,7 +706,7 @@ function createColetaAdminRoutes(pool, verificarToken) {
           f.cidade, f.uf, f.cep, f.latitude, f.longitude,
           f.cnpj, f.razao_social,
           f.vezes_usado, f.ultimo_uso, f.created_at,
-          c.nome_fantasia AS cliente_nome,
+          COALESCE(c.empresa, c.nome) AS cliente_nome,
           g.nome AS grupo_nome,
           p.id AS pendente_id,
           p.cod_profissional AS motoboy_cod,
