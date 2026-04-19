@@ -22,6 +22,7 @@ const express = require('express');
 const { validarLocalizacao, similaridade } = require('../../agent/validar-localizacao');
 const { validarNotaFiscal } = require('../../agent/validar-nota-fiscal');
 const { buscarRegiaoProfissional } = require('../../../shared/utils/profissionaisLookup');
+const { regioesBate } = require('../../../shared/utils/normalizarRegiao');
 
 const TAMANHO_MAX_FOTO_KB = 800;
 const LIMIAR_AUTO_APROVACAO = 90;          // % de confiança pra auto-aprovar
@@ -149,20 +150,25 @@ async function reverseGeocode(pool, latitude, longitude) {
 /**
  * Retorna as regiões ativas do módulo Coleta que batem com a região do motoboy no CRM.
  * Retorna array vazio se o motoboy não tem região cadastrada ou nenhuma região bate.
+ *
+ * Match usa `regioesBate()` — tolerante a acentos, caixa, pontuação, UF no final,
+ * stopwords ("de", "da", "do") e letras faltando (fuzzy ≥85%). Isso evita motoboys
+ * ficarem de fora quando a região foi cadastrada com typo ou variação ortográfica.
  */
 async function regioesDoMotoboy(pool, codProfissional) {
   const regiaoCrm = await buscarRegiaoProfissional(pool, codProfissional);
   if (!regiaoCrm || !regiaoCrm.trim()) return [];
 
+  // Busca TODAS as regiões ativas e filtra em JS com match tolerante.
+  // Em bases pequenas (< algumas centenas de regiões) isso é barato.
   const result = await pool.query(`
     SELECT id, nome, uf, cidade, grupo_enderecos_id
     FROM coleta_regioes
     WHERE ativo = true
-      AND UPPER(TRIM(nome)) = UPPER(TRIM($1))
     ORDER BY nome
-  `, [regiaoCrm]);
+  `);
 
-  return result.rows;
+  return result.rows.filter(r => regioesBate(regiaoCrm, r.nome));
 }
 
 function createColetaMotoboyRoutes(pool, verificarToken) {
