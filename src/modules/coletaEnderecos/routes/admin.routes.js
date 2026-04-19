@@ -447,17 +447,71 @@ function createColetaAdminRoutes(pool, verificarToken) {
       const latFinal = latitude_editada || p.latitude;
       const lngFinal = longitude_editada || p.longitude;
       const enderecoFinal = p.endereco_formatado || '';
-      console.log(`[coleta-aprovar] insert fav: nome=${nomeFinal} lat=${latFinal} lng=${lngFinal} end=${enderecoFinal?.slice(0,50)}`);
+
+      // Parser simples do endereço Google: "Rua X, 123 - Bairro, Cidade - UF, CEP, País"
+      // Cobre o formato típico do reverse geocoding em pt-BR.
+      function parsearEnderecoGoogle(s) {
+        const out = { rua: '', numero: '', bairro: '', cidade: '', uf: '', cep: '' };
+        if (!s) return out;
+        // Quebra por vírgula primeiro
+        const partes = s.split(',').map(x => x.trim());
+        // Parte 1: "Rua X"
+        out.rua = partes[0] || '';
+        // Parte 2: pode ser "123 - Bairro" ou "Bairro" ou "S/N - Bairro"
+        if (partes[1]) {
+          const m = partes[1].match(/^(.+?)\s*-\s*(.+)$/);
+          if (m) {
+            out.numero = m[1].trim();
+            out.bairro = m[2].trim();
+          } else if (/^[\d\w\/]+$/.test(partes[1])) {
+            out.numero = partes[1];
+          } else {
+            out.bairro = partes[1];
+          }
+        }
+        // Parte 3: "Cidade - UF" geralmente
+        if (partes[2]) {
+          const m = partes[2].match(/^(.+?)\s*-\s*([A-Z]{2})$/);
+          if (m) {
+            out.cidade = m[1].trim();
+            out.uf = m[2].trim();
+          } else {
+            out.cidade = partes[2];
+          }
+        }
+        // Parte 4: CEP (pode ter "Brasil" no final em outras posições)
+        for (let i = 3; i < partes.length; i++) {
+          const cepMatch = partes[i].match(/(\d{5}-?\d{3})/);
+          if (cepMatch && !out.cep) out.cep = cepMatch[1];
+        }
+        return out;
+      }
+
+      const parsed = parsearEnderecoGoogle(enderecoFinal);
+      // Fallback final pra rua: se Google não retornou nada, usa pelo menos algum texto
+      const ruaFinal = parsed.rua || enderecoFinal || `Lat ${latFinal}, Lng ${lngFinal}`;
+      const numeroFinal = parsed.numero || 'S/N';
+      const bairroFinal = parsed.bairro || null;
+      const cidadeFinal = parsed.cidade || p.cidade || null;
+      const ufFinal = parsed.uf || p.uf || null;
+      const cepFinal = parsed.cep || null;
+
+      console.log(`[coleta-aprovar] insert fav: nome=${nomeFinal} rua=${ruaFinal} num=${numeroFinal} bairro=${bairroFinal} cidade=${cidadeFinal} uf=${ufFinal} cep=${cepFinal}`);
 
       // Criar registro em solicitacao_favoritos com grupo_enderecos_id da região.
       // cliente_id fica null (é da base colaborativa, não pertence a um cliente específico).
       const favorito = await client.query(`
         INSERT INTO solicitacao_favoritos (
           cliente_id, grupo_enderecos_id, apelido, endereco_completo,
-          cidade, uf, latitude, longitude
-        ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7)
+          rua, numero, bairro, cidade, uf, cep,
+          latitude, longitude
+        ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id
-      `, [p.grupo_enderecos_id, nomeFinal, enderecoFinal, p.cidade, p.uf, latFinal, lngFinal]);
+      `, [
+        p.grupo_enderecos_id, nomeFinal, enderecoFinal,
+        ruaFinal, numeroFinal, bairroFinal, cidadeFinal, ufFinal, cepFinal,
+        latFinal, lngFinal
+      ]);
       const favoritoId = favorito.rows[0].id;
       console.log(`[coleta-aprovar] favorito criado: id=${favoritoId}`);
 
