@@ -21,9 +21,9 @@ const { listarProfissionais, listarRegioes } = require('../../../shared/utils/pr
  * Retorna string ou null se falhar.
  */
 async function reverseGeocode(pool, latitude, longitude) {
-  const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
   if (!GOOGLE_API_KEY) {
-    console.warn('[coleta-reverse] ⚠️ GOOGLE_MAPS_API_KEY e GOOGLE_API_KEY não configuradas');
+    console.warn('[coleta-reverse] ⚠️ GOOGLE_GEOCODING_API_KEY não configurada');
     return null;
   }
 
