@@ -393,7 +393,8 @@ router.get('/solicitacao/historico', verificarTokenSolicitacao, async (req, res)
     let query = `
       SELECT s.*, 
         (SELECT COUNT(*) FROM solicitacoes_pontos WHERE solicitacao_id = s.id) as total_pontos,
-        (SELECT numero_nota FROM solicitacoes_pontos WHERE solicitacao_id = s.id AND numero_nota IS NOT NULL AND numero_nota != '' ORDER BY ordem LIMIT 1) as primeiro_numero_nota
+        (SELECT numero_nota FROM solicitacoes_pontos WHERE solicitacao_id = s.id AND numero_nota IS NOT NULL AND numero_nota != '' ORDER BY ordem LIMIT 1) as primeiro_numero_nota,
+        (SELECT json_agg(json_build_object('status', sp.status, 'ordem', sp.ordem, 'data_chegada', sp.data_chegada, 'data_finalizado', sp.data_finalizado) ORDER BY sp.ordem) FROM solicitacoes_pontos sp WHERE sp.solicitacao_id = s.id) as pontos_status
       FROM solicitacoes_corrida s
       WHERE s.cliente_id = $1
     `;
