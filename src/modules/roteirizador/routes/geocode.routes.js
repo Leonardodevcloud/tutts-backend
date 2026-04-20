@@ -58,8 +58,20 @@ function createGeocodeRouter(pool) {
       // ETAPA 2: Buscar no Google (cache MISS)
       console.log('🔍 Cache MISS, buscando no Google:', endereco);
       
-      // components=country:br restringe resultados ao Brasil (evita casos tipo "loni" retornar Índia)
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR&components=country:br`;
+      // Detectar se a entrada são coordenadas (lat,lng) para usar reverse geocoding
+      const coordRegex = /^-?\d+\.\d+\s*,\s*-?\d+\.\d+$/;
+      const isCoords = coordRegex.test(endereco.trim());
+      
+      let url;
+      if (isCoords) {
+        // Reverse geocoding: coordenadas → endereço
+        const latlng = endereco.trim();
+        url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(latlng)}&key=${GOOGLE_API_KEY}&language=pt-BR&result_type=street_address|route|premise|subpremise|establishment|point_of_interest`;
+        console.log('📍 Usando reverse geocoding para coordenadas:', latlng);
+      } else {
+        // Forward geocoding: endereço → coordenadas
+        url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR&components=country:br`;
+      }
       
       const resp = await fetch(url);
       const data = await resp.json();
@@ -67,39 +79,48 @@ function createGeocodeRouter(pool) {
       if (data.status === 'OK' && data.results && data.results.length > 0) {
         console.log('✅ Google sucesso:', data.results.length, 'resultados');
         
-        // Valida que pelo menos um resultado é "preciso" (rua ou ponto específico).
-        // Rejeita se só retornar resultado genérico (cidade, estado, região) pra evitar
-        // motoboys indo a uma região inteira em vez de um endereço específico.
-        const TIPOS_GENERICOS = [
-          'country', 'administrative_area_level_1', 'administrative_area_level_2',
-          'locality', 'sublocality', 'sublocality_level_1', 'political', 'neighborhood'
-        ];
-        const TIPOS_PRECISOS = [
-          'street_address', 'premise', 'subpremise', 'route',
-          'establishment', 'point_of_interest', 'postal_code', 'plus_code'
-        ];
+        let primeiro;
+        let resultadosPrecisos;
         
-        const ehPreciso = (r) => {
-          const tipos = r.types || [];
-          // Aceita se tiver pelo menos um tipo preciso
-          if (tipos.some(t => TIPOS_PRECISOS.includes(t))) return true;
-          // Rejeita se só tiver tipos genéricos
-          if (tipos.every(t => TIPOS_GENERICOS.includes(t))) return false;
-          // Na dúvida, aceita
-          return true;
-        };
-        
-        const resultadosPrecisos = data.results.filter(ehPreciso);
-        
-        if (resultadosPrecisos.length === 0) {
-          console.log('⚠️ Google retornou só resultados genéricos, rejeitando:', data.results[0]?.types);
-          return res.status(404).json({ 
-            error: 'Endereço muito genérico — informe rua e número específicos',
-            tipos_retornados: data.results[0]?.types 
-          });
+        if (isCoords) {
+          // Reverse geocoding: o usuário já escolheu a posição no mapa,
+          // aceitar o resultado mais preciso que o Google retornar
+          primeiro = data.results[0];
+          console.log('📍 Reverse geocoding aceito:', primeiro.formatted_address, '| tipos:', primeiro.types);
+        } else {
+          // Forward geocoding: validar que o resultado é preciso
+          // Rejeita se só retornar resultado genérico (cidade, estado, região)
+          const TIPOS_GENERICOS = [
+            'country', 'administrative_area_level_1', 'administrative_area_level_2',
+            'locality', 'sublocality', 'sublocality_level_1', 'political', 'neighborhood'
+          ];
+          const TIPOS_PRECISOS = [
+            'street_address', 'premise', 'subpremise', 'route',
+            'establishment', 'point_of_interest', 'postal_code', 'plus_code'
+          ];
+          
+          const ehPreciso = (r) => {
+            const tipos = r.types || [];
+            if (tipos.some(t => TIPOS_PRECISOS.includes(t))) return true;
+            if (tipos.every(t => TIPOS_GENERICOS.includes(t))) return false;
+            return true;
+          };
+          
+          resultadosPrecisos = data.results.filter(ehPreciso);
+          
+          if (resultadosPrecisos.length === 0) {
+            console.log('⚠️ Google retornou só resultados genéricos, rejeitando:', data.results[0]?.types);
+            return res.status(404).json({ 
+              error: 'Endereço muito genérico — informe rua e número específicos',
+              tipos_retornados: data.results[0]?.types 
+            });
+          }
+          
+          primeiro = resultadosPrecisos[0];
         }
+        // Para reverse geocoding, usar coords originais; para forward, usar coords do resultado
+        var resultadosParaResponse = isCoords ? data.results.slice(0, 3) : (resultadosPrecisos || [primeiro]);
         
-        const primeiro = resultadosPrecisos[0];
         pool.query(
           `INSERT INTO enderecos_geocodificados 
            (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
@@ -109,8 +130,8 @@ function createGeocodeRouter(pool) {
             endereco,
             enderecoNormalizado,
             primeiro.formatted_address,
-            primeiro.geometry.location.lat,
-            primeiro.geometry.location.lng,
+            isCoords ? parseFloat(endereco.split(',')[0]) : primeiro.geometry.location.lat,
+            isCoords ? parseFloat(endereco.split(',')[1]) : primeiro.geometry.location.lng,
             'google'
           ]
         ).then(() => {
@@ -120,10 +141,10 @@ function createGeocodeRouter(pool) {
         });
         
         return res.json({
-          results: resultadosPrecisos.map(r => ({
+          results: resultadosParaResponse.map(r => ({
             endereco: r.formatted_address,
-            latitude: r.geometry.location.lat,
-            longitude: r.geometry.location.lng,
+            latitude: isCoords ? parseFloat(endereco.split(',')[0]) : r.geometry.location.lat,
+            longitude: isCoords ? parseFloat(endereco.split(',')[1]) : r.geometry.location.lng,
             tipos: r.types,
             componentes: r.address_components,
             fonte: 'google'
@@ -131,6 +152,29 @@ function createGeocodeRouter(pool) {
           fonte: 'google'
         });
       } else if (data.status === 'ZERO_RESULTS') {
+        // Para reverse geocoding, tentar sem filtro result_type
+        if (isCoords) {
+          console.log('📍 Reverse geocoding sem result_type (fallback)...');
+          const latlng = endereco.trim();
+          const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(latlng)}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+          const fbResp = await fetch(fallbackUrl);
+          const fbData = await fbResp.json();
+          if (fbData.status === 'OK' && fbData.results && fbData.results.length > 0) {
+            const r = fbData.results[0];
+            console.log('📍 Fallback aceito:', r.formatted_address);
+            return res.json({
+              results: [{
+                endereco: r.formatted_address,
+                latitude: parseFloat(latlng.split(',')[0]),
+                longitude: parseFloat(latlng.split(',')[1]),
+                tipos: r.types,
+                componentes: r.address_components,
+                fonte: 'google'
+              }],
+              fonte: 'google'
+            });
+          }
+        }
         return res.status(404).json({ error: 'Endereço não encontrado' });
       } else {
         console.log('⚠️ Google erro:', data.status, data.error_message);
