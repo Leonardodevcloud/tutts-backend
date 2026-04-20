@@ -99,18 +99,29 @@ router.get('/solicitacao/maps-key', verificarTokenSolicitacao, (req, res) => {
 // Atualizar configurações do cliente (partida padrão, etc)
 router.patch('/solicitacao/configuracoes', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao } = req.body;
+    const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao, limpar_endereco_padrao } = req.body;
     
     console.log('💾 Salvando configurações para cliente:', req.clienteSolicitacao.id);
-    console.log('📍 Endereço partida:', endereco_partida_padrao);
+    console.log('📍 Endereço partida:', endereco_partida_padrao, '| limpar:', limpar_endereco_padrao);
     
-    await pool.query(`
-      UPDATE clientes_solicitacao 
-      SET forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
-          endereco_partida_padrao = COALESCE($2, endereco_partida_padrao),
-          centro_custo_padrao = COALESCE($3, centro_custo_padrao)
-      WHERE id = $4
-    `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id]);
+    // Se limpar_endereco_padrao=true, setar null explicitamente (COALESCE não permite)
+    if (limpar_endereco_padrao) {
+      await pool.query(`
+        UPDATE clientes_solicitacao 
+        SET endereco_partida_padrao = NULL,
+            forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
+            centro_custo_padrao = COALESCE($2, centro_custo_padrao)
+        WHERE id = $3
+      `, [forma_pagamento_padrao, centro_custo_padrao, req.clienteSolicitacao.id]);
+    } else {
+      await pool.query(`
+        UPDATE clientes_solicitacao 
+        SET forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
+            endereco_partida_padrao = COALESCE($2, endereco_partida_padrao),
+            centro_custo_padrao = COALESCE($3, centro_custo_padrao)
+        WHERE id = $4
+      `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id]);
+    }
     
     console.log('✅ Configurações salvas com sucesso');
     res.json({ sucesso: true, endereco_partida_padrao });
