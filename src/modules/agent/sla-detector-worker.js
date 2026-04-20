@@ -23,6 +23,7 @@
 const fs = require('fs');
 const cron = require('node-cron');
 const { detectarOsNovas } = require('./sla-detector.service');
+const { withBrowserLock } = require('./playwright-lock');
 
 const SESSION_FILE = '/tmp/tutts-sla-session.json';
 
@@ -44,21 +45,8 @@ async function tentarRelogin() {
 
   try {
     log('🔑 Disparando relogin via playwright-sla-capture.garantirSessao()...');
-    // Importa lazy pra não carregar Playwright na boot do worker
     const { garantirSessao } = require('./playwright-sla-capture');
-
-    // 🔧 FIX (2026-04): substitui o hack antigo de chamar
-    // capturarPontosOS({ os_numero: '0000001' }) que abria browser, fazia
-    // login, navegava, ativava aba, procurava OS dummy no DOM, falhava,
-    // ativava busca por autocomplete, falhava de novo... só pra ter como
-    // efeito colateral o salvamento dos cookies.
-    //
-    // Agora garantirSessao() faz exatamente o mínimo necessário:
-    //   1. Loga (se preciso)
-    //   2. Navega pra acompanhamento-servicos (já dispara o XHR)
-    //   3. Salva storageState + meta_payload
-    // Mais rápido (~5s vs ~20s), sem ruído de "OS 0000001 não encontrada".
-    const result = await garantirSessao();
+    const result = await withBrowserLock('sla-detector-relogin', () => garantirSessao());
     log(`✅ Relogin concluído — sessao=${result.sessaoSalva} payload=${result.payloadCapturado}`);
     return true;
   } catch (err) {
@@ -74,12 +62,11 @@ async function tick(pool) {
   }
   _rodando = true;
   try {
-    const result = await detectarOsNovas(pool);
+    const result = await withBrowserLock('sla-detector-tick', () => detectarOsNovas(pool));
     if (result.sessaoExpirada) {
       const ok = await tentarRelogin();
       if (ok) {
-        // Tenta de novo após relogin
-        await detectarOsNovas(pool);
+        await withBrowserLock('sla-detector-retry', () => detectarOsNovas(pool));
       }
     }
   } catch (err) {
