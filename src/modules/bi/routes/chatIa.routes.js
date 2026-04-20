@@ -611,16 +611,17 @@ PERSONALIDADE:
 ╔══════════════════════════════════════════════════════════════════╗
 ║              🚨 REGRA CRÍTICA: SQL OBRIGATÓRIA 🚨               ║
 ║                                                                  ║
-║  Para QUALQUER pergunta que envolva números, dados, entregas,    ║
-║  performance, SLA, taxa, valor, faturamento, profissionais,      ║
-║  ranking, comparação ou análise — você DEVE gerar SQL.           ║
+║  PRIORIDADE 1: Use os DADOS PRÉ-CARREGADOS que vêm no prompt.   ║
+║  Eles são dados REAIS do banco. Analise-os diretamente.          ║
 ║                                                                  ║
-║  ❌ PROIBIDO: Responder com tabelas/números sem bloco SQL        ║
-║  ❌ PROIBIDO: Inventar dados de cabeça                           ║
-║  ✅ CORRETO: Gerar \`\`\`sql ... \`\`\` e esperar o resultado     ║
+║  PRIORIDADE 2: Se a pergunta precisa de dados que NÃO estão      ║
+║  nos dados pré-carregados (ex: filtro específico, cruzamento     ║
+║  incomum, detalhe por endereço), gere SQL com \`\`\`sql ... \`\`\` ║
 ║                                                                  ║
-║  Só responda SEM SQL para: saudações, explicações de conceitos,  ║
-║  perguntas sobre você, ou conversas gerais sem dados.            ║
+║  ❌ PROIBIDO: Inventar números que não estão nos dados            ║
+║  ❌ PROIBIDO: Arredondar ou "ajustar" os dados reais              ║
+║  ✅ CORRETO: Citar os números exatos dos dados pré-carregados     ║
+║  ✅ CORRETO: Gerar SQL apenas quando os dados não cobrem          ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 COMO FUNCIONA — Fluxo Técnico (interno):
@@ -949,13 +950,151 @@ Formatação de texto:
         }
       }
 
-      // v6.0: Injetar filtros no prompt do usuário de forma mais clara
+      // ═══════════════════════════════════════════════════════════
+      // ETAPA 0: PRÉ-CARREGAR DADOS REAIS (o segredo da assertividade)
+      // Em vez de pedir ao Gemini pra gerar SQL às cegas, buscamos
+      // os dados ANTES e injetamos no prompt. A IA analisa dados reais.
+      // ═══════════════════════════════════════════════════════════
+      let dadosPreCarregados = '';
+      try {
+        const wherePartes = ['COALESCE(ponto, 1) >= 2'];
+        const queryParams = [];
+        let paramIdx = 1;
+
+        if (filtros.cod_cliente?.length > 0) {
+          wherePartes.push(`cod_cliente IN (${filtros.cod_cliente.map(() => `$${paramIdx++}`).join(',')})`);
+          queryParams.push(...filtros.cod_cliente);
+        }
+        if (filtros.centro_custo?.length > 0) {
+          wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
+          queryParams.push(...filtros.centro_custo);
+        }
+        if (filtros.data_inicio && filtros.data_fim) {
+          wherePartes.push(`data_solicitado BETWEEN $${paramIdx++} AND $${paramIdx++}`);
+          queryParams.push(filtros.data_inicio, filtros.data_fim);
+        }
+        if (filtros.regiao) {
+          wherePartes.push(`bairro ILIKE $${paramIdx++}`);
+          queryParams.push(`%${filtros.regiao}%`);
+        }
+
+        const WHERE = wherePartes.join(' AND ');
+        const t0 = Date.now();
+
+        // Executar 5 queries em paralelo
+        const [resumoGeral, porCliente, porDia, porProfissional, porCategoria, faturamento] = await Promise.all([
+          // 1. Resumo geral
+          pool.query(`SELECT 
+            COUNT(DISTINCT os) as total_os,
+            COUNT(*) as total_entregas,
+            COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+            COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+            ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+            COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%') as retornos,
+            COUNT(DISTINCT cod_prof) as total_profissionais
+          FROM bi_entregas WHERE ${WHERE}`, queryParams),
+
+          // 2. Por cliente
+          pool.query(`SELECT 
+            cod_cliente, nome_cliente,
+            COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
+            COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+            COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+            ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+            COUNT(DISTINCT cod_prof) as profissionais
+          FROM bi_entregas WHERE ${WHERE}
+          GROUP BY cod_cliente, nome_cliente ORDER BY COUNT(*) DESC LIMIT 30`, queryParams),
+
+          // 3. Por dia
+          pool.query(`SELECT 
+            data_solicitado as dia,
+            COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
+            COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+            COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+            ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min
+          FROM bi_entregas WHERE ${WHERE}
+          GROUP BY data_solicitado ORDER BY data_solicitado LIMIT 60`, queryParams),
+
+          // 4. Top profissionais
+          pool.query(`SELECT 
+            cod_prof, nome_prof,
+            COUNT(*) as total_entregas,
+            COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+            ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min
+          FROM bi_entregas WHERE ${WHERE}
+          GROUP BY cod_prof, nome_prof ORDER BY COUNT(*) DESC LIMIT 20`, queryParams),
+
+          // 5. Por categoria
+          pool.query(`SELECT 
+            COALESCE(categoria, 'Sem categoria') as categoria,
+            COUNT(*) as total, 
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo
+          FROM bi_entregas WHERE ${WHERE}
+          GROUP BY categoria ORDER BY COUNT(*) DESC LIMIT 10`, queryParams),
+
+          // 6. Faturamento (com DISTINCT ON para não duplicar)
+          pool.query(`WITH fat AS (
+            SELECT DISTINCT ON (os) os, valor, valor_prof
+            FROM bi_entregas WHERE ${WHERE}
+            ORDER BY os, ponto ASC
+          ) SELECT 
+            ROUND(COALESCE(SUM(valor), 0), 2) as valor_total,
+            ROUND(COALESCE(SUM(valor_prof), 0), 2) as valor_prof_total,
+            ROUND(COALESCE(SUM(valor) - SUM(valor_prof), 0), 2) as faturamento,
+            ROUND(COALESCE(AVG(valor), 0), 2) as ticket_medio,
+            COUNT(*) as total_os_fat
+          FROM fat`, queryParams)
+        ]);
+
+        // Formatar dados para o prompt
+        const rg = resumoGeral.rows[0] || {};
+        const fat = faturamento.rows[0] || {};
+        dadosPreCarregados = `
+═══════════════════════════════════════════════════════════
+📊 DADOS REAIS PRÉ-CARREGADOS (fonte: banco de dados, ${Date.now() - t0}ms)
+Use ESTES dados para responder. NÃO invente números diferentes.
+═══════════════════════════════════════════════════════════
+
+RESUMO GERAL:
+  Total OS: ${rg.total_os || 0} | Total Entregas: ${rg.total_entregas || 0}
+  Dentro prazo: ${rg.dentro_prazo || 0} | Fora prazo: ${rg.fora_prazo || 0} | Taxa: ${rg.taxa_prazo || 0}%
+  Tempo médio: ${rg.tempo_medio_min || 0} min | Retornos: ${rg.retornos || 0}
+  Profissionais: ${rg.total_profissionais || 0}
+
+FINANCEIRO:
+  Valor total: R$ ${parseFloat(fat.valor_total || 0).toLocaleString('pt-BR')} | Valor profissional: R$ ${parseFloat(fat.valor_prof_total || 0).toLocaleString('pt-BR')}
+  Faturamento (lucro): R$ ${parseFloat(fat.faturamento || 0).toLocaleString('pt-BR')} | Ticket médio: R$ ${parseFloat(fat.ticket_medio || 0).toLocaleString('pt-BR')}
+
+POR CLIENTE (${porCliente.rows.length} clientes):
+${porCliente.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, tempo=${c.tempo_medio_min}min, fora=${c.fora_prazo}, profs=${c.profissionais}`).join('\n')}
+
+POR DIA (${porDia.rows.length} dias):
+${porDia.rows.map(d => `  ${d.dia}: ${d.total_entregas} entregas, prazo=${d.taxa_prazo}%, fora=${d.fora_prazo}, tempo=${d.tempo_medio_min}min`).join('\n')}
+
+TOP PROFISSIONAIS (${porProfissional.rows.length}):
+${porProfissional.rows.map(p => `  ${p.cod_prof} - ${p.nome_prof}: ${p.total_entregas} entregas, prazo=${p.taxa_prazo}%, tempo=${p.tempo_medio_min}min`).join('\n')}
+
+POR CATEGORIA:
+${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
+`;
+        console.log(`📊 [Chat IA v6] Dados pré-carregados em ${Date.now() - t0}ms (${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs)`);
+
+      } catch (preErr) {
+        console.error('⚠️ [Chat IA v6] Erro ao pré-carregar dados:', preErr.message);
+        dadosPreCarregados = '\n⚠️ Não foi possível pré-carregar dados. Use SQL para buscar.\n';
+      }
+
+      // Injetar dados no prompt do usuário
       const promptComFiltros = contextoFiltros
-        ? `[FILTROS ATIVOS: ${contextoFiltros.split('\n').filter(l => !l.startsWith('SQL')).join(' | ').trim()}]\n\n${prompt}`
-        : prompt;
+        ? `[FILTROS ATIVOS: ${contextoFiltros.split('\n').filter(l => !l.startsWith('SQL')).join(' | ').trim()}]\n${dadosPreCarregados}\n${prompt}`
+        : `${dadosPreCarregados}\n${prompt}`;
       messages.push({ role: 'user', content: promptComFiltros });
 
-      // ETAPA 1: Gerar SQL (temperatura baixa para precisão)
+      // ETAPA 1: Gerar resposta (a IA já tem os dados reais — pode responder direto OU gerar SQL para queries específicas)
       let resposta1;
       try {
         resposta1 = await chamarGemini(messages, systemPrompt, { temperature: 0.3, maxTokens: 65536 });
@@ -970,11 +1109,18 @@ Formatação de texto:
       while ((match = sqlRegex.exec(resposta1)) !== null) sqlBlocks.push(match[1].trim());
 
       if (sqlBlocks.length === 0) {
-        // Detectar se a resposta contém dados numéricos (tabelas inventadas)
-        // Padrões suspeitos: múltiplas linhas com números, percentuais, pipes de tabela
+        // Com dados pré-carregados, resposta direta é esperada e legítima
+        if (dadosPreCarregados && dadosPreCarregados.length > 100) {
+          console.log('✅ [Chat IA v6] Resposta direta (baseada em dados pré-carregados)');
+          if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
+          detectarESalvarMemorias(userId, prompt, resposta1).catch(() => {});
+          return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
+        }
+        
+        // Sem dados pré-carregados: detectar se a resposta contém dados numéricos (tabelas inventadas)
         const temDadosSuspeitos = (
-          (resposta1.match(/\d{2,}/g) || []).length > 5 &&  // muitos números
-          (resposta1.includes('|') || resposta1.includes('100.00') || resposta1.match(/\d+\.\d{2}/g)?.length > 3)  // tabelas ou percentuais formatados
+          (resposta1.match(/\d{2,}/g) || []).length > 5 &&
+          (resposta1.includes('|') || resposta1.includes('100.00') || resposta1.match(/\d+\.\d{2}/g)?.length > 3)
         );
         
         if (temDadosSuspeitos) {
@@ -982,7 +1128,7 @@ Formatação de texto:
           try {
             const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
               role: 'user',
-              content: 'ATENÇÃO: Você respondeu com dados sem executar SQL. Isso é PROIBIDO — os números podem estar errados. Gere obrigatoriamente um bloco ```sql com a query correta para buscar esses dados da tabela bi_entregas. NUNCA invente números.'
+              content: 'ATENÇÃO: Você respondeu com dados sem executar SQL e sem dados pré-carregados. Gere obrigatoriamente um bloco ```sql com a query correta para buscar esses dados da tabela bi_entregas. NUNCA invente números.'
             }];
             const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 65536 });
             const r2 = /```sql\n?([\s\S]*?)\n?```/g;
@@ -995,7 +1141,6 @@ Formatação de texto:
               resposta1 = resp2;
               console.log(`🔄 [Chat IA v6] Retry gerou ${sqlBlocks.length} SQL(s) — executando...`);
             } else {
-              // Mesmo no retry não gerou SQL — retorna aviso em vez de dados falsos
               console.log('⚠️ [Chat IA v6] Retry sem SQL — bloqueando dados inventados');
               return res.json({ success: true, resposta: '⚠️ Não consegui consultar os dados reais. Reformula a pergunta.', sql: null, dados: null });
             }
