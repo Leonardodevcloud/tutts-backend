@@ -15,6 +15,7 @@
 
 const { logger } = require('../../config/logger');
 const { processarCaptura } = require('./sla-capture.service');
+const { withBrowserLock } = require('./playwright-lock');
 
 // ── Config ────────────────────────────────────────────────────────────────
 const INTERVALO_NORMAL_MS = 5_000;   // 5s — poll interval
@@ -137,8 +138,10 @@ async function processarProximoPendente(pool) {
       [registro.id]
     );
 
-    // Processa (retry e atualização de status é responsabilidade do service)
-    await processarCaptura(pool, registro);
+    // Processa com lock global (evita EAGAIN por Chromium concorrente)
+    await withBrowserLock(`sla-capture-${registro.os_numero}`, () =>
+      processarCaptura(pool, registro)
+    );
   } catch (err) {
     falhasConsecutivas++;
     logErr(`Falha no tick #${falhasConsecutivas}: ${err.message}`);
