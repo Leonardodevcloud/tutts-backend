@@ -1167,7 +1167,7 @@ router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, as
     if (grupoId) {
       query = `
         SELECT * FROM solicitacao_favoritos 
-        WHERE grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL)
+        WHERE (grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL))
       `;
       params = [grupoId, req.clienteSolicitacao.id];
     } else {
