@@ -13,6 +13,7 @@ const { logger } = require('../../config/logger');
 const { normalizeLocation }        = require('./location-normalizer');
 const { executarCorrecaoEndereco } = require('./playwright-agent');
 const { haversineKm, RAIO_MAXIMO_KM } = require('./routes/correcao.routes');
+const { withBrowserLock } = require('./playwright-lock');
 
 // ── Configuração ────────────────────────────────────────────────
 const INTERVALO_NORMAL_MS  = 10_000;  // 10s — intervalo padrão de polling
@@ -151,18 +152,20 @@ async function processarProximoPendente(pool) {
       }
     }
 
-    // Executar Playwright (com watchdog absoluto para evitar travas infinitas)
+    // Executar Playwright (com lock global + watchdog absoluto)
     log(`🤖 Acionando Playwright para OS ${registro.os_numero}...`);
-    const resultado = await comTimeout(
-      executarCorrecaoEndereco({
-        os_numero:        registro.os_numero,
-        ponto:            registro.ponto,
-        latitude:         coords.latitude,
-        longitude:        coords.longitude,
-        cod_profissional: registro.cod_profissional || null,
-      }),
-      JOB_WATCHDOG_MS,
-      `playwright_os_${registro.os_numero}`
+    const resultado = await withBrowserLock(`agent-os-${registro.os_numero}`, () =>
+      comTimeout(
+        executarCorrecaoEndereco({
+          os_numero:        registro.os_numero,
+          ponto:            registro.ponto,
+          latitude:         coords.latitude,
+          longitude:        coords.longitude,
+          cod_profissional: registro.cod_profissional || null,
+        }),
+        JOB_WATCHDOG_MS,
+        `playwright_os_${registro.os_numero}`
+      )
     );
 
     if (resultado.sucesso) {
