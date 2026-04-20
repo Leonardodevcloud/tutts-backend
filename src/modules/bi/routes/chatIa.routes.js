@@ -584,6 +584,21 @@ PERSONALIDADE:
 - NUNCA invente dados. Se não achou, diz "não encontrei dados pra isso no período".
 - NUNCA termine com "posso ajudar?" ou sugestões genéricas. Responde e pronto.
 
+╔══════════════════════════════════════════════════════════════════╗
+║              🚨 REGRA CRÍTICA: SQL OBRIGATÓRIA 🚨               ║
+║                                                                  ║
+║  Para QUALQUER pergunta que envolva números, dados, entregas,    ║
+║  performance, SLA, taxa, valor, faturamento, profissionais,      ║
+║  ranking, comparação ou análise — você DEVE gerar SQL.           ║
+║                                                                  ║
+║  ❌ PROIBIDO: Responder com tabelas/números sem bloco SQL        ║
+║  ❌ PROIBIDO: Inventar dados de cabeça                           ║
+║  ✅ CORRETO: Gerar \`\`\`sql ... \`\`\` e esperar o resultado     ║
+║                                                                  ║
+║  Só responda SEM SQL para: saudações, explicações de conceitos,  ║
+║  perguntas sobre você, ou conversas gerais sem dados.            ║
+╚══════════════════════════════════════════════════════════════════╝
+
 COMO FUNCIONA — Fluxo Técnico (interno):
 1. Gestor pergunta algo → Você gera SQL dentro de \`\`\`sql ... \`\`\`
 2. O sistema executa e te devolve o resultado em JSON
@@ -850,10 +865,45 @@ Formatação de texto:
       while ((match = sqlRegex.exec(resposta1)) !== null) sqlBlocks.push(match[1].trim());
 
       if (sqlBlocks.length === 0) {
-        console.log('✅ [Chat IA v6] Resposta direta');
-        if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
-        detectarESalvarMemorias(userId, prompt, resposta1).catch(() => {});
-        return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
+        // Detectar se a resposta contém dados numéricos (tabelas inventadas)
+        // Padrões suspeitos: múltiplas linhas com números, percentuais, pipes de tabela
+        const temDadosSuspeitos = (
+          (resposta1.match(/\d{2,}/g) || []).length > 5 &&  // muitos números
+          (resposta1.includes('|') || resposta1.includes('100.00') || resposta1.match(/\d+\.\d{2}/g)?.length > 3)  // tabelas ou percentuais formatados
+        );
+        
+        if (temDadosSuspeitos) {
+          console.log('⚠️ [Chat IA v6] Resposta direta com dados suspeitos — forçando SQL...');
+          try {
+            const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
+              role: 'user',
+              content: 'ATENÇÃO: Você respondeu com dados sem executar SQL. Isso é PROIBIDO — os números podem estar errados. Gere obrigatoriamente um bloco ```sql com a query correta para buscar esses dados da tabela bi_entregas. NUNCA invente números.'
+            }];
+            const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 65536 });
+            const r2 = /```sql\n?([\s\S]*?)\n?```/g;
+            let m2, temSQL = false;
+            while ((m2 = r2.exec(resp2)) !== null) {
+              sqlBlocks.push(m2[1].trim());
+              temSQL = true;
+            }
+            if (temSQL) {
+              resposta1 = resp2;
+              console.log(`🔄 [Chat IA v6] Retry gerou ${sqlBlocks.length} SQL(s) — executando...`);
+            } else {
+              // Mesmo no retry não gerou SQL — retorna aviso em vez de dados falsos
+              console.log('⚠️ [Chat IA v6] Retry sem SQL — bloqueando dados inventados');
+              return res.json({ success: true, resposta: '⚠️ Não consegui consultar os dados reais. Reformula a pergunta.', sql: null, dados: null });
+            }
+          } catch (e) {
+            console.error('❌ [Chat IA v6] Erro no retry anti-alucinação:', e.message);
+            return res.json({ success: true, resposta: '⚠️ Erro ao buscar dados. Tenta de novo.', sql: null, dados: null });
+          }
+        } else {
+          console.log('✅ [Chat IA v6] Resposta direta');
+          if (conversa_id) await salvarMensagem(conversa_id, prompt, resposta1, null, null);
+          detectarESalvarMemorias(userId, prompt, resposta1).catch(() => {});
+          return res.json({ success: true, resposta: resposta1, sql: null, dados: null });
+        }
       }
 
       // ETAPA 2: Executar SQLs (com injeção de filtros)
