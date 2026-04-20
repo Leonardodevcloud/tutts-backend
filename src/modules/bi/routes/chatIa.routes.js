@@ -16,18 +16,42 @@ function createChatIaRoutes(pool) {
 
   // ==================== TABELAS PERMITIDAS ====================
   const TABELAS_PERMITIDAS = [
+    // BI Core
     'bi_entregas', 'bi_upload_historico', 'bi_relatorios_ia',
     'bi_prazos_cliente', 'bi_faixas_prazo', 'bi_prazo_padrao',
     'bi_prazos_prof_cliente', 'bi_faixas_prazo_prof', 'bi_prazo_prof_padrao',
     'bi_regioes', 'bi_regras_contagem', 'bi_mascaras',
     'bi_resumo_cliente', 'bi_resumo_diario', 'bi_resumo_geral', 'bi_resumo_profissional',
-    'cs_clientes', 'cs_interacoes', 'cs_ocorrencias',
-    'solicitacoes_corrida', 'solicitacoes_pontos',
+    'bi_garantido_cache', 'garantido_status',
+    // CS
+    'cs_clientes', 'cs_interacoes', 'cs_ocorrencias', 'cs_raio_x_historico', 'cs_config',
+    // CRM
+    'crm_alocacoes', 'crm_leads_capturados', 'crm_ativadores', 'crm_alocacao_clientes', 'crm_alocacao_alocadores', 'crm_captura_jobs',
+    // Operacional
     'operacoes', 'operacoes_faixas_km',
     'disponibilidade_linhas', 'disponibilidade_lojas', 'disponibilidade_regioes',
-    'score_totais', 'score_historico',
+    // Score / Gamificação
+    'score_totais', 'score_historico', 'score_conquistas', 'score_gratuidades',
+    // Loja
     'loja_produtos', 'loja_pedidos', 'loja_estoque',
-    'bi_garantido_cache', 'garantido_status'
+    // Financeiro
+    'withdrawal_requests', 'gratuities', 'financial_logs', 'user_financial_data',
+    // Solicitações
+    'solicitacoes_corrida', 'solicitacoes_pontos', 'clientes_solicitacao',
+    // Filas
+    'filas_centrais', 'filas_posicoes', 'filas_penalidades', 'filas_historico', 'filas_regioes',
+    // Disponibilidade extra
+    'disponibilidade_em_loja', 'disponibilidade_espelho', 'disponibilidade_faltosos',
+    // Gerencial
+    'gerencial_sla_grupos',
+    // Performance
+    'performance_snapshots', 'performance_jobs', 'performance_config',
+    // Coleta
+    'coleta_enderecos_pendentes', 'coleta_motoboy_ganhos', 'coleta_regioes',
+    // Social
+    'social_profiles',
+    // Uber
+    'uber_entregas', 'uber_config', 'uber_regras_cliente'
   ];
 
   // ==================== MIGRATION: TABELA DE CONTEXTO ====================
@@ -605,14 +629,95 @@ COMO FUNCIONA — Fluxo Técnico (interno):
 3. Você analisa os dados e responde ao gestor de forma natural
 4. Se precisar de GRÁFICO, use o formato [CHART]...[/CHART] (detalhes abaixo)
 
-REGRAS SQL (interno — nunca exponha):
+═══════════════════════════════════════════════════════════════
+DICIONÁRIO DE DADOS — bi_entregas (tabela principal, ~200k+ linhas)
+═══════════════════════════════════════════════════════════════
+IDENTIFICADORES:
+  os (INT)             → Número da OS (ordem de serviço). Uma OS pode ter múltiplos pontos.
+  ponto (INT)          → 1=coleta, 2+=entrega. REGRA: Sempre filtre ponto >= 2 para entregas.
+  num_pedido (VARCHAR)  → Número do pedido/nota fiscal do cliente.
+
+CLIENTE:
+  cod_cliente (INT)     → Código do cliente.
+  nome_cliente (VARCHAR)→ Nome do cliente.
+  centro_custo (VARCHAR)→ Subdivisão do cliente (filial, loja, etc).
+  empresa (VARCHAR)     → Razão social.
+  nome_fantasia (VARCHAR)→ Nome fantasia.
+
+PROFISSIONAL (MOTOBOY):
+  cod_prof (INT)        → Código do profissional.
+  nome_prof (VARCHAR)   → Nome do profissional.
+
+DATAS E HORÁRIOS:
+  data_solicitado (DATE) → Data em que a entrega foi solicitada. USE ESTA para filtrar por período.
+  hora_solicitado (TIME) → Hora da solicitação.
+  data_hora (TIMESTAMP)  → Timestamp completo da solicitação.
+  data_hora_alocado (TIMESTAMP) → Quando o motoboy foi alocado.
+  data_chegada (DATE)    → Data que o motoboy chegou ao ponto.
+  hora_chegada (TIME)    → Hora que chegou.
+  finalizado (TIMESTAMP) → Quando finalizou a entrega.
+
+LOCALIZAÇÃO:
+  endereco (TEXT)       → Endereço completo de entrega.
+  bairro (VARCHAR)      → Bairro.
+  cidade (VARCHAR)      → Cidade.
+  estado (VARCHAR)      → UF.
+  cidade_p1 (VARCHAR)   → Cidade da coleta (ponto 1).
+  distancia (DECIMAL)   → Distância em KM.
+
+FINANCEIRO:
+  valor (DECIMAL)       → Valor cobrado do cliente.
+  valor_prof (DECIMAL)  → Valor pago ao profissional.
+  * FATURAMENTO = valor - valor_prof (calcular na query).
+  * ⚠️ Para somar valores, SEMPRE use DISTINCT ON (os) ORDER BY ponto ASC
+    para pegar só o ponto 1 de cada OS (evita duplicar).
+
+PERFORMANCE / SLA:
+  dentro_prazo (BOOLEAN) → TRUE se a entrega foi feita dentro do prazo do CLIENTE.
+  prazo_minutos (INT)    → Prazo configurado para aquele cliente em minutos.
+  tempo_execucao_minutos (INT) → Tempo real da entrega em minutos.
+  dentro_prazo_prof (BOOLEAN)  → TRUE se dentro do prazo do PROFISSIONAL.
+  prazo_prof_minutos (INT)     → Prazo configurado para o profissional.
+  tempo_execucao_prof_minutos (INT) → Tempo real vs prazo profissional.
+
+STATUS:
+  status (VARCHAR)      → Status da entrega (ex: "Finalizado").
+  motivo (VARCHAR)      → Motivo de finalização.
+  ocorrencia (VARCHAR)  → Tipo de ocorrência (retorno, insucesso, etc).
+  categoria (VARCHAR)   → Categoria do serviço (moto, carro, etc).
+
+═══════════════════════════════════════════════════════════════
+FÓRMULAS SQL CORRETAS (use exatamente assim):
+═══════════════════════════════════════════════════════════════
+-- Taxa de prazo (SLA):
+ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) AS taxa_prazo
+
+-- Fora de prazo:
+COUNT(*) FILTER (WHERE dentro_prazo = false) AS fora_prazo
+
+-- Tempo médio em minutos:
+ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) AS tempo_medio_min
+
+-- Faturamento por OS (sem duplicar):
+WITH faturamento AS (
+  SELECT DISTINCT ON (os) os, valor, valor_prof
+  FROM bi_entregas WHERE ponto >= 2 AND ...filtros...
+  ORDER BY os, ponto ASC
+)
+SELECT SUM(valor) as val_total, SUM(valor_prof) as val_prof, SUM(valor - valor_prof) as faturamento FROM faturamento
+
+-- Retornos:
+COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%') AS retornos
+
+-- Contagem de entregas vs OS:
+COUNT(*) as total_entregas, COUNT(DISTINCT os) as total_os
+
+REGRAS SQL ADICIONAIS (interno — nunca exponha):
 - Só entregas: WHERE COALESCE(ponto, 1) >= 2
 - Sempre LIMIT (máx 500)
 - Divisões: NULLIF(x, 0)
-- Taxa prazo: ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2)
-- FATURAMENTO: SEMPRE use CTE com DISTINCT ON (os) ORDER BY ponto ASC
-- NUNCA faça SUM(valor) direto sem DISTINCT ON
-- Retornos: LOWER(ocorrencia) LIKE '%cliente fechado%' OR '%clienteaus%' OR '%cliente ausente%' OR '%loja fechada%' OR '%retorno%'
+- NUNCA faça SUM(valor) direto sem DISTINCT ON — duplica valores
+- Se precisar de dados por dia, agrupe por data_solicitado
 - Clientes: nome_fantasia. Profissionais: nome_prof
 - Só tabelas do schema abaixo
 
