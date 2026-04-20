@@ -124,6 +124,31 @@ function createChatIaRoutes(pool) {
     if (!resp.ok) {
       const errText = await resp.text();
       console.error(`❌ [Chat IA v6] Gemini HTTP ${resp.status}:`, errText);
+      
+      // Auto-retry para rate limit (429) — espera e tenta de novo até 2x
+      if (resp.status === 429) {
+        const retryMatch = errText.match(/retry.*?(\d+\.?\d*)\s*s/i);
+        const waitSecs = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) + 2 : 15;
+        console.log(`⏳ [Chat IA v6] Rate limit — aguardando ${waitSecs}s antes do retry...`);
+        await new Promise(r => setTimeout(r, waitSecs * 1000));
+        
+        console.log(`🔄 [Chat IA v6] Retry após 429...`);
+        const resp2 = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+        );
+        if (!resp2.ok) {
+          const errText2 = await resp2.text();
+          console.error(`❌ [Chat IA v6] Retry também falhou: HTTP ${resp2.status}`);
+          throw new Error(`Gemini API HTTP ${resp2.status} (após retry): ${errText2.substring(0, 200)}`);
+        }
+        const data2 = await resp2.json();
+        const text2 = data2.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const tokens2 = data2.usageMetadata?.totalTokenCount || 0;
+        console.log(`✅ [Chat IA v6] Retry OK (${text2.length} chars, ${tokens2} tokens)`);
+        return text2;
+      }
+      
       throw new Error(`Gemini API HTTP ${resp.status}: ${errText.substring(0, 200)}`);
     }
 
@@ -860,7 +885,7 @@ Formatação de texto:
         try {
           const retryMsgs = [...messages, { role: 'assistant', content: resposta1 }, {
             role: 'user',
-            content: `As queries SQL falharam com estes erros:\n${erros.join('\n')}\n\nConsulte o schema no system prompt e gere queries usando APENAS colunas que existem. Tabela principal: bi_entregas.\n${filtrosObrigatorios.clausulas.length > 0 ? `\n⚠️ LEMBRETE: Inclua OBRIGATORIAMENTE os filtros: ${filtrosObrigatorios.clausulas.map(c => c.tipo + '=' + (c.valores || [c.inicio]).join(',')).join(', ')}` : ''}`
+            content: `ERRO: As queries SQL falharam:\n${erros.join('\n')}\n\n╔══════════════════════════════════════════╗\n║ REGRAS ABSOLUTAS PARA O RETRY:          ║\n║ 1. Use APENAS a tabela: bi_entregas     ║\n║ 2. NUNCA invente dados ou tabelas       ║\n║ 3. Se não sabe a coluna, NÃO use        ║\n║ 4. Colunas válidas: os, cod_cliente,    ║\n║    nome_cliente, cod_prof, nome_prof,    ║\n║    data_solicitado, data_hora, valor,    ║\n║    valor_prof, dentro_prazo, distancia,  ║\n║    ponto, centro_custo, categoria,       ║\n║    tempo_execucao_minutos, ocorrencia,   ║\n║    data_chegada, hora_chegada, finalizado║\n╚══════════════════════════════════════════╝\n${filtrosObrigatorios.clausulas.length > 0 ? `\n⚠️ FILTROS OBRIGATÓRIOS: ${filtrosObrigatorios.clausulas.map(c => c.tipo + '=' + (c.valores || [c.inicio]).join(',')).join(', ')}` : ''}\n\nGere a SQL correta usando APENAS as colunas listadas acima. Responda SOMENTE com o bloco \`\`\`sql.`
           }];
           const resp2 = await chamarGemini(retryMsgs, systemPrompt, { temperature: 0.2, maxTokens: 65536 });
           const r2 = /```sql\n?([\s\S]*?)\n?```/g;
@@ -870,7 +895,7 @@ Formatação de texto:
             if (res2.success) { res2.rows.forEach(r => todosResultados.push(r)); res2.fields.forEach(f => todasColunas.add(f)); sqlsExecutadas.push(res2.sql); }
           }
           if (todosResultados.length === 0) {
-            return res.json({ success: true, resposta: resp2.replace(/```sql[\s\S]*?```/g, '').trim() || '⚠️ Não consegui consultar. Reformula aí.', sql: null, dados: null });
+            return res.json({ success: true, resposta: '⚠️ Não consegui consultar os dados. Tenta reformular a pergunta de outra forma.', sql: null, dados: null });
           }
         } catch (e) {
           return res.json({ success: true, resposta: '⚠️ Erro na consulta. Tenta reformular.', sql: null, dados: null });
