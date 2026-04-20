@@ -79,7 +79,8 @@ router.get('/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
       empresa: req.clienteSolicitacao.empresa,
       forma_pagamento_padrao: req.clienteSolicitacao.forma_pagamento_padrao,
       endereco_partida_padrao: req.clienteSolicitacao.endereco_partida_padrao,
-      centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao
+      centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao,
+      grupo_enderecos_id: req.clienteSolicitacao.grupo_enderecos_id || null
     }
   });
 });
@@ -1156,6 +1157,9 @@ router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, as
   try {
     const { q } = req.query;
     const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
+    const clienteId = req.clienteSolicitacao.id;
+    
+    console.log(`📚 [Endereços] Busca: cliente=${clienteId} (${req.clienteSolicitacao.nome}) | grupo=${grupoId || 'NENHUM'} | q="${q || ''}"`);
     
     // Scope: se está em grupo, vê todos do grupo + individuais próprios (legado sem grupo)
     //        se não está em grupo, vê só os individuais próprios
@@ -1189,6 +1193,7 @@ router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, as
     query += ` ORDER BY vezes_usado DESC, ultimo_uso DESC LIMIT 50`;
     
     const result = await pool.query(query, params);
+    console.log(`📚 [Endereços] Resultado: ${result.rows.length} endereço(s) encontrado(s) | scope=${grupoId ? 'grupo_' + grupoId : 'individual_' + clienteId}`);
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Erro ao buscar endereços:', err);
