@@ -651,20 +651,33 @@ REGRAS DE APRESENTAÇÃO:
 - Use emojis de status: ✅ acima da meta, ⚠️ próximo da meta, ❌ abaixo da meta.
 - Quando o gestor pedir "detalhamento" ou "detalhadamente", inclua: entregas, SLA, fora prazo, tempo médio, retornos, E centro de custo quando aplicável.
 
+QUANDO USAR DADOS PRÉ-CARREGADOS vs SQL:
+- DADOS PRÉ-CARREGADOS: visão geral de todos os clientes, evolução diária, resumo financeiro, ranking geral.
+  Exemplos: "como foi a performance?", "qual cliente mais entregou?", "como foi o SLA da semana?"
+- GERAR SQL: perguntas sobre um SUBCONJUNTO específico, como:
+  * Motoboys de um centro de custo específico → SQL com WHERE centro_custo = 'X'
+  * Entregas de um dia específico por profissional → SQL com WHERE data_solicitado = 'X'
+  * Detalhes de um profissional específico → SQL com WHERE cod_prof = X
+  * Qualquer cruzamento que NÃO está nos dados pré-carregados
+  Se o gestor pedir algo sobre um CLIENTE OU CENTRO DE CUSTO ESPECÍFICO e os dados pré-carregados não tiverem esse nível de detalhe, GERE SQL. Não use os dados agregados como se fossem do subconjunto pedido.
+
 ╔══════════════════════════════════════════════════════════════════╗
-║              🚨 REGRA CRÍTICA: SQL OBRIGATÓRIA 🚨               ║
+║           COMO RESPONDER — REGRA DE OURO                        ║
 ║                                                                  ║
-║  PRIORIDADE 1: Use os DADOS PRÉ-CARREGADOS que vêm no prompt.   ║
-║  Eles são dados REAIS do banco. Analise-os diretamente.          ║
+║  1. Pergunta GERAL (todos clientes, resumo, visão macro)?       ║
+║     → Use os DADOS PRÉ-CARREGADOS. Números exatos dali.        ║
 ║                                                                  ║
-║  PRIORIDADE 2: Se a pergunta precisa de dados que NÃO estão      ║
-║  nos dados pré-carregados (ex: filtro específico, cruzamento     ║
-║  incomum, detalhe por endereço), gere SQL com \`\`\`sql ... \`\`\` ║
+║  2. Pergunta ESPECÍFICA (um centro de custo, um motoboy,        ║
+║     um dia, um cruzamento de dados)?                             ║
+║     → GERE SQL com \`\`\`sql ... \`\`\`                           ║
+║     Os dados pré-carregados NÃO cobrem drill-downs.             ║
+║     Exemplo: "motoboys do BR Autoparts Goiânia" → SQL           ║
 ║                                                                  ║
-║  ❌ PROIBIDO: Inventar números que não estão nos dados            ║
-║  ❌ PROIBIDO: Arredondar ou "ajustar" os dados reais              ║
-║  ✅ CORRETO: Citar os números exatos dos dados pré-carregados     ║
-║  ✅ CORRETO: Gerar SQL apenas quando os dados não cobrem          ║
+║  ❌ PROIBIDO: Usar dados AGREGADOS para responder perguntas      ║
+║     ESPECÍFICAS. Se o gestor pergunta sobre 1 CC e você só       ║
+║     tem dados de TODOS os CCs juntos → GERE SQL.                ║
+║  ❌ PROIBIDO: Inventar dados que não estão em nenhum lugar.      ║
+║  ✅ CORRETO: SQL para drill-down, pré-carregados para visão.    ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 COMO FUNCIONA — Fluxo Técnico (interno):
