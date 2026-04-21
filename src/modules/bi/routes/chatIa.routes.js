@@ -634,10 +634,14 @@ PERSONALIDADE:
 - NUNCA termine com "posso ajudar?" ou sugestões genéricas. Responde e pronto.
 
 REGRAS DE NEGÓCIO (memorize — são fixas):
-- Cliente 767 (Grupo Comollati): prazo de entrega = 120 minutos (2 horas). Meta de SLA = 95%.
-- Demais clientes: prazo padrão = verificar na tabela bi_prazo_padrao ou nos dados.
+- Cliente 767 (Grupo Comollati): prazo de entrega = 120 minutos (2 horas) FIXO. Meta de SLA = 95%.
+  IMPORTANTE: O SLA do 767 é calculado por tempo_execucao_minutos <= 120, NÃO pelo campo dentro_prazo.
+  Os centros de custo do 767 são FILIAIS (BR Autoparts Goiânia, CampinasSP, Brasília, etc).
+  Os nomes pequenos (ex: "FERREIRA e MACHADO", "STOP CENTER") são as LOJAS dos clientes finais, NÃO filiais.
+  Quando falar do 767, mostre apenas os centros que são FILIAIS (os que começam com "BR" ou "Pellegrino").
+- Cliente 949: consolidar TODOS os centros de custo em uma única linha.
+- Demais clientes: prazo padrão = verificar nos dados pré-carregados (seção PRAZOS).
 - Meta geral de SLA = 85% (salvo exceções acima).
-- "Dentro do prazo" = campo dentro_prazo = true.
 - "Retorno" = ocorrência com "retorno", "cliente fechado", "cliente ausente", "loja fechada".
 - Faturamento = valor (cliente) - valor_prof (profissional).
 
@@ -1044,7 +1048,7 @@ Formatação de texto:
       mascarasResult.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
       const nomeDisplay = (cod, nome) => mascaras[String(cod)] || nome || 'Cod ' + cod;
 
-      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia, prazosCliente] = await Promise.all([
+      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia, prazosCliente, gerencialConfig, sla767] = await Promise.all([
         // 1. Resumo geral
         pool.query(`SELECT 
           COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
@@ -1151,7 +1155,22 @@ Formatação de texto:
         JOIN bi_faixas_prazo fp ON fp.prazo_cliente_id = pc.id
         WHERE pc.tipo = 'cliente'
         GROUP BY pc.codigo, pc.nome
-        ORDER BY pc.codigo`)
+        ORDER BY pc.codigo`),
+
+        // 11. Config gerencial (grupos SLA + centros de custo oficiais)
+        pool.query(`SELECT grupo, cod_cliente, centro_custo, nome_display FROM gerencial_sla_grupos ORDER BY grupo, cod_cliente, nome_display`),
+
+        // 12. SLA 767 especial (prazo fixo 2h = 120min por tempo_execucao, não por dentro_prazo)
+        pool.query(`SELECT 
+          COALESCE(centro_custo, nome_fantasia, 'Filial') as centro_custo,
+          COUNT(*) as entregas,
+          SUM(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 120 THEN 1 ELSE 0 END) as no_prazo_2h,
+          ROUND(100.0 * SUM(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 120 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) as taxa_2h,
+          COUNT(*) - SUM(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 120 THEN 1 ELSE 0 END) as fora_prazo_2h,
+          ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 480 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
+        FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND cod_cliente = 767
+        ${filtros.data_inicio && filtros.data_fim ? `AND data_solicitado BETWEEN '${filtros.data_inicio}' AND '${filtros.data_fim}'` : ''}
+        GROUP BY centro_custo, nome_fantasia ORDER BY COUNT(*) DESC`)
       ]);
 
       const rg = resumo.rows[0] || {};
@@ -1205,6 +1224,25 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
 ${prazosCliente.rows.length > 0 ? `PRAZOS CONFIGURADOS POR CLIENTE:
 ${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${nomeDisplay(p.cod_cliente, p.nome_display)}): ${p.prazo_min === p.prazo_max ? p.prazo_min + ' min (' + Math.round(p.prazo_min/60*10)/10 + 'h)' : 'faixas: ' + p.faixas}`).join('\n')}
 ⚠️ Use estes prazos como referência ao avaliar SLA.` : ''}
+
+${sla767.rows.length > 0 ? `⚠️ SLA ESPECIAL CLIENTE 767 (Grupo Comollati) — PRAZO FIXO 2 HORAS (120 min):
+ATENÇÃO: Para o cliente 767, o SLA é calculado por tempo_execucao_minutos <= 120, NÃO pelo campo dentro_prazo.
+Os números abaixo são os CORRETOS para o 767. Use ESTES, não os da seção "POR CLIENTE" acima.
+Meta: 95%
+${sla767.rows.map(s => `  ${s.centro_custo}: ${s.entregas} entregas, SLA 2h=${s.taxa_2h}%, fora=${s.fora_prazo_2h}, tempo=${s.tempo_medio}min`).join('\n')}` : ''}
+
+${gerencialConfig.rows.length > 0 ? `CONFIGURAÇÃO GERENCIAL (grupos SLA):
+${(() => {
+  const grupos = {};
+  gerencialConfig.rows.forEach(r => {
+    if (!grupos[r.grupo]) grupos[r.grupo] = [];
+    grupos[r.grupo].push(`  ${r.cod_cliente}${r.centro_custo ? ' | ' + r.centro_custo : ''} → ${r.nome_display || 'sem nome'}`);
+  });
+  return Object.entries(grupos).map(([g, items]) => `Grupo "${g}" (${items.length} itens):\n${items.join('\n')}`).join('\n\n');
+})()}
+⚠️ REGRA CENTRO DE CUSTO: Quando mostrar dados do 767, usar APENAS os centros configurados acima.
+   Centros pequenos (lojas) NÃO são filiais — são os clientes finais das filiais. Ignore-os na análise gerencial.
+   Cliente 949: consolidar TODOS os centros de custo em uma única linha.` : ''}
 `;
 
       console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs`);
