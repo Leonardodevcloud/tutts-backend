@@ -1111,7 +1111,7 @@ router.delete('/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (re
 // Salvar endereço
 router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao } = req.body;
+    const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social } = req.body;
     const grupoId = req.clienteSolicitacao.grupo_enderecos_id;  // null se não está em grupo
     
     console.log('📍 Salvando endereço:', { apelido, endereco_completo, rua, cidade, grupoId });
@@ -1150,12 +1150,12 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     const result = await pool.query(`
       INSERT INTO solicitacao_favoritos (
         cliente_id, grupo_enderecos_id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
-        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       RETURNING id
     `, [
       req.clienteSolicitacao.id, grupoId, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
-      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao
+      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social || null
     ]);
     
     console.log('✅ Endereço salvo com ID:', result.rows[0].id, 'grupo:', grupoId || 'individual');
