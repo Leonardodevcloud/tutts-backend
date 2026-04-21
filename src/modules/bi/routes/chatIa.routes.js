@@ -661,6 +661,19 @@ QUANDO USAR DADOS PRÉ-CARREGADOS vs SQL:
   * Qualquer cruzamento que NÃO está nos dados pré-carregados
   Se o gestor pedir algo sobre um CLIENTE OU CENTRO DE CUSTO ESPECÍFICO e os dados pré-carregados não tiverem esse nível de detalhe, GERE SQL. Não use os dados agregados como se fossem do subconjunto pedido.
 
+NOMES PARCIAIS / FUZZY MATCHING:
+- O gestor NUNCA vai digitar o nome exato. Ele vai dizer "Goiânia", "campinas", "brasilia", "pellegrino".
+- Você DEVE inferir o nome correto a partir dos dados pré-carregados.
+  "Goiânia" → "BR Autoparts Goiânia"
+  "campinas" → "BR AutoParts CampinasSP"  
+  "pellegrino" ou "pelle" → "Pellegrino SSA"
+  "brasilia" → "BR autoparts Brasilia"
+  "comollati" ou "767" → Grupo Comollati (cod 767)
+  "comando" → "Comando-GO"
+- Na SQL, use ILIKE '%parte_do_nome%' quando o nome não for 100% exato:
+  WHERE centro_custo ILIKE '%goiânia%' ou WHERE centro_custo ILIKE '%goiania%'
+- Se houver ambiguidade, pergunte. Mas se for óbvio, não pergunte — resolve.
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║           COMO RESPONDER — REGRA DE OURO                        ║
 ║                                                                  ║
