@@ -957,7 +957,7 @@ Formatação de texto:
       if (!filtros) return res.status(400).json({ error: 'Filtros são obrigatórios' });
 
       // Expansão de região — só se o frontend NÃO mandou cod_cliente já expandido
-      if (filtros.regiao && !filtros._regiao_expandida && (!filtros.cod_cliente || filtros.cod_cliente.length === 0)) {
+      if (filtros.regiao && (!filtros.cod_cliente || filtros.cod_cliente.length === 0)) {
         try {
           const rr = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
           if (rr.rows.length > 0) {
@@ -965,6 +965,27 @@ Formatação de texto:
             if (Array.isArray(itens)) {
               filtros.cod_cliente = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
               filtros._regiao_expandida = true;
+            }
+          }
+        } catch (e) {}
+      }
+
+      // Construir cliente_centro_map a partir da região (se não veio do frontend)
+      if (!filtros.cliente_centro_map && filtros.regiao) {
+        try {
+          const rr = await pool.query('SELECT clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
+          if (rr.rows.length > 0) {
+            const itens = typeof rr.rows[0].clientes === 'string' ? JSON.parse(rr.rows[0].clientes) : rr.rows[0].clientes;
+            if (Array.isArray(itens)) {
+              const mapa = {};
+              itens.forEach(i => {
+                const cod = String(typeof i === 'number' ? i : parseInt(i.cod_cliente));
+                if (cod === 'NaN') return;
+                if (!mapa[cod]) mapa[cod] = [];
+                if (i.centro_custo) mapa[cod].push(i.centro_custo);
+              });
+              filtros.cliente_centro_map = mapa;
+              console.log(`📊 [Pre-load] cliente_centro_map construído:`, JSON.stringify(mapa));
             }
           }
         } catch (e) {}
@@ -1188,10 +1209,19 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
             const itens = typeof regiao.clientes === 'string' ? JSON.parse(regiao.clientes) : regiao.clientes;
             if (Array.isArray(itens) && itens.length > 0) {
               const codClientes = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
-              const centros = itens.filter(i => i.centro_custo).map(i => i.centro_custo);
               filtros.cod_cliente = codClientes;
               filtros.nome_regiao = regiao.nome;
-              if (centros.length > 0 && centros.length < codClientes.length * 3) filtros.centro_custo = centros;
+              // Construir cliente_centro_map
+              const mapa = {};
+              itens.forEach(i => {
+                const cod = String(typeof i === 'number' ? i : parseInt(i.cod_cliente));
+                if (cod === 'NaN') return;
+                if (!mapa[cod]) mapa[cod] = [];
+                if (i.centro_custo) mapa[cod].push(i.centro_custo);
+              });
+              filtros.cliente_centro_map = mapa;
+              // Centro_custo flat para contexto do prompt (não para filtragem SQL)
+              filtros.centro_custo = itens.filter(i => i.centro_custo).map(i => i.centro_custo);
               try {
                 const nomesResult = await pool.query(
                   `SELECT DISTINCT cod_cliente, nome_fantasia FROM bi_entregas WHERE cod_cliente = ANY($1) AND nome_fantasia IS NOT NULL`,
@@ -1200,12 +1230,33 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
                 filtros.nomes_clientes = nomesResult.rows.map(r => r.nome_fantasia || ('cod ' + r.cod_cliente)).join(', ');
               } catch (e) { filtros.nomes_clientes = codClientes.map(c => 'cod ' + c).join(', '); }
               filtros._regiao_expandida = true;
-              console.log(`🗺️ [Chat IA v6] Região "${regiao.nome}" expandida para ${codClientes.length} clientes`);
+              console.log(`🗺️ [Chat IA v6] Região "${regiao.nome}" expandida para ${codClientes.length} clientes | mapa: ${JSON.stringify(mapa)}`);
             }
           }
         } catch (errRegiao) {
           console.warn('⚠️ [Chat IA v6] Erro ao expandir região:', errRegiao.message);
         }
+      }
+
+      // Se o frontend mandou cod_cliente mas sem cliente_centro_map, construir do regiao
+      if (filtros && filtros.regiao && filtros.cod_cliente?.length > 0 && !filtros.cliente_centro_map) {
+        try {
+          const rr = await pool.query('SELECT clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
+          if (rr.rows.length > 0) {
+            const itens = typeof rr.rows[0].clientes === 'string' ? JSON.parse(rr.rows[0].clientes) : rr.rows[0].clientes;
+            if (Array.isArray(itens)) {
+              const mapa = {};
+              itens.forEach(i => {
+                const cod = String(typeof i === 'number' ? i : parseInt(i.cod_cliente));
+                if (cod === 'NaN') return;
+                if (!mapa[cod]) mapa[cod] = [];
+                if (i.centro_custo) mapa[cod].push(i.centro_custo);
+              });
+              filtros.cliente_centro_map = mapa;
+              console.log(`🗺️ [Chat IA v6] cliente_centro_map construído do backend: ${JSON.stringify(mapa)}`);
+            }
+          }
+        } catch (e) {}
       }
 
       console.log(`\n🤖 [Chat IA v6] Prompt: "${prompt.substring(0, 100)}"`);
