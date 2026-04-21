@@ -1143,10 +1143,15 @@ Formatação de texto:
         GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 15`, queryParams),
 
         // 10. Prazos configurados por cliente
-        pool.query(`SELECT pc.cod_cliente, pc.prazo_minutos, m.mascara as nome_display
-          FROM bi_prazos_cliente pc
-          LEFT JOIN bi_mascaras m ON m.cod_cliente = pc.cod_cliente::text
-          ORDER BY pc.cod_cliente`)
+        pool.query(`SELECT pc.codigo as cod_cliente, pc.nome as nome_display,
+          MIN(fp.prazo_minutos) as prazo_min,
+          MAX(fp.prazo_minutos) as prazo_max,
+          STRING_AGG(fp.km_min || '-' || COALESCE(fp.km_max::text, '∞') || 'km=' || fp.prazo_minutos || 'min', ', ' ORDER BY fp.km_min) as faixas
+        FROM bi_prazos_cliente pc
+        JOIN bi_faixas_prazo fp ON fp.prazo_cliente_id = pc.id
+        WHERE pc.tipo = 'cliente'
+        GROUP BY pc.codigo, pc.nome
+        ORDER BY pc.codigo`)
       ]);
 
       const rg = resumo.rows[0] || {};
@@ -1198,8 +1203,8 @@ OCORRÊNCIAS / MOTIVOS:
 ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`).join('\n')}
 
 ${prazosCliente.rows.length > 0 ? `PRAZOS CONFIGURADOS POR CLIENTE:
-${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${p.nome_display || 'Cod ' + p.cod_cliente}): ${p.prazo_minutos} minutos (${Math.round(p.prazo_minutos/60*10)/10}h)`).join('\n')}
-⚠️ Use estes prazos como referência ao avaliar SLA. Se o prazo é 120min e a taxa é 88%, está ABAIXO da meta de 95%.` : ''}
+${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${nomeDisplay(p.cod_cliente, p.nome_display)}): ${p.prazo_min === p.prazo_max ? p.prazo_min + ' min (' + Math.round(p.prazo_min/60*10)/10 + 'h)' : 'faixas: ' + p.faixas}`).join('\n')}
+⚠️ Use estes prazos como referência ao avaliar SLA.` : ''}
 `;
 
       console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs`);
@@ -1352,10 +1357,8 @@ ${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${p.nome_display || 'Cod ' + 
           wherePartes.push(`data_solicitado BETWEEN $${paramIdx++} AND $${paramIdx++}`);
           queryParams.push(filtros.data_inicio, filtros.data_fim);
         }
-        if (filtros.regiao) {
-          wherePartes.push(`bairro ILIKE $${paramIdx++}`);
-          queryParams.push(`%${filtros.regiao}%`);
-        }
+        // NÃO filtrar por bairro — filtros.regiao é um ID, não um bairro.
+        // O filtro de região já é aplicado via cliente_centro_map acima.
 
         const WHERE = wherePartes.join(' AND ');
         const t0 = Date.now();
