@@ -674,6 +674,23 @@ NOMES PARCIAIS / FUZZY MATCHING:
   WHERE centro_custo ILIKE '%goiânia%' ou WHERE centro_custo ILIKE '%goiania%'
 - Se houver ambiguidade, pergunte. Mas se for óbvio, não pergunte — resolve.
 
+EXEMPLOS DE RESPOSTAS IDEAIS (siga este padrão):
+
+Pergunta: "como foi a performance dos clientes?"
+→ Use dados pré-carregados. Mostre tabela de TODOS os clientes ordenada por SLA (pior primeiro).
+→ Para o 767, use dados da seção "SLA ESPECIAL 767" (prazo 2h).
+→ Destrinche o 767 por centro de custo (filiais BR Autoparts, Pellegrino, etc).
+→ Finalize com análise: pontos de atenção, destaques positivos.
+
+Pergunta: "motoboys de Goiânia"
+→ Use dados da seção "PROFISSIONAIS POR CLIENTE/CC" → filtrar "Goiânia".
+→ Se não tiver, gere SQL: WHERE cod_cliente = 767 AND centro_custo ILIKE '%goiânia%'
+→ Mostre: nome, entregas, SLA, tempo médio. Ordene por entregas desc.
+
+Pergunta: "quem tá fora do prazo?"
+→ Use dados pré-carregados: profissionais com taxa_prazo < 85%.
+→ Se pedir de um CC específico, use seção "PROFISSIONAIS POR CLIENTE/CC".
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║           COMO RESPONDER — REGRA DE OURO                        ║
 ║                                                                  ║
@@ -1074,7 +1091,7 @@ Formatação de texto:
       mascarasResult.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
       const nomeDisplay = (cod, nome) => mascaras[String(cod)] || nome || 'Cod ' + cod;
 
-      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia, prazosCliente, gerencialConfig, sla767] = await Promise.all([
+      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia, prazosCliente, gerencialConfig, sla767, profsPorCC, porBairro, statusMotivo] = await Promise.all([
         // 1. Resumo geral
         pool.query(`SELECT 
           COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
@@ -1114,7 +1131,7 @@ Formatação de texto:
         FROM bi_entregas WHERE ${WHERE}
         GROUP BY data_solicitado ORDER BY data_solicitado`, queryParams),
 
-        // 4. Top 30 profissionais
+        // 4. TODOS os profissionais (sem limite)
         pool.query(`SELECT 
           cod_prof, nome_prof,
           COUNT(*) as total_entregas,
@@ -1122,9 +1139,14 @@ Formatação de texto:
           COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
           ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
           ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
-          ROUND(AVG(distancia) FILTER (WHERE distancia > 0), 1) as distancia_media_km
+          ROUND(AVG(distancia) FILTER (WHERE distancia > 0), 1) as distancia_media_km,
+          ROUND(SUM(distancia) FILTER (WHERE distancia > 0), 1) as distancia_total_km,
+          COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%') as retornos,
+          COUNT(*) FILTER (WHERE dentro_prazo_prof = true) as prazo_prof_ok,
+          COUNT(*) FILTER (WHERE dentro_prazo_prof = false) as prazo_prof_fora,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo_prof = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo_prof IS NOT NULL), 0), 2) as taxa_prazo_prof
         FROM bi_entregas WHERE ${WHERE}
-        GROUP BY cod_prof, nome_prof ORDER BY COUNT(*) DESC LIMIT 30`, queryParams),
+        GROUP BY cod_prof, nome_prof ORDER BY COUNT(*) DESC`, queryParams),
 
         // 5. Por categoria
         pool.query(`SELECT 
@@ -1155,7 +1177,7 @@ Formatação de texto:
           ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
           ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min
         FROM bi_entregas WHERE ${WHERE} AND centro_custo IS NOT NULL
-        GROUP BY cod_cliente, nome_cliente, centro_custo ORDER BY cod_cliente, COUNT(*) DESC LIMIT 60`, queryParams),
+        GROUP BY cod_cliente, nome_cliente, centro_custo ORDER BY cod_cliente, COUNT(*) DESC`, queryParams),
 
         // 8. Por hora do dia
         pool.query(`SELECT 
@@ -1183,10 +1205,10 @@ Formatação de texto:
         GROUP BY pc.codigo, pc.nome
         ORDER BY pc.codigo`),
 
-        // 11. Config gerencial (grupos SLA + centros de custo oficiais)
+        // 11. Config gerencial
         pool.query(`SELECT grupo, cod_cliente, centro_custo, nome_display FROM gerencial_sla_grupos ORDER BY grupo, cod_cliente, nome_display`),
 
-        // 12. SLA 767 especial (prazo fixo 2h = 120min por tempo_execucao, não por dentro_prazo)
+        // 12. SLA 767 especial (prazo fixo 2h)
         pool.query(`SELECT 
           COALESCE(centro_custo, nome_fantasia, 'Filial') as centro_custo,
           COUNT(*) as entregas,
@@ -1196,7 +1218,36 @@ Formatação de texto:
           ROUND(AVG(CASE WHEN tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 480 THEN tempo_execucao_minutos END)::numeric, 1) as tempo_medio
         FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND cod_cliente = 767
         ${filtros.data_inicio && filtros.data_fim ? `AND data_solicitado BETWEEN '${filtros.data_inicio}' AND '${filtros.data_fim}'` : ''}
-        GROUP BY centro_custo, nome_fantasia ORDER BY COUNT(*) DESC`)
+        GROUP BY centro_custo, nome_fantasia ORDER BY COUNT(*) DESC`),
+
+        // 13. Profissionais POR cliente/CC (top 10 por CC)
+        pool.query(`SELECT 
+          cod_cliente, nome_cliente, centro_custo, cod_prof, nome_prof,
+          COUNT(*) as entregas,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY cod_cliente, nome_cliente, centro_custo, cod_prof, nome_prof
+        HAVING COUNT(*) >= 3
+        ORDER BY cod_cliente, centro_custo, COUNT(*) DESC`, queryParams),
+
+        // 14. Top bairros
+        pool.query(`SELECT 
+          COALESCE(bairro, 'Sem bairro') as bairro,
+          cidade,
+          COUNT(*) as entregas,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(distancia) FILTER (WHERE distancia > 0), 1) as distancia_media
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY bairro, cidade ORDER BY COUNT(*) DESC LIMIT 30`, queryParams),
+
+        // 15. Status e motivos detalhados
+        pool.query(`SELECT 
+          COALESCE(status, 'Sem status') as status,
+          COALESCE(motivo, '-') as motivo,
+          COUNT(*) as total
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY status, motivo ORDER BY COUNT(*) DESC LIMIT 20`, queryParams)
       ]);
 
       const rg = resumo.rows[0] || {};
@@ -1232,8 +1283,8 @@ ${porCliente.rows.map(c => `  ${c.cod_cliente} - ${nomeDisplay(c.cod_cliente, c.
 EVOLUÇÃO DIÁRIA (${porDia.rows.length} dias):
 ${porDia.rows.map(d => `  ${d.dia}: ${d.total_entregas} entregas, OS=${d.total_os}, prazo=${d.taxa_prazo}%, fora=${d.fora_prazo}, tempo=${d.tempo_medio_min}min, profs=${d.profissionais}`).join('\n')}
 
-TOP PROFISSIONAIS (${porProfissional.rows.length}):
-${porProfissional.rows.map(p => `  ${p.cod_prof} - ${p.nome_prof}: ${p.total_entregas} entregas, prazo=${p.taxa_prazo}%, fora=${p.fora_prazo}, tempo=${p.tempo_medio_min}min, km=${p.distancia_media_km}`).join('\n')}
+TODOS OS PROFISSIONAIS (${porProfissional.rows.length}):
+${porProfissional.rows.map(p => `  ${p.cod_prof} - ${p.nome_prof}: ${p.total_entregas} ent, prazo=${p.taxa_prazo}%, fora=${p.fora_prazo}, tempo=${p.tempo_medio_min}min, km_med=${p.distancia_media_km}, km_tot=${p.distancia_total_km}, retornos=${p.retornos}, prazo_prof=${p.taxa_prazo_prof||'N/A'}%`).join('\n')}
 
 POR CATEGORIA:
 ${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
@@ -1246,6 +1297,26 @@ ${porHora.rows.map(h => `  ${String(h.hora).padStart(2, '0')}h: ${h.total} entre
 
 OCORRÊNCIAS / MOTIVOS:
 ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`).join('\n')}
+
+${statusMotivo.rows.length > 0 ? `STATUS / MOTIVO FINALIZAÇÃO:
+${statusMotivo.rows.map(s => `  ${s.status} | ${s.motivo}: ${s.total}`).join('\n')}` : ''}
+
+${porBairro.rows.length > 0 ? `TOP BAIRROS (${porBairro.rows.length}):
+${porBairro.rows.map(b => `  ${b.bairro} (${b.cidade||''}): ${b.entregas} ent, prazo=${b.taxa_prazo}%, dist=${b.distancia_media}km`).join('\n')}` : ''}
+
+${profsPorCC.rows.length > 0 ? `PROFISSIONAIS POR CLIENTE/CENTRO DE CUSTO (${profsPorCC.rows.length} combinações com 3+ entregas):
+${(() => {
+  const agrupado = {};
+  profsPorCC.rows.forEach(r => {
+    const chave = r.cod_cliente + ' ' + nomeDisplay(r.cod_cliente, r.nome_cliente) + (r.centro_custo ? ' | ' + r.centro_custo : '');
+    if (!agrupado[chave]) agrupado[chave] = [];
+    agrupado[chave].push(r);
+  });
+  return Object.entries(agrupado).map(([chave, profs]) =>
+    chave + ':\n' + profs.slice(0, 10).map(p => `    ${p.cod_prof} ${p.nome_prof}: ${p.entregas} ent, prazo=${p.taxa_prazo}%, tempo=${p.tempo_medio}min`).join('\n') +
+    (profs.length > 10 ? '\n    ... e mais ' + (profs.length - 10) + ' profissionais' : '')
+  ).join('\n');
+})()}` : ''}
 
 ${prazosCliente.rows.length > 0 ? `PRAZOS CONFIGURADOS POR CLIENTE:
 ${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${nomeDisplay(p.cod_cliente, p.nome_display)}): ${p.prazo_min === p.prazo_max ? p.prazo_min + ' min (' + Math.round(p.prazo_min/60*10)/10 + 'h)' : 'faixas: ' + p.faixas}`).join('\n')}
@@ -1271,7 +1342,7 @@ ${(() => {
    Cliente 949: consolidar TODOS os centros de custo em uma única linha.` : ''}
 `;
 
-      console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs`);
+      console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs, ${profsPorCC.rows.length} prof/CC, ${porBairro.rows.length} bairros`);
       res.json({ success: true, dados_contexto: texto, tempo_ms: tempo, resumo: { total_entregas: rg.total_entregas, total_clientes: porCliente.rows.length, total_dias: porDia.rows.length } });
 
     } catch (err) {
