@@ -324,6 +324,31 @@ function createChatIaRoutes(pool) {
     // Para cada cláusula obrigatória, verificar se já está presente
     const clausulasFaltantes = [];
     for (const clausula of filtrosObrigatorios.clausulas) {
+      // Filtro inteligente de região (cliente + centro mapeado)
+      if (clausula.tipo === 'cliente_centro_map') {
+        const temFiltro = sqlUpper.includes('COD_CLIENTE');
+        if (!temFiltro) {
+          const partes = [];
+          const clientesSemCentro = [];
+          for (const [cod, centros] of Object.entries(clausula.mapa)) {
+            const codInt = parseInt(cod);
+            if (isNaN(codInt)) continue;
+            if (centros && centros.length > 0) {
+              const centrosSQL = centros.map(c => `'${c.replace(/'/g, "''")}'`).join(',');
+              partes.push(`(cod_cliente = ${codInt} AND centro_custo IN (${centrosSQL}))`);
+            } else {
+              clientesSemCentro.push(codInt);
+            }
+          }
+          if (clientesSemCentro.length > 0) {
+            partes.push(`cod_cliente IN (${clientesSemCentro.join(',')})`);
+          }
+          if (partes.length > 0) {
+            clausulasFaltantes.push(`(${partes.join(' OR ')})`);
+          }
+        }
+        continue; // Pula os checks de cod_cliente e centro_custo separados
+      }
       // Verificar por cod_cliente
       if (clausula.tipo === 'cod_cliente') {
         const codsStr = clausula.valores.join(',');
@@ -864,18 +889,61 @@ Formatação de texto:
     const centrosCusto = filtros?.centro_custo
       ? (Array.isArray(filtros.centro_custo) ? filtros.centro_custo : [filtros.centro_custo]).filter(c => c && c.trim())
       : [];
+    // Mapa cliente → centros (se disponível da região)
+    const clienteCentroMap = filtros?.cliente_centro_map || null;
 
     if (codClientes.length > 0) {
-      clausulas.push({ tipo: 'cod_cliente', valores: codClientes });
-    }
-    if (centrosCusto.length > 0) {
-      clausulas.push({ tipo: 'centro_custo', valores: centrosCusto });
+      if (clienteCentroMap && Object.keys(clienteCentroMap).length > 0) {
+        // Região com mapeamento: gera filtro inteligente por cliente
+        clausulas.push({ tipo: 'cliente_centro_map', mapa: clienteCentroMap });
+      } else if (centrosCusto.length > 0 && codClientes.length === 1) {
+        // 1 cliente + centros específicos
+        clausulas.push({ tipo: 'cod_cliente', valores: codClientes });
+        clausulas.push({ tipo: 'centro_custo', valores: centrosCusto });
+      } else {
+        // Múltiplos clientes sem mapa OU sem centros → só filtra por cliente
+        clausulas.push({ tipo: 'cod_cliente', valores: codClientes });
+      }
     }
     if (filtros?.data_inicio && filtros?.data_fim) {
       clausulas.push({ tipo: 'periodo', inicio: filtros.data_inicio, fim: filtros.data_fim });
     }
 
     return { clausulas };
+  }
+  
+  /**
+   * Monta WHERE SQL para filtro de região com mapeamento cliente↔centro.
+   * Ex: { "767": ["Pellegrino SSA", "Goiânia"], "1072": [], "949": [] }
+   * → ((cod_cliente=767 AND centro_custo IN ('Pellegrino SSA','Goiânia')) OR cod_cliente IN (1072,949))
+   */
+  function montarWhereClienteCentro(mapa, paramIdx) {
+    const partes = [];
+    const params = [];
+    const clientesSemCentro = [];
+    
+    for (const [cod, centros] of Object.entries(mapa)) {
+      const codInt = parseInt(cod);
+      if (isNaN(codInt)) continue;
+      
+      if (centros && centros.length > 0) {
+        // Cliente com centro específico
+        const centroPlaceholders = centros.map(() => `$${paramIdx++}`);
+        partes.push(`(cod_cliente = $${paramIdx++} AND centro_custo IN (${centroPlaceholders.join(',')}))`);
+        params.push(...centros, codInt);
+      } else {
+        // Cliente sem centro → todos os centros
+        clientesSemCentro.push(codInt);
+      }
+    }
+    
+    if (clientesSemCentro.length > 0) {
+      const placeholders = clientesSemCentro.map(() => `$${paramIdx++}`);
+      partes.push(`cod_cliente IN (${placeholders.join(',')})`);
+      params.push(...clientesSemCentro);
+    }
+    
+    return { sql: partes.length > 0 ? `(${partes.join(' OR ')})` : 'TRUE', params, nextIdx: paramIdx };
   }
 
   // ========================================================================
@@ -888,8 +956,8 @@ Formatação de texto:
       let { filtros } = req.body;
       if (!filtros) return res.status(400).json({ error: 'Filtros são obrigatórios' });
 
-      // Expansão de região
-      if (filtros.regiao && !filtros._regiao_expandida) {
+      // Expansão de região — só se o frontend NÃO mandou cod_cliente já expandido
+      if (filtros.regiao && !filtros._regiao_expandida && (!filtros.cod_cliente || filtros.cod_cliente.length === 0)) {
         try {
           const rr = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
           if (rr.rows.length > 0) {
@@ -906,16 +974,25 @@ Formatação de texto:
       const queryParams = [];
       let paramIdx = 1;
 
-      if (filtros.cod_cliente?.length > 0) {
+      // Mapa cliente→centro (da região) OU filtro simples
+      const clienteCentroMap = filtros.cliente_centro_map || null;
+      
+      if (clienteCentroMap && Object.keys(clienteCentroMap).length > 0) {
+        // Região com mapeamento inteligente
+        const ccResult = montarWhereClienteCentro(clienteCentroMap, paramIdx);
+        wherePartes.push(ccResult.sql);
+        queryParams.push(...ccResult.params);
+        paramIdx = ccResult.nextIdx;
+      } else if (filtros.cod_cliente?.length > 0) {
         const ids = filtros.cod_cliente.map(c => parseInt(c)).filter(c => !isNaN(c));
         if (ids.length > 0) {
           wherePartes.push(`cod_cliente IN (${ids.map(() => `$${paramIdx++}`).join(',')})`);
           queryParams.push(...ids);
         }
-      }
-      if (filtros.centro_custo?.length > 0) {
-        wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
-        queryParams.push(...filtros.centro_custo);
+        if (filtros.centro_custo?.length > 0 && ids.length <= 1) {
+          wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
+          queryParams.push(...filtros.centro_custo);
+        }
       }
       if (filtros.data_inicio && filtros.data_fim) {
         wherePartes.push(`data_solicitado BETWEEN $${paramIdx++} AND $${paramIdx++}`);
@@ -1092,8 +1169,12 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
       if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
       if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada.' });
 
+      console.log(`🔍 [Chat IA v6] dados_contexto recebido: ${dados_contexto ? dados_contexto.length + ' chars' : 'NENHUM'}`);
+      console.log(`🔍 [Chat IA v6] filtros recebidos: cod_cliente=[${(filtros?.cod_cliente||[]).join(',')}] centro_custo=[${(filtros?.centro_custo||[]).join(',')}] regiao=${filtros?.regiao||'N/A'} periodo=${filtros?.data_inicio||'?'} a ${filtros?.data_fim||'?'}`);
+
       // ═══ Expansão de Região → Clientes ═══
-      if (filtros && filtros.regiao && !filtros._regiao_expandida) {
+      // Se o frontend já mandou cod_cliente expandido, NÃO re-expandir
+      if (filtros && filtros.regiao && !filtros._regiao_expandida && (!filtros.cod_cliente || filtros.cod_cliente.length === 0)) {
         try {
           const regiaoResult = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
           if (regiaoResult.rows.length > 0) {
@@ -1169,16 +1250,22 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
         const queryParams = [];
         let paramIdx = 1;
 
-        if (filtros.cod_cliente?.length > 0) {
+        const ccMap = filtros.cliente_centro_map || null;
+        if (ccMap && Object.keys(ccMap).length > 0) {
+          const ccResult = montarWhereClienteCentro(ccMap, paramIdx);
+          wherePartes.push(ccResult.sql);
+          queryParams.push(...ccResult.params);
+          paramIdx = ccResult.nextIdx;
+        } else if (filtros.cod_cliente?.length > 0) {
           const clienteIds = filtros.cod_cliente.map(c => parseInt(c)).filter(c => !isNaN(c));
           if (clienteIds.length > 0) {
             wherePartes.push(`cod_cliente IN (${clienteIds.map(() => `$${paramIdx++}`).join(',')})`);
             queryParams.push(...clienteIds);
           }
-        }
-        if (filtros.centro_custo?.length > 0) {
-          wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
-          queryParams.push(...filtros.centro_custo);
+          if (filtros.centro_custo?.length > 0 && clienteIds.length <= 1) {
+            wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
+            queryParams.push(...filtros.centro_custo);
+          }
         }
         if (filtros.data_inicio && filtros.data_fim) {
           wherePartes.push(`data_solicitado BETWEEN $${paramIdx++} AND $${paramIdx++}`);
