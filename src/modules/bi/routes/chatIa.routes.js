@@ -633,6 +633,20 @@ PERSONALIDADE:
 - NUNCA invente dados. Se não achou, diz "não encontrei dados pra isso no período".
 - NUNCA termine com "posso ajudar?" ou sugestões genéricas. Responde e pronto.
 
+REGRAS DE NEGÓCIO (memorize — são fixas):
+- Cliente 767 (Grupo Comollati): prazo de entrega = 120 minutos (2 horas). Meta de SLA = 95%.
+- Demais clientes: prazo padrão = verificar na tabela bi_prazo_padrao ou nos dados.
+- Meta geral de SLA = 85% (salvo exceções acima).
+- "Dentro do prazo" = campo dentro_prazo = true.
+- "Retorno" = ocorrência com "retorno", "cliente fechado", "cliente ausente", "loja fechada".
+- Faturamento = valor (cliente) - valor_prof (profissional).
+
+REGRAS DE APRESENTAÇÃO:
+- Quando um cliente tiver MÚLTIPLOS centros de custo nos dados, SEMPRE destrinche por centro de custo automaticamente, sem o gestor precisar pedir. Mostre a tabela com todos os centros.
+- Quando mostrar performance de vários clientes, ordene por taxa de prazo (pior primeiro) para destaque dos pontos de atenção.
+- Use emojis de status: ✅ acima da meta, ⚠️ próximo da meta, ❌ abaixo da meta.
+- Quando o gestor pedir "detalhamento" ou "detalhadamente", inclua: entregas, SLA, fora prazo, tempo médio, retornos, E centro de custo quando aplicável.
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║              🚨 REGRA CRÍTICA: SQL OBRIGATÓRIA 🚨               ║
 ║                                                                  ║
@@ -1030,7 +1044,7 @@ Formatação de texto:
       mascarasResult.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
       const nomeDisplay = (cod, nome) => mascaras[String(cod)] || nome || 'Cod ' + cod;
 
-      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia] = await Promise.all([
+      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia, prazosCliente] = await Promise.all([
         // 1. Resumo geral
         pool.query(`SELECT 
           COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
@@ -1126,7 +1140,13 @@ Formatação de texto:
           COUNT(*) as total,
           ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
         FROM bi_entregas WHERE ${WHERE}
-        GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 15`, queryParams)
+        GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 15`, queryParams),
+
+        // 10. Prazos configurados por cliente
+        pool.query(`SELECT pc.cod_cliente, pc.prazo_minutos, m.mascara as nome_display
+          FROM bi_prazos_cliente pc
+          LEFT JOIN bi_mascaras m ON m.cod_cliente = pc.cod_cliente::text
+          ORDER BY pc.cod_cliente`)
       ]);
 
       const rg = resumo.rows[0] || {};
@@ -1176,6 +1196,10 @@ ${porHora.rows.map(h => `  ${String(h.hora).padStart(2, '0')}h: ${h.total} entre
 
 OCORRÊNCIAS / MOTIVOS:
 ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`).join('\n')}
+
+${prazosCliente.rows.length > 0 ? `PRAZOS CONFIGURADOS POR CLIENTE:
+${prazosCliente.rows.map(p => `  ${p.cod_cliente} (${p.nome_display || 'Cod ' + p.cod_cliente}): ${p.prazo_minutos} minutos (${Math.round(p.prazo_minutos/60*10)/10}h)`).join('\n')}
+⚠️ Use estes prazos como referência ao avaliar SLA. Se o prazo é 120min e a taxa é 88%, está ABAIXO da meta de 95%.` : ''}
 `;
 
       console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs`);
