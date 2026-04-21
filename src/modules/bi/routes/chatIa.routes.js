@@ -879,11 +879,216 @@ Formatação de texto:
   }
 
   // ========================================================================
+  //  PRÉ-CARREGAMENTO DE DADOS (chamado ao "Iniciar Conversa")
+  //  Carrega TODOS os dados do período filtrado de uma vez.
+  //  O frontend armazena e envia em cada mensagem como contexto.
+  // ========================================================================
+  router.post('/bi/chat-ia/pre-carregar', async (req, res) => {
+    try {
+      let { filtros } = req.body;
+      if (!filtros) return res.status(400).json({ error: 'Filtros são obrigatórios' });
+
+      // Expansão de região
+      if (filtros.regiao && !filtros._regiao_expandida) {
+        try {
+          const rr = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(filtros.regiao)]);
+          if (rr.rows.length > 0) {
+            const itens = typeof rr.rows[0].clientes === 'string' ? JSON.parse(rr.rows[0].clientes) : rr.rows[0].clientes;
+            if (Array.isArray(itens)) {
+              filtros.cod_cliente = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
+              filtros._regiao_expandida = true;
+            }
+          }
+        } catch (e) {}
+      }
+
+      const wherePartes = ['COALESCE(ponto, 1) >= 2'];
+      const queryParams = [];
+      let paramIdx = 1;
+
+      if (filtros.cod_cliente?.length > 0) {
+        const ids = filtros.cod_cliente.map(c => parseInt(c)).filter(c => !isNaN(c));
+        if (ids.length > 0) {
+          wherePartes.push(`cod_cliente IN (${ids.map(() => `$${paramIdx++}`).join(',')})`);
+          queryParams.push(...ids);
+        }
+      }
+      if (filtros.centro_custo?.length > 0) {
+        wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
+        queryParams.push(...filtros.centro_custo);
+      }
+      if (filtros.data_inicio && filtros.data_fim) {
+        wherePartes.push(`data_solicitado BETWEEN $${paramIdx++} AND $${paramIdx++}`);
+        queryParams.push(filtros.data_inicio, filtros.data_fim);
+      }
+
+      const WHERE = wherePartes.join(' AND ');
+      const t0 = Date.now();
+      console.log(`📊 [Pre-load] WHERE: ${WHERE} | params: ${JSON.stringify(queryParams)}`);
+
+      const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia] = await Promise.all([
+        // 1. Resumo geral
+        pool.query(`SELECT 
+          COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
+          COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+          ROUND(AVG(EXTRACT(EPOCH FROM (data_hora_alocado - data_hora)) / 60) FILTER (WHERE data_hora_alocado IS NOT NULL AND data_hora IS NOT NULL AND data_hora_alocado > data_hora), 0) as tempo_medio_alocacao_min,
+          COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%') as retornos,
+          COUNT(DISTINCT cod_prof) as total_profissionais,
+          MIN(data_solicitado) as data_inicio, MAX(data_solicitado) as data_fim
+        FROM bi_entregas WHERE ${WHERE}`, queryParams),
+
+        // 2. Por cliente (todos)
+        pool.query(`SELECT 
+          cod_cliente, nome_cliente,
+          COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
+          COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+          ROUND(AVG(distancia) FILTER (WHERE distancia > 0), 1) as distancia_media_km,
+          COUNT(DISTINCT cod_prof) as profissionais,
+          COUNT(*) FILTER (WHERE LOWER(ocorrencia) LIKE '%retorno%' OR LOWER(ocorrencia) LIKE '%cliente fechado%' OR LOWER(ocorrencia) LIKE '%cliente ausente%' OR LOWER(ocorrencia) LIKE '%loja fechada%') as retornos
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY cod_cliente, nome_cliente ORDER BY COUNT(*) DESC`, queryParams),
+
+        // 3. Por dia
+        pool.query(`SELECT 
+          data_solicitado as dia,
+          COUNT(DISTINCT os) as total_os, COUNT(*) as total_entregas,
+          COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+          COUNT(DISTINCT cod_prof) as profissionais
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY data_solicitado ORDER BY data_solicitado`, queryParams),
+
+        // 4. Top 30 profissionais
+        pool.query(`SELECT 
+          cod_prof, nome_prof,
+          COUNT(*) as total_entregas,
+          COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min,
+          ROUND(AVG(distancia) FILTER (WHERE distancia > 0), 1) as distancia_media_km
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY cod_prof, nome_prof ORDER BY COUNT(*) DESC LIMIT 30`, queryParams),
+
+        // 5. Por categoria
+        pool.query(`SELECT 
+          COALESCE(categoria, 'Sem categoria') as categoria,
+          COUNT(*) as total, 
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY categoria ORDER BY COUNT(*) DESC`, queryParams),
+
+        // 6. Faturamento
+        pool.query(`WITH fat AS (
+          SELECT DISTINCT ON (os) os, valor, valor_prof
+          FROM bi_entregas WHERE ${WHERE}
+          ORDER BY os, ponto ASC
+        ) SELECT 
+          ROUND(COALESCE(SUM(valor), 0), 2) as valor_total,
+          ROUND(COALESCE(SUM(valor_prof), 0), 2) as valor_prof_total,
+          ROUND(COALESCE(SUM(valor - valor_prof), 0), 2) as faturamento,
+          ROUND(COALESCE(AVG(valor), 0), 2) as ticket_medio
+        FROM fat`, queryParams),
+
+        // 7. Por centro de custo
+        pool.query(`SELECT 
+          cod_cliente, nome_cliente, centro_custo,
+          COUNT(*) as total_entregas,
+          COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo,
+          ROUND(AVG(tempo_execucao_minutos) FILTER (WHERE tempo_execucao_minutos > 0 AND tempo_execucao_minutos < 480), 0) as tempo_medio_min
+        FROM bi_entregas WHERE ${WHERE} AND centro_custo IS NOT NULL
+        GROUP BY cod_cliente, nome_cliente, centro_custo ORDER BY cod_cliente, COUNT(*) DESC LIMIT 60`, queryParams),
+
+        // 8. Por hora do dia
+        pool.query(`SELECT 
+          EXTRACT(HOUR FROM data_hora)::int as hora,
+          COUNT(*) as total
+        FROM bi_entregas WHERE ${WHERE} AND data_hora IS NOT NULL
+        GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, queryParams),
+
+        // 9. Por ocorrência/motivo
+        pool.query(`SELECT 
+          COALESCE(ocorrencia, 'Normal') as ocorrencia,
+          COUNT(*) as total,
+          ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as percentual
+        FROM bi_entregas WHERE ${WHERE}
+        GROUP BY ocorrencia ORDER BY COUNT(*) DESC LIMIT 15`, queryParams)
+      ]);
+
+      const rg = resumo.rows[0] || {};
+      const fat = faturamento.rows[0] || {};
+      const tempo = Date.now() - t0;
+
+      // Montar texto completo
+      const texto = `
+═══════════════════════════════════════════════════════════════
+📊 DADOS COMPLETOS DO PERÍODO (carregados em ${tempo}ms do banco de dados)
+ESTES são os dados REAIS. Use-os para responder QUALQUER pergunta.
+NÃO invente, NÃO arredonde, NÃO altere nenhum número.
+Se a pergunta não pode ser respondida com estes dados, gere SQL.
+═══════════════════════════════════════════════════════════════
+
+PERÍODO: ${rg.data_inicio || 'N/A'} a ${rg.data_fim || 'N/A'}
+
+RESUMO GERAL:
+  Total OS: ${rg.total_os || 0} | Total Entregas: ${rg.total_entregas || 0}
+  Dentro prazo: ${rg.dentro_prazo || 0} | Fora prazo: ${rg.fora_prazo || 0} | Taxa SLA: ${rg.taxa_prazo || 0}%
+  Tempo médio entrega: ${rg.tempo_medio_min || 0} min | Tempo médio alocação: ${rg.tempo_medio_alocacao_min || 0} min
+  Retornos: ${rg.retornos || 0} | Profissionais ativos: ${rg.total_profissionais || 0}
+
+FINANCEIRO:
+  Valor total cliente: R$ ${parseFloat(fat.valor_total || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+  Valor profissional: R$ ${parseFloat(fat.valor_prof_total || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+  Faturamento (lucro): R$ ${parseFloat(fat.faturamento || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+  Ticket médio: R$ ${parseFloat(fat.ticket_medio || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+
+POR CLIENTE (${porCliente.rows.length}):
+${porCliente.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente}: ${c.total_entregas} entregas, OS=${c.total_os}, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min, km=${c.distancia_media_km}, retornos=${c.retornos}, profs=${c.profissionais}`).join('\n')}
+
+EVOLUÇÃO DIÁRIA (${porDia.rows.length} dias):
+${porDia.rows.map(d => `  ${d.dia}: ${d.total_entregas} entregas, OS=${d.total_os}, prazo=${d.taxa_prazo}%, fora=${d.fora_prazo}, tempo=${d.tempo_medio_min}min, profs=${d.profissionais}`).join('\n')}
+
+TOP PROFISSIONAIS (${porProfissional.rows.length}):
+${porProfissional.rows.map(p => `  ${p.cod_prof} - ${p.nome_prof}: ${p.total_entregas} entregas, prazo=${p.taxa_prazo}%, fora=${p.fora_prazo}, tempo=${p.tempo_medio_min}min, km=${p.distancia_media_km}`).join('\n')}
+
+POR CATEGORIA:
+${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
+
+${porCC.rows.length > 0 ? `POR CENTRO DE CUSTO (${porCC.rows.length}):
+${porCC.rows.map(c => `  ${c.cod_cliente} ${c.nome_cliente} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min`).join('\n')}` : ''}
+
+DISTRIBUIÇÃO POR HORA:
+${porHora.rows.map(h => `  ${String(h.hora).padStart(2, '0')}h: ${h.total} entregas`).join('\n')}
+
+OCORRÊNCIAS / MOTIVOS:
+${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`).join('\n')}
+`;
+
+      console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs`);
+      res.json({ success: true, dados_contexto: texto, tempo_ms: tempo, resumo: { total_entregas: rg.total_entregas, total_clientes: porCliente.rows.length, total_dias: porDia.rows.length } });
+
+    } catch (err) {
+      console.error('❌ [Pre-load] Erro:', err.message);
+      res.status(500).json({ error: 'Erro ao pré-carregar dados: ' + err.message });
+    }
+  });
+
+  // ========================================================================
   //  ENDPOINT PRINCIPAL
   // ========================================================================
   router.post('/bi/chat-ia', async (req, res) => {
     try {
-      const { prompt, historico, filtros, conversa_id } = req.body;
+      const { prompt, historico, filtros, conversa_id, dados_contexto } = req.body;
       if (!prompt || prompt.trim().length < 3) return res.status(400).json({ error: 'Prompt deve ter pelo menos 3 caracteres.' });
       if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'GEMINI_API_KEY não configurada.' });
 
@@ -951,19 +1156,25 @@ Formatação de texto:
       }
 
       // ═══════════════════════════════════════════════════════════
-      // ETAPA 0: PRÉ-CARREGAR DADOS REAIS (o segredo da assertividade)
-      // Em vez de pedir ao Gemini pra gerar SQL às cegas, buscamos
-      // os dados ANTES e injetamos no prompt. A IA analisa dados reais.
+      // ETAPA 0: DADOS REAIS
+      // Se o frontend mandou dados_contexto (pré-carregado no "Iniciar"),
+      // usa direto. Senão, faz pré-load rápido como fallback.
       // ═══════════════════════════════════════════════════════════
-      let dadosPreCarregados = '';
-      try {
+      let dadosPreCarregados = dados_contexto || '';
+      
+      if (!dadosPreCarregados) {
+        // Fallback: pré-load rápido (caso o frontend não tenha mandado)
+        try {
         const wherePartes = ['COALESCE(ponto, 1) >= 2'];
         const queryParams = [];
         let paramIdx = 1;
 
         if (filtros.cod_cliente?.length > 0) {
-          wherePartes.push(`cod_cliente IN (${filtros.cod_cliente.map(() => `$${paramIdx++}`).join(',')})`);
-          queryParams.push(...filtros.cod_cliente);
+          const clienteIds = filtros.cod_cliente.map(c => parseInt(c)).filter(c => !isNaN(c));
+          if (clienteIds.length > 0) {
+            wherePartes.push(`cod_cliente IN (${clienteIds.map(() => `$${paramIdx++}`).join(',')})`);
+            queryParams.push(...clienteIds);
+          }
         }
         if (filtros.centro_custo?.length > 0) {
           wherePartes.push(`centro_custo IN (${filtros.centro_custo.map(() => `$${paramIdx++}`).join(',')})`);
@@ -980,9 +1191,12 @@ Formatação de texto:
 
         const WHERE = wherePartes.join(' AND ');
         const t0 = Date.now();
+        
+        console.log(`📊 [Chat IA v6] Pre-load WHERE: ${WHERE}`);
+        console.log(`📊 [Chat IA v6] Pre-load params: ${JSON.stringify(queryParams)}`);
 
-        // Executar 5 queries em paralelo
-        const [resumoGeral, porCliente, porDia, porProfissional, porCategoria, faturamento] = await Promise.all([
+        // Executar 6 queries em paralelo
+        const [resumoGeral, porCliente, porDia, porProfissional, porCategoria, faturamento, porCentroCusto] = await Promise.all([
           // 1. Resumo geral
           pool.query(`SELECT 
             COUNT(DISTINCT os) as total_os,
@@ -1047,7 +1261,17 @@ Formatação de texto:
             ROUND(COALESCE(SUM(valor) - SUM(valor_prof), 0), 2) as faturamento,
             ROUND(COALESCE(AVG(valor), 0), 2) as ticket_medio,
             COUNT(*) as total_os_fat
-          FROM fat`, queryParams)
+          FROM fat`, queryParams),
+
+          // 7. Por centro de custo
+          pool.query(`SELECT 
+            cod_cliente, nome_cliente, centro_custo,
+            COUNT(*) as total_entregas,
+            COUNT(*) FILTER (WHERE dentro_prazo = true) as dentro_prazo,
+            COUNT(*) FILTER (WHERE dentro_prazo = false) as fora_prazo,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 2) as taxa_prazo
+          FROM bi_entregas WHERE ${WHERE} AND centro_custo IS NOT NULL
+          GROUP BY cod_cliente, nome_cliente, centro_custo ORDER BY cod_cliente, COUNT(*) DESC LIMIT 50`, queryParams)
         ]);
 
         // Formatar dados para o prompt
@@ -1080,12 +1304,18 @@ ${porProfissional.rows.map(p => `  ${p.cod_prof} - ${p.nome_prof}: ${p.total_ent
 
 POR CATEGORIA:
 ${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
+
+${porCentroCusto.rows.length > 0 ? `POR CENTRO DE CUSTO (${porCentroCusto.rows.length}):
+${porCentroCusto.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}`).join('\n')}` : ''}
 `;
-        console.log(`📊 [Chat IA v6] Dados pré-carregados em ${Date.now() - t0}ms (${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs)`);
+        console.log(`📊 [Chat IA v6] Dados pré-carregados em ${Date.now() - t0}ms (${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs, ${porCentroCusto.rows.length} CCs, resumo: ${rg.total_entregas} entregas)`);
 
       } catch (preErr) {
         console.error('⚠️ [Chat IA v6] Erro ao pré-carregar dados:', preErr.message);
         dadosPreCarregados = '\n⚠️ Não foi possível pré-carregar dados. Use SQL para buscar.\n';
+      }
+      } else {
+        console.log(`📊 [Chat IA v6] Usando dados pré-carregados do frontend (${dadosPreCarregados.length} chars)`);
       }
 
       // Injetar dados no prompt do usuário
