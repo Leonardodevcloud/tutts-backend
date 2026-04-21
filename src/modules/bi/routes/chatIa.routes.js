@@ -1003,6 +1003,12 @@ Formatação de texto:
       const t0 = Date.now();
       console.log(`📊 [Pre-load] WHERE: ${WHERE} | params: ${JSON.stringify(queryParams)}`);
 
+      // Buscar máscaras de clientes
+      const mascarasResult = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+      const mascaras = {};
+      mascarasResult.rows.forEach(m => { mascaras[String(m.cod_cliente)] = m.mascara; });
+      const nomeDisplay = (cod, nome) => mascaras[String(cod)] || nome || 'Cod ' + cod;
+
       const [resumo, porCliente, porDia, porProfissional, porCategoria, faturamento, porCC, porHora, porOcorrencia] = await Promise.all([
         // 1. Resumo geral
         pool.query(`SELECT 
@@ -1130,7 +1136,7 @@ FINANCEIRO:
   Ticket médio: R$ ${parseFloat(fat.ticket_medio || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
 
 POR CLIENTE (${porCliente.rows.length}):
-${porCliente.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente}: ${c.total_entregas} entregas, OS=${c.total_os}, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min, km=${c.distancia_media_km}, retornos=${c.retornos}, profs=${c.profissionais}`).join('\n')}
+${porCliente.rows.map(c => `  ${c.cod_cliente} - ${nomeDisplay(c.cod_cliente, c.nome_cliente)}: ${c.total_entregas} entregas, OS=${c.total_os}, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min, km=${c.distancia_media_km}, retornos=${c.retornos}, profs=${c.profissionais}`).join('\n')}
 
 EVOLUÇÃO DIÁRIA (${porDia.rows.length} dias):
 ${porDia.rows.map(d => `  ${d.dia}: ${d.total_entregas} entregas, OS=${d.total_os}, prazo=${d.taxa_prazo}%, fora=${d.fora_prazo}, tempo=${d.tempo_medio_min}min, profs=${d.profissionais}`).join('\n')}
@@ -1142,7 +1148,7 @@ POR CATEGORIA:
 ${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
 
 ${porCC.rows.length > 0 ? `POR CENTRO DE CUSTO (${porCC.rows.length}):
-${porCC.rows.map(c => `  ${c.cod_cliente} ${c.nome_cliente} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min`).join('\n')}` : ''}
+${porCC.rows.map(c => `  ${c.cod_cliente} ${nomeDisplay(c.cod_cliente, c.nome_cliente)} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}, tempo=${c.tempo_medio_min}min`).join('\n')}` : ''}
 
 DISTRIBUIÇÃO POR HORA:
 ${porHora.rows.map(h => `  ${String(h.hora).padStart(2, '0')}h: ${h.total} entregas`).join('\n')}
@@ -1282,6 +1288,11 @@ ${porOcorrencia.rows.map(o => `  ${o.ocorrencia}: ${o.total} (${o.percentual}%)`
         console.log(`📊 [Chat IA v6] Pre-load WHERE: ${WHERE}`);
         console.log(`📊 [Chat IA v6] Pre-load params: ${JSON.stringify(queryParams)}`);
 
+        const mascarasRes = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+        const mascarasFb = {};
+        mascarasRes.rows.forEach(m => { mascarasFb[String(m.cod_cliente)] = m.mascara; });
+        const nomeDisplayFb = (cod, nome) => mascarasFb[String(cod)] || nome || 'Cod ' + cod;
+
         // Executar 6 queries em paralelo
         const [resumoGeral, porCliente, porDia, porProfissional, porCategoria, faturamento, porCentroCusto] = await Promise.all([
           // 1. Resumo geral
@@ -1381,7 +1392,7 @@ FINANCEIRO:
   Faturamento (lucro): R$ ${parseFloat(fat.faturamento || 0).toLocaleString('pt-BR')} | Ticket médio: R$ ${parseFloat(fat.ticket_medio || 0).toLocaleString('pt-BR')}
 
 POR CLIENTE (${porCliente.rows.length} clientes):
-${porCliente.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, tempo=${c.tempo_medio_min}min, fora=${c.fora_prazo}, profs=${c.profissionais}`).join('\n')}
+${porCliente.rows.map(c => `  ${c.cod_cliente} - ${nomeDisplayFb(c.cod_cliente, c.nome_cliente)}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, tempo=${c.tempo_medio_min}min, fora=${c.fora_prazo}, profs=${c.profissionais}`).join('\n')}
 
 POR DIA (${porDia.rows.length} dias):
 ${porDia.rows.map(d => `  ${d.dia}: ${d.total_entregas} entregas, prazo=${d.taxa_prazo}%, fora=${d.fora_prazo}, tempo=${d.tempo_medio_min}min`).join('\n')}
@@ -1393,7 +1404,7 @@ POR CATEGORIA:
 ${porCategoria.rows.map(c => `  ${c.categoria}: ${c.total} entregas, prazo=${c.taxa_prazo}%`).join('\n')}
 
 ${porCentroCusto.rows.length > 0 ? `POR CENTRO DE CUSTO (${porCentroCusto.rows.length}):
-${porCentroCusto.rows.map(c => `  ${c.cod_cliente} - ${c.nome_cliente} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}`).join('\n')}` : ''}
+${porCentroCusto.rows.map(c => `  ${c.cod_cliente} - ${nomeDisplayFb(c.cod_cliente, c.nome_cliente)} | ${c.centro_custo}: ${c.total_entregas} entregas, prazo=${c.taxa_prazo}%, fora=${c.fora_prazo}`).join('\n')}` : ''}
 `;
         console.log(`📊 [Chat IA v6] Dados pré-carregados em ${Date.now() - t0}ms (${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs, ${porCentroCusto.rows.length} CCs, resumo: ${rg.total_entregas} entregas)`);
 
