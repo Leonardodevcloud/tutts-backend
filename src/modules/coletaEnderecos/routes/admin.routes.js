@@ -780,6 +780,28 @@ function createColetaAdminRoutes(pool, verificarToken) {
     }
   });
 
+  // Cria um novo endereço na base (admin)
+  router.post('/admin/coleta/enderecos-cadastrados', verificarToken, async (req, res) => {
+    try {
+      const { apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id } = req.body || {};
+      if (!apelido || !endereco_completo) return res.status(400).json({ error: 'Apelido e endereço completo são obrigatórios' });
+
+      const result = await pool.query(`
+        INSERT INTO solicitacao_favoritos (apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id, origem, vezes_usado)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'admin', 0)
+        RETURNING id, apelido
+      `, [apelido, endereco_completo, rua || null, numero || null, bairro || null, cidade || null, uf || null, cep || null, 
+          latitude ? parseFloat(latitude) : null, longitude ? parseFloat(longitude) : null, 
+          grupo_enderecos_id ? parseInt(grupo_enderecos_id) : null]);
+
+      console.log(`✅ [Coleta Admin] Endereço criado: ${result.rows[0].id} - ${apelido}`);
+      res.json({ sucesso: true, endereco: result.rows[0] });
+    } catch (err) {
+      console.error('❌ Erro ao criar endereço:', err);
+      res.status(500).json({ error: 'Erro ao criar', details: err.message });
+    }
+  });
+
   // Exclui um endereço cadastrado.
   // Se veio de coleta (origem motoboy), também limpa o vínculo do pendente.
   router.delete('/admin/coleta/enderecos-cadastrados/:id', verificarToken, async (req, res) => {
