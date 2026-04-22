@@ -171,6 +171,36 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       return res.status(400).json({ error: 'Ordenação automática permite máximo de 20 pontos' });
     }
     
+    // Validação campos obrigatórios por ponto: razão social + número da NF
+    // OBS: pontos antigos migrados (fluxo de retorno, etc) podem não ter razão social,
+    //      então só valido pontos "novos" vindos do frontend, que sempre têm algum campo preenchido.
+    for (let i = 0; i < pontos.length; i++) {
+      const p = pontos[i];
+      const razaoSocialPonto = (p.razao_social || p.nome_fantasia || '').trim();
+      const numeroNotaPonto = (p.numero_nota || '').trim();
+      if (!razaoSocialPonto) {
+        return res.status(400).json({ error: `Razão social / Nome fantasia é obrigatório no ponto ${i + 1}` });
+      }
+      if (!numeroNotaPonto) {
+        return res.status(400).json({ error: `Nº da NF é obrigatório no ponto ${i + 1}` });
+      }
+    }
+    
+    // Monta o texto concatenado (multilinha) que vai em `obs` do payload Tutts.
+    // Inclui apenas campos preenchidos. Essa string ajuda o motoboy a ver tudo mesmo
+    // se o app dele só expuser bem o campo observação. Os campos estruturados
+    // (procurarPor, numeroNota, telefone, complemento) também continuam sendo enviados.
+    const montarObsConcatenada = (p) => {
+      const razaoSocial = (p.razao_social || p.nome_fantasia || '').trim();
+      const linhas = [];
+      if (razaoSocial) linhas.push(razaoSocial);
+      if ((p.complemento || '').trim()) linhas.push(`Compl: ${p.complemento.trim()}`);
+      if ((p.numero_nota || '').trim()) linhas.push(`NF: ${p.numero_nota.trim()}`);
+      if ((p.telefone || '').trim()) linhas.push(`Tel: ${p.telefone.trim()}`);
+      if ((p.observacao || '').trim()) linhas.push(`Obs: ${p.observacao.trim()}`);
+      return linhas.join('\n');
+    };
+    
     // Montar payload para API Tutts - MÍNIMO conforme documentação
     const pontosFormatados = pontos.map(p => {
       // Se rua estiver vazia, usar endereco_completo como fallback
@@ -182,13 +212,16 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         rua = `Coordenadas: ${p.latitude}, ${p.longitude}`;
       }
       
+      const razaoSocial = (p.razao_social || p.nome_fantasia || '').trim();
+      const obsConcatenada = montarObsConcatenada(p);
+      
       const ponto = {
         rua: rua,
         numero: p.numero || '',
         bairro: p.bairro || '',
         cidade: p.cidade || '',
         uf: p.uf || '',
-        obs: p.observacao || ''
+        obs: obsConcatenada
       };
       
       // Adicionar coordenadas se existirem
@@ -197,7 +230,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       if (p.cep) ponto.cep = p.cep;
       if (p.complemento) ponto.complemento = p.complemento;
       if (p.telefone) ponto.telefone = p.telefone;
-      if (p.procurar_por) ponto.procurarPor = p.procurar_por;
+      // procurarPor agora recebe a razão social (campo nativo da Tutts = quem procurar no local)
+      if (razaoSocial) ponto.procurarPor = razaoSocial;
       if (p.numero_nota) ponto.numeroNota = p.numero_nota;
       if (p.codigo_finalizar) ponto.codigoFinalizarEnd = p.codigo_finalizar;
       
@@ -288,16 +322,18 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       const p = pontos[i];
       // Montar endereco_completo se não vier do frontend
       const enderecoCompleto = p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(x => x && x.trim()).join(', ');
+      // razao_social aceita tanto o campo novo quanto o legado nome_fantasia vindo do frontend
+      const razaoSocialPonto = (p.razao_social || p.nome_fantasia || '').trim() || null;
       await pool.query(`
         INSERT INTO solicitacoes_pontos (
           solicitacao_id, ordem, rua, numero, complemento, bairro, cidade, uf, cep,
           latitude, longitude, observacao, telefone, procurar_por, numero_nota, codigo_finalizar,
-          status, endereco_completo
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          status, endereco_completo, razao_social
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       `, [
         solicitacaoId, i + 1, p.rua, p.numero, p.complemento, p.bairro, p.cidade, p.uf, p.cep,
         p.latitude, p.longitude, p.observacao, p.telefone, p.procurar_por, p.numero_nota, p.codigo_finalizar,
-        'pendente', enderecoCompleto
+        'pendente', enderecoCompleto, razaoSocialPonto
       ]);
     }
     
