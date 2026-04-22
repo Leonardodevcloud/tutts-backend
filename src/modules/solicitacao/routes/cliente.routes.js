@@ -1353,32 +1353,40 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
 // Buscar endereços salvos (inclui endereços do grupo se o cliente pertencer a um)
 router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q, pagina } = req.query;
     const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     const clienteId = req.clienteSolicitacao.id;
     
-    console.log(`📚 [Endereços] Busca: cliente=${clienteId} (${req.clienteSolicitacao.nome}) | grupo=${grupoId || 'NENHUM'} | q="${q || ''}"`);
+    // Modo paginado: ativado explicitamente via ?pagina=N. Sem o param, mantém
+    // retrocompatibilidade (retorna array, como o drawer da aba Nova espera).
+    const modoPaginado = pagina !== undefined;
+    const paginaNum = Math.max(1, parseInt(pagina) || 1);
+    const limiteNum = Math.min(500, Math.max(1, parseInt(req.query.limite) || 100));
+    const offset = (paginaNum - 1) * limiteNum;
+    
+    // Limite efetivo: busca por texto usa teto fixo de 50 (suficiente pra filtro);
+    // listagem paginada usa o `limite` da query.
+    const temBusca = q && q.trim();
+    const limiteEfetivo = temBusca ? 50 : limiteNum;
+    
+    console.log(`📚 [Endereços] Busca: cliente=${clienteId} (${req.clienteSolicitacao.nome}) | grupo=${grupoId || 'NENHUM'} | q="${q || ''}" | pagina=${modoPaginado ? paginaNum : 'N/A'} | limite=${limiteEfetivo}`);
     
     // Scope: se está em grupo, vê todos do grupo + individuais próprios (legado sem grupo)
     //        se não está em grupo, vê só os individuais próprios
-    let query, params;
+    let whereBase, params;
     if (grupoId) {
-      query = `
-        SELECT * FROM solicitacao_favoritos 
-        WHERE (grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL))
-      `;
+      whereBase = '(grupo_enderecos_id = $1 OR (cliente_id = $2 AND grupo_enderecos_id IS NULL))';
       params = [grupoId, req.clienteSolicitacao.id];
     } else {
-      query = `
-        SELECT * FROM solicitacao_favoritos 
-        WHERE cliente_id = $1 AND grupo_enderecos_id IS NULL
-      `;
+      whereBase = 'cliente_id = $1 AND grupo_enderecos_id IS NULL';
       params = [req.clienteSolicitacao.id];
     }
     
-    if (q && q.trim()) {
+    // Cláusula de filtro por texto (se houver)
+    let whereBusca = '';
+    if (temBusca) {
       const paramIdx = params.length + 1;
-      query += ` AND (
+      whereBusca = ` AND (
         apelido ILIKE $${paramIdx} OR 
         endereco_completo ILIKE $${paramIdx} OR 
         rua ILIKE $${paramIdx} OR 
@@ -1388,8 +1396,38 @@ router.get('/solicitacao/enderecos-salvos/buscar', verificarTokenSolicitacao, as
       params.push(`%${q.trim()}%`);
     }
     
-    query += ` ORDER BY vezes_usado DESC, ultimo_uso DESC LIMIT 50`;
+    // ORDER BY com desempate estável (id DESC) é crítico pra paginação:
+    // sem ele, registros com mesmo vezes_usado podem repetir/pular entre páginas.
+    const orderBy = ` ORDER BY vezes_usado DESC, ultimo_uso DESC NULLS LAST, id DESC`;
     
+    // Modo paginado sem busca: faz COUNT + SELECT com OFFSET na mesma round-trip
+    if (modoPaginado && !temBusca) {
+      const countQuery = `SELECT COUNT(*)::int AS total FROM solicitacao_favoritos WHERE ${whereBase}`;
+      const dataQuery = `SELECT * FROM solicitacao_favoritos WHERE ${whereBase}${orderBy} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      const dataParams = [...params, limiteEfetivo, offset];
+      
+      const [countResult, dataResult] = await Promise.all([
+        pool.query(countQuery, params),
+        pool.query(dataQuery, dataParams)
+      ]);
+      
+      const total = countResult.rows[0].total;
+      const temMais = (offset + dataResult.rows.length) < total;
+      
+      console.log(`📚 [Endereços] Resultado paginado: ${dataResult.rows.length}/${total} | pagina=${paginaNum} | tem_mais=${temMais}`);
+      return res.json({
+        enderecos: dataResult.rows,
+        total,
+        pagina: paginaNum,
+        limite: limiteEfetivo,
+        tem_mais: temMais
+      });
+    }
+    
+    // Caminhos legados: busca por texto OU chamada sem params
+    // Ambos retornam array puro (retrocompatibilidade com drawer aba Nova e
+    // qualquer chamada antiga de carregarTodosEnderecos sem params).
+    const query = `SELECT * FROM solicitacao_favoritos WHERE ${whereBase}${whereBusca}${orderBy} LIMIT ${limiteEfetivo}`;
     const result = await pool.query(query, params);
     console.log(`📚 [Endereços] Resultado: ${result.rows.length} endereço(s) encontrado(s) | scope=${grupoId ? 'grupo_' + grupoId : 'individual_' + clienteId}`);
     res.json(result.rows);
