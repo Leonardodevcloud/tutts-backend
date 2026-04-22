@@ -211,7 +211,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       centroCusto: centro_custo || req.clienteSolicitacao.centro_custo_padrao || req.clienteSolicitacao.nome || 'Central',
       pontos: pontosFormatados,
       retorno: retorno ? 'S' : 'N',
-      formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F'
+      formaPagamento: forma_pagamento || req.clienteSolicitacao.forma_pagamento_padrao || 'F',
+      UrlRetorno: 'https://tutts-backend-production.up.railway.app/api/webhook/tutts'
     };
     
     // Adicionar campos opcionais apenas se tiverem valor
@@ -1085,6 +1086,9 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
       return res.status(400).json({ error: 'Resposta inválida da Tutts' });
     }
     
+    const osRetornadas = Object.keys(dataTutts.Sucesso);
+    console.log(`📥 [SYNC-HIST] Tutts retornou ${osRetornadas.length} de ${listaOS.length} OS pedidas`);
+    
     const mapearStatus = (s) => {
       switch (s) {
         case 'SP': return 'enviado';
@@ -1101,13 +1105,20 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
     
     for (const os of listaOS) {
       const dadosOS = dataTutts.Sucesso[os];
-      if (!dadosOS) continue;
+      if (!dadosOS) { console.log(`⚠️ [SYNC-HIST] OS ${os}: sem dados na resposta da Tutts`); continue; }
       
       const novoStatus = mapearStatus(dadosOS.status);
-      if (!novoStatus) continue;
+      if (!novoStatus) { console.log(`⚠️ [SYNC-HIST] OS ${os}: status desconhecido "${dadosOS.status}"`); continue; }
       
       const corrida = corridas.rows.find(c => String(c.tutts_os_numero) === String(os));
       if (!corrida) continue;
+      
+      const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+      const temPontos = Array.isArray(dadosOS.pontos) && dadosOS.pontos.length > 0;
+      const pontosComFoto = temPontos ? dadosOS.pontos.filter(p => p.statusPonto?.protocolo?.length > 0).length : 0;
+      const pontosComChegada = temPontos ? dadosOS.pontos.filter(p => p.statusPonto?.chegada).length : 0;
+      
+      console.log(`📋 [SYNC-HIST] OS ${os}: status=${novoStatus} prof=${dadosProf.nome||'N/A'} pontos=${temPontos ? dadosOS.pontos.length : 0} c/foto=${pontosComFoto} c/chegada=${pontosComChegada}`);
       
       // Atualizar pontos
       if (Array.isArray(dadosOS.pontos)) {
@@ -1159,7 +1170,6 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
       }
       
       // Atualizar corrida
-      const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
       await pool.query(`
         UPDATE solicitacoes_corrida SET
           status = $1,
@@ -1184,8 +1194,8 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
       atualizadas++;
     }
     
-    console.log(`✅ [SYNC-HIST] ${atualizadas}/${listaOS.length} corridas atualizadas`);
-    res.json({ sucesso: true, atualizadas, total_verificadas: listaOS.length });
+    console.log(`✅ [SYNC-HIST] ${atualizadas}/${listaOS.length} corridas atualizadas (Tutts retornou ${osRetornadas.length} OS)`);
+    res.json({ sucesso: true, atualizadas, total_verificadas: listaOS.length, total_retornadas_tutts: osRetornadas.length });
   } catch (err) {
     console.error('❌ Erro ao sincronizar histórico:', err);
     res.status(500).json({ error: 'Erro ao sincronizar histórico' });
