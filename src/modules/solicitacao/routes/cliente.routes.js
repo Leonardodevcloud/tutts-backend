@@ -1051,7 +1051,11 @@ router.post('/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, r
 // Sincronizar histórico (corridas finalizadas/canceladas que podem ter dados incompletos)
 router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { limite = 50, apenasIncompletas = true } = req.body || {};
+    // Limite máximo: 500 corridas por chamada (10 lotes de 50 = ~20s). Acima disso corre risco
+    // de timeout de proxy. Default 50 pra não mudar comportamento de chamadas sem parâmetro.
+    const limiteBruto = parseInt((req.body || {}).limite) || 50;
+    const limite = Math.min(500, Math.max(1, limiteBruto));
+    const apenasIncompletas = (req.body || {}).apenasIncompletas !== false;
     
     // Buscar corridas recentes do cliente que tem OS na Tutts
     let query = `
@@ -1098,26 +1102,52 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
     const listaOS = corridas.rows.map(c => c.tutts_os_numero).filter(Boolean);
     console.log(`🔄 [SYNC-HIST] Sincronizando ${listaOS.length} corridas para cliente ${codCliente}`);
     
-    // Chamar API Tutts
-    const respTutts = await fetch('https://tutts.com.br/integracao', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: tokenStatus, codCliente: codCliente, servicos: listaOS })
-    });
-    
-    const dataTutts = await respTutts.json();
-    
-    if (dataTutts.Erro) {
-      console.error('❌ [SYNC-HIST] Erro da Tutts:', dataTutts.Erro);
-      return res.status(400).json({ error: dataTutts.Erro });
+    // A API da Tutts rejeita requisições com 100+ OS ("Desculpe, só é possível buscar até 100
+    // serviços por vez."). Pra não bater nesse limite e ainda deixar margem de segurança,
+    // fazemos chamadas em lotes de 50 OS — sequencial pra evitar rate limit por frequência.
+    const LOTE_SIZE = 50;
+    const lotes = [];
+    for (let i = 0; i < listaOS.length; i += LOTE_SIZE) {
+      lotes.push(listaOS.slice(i, i + LOTE_SIZE));
     }
     
-    if (!dataTutts.Sucesso) {
-      return res.status(400).json({ error: 'Resposta inválida da Tutts' });
+    const resultadosPorOS = {};
+    const errosLotes = [];
+    
+    for (let idx = 0; idx < lotes.length; idx++) {
+      const lote = lotes[idx];
+      console.log(`🔄 [SYNC-HIST] Lote ${idx + 1}/${lotes.length}: consultando ${lote.length} OS`);
+      try {
+        const respTutts = await fetch('https://tutts.com.br/integracao', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: tokenStatus, codCliente: codCliente, servicos: lote })
+        });
+        const dataTutts = await respTutts.json();
+        
+        if (dataTutts.Erro) {
+          console.error(`❌ [SYNC-HIST] Lote ${idx + 1} erro Tutts:`, dataTutts.Erro);
+          errosLotes.push({ lote: idx + 1, erro: dataTutts.Erro });
+          continue;
+        }
+        if (dataTutts.Sucesso) {
+          // Agrega resultados de todos os lotes num único map { os_numero: dadosOS }
+          Object.assign(resultadosPorOS, dataTutts.Sucesso);
+        }
+      } catch (errLote) {
+        console.error(`❌ [SYNC-HIST] Lote ${idx + 1} exceção:`, errLote.message);
+        errosLotes.push({ lote: idx + 1, erro: errLote.message });
+      }
     }
     
-    const osRetornadas = Object.keys(dataTutts.Sucesso);
-    console.log(`📥 [SYNC-HIST] Tutts retornou ${osRetornadas.length} de ${listaOS.length} OS pedidas`);
+    // Se TODOS os lotes falharam, devolve erro. Se pelo menos um deu certo, segue o processamento
+    // parcial e reporta os erros no retorno.
+    if (errosLotes.length === lotes.length && lotes.length > 0) {
+      return res.status(400).json({ error: `Falha na Tutts: ${errosLotes[0].erro}` });
+    }
+    
+    const osRetornadas = Object.keys(resultadosPorOS);
+    console.log(`📥 [SYNC-HIST] Tutts retornou ${osRetornadas.length} de ${listaOS.length} OS pedidas em ${lotes.length} lote(s)${errosLotes.length > 0 ? ` (${errosLotes.length} lote(s) com erro)` : ''}`);
     
     const mapearStatus = (s) => {
       switch (s) {
@@ -1134,7 +1164,7 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
     let atualizadas = 0;
     
     for (const os of listaOS) {
-      const dadosOS = dataTutts.Sucesso[os];
+      const dadosOS = resultadosPorOS[os];
       if (!dadosOS) { console.log(`⚠️ [SYNC-HIST] OS ${os}: sem dados na resposta da Tutts`); continue; }
       
       const novoStatus = mapearStatus(dadosOS.status);
