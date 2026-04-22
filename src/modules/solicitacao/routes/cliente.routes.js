@@ -778,35 +778,29 @@ router.post('/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, r
           const sp = ponto.statusPonto || {};
           console.log(`🕐 [SYNC] OS ${os} Ponto ${pontoNumero}: ${pontoStatus} | chegada=${sp.chegada || 'NULL'} | saida=${sp.saida || 'NULL'}`);
           try {
+            const chegadaTs = sp.chegada || null;
+            const saidaTs = pontoStatus === 'finalizado' ? (sp.saida || null) : null;
+            const motivoTxt = sp.motivo || sp.ocorrencia || null;
+            const fotosTxt = sp.protocolo?.length ? JSON.stringify(sp.protocolo) : null;
+            const assinTxt = sp.assinatura?.length ? JSON.stringify(sp.assinatura) : null;
             await pool.query(`
               UPDATE solicitacoes_pontos SET
-                status = $1,
+                status = $1::text,
                 status_atualizado_em = CURRENT_TIMESTAMP,
-                data_chegada = CASE 
-                  WHEN $2::timestamp IS NOT NULL THEN $2::timestamp
-                  WHEN $1 IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE data_chegada 
-                END,
-                data_coletado = CASE
-                  WHEN $1 = 'coletado' AND data_coletado IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE data_coletado
-                END,
-                data_finalizado = CASE 
-                  WHEN $3::timestamp IS NOT NULL THEN $3::timestamp
-                  WHEN $1 = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE data_finalizado 
-                END,
-                motivo_descricao = COALESCE($4, motivo_descricao),
+                data_chegada = COALESCE($2::timestamp, data_chegada, CASE WHEN $1::text IN ('chegou','coletado','finalizado') THEN CURRENT_TIMESTAMP ELSE NULL END),
+                data_coletado = COALESCE(data_coletado, CASE WHEN $1::text = 'coletado' THEN CURRENT_TIMESTAMP ELSE NULL END),
+                data_finalizado = COALESCE($3::timestamp, data_finalizado, CASE WHEN $1::text = 'finalizado' THEN CURRENT_TIMESTAMP ELSE NULL END),
+                motivo_descricao = COALESCE($4::text, motivo_descricao),
                 fotos = COALESCE($5::jsonb, fotos),
                 assinatura = COALESCE($6::jsonb, assinatura)
               WHERE solicitacao_id = $7 AND ordem = $8
             `, [
               pontoStatus,
-              sp.chegada || null,
-              pontoStatus === 'finalizado' ? (sp.saida || null) : null,
-              sp.motivo || sp.ocorrencia || null,
-              sp.protocolo?.length ? JSON.stringify(sp.protocolo) : null,
-              sp.assinatura?.length ? JSON.stringify(sp.assinatura) : null,
+              chegadaTs,
+              saidaTs,
+              motivoTxt,
+              fotosTxt,
+              assinTxt,
               corrida.id,
               pontoNumero
             ]);
@@ -1135,28 +1129,22 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
           
           const sp = ponto.statusPonto || {};
           try {
+            const chegadaTs2 = sp.chegada || null;
+            const saidaTs2 = pontoStatus === 'finalizado' ? (sp.saida || null) : null;
             await pool.query(`
               UPDATE solicitacoes_pontos SET
-                status = $1,
+                status = $1::text,
                 status_atualizado_em = CURRENT_TIMESTAMP,
-                data_chegada = CASE 
-                  WHEN $2::timestamp IS NOT NULL THEN $2::timestamp
-                  WHEN $1 IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE data_chegada 
-                END,
-                data_finalizado = CASE 
-                  WHEN $3::timestamp IS NOT NULL THEN $3::timestamp
-                  WHEN $1 = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE data_finalizado 
-                END,
-                motivo_descricao = COALESCE($4, motivo_descricao),
+                data_chegada = COALESCE($2::timestamp, data_chegada, CASE WHEN $1::text IN ('chegou','coletado','finalizado') THEN CURRENT_TIMESTAMP ELSE NULL END),
+                data_finalizado = COALESCE($3::timestamp, data_finalizado, CASE WHEN $1::text = 'finalizado' THEN CURRENT_TIMESTAMP ELSE NULL END),
+                motivo_descricao = COALESCE($4::text, motivo_descricao),
                 fotos = COALESCE($5::jsonb, fotos),
                 assinatura = COALESCE($6::jsonb, assinatura)
               WHERE solicitacao_id = $7 AND ordem = $8
             `, [
               pontoStatus,
-              sp.chegada || null,
-              pontoStatus === 'finalizado' ? (sp.saida || null) : null,
+              chegadaTs2,
+              saidaTs2,
               sp.motivo || sp.ocorrencia || null,
               sp.protocolo?.length ? JSON.stringify(sp.protocolo) : null,
               sp.assinatura?.length ? JSON.stringify(sp.assinatura) : null,
