@@ -188,19 +188,20 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       }
     }
     
-    // Monta o texto concatenado (multilinha) que vai em `obs` do payload Tutts.
-    // Inclui apenas campos preenchidos. Essa string ajuda o motoboy a ver tudo mesmo
-    // se o app dele só expuser bem o campo observação. Os campos estruturados
-    // (procurarPor, numeroNota, telefone, complemento) também continuam sendo enviados.
-    const montarObsConcatenada = (p) => {
+    // Monta o texto inline (com prefixos e vírgula como separador) que vai em `obs` do payload Tutts.
+    // Formato solicitado pelo cliente pra melhor legibilidade no app do motoboy, já que quebras
+    // de linha não são renderizadas pelo sistema. Exemplo:
+    //   NOME FANTASIA: LBC LTDA, COMPLEMENTO: Sala 302, NF: 12345, OBS: Deixar na portaria, TEL: 71999998888
+    // Só inclui campos preenchidos.
+    const montarObsInline = (p) => {
       const razaoSocial = (p.razao_social || p.nome_fantasia || '').trim();
-      const linhas = [];
-      if (razaoSocial) linhas.push(razaoSocial);
-      if ((p.complemento || '').trim()) linhas.push(`Compl: ${p.complemento.trim()}`);
-      if ((p.numero_nota || '').trim()) linhas.push(`NF: ${p.numero_nota.trim()}`);
-      if ((p.telefone || '').trim()) linhas.push(`Tel: ${p.telefone.trim()}`);
-      if ((p.observacao || '').trim()) linhas.push(`Obs: ${p.observacao.trim()}`);
-      return linhas.join('\n');
+      const partes = [];
+      if (razaoSocial) partes.push(`NOME FANTASIA: ${razaoSocial}`);
+      if ((p.complemento || '').trim()) partes.push(`COMPLEMENTO: ${p.complemento.trim()}`);
+      if ((p.numero_nota || '').trim()) partes.push(`NF: ${p.numero_nota.trim()}`);
+      if ((p.observacao || '').trim()) partes.push(`OBS: ${p.observacao.trim()}`);
+      if ((p.telefone || '').trim()) partes.push(`TEL: ${p.telefone.trim()}`);
+      return partes.join(', ');
     };
     
     // Montar payload para API Tutts - MÍNIMO conforme documentação
@@ -214,8 +215,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         rua = `Coordenadas: ${p.latitude}, ${p.longitude}`;
       }
       
-      const razaoSocial = (p.razao_social || p.nome_fantasia || '').trim();
-      const obsConcatenada = montarObsConcatenada(p);
+      const obsInline = montarObsInline(p);
       
       const ponto = {
         rua: rua,
@@ -223,18 +223,16 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         bairro: p.bairro || '',
         cidade: p.cidade || '',
         uf: p.uf || '',
-        obs: obsConcatenada
+        obs: obsInline
       };
       
       // Adicionar coordenadas se existirem
       if (p.latitude) ponto.la = String(p.latitude);
       if (p.longitude) ponto.lo = String(p.longitude);
       if (p.cep) ponto.cep = p.cep;
-      if (p.complemento) ponto.complemento = p.complemento;
-      if (p.telefone) ponto.telefone = p.telefone;
-      // procurarPor agora recebe a razão social (campo nativo da Tutts = quem procurar no local)
-      if (razaoSocial) ponto.procurarPor = razaoSocial;
-      if (p.numero_nota) ponto.numeroNota = p.numero_nota;
+      // IMPORTANTE: procurarPor, numeroNota, telefone e complemento NÃO são enviados
+      // como campos estruturados, pois todos já vão concatenados em `obs` com prefixos.
+      // Enviar duplicaria a informação no app do motoboy.
       if (p.codigo_finalizar) ponto.codigoFinalizarEnd = p.codigo_finalizar;
       
       return ponto;
