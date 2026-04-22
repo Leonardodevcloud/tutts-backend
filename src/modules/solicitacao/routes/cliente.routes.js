@@ -1465,15 +1465,13 @@ router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, asy
     const { apelido, complemento, observacao_padrao, telefone_padrao, procurar_por_padrao } = req.body;
     const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
     
-    // Verificar autorização: próprio ou mesmo grupo
-    const autoCheck = grupoId
-      ? 'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))'
-      : 'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL';
-    const autoParams = grupoId ? [id, grupoId, req.clienteSolicitacao.id] : [id, req.clienteSolicitacao.id];
+    // Verificar autorização: apenas o criador pode editar
+    const autoCheck = 'SELECT id FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2';
+    const autoParams = [id, req.clienteSolicitacao.id];
     
     const existe = await pool.query(autoCheck, autoParams);
     if (existe.rows.length === 0) {
-      return res.status(404).json({ error: 'Endereço não encontrado' });
+      return res.status(403).json({ error: 'Você só pode editar endereços que você cadastrou' });
     }
     
     await pool.query(`
@@ -1503,20 +1501,13 @@ router.patch('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, asy
 // Deletar endereço salvo (qualquer membro do grupo pode deletar endereços do grupo)
 router.delete('/solicitacao/enderecos-salvos/:id', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const grupoId = req.clienteSolicitacao.grupo_enderecos_id;
-    
-    if (grupoId) {
-      await pool.query(
-        `DELETE FROM solicitacao_favoritos 
-         WHERE id = $1 AND (grupo_enderecos_id = $2 OR (cliente_id = $3 AND grupo_enderecos_id IS NULL))`,
-        [req.params.id, grupoId, req.clienteSolicitacao.id]
-      );
-    } else {
-      await pool.query(
-        `DELETE FROM solicitacao_favoritos 
-         WHERE id = $1 AND cliente_id = $2 AND grupo_enderecos_id IS NULL`,
-        [req.params.id, req.clienteSolicitacao.id]
-      );
+    // Apenas o criador pode excluir
+    const result = await pool.query(
+      'DELETE FROM solicitacao_favoritos WHERE id = $1 AND cliente_id = $2 RETURNING id',
+      [req.params.id, req.clienteSolicitacao.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(403).json({ error: 'Você só pode excluir endereços que você cadastrou' });
     }
     res.json({ sucesso: true });
   } catch (err) {
