@@ -131,9 +131,23 @@ app.get('/api/version', (req, res) => {
   res.json({ version: env.SERVER_VERSION, timestamp: new Date().toISOString() });
 });
 
-// 🔒 Webhook security (before routes)
-app.use("/api/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
-app.use("/api/solicitacao/webhook/tutts", webhookBasicValidation, verificarWebhookSignature);
+// Health check para testar se a URL do webhook está acessível (GET sem auth)
+app.get('/api/webhook/tutts', (req, res) => {
+  res.json({ status: 'ok', mensagem: 'Webhook Tutts ativo', timestamp: new Date().toISOString() });
+});
+app.get('/api/solicitacao/webhook/tutts', (req, res) => {
+  res.json({ status: 'ok', mensagem: 'Webhook Solicitação Tutts ativo', timestamp: new Date().toISOString() });
+});
+
+// 🔒 Webhook security (POST only — Tutts não envia HMAC signature)
+app.post("/api/webhook/tutts", webhookBasicValidation, (req, res, next) => {
+  console.log(`📨 [WEBHOOK] Tutts POST recebido de ${req.ip} | OS: ${req.body?.ID || 'N/A'} | status: ${req.body?.Status?.ID ?? 'N/A'}`);
+  next();
+});
+app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res, next) => {
+  console.log(`📨 [WEBHOOK] Tutts POST recebido (v2) de ${req.ip} | OS: ${req.body?.ID || 'N/A'}`);
+  next();
+});
 
 // 🪝 Webhooks Uber Direct — montados ANTES de qualquer auth global
 // 🔒 SECURITY FIX: middlewares globais como `app.use('/api', verificarToken, ...)`
