@@ -173,6 +173,36 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_clientes_solic_grupo ON clientes_solicitacao(grupo_enderecos_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_webhook_os ON solicitacao_webhooks_log(tutts_os_numero)`).catch(() => {});
     console.log('✅ Índices solicitação criados');
+
+    // Migration: colunas usadas pelo webhook handler que faltam na tabela original
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS dados_pontos JSONB`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS status_codigo DECIMAL(5,2)`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS status_atualizado_em TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS profissional_cpf VARCHAR(20)`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS profissional_codigo VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS rota_profissional JSONB`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS cor_veiculo VARCHAR(50)`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS modelo_veiculo VARCHAR(100)`).catch(() => {});
+    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS ultima_atualizacao TIMESTAMP`).catch(() => {});
+    console.log('✅ Colunas webhook solicitacoes_corrida verificadas');
+
+    // Tabela de logs detalhados do webhook (handler /api/webhook/tutts)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS webhook_tutts_logs (
+        id SERIAL PRIMARY KEY,
+        os_numero VARCHAR(100),
+        solicitacao_id INT,
+        status_id DECIMAL(5,2),
+        status_descricao TEXT,
+        profissional_nome VARCHAR(255),
+        ponto_numero INT,
+        ponto_status VARCHAR(50),
+        payload_completo JSONB,
+        criado_em TIMESTAMP DEFAULT NOW()
+      )
+    `).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_webhook_logs_os ON webhook_tutts_logs(os_numero)`).catch(() => {});
+    console.log('✅ Tabela webhook_tutts_logs verificada');
 }
 
 module.exports = { initSolicitacaoTables };
