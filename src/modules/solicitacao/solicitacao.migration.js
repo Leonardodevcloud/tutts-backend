@@ -174,6 +174,11 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_webhook_os ON solicitacao_webhooks_log(tutts_os_numero)`).catch(() => {});
     console.log('✅ Índices solicitação criados');
 
+    // Migration: razão social / nome fantasia em solicitacoes_pontos (novo campo obrigatório no form)
+    // Corridas antigas permanecem com procurar_por preenchido e razao_social nula — fallback é tratado no frontend.
+    await pool.query(`ALTER TABLE solicitacoes_pontos ADD COLUMN IF NOT EXISTS razao_social VARCHAR(500)`).catch(e => console.log('⚠️ razao_social em solicitacoes_pontos:', e.message));
+    console.log('✅ Coluna razao_social em solicitacoes_pontos verificada');
+
     // Migration: colunas usadas pelo webhook handler que faltam na tabela original
     await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS dados_pontos JSONB`).catch(() => {});
     await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS status_codigo DECIMAL(5,2)`).catch(() => {});
