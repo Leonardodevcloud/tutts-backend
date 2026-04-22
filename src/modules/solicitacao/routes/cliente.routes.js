@@ -172,9 +172,11 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     }
     
     // Validação campos obrigatórios por ponto: razão social + número da NF
-    // OBS: pontos antigos migrados (fluxo de retorno, etc) podem não ter razão social,
-    //      então só valido pontos "novos" vindos do frontend, que sempre têm algum campo preenchido.
+    // IMPORTANTE: o ponto 1 é o de coleta (estabelecimento do próprio cliente),
+    // então pulamos a validação — não faz sentido exigir razão social de si mesmo.
+    // Essa convenção (ordem 1 = coleta) segue o que o frontend já pratica.
     for (let i = 0; i < pontos.length; i++) {
+      if (i === 0) continue; // coleta: sem validação
       const p = pontos[i];
       const razaoSocialPonto = (p.razao_social || p.nome_fantasia || '').trim();
       const numeroNotaPonto = (p.numero_nota || '').trim();
