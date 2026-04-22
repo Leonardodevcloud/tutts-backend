@@ -1295,16 +1295,26 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     }
     
     // Verificar duplicatas: se tem grupo, busca no grupo inteiro; senão só no cliente
-    const scopeClausula = grupoId 
-      ? '(grupo_enderecos_id = $1 OR cliente_id = $6)' 
-      : '(cliente_id = $6 AND grupo_enderecos_id IS NULL)';
+    // IMPORTANTE: os placeholders precisam refletir APENAS os parâmetros efetivamente usados
+    // em cada ramo. Passar um parâmetro null que não aparece na query causa erro 42P18
+    // ("could not determine data type of parameter") no PostgreSQL — foi o bug que travava
+    // clientes sem grupo (grupoId null) em produção.
+    let scopeClausula, scopeParams;
+    if (grupoId) {
+      scopeClausula = '(grupo_enderecos_id = $1 OR cliente_id = $2)';
+      scopeParams = [grupoId, req.clienteSolicitacao.id];
+    } else {
+      scopeClausula = '(cliente_id = $1 AND grupo_enderecos_id IS NULL)';
+      scopeParams = [req.clienteSolicitacao.id];
+    }
+    const base = scopeParams.length; // 2 se tem grupo, 1 se não
     const existe = await pool.query(
       `SELECT id FROM solicitacao_favoritos 
        WHERE ${scopeClausula} AND (
-         (endereco_completo = $2 AND $2 IS NOT NULL) OR 
-         (rua = $3 AND numero = $4 AND cidade = $5)
+         (endereco_completo = $${base + 1} AND $${base + 1} IS NOT NULL) OR 
+         (rua = $${base + 2} AND numero = $${base + 3} AND cidade = $${base + 4})
        )`,
-      [grupoId, endereco_completo, rua, numero, cidade, req.clienteSolicitacao.id]
+      [...scopeParams, endereco_completo, rua, numero, cidade]
     );
     
     if (existe.rows.length > 0) {
