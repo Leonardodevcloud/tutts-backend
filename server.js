@@ -140,13 +140,156 @@ app.get('/api/solicitacao/webhook/tutts', (req, res) => {
 });
 
 // 🔒 Webhook security (POST only — Tutts não envia HMAC signature)
-app.post("/api/webhook/tutts", webhookBasicValidation, (req, res, next) => {
-  console.log(`📨 [WEBHOOK] Tutts POST recebido de ${req.ip} | OS: ${req.body?.ID || 'N/A'} | status: ${req.body?.Status?.ID ?? 'N/A'}`);
-  next();
+// Handler COMPLETO direto no server.js — não depende do router/middleware chain
+app.post("/api/webhook/tutts", webhookBasicValidation, async (req, res) => {
+  try {
+    const payload = req.body;
+    const osNumero = payload.ID;
+    const status = payload.Status;
+    const urlRastreamento = payload.UrlRastreamento;
+    const statusEndereco = payload.statusEndereco;
+    
+    console.log(`📨 [WEBHOOK] OS: ${osNumero} | status.ID: ${status?.ID ?? 'N/A'} | ponto: ${statusEndereco?.endereco?.ponto || 'N/A'} | codigo: ${statusEndereco?.codigo || 'N/A'}`);
+    
+    if (!osNumero) {
+      return res.status(200).json({ recebido: true, mensagem: 'Payload sem ID' });
+    }
+    
+    const solicitacao = await pool.query(
+      'SELECT id, status, dados_pontos FROM solicitacoes_corrida WHERE tutts_os_numero = $1',
+      [osNumero]
+    );
+    
+    if (solicitacao.rows.length === 0) {
+      console.log(`⚠️ [WEBHOOK] OS ${osNumero} não encontrada no sistema`);
+      return res.status(200).json({ recebido: true, mensagem: 'OS não encontrada' });
+    }
+    
+    const solicitacaoId = solicitacao.rows[0].id;
+    let dadosPontos = solicitacao.rows[0].dados_pontos || [];
+    if (typeof dadosPontos === 'string') dadosPontos = JSON.parse(dadosPontos);
+    
+    // Mapear status
+    let novoStatus = solicitacao.rows[0].status;
+    let statusDescricao = '';
+    let statusId = status?.ID !== undefined ? parseFloat(status.ID) : null;
+    
+    if (statusId !== null) {
+      if (statusId === 0) { novoStatus = 'aceito'; statusDescricao = 'Profissional recebeu a OS'; }
+      else if (statusId === 0.5) { novoStatus = 'em_andamento'; statusDescricao = 'Chegou no ponto'; }
+      else if (statusId === 0.75) { novoStatus = 'em_andamento'; statusDescricao = 'Coleta confirmada'; }
+      else if (statusId === 1) { novoStatus = 'em_andamento'; statusDescricao = 'Ponto finalizado'; }
+      else if (statusId === 2) { novoStatus = 'finalizado'; statusDescricao = 'OS finalizada'; }
+    }
+    
+    // Dados do profissional
+    const profNome = status?.Nome || null;
+    const profFoto = status?.Foto || null;
+    const profPlaca = status?.placa || null;
+    const profTelefone = status?.telefone || null;
+    const profCodigo = status?.codProf || null;
+    
+    // Atualizar ponto específico se informado
+    if (statusEndereco?.endereco) {
+      const pontoNumero = parseInt(statusEndereco.endereco.ponto);
+      const pontoIdx = pontoNumero - 1;
+      
+      let pontoStatus = 'pendente';
+      const cod = (statusEndereco.codigo || '').toUpperCase();
+      if (cod === 'FIN' || (statusEndereco.codigoCompleto || '').toUpperCase() === 'FINALIZADO') pontoStatus = 'finalizado';
+      else if (cod === 'CHE' || (statusEndereco.codigoCompleto || '').toUpperCase() === 'CHEGOU') pontoStatus = 'chegou';
+      else if (cod === 'COL' || (statusEndereco.codigoCompleto || '').toUpperCase() === 'COLETADO') pontoStatus = 'coletado';
+      
+      // Atualizar dados_pontos JSONB
+      while (dadosPontos.length <= pontoIdx) dadosPontos.push({});
+      dadosPontos[pontoIdx] = {
+        ...dadosPontos[pontoIdx],
+        status: pontoStatus,
+        status_codigo: statusEndereco.codigo,
+        status_descricao: statusEndereco.descricao,
+        data_evento: statusEndereco.criadoEm,
+        data_coletado: statusEndereco.endereco.dataColetado,
+        tempo_espera: statusEndereco.endereco.tempoEspera,
+        endereco_completo: statusEndereco.endereco.enderecoCompleto,
+        assinatura: statusEndereco.endereco.assinatura || null,
+        protocolo_fotos: statusEndereco.endereco.protocolo || null,
+        motivo_tipo: statusEndereco.endereco.motivo?.tipo || null,
+        motivo_descricao: statusEndereco.endereco.motivo?.descricao || null,
+        is_retorno: statusEndereco.endereco.retorno === true || statusEndereco.endereco.isRetorno === true || false
+      };
+      
+      // Atualizar tabela solicitacoes_pontos
+      try {
+        await pool.query(`
+          UPDATE solicitacoes_pontos SET
+            status = $1,
+            status_atualizado_em = CURRENT_TIMESTAMP,
+            data_chegada = CASE WHEN $1 IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP ELSE data_chegada END,
+            data_coletado = CASE WHEN $1 = 'coletado' AND data_coletado IS NULL THEN CURRENT_TIMESTAMP ELSE data_coletado END,
+            data_finalizado = CASE WHEN $1 = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP ELSE data_finalizado END,
+            motivo_finalizacao = COALESCE($2, motivo_finalizacao),
+            motivo_descricao = COALESCE($3, motivo_descricao),
+            fotos = COALESCE($4::jsonb, fotos),
+            assinatura = COALESCE($5::jsonb, assinatura)
+          WHERE solicitacao_id = $6 AND ordem = $7
+        `, [
+          pontoStatus,
+          statusEndereco.endereco.motivo?.tipo || null,
+          statusEndereco.endereco.motivo?.descricao || null,
+          statusEndereco.endereco.protocolo ? JSON.stringify(statusEndereco.endereco.protocolo) : null,
+          statusEndereco.endereco.assinatura ? JSON.stringify(statusEndereco.endereco.assinatura) : null,
+          solicitacaoId,
+          pontoNumero
+        ]);
+        console.log(`📍 [WEBHOOK] Ponto ${pontoNumero} → ${pontoStatus} | fotos: ${statusEndereco.endereco.protocolo ? 'SIM' : 'não'}`);
+      } catch (errPonto) {
+        console.error(`⚠️ [WEBHOOK] Erro ponto ${pontoNumero}:`, errPonto.message);
+      }
+    }
+    
+    // Atualizar corrida principal
+    await pool.query(`
+      UPDATE solicitacoes_corrida SET
+        status = $1,
+        profissional_nome = COALESCE($2, profissional_nome),
+        profissional_foto = COALESCE($3, profissional_foto),
+        profissional_placa = COALESCE($4, profissional_placa),
+        profissional_telefone = COALESCE($5, profissional_telefone),
+        profissional_codigo = COALESCE($6, profissional_codigo),
+        tutts_url_rastreamento = COALESCE($7, tutts_url_rastreamento),
+        dados_pontos = $8,
+        ultima_atualizacao = NOW(),
+        atualizado_em = NOW()
+      WHERE id = $9
+    `, [
+      novoStatus,
+      profNome, profFoto, profPlaca, profTelefone, profCodigo,
+      urlRastreamento,
+      JSON.stringify(dadosPontos),
+      solicitacaoId
+    ]);
+    
+    // Log na tabela webhook_tutts_logs
+    try {
+      await pool.query(`
+        INSERT INTO webhook_tutts_logs (os_numero, solicitacao_id, status_id, status_descricao, profissional_nome, ponto_numero, ponto_status, payload_completo)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [osNumero, solicitacaoId, statusId, statusDescricao, profNome, statusEndereco?.endereco?.ponto || null, statusEndereco?.codigo || null, JSON.stringify(payload)]);
+    } catch (logErr) { console.error('⚠️ [WEBHOOK] Erro log:', logErr.message); }
+    
+    console.log(`✅ [WEBHOOK] OS ${osNumero}: ${statusDescricao} (${novoStatus})`);
+    res.status(200).json({ recebido: true, processado: true, os: osNumero, status: novoStatus });
+  } catch (err) {
+    console.error('❌ [WEBHOOK] Erro:', err.message);
+    res.status(200).json({ recebido: true, erro: err.message });
+  }
 });
-app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res, next) => {
-  console.log(`📨 [WEBHOOK] Tutts POST recebido (v2) de ${req.ip} | OS: ${req.body?.ID || 'N/A'}`);
-  next();
+
+// Duplicar para a rota alternativa
+app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res) => {
+  // Redirecionar internamente para o handler principal
+  req.url = '/api/webhook/tutts';
+  req.app.handle(req, res);
 });
 
 // 🪝 Webhooks Uber Direct — montados ANTES de qualquer auth global
