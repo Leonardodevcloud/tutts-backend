@@ -1016,6 +1016,182 @@ router.post('/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, r
 });
 
 // Salvar endereço favorito
+
+// Sincronizar histórico (corridas finalizadas/canceladas que podem ter dados incompletos)
+router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { limite = 50, apenasIncompletas = true } = req.body || {};
+    
+    // Buscar corridas recentes do cliente que tem OS na Tutts
+    let query = `
+      SELECT id, tutts_os_numero, status, dados_pontos,
+        (SELECT COUNT(*) FROM solicitacoes_pontos sp WHERE sp.solicitacao_id = s.id AND sp.data_chegada IS NOT NULL) as pontos_com_chegada,
+        (SELECT COUNT(*) FROM solicitacoes_pontos sp WHERE sp.solicitacao_id = s.id AND sp.fotos IS NOT NULL AND sp.fotos::text != '[]' AND sp.fotos::text != 'null') as pontos_com_fotos,
+        (SELECT COUNT(*) FROM solicitacoes_pontos sp WHERE sp.solicitacao_id = s.id) as total_pontos
+      FROM solicitacoes_corrida s
+      WHERE s.cliente_id = $1
+        AND s.tutts_os_numero IS NOT NULL
+    `;
+    const params = [req.clienteSolicitacao.id];
+    
+    if (apenasIncompletas) {
+      // Só corridas que parecem ter dados faltando
+      query += ` AND (
+        s.profissional_nome IS NULL
+        OR NOT EXISTS (SELECT 1 FROM solicitacoes_pontos sp WHERE sp.solicitacao_id = s.id AND sp.data_chegada IS NOT NULL)
+      )`;
+    }
+    
+    query += ` ORDER BY s.criado_em DESC LIMIT $2`;
+    params.push(limite);
+    
+    const corridas = await pool.query(query, params);
+    
+    if (corridas.rows.length === 0) {
+      return res.json({ sucesso: true, atualizadas: 0, total_verificadas: 0, mensagem: 'Nenhuma corrida para sincronizar' });
+    }
+    
+    // Credenciais do cliente
+    let tokenStatus = req.clienteSolicitacao.tutts_token_api || req.clienteSolicitacao.tutts_token;
+    if (tokenStatus && tokenStatus.includes('-gravar')) {
+      tokenStatus = tokenStatus.replace('-gravar', '-status');
+    } else if (tokenStatus && !tokenStatus.includes('-status')) {
+      tokenStatus = tokenStatus + '-status';
+    }
+    const codCliente = req.clienteSolicitacao.tutts_codigo_cliente || req.clienteSolicitacao.tutts_cod_cliente;
+    
+    if (!tokenStatus || !codCliente) {
+      return res.status(400).json({ error: 'Cliente não tem credenciais da Tutts configuradas' });
+    }
+    
+    const listaOS = corridas.rows.map(c => c.tutts_os_numero).filter(Boolean);
+    console.log(`🔄 [SYNC-HIST] Sincronizando ${listaOS.length} corridas para cliente ${codCliente}`);
+    
+    // Chamar API Tutts
+    const respTutts = await fetch('https://tutts.com.br/integracao', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tokenStatus, codCliente: codCliente, servicos: listaOS })
+    });
+    
+    const dataTutts = await respTutts.json();
+    
+    if (dataTutts.Erro) {
+      console.error('❌ [SYNC-HIST] Erro da Tutts:', dataTutts.Erro);
+      return res.status(400).json({ error: dataTutts.Erro });
+    }
+    
+    if (!dataTutts.Sucesso) {
+      return res.status(400).json({ error: 'Resposta inválida da Tutts' });
+    }
+    
+    const mapearStatus = (s) => {
+      switch (s) {
+        case 'SP': return 'enviado';
+        case 'A': return 'em_andamento';
+        case 'F': return 'finalizado';
+        case 'C': return 'cancelado';
+        case 'V': return 'enviado';
+        case 'U': return 'enviado';
+        default: return null;
+      }
+    };
+    
+    let atualizadas = 0;
+    
+    for (const os of listaOS) {
+      const dadosOS = dataTutts.Sucesso[os];
+      if (!dadosOS) continue;
+      
+      const novoStatus = mapearStatus(dadosOS.status);
+      if (!novoStatus) continue;
+      
+      const corrida = corridas.rows.find(c => String(c.tutts_os_numero) === String(os));
+      if (!corrida) continue;
+      
+      // Atualizar pontos
+      if (Array.isArray(dadosOS.pontos)) {
+        for (const ponto of dadosOS.pontos) {
+          const pontoNumero = parseInt(ponto.ponto);
+          if (!pontoNumero) continue;
+          
+          let pontoStatus = null;
+          const codigo = (ponto.codigo || '').toUpperCase();
+          if (codigo === 'CHE') pontoStatus = 'chegou';
+          else if (codigo === 'COL') pontoStatus = 'coletado';
+          else if (codigo === 'FIN') pontoStatus = 'finalizado';
+          else continue;
+          
+          const sp = ponto.statusPonto || {};
+          try {
+            await pool.query(`
+              UPDATE solicitacoes_pontos SET
+                status = $1,
+                status_atualizado_em = CURRENT_TIMESTAMP,
+                data_chegada = CASE 
+                  WHEN $2::timestamp IS NOT NULL THEN $2::timestamp
+                  WHEN $1 IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP
+                  ELSE data_chegada 
+                END,
+                data_finalizado = CASE 
+                  WHEN $3::timestamp IS NOT NULL THEN $3::timestamp
+                  WHEN $1 = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP
+                  ELSE data_finalizado 
+                END,
+                motivo_descricao = COALESCE($4, motivo_descricao),
+                fotos = COALESCE($5::jsonb, fotos),
+                assinatura = COALESCE($6::jsonb, assinatura)
+              WHERE solicitacao_id = $7 AND ordem = $8
+            `, [
+              pontoStatus,
+              sp.chegada || null,
+              pontoStatus === 'finalizado' ? (sp.saida || null) : null,
+              sp.motivo || sp.ocorrencia || null,
+              sp.protocolo?.length ? JSON.stringify(sp.protocolo) : null,
+              sp.assinatura?.length ? JSON.stringify(sp.assinatura) : null,
+              corrida.id,
+              pontoNumero
+            ]);
+          } catch (errPonto) {
+            console.error(`⚠️ [SYNC-HIST] Ponto ${pontoNumero} OS ${os}:`, errPonto.message);
+          }
+        }
+      }
+      
+      // Atualizar corrida
+      const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+      await pool.query(`
+        UPDATE solicitacoes_corrida SET
+          status = $1,
+          profissional_nome = COALESCE($2, profissional_nome),
+          profissional_cpf = COALESCE($3, profissional_cpf),
+          profissional_placa = COALESCE($4, profissional_placa),
+          tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
+          dados_pontos = COALESCE($6, dados_pontos),
+          ultima_atualizacao = NOW(),
+          atualizado_em = NOW()
+        WHERE id = $7
+      `, [
+        novoStatus,
+        dadosProf.nome || null,
+        dadosProf.cpf || null,
+        dadosProf.placa || null,
+        dadosOS.urlRastreamento || null,
+        dadosOS.pontos ? JSON.stringify(dadosOS.pontos) : null,
+        corrida.id
+      ]);
+      
+      atualizadas++;
+    }
+    
+    console.log(`✅ [SYNC-HIST] ${atualizadas}/${listaOS.length} corridas atualizadas`);
+    res.json({ sucesso: true, atualizadas, total_verificadas: listaOS.length });
+  } catch (err) {
+    console.error('❌ Erro ao sincronizar histórico:', err);
+    res.status(500).json({ error: 'Erro ao sincronizar histórico' });
+  }
+});
+
 router.post('/solicitacao/favoritos', verificarTokenSolicitacao, async (req, res) => {
   try {
     const { apelido, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao } = req.body;
