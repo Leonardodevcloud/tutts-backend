@@ -243,7 +243,14 @@ async function fazerLogin(page) {
   log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional }) {
+async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional, onProgresso }) {
+  // onProgresso(etapa, percentual) — callback opcional chamado em marcos significativos
+  // para reportar avanço ao frontend via banco. Etapas: login, localizando, codificando,
+  // confirmando, recalculando, finalizando. Percentual: 0-100.
+  // Se não passado, é no-op — mantém compatibilidade com chamadores antigos.
+  const reportar = typeof onProgresso === 'function'
+    ? (etapa, pct) => { try { onProgresso(etapa, pct); } catch (_) {} }
+    : () => {};
   if (!process.env.SISTEMA_EXTERNO_URL) {
     return { sucesso: false, erro: 'SISTEMA_EXTERNO_URL não configurada.' };
   }
@@ -298,6 +305,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // ── Passo 1: Autenticação + ir para acompanhamento ───────────────────────
     log('📌 Passo 1: Autenticação');
+    reportar('login', 15);
 
     await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     await page.waitForTimeout(2000);
@@ -329,6 +337,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // ── Passo 2: Localizar botão END. da OS ────────────────────────────────
     log(`📌 Passo 2: Localizando OS ${os_numero}`);
+    reportar('localizando', 30);
 
     const btnSelector = `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
 
@@ -738,6 +747,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
     log('📌 Passo 5: Preenchendo coordenadas');
+    reportar('codificando', 55);
 
     const inputLat = page.locator('input[placeholder="Latitude"]:visible').first();
     const inputLon = page.locator('input[placeholder="Longitude"]:visible').first();
@@ -851,6 +861,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     // ── Passo 6: Confirmar alteração ─────────────────────────────────────────
     log('📌 Passo 6: Confirmando alteração de endereço');
+    reportar('confirmando', 75);
 
     // Capturar o endereço antigo do span ANTES de confirmar (para comparar depois)
     const endAntigoSpan = await page.evaluate((pontoNum) => {
@@ -1086,7 +1097,8 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
 
       // ── Passo 9: Calcular frete ─────────────────────────────────────────────
-      log('\u{1f4cc} Passo 9: Calculando frete');
+      log('📌 Passo 9: Calculando frete');
+      reportar('recalculando', 90);
 
       // Aguardar spinners da lupa sumirem COMPLETAMENTE
       for (let sw = 0; sw < 15; sw++) {
@@ -1394,6 +1406,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
 
     log(`🎉 OS ${os_numero} Ponto ${ponto} — completo! Frete: ${freteRecalculado ? 'SIM' : 'NÃO'}`);
+    reportar('finalizando', 100);
     return { sucesso: true, endereco_corrigido: enderecoResolvido || enderecoParaPreencher || null, endereco_antigo: enderecoAntigo || null, frete_recalculado: freteRecalculado, ponto1: ponto1Info, valores_antes: valoresAntes, valores_depois: valoresDepois || null };
 
   } catch (err) {
