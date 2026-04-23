@@ -220,13 +220,18 @@ app.post("/api/webhook/tutts", webhookBasicValidation, async (req, res) => {
       
       // Atualizar tabela solicitacoes_pontos
       try {
+        // IMPORTANTE: $1 é castado explicitamente pra ::text no primeiro uso.
+        // Sem isso, o driver pg não consegue deduzir o tipo quando $1 aparece em contextos
+        // diferentes (SET status = $1, depois CASE WHEN $1 IN (...), depois $1 = 'coletado').
+        // Postgres dava erro silencioso: "inconsistent types deduced for parameter $1".
+        // Com o cast, o tipo fica fixo como text e as outras ocorrências herdam.
         await pool.query(`
           UPDATE solicitacoes_pontos SET
-            status = $1,
+            status = $1::text,
             status_atualizado_em = CURRENT_TIMESTAMP,
-            data_chegada = CASE WHEN $1 IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP ELSE data_chegada END,
-            data_coletado = CASE WHEN $1 = 'coletado' AND data_coletado IS NULL THEN CURRENT_TIMESTAMP ELSE data_coletado END,
-            data_finalizado = CASE WHEN $1 = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP ELSE data_finalizado END,
+            data_chegada = CASE WHEN $1::text IN ('chegou','coletado','finalizado') AND data_chegada IS NULL THEN CURRENT_TIMESTAMP ELSE data_chegada END,
+            data_coletado = CASE WHEN $1::text = 'coletado' AND data_coletado IS NULL THEN CURRENT_TIMESTAMP ELSE data_coletado END,
+            data_finalizado = CASE WHEN $1::text = 'finalizado' AND data_finalizado IS NULL THEN CURRENT_TIMESTAMP ELSE data_finalizado END,
             motivo_finalizacao = COALESCE($2, motivo_finalizacao),
             motivo_descricao = COALESCE($3, motivo_descricao),
             fotos = COALESCE($4::jsonb, fotos),
