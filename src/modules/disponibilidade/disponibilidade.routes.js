@@ -220,6 +220,7 @@ router.delete('/disponibilidade/lojas/:id', async (req, res) => {
 
 // POST /api/disponibilidade/linhas - Adicionar linhas a uma loja
 router.post('/disponibilidade/linhas', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { loja_id, quantidade, is_excedente } = req.body;
     
@@ -228,7 +229,7 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     }
     
     // Verificar se loja existe
-    const lojaCheck = await pool.query('SELECT id FROM disponibilidade_lojas WHERE id = $1', [loja_id]);
+    const lojaCheck = await client.query('SELECT id FROM disponibilidade_lojas WHERE id = $1', [loja_id]);
     if (lojaCheck.rows.length === 0) {
       return res.status(400).json({ error: 'Loja não encontrada' });
     }
@@ -237,13 +238,30 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     const excedente = is_excedente === true;
     const linhas = [];
     
+    // Transação: INSERT das linhas + atualizar contador agregado na loja.
+    // Sem isso, qtd_titulares/qtd_excedentes ficam defasados e a regra de limite mínimo
+    // (aplicada no DELETE) opera com valor desatualizado.
+    await client.query('BEGIN');
+    
     for (let i = 0; i < qtd; i++) {
-      const result = await pool.query(
+      const result = await client.query(
         'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
         [loja_id, 'A CONFIRMAR', excedente]
       );
       linhas.push(result.rows[0]);
     }
+    
+    // Atualiza contador agregado: soma quantidade ao campo correto.
+    // COALESCE tolera NULL em registros antigos.
+    const campoContador = excedente ? 'qtd_excedentes' : 'qtd_titulares';
+    await client.query(
+      `UPDATE disponibilidade_lojas
+       SET ${campoContador} = COALESCE(${campoContador}, 0) + $1
+       WHERE id = $2`,
+      [qtd, loja_id]
+    );
+    
+    await client.query('COMMIT');
     
     console.log('✅', qtd, excedente ? 'excedente(s)' : 'titular(es)', 'adicionado(s) à loja', loja_id);
     // Broadcast: novas linhas adicionadas
@@ -252,8 +270,11 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     }
     res.json(linhas);
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('❌ Erro ao criar linhas:', err);
     res.status(500).json({ error: 'Erro ao criar linhas' });
+  } finally {
+    client.release();
   }
 });
 
@@ -346,25 +367,34 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
 });
 
 // DELETE /api/disponibilidade/linhas/:id - Deletar linha
+// Query ?force=true — usado pela aba admin (Config) para pular a regra de limite mínimo
+// de titulares. O admin pode reduzir livremente e o contador agregado qtd_titulares/qtd_excedentes
+// é decrementado junto (assim a loja fica reconfigurada, não inconsistente).
 router.delete('/disponibilidade/linhas/:id', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
+    const force = req.query.force === 'true';
     
     // Buscar a linha e a loja
-    const linhaCheck = await pool.query(
+    const linhaCheck = await client.query(
       `SELECT li.id, li.loja_id, li.is_excedente, li.is_reposicao,
               l.qtd_titulares
        FROM disponibilidade_linhas li
        JOIN disponibilidade_lojas l ON l.id = li.loja_id
        WHERE li.id = $1`, [id]
     );
-    if (linhaCheck.rows.length === 0) return res.status(404).json({ error: 'Linha não encontrada' });
+    if (linhaCheck.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ error: 'Linha não encontrada' });
+    }
 
     const linha = linhaCheck.rows[0];
 
-    // Se é linha titular (não excedente, não reposição), verificar limite
-    if (!linha.is_excedente && !linha.is_reposicao) {
-      const { rows: [contagem] } = await pool.query(
+    // Regra de limite mínimo: só aplica quando NÃO é force (operação normal, não admin).
+    // Se é linha titular (não excedente, não reposição), verificar limite.
+    if (!force && !linha.is_excedente && !linha.is_reposicao) {
+      const { rows: [contagem] } = await client.query(
         `SELECT COUNT(*) as total_titulares
          FROM disponibilidade_linhas
          WHERE loja_id = $1 AND COALESCE(is_excedente, FALSE) = FALSE AND COALESCE(is_reposicao, FALSE) = FALSE`,
@@ -376,6 +406,7 @@ router.delete('/disponibilidade/linhas/:id', async (req, res) => {
       console.log(`[Disp-Delete] Linha #${id} | loja_id=${linha.loja_id} | titularesAtuais=${titularesAtuais} | limiteMinimo=${limiteMinimo} | bloquear=${titularesAtuais <= limiteMinimo}`);
 
       if (titularesAtuais <= limiteMinimo) {
+        client.release();
         return res.status(400).json({
           error: `Não é possível excluir. Limite mínimo de ${limiteMinimo} titular(es) atingido.`,
           titulares_atuais: titularesAtuais,
@@ -384,15 +415,41 @@ router.delete('/disponibilidade/linhas/:id', async (req, res) => {
       }
     }
 
-    const result = await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *', [id]);
+    // Transação: DELETE da linha + decrementar contador agregado da loja.
+    // Sem isso, qtd_titulares/qtd_excedentes ficariam inflados após remoções do admin.
+    // GREATEST(..., 0) protege contra contador ficar negativo se já estava desalinhado.
+    await client.query('BEGIN');
+    
+    const result = await client.query(
+      'DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    const campoContador = linha.is_excedente ? 'qtd_excedentes' : 'qtd_titulares';
+    await client.query(
+      `UPDATE disponibilidade_lojas
+       SET ${campoContador} = GREATEST(COALESCE(${campoContador}, 0) - 1, 0)
+       WHERE id = $1`,
+      [linha.loja_id]
+    );
+    
+    await client.query('COMMIT');
+    
+    if (force) {
+      console.log(`[Disp-Delete] Linha #${id} removida em modo force (admin) — contador ${campoContador} decrementado`);
+    }
+    
     // Broadcast: linha removida
     if (global.broadcastDisponibilidade) {
       global.broadcastDisponibilidade('DISP_LINHA_DELETE', { id: parseInt(id), loja_id: result.rows[0].loja_id }, getSenderWsId(req));
     }
     res.json({ success: true, deleted: result.rows[0] });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('❌ Erro ao deletar linha:', err);
     res.status(500).json({ error: 'Erro ao deletar linha' });
+  } finally {
+    client.release();
   }
 });
 
