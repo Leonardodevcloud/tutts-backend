@@ -846,37 +846,58 @@ router.post('/solicitacao/sincronizar', verificarTokenSolicitacao, async (req, r
         }
       }
       
-      // Só atualizar se status mudou
-      if (corrida.status !== novoStatus) {
-        // Extrair dados do profissional
-        const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
-        
+      // Extrair dados do profissional (sempre — podem ter vindo vazios antes e cheios agora,
+      // ex: cliente não tinha webhook configurado e agora quer preencher fotos retroativamente)
+      const dadosProf = dadosOS.dadosProf || dadosOS.dadosProfissional || {};
+      const temDadosProf = !!(
+        dadosProf.nome || dadosProf.Nome ||
+        dadosProf.foto || dadosProf.Foto ||
+        dadosProf.placa || dadosProf.Placa ||
+        dadosProf.telefone || dadosProf.Telefone
+      );
+      const statusMudou = corrida.status !== novoStatus;
+      
+      // UPDATE se: status mudou OU há dados do profissional pra preencher.
+      // Se nada mudou E Tutts não retornou profissional, pula (evita NOW() inútil em atualizado_em).
+      if (statusMudou || temDadosProf) {
         await pool.query(`
           UPDATE solicitacoes_corrida SET
             status = $1,
             profissional_nome = COALESCE($2, profissional_nome),
             profissional_cpf = COALESCE($3, profissional_cpf),
             profissional_placa = COALESCE($4, profissional_placa),
-            tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
-            dados_pontos = COALESCE($6, dados_pontos),
+            profissional_foto = COALESCE($5, profissional_foto),
+            profissional_telefone = COALESCE($6, profissional_telefone),
+            profissional_email = COALESCE($7, profissional_email),
+            profissional_codigo = COALESCE($8, profissional_codigo),
+            tutts_url_rastreamento = COALESCE($9, tutts_url_rastreamento),
+            dados_pontos = COALESCE($10, dados_pontos),
             ultima_atualizacao = NOW(),
             atualizado_em = NOW()
-          WHERE id = $7
+          WHERE id = $11
         `, [
           novoStatus,
-          dadosProf.nome || null,
-          dadosProf.cpf || null,
-          dadosProf.placa || null,
+          dadosProf.nome || dadosProf.Nome || null,
+          dadosProf.cpf || dadosProf.CPF || null,
+          dadosProf.placa || dadosProf.Placa || null,
+          dadosProf.foto || dadosProf.Foto || null,
+          dadosProf.telefone || dadosProf.Telefone || null,
+          dadosProf.email || dadosProf.Email || null,
+          dadosProf.codProf || dadosProf.CodProf || null,
           dadosOS.urlRastreamento || null,
           dadosOS.pontos ? JSON.stringify(dadosOS.pontos) : null,
           corrida.id
         ]);
         
-        atualizadas++;
-        if (novoStatus === 'finalizado') finalizadas++;
-        if (novoStatus === 'cancelado') canceladas++;
-        
-        console.log(`✅ [SINCRONIZAR] OS ${os}: ${corrida.status} → ${novoStatus}`);
+        // Contagens mantêm semântica original: só contam como "atualizadas" quando status mudou
+        if (statusMudou) {
+          atualizadas++;
+          if (novoStatus === 'finalizado') finalizadas++;
+          if (novoStatus === 'cancelado') canceladas++;
+          console.log(`✅ [SINCRONIZAR] OS ${os}: ${corrida.status} → ${novoStatus}`);
+        } else {
+          console.log(`✅ [SINCRONIZAR] OS ${os}: status inalterado, dados do profissional atualizados (foto/telefone/etc)`);
+        }
       }
     }
     
@@ -1230,16 +1251,24 @@ router.post('/solicitacao/sincronizar-historico', verificarTokenSolicitacao, asy
           profissional_nome = COALESCE($2, profissional_nome),
           profissional_cpf = COALESCE($3, profissional_cpf),
           profissional_placa = COALESCE($4, profissional_placa),
-          tutts_url_rastreamento = COALESCE($5, tutts_url_rastreamento),
-          dados_pontos = COALESCE($6, dados_pontos),
+          profissional_foto = COALESCE($5, profissional_foto),
+          profissional_telefone = COALESCE($6, profissional_telefone),
+          profissional_email = COALESCE($7, profissional_email),
+          profissional_codigo = COALESCE($8, profissional_codigo),
+          tutts_url_rastreamento = COALESCE($9, tutts_url_rastreamento),
+          dados_pontos = COALESCE($10, dados_pontos),
           ultima_atualizacao = NOW(),
           atualizado_em = NOW()
-        WHERE id = $7
+        WHERE id = $11
       `, [
         novoStatus,
-        dadosProf.nome || null,
-        dadosProf.cpf || null,
-        dadosProf.placa || null,
+        dadosProf.nome || dadosProf.Nome || null,
+        dadosProf.cpf || dadosProf.CPF || null,
+        dadosProf.placa || dadosProf.Placa || null,
+        dadosProf.foto || dadosProf.Foto || null,
+        dadosProf.telefone || dadosProf.Telefone || null,
+        dadosProf.email || dadosProf.Email || null,
+        dadosProf.codProf || dadosProf.CodProf || null,
         dadosOS.urlRastreamento || null,
         dadosOS.pontos ? JSON.stringify(dadosOS.pontos) : null,
         corrida.id
