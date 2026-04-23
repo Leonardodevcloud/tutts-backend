@@ -256,37 +256,46 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
   log(`🚀 OS ${os_numero} | Ponto ${ponto} | ${latitude}, ${longitude}`);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-default-apps',
-      '--mute-audio',
-      '--no-first-run',
-    ],
-  });
-
-  let contextOptions = {};
-  if (fs.existsSync(SESSION_FILE)) {
-    contextOptions = { storageState: SESSION_FILE };
-    log('♻️  Usando sessão salva');
-  }
-
-  const context = await browser.newContext({
-    ...contextOptions,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 900 },
-  });
-
-  let page = await context.newPage();
-  page.setDefaultTimeout(TIMEOUT);
+  // IMPORTANTE: declaramos browser/context/page ANTES do try, mas só inicializamos DENTRO dele.
+  // Motivo: se `chromium.launch()`, `browser.newContext()` ou `context.newPage()` falhar,
+  // o `finally` precisa ter acesso a essas variáveis pra fechar o que foi criado.
+  // Antes do fix, browser era criado com `const browser = await chromium.launch()` FORA do try,
+  // e uma falha em newContext/newPage deixava o Chromium zumbi no sistema.
+  let browser = null;
+  let context = null;
+  let page = null;
 
   try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--mute-audio',
+        '--no-first-run',
+      ],
+    });
+
+    let contextOptions = {};
+    if (fs.existsSync(SESSION_FILE)) {
+      contextOptions = { storageState: SESSION_FILE };
+      log('♻️  Usando sessão salva');
+    }
+
+    context = await browser.newContext({
+      ...contextOptions,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 900 },
+    });
+
+    page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
     // ── Passo 1: Autenticação + ir para acompanhamento ───────────────────────
     log('📌 Passo 1: Autenticação');
 
