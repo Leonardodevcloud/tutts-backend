@@ -801,7 +801,7 @@ Encerre com um parágrafo de parceria interna: "Estamos à disposição para apr
       // Incluir link do mapa no response final
       // Incluir link do mapa no response final
       const geminiResponse = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
         {
           method: 'POST',
           headers: {
