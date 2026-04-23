@@ -75,7 +75,7 @@ async function extrairDadosNF(base64Foto) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) { log('⚠️ GEMINI_API_KEY não configurada'); return null; }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
   const puro = base64Foto.replace(/^data:image\/[a-z]+;base64,/, '');
 
   const prompt = `Você é um OCR especializado em notas fiscais brasileiras (NF-e, NFC-e, DANFE, cupom fiscal).
