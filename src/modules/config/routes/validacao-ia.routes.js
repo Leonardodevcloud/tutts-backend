@@ -8,7 +8,7 @@ const crypto = require('crypto');
 function createValidacaoIaRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+  const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
 
   const SYSTEM_PROMPT = `Você é o assistente de validação visual da Central Tutts, uma plataforma de gestão logística de entregas em Salvador/BA.
 
