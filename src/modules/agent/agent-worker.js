@@ -154,6 +154,14 @@ async function processarProximoPendente(pool) {
 
     // Executar Playwright (com lock global + watchdog absoluto)
     log(`🤖 Acionando Playwright para OS ${registro.os_numero}...`);
+
+    // Marco inicial: registro saiu do 'pendente' e vai abrir browser.
+    // O Playwright só começará a reportar a partir de 15% (login).
+    await pool.query(
+      `UPDATE ajustes_automaticos SET etapa_atual = 'iniciando', progresso = 5 WHERE id = $1`,
+      [registro.id]
+    ).catch(() => {});
+
     const resultado = await withBrowserLock(`agent-os-${registro.os_numero}`, () =>
       comTimeout(
         executarCorrecaoEndereco({
@@ -162,6 +170,14 @@ async function processarProximoPendente(pool) {
           latitude:         coords.latitude,
           longitude:        coords.longitude,
           cod_profissional: registro.cod_profissional || null,
+          // Callback que o Playwright chama em marcos do fluxo.
+          // Falha no UPDATE não pode derrubar o job — silenciar com .catch.
+          onProgresso: (etapa, pct) => {
+            pool.query(
+              `UPDATE ajustes_automaticos SET etapa_atual = $1, progresso = $2 WHERE id = $3`,
+              [etapa, pct, registro.id]
+            ).catch(() => {});
+          },
         }),
         JOB_WATCHDOG_MS,
         `playwright_os_${registro.os_numero}`
