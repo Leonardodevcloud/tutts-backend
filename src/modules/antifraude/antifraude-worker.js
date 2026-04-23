@@ -70,6 +70,15 @@ function startAntiFraudeWorker(pool) {
   workerAtivo = true;
 
   (async () => {
+    // Cron automático foi desligado a pedido — antifraude agora roda SÓ por ação manual
+    // (via botão na UI → POST /antifraude/varredura). A função executarVarreduraCompleta
+    // continua exportada abaixo, então os endpoints manuais continuam funcionando.
+    //
+    // Pra reativar: remover o early return abaixo E setar config `cron_ativo = 'true'` no banco.
+    log('⏸️ Cron automático desativado — varredura só via ação manual');
+    return;
+
+    // eslint-disable-next-line no-unreachable
     const config = await carregarConfig(pool);
     if (config.cron_ativo !== 'true') { log('⏸️ Cron desativado'); return; }
     const intervaloMin = parseInt(config.cron_intervalo_min) || 60;
