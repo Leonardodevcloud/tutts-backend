@@ -151,8 +151,14 @@ function cacheMiddleware(req, res, next) {
 function cacheInvalidationMiddleware(req, res, next) {
   if (req.method === 'GET') return next();
 
+  // Escritas que invalidam o cache inteiro:
+  // 1. Uploads/recalculos de entregas (lista fixa)
+  // 2. DELETE em /api/bi/uploads/*
+  // 3. Qualquer POST/PUT/DELETE em /api/bi/regioes — sem isso, edições
+  //    de região não apareciam no frontend (cache STATIC de 10min retornava valor antigo)
   const isWrite = WRITE_PATHS.includes(req.path) ||
-    (req.method === 'DELETE' && req.path.startsWith('/api/bi/uploads'));
+    (req.method === 'DELETE' && req.path.startsWith('/api/bi/uploads')) ||
+    (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path.startsWith('/api/bi/regioes'));
 
   if (!isWrite) return next();
 
