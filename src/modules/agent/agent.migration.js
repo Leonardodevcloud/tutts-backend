@@ -49,6 +49,11 @@ async function initAgentTables(pool) {
     { nome: 'validacao_localizacao', tipo: 'JSONB' },
     { nome: 'valores_antes', tipo: 'JSONB' },
     { nome: 'valores_depois', tipo: 'JSONB' },
+    // Progresso em tempo real: atualizado pelo worker conforme Playwright avança.
+    // etapa_atual codifica a fase (login/localizando/codificando/confirmando/recalculando/finalizando),
+    // progresso é 0-100 — lidos pelo frontend via /agent/status/:id e exibidos na animação.
+    { nome: 'etapa_atual',  tipo: 'VARCHAR(30)' },
+    { nome: 'progresso',    tipo: 'SMALLINT DEFAULT 0' },
   ];
 
   for (const col of colunas) {
