@@ -1,5 +1,22 @@
 const express = require('express');
 const { normalizarEndereco } = require('../roteirizador.service');
+
+// Detecta se a query corresponde a um endereço "posicional" típico de Brasília,
+// cidades-satélite do DF (Taguatinga, Ceilândia, Guará, Águas Claras etc) e Goiânia.
+// Esses endereços usam sistema de setor/quadra/lote em vez de rua+número linear,
+// e o Google frequentemente classifica o resultado como `sublocality`/`neighborhood`
+// em vez de `premise`/`street_address` — fazendo o filtro padrão rejeitar.
+function detectarEnderecoPosicional(endereco) {
+    if (!endereco) return false;
+    const norm = endereco.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // Padrão 1: sigla maiúscula de 2-5 letras seguida (com ou sem espaço) de número.
+    // Cobre SQN 302, CLN 310, QI 23, SHIS 12, AOS 5, EQN 404, QNL 20, QMSW 1, AE 4, etc.
+    if (/\b[A-Z]{2,5}\s*\d/.test(norm)) return true;
+    // Padrão 2: palavras-chave explícitas de endereço posicional seguidas de identificador
+    if (/\b(QUADRA|QD\.?|LOTE|LT\.?|SETOR|BLOCO|CONJUNTO|CONJ\.?)\s+[A-Z0-9]/.test(norm)) return true;
+    return false;
+}
+
 function createGeocodeRouter(pool) {
   const router = express.Router();
 
@@ -107,6 +124,24 @@ function createGeocodeRouter(pool) {
           };
           
           resultadosPrecisos = data.results.filter(ehPreciso);
+          
+          if (resultadosPrecisos.length === 0) {
+            // FALLBACK: se a query é um endereço posicional (Brasília/Goiânia/cidades-satélite)
+            // e o Google retornou resultados só com `sublocality` ou `neighborhood`, aceitamos.
+            // Esses endereços (SQN 302, QI 23, CLN 310 etc) raramente são classificados como
+            // `premise` pelo Google, mas o resultado ainda aponta pra região certa.
+            if (detectarEnderecoPosicional(endereco)) {
+              const TIPOS_POSICIONAIS_OK = ['sublocality', 'sublocality_level_1', 'sublocality_level_2', 'neighborhood'];
+              const candidatosPosicionais = data.results.filter(r => {
+                const tipos = r.types || [];
+                return tipos.some(t => TIPOS_POSICIONAIS_OK.includes(t));
+              });
+              if (candidatosPosicionais.length > 0) {
+                console.log(`⚠️ [GEOCODE] Filtro relaxado p/ endereço posicional: "${endereco}" → "${candidatosPosicionais[0].formatted_address}" tipos=${JSON.stringify(candidatosPosicionais[0].types)}`);
+                resultadosPrecisos = candidatosPosicionais;
+              }
+            }
+          }
           
           if (resultadosPrecisos.length === 0) {
             console.log('⚠️ Google retornou só resultados genéricos, rejeitando:', data.results[0]?.types);
