@@ -186,6 +186,7 @@ router.delete('/disponibilidade/lojas/:id', async (req, res) => {
 
 // POST /api/disponibilidade/linhas - Adicionar linhas a uma loja
 router.post('/disponibilidade/linhas', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { loja_id, quantidade, is_excedente } = req.body;
     
@@ -194,7 +195,7 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     }
     
     // Verificar se loja existe
-    const lojaCheck = await pool.query('SELECT id FROM disponibilidade_lojas WHERE id = $1', [loja_id]);
+    const lojaCheck = await client.query('SELECT id FROM disponibilidade_lojas WHERE id = $1', [loja_id]);
     if (lojaCheck.rows.length === 0) {
       return res.status(400).json({ error: 'Loja não encontrada' });
     }
@@ -203,19 +204,39 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     const excedente = is_excedente === true;
     const linhas = [];
     
+    // Transação: INSERT das linhas + atualizar contador agregado na loja.
+    // Sem isso, os campos disponibilidade_lojas.qtd_titulares/qtd_excedentes
+    // ficam defasados e só sincronizam quando a migration roda.
+    await client.query('BEGIN');
+    
     for (let i = 0; i < qtd; i++) {
-      const result = await pool.query(
+      const result = await client.query(
         'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
         [loja_id, 'A CONFIRMAR', excedente]
       );
       linhas.push(result.rows[0]);
     }
     
+    // Atualiza contador agregado: soma quantidade ao campo correto (titulares ou excedentes).
+    // Usa COALESCE pra tolerar NULL nos registros antigos.
+    const campoContador = excedente ? 'qtd_excedentes' : 'qtd_titulares';
+    await client.query(
+      `UPDATE disponibilidade_lojas
+       SET ${campoContador} = COALESCE(${campoContador}, 0) + $1
+       WHERE id = $2`,
+      [qtd, loja_id]
+    );
+    
+    await client.query('COMMIT');
+    
     console.log('✅', qtd, excedente ? 'excedente(s)' : 'titular(es)', 'adicionado(s) à loja', loja_id);
     res.json(linhas);
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('❌ Erro ao criar linhas:', err);
     res.status(500).json({ error: 'Erro ao criar linhas' });
+  } finally {
+    client.release();
   }
 });
 
@@ -288,17 +309,45 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
 
 // DELETE /api/disponibilidade/linhas/:id - Deletar linha
 router.delete('/disponibilidade/linhas/:id', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
-    const result = await pool.query('DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *', [id]);
+    
+    // Transação: buscar linha (pra saber loja_id + se era excedente), deletar,
+    // e decrementar o contador agregado certo na loja.
+    // Sem isso, os campos qtd_titulares/qtd_excedentes ficam inflados após remoções.
+    await client.query('BEGIN');
+    
+    const result = await client.query(
+      'DELETE FROM disponibilidade_linhas WHERE id = $1 RETURNING *',
+      [id]
+    );
     
     if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Linha não encontrada' });
     }
-    res.json({ success: true, deleted: result.rows[0] });
+    
+    const linhaRemovida = result.rows[0];
+    const campoContador = linhaRemovida.is_excedente ? 'qtd_excedentes' : 'qtd_titulares';
+    
+    // GREATEST(...,0) protege contra contador ficar negativo caso já esteja desalinhado.
+    await client.query(
+      `UPDATE disponibilidade_lojas
+       SET ${campoContador} = GREATEST(COALESCE(${campoContador}, 0) - 1, 0)
+       WHERE id = $1`,
+      [linhaRemovida.loja_id]
+    );
+    
+    await client.query('COMMIT');
+    
+    res.json({ success: true, deleted: linhaRemovida });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('❌ Erro ao deletar linha:', err);
     res.status(500).json({ error: 'Erro ao deletar linha' });
+  } finally {
+    client.release();
   }
 });
 
