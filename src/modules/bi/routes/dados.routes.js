@@ -527,10 +527,19 @@ router.get('/bi/graficos', async (req, res) => {
 // Listar clientes únicos (para dropdown)
 router.get('/bi/clientes', async (req, res) => {
   try {
+    // Deduplica por cod_cliente pegando o nome_cliente do registro MAIS RECENTE.
+    // Antes: SELECT DISTINCT cod_cliente, nome_cliente retornava duplicatas quando
+    // o mesmo código aparece com nomes diferentes (cadastro mudou ao longo do tempo).
+    // Agora: DISTINCT ON pega um único registro por cliente, ordenado por data desc.
     const result = await pool.query(`
-      SELECT DISTINCT cod_cliente, nome_cliente 
-      FROM bi_entregas 
-      WHERE cod_cliente IS NOT NULL
+      SELECT cod_cliente, nome_cliente FROM (
+        SELECT DISTINCT ON (cod_cliente)
+          cod_cliente,
+          nome_cliente
+        FROM bi_entregas
+        WHERE cod_cliente IS NOT NULL
+        ORDER BY cod_cliente, data_hora DESC NULLS LAST
+      ) c
       ORDER BY nome_cliente
     `);
     res.json(result.rows);
