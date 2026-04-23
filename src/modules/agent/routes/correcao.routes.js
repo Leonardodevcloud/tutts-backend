@@ -215,7 +215,7 @@ function createCorrecaoRoutes(pool) {
 
     try {
       const { rows } = await pool.query(
-        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em, valores_antes, valores_depois
+        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em, valores_antes, valores_depois, etapa_atual, progresso
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
