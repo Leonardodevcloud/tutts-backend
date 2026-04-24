@@ -366,13 +366,9 @@ function createLeadsCapturaRoutes(pool) {
       return res.status(409).json({ success: false, error: 'Já existe uma captura em andamento.' });
     }
 
-    // Importar dinamicamente (evita crash se arquivo não existir)
-    let capturarLeadsCadastrados;
-    try {
-      capturarLeadsCadastrados = require('../playwright-crm-leads').capturarLeadsCadastrados;
-    } catch (e) {
-      return res.status(503).json({ success: false, error: 'Módulo Playwright não disponível: ' + e.message });
-    }
+    // ⚠️ REFACTOR 2026-04: Esta rota agora apenas ENFILEIRA o job.
+    // O processamento real é feito pelo agente crm-leads.agent.js no tutts-agents.
+    // Frontend deve fazer polling em GET /jobs/:id pra saber quando termina.
 
     const { data_inicio, data_fim, tipo = 'manual', iniciado_por = 'admin' } = req.body || {};
 
@@ -387,7 +383,7 @@ function createLeadsCapturaRoutes(pool) {
     try {
       const { rows } = await pool.query(
         `INSERT INTO crm_captura_jobs (tipo, status, data_inicio, data_fim, iniciado_por)
-         VALUES ($1, 'executando', $2, $3, $4) RETURNING id`,
+         VALUES ($1, 'pendente', $2, $3, $4) RETURNING id`,
         [tipo, dataInicio, dataFim, iniciado_por]
       );
       jobId = rows[0].id;
@@ -395,88 +391,12 @@ function createLeadsCapturaRoutes(pool) {
       return res.status(500).json({ success: false, error: `Erro ao criar job: ${err.message}` });
     }
 
-    res.json({ success: true, message: 'Captura iniciada', job_id: jobId, periodo: { data_inicio: dataInicio, data_fim: dataFim } });
-
-    // ── Background ────────────────────────────────────────────
-    capturaEmAndamento = true;
-
-    try {
-      console.log(`[CRM-Captura] Job #${jobId}: ${dataInicio} → ${dataFim}`);
-      const resultado = await capturarLeadsCadastrados({ dataInicio, dataFim });
-
-      let novos = 0, jaExistentes = 0, ativos = 0, inativos = 0;
-
-      for (const lead of resultado.registros) {
-        try {
-          // Verificar status via API Tutts
-          if (lead.celular && !lead.status_api) {
-            const { status_api } = await verificarLeadAPI(lead.celular);
-            if (status_api) {
-              lead.status_api = status_api;
-              lead.api_verificado_em = new Date().toISOString();
-            }
-            await new Promise(r => setTimeout(r, 150)); // delay
-          }
-
-          const { rows: existentes } = await pool.query('SELECT id FROM crm_leads_capturados WHERE cod = $1', [lead.cod]);
-
-          if (existentes.length > 0) {
-            await pool.query(
-              `UPDATE crm_leads_capturados SET
-                nome=COALESCE($2,nome), telefones_raw=COALESCE($3,telefones_raw), celular=COALESCE($4,celular),
-                telefone_fixo=COALESCE($5,telefone_fixo), telefone_normalizado=COALESCE($6,telefone_normalizado),
-                email=COALESCE($7,email), categoria=COALESCE($8,categoria), data_cadastro=COALESCE($9,data_cadastro),
-                cidade=COALESCE($10,cidade), estado=COALESCE($11,estado), regiao=COALESCE($12,regiao),
-                status_sistema=COALESCE($13,status_sistema), status_api=COALESCE($14,status_api),
-                api_verificado_em=COALESCE($15,api_verificado_em), job_id=$16
-              WHERE cod=$1`,
-              [lead.cod, lead.nome, lead.telefones_raw, lead.celular, lead.telefone_fixo,
-               lead.telefone_normalizado, lead.email, lead.categoria, lead.data_cadastro,
-               lead.cidade, lead.estado, lead.regiao, lead.status_sistema, lead.status_api,
-               lead.api_verificado_em, jobId]
-            );
-            jaExistentes++;
-          } else {
-            await pool.query(
-              `INSERT INTO crm_leads_capturados
-                (cod,nome,telefones_raw,celular,telefone_fixo,telefone_normalizado,email,categoria,
-                 data_cadastro,cidade,estado,regiao,status_sistema,status_api,api_verificado_em,job_id)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-              [lead.cod, lead.nome, lead.telefones_raw, lead.celular, lead.telefone_fixo,
-               lead.telefone_normalizado, lead.email, lead.categoria, lead.data_cadastro,
-               lead.cidade, lead.estado, lead.regiao, lead.status_sistema, lead.status_api,
-               lead.api_verificado_em, jobId]
-            );
-            novos++;
-          }
-
-          if (lead.status_api === 'ativo') ativos++;
-          else if (lead.status_api === 'inativo') inativos++;
-        } catch (e) {
-          console.error(`[CRM-Captura] Erro lead cod=${lead.cod}: ${e.message}`);
-        }
-      }
-
-      await pool.query(
-        `UPDATE crm_captura_jobs SET status='concluido', total_capturados=$2, total_novos=$3,
-         total_ja_existentes=$4, total_api_verificados=$5, total_ativos=$6, total_inativos=$7,
-         screenshots=$8, concluido_em=NOW() WHERE id=$1`,
-        [jobId, resultado.total, novos, jaExistentes,
-         resultado.registros.filter(r => r.status_api && r.status_api !== 'erro').length,
-         ativos, inativos, JSON.stringify(resultado.screenshots || [])]
-      );
-
-      console.log(`[CRM-Captura] ✅ Job #${jobId}: ${novos} novos | ${jaExistentes} atualizados | ${ativos} ativos | ${inativos} inativos`);
-
-      // 📱 Notificar grupo WhatsApp com os novos leads
-      await notificarGrupoNovosLeads();
-    } catch (err) {
-      console.error(`[CRM-Captura] ❌ Job #${jobId}: ${err.message}`);
-      await pool.query('UPDATE crm_captura_jobs SET status=$2, erro=$3, concluido_em=NOW() WHERE id=$1',
-        [jobId, 'erro', err.message]).catch(() => {});
-    } finally {
-      capturaEmAndamento = false;
-    }
+    return res.json({
+      success: true,
+      message: 'Captura enfileirada. Acompanhe via GET /jobs/' + jobId,
+      job_id: jobId,
+      periodo: { data_inicio: dataInicio, data_fim: dataFim },
+    });
   });
 
   // ══════════════════════════════════════════════════════════════
