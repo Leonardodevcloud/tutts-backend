@@ -22,6 +22,18 @@ function createAgentRouter(pool, verificarToken, verificarAdmin) {
   router.use(createHistoricoRoutes(pool, verificarAdmin));
   router.use(createSlaCaptureRoutes(pool, verificarToken, verificarAdmin));
 
+  // ── Pool status (debug) ─────────────────────────────────────────────────────
+  // GET /agent/pool/status — snapshot do agent-pool e browser-pool
+  // Útil pra ver: slots ocupados, ticks executados, último erro de cada agente.
+  router.get('/pool/status', verificarAdmin, (_req, res) => {
+    try {
+      const { getPoolSnapshot } = require('./index');
+      res.json({ ok: true, snapshot: getPoolSnapshot() });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
   // ── Screenshots de debug ────────────────────────────────────────────────────
   router.get('/screenshots', (req, res) => {
     try {

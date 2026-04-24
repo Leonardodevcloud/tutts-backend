@@ -1,121 +1,19 @@
-'use strict';
-
 /**
- * sla-detector-worker.js
- *
- * Cron janela comercial Bahia que dispara detectarOsNovas a cada 2 minutos.
- * Substitui a extensão Chrome — operadores não precisam mais de nada.
- *
- * Janela:
- *   Seg-Sex 08:00 → 18:00 (a cada 2 minutos)
- *   Sáb     08:00 → 12:00 (a cada 2 minutos)
- *   Fora disso: dorme totalmente.
- *
- * Auto-relogin: se detectarOsNovas retornar sessaoExpirada=true,
- * chama capturarPontosOS com OS dummy só pra forçar o login do
- * playwright-sla-capture (que já cuida de salvar /tmp/tutts-sla-session.json).
- *
- * 🔧 FIX (2026-04): Bootstrap proativo no startup — se o arquivo de sessão
- *     não existe no disco (deploy novo, container limpo), força um relogin
- *     imediato em vez de esperar o primeiro tick do cron na janela comercial.
+ * sla-detector-worker.js — DEPRECATED 2026-04
+ * ─────────────────────────────────────────────────────────────────────────
+ * Substituído por agents/sla-detector.agent.js.
  */
 
-const fs = require('fs');
-const cron = require('node-cron');
-const { detectarOsNovas } = require('./sla-detector.service');
-const { withBrowserLock } = require('./playwright-lock');
+'use strict';
 
-const SESSION_FILE = '/tmp/tutts-sla-session.json';
+const { logger } = require('../../config/logger');
 
-let _rodando = false;
-let _ultimoRelogin = 0;
-const RELOGIN_COOLDOWN_MS = 60_000; // não relogar mais de 1x por minuto
-
-function log(msg) {
-  console.log(`[sla-detector-worker] ${msg}`);
+function startSlaDetectorWorker(_pool) {
+  logger.info('[sla-detector-worker DEPRECATED] start ignorado — use agent-pool');
 }
 
-async function tentarRelogin() {
-  const agora = Date.now();
-  if (agora - _ultimoRelogin < RELOGIN_COOLDOWN_MS) {
-    log('⏭️ Relogin em cooldown, pulando');
-    return false;
-  }
-  _ultimoRelogin = agora;
-
-  try {
-    log('🔑 Disparando relogin via playwright-sla-capture.garantirSessao()...');
-    const { garantirSessao } = require('./playwright-sla-capture');
-    const result = await withBrowserLock('sla-detector-relogin', () => garantirSessao());
-    log(`✅ Relogin concluído — sessao=${result.sessaoSalva} payload=${result.payloadCapturado}`);
-    return true;
-  } catch (err) {
-    log(`❌ Relogin falhou: ${err.message}`);
-    return false;
-  }
+function stopSlaDetectorWorker() {
+  logger.info('[sla-detector-worker DEPRECATED] stop ignorado — use agent-pool');
 }
 
-async function tick(pool) {
-  if (_rodando) {
-    log('⏭️ Tick anterior ainda rodando, pulando');
-    return;
-  }
-  _rodando = true;
-  try {
-    const result = await withBrowserLock('sla-detector-tick', () => detectarOsNovas(pool));
-    if (result.sessaoExpirada) {
-      const ok = await tentarRelogin();
-      if (ok) {
-        await withBrowserLock('sla-detector-retry', () => detectarOsNovas(pool));
-      }
-    }
-  } catch (err) {
-    log(`❌ Erro no tick: ${err.message}`);
-  } finally {
-    _rodando = false;
-  }
-}
-
-function startSlaDetectorWorker(pool) {
-  if (process.env.SLA_DETECTOR_ATIVO !== 'true') {
-    log('⏸️ SLA_DETECTOR_ATIVO != true — worker NÃO iniciado');
-    return;
-  }
-
-  const tz = { timezone: 'America/Bahia' };
-
-  // Seg-Sex 08:00-17:58 a cada 2 min
-  cron.schedule('*/2 8-17 * * 1-5', () => tick(pool), tz);
-  // Borda 18:00 seg-sex
-  cron.schedule('0 18 * * 1-5', () => tick(pool), tz);
-  // Sáb 08:00-11:58 a cada 2 min
-  cron.schedule('*/2 8-11 * * 6', () => tick(pool), tz);
-  // Borda 12:00 sáb
-  cron.schedule('0 12 * * 6', () => tick(pool), tz);
-
-  log('▶️ SLA Detector Worker iniciado (Seg-Sex 08-18h, Sáb 08-12h, Bahia, polling 2min)');
-
-  // 🔧 FIX (2026-04): Bootstrap proativo
-  // Se o arquivo de sessão não existe no disco (container limpo após deploy),
-  // força um relogin imediato em vez de esperar o primeiro tick do cron.
-  // Sem isso, a fila fica parada até o próximo */2 dentro da janela comercial,
-  // e mesmo assim só destrava se o fix do catch em sla-detector.service.js
-  // estiver aplicado (caso contrário sessaoExpirada nunca vira true).
-  if (!fs.existsSync(SESSION_FILE)) {
-    log('🚀 Sessão Playwright ausente no boot — forçando relogin inicial');
-    tentarRelogin()
-      .then(ok => {
-        if (ok && process.env.SLA_DETECTOR_ATIVO === 'true') {
-          // Após relogin bem-sucedido, dispara um tick imediato pra começar
-          // a drenar a fila sem esperar o cron.
-          log('🎬 Disparando primeiro tick após bootstrap');
-          tick(pool).catch(err => log(`❌ Tick pós-bootstrap: ${err.message}`));
-        }
-      })
-      .catch(err => log(`❌ Bootstrap relogin: ${err.message}`));
-  } else {
-    log('✅ Sessão Playwright já existe no disco');
-  }
-}
-
-module.exports = { startSlaDetectorWorker };
+module.exports = { startSlaDetectorWorker, stopSlaDetectorWorker };

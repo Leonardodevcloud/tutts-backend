@@ -26,7 +26,29 @@ const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
 
-const SESSION_FILE = '/tmp/tutts-sla-session.json';
+// getSessionFile() pode ser sobrescrito por chamada (ver setOverrides abaixo).
+// Default: arquivo único pra compatibilidade com chamadas legadas (sem pool).
+const SESSION_FILE_DEFAULT = '/tmp/tutts-sla-session.json';
+
+// Overrides por chamada — setados pelo agent-pool antes de cada job.
+// Seguro porque o browser-pool garante SÓ 1 chamada dessas funções por vez
+// dentro do mesmo processo Node.
+let _sessionFileOverride = null;
+let _credentialsOverride = null;
+
+function getSessionFile() {
+  return _sessionFileOverride || SESSION_FILE_DEFAULT;
+}
+
+function setOverrides(opts) {
+  _sessionFileOverride = (opts && opts.sessionFile) || null;
+  _credentialsOverride = (opts && opts.credentials) || null;
+}
+
+function clearOverrides() {
+  _sessionFileOverride = null;
+  _credentialsOverride = null;
+}
 const META_FILE    = '/tmp/tutts-sla-meta.json';     // 🆕 payload AJAX do endpoint alvo
 const NETWORK_LOG_FILE = '/tmp/tutts-sla-network.json'; // 🆕 dump de TODAS as chamadas pro tutts.com.br
 const TIMEOUT      = 25000;
@@ -279,9 +301,11 @@ async function isLoggedIn(page) {
   }
 }
 
-async function fazerLogin(page) {
-  const email = process.env.SISTEMA_EXTERNO_SLA_EMAIL;
-  const senha = process.env.SISTEMA_EXTERNO_SLA_SENHA;
+async function fazerLogin(page, overrides) {
+  // overrides opcional: { email, senha } — usado pelo agent-pool quando há
+  // múltiplas contas (1 por slot). Se ausente, cai no env padrão (compat).
+  const email = (overrides && overrides.email) || process.env.SISTEMA_EXTERNO_SLA_EMAIL;
+  const senha = (overrides && overrides.senha) || process.env.SISTEMA_EXTERNO_SLA_SENHA;
 
   if (!email || !senha) {
     throw new Error(
@@ -289,7 +313,7 @@ async function fazerLogin(page) {
     );
   }
 
-  log('🔐 Login SLA (credencial dedicada)...');
+  log(`🔐 Login SLA (${overrides ? 'override' : 'env padrão'}): ${email}`);
 
   await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
   await page.waitForTimeout(1500);
@@ -396,14 +420,14 @@ function ponto1Bate767(texto) {
 
 /**
  * Função dedicada a APENAS:
- *   1. Garantir que existe uma sessão Playwright válida em SESSION_FILE
+ *   1. Garantir que existe uma sessão Playwright válida em getSessionFile()
  *   2. Garantir que o META_FILE com o payload AJAX está atualizado
  *
  * Sem buscar nenhuma OS, sem clicar em nada, sem ruído.
  *
  * Fluxo:
  *   - Abre browser headless
- *   - Tenta reusar SESSION_FILE; se inválido, faz login completo
+ *   - Tenta reusar getSessionFile(); se inválido, faz login completo
  *   - Visita /acompanhamento-servicos — isso dispara automaticamente o XHR
  *     pro endpoint viewServicoAcompanhamento, e o listener instalado por
  *     instalarCapturaPayload(context) escreve o META_FILE
@@ -438,9 +462,9 @@ async function garantirSessao() {
   try {
     browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
 
-    if (fs.existsSync(SESSION_FILE)) {
+    if (fs.existsSync(getSessionFile())) {
       try {
-        context = await browser.newContext({ storageState: SESSION_FILE });
+        context = await browser.newContext({ storageState: getSessionFile() });
       } catch {
         context = await browser.newContext();
       }
@@ -460,7 +484,7 @@ async function garantirSessao() {
 
     if (!(await isLoggedIn(page))) {
       log('🔓 garantirSessao: sessão inválida, fazendo login completo');
-      await fazerLogin(page);
+      await fazerLogin(page, _credentialsOverride);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(1500);
     } else {
@@ -503,7 +527,7 @@ async function garantirSessao() {
 
     // Persiste storageState atualizado
     try {
-      await context.storageState({ path: SESSION_FILE });
+      await context.storageState({ path: getSessionFile() });
       log('💾 garantirSessao: storageState salvo');
     } catch (e) {
       log(`⚠️ garantirSessao: falha ao salvar storageState: ${e.message}`);
@@ -594,9 +618,9 @@ async function coletarOsEmExecucao() {
     browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
     etapa('browser_launched');
 
-    if (fs.existsSync(SESSION_FILE)) {
+    if (fs.existsSync(getSessionFile())) {
       try {
-        context = await browser.newContext({ storageState: SESSION_FILE });
+        context = await browser.newContext({ storageState: getSessionFile() });
         etapa('context_with_storage');
       } catch (e) {
         etapa('context_storage_failed', { erro: e.message });
@@ -617,7 +641,7 @@ async function coletarOsEmExecucao() {
 
     if (!(await isLoggedIn(page))) {
       etapa('login_needed');
-      await fazerLogin(page);
+      await fazerLogin(page, _credentialsOverride);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(1500);
       etapa('login_done');
@@ -650,7 +674,7 @@ async function coletarOsEmExecucao() {
     await page.waitForTimeout(500);
 
     // Salva storageState atualizado
-    try { await context.storageState({ path: SESSION_FILE }); } catch (_) {}
+    try { await context.storageState({ path: getSessionFile() }); } catch (_) {}
 
     // Extrai o total esperado do texto "Serviço(s) em execução (149)"
     try {
@@ -830,9 +854,9 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
 
     // Reusa cookies se possível
-    if (fs.existsSync(SESSION_FILE)) {
+    if (fs.existsSync(getSessionFile())) {
       try {
-        context = await browser.newContext({ storageState: SESSION_FILE });
+        context = await browser.newContext({ storageState: getSessionFile() });
       } catch {
         context = await browser.newContext();
       }
@@ -856,14 +880,14 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 
     // Confirma sessão — se não, relogin
     if (!(await isLoggedIn(page))) {
-      await fazerLogin(page);
+      await fazerLogin(page, _credentialsOverride);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(1500);
     }
 
     // Persiste cookies pra próxima captura reaproveitar
     try {
-      await context.storageState({ path: SESSION_FILE });
+      await context.storageState({ path: getSessionFile() });
     } catch (_) {}
 
     // ── Passo 1: ativa aba "Em execução" ──────────────────────────────────
@@ -921,13 +945,13 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
         // Sessão provavelmente morreu — força re-login e retry
         log('⚠️ Campo de busca não apareceu — forçando re-login');
         try {
-          if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+          if (fs.existsSync(getSessionFile())) fs.unlinkSync(getSessionFile());
         } catch (_) {}
-        await fazerLogin(page);
+        await fazerLogin(page, _credentialsOverride);
         await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
         await page.waitForTimeout(2000);
         try {
-          await context.storageState({ path: SESSION_FILE });
+          await context.storageState({ path: getSessionFile() });
         } catch (_) {}
 
         // Reativa aba execução
@@ -1165,6 +1189,9 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 // Resultado: quando o lock global libera, o browser do job anterior já se foi.
 
 module.exports = {
+  // Overrides para uso pelo agent-pool (multi-conta)
+  setOverrides,
+  clearOverrides,
   capturarPontosOS,
   garantirSessao,
   coletarOsEmExecucao,

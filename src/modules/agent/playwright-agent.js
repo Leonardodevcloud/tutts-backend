@@ -22,7 +22,27 @@ const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
 
-const SESSION_FILE   = '/tmp/tutts-rpa-session.json';
+// getSessionFile() pode ser sobrescrito via setOverrides (usado pelo agent-pool
+// quando há múltiplas contas com 1 sessão por slot).
+const SESSION_FILE_DEFAULT = '/tmp/tutts-rpa-session.json';
+
+let _sessionFileOverride = null;
+let _credentialsOverride = null;
+
+function getSessionFile() {
+  return _sessionFileOverride || SESSION_FILE_DEFAULT;
+}
+
+function setOverrides(opts) {
+  _sessionFileOverride = (opts && opts.sessionFile) || null;
+  _credentialsOverride = (opts && opts.credentials) || null;
+}
+
+function clearOverrides() {
+  _sessionFileOverride = null;
+  _credentialsOverride = null;
+}
+
 const SCREENSHOT_DIR = '/tmp/screenshots';
 const TIMEOUT        = 25000;
 // Timeout mais largo só para page.goto() — navegação pro sistema externo
@@ -217,8 +237,15 @@ async function isLoggedIn(page) {
   }
 }
 
-async function fazerLogin(page) {
-  log('🔐 Fazendo login...');
+async function fazerLogin(page, overrides) {
+  const email = (overrides && overrides.email) || process.env.SISTEMA_EXTERNO_EMAIL;
+  const senha = (overrides && overrides.senha) || process.env.SISTEMA_EXTERNO_SENHA;
+
+  if (!email || !senha) {
+    throw new Error('SISTEMA_EXTERNO_EMAIL / SISTEMA_EXTERNO_SENHA não configuradas.');
+  }
+
+  log(`🔐 Login (${overrides ? 'override' : 'env padrão'}): ${email}`);
 
   await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   await page.waitForTimeout(1500);
@@ -229,8 +256,8 @@ async function fazerLogin(page) {
     throw new Error(`Página de login não carregou. URL: ${page.url()}. Screenshot: ${ss}`);
   }
 
-  await page.fill('#loginEmail', process.env.SISTEMA_EXTERNO_EMAIL);
-  await page.fill('input[type="password"]', process.env.SISTEMA_EXTERNO_SENHA);
+  await page.fill('#loginEmail', email);
+  await page.fill('input[type="password"]', senha);
 
   // type="button" com name="logar" (não é submit!)
   await page.locator('input[name="logar"]').first().click();
@@ -289,8 +316,8 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     });
 
     let contextOptions = {};
-    if (fs.existsSync(SESSION_FILE)) {
-      contextOptions = { storageState: SESSION_FILE };
+    if (fs.existsSync(getSessionFile())) {
+      contextOptions = { storageState: getSessionFile() };
       log('♻️  Usando sessão salva');
     }
 
@@ -311,14 +338,14 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await page.waitForTimeout(2000);
 
     if (!(await isLoggedIn(page))) {
-      if (fs.existsSync(SESSION_FILE)) {
-        fs.unlinkSync(SESSION_FILE);
+      if (fs.existsSync(getSessionFile())) {
+        fs.unlinkSync(getSessionFile());
         log('🗑️  Sessão inválida removida');
       }
-      await fazerLogin(page);
+      await fazerLogin(page, _credentialsOverride);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
       await page.waitForTimeout(2000);
-      await context.storageState({ path: SESSION_FILE });
+      await context.storageState({ path: getSessionFile() });
       log('💾 Sessão salva');
     } else {
       log('✅ Já logado');
@@ -395,14 +422,14 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       if (!inputVisivel) {
         // Sessão pode ter expirado — forçar re-login
         log('⚠️ Campo de busca não apareceu — forçando re-login...');
-        if (fs.existsSync(SESSION_FILE)) {
-          fs.unlinkSync(SESSION_FILE);
+        if (fs.existsSync(getSessionFile())) {
+          fs.unlinkSync(getSessionFile());
           log('🗑️  Sessão removida');
         }
-        await fazerLogin(page);
+        await fazerLogin(page, _credentialsOverride);
         await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
         await page.waitForTimeout(2000);
-        await context.storageState({ path: SESSION_FILE });
+        await context.storageState({ path: getSessionFile() });
         log('💾 Sessão renovada');
 
         // Re-clicar na aba Em execução
@@ -1428,4 +1455,4 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
   }
 }
 
-module.exports = { executarCorrecaoEndereco };
+module.exports = { executarCorrecaoEndereco, setOverrides, clearOverrides };
