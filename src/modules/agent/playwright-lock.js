@@ -11,35 +11,39 @@
  *   });
  *
  * Se o lock já estiver ocupado, a chamada ESPERA até liberar (fila FIFO).
- * Timeout de segurança: se um job segurar o lock por mais de 5 minutos,
- * libera automaticamente para evitar deadlock permanente.
+ *
+ * 🔧 CRÍTICO (2026-04): O lock NÃO tem mais force-release por timeout.
+ * Liberação só acontece via `await fn()` resolver/rejeitar.
+ *
+ * Por quê? O force-release antigo (5 min) liberava o lock enquanto o Chromium
+ * ainda estava vivo no processo anterior — o próximo job pegava o lock e
+ * tentava `chromium.launch()` em paralelo, causando SIGTRAP / "Target page,
+ * context or browser has been closed".
+ *
+ * A garantia de não-deadlock agora é responsabilidade do callee:
+ *   1. Toda função que pega o lock TEM que ter try/finally fechando o browser.
+ *   2. O callee usa watchdog INTERNO (próprio das funções do playwright-sla-capture
+ *      e playwright-agent) — quando dispara, mata o Chromium ANTES de retornar,
+ *      e SÓ DEPOIS o lock é liberado.
  */
 
 'use strict';
 
 const { logger } = require('../../config/logger');
 
-const LOCK_TIMEOUT_MS = 5 * 60_000; // 5 min — timeout absoluto do lock
-
 let _busy = false;
 let _heldBy = null;
 let _heldSince = null;
 let _queue = [];
-let _forceReleaseTimer = null;
 
 function log(msg) {
   logger.info(`[playwright-lock] ${msg}`);
 }
 
 function _release() {
-  if (_forceReleaseTimer) {
-    clearTimeout(_forceReleaseTimer);
-    _forceReleaseTimer = null;
-  }
-  
   const elapsed = _heldSince ? Math.round((Date.now() - _heldSince) / 1000) : 0;
   log(`🔓 Lock liberado por [${_heldBy}] após ${elapsed}s (fila: ${_queue.length})`);
-  
+
   _heldBy = null;
   _heldSince = null;
 
@@ -48,12 +52,6 @@ function _release() {
     _heldBy = next.quem;
     _heldSince = Date.now();
     log(`🔒 Lock concedido a [${next.quem}] (restam ${_queue.length} na fila)`);
-    
-    _forceReleaseTimer = setTimeout(() => {
-      log(`⚠️ TIMEOUT: [${_heldBy}] segurou o lock por ${LOCK_TIMEOUT_MS / 1000}s — forçando liberação`);
-      _release();
-    }, LOCK_TIMEOUT_MS);
-    
     next.resolve();
   } else {
     _busy = false;
@@ -67,12 +65,6 @@ function _acquire(quem) {
       _heldBy = quem;
       _heldSince = Date.now();
       log(`🔒 Lock concedido a [${quem}] (fila vazia)`);
-      
-      _forceReleaseTimer = setTimeout(() => {
-        log(`⚠️ TIMEOUT: [${_heldBy}] segurou o lock por ${LOCK_TIMEOUT_MS / 1000}s — forçando liberação`);
-        _release();
-      }, LOCK_TIMEOUT_MS);
-      
       resolve();
     } else {
       log(`⏳ [${quem}] aguardando lock (ocupado por [${_heldBy}] há ${Math.round((Date.now() - _heldSince) / 1000)}s, fila: ${_queue.length})`);
@@ -85,6 +77,10 @@ function _acquire(quem) {
  * Executa fn() com lock exclusivo de Playwright.
  * Se outro worker já tem o lock, espera na fila.
  * O lock é SEMPRE liberado no finally, mesmo se fn() lançar erro.
+ *
+ * IMPORTANTE: fn() DEVE garantir que qualquer browser/context aberto seja
+ * fechado ANTES de retornar (sucesso ou erro). Caso contrário, o próximo
+ * job na fila vai disparar Chromium concorrente.
  */
 async function withBrowserLock(quem, fn) {
   await _acquire(quem);
