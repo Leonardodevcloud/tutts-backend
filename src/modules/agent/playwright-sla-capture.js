@@ -141,62 +141,20 @@ const ACOMP_URL = () =>
   process.env.SISTEMA_EXTERNO_ACOMPANHAMENTO_URL ||
   'https://tutts.com.br/expresso/expressoat/acompanhamento-servicos';
 
-// ── Mutex interno (serializa capturas nesta sessão) ──────────────────────────
-let _mutexBusy = false;
-const _mutexQueue = [];
-const MUTEX_ACQUIRE_TIMEOUT_MS = 120_000; // 2min — se travou tanto, algo morreu
-let _mutexHeldSince = null; // timestamp quando o mutex foi adquirido
-let _mutexHeldBy = null;     // string identificando quem tem o mutex (debug)
-
-async function acquireMutex(quem = 'desconhecido') {
-  if (!_mutexBusy) {
-    _mutexBusy = true;
-    _mutexHeldSince = Date.now();
-    _mutexHeldBy = quem;
-    return;
-  }
-
-  // Há quanto tempo o mutex está segurado?
-  const heldFor = _mutexHeldSince ? Date.now() - _mutexHeldSince : 0;
-  log(`⏳ Mutex ocupado por ${_mutexHeldBy || '?'} há ${(heldFor/1000).toFixed(1)}s — ${quem} entra na fila`);
-
-  // Espera com timeout — se passar de MUTEX_ACQUIRE_TIMEOUT, lança erro
-  // pra evitar promises empilhadas pra sempre quando alguém trava
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      // Remove a si mesmo da fila
-      const idx = _mutexQueue.indexOf(entry);
-      if (idx >= 0) _mutexQueue.splice(idx, 1);
-      reject(new Error(
-        `Mutex acquire timeout (${MUTEX_ACQUIRE_TIMEOUT_MS}ms) — ` +
-        `segurado por ${_mutexHeldBy} há ${((Date.now() - _mutexHeldSince)/1000).toFixed(1)}s`
-      ));
-    }, MUTEX_ACQUIRE_TIMEOUT_MS);
-
-    const entry = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    _mutexQueue.push(entry);
-  });
-
-  _mutexBusy = true;
-  _mutexHeldSince = Date.now();
-  _mutexHeldBy = quem;
+// ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
+// Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
+// Manter dois sistemas de lock causava deadlock: o lock global liberava
+// mas o mutex interno ainda estava preso até timeout (2min).
+//
+// Estas funções viraram no-op pra não quebrar chamadas existentes. Toda
+// serialização de Playwright agora passa pelos workers (sla-capture-worker,
+// sla-detector-worker, agent-worker) que já envolvem em withBrowserLock.
+async function acquireMutex(_quem) {
+  return; // no-op
 }
 
 function releaseMutex() {
-  if (_mutexHeldSince) {
-    const heldFor = Date.now() - _mutexHeldSince;
-    if (heldFor > 30_000) {
-      log(`⚠️ Mutex segurado por ${_mutexHeldBy} durante ${(heldFor/1000).toFixed(1)}s (limite saudável: 30s)`);
-    }
-  }
-  _mutexBusy = false;
-  _mutexHeldSince = null;
-  _mutexHeldBy = null;
-  const next = _mutexQueue.shift();
-  if (next) next();
+  return; // no-op
 }
 
 /**
@@ -461,9 +419,13 @@ function ponto1Bate767(texto) {
 async function garantirSessao() {
   await acquireMutex('garantirSessao');
 
-  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
-
-  let context;
+  // 🔧 CRÍTICO (2026-04): browser/context declarados ANTES do try, mas só
+  // INICIALIZADOS dentro dele. Se `chromium.launch()` ou `newContext()` falhar
+  // (SIGTRAP, EAGAIN, OOM), o finally precisa ter acesso pra fechar o que
+  // foi (parcialmente) criado. Antes do fix, launch fora do try deixava
+  // Chromium zumbi quando falhava no meio da inicialização.
+  let browser = null;
+  let context = null;
   let payloadAntes = null;
 
   // Snapshot do mtime do META_FILE pra detectar se a captura efetivamente atualizou
@@ -474,6 +436,8 @@ async function garantirSessao() {
   } catch (_) {}
 
   try {
+    browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
+
     if (fs.existsSync(SESSION_FILE)) {
       try {
         context = await browser.newContext({ storageState: SESSION_FILE });
@@ -858,10 +822,13 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 
   await acquireMutex(`capturarPontosOS(${os_numero})`);
 
-  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
+  // 🔧 CRÍTICO (2026-04): browser/context dentro do try (ver comentário em garantirSessao)
+  let browser = null;
+  let context = null;
 
-  let context;
   try {
+    browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
+
     // Reusa cookies se possível
     if (fs.existsSync(SESSION_FILE)) {
       try {
@@ -1173,53 +1140,35 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// WATCHDOGS — wrappers de timeout absoluto
+// EXPORTS
 // ═════════════════════════════════════════════════════════════════════════════
-// Mesmo com mutex timeout e fecharBrowserSeguro, ainda dá pra alguma operação
-// ficar pendurada DENTRO da função (waitForSelector, click, etc). Esses
-// wrappers garantem que NENHUMA chamada pode demorar mais que o limite,
-// mesmo que isso signifique vazar um Chromium órfão de vez em quando
-// (que será recolhido pelo GC ou OOM-killer eventualmente).
 //
-// Limites generosos pra dar margem a operações lentas mas saudáveis:
-//   - capturarPontosOS:       90s (1 OS, modal + parser)
-//   - coletarOsEmExecucao:   120s (15 páginas)
-//   - garantirSessao:         60s (login + 1 navegação)
-
-const WATCHDOG_CAPTURAR_MS  = 90_000;
-const WATCHDOG_COLETAR_MS   = 120_000;
-const WATCHDOG_SESSAO_MS    = 60_000;
-
-async function capturarPontosOSComWatchdog(args) {
-  return comTimeout(
-    capturarPontosOS(args),
-    WATCHDOG_CAPTURAR_MS,
-    `capturarPontosOS(${args && args.os_numero})`
-  );
-}
-
-async function coletarOsEmExecucaoComWatchdog() {
-  return comTimeout(
-    coletarOsEmExecucao(),
-    WATCHDOG_COLETAR_MS,
-    'coletarOsEmExecucao'
-  );
-}
-
-async function garantirSessaoComWatchdog() {
-  return comTimeout(
-    garantirSessao(),
-    WATCHDOG_SESSAO_MS,
-    'garantirSessao'
-  );
-}
+// 🔧 CRÍTICO (2026-04): Wrappers `*ComWatchdog` REMOVIDOS.
+//
+// Antes existiam wrappers `comTimeout(fn(), 90s, ...)` que envolviam as funções
+// inteiras. O problema: `comTimeout` faz `Promise.race`, e quando o timeout
+// dispara, a função INTERNA continua rodando (JS não cancela Promise) — mas
+// o lock global `withBrowserLock` libera porque a Promise rejeitou.
+//
+// Resultado: o próximo job pegava o lock e tentava `chromium.launch()` em
+// CIMA do anterior ainda fechando, causando SIGTRAP / "Target page, context
+// or browser has been closed".
+//
+// A garantia de não-trava agora vem de duas camadas:
+//   1. Timeouts INTERNOS do Playwright em cada operação (TIMEOUT=25s,
+//      NAV_TIMEOUT=45s, page.setDefaultTimeout) — qualquer operação individual
+//      lança erro se demorar muito.
+//   2. `fecharBrowserSeguro` no `finally` de cada função (close gracioso 5s,
+//      depois SIGKILL no processo). Garante que quando a função retorna
+//      (sucesso ou erro), o Chromium ESTÁ MORTO.
+//
+// Resultado: quando o lock global libera, o browser do job anterior já se foi.
 
 module.exports = {
-  // Os exports principais agora são as versões com watchdog
-  capturarPontosOS: capturarPontosOSComWatchdog,
-  garantirSessao: garantirSessaoComWatchdog,
-  coletarOsEmExecucao: coletarOsEmExecucaoComWatchdog,
-  // Versões cruas (sem watchdog) pra testes/debug
+  capturarPontosOS,
+  garantirSessao,
+  coletarOsEmExecucao,
+  // Aliases mantidos pra compatibilidade com import antigo
   _semWatchdog: {
     capturarPontosOS,
     garantirSessao,
