@@ -21,9 +21,18 @@ const MAX_FALHAS_SEGUIDAS  = 3;       // após 3 falhas de DB, ativa back-off
 const BACKOFF_BASE_MS      = 30_000;  // 30s inicial no back-off
 const BACKOFF_MAX_MS       = 5 * 60_000; // teto: 5 minutos
 
-// Watchdog absoluto: se um único job Playwright passar disso, mata e segue.
-// Cobre o caso do Chromium pendurar indefinidamente sem lançar erro.
-const JOB_WATCHDOG_MS      = 4 * 60_000; // 4 min (sistema externo + rede margem)
+// 🔧 REMOVIDO (2026-04): JOB_WATCHDOG_MS + comTimeout
+//
+// O watchdog absoluto de 4min envolvendo `executarCorrecaoEndereco` causava
+// vazamento de Chromium: quando disparava, a Promise interna continuava
+// rodando e tentando fechar o browser, mas `withBrowserLock` já tinha
+// liberado — o próximo job pegava o lock e dava `chromium.launch()` em
+// cima do anterior. Resultado: SIGTRAP / "Target page, context or browser
+// has been closed" nos logs.
+//
+// A garantia de não-trava agora vem dos timeouts internos do playwright-agent
+// (TIMEOUT=25s, NAV_TIMEOUT=45s) e do `fecharBrowserSeguro` no finally
+// interno — quando a função retorna (sucesso OU erro), o Chromium está morto.
 
 // ── Estado do circuit breaker ───────────────────────────────────
 let workerAtivo       = false;
@@ -32,19 +41,6 @@ let proximoTick       = null;
 
 function log(msg) {
   logger.info(`[agent-worker] ${msg}`);
-}
-
-/**
- * Watchdog: promise com timeout absoluto. Não cancela a promise original
- * (JS não tem cancellation), mas o finally do Playwright fecha o browser
- * dentro de poucos segundos depois via fecharBrowserSeguro.
- */
-function comTimeout(promise, ms, nome) {
-  let timer;
-  const timeout = new Promise((_, rej) => {
-    timer = setTimeout(() => rej(new Error(`${nome}: watchdog ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -163,25 +159,21 @@ async function processarProximoPendente(pool) {
     ).catch(() => {});
 
     const resultado = await withBrowserLock(`agent-os-${registro.os_numero}`, () =>
-      comTimeout(
-        executarCorrecaoEndereco({
-          os_numero:        registro.os_numero,
-          ponto:            registro.ponto,
-          latitude:         coords.latitude,
-          longitude:        coords.longitude,
-          cod_profissional: registro.cod_profissional || null,
-          // Callback que o Playwright chama em marcos do fluxo.
-          // Falha no UPDATE não pode derrubar o job — silenciar com .catch.
-          onProgresso: (etapa, pct) => {
-            pool.query(
-              `UPDATE ajustes_automaticos SET etapa_atual = $1, progresso = $2 WHERE id = $3`,
-              [etapa, pct, registro.id]
-            ).catch(() => {});
-          },
-        }),
-        JOB_WATCHDOG_MS,
-        `playwright_os_${registro.os_numero}`
-      )
+      executarCorrecaoEndereco({
+        os_numero:        registro.os_numero,
+        ponto:            registro.ponto,
+        latitude:         coords.latitude,
+        longitude:        coords.longitude,
+        cod_profissional: registro.cod_profissional || null,
+        // Callback que o Playwright chama em marcos do fluxo.
+        // Falha no UPDATE não pode derrubar o job — silenciar com .catch.
+        onProgresso: (etapa, pct) => {
+          pool.query(
+            `UPDATE ajustes_automaticos SET etapa_atual = $1, progresso = $2 WHERE id = $3`,
+            [etapa, pct, registro.id]
+          ).catch(() => {});
+        },
+      })
     );
 
     if (resultado.sucesso) {
