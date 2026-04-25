@@ -137,6 +137,37 @@ async function initColetaEnderecosTables(pool) {
       WHERE cnpj IS NOT NULL
   `).catch(e => console.log('⚠️ UNIQUE cnpj+grupo:', e.message));
   console.log('✅ Colunas NF em solicitacao_favoritos + UNIQUE (cnpj, grupo)');
+
+  // 2026-04: Função de cadastro pelo motoboy DESATIVADA.
+  // Cancela todos os ganhos pendentes/aguardando pagamento (one-time).
+  // Histórico fica preservado pra auditoria — só muda o status.
+  // IDEMPOTENTE: rodar mais de uma vez não causa efeito colateral (já estão 'cancelado').
+  try {
+    const r = await pool.query(`
+      UPDATE coleta_motoboy_ganhos
+      SET status = 'cancelado',
+          observacao = COALESCE(observacao || ' | ', '') || 'Cancelado em 2026-04: função de cadastro desativada'
+      WHERE status IN ('pendente', 'aprovado_aguardando_pagamento', 'aprovado')
+    `);
+    if (r.rowCount > 0) {
+      console.log(`✅ ${r.rowCount} ganho(s) de coleta cancelado(s) (função desativada)`);
+    }
+  } catch (e) {
+    console.log('⚠️ Cancelamento de ganhos coleta (provavelmente coluna observacao não existe):', e.message);
+    // Fallback sem observacao caso a coluna não exista
+    try {
+      const r2 = await pool.query(`
+        UPDATE coleta_motoboy_ganhos
+        SET status = 'cancelado'
+        WHERE status IN ('pendente', 'aprovado_aguardando_pagamento', 'aprovado')
+      `);
+      if (r2.rowCount > 0) {
+        console.log(`✅ ${r2.rowCount} ganho(s) de coleta cancelado(s) (sem observacao)`);
+      }
+    } catch (e2) {
+      console.log('⚠️ Cancelamento alternativo também falhou:', e2.message);
+    }
+  }
 }
 
 module.exports = { initColetaEnderecosTables };

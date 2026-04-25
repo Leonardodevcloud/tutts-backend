@@ -278,6 +278,17 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
   //   6. Decide auto-aprovar (≥90% confiança IA) ou jogar pra fila admin
 
   router.post('/motoboy/coleta', verificarToken, async (req, res) => {
+    // 2026-04: Função de cadastro pelo motoboy DESATIVADA.
+    // Motoboys agora apenas consultam endereços já cadastrados pelos admins.
+    // Mantemos a rota com 410 Gone pra clientes antigos receberem mensagem clara.
+    return res.status(410).json({
+      error: 'Cadastro de endereços desativado. Esta tela agora é apenas para consulta.',
+      codigo: 'FEATURE_DEPRECATED'
+    });
+  });
+
+  // ===== Implementação antiga preservada como dead code (caso queiramos reativar) =====
+  router.post('/motoboy/coleta/_deprecated', verificarToken, async (req, res) => {
     const client = await pool.connect();
     try {
       const cod = req.user?.codProfissional;
@@ -623,6 +634,8 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
         enderecosGrupo = await pool.query(`
           SELECT f.id, f.apelido, f.endereco_completo, f.cidade, f.uf,
                  f.latitude, f.longitude, f.vezes_usado, f.ultimo_uso,
+                 f.procurar_por_padrao, f.telefone_padrao, f.observacao_padrao,
+                 f.razao_social, f.nome_fantasia,
                  p.cod_profissional AS cadastrado_por,
                  p.criado_em AS cadastrado_em,
                  CASE WHEN p.foto_base64 IS NOT NULL THEN true ELSE false END AS tem_foto,
@@ -638,18 +651,9 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
         `, paramsEnderecos);
       }
 
-      // Pendentes / rejeitados do próprio motoboy (sempre visíveis, mesmo sem região)
-      const meusPendentes = await pool.query(`
-        SELECT p.id, p.nome_cliente AS apelido, p.endereco_formatado AS endereco_completo,
-               p.latitude, p.longitude, p.status, p.confianca_ia, p.motivo_rejeicao,
-               p.criado_em, r.nome AS regiao_nome
-        FROM coleta_enderecos_pendentes p
-        LEFT JOIN coleta_regioes r ON r.id = p.regiao_id
-        WHERE p.cod_profissional = $1 AND p.status IN ('validacao_manual', 'rejeitado')
-          ${termo ? `AND (p.nome_cliente ILIKE $2 OR p.endereco_formatado ILIKE $2)` : ''}
-        ORDER BY p.criado_em DESC
-        LIMIT 30
-      `, termo ? [cod, termo] : [cod]);
+      // 2026-04: motoboy não cadastra mais endereços (função desativada).
+      // meus_pendentes retorna sempre vazio — frontend antigo continua funcionando, novo nem renderiza.
+      const meusPendentes = { rows: [] };
 
       res.json({
         aprovados: enderecosGrupo.rows,
