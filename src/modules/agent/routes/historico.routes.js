@@ -94,6 +94,26 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
   });
 
+  // 2026-04: GET /agent/foto-nf/:id (admin) — foto da nota fiscal
+  router.get('/foto-nf/:id', verificarAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID invalido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT foto_nf FROM ajustes_automaticos WHERE id = $1`,
+        [id]
+      );
+      if (rows.length === 0 || !rows[0].foto_nf) {
+        return res.status(404).json({ erro: 'Foto da NF nao encontrada.' });
+      }
+      return res.json({ foto: rows[0].foto_nf });
+    } catch (err) {
+      console.error('[agent/foto-nf]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar foto da NF.' });
+    }
+  });
+
   // GET /agent/historico (admin) — agora retorna coords para o mapa
   router.get('/historico', verificarAdmin, async (req, res) => {
     const { status, os_numero, de, ate, page = 1, per_page = 30 } = req.query;

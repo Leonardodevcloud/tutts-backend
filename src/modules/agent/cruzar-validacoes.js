@@ -170,13 +170,22 @@ function cruzarValidacoes({ nf, receita, fachada }) {
   // Mensagem amigável pro motoboy
   let mensagem_motoboy = null;
   if (receita && receita.ok) {
+    // 2026-04: prioriza nome fantasia pra exibição (motoboy reconhece melhor)
     const nome = receita.nome_fantasia || receita.razao_social || 'Estabelecimento';
     if (!receita_ativa) {
       mensagem_motoboy = `⚠️ ${nome} consta como ${receita.situacao} na Receita`;
     } else if (pelo_menos_um_90) {
       mensagem_motoboy = `✅ ${nome} confirmado pela Receita Federal`;
     } else {
-      mensagem_motoboy = `⚠️ ${nome} encontrado na Receita, mas dados da NF/foto divergem`;
+      // 2026-04: lógica mais inteligente — se endereço bate forte (≥80%), confiar
+      // mesmo se fachada diverge (foto pode estar errada / vizinho / sem placa)
+      const enderecoBate = (scores.endereco_nf_vs_receita || 0) >= 80;
+      const razaoBate = (scores.razao_nf_vs_receita || 0) >= 80;
+      if (enderecoBate || razaoBate) {
+        mensagem_motoboy = `✅ ${nome} encontrado na Receita (endereço/razão social conferem)`;
+      } else {
+        mensagem_motoboy = `⚠️ ${nome} encontrado na Receita, mas dados da NF/foto divergem`;
+      }
     }
   } else if (receita) {
     mensagem_motoboy = `⚠️ Não consultamos a Receita: ${receita.motivo || 'erro desconhecido'}`;

@@ -134,6 +134,20 @@ module.exports = defineAgent({
         updates.push(`endereco_antigo = $${params.length + 1}`);
         params.push(resultado.endereco_antigo);
       }
+      // 2026-04: gravar campos do Playwright que estavam sendo ignorados
+      // (causavam: status "Frete pendente" e ausência do comparativo Antes/Depois)
+      if (typeof resultado.frete_recalculado === 'boolean') {
+        updates.push(`frete_recalculado = $${params.length + 1}`);
+        params.push(resultado.frete_recalculado);
+      }
+      if (resultado.valores_antes) {
+        updates.push(`valores_antes = $${params.length + 1}`);
+        params.push(JSON.stringify(resultado.valores_antes));
+      }
+      if (resultado.valores_depois) {
+        updates.push(`valores_depois = $${params.length + 1}`);
+        params.push(JSON.stringify(resultado.valores_depois));
+      }
       params.push(registro.id);
 
       await pool.query(
