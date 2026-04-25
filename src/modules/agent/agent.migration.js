@@ -47,6 +47,8 @@ async function initAgentTables(pool) {
     { nome: 'endereco_antigo_lat', tipo: 'DECIMAL(10, 8)' },
     { nome: 'endereco_antigo_lng', tipo: 'DECIMAL(11, 8)' },
     { nome: 'validacao_localizacao', tipo: 'JSONB' },
+    { nome: 'foto_nf',               tipo: 'TEXT' },     // base64 da NF (obrigatória pro caller)
+    { nome: 'validacao_nf',          tipo: 'JSONB' },    // resultado completo: NF + Receita + cruzamento
     { nome: 'valores_antes', tipo: 'JSONB' },
     { nome: 'valores_depois', tipo: 'JSONB' },
     // Progresso em tempo real: atualizado pelo worker conforme Playwright avança.

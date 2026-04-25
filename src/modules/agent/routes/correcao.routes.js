@@ -9,6 +9,9 @@
 
 const express = require('express');
 const { validarLocalizacao } = require('../validar-localizacao');
+// 2026-04: validação NF + cruzamento com Receita Federal
+const { validarNotaFiscal } = require('../validar-nota-fiscal');
+const { cruzarValidacoes } = require('../cruzar-validacoes');
 
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -24,7 +27,9 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 const RAIO_MAXIMO_KM = 2;
 
-function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada }) {
+// 2026-04: foto_nf agora é OBRIGATÓRIA, foto_fachada virou OPCIONAL.
+// O motoboy DEVE enviar a NF (prova fiscal); fachada é bônus de confiança.
+function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf }) {
   const erros = [];
 
   if (!os_numero || String(os_numero).trim() === '')
@@ -55,8 +60,8 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     }
   }
 
-  if (!foto_fachada || String(foto_fachada).trim() === '') {
-    erros.push('Foto da fachada é obrigatória.');
+  if (!foto_nf || String(foto_nf).trim() === '') {
+    erros.push('Foto da nota fiscal é obrigatória.');
   }
 
   return erros;
@@ -70,16 +75,20 @@ function createCorrecaoRoutes(pool) {
 
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
-    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada } = req.body || {};
+    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf } = req.body || {};
 
-    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada });
+    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
     }
 
     try {
+      // Foto da fachada agora é OPCIONAL — só valida tamanho se enviada
       if (foto_fachada && foto_fachada.length > 7_000_000) {
-        return res.status(400).json({ sucesso: false, erros: ['Foto muito grande. Máximo 5MB.'] });
+        return res.status(400).json({ sucesso: false, erros: ['Foto da fachada muito grande. Máximo 5MB.'] });
+      }
+      if (foto_nf && foto_nf.length > 7_000_000) {
+        return res.status(400).json({ sucesso: false, erros: ['Foto da NF muito grande. Máximo 5MB.'] });
       }
 
       const usuarioId       = req.user?.id   || null;
@@ -113,36 +122,76 @@ function createCorrecaoRoutes(pool) {
         });
       }
 
-      // ── Validar localização: foto da fachada vs Google Places ──
-      let validacaoLoc = null;
+      // ── 1. Validar NF (obrigatória) — extrai dados via Gemini E consulta Receita ──
+      let validacaoNF = null;
       try {
-        validacaoLoc = await validarLocalizacao(
-          foto_fachada,
-          parseFloat(motoboy_lat),
-          parseFloat(motoboy_lng)
-        );
+        validacaoNF = await validarNotaFiscal(foto_nf, {
+          latitude: parseFloat(motoboy_lat),
+          longitude: parseFloat(motoboy_lng),
+        });
 
-        if (validacaoLoc && validacaoLoc.foto_rejeitada) {
-          // Foto inválida — BLOQUEAR envio
-          console.log(`[agent] ❌ Foto rejeitada: ${validacaoLoc.motivo}`);
+        // Se NF não passou validação básica (não é NF, ilegível, CNPJ inválido) → BLOQUEAR
+        if (validacaoNF && validacaoNF.nf_rejeitada) {
+          console.log(`[agent] ❌ NF rejeitada: ${validacaoNF.motivo}`);
           return res.status(400).json({
             sucesso: false,
-            foto_rejeitada: true,
-            motivo_rejeicao: validacaoLoc.motivo,
-            erros: [validacaoLoc.motivo],
+            nf_rejeitada: true,
+            motivo_rejeicao: validacaoNF.motivo,
+            erros: [validacaoNF.motivo],
           });
         }
 
-        if (validacaoLoc && validacaoLoc.valido) {
-          console.log(`[agent] ✅ Localização validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
-        } else if (validacaoLoc) {
-          console.log(`[agent] ⚠️ Localização NÃO validada: ${validacaoLoc.motivo} — prosseguindo com aviso`);
+        if (validacaoNF) {
+          console.log(`[agent] ✅ NF analisada: CNPJ=${validacaoNF.dados?.cnpj_formatado} confianca=${validacaoNF.confianca}%`);
         }
-      } catch (valErr) {
-        console.error('[agent] ⚠️ Erro validação localização (não-bloqueante):', valErr.message);
+      } catch (nfErr) {
+        console.error('[agent] ⚠️ Erro validação NF (não-bloqueante):', nfErr.message);
       }
 
-      const validacaoJson = validacaoLoc ? JSON.stringify({
+      // ── 2. Validar fachada (opcional) — foto + Google Places ──
+      let validacaoLoc = null;
+      if (foto_fachada) {
+        try {
+          validacaoLoc = await validarLocalizacao(
+            foto_fachada,
+            parseFloat(motoboy_lat),
+            parseFloat(motoboy_lng)
+          );
+
+          if (validacaoLoc && validacaoLoc.foto_rejeitada) {
+            // Fachada inválida — BLOQUEAR (motoboy enviou fachada errada)
+            console.log(`[agent] ❌ Foto fachada rejeitada: ${validacaoLoc.motivo}`);
+            return res.status(400).json({
+              sucesso: false,
+              foto_rejeitada: true,
+              motivo_rejeicao: validacaoLoc.motivo,
+              erros: [validacaoLoc.motivo],
+            });
+          }
+
+          if (validacaoLoc && validacaoLoc.valido) {
+            console.log(`[agent] ✅ Fachada validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
+          } else if (validacaoLoc) {
+            console.log(`[agent] ⚠️ Fachada não validada: ${validacaoLoc.motivo} — prosseguindo com aviso`);
+          }
+        } catch (valErr) {
+          console.error('[agent] ⚠️ Erro validação fachada (não-bloqueante):', valErr.message);
+        }
+      }
+
+      // ── 3. Cruzar tudo: NF + Receita + Fachada → score combinado ──
+      let cruzamento = null;
+      if (validacaoNF && !validacaoNF.nf_rejeitada) {
+        cruzamento = cruzarValidacoes({
+          nf: validacaoNF.dados,
+          receita: validacaoNF.receita,
+          fachada: validacaoLoc,
+        });
+        console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | salvar=${cruzamento.pode_salvar_no_banco}`);
+      }
+
+      // JSON pra coluna validacao_localizacao
+      const validacaoLocJson = validacaoLoc ? JSON.stringify({
         valido: validacaoLoc.valido,
         nome_foto: validacaoLoc.nome_foto,
         match: validacaoLoc.match_google,
@@ -151,9 +200,23 @@ function createCorrecaoRoutes(pool) {
         lugares_proximos: validacaoLoc.lugares_proximos,
       }) : null;
 
+      // JSON pra coluna validacao_nf — inclui dados NF + Receita + cruzamento
+      const validacaoNfJson = validacaoNF ? JSON.stringify({
+        confianca: validacaoNF.confianca,
+        match_cidade: validacaoNF.match_cidade,
+        dados: validacaoNF.dados,
+        receita: validacaoNF.receita,
+        cruzamento,
+      }) : null;
+
+      // ── 4. Insere job na fila (Playwright vai processar a correção igual) ──
       const { rows } = await pool.query(
-        `INSERT INTO ajustes_automaticos (os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, status, usuario_id, usuario_nome, cod_profissional, validacao_localizacao)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pendente', $7, $8, $9, $10)
+        `INSERT INTO ajustes_automaticos (
+           os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng,
+           foto_fachada, foto_nf, status, usuario_id, usuario_nome, cod_profissional,
+           validacao_localizacao, validacao_nf
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendente', $8, $9, $10, $11, $12)
          RETURNING id, status, criado_em`,
         [
           String(os_numero).trim(),
@@ -161,15 +224,72 @@ function createCorrecaoRoutes(pool) {
           String(localizacao_raw).trim(),
           parseFloat(motoboy_lat),
           parseFloat(motoboy_lng),
-          foto_fachada,
+          foto_fachada || null,
+          foto_nf,
           usuarioId,
           usuarioNome,
           codProfissional,
-          validacaoJson,
+          validacaoLocJson,
+          validacaoNfJson,
         ]
       );
 
       const reg = rows[0];
+
+      // ── 5. Se cruzamento confirmou (Receita ATIVA + score≥90), grava endereço no banco de consulta ──
+      // Tabela alvo: solicitacao_favoritos (consultada pelo módulo Coleta).
+      // É async/best-effort: se falhar, NÃO bloqueia a correção.
+      let gravadoFavorito = false;
+      try {
+        if (cruzamento && cruzamento.pode_salvar_no_banco && validacaoNF?.receita?.ok) {
+          const r = validacaoNF.receita;
+          const cnpj = (r.cnpj || '').replace(/\D/g, '');
+          if (cnpj.length === 14) {
+            // grupo_enderecos_id: tenta achar pela região do motoboy (se ele tiver) — opcional, fica null se não houver
+            let grupoId = null;
+            if (codProfissional) {
+              try {
+                const grpQ = await pool.query(`
+                  SELECT cr.grupo_enderecos_id
+                    FROM coleta_regioes cr
+                    JOIN crm_profissionais_regiao crm ON UPPER(crm.regiao) = UPPER(cr.nome) AND UPPER(crm.estado) = UPPER(cr.uf)
+                   WHERE crm.cod_profissional = $1 AND cr.grupo_enderecos_id IS NOT NULL
+                   LIMIT 1
+                `, [codProfissional]).catch(() => ({ rows: [] }));
+                grupoId = grpQ.rows[0]?.grupo_enderecos_id || null;
+              } catch (_) { /* tabela CRM pode não existir, ignora */ }
+            }
+
+            // Apelido = nome_fantasia da Receita (ou razão social como fallback)
+            const apelido = r.nome_fantasia || r.razao_social || 'Estabelecimento';
+            const enderecoCompleto = r.endereco || null;
+
+            // UPSERT: se CNPJ + grupo já existe, ignora (UNIQUE constraint cuida disso)
+            await pool.query(`
+              INSERT INTO solicitacao_favoritos (
+                grupo_enderecos_id, apelido, endereco_completo,
+                rua, numero, complemento, bairro, cidade, uf, cep,
+                latitude, longitude, telefone_padrao, procurar_por_padrao,
+                cnpj, razao_social, nome_fantasia
+              ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17
+              )
+              ON CONFLICT DO NOTHING
+            `, [
+              grupoId, apelido, enderecoCompleto,
+              r.logradouro, r.numero, r.complemento, r.bairro, r.municipio, r.uf, r.cep,
+              parseFloat(motoboy_lat), parseFloat(motoboy_lng),
+              r.telefone, apelido,
+              cnpj, r.razao_social, r.nome_fantasia
+            ]);
+            gravadoFavorito = true;
+            console.log(`[agent] 💾 Endereço ${apelido} (CNPJ ${cnpj}) salvo em solicitacao_favoritos`);
+          }
+        }
+      } catch (favErr) {
+        console.error('[agent] ⚠️ Erro gravando favorito (não-bloqueante):', favErr.message);
+      }
 
       // 🔔 Notificar admin via WebSocket
       if (typeof global.broadcastToAdmins === 'function') {
@@ -184,6 +304,22 @@ function createCorrecaoRoutes(pool) {
             match: validacaoLoc.match_google,
             confianca: validacaoLoc.confianca,
             motivo: validacaoLoc.motivo,
+          } : null,
+          // 2026-04: dados da Receita + cruzamento na notificação admin
+          nf: validacaoNF ? {
+            cnpj: validacaoNF.dados?.cnpj_formatado,
+            confianca: validacaoNF.confianca,
+          } : null,
+          receita: validacaoNF?.receita?.ok ? {
+            razao_social: validacaoNF.receita.razao_social,
+            nome_fantasia: validacaoNF.receita.nome_fantasia,
+            situacao: validacaoNF.receita.situacao,
+            ativa: validacaoNF.receita.ativa,
+          } : null,
+          cruzamento: cruzamento ? {
+            score_max: cruzamento.score_max,
+            scores: cruzamento.scores,
+            salvo_no_banco: gravadoFavorito,
           } : null,
         };
         global.broadcastToAdmins('AGENT_VALIDACAO', wsPayload);
@@ -200,6 +336,25 @@ function createCorrecaoRoutes(pool) {
           confianca: validacaoLoc.confianca,
           motivo: validacaoLoc.motivo,
           alerta: !validacaoLoc.valido,
+        } : null,
+        // 2026-04: confirmação Receita Federal pro motoboy
+        nota_fiscal: validacaoNF && !validacaoNF.nf_rejeitada ? {
+          cnpj: validacaoNF.dados?.cnpj_formatado,
+          confianca: validacaoNF.confianca,
+        } : null,
+        receita: validacaoNF?.receita?.ok ? {
+          razao_social: validacaoNF.receita.razao_social,
+          nome_fantasia: validacaoNF.receita.nome_fantasia,
+          situacao: validacaoNF.receita.situacao,
+          ativa: validacaoNF.receita.ativa,
+          endereco: validacaoNF.receita.endereco,
+          telefone: validacaoNF.receita.telefone,
+        } : null,
+        cruzamento: cruzamento ? {
+          score_max: cruzamento.score_max,
+          scores: cruzamento.scores,
+          mensagem: cruzamento.mensagem_motoboy,
+          salvo_no_banco: gravadoFavorito,
         } : null,
       });
     } catch (err) {

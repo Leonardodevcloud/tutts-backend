@@ -245,12 +245,32 @@ async function validarNotaFiscal(fotoBase64, contexto = {}) {
 
   log(`✅ NF analisada: CNPJ=${formatarCnpj(cnpj)} score=${Math.min(100, score)} cidade_match=${matchCidade}`);
 
+  // 2026-04: Consulta Receita Federal pra confirmar dados oficiais.
+  // Não-bloqueante: se Receita falhar (offline/timeout), NF continua válida.
+  // Caller cruza dados extraídos vs oficiais via cruzar-validacoes.js.
+  let receita = null;
+  if (contexto.consultarReceita !== false) { // permite desligar via flag
+    try {
+      const { consultarReceita } = require('./consultar-receita');
+      receita = await consultarReceita(cnpj);
+      if (receita.ok) {
+        log(`📋 Receita ${formatarCnpj(cnpj)}: ${receita.razao_social} (${receita.situacao}) via ${receita.fonte}`);
+      } else {
+        log(`📋 Receita ${formatarCnpj(cnpj)}: ${receita.motivo}`);
+      }
+    } catch (err) {
+      log(`⚠️ Erro consultando Receita: ${err.message}`);
+      receita = { ok: false, motivo: `Exceção: ${err.message}` };
+    }
+  }
+
   return {
     nf_rejeitada: false,
     motivo: null,
     confianca: Math.min(100, score),
     dados,
-    match_cidade: matchCidade
+    match_cidade: matchCidade,
+    receita,                    // resultado completo da Receita (ou {ok:false, motivo})
   };
 }
 
