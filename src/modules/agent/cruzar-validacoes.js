@@ -135,28 +135,65 @@ function scoreEndereco(end1, end2) {
  *     resumo: 'Razão social NF↔Receita: 95% • Endereço NF↔Receita: 92%'
  *   }
  */
-function cruzarValidacoes({ nf, receita, fachada }) {
+/**
+ * Função principal — versão 2026-04 com 6 regras NÃO baseadas em Receita.
+ *
+ * Receita Federal vira INFORMATIVA: aparece na tela mas NÃO entra no critério
+ * de salvar. As 6 regras abaixo são as únicas que decidem.
+ *
+ * Entrada:
+ *   nf       — { razao_social, nome_fantasia, endereco_nf, ... } da NF (Gemini)
+ *   receita  — { razao_social, ... } — só pra exibir na tela do motoboy
+ *   fachada  — { nome_foto, match_google: { nome } } da foto (validar-localizacao.js)
+ *   localizacao_raw — string que o motoboy DIGITOU como endereço de entrega
+ *
+ * Critério: PELO MENOS UM dos 6 scores ≥90% → salva no banco.
+ *
+ * As 6 regras:
+ *   1. Foto fachada (Gemini) ↔ Google Places (nome do estabelecimento)
+ *   2. Razão social NF ↔ Google Places (nome)
+ *   3. Razão social NF ↔ Foto fachada (Gemini)
+ *   4. Nome fantasia NF ↔ Google Places (nome)
+ *   5. Nome fantasia NF ↔ Foto fachada (Gemini)
+ *   6. Endereço NF ↔ Endereço que motoboy digitou (localizacao_raw)
+ */
+function cruzarValidacoes({ nf, receita, fachada, localizacao_raw }) {
   const scores = {};
 
-  if (nf && receita && receita.ok) {
-    if (nf.razao_social && receita.razao_social) {
-      scores.razao_nf_vs_receita = scoreSimilaridade(nf.razao_social, receita.razao_social);
-    }
-    if (nf.nome_fantasia && receita.nome_fantasia) {
-      scores.fantasia_nf_vs_receita = scoreSimilaridade(nf.nome_fantasia, receita.nome_fantasia);
-    }
-    if (nf.endereco_nf && receita.endereco) {
-      scores.endereco_nf_vs_receita = scoreEndereco(nf.endereco_nf, receita.endereco);
-    }
+  // Fachada (Gemini extraiu o nome de algum estabelecimento da foto)
+  const nomeFachada = fachada && fachada.nome_foto;
+
+  // Google Places (resultado do match com o estabelecimento mais próximo)
+  const nomeGoogle = fachada && fachada.match_google && fachada.match_google.nome;
+
+  // Regra 1: Foto fachada ↔ Google Places
+  if (nomeFachada && nomeGoogle) {
+    scores.fachada_vs_google = scoreSimilaridade(nomeFachada, nomeGoogle);
   }
 
-  if (fachada && fachada.nome_foto && receita && receita.ok) {
-    if (receita.nome_fantasia) {
-      scores.fachada_vs_receita_fantasia = scoreSimilaridade(fachada.nome_foto, receita.nome_fantasia);
-    }
-    if (receita.razao_social) {
-      scores.fachada_vs_receita_razao = scoreSimilaridade(fachada.nome_foto, receita.razao_social);
-    }
+  // Regra 2: Razão NF ↔ Google Places
+  if (nf && nf.razao_social && nomeGoogle) {
+    scores.razao_nf_vs_google = scoreSimilaridade(nf.razao_social, nomeGoogle);
+  }
+
+  // Regra 3: Razão NF ↔ Foto fachada
+  if (nf && nf.razao_social && nomeFachada) {
+    scores.razao_nf_vs_fachada = scoreSimilaridade(nf.razao_social, nomeFachada);
+  }
+
+  // Regra 4: Nome fantasia NF ↔ Google Places
+  if (nf && nf.nome_fantasia && nomeGoogle) {
+    scores.fantasia_nf_vs_google = scoreSimilaridade(nf.nome_fantasia, nomeGoogle);
+  }
+
+  // Regra 5: Nome fantasia NF ↔ Foto fachada
+  if (nf && nf.nome_fantasia && nomeFachada) {
+    scores.fantasia_nf_vs_fachada = scoreSimilaridade(nf.nome_fantasia, nomeFachada);
+  }
+
+  // Regra 6: Endereço NF ↔ Endereço que motoboy DIGITOU
+  if (nf && nf.endereco_nf && localizacao_raw) {
+    scores.endereco_nf_vs_motoboy = scoreEndereco(nf.endereco_nf, localizacao_raw);
   }
 
   const valores = Object.values(scores).filter(v => typeof v === 'number');
@@ -164,53 +201,42 @@ function cruzarValidacoes({ nf, receita, fachada }) {
   const pelo_menos_um_90 = score_max >= 90;
   const receita_ativa = !!(receita && receita.ok && receita.ativa);
 
-  // CRITÉRIO: salva no banco se (a) Receita confirmou + ATIVA + (b) algum score ≥90
-  const pode_salvar_no_banco = receita_ativa && pelo_menos_um_90;
+  // CRITÉRIO DE SALVAR (2026-04): apenas score≥90% em pelo menos 1 das 6 regras.
+  // Receita NÃO entra no critério (é só informativa pro motoboy).
+  const pode_salvar_no_banco = pelo_menos_um_90;
 
-  // Mensagem amigável pro motoboy
+  // Mensagem pro motoboy (Receita continua sendo MOSTRADA, só não bloqueia salvamento)
   let mensagem_motoboy = null;
   if (receita && receita.ok) {
-    // 2026-04: prioriza nome fantasia pra exibição (motoboy reconhece melhor)
     const nome = receita.nome_fantasia || receita.razao_social || 'Estabelecimento';
     if (!receita_ativa) {
       mensagem_motoboy = `⚠️ ${nome} consta como ${receita.situacao} na Receita`;
     } else if (pelo_menos_um_90) {
       mensagem_motoboy = `✅ ${nome} confirmado pela Receita Federal`;
     } else {
-      // 2026-04: lógica mais inteligente — se endereço bate forte (≥80%), confiar
-      // mesmo se fachada diverge (foto pode estar errada / vizinho / sem placa)
-      const enderecoBate = (scores.endereco_nf_vs_receita || 0) >= 80;
-      const razaoBate = (scores.razao_nf_vs_receita || 0) >= 80;
-      if (enderecoBate || razaoBate) {
-        mensagem_motoboy = `✅ ${nome} encontrado na Receita (endereço/razão social conferem)`;
-      } else {
-        mensagem_motoboy = `⚠️ ${nome} encontrado na Receita, mas dados da NF/foto divergem`;
-      }
+      // Receita ATIVA + ainda assim score baixo: dado é confiável mas dados não conferem
+      mensagem_motoboy = `ℹ️ ${nome} encontrado na Receita (validação cruzada não atingiu 90%)`;
     }
   } else if (receita) {
     mensagem_motoboy = `⚠️ Não consultamos a Receita: ${receita.motivo || 'erro desconhecido'}`;
   }
 
-  // Resumo curto pra logs/admin
-  const resumoPartes = [];
-  if (typeof scores.razao_nf_vs_receita === 'number') {
-    resumoPartes.push(`Razão NF↔Receita: ${scores.razao_nf_vs_receita}%`);
-  }
-  if (typeof scores.fantasia_nf_vs_receita === 'number') {
-    resumoPartes.push(`Fantasia NF↔Receita: ${scores.fantasia_nf_vs_receita}%`);
-  }
-  if (typeof scores.endereco_nf_vs_receita === 'number') {
-    resumoPartes.push(`Endereço NF↔Receita: ${scores.endereco_nf_vs_receita}%`);
-  }
-  if (typeof scores.fachada_vs_receita_fantasia === 'number') {
-    resumoPartes.push(`Fachada↔Fantasia Receita: ${scores.fachada_vs_receita_fantasia}%`);
-  }
+  // Resumo curto pra logs/admin (só as 6 regras novas)
+  const labels = {
+    fachada_vs_google:        'Fachada↔Google',
+    razao_nf_vs_google:       'Razão NF↔Google',
+    razao_nf_vs_fachada:      'Razão NF↔Fachada',
+    fantasia_nf_vs_google:    'Fantasia NF↔Google',
+    fantasia_nf_vs_fachada:   'Fantasia NF↔Fachada',
+    endereco_nf_vs_motoboy:   'Endereço NF↔Motoboy',
+  };
+  const resumoPartes = Object.entries(scores).map(([k, v]) => `${labels[k] || k}: ${v}%`);
 
   return {
     scores,
     score_max,
     pelo_menos_um_90,
-    receita_ativa,
+    receita_ativa,           // mantido pra exibição
     pode_salvar_no_banco,
     mensagem_motoboy,
     resumo: resumoPartes.join(' • '),

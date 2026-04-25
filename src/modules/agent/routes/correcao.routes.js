@@ -27,9 +27,9 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 const RAIO_MAXIMO_KM = 2;
 
-// 2026-04: foto_nf agora é OBRIGATÓRIA, foto_fachada virou OPCIONAL.
-// O motoboy DEVE enviar a NF (prova fiscal); fachada é bônus de confiança.
-function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf }) {
+// 2026-04 v2: foto_nf E foto_fachada agora são AMBAS obrigatórias.
+// As 6 regras de cruzamento dependem de ambas pra calcular scores corretamente.
+function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada }) {
   const erros = [];
 
   if (!os_numero || String(os_numero).trim() === '')
@@ -64,6 +64,11 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     erros.push('Foto da nota fiscal é obrigatória.');
   }
 
+  // 2026-04 v2: foto fachada também obrigatória (era opcional na v1)
+  if (!foto_fachada || String(foto_fachada).trim() === '') {
+    erros.push('Foto da fachada é obrigatória.');
+  }
+
   return erros;
 }
 
@@ -77,7 +82,7 @@ function createCorrecaoRoutes(pool) {
   router.post('/corrigir-endereco', async (req, res) => {
     const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf } = req.body || {};
 
-    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf });
+    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
     }
@@ -186,6 +191,7 @@ function createCorrecaoRoutes(pool) {
           nf: validacaoNF.dados,
           receita: validacaoNF.receita,
           fachada: validacaoLoc,
+          localizacao_raw: String(localizacao_raw || '').trim(),  // 2026-04 v2: regra 6 (endereço NF ↔ digitado)
         });
         console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | salvar=${cruzamento.pode_salvar_no_banco}`);
       }
@@ -239,11 +245,17 @@ function createCorrecaoRoutes(pool) {
       // ── 5. Se cruzamento confirmou (Receita ATIVA + score≥90), grava endereço no banco de consulta ──
       // Tabela alvo: solicitacao_favoritos (consultada pelo módulo Coleta).
       // É async/best-effort: se falhar, NÃO bloqueia a correção.
+      // 2026-04 v2: critério de salvar mudou — agora é APENAS score≥90% das 6 regras.
+      // Receita não é mais pré-requisito (pode ser null/baixada que ainda salva).
+      // Dados oficiais (Receita) são usados quando disponíveis; senão, fallback pros dados da NF.
       let gravadoFavorito = false;
       try {
-        if (cruzamento && cruzamento.pode_salvar_no_banco && validacaoNF?.receita?.ok) {
-          const r = validacaoNF.receita;
-          const cnpj = (r.cnpj || '').replace(/\D/g, '');
+        if (cruzamento && cruzamento.pode_salvar_no_banco) {
+          const r = (validacaoNF?.receita && validacaoNF.receita.ok) ? validacaoNF.receita : null;
+          const nfDados = validacaoNF?.dados || {};
+          // CNPJ: prioriza Receita; cai pra NF se não houver
+          const cnpj = ((r && r.cnpj) || nfDados.cnpj || '').replace(/\D/g, '');
+
           if (cnpj.length === 14) {
             // grupo_enderecos_id: tenta achar pela região do motoboy (se ele tiver) — opcional, fica null se não houver
             let grupoId = null;
@@ -260,9 +272,20 @@ function createCorrecaoRoutes(pool) {
               } catch (_) { /* tabela CRM pode não existir, ignora */ }
             }
 
-            // Apelido = nome_fantasia da Receita (ou razão social como fallback)
-            const apelido = r.nome_fantasia || r.razao_social || 'Estabelecimento';
-            const enderecoCompleto = r.endereco || null;
+            // Dados pra gravar — Receita tem prioridade onde possível
+            const razaoSocial    = (r && r.razao_social) || nfDados.razao_social || null;
+            const nomeFantasia   = (r && r.nome_fantasia) || nfDados.nome_fantasia || null;
+            const apelido        = nomeFantasia || razaoSocial || 'Estabelecimento';
+            const enderecoCompleto = (r && r.endereco) || nfDados.endereco_nf || null;
+            const logradouro     = (r && r.logradouro) || null;  // NF não separa, só Receita
+            const numero         = (r && r.numero) || null;
+            const complemento    = (r && r.complemento) || null;
+            const bairro         = (r && r.bairro) || nfDados.bairro || null;
+            const cidade         = (r && r.municipio) || nfDados.cidade_nf || null;
+            const uf             = (r && r.uf) || nfDados.uf_nf || null;
+            const cep            = (r && r.cep) || nfDados.cep_nf || null;
+            // Telefone NF tem prioridade (mais específico do cliente naquela entrega)
+            const telefone       = nfDados.telefone_nf || (r && r.telefone) || null;
 
             // UPSERT: se CNPJ + grupo já existe, ignora (UNIQUE constraint cuida disso)
             await pool.query(`
@@ -278,16 +301,15 @@ function createCorrecaoRoutes(pool) {
               ON CONFLICT DO NOTHING
             `, [
               grupoId, apelido, enderecoCompleto,
-              r.logradouro, r.numero, r.complemento, r.bairro, r.municipio, r.uf, r.cep,
+              logradouro, numero, complemento, bairro, cidade, uf, cep,
               parseFloat(motoboy_lat), parseFloat(motoboy_lng),
-              // 2026-04: telefone da NF tem prioridade (mais específico do cliente),
-              // fallback pro telefone da Receita (matriz, frequentemente desatualizado)
-              (validacaoNF?.dados?.telefone_nf || r.telefone),
-              apelido,
-              cnpj, r.razao_social, r.nome_fantasia
+              telefone, apelido,
+              cnpj, razaoSocial, nomeFantasia
             ]);
             gravadoFavorito = true;
-            console.log(`[agent] 💾 Endereço ${apelido} (CNPJ ${cnpj}) salvo em solicitacao_favoritos`);
+            console.log(`[agent] 💾 Endereço ${apelido} (CNPJ ${cnpj}) salvo em solicitacao_favoritos (score=${cruzamento.score_max}%)`);
+          } else {
+            console.log(`[agent] ⚠️ score≥90% mas CNPJ inválido — não gravado em solicitacao_favoritos`);
           }
         }
       } catch (favErr) {
