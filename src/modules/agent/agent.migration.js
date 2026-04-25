@@ -49,6 +49,10 @@ async function initAgentTables(pool) {
     { nome: 'validacao_localizacao', tipo: 'JSONB' },
     { nome: 'foto_nf',               tipo: 'TEXT' },     // base64 da NF (obrigatória pro caller)
     { nome: 'validacao_nf',          tipo: 'JSONB' },    // resultado completo: NF + Receita + cruzamento
+    // 2026-04: Colunas usadas pelos agentes do pool (Etapa 1) que faltavam na migration
+    { nome: 'erro',            tipo: 'TEXT' },           // mensagem de erro quando status='falhou' (usada por agent-correcao.agent.js)
+    { nome: 'finalizado_em',   tipo: 'TIMESTAMP' },      // quando job terminou (sucesso ou falha)
+    { nome: 'screenshot_path', tipo: 'TEXT' },           // caminho do screenshot capturado em caso de erro Playwright
     { nome: 'valores_antes', tipo: 'JSONB' },
     { nome: 'valores_depois', tipo: 'JSONB' },
     // Progresso em tempo real: atualizado pelo worker conforme Playwright avança.
@@ -79,6 +83,21 @@ async function initAgentTables(pool) {
     } catch (err) {
       console.log(`⚠️ Índice: ${err.message}`);
     }
+  }
+
+  // 2026-04: Aceitar status 'falhou' (usado pelos agentes do pool — Etapa 1)
+  // CHECK constraint original só aceitava 'pendente'/'processando'/'sucesso'/'erro'.
+  // Idempotente: se constraint não existir ou já estiver atualizada, não quebra.
+  try {
+    await pool.query(`ALTER TABLE ajustes_automaticos DROP CONSTRAINT IF EXISTS ajustes_automaticos_status_check`);
+    await pool.query(`
+      ALTER TABLE ajustes_automaticos
+      ADD CONSTRAINT ajustes_automaticos_status_check
+      CHECK (status IN ('pendente', 'processando', 'sucesso', 'erro', 'falhou'))
+    `);
+    console.log('✅ Constraint status atualizado (aceita "falhou")');
+  } catch (err) {
+    console.log(`⚠️ Constraint status: ${err.message}`);
   }
 
   console.log('✅ Módulo Agente RPA — tabela ajustes_automaticos verificada/criada');
