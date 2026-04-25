@@ -12,6 +12,8 @@ const { validarLocalizacao } = require('../validar-localizacao');
 // 2026-04: validação NF + cruzamento com Receita Federal
 const { validarNotaFiscal } = require('../validar-nota-fiscal');
 const { cruzarValidacoes } = require('../cruzar-validacoes');
+// 2026-04 v3: consulta Receita direto quando motoboy digita CNPJ
+const { consultarReceita } = require('../consultar-receita');
 
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -27,9 +29,38 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 const RAIO_MAXIMO_KM = 2;
 
-// 2026-04 v2: foto_nf E foto_fachada agora são AMBAS obrigatórias.
-// As 6 regras de cruzamento dependem de ambas pra calcular scores corretamente.
-function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada }) {
+/**
+ * Valida CNPJ brasileiro (14 dígitos + 2 dígitos verificadores).
+ * Retorna true se válido, false caso contrário.
+ * Não considera CNPJs com todos os dígitos iguais (ex: 00000000000000).
+ */
+function validarCNPJ(cnpj) {
+  const c = String(cnpj || '').replace(/\D/g, '');
+  if (c.length !== 14) return false;
+  if (/^(\d)\1+$/.test(c)) return false; // todos iguais
+
+  // Cálculo dos dígitos verificadores
+  const calc = (base, pesos) => {
+    let soma = 0;
+    for (let i = 0; i < pesos.length; i++) soma += parseInt(base[i], 10) * pesos[i];
+    const resto = soma % 11;
+    return resto < 2 ? 0 : 11 - resto;
+  };
+
+  const pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const pesos2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+
+  const d1 = calc(c, pesos1);
+  if (d1 !== parseInt(c[12], 10)) return false;
+  const d2 = calc(c, pesos2);
+  if (d2 !== parseInt(c[13], 10)) return false;
+
+  return true;
+}
+
+// 2026-04 v3: motoboy escolhe ENTRE foto_nf OU cnpj_manual.
+// foto_fachada continua sendo SEMPRE obrigatória.
+function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada, cnpj_manual }) {
   const erros = [];
 
   if (!os_numero || String(os_numero).trim() === '')
@@ -60,11 +91,20 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     }
   }
 
-  if (!foto_nf || String(foto_nf).trim() === '') {
-    erros.push('Foto da nota fiscal é obrigatória.');
+  // 2026-04 v3: foto_nf OU cnpj_manual obrigatório (XOR — pelo menos um)
+  const temFotoNf = !!(foto_nf && String(foto_nf).trim() !== '');
+  const temCnpjManual = !!(cnpj_manual && String(cnpj_manual).replace(/\D/g, '').length > 0);
+
+  if (!temFotoNf && !temCnpjManual) {
+    erros.push('Envie a foto da nota fiscal OU digite o CNPJ do cliente.');
   }
 
-  // 2026-04 v2: foto fachada também obrigatória (era opcional na v1)
+  // Se CNPJ digitado, valida dígito verificador (bloqueia inválido)
+  if (temCnpjManual && !validarCNPJ(cnpj_manual)) {
+    erros.push('CNPJ inválido. Confira os dígitos.');
+  }
+
+  // Foto fachada continua sempre obrigatória
   if (!foto_fachada || String(foto_fachada).trim() === '') {
     erros.push('Foto da fachada é obrigatória.');
   }
@@ -80,9 +120,9 @@ function createCorrecaoRoutes(pool) {
 
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
-    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf } = req.body || {};
+    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf, cnpj_manual } = req.body || {};
 
-    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada });
+    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada, cnpj_manual });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
     }
@@ -127,33 +167,73 @@ function createCorrecaoRoutes(pool) {
         });
       }
 
-      // ── 1. Validar NF (obrigatória) — extrai dados via Gemini E consulta Receita ──
+      // ── 1. Obter dados do cliente: por foto da NF (Gemini) OU por CNPJ digitado ──
+      // 2026-04 v3: motoboy escolhe um dos dois caminhos.
       let validacaoNF = null;
-      try {
-        validacaoNF = await validarNotaFiscal(foto_nf, {
-          latitude: parseFloat(motoboy_lat),
-          longitude: parseFloat(motoboy_lng),
-        });
 
-        // Se NF não passou validação básica (não é NF, ilegível, CNPJ inválido) → BLOQUEAR
-        if (validacaoNF && validacaoNF.nf_rejeitada) {
-          console.log(`[agent] ❌ NF rejeitada: ${validacaoNF.motivo}`);
-          return res.status(400).json({
-            sucesso: false,
-            nf_rejeitada: true,
-            motivo_rejeicao: validacaoNF.motivo,
-            erros: [validacaoNF.motivo],
+      if (foto_nf) {
+        // Caminho A: foto NF → Gemini extrai dados → consulta Receita (já dentro do validar)
+        try {
+          validacaoNF = await validarNotaFiscal(foto_nf, {
+            latitude: parseFloat(motoboy_lat),
+            longitude: parseFloat(motoboy_lng),
           });
-        }
 
-        if (validacaoNF) {
-          console.log(`[agent] ✅ NF analisada: CNPJ=${validacaoNF.dados?.cnpj_formatado} confianca=${validacaoNF.confianca}%`);
+          // Se NF não passou validação básica (não é NF, ilegível, CNPJ inválido) → BLOQUEAR
+          if (validacaoNF && validacaoNF.nf_rejeitada) {
+            console.log(`[agent] ❌ NF rejeitada: ${validacaoNF.motivo}`);
+            return res.status(400).json({
+              sucesso: false,
+              nf_rejeitada: true,
+              motivo_rejeicao: validacaoNF.motivo,
+              erros: [validacaoNF.motivo],
+            });
+          }
+
+          if (validacaoNF) {
+            console.log(`[agent] ✅ NF analisada: CNPJ=${validacaoNF.dados?.cnpj_formatado} confianca=${validacaoNF.confianca}%`);
+          }
+        } catch (nfErr) {
+          console.error('[agent] ⚠️ Erro validação NF (não-bloqueante):', nfErr.message);
         }
-      } catch (nfErr) {
-        console.error('[agent] ⚠️ Erro validação NF (não-bloqueante):', nfErr.message);
+      } else if (cnpj_manual) {
+        // Caminho B: CNPJ digitado pelo motoboy → consulta Receita direto, sem Gemini.
+        // Não temos dados extraídos da NF (razão_social, nome_fantasia, endereco_nf etc),
+        // mas a consulta Receita ainda traz tudo isso oficialmente.
+        const cnpjLimpo = String(cnpj_manual).replace(/\D/g, '');
+        try {
+          const receita = await consultarReceita(cnpjLimpo);
+          // Estrutura compatível com o que validarNotaFiscal retornaria
+          validacaoNF = {
+            nf_rejeitada: false,
+            motivo: null,
+            confianca: null,         // não temos confiança IA porque não rodou Gemini
+            origem: 'cnpj_manual',   // marcador pra log/auditoria
+            dados: {
+              cnpj: cnpjLimpo,
+              cnpj_formatado: cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5'),
+              // Demais campos vão ficar null — Gemini não rodou. Cruzamento usa só o que tiver.
+              razao_social: null,
+              nome_fantasia: null,
+              endereco_nf: null,
+              telefone_nf: null,
+            },
+            match_cidade: null,
+            receita,
+          };
+          console.log(`[agent] ✅ CNPJ manual ${cnpjLimpo} → Receita: ${receita.ok ? receita.razao_social : receita.motivo}`);
+        } catch (cnpjErr) {
+          console.error('[agent] ⚠️ Erro consultando CNPJ manual (não-bloqueante):', cnpjErr.message);
+          validacaoNF = {
+            nf_rejeitada: false,
+            origem: 'cnpj_manual',
+            dados: { cnpj: cnpjLimpo, cnpj_formatado: cnpjLimpo },
+            receita: { ok: false, motivo: cnpjErr.message },
+          };
+        }
       }
 
-      // ── 2. Validar fachada (opcional) — foto + Google Places ──
+      // ── 2. Validar fachada (obrigatória) — foto + Google Places ──
       let validacaoLoc = null;
       if (foto_fachada) {
         try {
