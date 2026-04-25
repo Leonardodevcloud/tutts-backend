@@ -280,7 +280,10 @@ function createCorrecaoRoutes(pool) {
               grupoId, apelido, enderecoCompleto,
               r.logradouro, r.numero, r.complemento, r.bairro, r.municipio, r.uf, r.cep,
               parseFloat(motoboy_lat), parseFloat(motoboy_lng),
-              r.telefone, apelido,
+              // 2026-04: telefone da NF tem prioridade (mais específico do cliente),
+              // fallback pro telefone da Receita (matriz, frequentemente desatualizado)
+              (validacaoNF?.dados?.telefone_nf || r.telefone),
+              apelido,
               cnpj, r.razao_social, r.nome_fantasia
             ]);
             gravadoFavorito = true;

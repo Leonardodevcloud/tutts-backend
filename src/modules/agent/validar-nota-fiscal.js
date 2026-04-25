@@ -80,33 +80,42 @@ async function extrairDadosNF(base64Foto) {
 
   const prompt = `Você é um OCR especializado em notas fiscais brasileiras (NF-e, NFC-e, DANFE, cupom fiscal).
 
-Analise a foto e extraia os dados do EMISSOR (loja que emitiu a nota), retornando APENAS um JSON válido sem markdown:
+CONTEXTO IMPORTANTE: Esta nota fiscal é uma PROVA DE ENTREGA de um motoboy. O CNPJ que precisamos é do CLIENTE QUE VAI RECEBER a mercadoria (DESTINATÁRIO/REMETENTE no DANFE), NÃO do emissor (loja que vendeu).
+
+Em DANFEs padrão, o bloco do destinatário está claramente marcado como "DESTINATÁRIO/REMETENTE" e contém: NOME/RAZÃO SOCIAL, CNPJ/CPF, ENDEREÇO, BAIRRO/DISTRITO, CEP, MUNICÍPIO, FONE/FAX, UF, INSCRIÇÃO ESTADUAL.
+
+Em cupons fiscais ou notas mais simples, pode aparecer como "CONSUMIDOR", "CLIENTE", "DESTINATÁRIO" ou similar — geralmente abaixo dos dados do emissor.
+
+Analise a foto e extraia os dados do DESTINATÁRIO (cliente que recebe a mercadoria), retornando APENAS um JSON válido sem markdown:
 
 {
   "is_nota_fiscal": true | false,
   "qualidade_foto": "boa" | "ruim" | "ilegivel",
-  "razao_social": "string ou null",
-  "nome_fantasia": "string ou null",
-  "cnpj": "string só com dígitos, 14 chars, ou null",
-  "numero_nf": "string ou null",
-  "endereco_emissor": "string completa ou null",
-  "rua": "string ou null",
-  "numero_endereco": "string ou null",
-  "bairro": "string ou null",
-  "cidade": "string ou null",
-  "uf": "2 letras ou null",
-  "cep": "string só com dígitos, 8 chars, ou null",
+  "razao_social": "string ou null (do destinatário)",
+  "nome_fantasia": "string ou null (raramente aparece pra destinatário, geralmente null)",
+  "cnpj": "string só com dígitos, 14 chars, ou null (do destinatário)",
+  "numero_nf": "string ou null (número da nota, mantém igual)",
+  "endereco_emissor": "string completa do destinatário ou null",
+  "rua": "string ou null (do destinatário)",
+  "numero_endereco": "string ou null (do destinatário)",
+  "bairro": "string ou null (do destinatário)",
+  "cidade": "string ou null (do destinatário)",
+  "uf": "2 letras ou null (do destinatário)",
+  "cep": "string só com dígitos, 8 chars, ou null (do destinatário)",
+  "telefone": "string só com dígitos (com DDD, ex: 62992234567) ou null — do destinatário, geralmente em FONE/FAX",
   "motivo_rejeicao": "string explicando se is_nota_fiscal=false ou qualidade=ilegivel"
 }
 
 REGRAS:
 - Se a foto não é uma nota fiscal (é uma foto qualquer, paisagem, fachada, etc.) → is_nota_fiscal=false e descreva o que vê em motivo_rejeicao.
 - Se a foto está MUITO borrada/escura/cortada e não dá pra ler nada → qualidade_foto="ilegivel" e is_nota_fiscal pode ser true.
-- O CNPJ deve ser do EMISSOR (a loja que emitiu a NF), não do destinatário.
-- Razão social vs nome fantasia: razão social é o nome jurídico (ex: "BOM DIA AUTO PEÇAS LTDA"), nome fantasia é o nome comercial (ex: "BOM DIA PEÇAS"). Se só achar um, preencha esse e deixe o outro null.
+- ATENÇÃO: O CNPJ deve ser do DESTINATÁRIO (cliente que recebe), NUNCA do emissor (loja que vendeu). Em DANFEs procure o bloco "DESTINATÁRIO/REMETENTE".
+- Se a NF tiver APENAS dados do emissor visíveis (sem bloco de destinatário, ou bloco de destinatário cortado/ilegível) → use os dados do emissor MESMO ASSIM e mencione isso em motivo_rejeicao com qualidade_foto="ruim". Não retorne null se houver QUALQUER dado utilizável.
+- Se o destinatário for "CONSUMIDOR FINAL" sem CNPJ (só CPF), retorne cnpj=null e razao_social com o nome do consumidor se houver.
+- Razão social vs nome fantasia: razão social é o nome jurídico (ex: "BOM DIA AUTO PEÇAS LTDA"), nome fantasia é o nome comercial. Para destinatários, geralmente só há razão social — deixe nome_fantasia como null se não estiver explícito.
 - Se algum campo não existir ou estiver ilegível, use null (não invente).
-- O número da NF tipicamente aparece como "Nº" ou "Nota:" ou no DANFE como sequência de 9 dígitos.
-- Para endereço, pegue o do EMISSOR (cabeçalho da nota), nunca do destinatário.
+- O número da NF (numero_nf) é o número geral da nota, não pertence a nenhum dos dois (emissor ou destinatário) — pegue como aparece.
+- Para endereço (endereco_emissor — manter o nome do campo por compatibilidade), pegue o do DESTINATÁRIO.
 - NÃO inclua markdown, comentários ou texto fora do JSON.`;
 
   const body = {
@@ -203,7 +212,8 @@ async function validarNotaFiscal(fotoBase64, contexto = {}) {
     endereco_nf: extracao.endereco_emissor || null,
     cidade_nf: extracao.cidade || null,
     uf_nf: extracao.uf || null,
-    cep_nf: extracao.cep || null
+    cep_nf: extracao.cep || null,
+    telefone_nf: extracao.telefone ? String(extracao.telefone).replace(/\D/g, '') : null,
   };
 
   // CNPJ é obrigatório — sem ele, não dá pra deduplicar
