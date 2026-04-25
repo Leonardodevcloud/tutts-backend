@@ -178,10 +178,12 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     for (let i = 0; i < pontos.length; i++) {
       if (i === 0) continue; // coleta: sem validação
       const p = pontos[i];
-      const razaoSocialPonto = (p.razao_social || p.nome_fantasia || '').trim();
+      // 2026-04: nome_fantasia agora é o campo OBRIGATÓRIO (separado de razão social, que é opcional)
+      // Compat: se vier só razao_social do front antigo, aceita como nome_fantasia
+      const nomeFantasiaPonto = (p.nome_fantasia || p.razao_social || '').trim();
       const numeroNotaPonto = (p.numero_nota || '').trim();
-      if (!razaoSocialPonto) {
-        return res.status(400).json({ error: `Razão social / Nome fantasia é obrigatório no ponto ${i + 1}` });
+      if (!nomeFantasiaPonto) {
+        return res.status(400).json({ error: `Nome fantasia é obrigatório no ponto ${i + 1}` });
       }
       if (!numeroNotaPonto) {
         return res.status(400).json({ error: `Nº da NF é obrigatório no ponto ${i + 1}` });
@@ -191,12 +193,17 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     // Monta o texto inline (com prefixos e vírgula como separador) que vai em `obs` do payload Tutts.
     // Formato solicitado pelo cliente pra melhor legibilidade no app do motoboy, já que quebras
     // de linha não são renderizadas pelo sistema. Exemplo:
-    //   NOME FANTASIA: LBC LTDA, COMPLEMENTO: Sala 302, NF: 12345, OBS: Deixar na portaria, TEL: 71999998888
-    // Só inclui campos preenchidos.
+    //   NOME FANTASIA: LBC LTDA, RAZAO SOCIAL: LBC COMERCIO LTDA, NF: 12345, OBS: ...
+    // Só inclui campos preenchidos. Razão social só aparece se for diferente do nome fantasia.
     const montarObsInline = (p) => {
-      const razaoSocial = (p.razao_social || p.nome_fantasia || '').trim();
+      const nomeFantasia = (p.nome_fantasia || p.razao_social || '').trim();
+      const razaoSocial = (p.razao_social || '').trim();
       const partes = [];
-      if (razaoSocial) partes.push(`NOME FANTASIA: ${razaoSocial}`);
+      if (nomeFantasia) partes.push(`NOME FANTASIA: ${nomeFantasia}`);
+      // Inclui razão social só se preenchida e diferente do nome fantasia (evita duplicação no app do motoboy)
+      if (razaoSocial && razaoSocial.toUpperCase() !== nomeFantasia.toUpperCase()) {
+        partes.push(`RAZAO SOCIAL: ${razaoSocial}`);
+      }
       if ((p.complemento || '').trim()) partes.push(`COMPLEMENTO: ${p.complemento.trim()}`);
       if ((p.numero_nota || '').trim()) partes.push(`NF: ${p.numero_nota.trim()}`);
       if ((p.observacao || '').trim()) partes.push(`OBS: ${p.observacao.trim()}`);
@@ -322,18 +329,23 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       const p = pontos[i];
       // Montar endereco_completo se não vier do frontend
       const enderecoCompleto = p.endereco_completo || [p.rua, p.numero, p.bairro, p.cidade, p.uf].filter(x => x && x.trim()).join(', ');
-      // razao_social aceita tanto o campo novo quanto o legado nome_fantasia vindo do frontend
-      const razaoSocialPonto = (p.razao_social || p.nome_fantasia || '').trim() || null;
+      // 2026-04: razao_social e nome_fantasia agora são campos SEPARADOS no form.
+      //   - nome_fantasia: nome popular (obrigatório no front, ex: "Auto Peças do João")
+      //   - razao_social: razão social fiscal (opcional, ex: "JOÃO MOREIRA AUTO PEÇAS LTDA")
+      // Compat: se o front antigo enviar só razao_social, copia pra nome_fantasia
+      // Compat: se vier só nome_fantasia (sem razao_social), salva nome_fantasia e deixa razao_social null
+      const nomeFantasiaPonto = (p.nome_fantasia || p.razao_social || '').trim() || null;
+      const razaoSocialPonto = (p.razao_social || '').trim() || null;
       await pool.query(`
         INSERT INTO solicitacoes_pontos (
           solicitacao_id, ordem, rua, numero, complemento, bairro, cidade, uf, cep,
           latitude, longitude, observacao, telefone, procurar_por, numero_nota, codigo_finalizar,
-          status, endereco_completo, razao_social
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+          status, endereco_completo, razao_social, nome_fantasia
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       `, [
         solicitacaoId, i + 1, p.rua, p.numero, p.complemento, p.bairro, p.cidade, p.uf, p.cep,
         p.latitude, p.longitude, p.observacao, p.telefone, p.procurar_por, p.numero_nota, p.codigo_finalizar,
-        'pendente', enderecoCompleto, razaoSocialPonto
+        'pendente', enderecoCompleto, razaoSocialPonto, nomeFantasiaPonto
       ]);
     }
     
@@ -1380,7 +1392,7 @@ router.delete('/solicitacao/favoritos/:id', verificarTokenSolicitacao, async (re
 // Salvar endereço
 router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social } = req.body;
+    const { apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep, latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social, nome_fantasia } = req.body;
     const grupoId = req.clienteSolicitacao.grupo_enderecos_id;  // null se não está em grupo
     
     console.log('📍 Salvando endereço:', { apelido, endereco_completo, rua, cidade, grupoId });
@@ -1388,6 +1400,11 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     if (!endereco_completo && !rua) {
       return res.status(400).json({ error: 'Endereço é obrigatório' });
     }
+    
+    // 2026-04: nome_fantasia e razao_social agora são separados.
+    // Compat com front antigo que pode mandar só razao_social.
+    const nomeFantasiaFinal = (nome_fantasia || razao_social || '').trim() || null;
+    const razaoSocialFinal = (razao_social || '').trim() || null;
     
     // Verificar duplicatas: se tem grupo, busca no grupo inteiro; senão só no cliente
     // IMPORTANTE: os placeholders precisam refletir APENAS os parâmetros efetivamente usados
@@ -1419,9 +1436,11 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
             vezes_usado = vezes_usado + 1, 
             ultimo_uso = CURRENT_TIMESTAMP,
             latitude = COALESCE($3, latitude), 
-            longitude = COALESCE($4, longitude)
+            longitude = COALESCE($4, longitude),
+            nome_fantasia = COALESCE($5, nome_fantasia),
+            razao_social = COALESCE($6, razao_social)
         WHERE id = $1
-      `, [existe.rows[0].id, apelido, latitude, longitude]);
+      `, [existe.rows[0].id, apelido, latitude, longitude, nomeFantasiaFinal, razaoSocialFinal]);
       
       return res.json({ sucesso: true, id: existe.rows[0].id, atualizado: true });
     }
@@ -1429,12 +1448,12 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     const result = await pool.query(`
       INSERT INTO solicitacao_favoritos (
         cliente_id, grupo_enderecos_id, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
-        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social, nome_fantasia
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING id
     `, [
       req.clienteSolicitacao.id, grupoId, apelido, endereco_completo, rua, numero, complemento, bairro, cidade, uf, cep,
-      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razao_social || null
+      latitude, longitude, telefone_padrao, procurar_por_padrao, observacao_padrao, razaoSocialFinal, nomeFantasiaFinal
     ]);
     
     console.log('✅ Endereço salvo com ID:', result.rows[0].id, 'grupo:', grupoId || 'individual');

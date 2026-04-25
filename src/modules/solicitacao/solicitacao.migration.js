@@ -179,6 +179,18 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`ALTER TABLE solicitacoes_pontos ADD COLUMN IF NOT EXISTS razao_social VARCHAR(500)`).catch(e => console.log('⚠️ razao_social em solicitacoes_pontos:', e.message));
     console.log('✅ Coluna razao_social em solicitacoes_pontos verificada');
 
+    // Migration 2026-04: separação razao_social vs nome_fantasia (eram um campo só, viraram dois)
+    // - nome_fantasia (NOVO, obrigatório no form): nome popular do estabelecimento (ex: "Auto Peças do João")
+    // - razao_social (já existia, agora opcional): razão social fiscal (ex: "JOÃO MOREIRA AUTO PEÇAS LTDA")
+    // Migração one-time: copia razao_social → nome_fantasia onde nome_fantasia ainda for NULL.
+    await pool.query(`ALTER TABLE solicitacoes_pontos ADD COLUMN IF NOT EXISTS nome_fantasia VARCHAR(500)`).catch(e => console.log('⚠️ nome_fantasia em solicitacoes_pontos:', e.message));
+    await pool.query(`UPDATE solicitacoes_pontos SET nome_fantasia = razao_social WHERE nome_fantasia IS NULL AND razao_social IS NOT NULL`).catch(e => console.log('⚠️ migração nome_fantasia em pontos:', e.message));
+    console.log('✅ Coluna nome_fantasia em solicitacoes_pontos verificada e migrada');
+
+    await pool.query(`ALTER TABLE solicitacao_favoritos ADD COLUMN IF NOT EXISTS nome_fantasia VARCHAR(500)`).catch(e => console.log('⚠️ nome_fantasia em solicitacao_favoritos:', e.message));
+    await pool.query(`UPDATE solicitacao_favoritos SET nome_fantasia = razao_social WHERE nome_fantasia IS NULL AND razao_social IS NOT NULL`).catch(e => console.log('⚠️ migração nome_fantasia em favoritos:', e.message));
+    console.log('✅ Coluna nome_fantasia em solicitacao_favoritos verificada e migrada');
+
     // Migration: colunas usadas pelo webhook handler que faltam na tabela original
     await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS dados_pontos JSONB`).catch(() => {});
     await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS status_codigo DECIMAL(5,2)`).catch(() => {});
