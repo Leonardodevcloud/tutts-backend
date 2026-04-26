@@ -283,12 +283,34 @@ async function executarLiberacaoPonto1(page, os_numero) {
   await page.waitForTimeout(300);
 
   // Clica no botão "Liberar"
-  // Importante: NÃO confundir com a label "Liberar ponto 1" do checkbox.
-  // Botão real fica fora dos divs de checkbox, geralmente no rodapé do modal.
-  const btnLiberar = page.locator('#modalPadrao button').filter({ hasText: /^Liberar$/ }).first();
-  await btnLiberar.waitFor({ state: 'visible', timeout: 5000 });
-  await btnLiberar.click();
-  log(`✅ Botão "Liberar" clicado`);
+  // 2026-04 fix: o "botão" é na verdade <input type="button" value="Liberar" class="btn btn-primary">
+  // (não é <button>!) — por isso uso seletor que pega ambos.
+  // Estratégia em cascata, do mais específico ao mais genérico:
+  const seletoresBtnLiberar = [
+    // 1) input[value="Liberar"] dentro do modal — match exato com o HTML real
+    '#modalPadrao input[type="button"][value="Liberar"]',
+    // 2) input com classe btn-primary (geralmente é o botão de ação)
+    '#modalPadrao input[type="button"].btn-primary',
+    // 3) qualquer input/button com texto "Liberar" — mais flexível
+    '#modalPadrao input[value*="Liberar"]:not([value*="ponto"])',
+    // 4) button (caso mudem no futuro)
+    '#modalPadrao button.btn-primary',
+  ];
+
+  let clicouLiberar = false;
+  for (const sel of seletoresBtnLiberar) {
+    const btn = page.locator(sel).first();
+    if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await btn.click();
+      log(`✅ Botão "Liberar" clicado (seletor: ${sel})`);
+      clicouLiberar = true;
+      break;
+    }
+  }
+  if (!clicouLiberar) {
+    const ss = await screenshot(page, os_numero, 'btn_liberar_nao_achado');
+    throw new Error(`Botão "Liberar" não encontrado no modal. Screenshot: ${ss}`);
+  }
 
   // Aguarda texto "Enviado" no #divRetornoModal — pode demorar segundos
   log(`⏳ Aguardando confirmação "Enviado"...`);
