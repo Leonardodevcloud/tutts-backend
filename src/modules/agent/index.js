@@ -27,6 +27,7 @@
 const { createAgentRouter } = require('./agent.routes');
 const initAgentTablesBase   = require('./agent.migration');
 const initSlaCaptureTables  = require('./sla-capture.migration');
+const initLiberacaoTables   = require('./liberacao.migration');  // 2026-04 v3: novo módulo
 const agentPool             = require('./core/agent-pool');
 
 // ── Agentes ──────────────────────────────────────────────────
@@ -36,6 +37,7 @@ const slaDetectorAgent    = require('./agents/sla-detector.agent');
 const performanceAgent    = require('./agents/performance.agent');
 const performanceCronAgents = require('./agents/performance-cron.agent'); // ARRAY de 3 agentes
 const crmLeadsAgent       = require('./agents/crm-leads.agent');
+const liberarPontoAgent   = require('./agents/liberar-ponto.agent');     // 2026-04 v3
 
 async function initAgentTables(pool) {
   await initAgentTablesBase(pool);
@@ -43,6 +45,12 @@ async function initAgentTables(pool) {
     await initSlaCaptureTables(pool);
   } catch (e) {
     console.error('⚠️ SLA Capture tables error:', e.message);
+  }
+  // 2026-04 v3: tabela do novo módulo Liberar Ponto
+  try {
+    await initLiberacaoTables(pool);
+  } catch (e) {
+    console.error('⚠️ Liberacao tables error:', e.message);
   }
 }
 
@@ -66,6 +74,8 @@ function startAgentWorker(pool) {
 
     // Etapa A — CRM
     agentPool.register(crmLeadsAgent);
+    // 2026-04 v3: novo agente "Liberar Ponto"
+    agentPool.register(liberarPontoAgent);
 
     agentPool.startAll(pool);
     console.log('✅ Agent pool iniciado com 8 agentes');

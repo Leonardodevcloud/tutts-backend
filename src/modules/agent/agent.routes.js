@@ -12,6 +12,7 @@ const path    = require('path');
 const { createCorrecaoRoutes }   = require('./routes/correcao.routes');
 const { createHistoricoRoutes }  = require('./routes/historico.routes');
 const { createSlaCaptureRoutes } = require('./routes/sla-capture.routes');
+const { createLiberacaoRoutes }  = require('./routes/liberar-ponto.routes');  // 2026-04 v3
 
 const SCREENSHOT_DIR = '/tmp/screenshots';
 
@@ -21,6 +22,7 @@ function createAgentRouter(pool, verificarToken, verificarAdmin) {
   router.use(createCorrecaoRoutes(pool));
   router.use(createHistoricoRoutes(pool, verificarAdmin));
   router.use(createSlaCaptureRoutes(pool, verificarToken, verificarAdmin));
+  router.use(createLiberacaoRoutes(pool));  // 2026-04 v3 — endpoints de liberar ponto
 
   // ── Pool status (debug) ─────────────────────────────────────────────────────
   // GET /agent/pool/status — snapshot do agent-pool e browser-pool
