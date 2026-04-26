@@ -224,8 +224,8 @@ module.exports = defineAgent({
         [registro.id]
       );
 
-      ctx.log(`📤 Enviando ${entregas.length} entregas pro /bi/entregas/upload`);
-      const postRes = await postJsonInterno('/bi/entregas/upload', {
+      ctx.log(`📤 Enviando ${entregas.length} entregas pro /api/bi/entregas/upload`);
+      const postRes = await postJsonInterno('/api/bi/entregas/upload', {
         entregas,
         data_referencia: dataRef,
         usuario_id: registro.usuario_id || null,
