@@ -246,9 +246,12 @@ module.exports = defineAgent({
 
       // 4. Sucesso — extrai contadores da resposta do BI
       const body = postRes.body || {};
-      // Endpoint do BI retorna campos como linhas_inseridas, linhas_ignoradas no historico
-      const linhasInseridas = body.entregasInseridas || body.linhas_inseridas || body.inseridas || entregas.length;
-      const linhasIgnoradas = body.entregasIgnoradas || body.linhas_ignoradas || body.ignoradas || 0;
+      // 2026-04 fix: endpoint /api/bi/entregas/upload retorna `inseridos` e `ignorados`
+      // (masculino, com S no final). O agente buscava `inseridas`/`ignoradas` antes,
+      // caindo sempre no fallback entregas.length (mostrando 223/0 mesmo quando a
+      // dedup ignorava tudo).
+      const linhasInseridas = body.inseridos ?? body.entregasInseridas ?? body.linhas_inseridas ?? body.inseridas ?? entregas.length;
+      const linhasIgnoradas = body.ignorados ?? body.entregasIgnoradas ?? body.linhas_ignoradas ?? body.ignoradas ?? 0;
 
       await pool.query(`
         UPDATE bi_imports
