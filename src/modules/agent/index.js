@@ -38,6 +38,8 @@ const performanceAgent    = require('./agents/performance.agent');
 const performanceCronAgents = require('./agents/performance-cron.agent'); // ARRAY de 3 agentes
 const crmLeadsAgent       = require('./agents/crm-leads.agent');
 const liberarPontoAgent   = require('./agents/liberar-ponto.agent');     // 2026-04 v3
+const biImportAgent       = require('./agents/bi-import.agent');         // 2026-04 v3
+const initBiImportTables  = require('./bi-import.migration');            // 2026-04 v3
 
 async function initAgentTables(pool) {
   await initAgentTablesBase(pool);
@@ -51,6 +53,12 @@ async function initAgentTables(pool) {
     await initLiberacaoTables(pool);
   } catch (e) {
     console.error('⚠️ Liberacao tables error:', e.message);
+  }
+  // 2026-04 v3: tabela do novo módulo BI Import
+  try {
+    await initBiImportTables(pool);
+  } catch (e) {
+    console.error('⚠️ BI Import tables error:', e.message);
   }
 }
 
@@ -77,8 +85,28 @@ function startAgentWorker(pool) {
     // 2026-04 v3: novo agente "Liberar Ponto"
     agentPool.register(liberarPontoAgent);
 
+    // 2026-04 v3: novo agente "BI Import"
+    agentPool.register(biImportAgent);
+    // Cron próprio pra criar job D-1 às 10h da manhã (diferente do cron do agent que processa).
+    // Esse cron só CRIA o job — o worker do pool pega depois.
+    try {
+      const cron = require('node-cron');
+      const cronExpr = process.env.BI_IMPORT_CRON || '0 10 * * *';
+      cron.schedule(cronExpr, async () => {
+        try {
+          const data = biImportAgent.calcularDataD1();
+          await biImportAgent.criarJobCronSeNaoExistir(pool, data);
+        } catch (e) {
+          console.error('[bi-import-cron] erro:', e.message);
+        }
+      }, { timezone: 'America/Bahia' });
+      console.log(`📅 Cron BI Import agendado: "${cronExpr}" (TZ: America/Bahia)`);
+    } catch (e) {
+      console.error('⚠️ Falha ao agendar cron BI Import:', e.message);
+    }
+
     agentPool.startAll(pool);
-    console.log('✅ Agent pool iniciado com 8 agentes');
+    console.log('✅ Agent pool iniciado com 9 agentes');
   } catch (e) {
     console.error('❌ Falha ao iniciar agent pool:', e.message);
   }
