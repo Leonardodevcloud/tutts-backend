@@ -71,6 +71,21 @@ const verificarToken = (req, res, next) => {
     return next();
   }
 
+  // 2026-04 v3: bypass server-to-server via header x-internal-secret
+  // Usado por agentes RPA que rodam no worker separado (tutts-agents)
+  // pra bater no tutts-backend sem precisar de JWT humano.
+  const internalSecret = req.headers['x-internal-secret'];
+  if (internalSecret && process.env.INTERNAL_SECRET && internalSecret === process.env.INTERNAL_SECRET) {
+    req.user = {
+      id: 0,
+      nome: 'Agente Interno',
+      role: 'admin_master',
+      tipo: 'admin',
+      _internal: true,
+    };
+    return next();
+  }
+
   const token = extractToken(req);
 
   if (!token) {

@@ -58,8 +58,10 @@ function postJsonInterno(pathUrl, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(dados),
-        // Token interno opcional — o endpoint /bi/entregas/upload atual não exige auth
-        // mas se um dia adicionarem, basta setar BACKEND_INTERNAL_TOKEN
+        // 2026-04 v3: header pra bypass do CSRF + verificarToken no backend principal.
+        // Backend valida que o secret bate com INTERNAL_SECRET (env)
+        ...(process.env.INTERNAL_SECRET ? { 'x-internal-secret': process.env.INTERNAL_SECRET } : {}),
+        // Token Bearer opcional (se um dia adicionarem auth extra)
         ...(process.env.BACKEND_INTERNAL_TOKEN ? { 'Authorization': `Bearer ${process.env.BACKEND_INTERNAL_TOKEN}` } : {}),
       },
       timeout: 600_000,  // 10min — payload pode ser GRANDE (~3000 linhas)

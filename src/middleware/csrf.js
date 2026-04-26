@@ -83,6 +83,13 @@ function verificarCsrf(req, res, next) {
     return next();
   }
 
+  // 2026-04 v3: bypass para chamadas server-to-server via x-internal-secret
+  // (agentes RPA no worker separado batendo no backend principal)
+  const internalSecret = req.headers['x-internal-secret'];
+  if (internalSecret && process.env.INTERNAL_SECRET && internalSecret === process.env.INTERNAL_SECRET) {
+    return next();
+  }
+
   // JWT Bearer token no header Authorization já protege contra CSRF
   // (browser não envia automaticamente como faz com cookies)
   const authHeader = req.headers['authorization'];
