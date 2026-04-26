@@ -112,8 +112,11 @@ module.exports = defineAgent({
   slots: SLOTS,
   sessionStrategy: 'isolada',
   intervalo: 30_000,
-  cronExpression: process.env.BI_IMPORT_CRON || CRON_DEFAULT,
-  timezone: 'America/Bahia',
+  // 2026-04 fix: removido cronExpression daqui — o agente roda em modo PARALELO
+  // (pega jobs pendentes da fila bi_imports). O cron 10h continua existindo,
+  // mas é gerenciado externamente em index.js que CRIA o job, e este worker
+  // apenas processa.
+  // timezone: 'America/Bahia',
 
   // ── Cron 10h: cria job D-1 e deixa o tickGlobal/buscarPendentes processar
   // (defineAgent suporta cron OU paralelo, não ambos. Vamos usar PARALELO
