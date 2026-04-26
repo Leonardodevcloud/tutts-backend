@@ -96,7 +96,7 @@ function createLiberacaoRoutes(pool) {
     try {
       const usuarioId = req.user?.id || null;
       // Motoboy só vê os próprios; admin vê tudo
-      const isAdmin = req.user?.tipo === 'admin' || req.user?.role === 'admin';
+      const isAdmin = req.user?.tipo === 'admin' || ['admin', 'admin_master', 'admin_financeiro'].includes(req.user?.role);
 
       let q;
       if (isAdmin) {
@@ -161,7 +161,7 @@ function createLiberacaoRoutes(pool) {
 
   // ── GET /agent/liberar-ponto/historico (admin) ───────────────────────────
   router.get('/liberar-ponto/historico', async (req, res) => {
-    const isAdmin = req.user?.tipo === 'admin' || req.user?.role === 'admin';
+    const isAdmin = req.user?.tipo === 'admin' || ['admin', 'admin_master', 'admin_financeiro'].includes(req.user?.role);
     if (!isAdmin) return res.status(403).json({ erro: 'Acesso negado.' });
 
     const { status, os_numero, de, ate, page = 1, per_page = 30 } = req.query;
