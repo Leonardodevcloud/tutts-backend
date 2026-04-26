@@ -175,21 +175,40 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
       }
     });
 
-    // === Tipo veículo: Motofrete + Motofrete Expresso + Carro Utilitário + Tutts Fast + Motofrete-C ===
-    // Os values exatos dependem do sistema. Vou marcar tudo EXCETO "Carro Utilitário (Expresso)"
-    // que é o único deselecionado nos prints.
-    const cbsVeiculo = document.querySelectorAll('input[name="tipoVeiculo"]');
+    // === Tipo veículo (name="T") — desmarcar APENAS Carro Utilitário (Expresso) ===
+    // Descobertas via DevTools (HTML real do sistema):
+    //   - Os checkboxes têm name="T", NÃO "tipoVeiculo"
+    //   - Carro Utilitário (Expresso) tem value="UC"
+    //   - Motofrete (Expresso) tem value="MC"
+    //   - O <label> fica em <label class="form-check-label"> dentro de <span class="form-check">
+    const cbsVeiculo = document.querySelectorAll('input[name="T"]');
     cbsVeiculo.forEach(cb => {
-      const txt = (cb.parentElement?.textContent || '').toLowerCase();
-      // marca tudo, exceto "Carro Utilitário (Expresso)"
-      const ehCarroUtilExpresso = txt.includes('carro utilit') && txt.includes('expresso');
+      // Pega texto da label (irmã do input dentro do span.form-check)
+      const label = cb.parentElement?.querySelector('label.form-check-label');
+      const txt = (label?.textContent || '').toLowerCase().trim();
+      const ehCarroUtilExpresso =
+        cb.value === 'UC' ||
+        (txt.includes('carro') && txt.includes('utilit') && txt.includes('expresso'));
+
       cb.checked = !ehCarroUtilExpresso;
       const btn = cb.closest('button.multiselect-option');
       if (btn) {
         if (!ehCarroUtilExpresso) btn.classList.add('active');
         else btn.classList.remove('active');
       }
+      // Dispara evento change pra Bootstrap multiselect atualizar
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
     });
+
+    // Atualiza texto do dropdown tipo veículo
+    const tvBtnGroup = document.querySelectorAll('input[name="T"]')[0]?.closest('.btn-group');
+    if (tvBtnGroup) {
+      const txtSel = tvBtnGroup.querySelector('.multiselect-selected-text');
+      if (txtSel) {
+        const marcados = tvBtnGroup.querySelectorAll('input[name="T"]:checked').length;
+        txtSel.textContent = marcados + ' selecionados';
+      }
+    }
 
     // === Registros por página ===
     const quantSel = document.getElementById('quantLimite');
