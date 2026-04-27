@@ -14,6 +14,8 @@ const { validarNotaFiscal } = require('../validar-nota-fiscal');
 const { cruzarValidacoes } = require('../cruzar-validacoes');
 // 2026-04 v3: consulta Receita direto quando motoboy digita CNPJ
 const { consultarReceita } = require('../consultar-receita');
+// 2026-04 v4: pré-validação rápida da foto (camera coaching)
+const { validarFotoNfPreview } = require('../validar-foto-nf-preview');
 
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -292,8 +294,12 @@ function createCorrecaoRoutes(pool) {
         lugares_proximos: validacaoLoc.lugares_proximos,
       }) : null;
 
-      // JSON pra coluna validacao_nf — inclui dados NF + Receita + cruzamento
+      // JSON pra coluna validacao_nf — inclui dados NF + Receita + cruzamento + origem
+      // 2026-04 v4: incluído `origem` para que o admin diferencie "foto enviada" (Gemini)
+      // de "CNPJ digitado pelo motoboy" — antes ficava sempre como "EXTRAÍDO DA NF (IA)"
+      // pois o JSON não persistia esse campo, só a variável em memória.
       const validacaoNfJson = validacaoNF ? JSON.stringify({
+        origem: validacaoNF.origem || 'foto_nf',
         confianca: validacaoNF.confianca,
         match_cidade: validacaoNF.match_cidade,
         dados: validacaoNF.dados,
@@ -499,6 +505,46 @@ function createCorrecaoRoutes(pool) {
     } catch (err) {
       console.error('[agent/corrigir-endereco]', err.message);
       return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enfileirar.' });
+    }
+  });
+
+  // 2026-04 v4: POST /agent/validar-foto-nf-preview
+  // Pré-validação RÁPIDA da foto da NF antes do submit final.
+  // Usado pelo camera coaching no frontend pra guiar o motoboy.
+  // NÃO grava nada no banco — só roda Gemini Flash Lite e retorna feedback.
+  router.post('/validar-foto-nf-preview', async (req, res) => {
+    const { foto } = req.body || {};
+
+    if (!foto || typeof foto !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        erro: 'Campo "foto" obrigatório (base64 da imagem).'
+      });
+    }
+
+    if (foto.length > 7_000_000) {
+      return res.status(400).json({
+        ok: false,
+        erro: 'Foto muito grande. Máximo 5MB.'
+      });
+    }
+
+    try {
+      const resultado = await validarFotoNfPreview(foto);
+      return res.json(resultado);
+    } catch (err) {
+      console.error('[agent/validar-foto-nf-preview]', err.message);
+      // Em caso de erro, falha ABERTA (motoboy pode tentar enviar mesmo assim)
+      return res.json({
+        ok: true,
+        qualidade: 'media',
+        eh_nota_fiscal: true,
+        cnpj_legivel: false,
+        cnpj_lido: null,
+        problemas: [],
+        dica: null,
+        erro: 'erro_interno_preview',
+      });
     }
   });
 
