@@ -1,41 +1,33 @@
-FROM node:18-slim
+# 2026-04: Refeito do zero pra resolver "spawn EAGAIN" no chromium_headless_shell.
+# 
+# Problemas do Dockerfile antigo:
+#   1. Lista de libs era pra Playwright 1.41 — versões 1.49+ exigem libs adicionais.
+#   2. "RUN npx playwright install chromium" rodava 2x (uma no postinstall, outra
+#      no Dockerfile) sem --with-deps na segunda, podendo deixar binário sem libs.
+#   3. Sem package-lock.json, cada build podia resolver Playwright em versão diferente,
+#      gerando mismatch entre node_modules e binário do Chromium baixado.
+#
+# Solução:
+#   - Versão do Playwright TRAVADA no package.json (sem ^).
+#   - Usa imagem oficial mcr.microsoft.com/playwright que JÁ vem com Chromium + libs
+#     na versão exata. Garante compatibilidade total entre Node + Playwright + Chromium.
+#   - Não precisa mais instalar libs do sistema manualmente.
 
-# Instalar dependências do sistema para o Chromium
-RUN apt-get update && apt-get install -y \
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libdbus-1-3 \
-    libxcb1 \
-    libxkbcommon0 \
-    libx11-6 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
-    libatspi2.0-0 \
-    wget \
-    ca-certificates \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+
+# Imagem oficial vem com Node 20 e usuário "pwuser" pré-configurado.
+# Mas o código atual roda como root, então fixamos pra root pra não quebrar
+# permissões de /root/.cache/ms-playwright (onde o binário do Chromium fica).
+USER root
 
 WORKDIR /app
 
-# Copiar package.json e instalar dependências
+# Copiar package.json e instalar deps.
+# IMPORTANTE: o postinstall ("npx playwright install --with-deps chromium")
+# vira essencialmente NO-OP aqui, porque a imagem JÁ tem o Chromium da versão certa.
+# Mas mantemos no package.json pra dev local em quem não usa Docker.
 COPY package*.json ./
-RUN npm install
-
-# Instalar Chromium do Playwright
-RUN npx playwright install chromium
+RUN npm install --omit=dev=false && npm cache clean --force
 
 # Copiar o restante do código
 COPY . .
