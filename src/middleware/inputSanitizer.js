@@ -1,19 +1,39 @@
 /**
  * src/middleware/inputSanitizer.js
  * 🔒 SECURITY: Sanitização global de inputs
- * 
+ *
  * Protege contra:
  * - XSS (script tags, event handlers, javascript: protocol)
  * - Prototype pollution (__proto__, constructor)
  * - Null bytes
- * 
+ *
  * Roda em TODAS as requests antes das rotas.
+ *
+ * 2026-04: ALLOWLIST de rotas que pulam a sanitização de campos específicos
+ * (uploads de imagem em base64). Motivos:
+ *   1. Performance: regex em string de 5MB bloqueia event loop por ~30ms.
+ *   2. Risco: base64 contém caracteres arbitrários e pode dar falso positivo
+ *      em regex como /<\/script>/i, mutando a string e quebrando a imagem.
+ *   3. Sanitização XSS em base64 é semanticamente errada — base64 NUNCA
+ *      é renderizado como HTML, é decodado em bytes binários no servidor.
  */
 
+// 2026-04: campos que NÃO devem ser sanitizados nessas rotas (preservados intactos).
+// Lista por path prefix → array de nomes de campo do body.
+// Match é por path.startsWith(prefix). Uma rota pode ter múltiplos prefixos.
+const SKIP_FIELDS_BY_PATH = [
+  // Módulo Agente RPA — correção de endereço com fotos
+  { prefix: '/api/agent/corrigir-endereco', fields: ['foto_fachada', 'foto_nf'] },
+  { prefix: '/agent/corrigir-endereco',     fields: ['foto_fachada', 'foto_nf'] },
+  // Outras rotas com upload base64 — adicionar aqui se aparecer "imagem corrompida"
+  // após este fix em outras features. Padrão: { prefix, fields: ['campo1', 'campo2'] }
+];
+
 /**
- * Sanitiza recursivamente valores string de um objeto
+ * Sanitiza recursivamente valores string de um objeto, pulando campos da skipList.
+ * skipList só vale no NÍVEL TOPO do objeto — campos profundos são sanitizados normal.
  */
-function sanitizeValue(value, depth = 0) {
+function sanitizeValue(value, depth = 0, skipList = null) {
   if (depth > 10) return value;
 
   if (typeof value === 'string') {
@@ -35,7 +55,7 @@ function sanitizeValue(value, depth = 0) {
   }
 
   if (Array.isArray(value)) {
-    return value.map(item => sanitizeValue(item, depth + 1));
+    return value.map(item => sanitizeValue(item, depth + 1, null));
   }
 
   if (value && typeof value === 'object') {
@@ -45,12 +65,29 @@ function sanitizeValue(value, depth = 0) {
       if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
         continue;
       }
-      sanitized[key] = sanitizeValue(val, depth + 1);
+      // 2026-04: pula campo se estiver na skipList (preserva intacto)
+      if (skipList && skipList.includes(key) && typeof val === 'string') {
+        sanitized[key] = val;
+        continue;
+      }
+      sanitized[key] = sanitizeValue(val, depth + 1, null);
     }
     return sanitized;
   }
 
   return value;
+}
+
+/**
+ * Resolve a skipList aplicável ao path da request.
+ * Retorna array de nomes de campo ou null se nenhum prefix matcher.
+ */
+function resolverSkipList(path) {
+  if (!path) return null;
+  for (const rule of SKIP_FIELDS_BY_PATH) {
+    if (path.startsWith(rule.prefix)) return rule.fields;
+  }
+  return null;
 }
 
 /**
@@ -64,11 +101,13 @@ function sanitizeInput(req, res, next) {
       return next();
     }
 
+    const skipList = resolverSkipList(req.path || req.originalUrl);
+
     if (req.body && typeof req.body === 'object') {
-      req.body = sanitizeValue(req.body);
+      req.body = sanitizeValue(req.body, 0, skipList);
     }
     if (req.query && typeof req.query === 'object') {
-      req.query = sanitizeValue(req.query);
+      req.query = sanitizeValue(req.query, 0, null);
     }
   } catch (err) {
     console.error('❌ Erro na sanitização de input:', err.message);
