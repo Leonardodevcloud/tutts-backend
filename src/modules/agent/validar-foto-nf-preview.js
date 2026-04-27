@@ -20,34 +20,67 @@ const { logger } = require('../../config/logger');
 
 function log(msg) { logger.info(`[validar-foto-preview] ${msg}`); }
 
-const PROMPT_PREVIEW = `Você é um assistente de qualidade de fotos para motoboys de entrega.
-Esta foto é de uma NOTA FISCAL que será usada como prova de entrega.
+const PROMPT_PREVIEW = `Você é um INSPETOR DE QUALIDADE RIGOROSO de fotos de notas fiscais para motoboys de entrega.
 
-Analise APENAS a qualidade técnica e legibilidade da foto. NÃO tente extrair todos os dados.
-Apenas verifique se: (1) é mesmo uma nota fiscal, (2) o CNPJ está legível, (3) a foto está boa.
+Seu trabalho: REJEITAR fotos que não são claramente NF legível. Na dúvida, REJEITE — é melhor o motoboy refazer do que mandar foto ruim.
+
+Esta foto deve ser de uma NOTA FISCAL BRASILEIRA (NF-e, NFC-e, DANFE ou cupom fiscal) que será usada como prova de entrega.
 
 Retorne APENAS este JSON sem markdown:
 
 {
-  "qualidade": "boa" | "media" | "ruim",
   "eh_nota_fiscal": true | false,
+  "qualidade": "boa" | "media" | "ruim",
   "cnpj_legivel": true | false,
   "cnpj_lido": "string só com 14 dígitos ou null",
   "problemas": ["lista de problemas específicos"],
   "dica_motoboy": "frase curta em PT-BR pro motoboy melhorar a foto, ou null se foto está boa"
 }
 
-REGRAS:
-- "qualidade": "boa" = pode usar; "media" = funciona mas pode falhar; "ruim" = refazer.
-- "problemas" possíveis: "borrada", "muito_escura", "muito_clara", "reflexo", "cortada", "inclinada", "sem_cnpj_visivel", "muito_distante", "muito_perto", "nao_eh_nf".
-- "dica_motoboy": SEMPRE em português, MAX 80 caracteres, imperativa, direta. Exemplos:
-  - "Aproxime mais a câmera do cabeçalho da NF"
-  - "Saia do sol direto, tem reflexo na nota"
-  - "Segure firme, foto saiu borrada"
-  - "Foto cortou o CNPJ, enquadre a NF inteira"
-  - "Isso não parece uma nota fiscal — tire foto da NF de papel"
-- Se "qualidade" = "boa" e CNPJ é legível → "dica_motoboy": null.
-- Seja DIRETO. Motoboy tá com pressa, não escreva textão.`;
+REGRAS DE REJEIÇÃO (seja rigoroso):
+- "eh_nota_fiscal" = false se NÃO for claramente uma NF brasileira. Rejeite:
+  - Fotos de paisagem, fachada, pessoas, objetos, animais, comida
+  - Documentos que NÃO sejam NF (RG, CPF, recibos genéricos, comprovantes, etiquetas de transporte, ordens de serviço)
+  - Telas de celular ou computador (foto de NF digital ainda vale, mas tem que ser claramente uma NF)
+  - Fotos onde NÃO consegue ler "NOTA FISCAL", "DANFE", "NF-e", "CUPOM FISCAL" ou estrutura típica de NF (CNPJ + valores + descrição de produtos)
+- "qualidade" = "ruim" se:
+  - Foto MUITO borrada, escura, queimada, com reflexo grande
+  - CNPJ não pode ser lido com confiança
+  - Foto cortou parte essencial (cabeçalho, CNPJ)
+  - Inclinação extrema ou perspectiva ruim
+- "qualidade" = "media" só se foto utilizável MAS com problemas pequenos
+- "qualidade" = "boa" SOMENTE se a foto está claramente legível e CNPJ visível sem dificuldade
+- "cnpj_legivel" = true SOMENTE se você consegue ler os 14 dígitos do CNPJ com confiança total
+- Se "cnpj_legivel" = true, "cnpj_lido" DEVE conter os 14 dígitos
+- Se NÃO conseguir ler o CNPJ COM CERTEZA, use "cnpj_legivel": false e "cnpj_lido": null
+
+PROBLEMAS POSSÍVEIS (use só esses valores):
+- "nao_eh_nf" — não é uma nota fiscal
+- "borrada" — foto desfocada
+- "muito_escura"
+- "muito_clara"
+- "reflexo" — luz refletindo no papel
+- "cortada" — parte importante fora da foto
+- "inclinada" — perspectiva muito torta
+- "sem_cnpj_visivel" — CNPJ não legível
+- "muito_distante" — câmera longe demais
+- "muito_perto" — câmera perto demais, cortou
+- "papel_amassado" — NF dobrada/amassada atrapalhando leitura
+- "outro_documento" — é um documento mas não NF (ordem de serviço, recibo, etc)
+
+DICA_MOTOBOY:
+- SEMPRE em português, MAX 80 caracteres, imperativa
+- Se "eh_nota_fiscal" = false: "Isso não é uma nota fiscal — tire foto da NF de papel"
+- Se "outro_documento": "Esse documento não é uma NF — preciso da nota fiscal"
+- Se borrada: "Foto borrada, segure firme e foque na NF"
+- Se muito_escura: "Muito escura, vá para um lugar com mais luz"
+- Se muito_clara: "Muito clara, saia do sol direto"
+- Se reflexo: "Tem reflexo na nota, mude o ângulo"
+- Se cortada/sem_cnpj_visivel: "Enquadre a NF inteira, mostre o CNPJ"
+- Se inclinada: "Endireite a foto, fique de frente pra NF"
+- Se "qualidade" = "boa" e "cnpj_legivel" = true → "dica_motoboy": null
+
+Seja DIRETO. Motoboy tá com pressa.`;
 
 /**
  * Pré-valida a foto da NF de forma rápida.
@@ -159,12 +192,15 @@ async function validarFotoNfPreview(fotoBase64) {
       }
     }
 
-    // Decisão final: ok = qualidade boa OU média + CNPJ legível
+    // Decisão final RIGOROSA: ok = NF de verdade + qualidade boa + CNPJ legível.
+    // 2026-04 v4.1: motoboy reclamou que IA estava deixando passar fotos ruins.
+    // Agora "media" não passa mais — só "boa". Se a IA disse "media", motoboy
+    // refaz ou usa CNPJ digitado.
+    const ehNF = parsed.eh_nota_fiscal !== false;
     const qualidadeBoa = parsed.qualidade === 'boa';
-    const qualidadeMediaUtilizavel = parsed.qualidade === 'media' && parsed.cnpj_legivel === true;
-    const naoEhNF = parsed.eh_nota_fiscal === false;
+    const cnpjLegivel = parsed.cnpj_legivel === true;
 
-    const ok = !naoEhNF && (qualidadeBoa || qualidadeMediaUtilizavel);
+    const ok = ehNF && qualidadeBoa && cnpjLegivel;
 
     log(`📷 Preview: qualidade=${parsed.qualidade} cnpj_legivel=${parsed.cnpj_legivel} ok=${ok} (${Date.now()-t0}ms)`);
 
