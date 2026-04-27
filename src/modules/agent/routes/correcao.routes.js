@@ -507,6 +507,26 @@ function createCorrecaoRoutes(pool) {
     }
   });
 
+  // GET /agent/foto-nf/:id  (2026-04: foto da nota fiscal — análoga a /foto/:id)
+  router.get('/foto-nf/:id', async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT foto_nf FROM ajustes_automaticos WHERE id = $1`,
+        [id]
+      );
+      if (rows.length === 0 || !rows[0].foto_nf) {
+        return res.status(404).json({ erro: 'Foto da NF não encontrada.' });
+      }
+      return res.json({ foto: rows[0].foto_nf });
+    } catch (err) {
+      console.error('[agent/foto-nf]', err.message);
+      return res.status(500).json({ erro: 'Erro ao buscar foto da NF.' });
+    }
+  });
+
 
   // Screenshots debug (temporario - acesso via chave)
   const SDIR = '/tmp/screenshots';
