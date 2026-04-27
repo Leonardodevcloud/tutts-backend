@@ -122,6 +122,9 @@ function createCorrecaoRoutes(pool) {
   router.post('/corrigir-endereco', async (req, res) => {
     const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf, cnpj_manual } = req.body || {};
 
+    // 🔍 DEBUG (remover depois): identificar por que foto_nf chega NULL no banco
+    console.log(`[agent/DEBUG] 📥 BODY OS=${os_numero} | foto_nf: tipo=${typeof foto_nf} truthy=${!!foto_nf} len=${foto_nf ? foto_nf.length : 0} | foto_fachada: len=${foto_fachada ? foto_fachada.length : 0} | cnpj_manual=${cnpj_manual || 'nada'}`);
+
     const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada, cnpj_manual });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
@@ -296,6 +299,9 @@ function createCorrecaoRoutes(pool) {
       }) : null;
 
       // ── 4. Insere job na fila (Playwright vai processar a correção igual) ──
+      // 🔍 DEBUG (remover depois): conferir foto_nf imediatamente antes do INSERT
+      console.log(`[agent/DEBUG] 💾 PRE-INSERT OS=${os_numero} | foto_nf: tipo=${typeof foto_nf} truthy=${!!foto_nf} len=${foto_nf ? foto_nf.length : 0}`);
+
       const { rows } = await pool.query(
         `INSERT INTO ajustes_automaticos (
            os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng,
@@ -321,6 +327,12 @@ function createCorrecaoRoutes(pool) {
       );
 
       const reg = rows[0];
+
+      // 🔍 DEBUG (remover depois): confirmar gravação
+      try {
+        const c = await pool.query('SELECT (foto_nf IS NOT NULL) AS tem, LENGTH(foto_nf) AS tam FROM ajustes_automaticos WHERE id = $1', [reg.id]);
+        console.log(`[agent/DEBUG] ✅ POS-INSERT id=${reg.id} OS=${os_numero} | foto_nf no banco: tem=${c.rows[0]?.tem} tam=${c.rows[0]?.tam}`);
+      } catch(_) {}
 
       // ── 5. Se cruzamento confirmou (Receita ATIVA + score≥90), grava endereço no banco de consulta ──
       // Tabela alvo: solicitacao_favoritos (consultada pelo módulo Coleta).
@@ -504,26 +516,6 @@ function createCorrecaoRoutes(pool) {
     } catch (err) {
       console.error('[agent/foto]', err.message);
       return res.status(500).json({ erro: 'Erro ao buscar foto.' });
-    }
-  });
-
-  // GET /agent/foto-nf/:id  (2026-04: foto da nota fiscal — análoga a /foto/:id)
-  router.get('/foto-nf/:id', async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return res.status(400).json({ erro: 'ID inválido.' });
-
-    try {
-      const { rows } = await pool.query(
-        `SELECT foto_nf FROM ajustes_automaticos WHERE id = $1`,
-        [id]
-      );
-      if (rows.length === 0 || !rows[0].foto_nf) {
-        return res.status(404).json({ erro: 'Foto da NF não encontrada.' });
-      }
-      return res.json({ foto: rows[0].foto_nf });
-    } catch (err) {
-      console.error('[agent/foto-nf]', err.message);
-      return res.status(500).json({ erro: 'Erro ao buscar foto da NF.' });
     }
   });
 
