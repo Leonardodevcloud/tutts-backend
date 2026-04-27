@@ -728,6 +728,96 @@ router.post('/bi/entregas/atualizar-alocado', async (req, res) => {
   }
 });
 
+// 2026-04 v3 — Histórico UNIFICADO de uploads (manuais + RPA)
+// Retorna lista combinada de bi_upload_historico (manuais) + bi_imports (RPA)
+// ordenada por data desc. Filtro opcional ?origem=manual|auto|todos
+router.get('/bi/uploads/historico-unificado', async (req, res) => {
+  try {
+    const origem = (req.query.origem || 'todos').toLowerCase();
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+
+    let resultados = [];
+
+    // Manuais (bi_upload_historico)
+    if (origem === 'todos' || origem === 'manual') {
+      const r1 = await pool.query(`
+        SELECT
+          'manual'                          AS origem,
+          id,
+          nome_arquivo                      AS arquivo,
+          usuario_nome                      AS por,
+          COALESCE(linhas_inseridas, total_linhas, 0) AS linhas,
+          data_upload                       AS quando,
+          NULL::text                        AS status,
+          NULL::date                        AS data_referencia
+        FROM bi_upload_historico
+        ORDER BY data_upload DESC
+        LIMIT $1
+      `, [limit]).catch(() => ({ rows: [] }));
+      resultados = resultados.concat(r1.rows);
+    }
+
+    // RPA (bi_imports)
+    if (origem === 'todos' || origem === 'auto') {
+      const r2 = await pool.query(`
+        SELECT
+          'auto'                            AS origem,
+          id,
+          'bi_' || data_referencia::text    AS arquivo,
+          COALESCE(usuario_nome, 'RPA')     AS por,
+          COALESCE(linhas_inseridas, 0)     AS linhas,
+          COALESCE(finalizado_em, criado_em) AS quando,
+          status,
+          data_referencia
+        FROM bi_imports
+        WHERE status = 'sucesso'
+        ORDER BY COALESCE(finalizado_em, criado_em) DESC
+        LIMIT $1
+      `, [limit]).catch(() => ({ rows: [] }));
+      resultados = resultados.concat(r2.rows);
+    }
+
+    // Ordenar por data desc
+    resultados.sort((a, b) => new Date(b.quando) - new Date(a.quando));
+    
+    // Aplicar limit final
+    resultados = resultados.slice(0, limit);
+
+    res.json(resultados);
+  } catch (err) {
+    console.error('❌ Erro ao listar histórico unificado:', err);
+    res.status(500).json({ error: 'Erro ao listar histórico' });
+  }
+});
+
+// Excluir item do histórico unificado (rota inteligente — escolhe tabela pela origem)
+router.delete('/bi/uploads/historico-unificado/:origem/:id', async (req, res) => {
+  try {
+    const { origem, id } = req.params;
+    const idInt = parseInt(id);
+    if (!idInt) return res.status(400).json({ error: 'ID inválido' });
+
+    if (origem === 'manual') {
+      // Deleta entregas associadas + registro do histórico
+      await pool.query('DELETE FROM bi_entregas WHERE upload_id = $1', [idInt]);
+      const r = await pool.query('DELETE FROM bi_upload_historico WHERE id = $1', [idInt]);
+      return res.json({ success: true, deletados: r.rowCount });
+    }
+    
+    if (origem === 'auto') {
+      // Deleta entregas associadas (se tiver upload_id em bi_entregas correspondente)
+      // + registro do bi_imports
+      const r = await pool.query('DELETE FROM bi_imports WHERE id = $1', [idInt]);
+      return res.json({ success: true, deletados: r.rowCount });
+    }
+
+    return res.status(400).json({ error: 'Origem inválida' });
+  } catch (err) {
+    console.error('❌ Erro ao excluir histórico unificado:', err);
+    res.status(500).json({ error: 'Erro ao excluir' });
+  }
+});
+
 // Dashboard BI - Métricas gerais COMPLETO
 router.get('/bi/uploads', async (req, res) => {
   try {
