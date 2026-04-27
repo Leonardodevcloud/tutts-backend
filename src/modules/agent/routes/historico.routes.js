@@ -101,11 +101,24 @@ function createHistoricoRoutes(pool, verificarAdmin) {
 
     try {
       const { rows } = await pool.query(
-        `SELECT foto_nf FROM ajustes_automaticos WHERE id = $1`,
+        `SELECT foto_nf, validacao_nf FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
-      if (rows.length === 0 || !rows[0].foto_nf) {
-        return res.status(404).json({ erro: 'Foto da NF nao encontrada.' });
+      if (rows.length === 0) {
+        return res.status(404).json({ erro: 'Solicitacao nao encontrada.', sem_foto: true });
+      }
+      if (!rows[0].foto_nf) {
+        // Solicitacao existe mas nao tem foto da NF — pode ser que tenha sido
+        // enviada via CNPJ digitado, ou que a foto nao foi salva por algum motivo.
+        const temValidacao = !!rows[0].validacao_nf;
+        const origem = rows[0].validacao_nf?.origem || rows[0].validacao_nf?.dados?.origem;
+        let motivo = 'Esta solicitacao nao tem foto da NF salva.';
+        if (origem === 'cnpj_manual') {
+          motivo = 'O motoboy enviou apenas o CNPJ digitado (sem foto da NF).';
+        } else if (temValidacao) {
+          motivo = 'A foto da NF foi processada pela IA mas nao foi salva no banco. Possivel falha no envio.';
+        }
+        return res.status(404).json({ erro: motivo, sem_foto: true });
       }
       return res.json({ foto: rows[0].foto_nf });
     } catch (err) {
@@ -140,7 +153,9 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                   latitude, longitude, motoboy_lat, motoboy_lng,
                   ponto1_lat, ponto1_lng, ponto1_endereco,
                   endereco_antigo_lat, endereco_antigo_lng,
-                  validacao_localizacao, validacao_nf, valores_antes, valores_depois
+                  validacao_localizacao, validacao_nf, valores_antes, valores_depois,
+                  (foto_nf IS NOT NULL) AS tem_foto_nf,
+                  (foto_fachada IS NOT NULL) AS tem_foto_fachada
            FROM ajustes_automaticos ${where}
            ORDER BY criado_em DESC
            LIMIT $${p} OFFSET $${p + 1}`,
