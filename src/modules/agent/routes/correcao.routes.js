@@ -115,8 +115,11 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
 function createCorrecaoRoutes(pool) {
   const router = express.Router();
 
-  // Aumentar limite do body para aceitar foto base64
-  router.use(express.json({ limit: '10mb' }));
+  // 2026-04: REMOVIDO router.use(express.json({ limit: '10mb' })).
+  // Body parser global no server.js já aceita até 50mb, e essa duplicação
+  // só servia pra ESTREITAR o limite aqui (10mb), o que pode quebrar
+  // requests legítimos com foto fachada (5mb) + foto NF (5mb) + overhead
+  // de outros campos. Express body parser global é suficiente.
 
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
@@ -302,6 +305,25 @@ function createCorrecaoRoutes(pool) {
       // 🔍 DEBUG (remover depois): conferir foto_nf imediatamente antes do INSERT
       console.log(`[agent/DEBUG] 💾 PRE-INSERT OS=${os_numero} | foto_nf: tipo=${typeof foto_nf} truthy=${!!foto_nf} len=${foto_nf ? foto_nf.length : 0}`);
 
+      // 2026-04: ALERT diagnóstico — Gemini processou OK mas foto sumiu antes do INSERT.
+      // Cenário-alvo: Tela admin mostra dados extraídos mas "Sem foto da NF".
+      // Causa mais provável: foto chegou cortada (rede 4G fraco) e o
+      // foto_nf virou null/undefined em algum middleware. Loga DETALHADO pra
+      // permitir investigar nos logs do Railway sem mudar comportamento.
+      if (validacaoNF && validacaoNF.dados && validacaoNF.dados.cnpj && (!foto_nf || foto_nf.length < 100)) {
+        console.error(
+          `[agent/ALERT] ⚠️ FOTO_NF VAZIA APÓS GEMINI! ` +
+          `OS=${os_numero} CNPJ=${validacaoNF.dados.cnpj_formatado} ` +
+          `tipo=${typeof foto_nf} len=${foto_nf ? foto_nf.length : 0} ` +
+          `origem=${validacaoNF.origem || 'foto_nf'} ` +
+          `usuario=${usuarioNome}. ` +
+          `IA extraiu mas foto não foi salva — verificar payload do request.`
+        );
+      }
+
+      // Garante que foto_nf vai como null explícito (não undefined/string vazia) pro INSERT
+      const fotoNfParaInsert = (foto_nf && typeof foto_nf === 'string' && foto_nf.length > 100) ? foto_nf : null;
+
       const { rows } = await pool.query(
         `INSERT INTO ajustes_automaticos (
            os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng,
@@ -317,7 +339,7 @@ function createCorrecaoRoutes(pool) {
           parseFloat(motoboy_lat),
           parseFloat(motoboy_lng),
           foto_fachada || null,
-          foto_nf,
+          fotoNfParaInsert,
           usuarioId,
           usuarioNome,
           codProfissional,
