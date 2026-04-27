@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "postinstall": "node -e \"if (!process.env.SKIP_PLAYWRIGHT_INSTALL) { require('child_process').execSync('npx playwright install chromium', {stdio:'inherit'}); }\""
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
@@ -22,7 +22,7 @@
     "node-cache": "^5.1.2",
     "node-cron": "^3.0.3",
     "pg": "^8.11.3",
-    "playwright": "^1.41.0",
+    "playwright": "1.49.1",
     "ws": "^8.16.0",
     "starkbank": "^2.26.0",
     "xlsx": "^0.18.5",
