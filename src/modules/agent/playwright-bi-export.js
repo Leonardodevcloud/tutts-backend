@@ -160,13 +160,85 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
     const radioEnd = document.querySelector('input[name="endereco"][value="CE"]');
     if (radioEnd) { radioEnd.checked = true; radioEnd.click(); }
 
-    // === Dados profissional: Com (CDP) ===
-    const radioProf = document.querySelector('input[name="profissional"][value="CDP"]');
-    if (radioProf) { radioProf.checked = true; radioProf.click(); }
+    // === Dados profissional: "Com dados do profissional" ===
+    // 2026-04 BUGFIX CRÍTICO: o sistema externo (tutts.com.br) usa um
+    // <select> com este name, NÃO um radio. O código antigo procurava
+    // input[name="profissional"][value="CDP"] e nunca achava — então o
+    // select ficava no default "Sem dados do profissional", e a planilha
+    // baixada vinha com cod_prof e nome_prof VAZIOS. Resultado: o módulo
+    // Garantido (e qualquer cruzamento por profissional) ficava todo zerado.
+    //
+    // HTML real:
+    //   <select name="profissional" id="profissional">
+    //     <option>Sem dados do profissional</option>
+    //     <option>Com dados do profissional</option>
+    //   </select>
+    //
+    // Estratégia: marcar a SEGUNDA option (que é "Com dados"), ou achar
+    // pela substring "com" na label, ou por qualquer value que comece com C.
+    // Isso é defensivo pra cobrir variações no value (CDP, 1, "com", etc).
+    (function setarDadosProfissional() {
+      // Tenta primeiro pelo id "profissional" (mais preciso)
+      let sel = document.getElementById('profissional');
+      // Fallback: busca por name
+      if (!sel || sel.tagName !== 'SELECT') {
+        sel = document.querySelector('select[name="profissional"]');
+      }
+      if (!sel) return;  // não achou, deixa quieto
 
-    // === Dados cliente: Com (CDC) — pode estar em select OU radio ===
-    const radioCli = document.querySelector('input[name="cliente_dados"][value="CDC"]');
-    if (radioCli) { radioCli.checked = true; radioCli.click(); }
+      // Procura a option "Com dados do profissional" pelo texto (insensitive)
+      let opcaoEscolhida = null;
+      for (const opt of sel.options) {
+        const txt = (opt.textContent || '').toLowerCase().trim();
+        if (txt.startsWith('com') && txt.includes('dado') && txt.includes('profissional')) {
+          opcaoEscolhida = opt;
+          break;
+        }
+      }
+      // Fallback: se tiver 2 options e não achou pelo texto, pega a 2ª
+      // ("Sem" geralmente é a 1ª, "Com" é a 2ª)
+      if (!opcaoEscolhida && sel.options.length >= 2) {
+        opcaoEscolhida = sel.options[1];
+      }
+      if (!opcaoEscolhida) return;
+
+      sel.value = opcaoEscolhida.value;
+      // Dispara change pra qualquer JS do sistema externo reagir (se tiver)
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    })();
+
+    // === Dados cliente: "Com dados do cliente" ===
+    // 2026-04: mesma correção do profissional. O default já é "Com dados",
+    // mas pra consistência (e segurança caso default mude), forçamos.
+    (function setarDadosCliente() {
+      let sel = document.getElementById('cliente_dados') || document.getElementById('cliente');
+      if (!sel || sel.tagName !== 'SELECT') {
+        sel = document.querySelector('select[name="cliente_dados"]') ||
+              document.querySelector('select[name="cliente"]');
+      }
+      if (!sel) {
+        // Fallback pro código antigo (radio) caso o sistema mude de volta
+        const radioCli = document.querySelector('input[name="cliente_dados"][value="CDC"]');
+        if (radioCli) { radioCli.checked = true; radioCli.click(); }
+        return;
+      }
+
+      let opcaoEscolhida = null;
+      for (const opt of sel.options) {
+        const txt = (opt.textContent || '').toLowerCase().trim();
+        if (txt.startsWith('com') && txt.includes('dado') && txt.includes('cliente')) {
+          opcaoEscolhida = opt;
+          break;
+        }
+      }
+      if (!opcaoEscolhida && sel.options.length >= 2) {
+        opcaoEscolhida = sel.options[1];
+      }
+      if (!opcaoEscolhida) return;
+
+      sel.value = opcaoEscolhida.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    })();
 
     // === Status (serviço): Em execução (E) + Concluídos (F) ===
     const cbsStatus = document.querySelectorAll('input[name="statusOS"]');
