@@ -279,13 +279,20 @@ function createLeadsCapturaRoutes(pool) {
 
       // 4. Playwright screenshot
       console.log('[CRM-Resumo] Gerando imagem do resumo diário...');
-      const { chromium } = require('playwright');
-      const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-      const page = await browser.newPage({ viewport: { width: 540, height: 800 } });
-      await page.setContent(html, { waitUntil: 'domcontentloaded' });
-      const element = await page.$('body > div');
-      const screenshotBuffer = await element.screenshot({ type: 'png' });
-      await browser.close();
+      // 2026-04: usa helper unificado pra garantir close + SIGKILL fallback
+      const { lancarChromiumSeguro } = require('../../../shared/playwright-launch');
+      const { browser, fechar } = await lancarChromiumSeguro({
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+      let screenshotBuffer;
+      try {
+        const page = await browser.newPage({ viewport: { width: 540, height: 800 } });
+        await page.setContent(html, { waitUntil: 'domcontentloaded' });
+        const element = await page.$('body > div');
+        screenshotBuffer = await element.screenshot({ type: 'png' });
+      } finally {
+        await fechar();
+      }
 
       const imageBase64 = screenshotBuffer.toString('base64');
       console.log(`[CRM-Resumo] Imagem gerada (${(screenshotBuffer.length / 1024).toFixed(0)}KB)`);
