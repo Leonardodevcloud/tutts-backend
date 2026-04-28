@@ -238,12 +238,15 @@ function createRaioXClienteRoutes(pool) {
    */
   async function capturarScreenshotMapa(linkMapa) {
     if (!linkMapa) return null;
-    let browser = null;
+    // 2026-04: usa helper unificado pra garantir SIGKILL fallback se close pendurar
+    const { lancarChromiumSeguro } = require('../../../shared/playwright-launch');
+    let fechar = null;
     try {
-      const chromium = require('playwright').chromium;
-      browser = await chromium.launch({
+      const launched = await lancarChromiumSeguro({
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-web-security']
       });
+      const browser = launched.browser;
+      fechar = launched.fechar;
       const page = await browser.newPage();
       await page.setViewportSize({ width: 1280, height: 720 });
       await page.goto(linkMapa, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -263,14 +266,13 @@ function createRaioXClienteRoutes(pool) {
       await page.waitForTimeout(2000);
 
       const buf = await page.screenshot({ type: 'jpeg', quality: 82 });
-      await browser.close();
-      browser = null;
       console.log(`🗺️ [RaioX Cliente] Screenshot mapa capturado (${(buf.length / 1024).toFixed(0)}KB)`);
       return 'data:image/jpeg;base64,' + buf.toString('base64');
     } catch (error) {
       console.warn('⚠️ [RaioX Cliente] Falha ao capturar mapa:', error.message);
-      if (browser) try { await browser.close(); } catch (e) {}
       return null;
+    } finally {
+      if (fechar) await fechar();
     }
   }
 
