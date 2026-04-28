@@ -20,6 +20,10 @@
 'use strict';
 
 const { chromium } = require('playwright');
+// 2026-04: helper unificado de launch + close robusto (com SIGKILL fallback).
+// Resolve "spawn EAGAIN" causado por processos Chromium que ficam zumbi
+// quando browser.close() pendura sob pressão de memória.
+const { lancarChromiumSeguro } = require('../../shared/playwright-launch');
 const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
@@ -587,7 +591,8 @@ async function capturarLeadsCadastrados({ dataInicio, dataFim }) {
 
   const screenshots = [];
 
-  const browser = await chromium.launch({
+  // 2026-04: launch + close robusto (com SIGKILL fallback se browser.close pendurar)
+  const { browser, fechar } = await lancarChromiumSeguro({
     headless: true,
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
@@ -644,7 +649,7 @@ async function capturarLeadsCadastrados({ dataInicio, dataFim }) {
     if (ss) screenshots.push(ss);
     throw Object.assign(err, { screenshots });
   } finally {
-    await browser.close();
+    await fechar();
   }
 }
 
