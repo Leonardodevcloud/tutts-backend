@@ -9,6 +9,7 @@ function createRaioXPdfRoutes(pool) {
 
   router.get('/cs/raio-x/pdf/:id', async (req, res) => {
     let browser;
+    let fecharBrowser = null;  // 2026-04: handle do close robusto via helper
     try {
       const id = parseInt(req.params.id);
       if (!id || isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
@@ -200,9 +201,13 @@ function createRaioXPdfRoutes(pool) {
       // ═══ CAPTURAR SCREENSHOT DO MAPA DE CALOR ═══
       var mapaScreenshotB64 = '';
       if (linkMapa) {
+        // 2026-04: helper unificado com SIGKILL fallback
+        var lancarChromiumSeguro_capture = require('../../../shared/playwright-launch').lancarChromiumSeguro;
+        var fecharCapture = null;
         try {
-          var chromiumCapture = require('playwright').chromium;
-          var captureBrowser = await chromiumCapture.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-web-security'] });
+          var capturedLaunch = await lancarChromiumSeguro_capture({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-web-security'] });
+          var captureBrowser = capturedLaunch.browser;
+          fecharCapture = capturedLaunch.fechar;
           var capturePage = await captureBrowser.newPage();
           await capturePage.setViewportSize({ width: 1280, height: 720 });
           await capturePage.goto(linkMapa, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -225,11 +230,12 @@ function createRaioXPdfRoutes(pool) {
 
           var screenshotBuffer = await capturePage.screenshot({ type: 'jpeg', quality: 85 });
           mapaScreenshotB64 = 'data:image/jpeg;base64,' + screenshotBuffer.toString('base64');
-          await captureBrowser.close();
           console.log('\uD83D\uDDFA Screenshot mapa de calor capturado (' + (screenshotBuffer.length / 1024).toFixed(0) + 'KB)');
         } catch (mapaErr) {
           console.warn('\u26A0\uFE0F Falha ao capturar mapa de calor:', mapaErr.message);
           mapaScreenshotB64 = '';
+        } finally {
+          if (fecharCapture) await fecharCapture();
         }
       }
 
@@ -393,13 +399,17 @@ function createRaioXPdfRoutes(pool) {
         + '</body></html>';
 
       // ═══ PDF ═══
-      var chromium = require('playwright').chromium;
-      browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+      // 2026-04: helper unificado com SIGKILL fallback
+      var lancarChromiumSeguro_pdf1 = require('../../../shared/playwright-launch').lancarChromiumSeguro;
+      var launchedPdf1 = await lancarChromiumSeguro_pdf1({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+      browser = launchedPdf1.browser;
+      fecharBrowser = launchedPdf1.fechar;
       var page = await browser.newPage();
       await page.setViewportSize({ width: 1280, height: 720 });
       await page.setContent(html, { waitUntil: 'networkidle' });
       var pdfBuffer = await page.pdf({ width: '1280px', height: '720px', printBackground: true, margin: { top: 0, right: 0, bottom: 0, left: 0 } });
-      await browser.close();
+      await fecharBrowser();
+      fecharBrowser = null;
       browser = null;
 
       var filename = 'RaioX_' + nomeCliente.replace(/[^a-zA-Z0-9]/g, '_') + '_' + rx.data_inicio + '_' + rx.data_fim + '.pdf';
@@ -410,7 +420,7 @@ function createRaioXPdfRoutes(pool) {
       console.log('\uD83D\uDCCA PDF Raio-X v3: ' + filename + ' (' + (pdfBuffer.length / 1024).toFixed(0) + 'KB)');
 
     } catch (error) {
-      if (browser) try { await browser.close(); } catch (e) {}
+      if (fecharBrowser) try { await fecharBrowser(); } catch (e) {}
       console.error('\u274C Erro PDF Raio-X:', error.message);
       res.status(500).json({ error: 'Erro ao gerar PDF: ' + error.message });
     }
@@ -420,6 +430,7 @@ function createRaioXPdfRoutes(pool) {
   // PDF do relatório TEXTUAL (analise_texto) — reflete edições do usuário
   router.get('/cs/raio-x/pdf-texto/:id', async (req, res) => {
     let browser;
+    let fecharBrowser = null;  // 2026-04: handle do close robusto via helper
     try {
       const id = parseInt(req.params.id);
       if (!id || isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
@@ -525,8 +536,11 @@ function createRaioXPdfRoutes(pool) {
 
         + '</body></html>';
 
-      var chromium = require('playwright').chromium;
-      browser = await chromium.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+      // 2026-04: helper unificado com SIGKILL fallback
+      var lancarChromiumSeguro_pdf2 = require('../../../shared/playwright-launch').lancarChromiumSeguro;
+      var launchedPdf2 = await lancarChromiumSeguro_pdf2({ args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+      browser = launchedPdf2.browser;
+      fecharBrowser = launchedPdf2.fechar;
       var page = await browser.newPage();
       await page.setContent(html, { waitUntil: 'networkidle' });
       var pdfBuffer = await page.pdf({
@@ -535,7 +549,8 @@ function createRaioXPdfRoutes(pool) {
         margin: { top: '18mm', right: '0', bottom: '12mm', left: '0' },
         displayHeaderFooter: false
       });
-      await browser.close();
+      await fecharBrowser();
+      fecharBrowser = null;
       browser = null;
 
       var filename = 'RaioX_Texto_' + nomeCliente.replace(/[^a-zA-Z0-9]/g, '_') + '.pdf';
@@ -546,7 +561,7 @@ function createRaioXPdfRoutes(pool) {
       console.log('\uD83D\uDCDD PDF Raio-X Texto: ' + filename + ' (' + (pdfBuffer.length / 1024).toFixed(0) + 'KB)');
 
     } catch (error) {
-      if (browser) try { await browser.close(); } catch (e) {}
+      if (fecharBrowser) try { await fecharBrowser(); } catch (e) {}
       console.error('\u274C Erro PDF Raio-X Texto:', error.message);
       res.status(500).json({ error: 'Erro ao gerar PDF texto: ' + error.message });
     }
