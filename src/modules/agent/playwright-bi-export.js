@@ -53,8 +53,24 @@ function comTimeout(promise, ms, nome) {
 
 async function fecharBrowserSeguro(browser) {
   if (!browser) return;
-  try { await comTimeout(browser.close(), 10000, 'browser.close'); }
-  catch (e) { log(`⚠️ Erro fechando browser: ${e.message}`); }
+  // 2026-04 v2: tenta close gracioso com timeout. Se pendurar, mata via SIGKILL.
+  // Sem o SIGKILL, processos Chromium ficavam zumbi consumindo RAM até estourar
+  // o limite do container e dar "spawn EAGAIN" nos próximos launches.
+  try {
+    await comTimeout(browser.close(), 5000, 'browser.close');
+    return;
+  } catch (e) {
+    log(`⚠️ browser.close() pendurou (${e.message}) — tentando SIGKILL`);
+  }
+  try {
+    const proc = browser.process && browser.process();
+    if (proc && typeof proc.kill === 'function') {
+      proc.kill('SIGKILL');
+      log(`💀 Chromium pid=${proc.pid} morto via SIGKILL`);
+    }
+  } catch (e2) {
+    log(`⚠️ SIGKILL falhou: ${e2.message}`);
+  }
 }
 
 async function screenshot(page, etapa) {
