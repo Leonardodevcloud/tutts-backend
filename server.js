@@ -1022,15 +1022,19 @@ initDatabase().then(async () => {
 
         let imageBase64;
         try {
-          const { chromium } = require('playwright');
-          const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
-          const page = await browser.newPage({ viewport: { width: 670, height: 800 } });
-          await page.setContent(`<!DOCTYPE html><html><body style="margin:0;background:#f8f7ff">${html}</body></html>`, { waitUntil: 'domcontentloaded' });
-          await page.waitForTimeout(300);
-          const el = await page.$('body > div');
-          const buf = await (el || page).screenshot({ type: 'png' });
-          imageBase64 = buf.toString('base64');
-          await browser.close();
+          // 2026-04: helper unificado com SIGKILL fallback (resolve "spawn EAGAIN")
+          const { lancarChromiumSeguro } = require('./src/shared/playwright-launch');
+          const { browser, fechar } = await lancarChromiumSeguro({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
+          try {
+            const page = await browser.newPage({ viewport: { width: 670, height: 800 } });
+            await page.setContent(`<!DOCTYPE html><html><body style="margin:0;background:#f8f7ff">${html}</body></html>`, { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(300);
+            const el = await page.$('body > div');
+            const buf = await (el || page).screenshot({ type: 'png' });
+            imageBase64 = buf.toString('base64');
+          } finally {
+            await fechar();
+          }
           console.log(`📸 [CRON Disp] Imagem gerada: ${Math.round(imageBase64.length / 1024)}KB`);
         } catch (imgErr) {
           console.error(`❌ [CRON Disp] Erro Playwright:`, imgErr.message);
