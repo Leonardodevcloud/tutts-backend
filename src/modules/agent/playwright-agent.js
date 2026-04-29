@@ -21,6 +21,8 @@ const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
+// 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
+const { aplicarBloqueio } = require('../../shared/network-blocker');
 
 // getSessionFile() pode ser sobrescrito via setOverrides (usado pelo agent-pool
 // quando há múltiplas contas com 1 sessão por slot).
@@ -142,6 +144,11 @@ function limparScreenshotsAntigos() {
 }
 
 async function screenshot(page, os, etapa) {
+  // 2026-04 egress-fix: skip se SCREENSHOTS_ENABLED=0
+  if (process.env.SCREENSHOTS_ENABLED === '0' ||
+      process.env.SCREENSHOTS_ENABLED === 'false') {
+    return null;
+  }
   const file = path.join(SCREENSHOT_DIR, `OS${os}_${etapa}_${Date.now()}.png`);
   try { await page.screenshot({ path: file, fullPage: true }); } catch (_) {}
   log(`📸 ${path.basename(file)}`);
@@ -326,6 +333,9 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 900 },
     });
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'agent-correcao');
 
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
