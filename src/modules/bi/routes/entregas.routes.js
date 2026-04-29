@@ -763,7 +763,10 @@ router.get('/bi/uploads/historico-unificado', async (req, res) => {
         SELECT
           'auto'                            AS origem,
           id,
-          'bi_' || data_referencia::text    AS arquivo,
+          -- 2026-04: padronizado pra 'relatorio DD-MM-YYYY' (mesmo dos uploads manuais).
+          -- Como o nome é gerado on-the-fly aqui, mudança aplica retroativamente
+          -- a TODOS os imports RPA do histórico (sem precisar alterar dados).
+          'relatorio ' || TO_CHAR(data_referencia, 'DD-MM-YYYY') AS arquivo,
           COALESCE(usuario_nome, 'RPA')     AS por,
           COALESCE(linhas_inseridas, 0)     AS linhas,
           COALESCE(finalizado_em, criado_em) AS quando,
