@@ -87,6 +87,11 @@ async function fecharBrowserSeguro(browser) {
 }
 
 async function screenshot(page, os, etapa) {
+  // 2026-04 egress-fix: skip se SCREENSHOTS_ENABLED=0
+  if (process.env.SCREENSHOTS_ENABLED === '0' ||
+      process.env.SCREENSHOTS_ENABLED === 'false') {
+    return null;
+  }
   try {
     const filename = `OS${os}_LIB_${etapa}_${Date.now()}.png`;
     const filepath = path.join(SCREENSHOT_DIR, filename);
