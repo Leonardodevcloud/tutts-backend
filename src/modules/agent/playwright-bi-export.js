@@ -507,7 +507,10 @@ async function gerarELinkParaBI(page) {
  */
 function baixarArquivo(url, dataReferencia) {
   return new Promise((resolve, reject) => {
-    const filename = `bi_${dataReferencia}_${Date.now()}.xlsx`;
+    // 2026-04: padronizado pra `relatorio DD-MM-YYYY.xlsx` (mesmo padrão dos
+    // uploads manuais antigos). Convertendo de YYYY-MM-DD pra DD-MM-YYYY.
+    const [ano, mes, dia] = dataReferencia.split('-');
+    const filename = `relatorio ${dia}-${mes}-${ano}.xlsx`;
     const filepath = path.join(DOWNLOAD_DIR, filename);
     const file = fs.createWriteStream(filepath);
 
