@@ -24,7 +24,7 @@ const SCREENSHOT_DIR = '/tmp/screenshots';
 const DOWNLOAD_DIR   = '/tmp/bi-imports';
 const TIMEOUT        = 25000;
 const NAV_TIMEOUT    = 60000;
-const BUSCA_TIMEOUT  = 180000;  // 3min — buscar 1 dia inteiro pode demorar
+const BUSCA_TIMEOUT  = 300000;  // 5min — buscar com 1000-10000 registros pode demorar (era 180s mas estava timing out)
 const EXCEL_TIMEOUT  = 240000;  // 4min — gerar Excel BI demora MAIS
 
 const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
@@ -171,44 +171,90 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
 
   const validacoes = await page.evaluate((dt) => {
     // ─── Helpers ─────────────────────────────────────────────────────────
-    // Marca opções por value num <select multiple>, sincroniza UI Bootstrap
+    // Marca opções por value num <select multiple> Bootstrap multiselect.
+    //
+    // 2026-04 BUGFIX V3: a estratégia antiga manipulava .selected do <option>
+    // nativo + adicionava/removia class "active" do botão visual. ISSO NÃO
+    // FUNCIONA pra Bootstrap multiselect. O Bootstrap mantém estado interno
+    // próprio que só sincroniza quando você CLICA no botão (porque o handler
+    // de click do plugin atualiza o <option> nativo + estado interno + UI).
+    //
+    // Manipular .selected sem clicar = form submit não vê o filtro aplicado
+    // = sistema retorna 0 resultados = timeout em 180s.
+    //
+    // Estratégia correta: simular CLICK do usuário em cada botão que precisa
+    // mudar de estado. O handler do Bootstrap faz todo o resto (atualiza
+    // <select>, atualiza estado interno, atualiza UI, dispara change).
     function setMultiselectByValues(selectId, valoresDesejados) {
       const sel = document.getElementById(selectId);
       if (!sel) return { ok: false, motivo: 'select_nao_encontrado', selectId };
 
-      const valoresAplicados = [];
-      // Estratégia 1: marca <option> nativo
-      [...sel.options].forEach(opt => {
-        opt.selected = valoresDesejados.includes(opt.value);
-        if (opt.selected) valoresAplicados.push(opt.value);
-      });
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-
-      // Estratégia 2 (fallback UI): clica nos <button> Bootstrap pra sincronizar
-      // O Bootstrap multiselect deixa um <span class="multiselect-native-select">
-      // antes do <select>; o container de botões fica como sibling.
+      // Acha o container de botões Bootstrap (irmão do <span> que contém o <select>)
+      // Estrutura típica:
+      //   <span class="multiselect-native-select">
+      //     <select id="..." multiple>...</select>
+      //     <div class="btn-group">
+      //       <button class="multiselect">...</button>  ← botão dropdown principal
+      //       <div class="multiselect-container dropdown-menu">
+      //         <button class="multiselect-option" title="...">...</button>
+      //         ...
+      //       </div>
+      //     </div>
+      //   </span>
       const span = sel.closest('span.multiselect-native-select');
-      const btnGroup = span?.parentElement?.querySelector('.btn-group');
-      if (btnGroup) {
-        const btns = btnGroup.querySelectorAll('.multiselect-option');
-        btns.forEach((btn, idx) => {
-          // Cada botão corresponde a uma option na ordem
-          const opt = sel.options[idx];
-          if (!opt) return;
-          const queroAtivo = valoresDesejados.includes(opt.value);
-          const taAtivo = btn.classList.contains('active');
-          if (queroAtivo && !taAtivo) btn.classList.add('active');
-          if (!queroAtivo && taAtivo) btn.classList.remove('active');
-        });
+      const btnGroup = span?.querySelector('.btn-group') || span?.parentElement?.querySelector('.btn-group');
 
-        // Atualiza texto do botão principal ("X selecionados")
-        const txt = btnGroup.querySelector('.multiselect-selected-text');
-        if (txt) {
-          txt.textContent = valoresAplicados.length + ' selecionados';
-        }
+      if (!btnGroup) {
+        // Sem container Bootstrap → não é multiselect, fallback pro <select> nativo
+        const valoresAplicados = [];
+        [...sel.options].forEach(opt => {
+          opt.selected = valoresDesejados.includes(opt.value);
+          if (opt.selected) valoresAplicados.push(opt.value);
+        });
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, valoresAplicados, qtd: valoresAplicados.length, estrategia: 'select_nativo' };
       }
 
-      return { ok: true, valoresAplicados, qtd: valoresAplicados.length };
+      // Estratégia: para cada <option>, ver se o botão Bootstrap correspondente
+      // está no estado certo. Se não está, CLICAR no botão (deixa o Bootstrap
+      // gerenciar tudo: option.selected, class active, estado interno).
+      const buttons = [...btnGroup.querySelectorAll('.multiselect-option')];
+      const valoresAplicados = [];
+
+      [...sel.options].forEach((opt, idx) => {
+        const queroSelecionado = valoresDesejados.includes(opt.value);
+        const taSelecionado = opt.selected;
+
+        if (queroSelecionado !== taSelecionado) {
+          // Estado errado — clica no botão pro Bootstrap toggle
+          // Bootstrap multiselect mantém botões na MESMA ordem das options
+          const btn = buttons[idx];
+          if (btn) {
+            // Click pode disparar event handler que faz toggle.
+            // Note: usamos .click() que é síncrono no DOM e dispara o
+            // event listener do Bootstrap.
+            btn.click();
+          } else {
+            // Sem botão visual — fallback: muda .selected diretamente
+            opt.selected = queroSelecionado;
+          }
+        }
+
+        if (opt.selected) valoresAplicados.push(opt.value);
+      });
+
+      // Re-lê estado APÓS clicks pra log preciso
+      const valoresFinais = [...sel.options].filter(o => o.selected).map(o => o.value);
+
+      // Dispara change pra qualquer outro código JS reagir
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+
+      return {
+        ok: true,
+        valoresAplicados: valoresFinais,
+        qtd: valoresFinais.length,
+        estrategia: 'click_bootstrap'
+      };
     }
 
     // Marca radio por name+value, dispara click pra sistema reagir
@@ -315,22 +361,38 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
     // ✅ Já corrigido em sessão anterior, mantendo.
     resultados.dadosProfissional = setSelectBySubstring('profissional', ['com', 'dado', 'profissional']);
 
-    // ─── 12. Registros por página: maior valor (10000) ───────────────────
+    // ─── 12. Registros por página: 1000 (não 10000 que estourava timeout) ───
+    // 2026-04 BUGFIX: a versão anterior tentava pegar o MAIOR valor (10000),
+    // mas isso fazia o sistema externo demorar >180s pra renderizar a tabela
+    // ("Busca não retornou dados em 180s"). 1000 é o sweet spot:
+    //   - Cobre 99% dos dias (média 100-500 OS/dia, máximo histórico ~800)
+    //   - Renderiza em ~30-60s
+    //   - Se algum dia tiver >1000, o sistema ainda mostra os primeiros 1000
+    //     e podemos paginar via botão "Próximo" se necessário (extensão futura)
     {
       const sel = document.getElementById('quantLimite');
       if (sel) {
-        // Pega a maior opção numérica
-        let maior = 0;
-        for (const opt of sel.options) {
-          const n = parseInt(opt.value, 10);
-          if (!isNaN(n) && n > maior) maior = n;
+        // Tenta valor balanceado: 1000 > 500 > maior disponível
+        const VALORES_PREFERIDOS = ['1000', '500', '100'];
+        let escolhido = null;
+        for (const pref of VALORES_PREFERIDOS) {
+          const opt = [...sel.options].find(o => o.value === pref);
+          if (opt) { escolhido = opt; break; }
         }
-        if (maior > 0) {
-          sel.value = String(maior);
+        // Fallback: maior disponível
+        if (!escolhido) {
+          let maior = 0;
+          for (const opt of sel.options) {
+            const n = parseInt(opt.value, 10);
+            if (!isNaN(n) && n > maior) { maior = n; escolhido = opt; }
+          }
+        }
+        if (escolhido) {
+          sel.value = escolhido.value;
           sel.dispatchEvent(new Event('change', { bubbles: true }));
-          resultados.registrosPorPagina = { ok: true, valor: maior };
+          resultados.registrosPorPagina = { ok: true, valor: escolhido.value };
         } else {
-          resultados.registrosPorPagina = { ok: false, motivo: 'sem_options_numericas' };
+          resultados.registrosPorPagina = { ok: false, motivo: 'sem_options' };
         }
       } else {
         resultados.registrosPorPagina = { ok: false, motivo: 'select_nao_encontrado' };
