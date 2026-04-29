@@ -40,6 +40,11 @@ function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive
 ensureDir(SCREENSHOT_DIR);
 
 async function screenshotDebug(page, nome) {
+  // 2026-04 egress-fix: skip se SCREENSHOTS_ENABLED=0
+  if (process.env.SCREENSHOTS_ENABLED === '0' ||
+      process.env.SCREENSHOTS_ENABLED === 'false') {
+    return null;
+  }
   try {
     const file = path.join(SCREENSHOT_DIR, `crm-${nome}-${Date.now()}.png`);
     await page.screenshot({ path: file, fullPage: false });
