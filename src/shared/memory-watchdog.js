@@ -30,12 +30,21 @@
 
 'use strict';
 
-// Limites em bytes
-const WARN_LIMIT = 1.0 * 1024 * 1024 * 1024;  // 1 GB → loga aviso
-const KILL_LIMIT = 1.5 * 1024 * 1024 * 1024;  // 1.5 GB → restart
+// Limites em bytes — configuráveis via env var
+// MEMORY_WATCHDOG_WARN_MB: limite de warning (default 1024 MB)
+// MEMORY_WATCHDOG_KILL_MB: limite que dispara restart (default 1536 MB)
+// MEMORY_WATCHDOG_CHECKS:  verificações seguidas necessárias (default 3)
+//
+// Razão de ser configurável: o tutts-agents (worker) é mais sensível e
+// roda Chromium 24/7 — limite menor faz sentido. Já o tutts-backend
+// atende HTTP e pode ter picos legítimos durante exports/uploads grandes,
+// então usa limites maiores e mais verificações antes de matar (pra não
+// reiniciar com users no meio de operação).
+const WARN_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_WARN_MB, 10) || 1024) * 1024 * 1024;
+const KILL_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_KILL_MB, 10) || 1536) * 1024 * 1024;
 
 // Quantas verificações seguidas precisam estourar antes de matar
-const VERIFICACOES_NECESSARIAS = 3;
+const VERIFICACOES_NECESSARIAS = parseInt(process.env.MEMORY_WATCHDOG_CHECKS, 10) || 3;
 
 // Intervalo de verificação
 const INTERVALO_MS = 60 * 1000;
