@@ -10,6 +10,8 @@ const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
+// 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
+const { aplicarBloqueio } = require('../../shared/network-blocker');
 
 const SESSION_FILE_PERF = '/tmp/tutts-perf-session.json';
 const SCREENSHOT_DIR    = '/tmp/screenshots';
@@ -55,6 +57,11 @@ async function fecharBrowserSeguro(browser) {
 }
 
 async function screenshotDebug(page, nome) {
+  // 2026-04 egress-fix: skip se SCREENSHOTS_ENABLED=0
+  if (process.env.SCREENSHOTS_ENABLED === '0' ||
+      process.env.SCREENSHOTS_ENABLED === 'false') {
+    return;
+  }
   try {
     const file = path.join(SCREENSHOT_DIR, 'perf-' + nome + '-' + Date.now() + '.png');
     await page.screenshot({ path: file, fullPage: false });
@@ -379,6 +386,10 @@ async function buscarPerformanceBatch(configs) {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 900 },
   }));
+
+  // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+  await aplicarBloqueio(context, 'performance');
+
   var page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT);
 
