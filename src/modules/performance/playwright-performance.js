@@ -21,6 +21,39 @@ function log(msg) { logger.info('[playwright-perf] ' + msg); }
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 ensureDir(SCREENSHOT_DIR);
 
+// 2026-04 leakfix: helper pra fechar browser sem pendurar
+// Se browser.close() travar, mata via SIGKILL pra evitar Chromium zumbi
+// consumindo RAM. Sem isso, processos travados acumulam até estourar
+// memória do container.
+function comTimeout(promise, ms, descricao) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${descricao} excedeu ${ms}ms`)),
+      ms
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function fecharBrowserSeguro(browser) {
+  if (!browser) return;
+  try {
+    await comTimeout(browser.close(), 5_000, 'browser.close');
+  } catch (e) {
+    log(`⚠️ browser.close() pendurou: ${e.message} — SIGKILL`);
+    try {
+      const proc = browser.process && browser.process();
+      if (proc && typeof proc.kill === 'function') {
+        proc.kill('SIGKILL');
+        log(`💀 Chromium pid=${proc.pid} morto via SIGKILL`);
+      }
+    } catch (e2) {
+      log(`⚠️ Falha no kill: ${e2.message}`);
+    }
+  }
+}
+
 async function screenshotDebug(page, nome) {
   try {
     const file = path.join(SCREENSHOT_DIR, 'perf-' + nome + '-' + Date.now() + '.png');
@@ -327,31 +360,6 @@ async function buscarPerformance(opts) {
 
 // ══════════════════════════════════════════════════════════════
 // BATCH — ABRE BROWSER 1 VEZ, PERCORRE CLIENTES
-// 2026-04: helper de fechamento robusto. Antes de existir, um browser.close()
-// que pendurasse (caso comum em container com pressão de memória) travava o
-// finally pra sempre e deixava processos Chromium zombi consumindo RAM.
-// Sintoma: "spawn EAGAIN" depois de algumas horas de uptime.
-async function fecharBrowserSeguro(browser) {
-  if (!browser) return;
-  try {
-    await Promise.race([
-      browser.close(),
-      new Promise(function(_, rej) { setTimeout(function() { rej(new Error('timeout')); }, 5000); }),
-    ]);
-  } catch (e) {
-    log('⚠️ browser.close() pendurou (' + e.message + ') — tentando SIGKILL');
-    try {
-      var proc = browser.process && browser.process();
-      if (proc && typeof proc.kill === 'function') {
-        proc.kill('SIGKILL');
-        log('💀 Chromium pid=' + proc.pid + ' morto via SIGKILL');
-      }
-    } catch (e2) {
-      log('⚠️ SIGKILL falhou: ' + e2.message);
-    }
-  }
-}
-
 // ══════════════════════════════════════════════════════════════
 async function buscarPerformanceBatch(configs) {
   if (!process.env.SISTEMA_EXTERNO_URL) throw new Error('SISTEMA_EXTERNO_URL não configurada.');
@@ -359,31 +367,24 @@ async function buscarPerformanceBatch(configs) {
 
   log('🚀 BATCH: ' + configs.length + ' consulta(s) | ' + configs[0].dataInicio + '→' + configs[0].dataFim);
 
-  // 2026-04: declaramos browser/context/page como null ANTES do try.
-  // Motivo: se chromium.launch() ou newContext() ou newPage() falhar,
-  // o finally precisa fechar o que foi criado (sem isso, falha no
-  // newContext deixa o browser zombie e estoura RAM em algumas horas).
-  var browser = null;
-  var context = null;
-  var page = null;
+  var browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-default-apps', '--mute-audio', '--no-first-run'],
+  });
+
+  var contextOptions = {};
+  if (fs.existsSync(SESSION_FILE_PERF)) { contextOptions = { storageState: SESSION_FILE_PERF }; log('♻️ Sessão encontrada'); }
+
+  var context = await browser.newContext(Object.assign({}, contextOptions, {
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900 },
+  }));
+  var page = await context.newPage();
+  page.setDefaultTimeout(TIMEOUT);
+
   var resultados = [];
 
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-default-apps', '--mute-audio', '--no-first-run'],
-    });
-
-    var contextOptions = {};
-    if (fs.existsSync(SESSION_FILE_PERF)) { contextOptions = { storageState: SESSION_FILE_PERF }; log('♻️ Sessão encontrada'); }
-
-    context = await browser.newContext(Object.assign({}, contextOptions, {
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
-    }));
-    page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT);
-
     // 1. Login + navegação — UMA VEZ
     await navegarParaFiltros(page, context);
 
@@ -419,20 +420,16 @@ async function buscarPerformanceBatch(configs) {
         resultados.push({ success: true, codCliente: cfg.codCliente, centroCusto: cfg.centroCusto, total: total, no_prazo: no_prazo, fora_prazo: fora_prazo, sem_dados: sem_dados, pct_no_prazo: pct_no_prazo, por_cliente: agruparPorCliente(registros), registros: registros });
       } catch (err) {
         log('❌ ' + label + ': ' + err.message);
-        try { await screenshotDebug(page, 'error-' + (cfg.codCliente || 'all')); } catch(_) {}
+        await screenshotDebug(page, 'error-' + (cfg.codCliente || 'all'));
         resultados.push({ success: false, codCliente: cfg.codCliente, centroCusto: cfg.centroCusto, error: err.message, total: 0, no_prazo: 0, fora_prazo: 0, sem_dados: 0, pct_no_prazo: 0, por_cliente: [], registros: [] });
       }
     }
   } catch (err) {
-    if (page) {
-      try { await screenshotDebug(page, 'batch-error'); } catch(_) {}
-    }
+    await screenshotDebug(page, 'batch-error');
     throw err;
   } finally {
-    // 2026-04: fechamento robusto com timeout + SIGKILL fallback.
-    // Antes era "await browser.close()" puro — se pendurasse, a Promise
-    // nunca resolvia e ficava processo Chromium zombi consumindo RAM.
-    // Sintoma: spawn EAGAIN após horas de uptime.
+    // 2026-04 leakfix: usar fecharBrowserSeguro em vez de browser.close()
+    // direto, pra que SIGKILL seja aplicado se o close pendurar.
     await fecharBrowserSeguro(browser);
     log('🏁 BATCH finalizado: ' + resultados.filter(function(r) { return r.success; }).length + '/' + configs.length + ' OK');
   }
