@@ -25,6 +25,8 @@ const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
+// 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
+const { aplicarBloqueio } = require('../../shared/network-blocker');
 
 // getSessionFile() pode ser sobrescrito por chamada (ver setOverrides abaixo).
 // Default: arquivo único pra compatibilidade com chamadas legadas (sem pool).
@@ -472,6 +474,9 @@ async function garantirSessao() {
       context = await browser.newContext();
     }
 
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/capturarPontos');
+
     // 🔑 Listener de captura de payload — mesma função usada pelo capturarPontosOS
     instalarCapturaPayload(context);
 
@@ -630,6 +635,9 @@ async function coletarOsEmExecucao() {
       context = await browser.newContext();
       etapa('context_no_storage');
     }
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/coletarOs');
 
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
@@ -863,6 +871,9 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
     } else {
       context = await browser.newContext();
     }
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/3');
 
     // 🆕 Instala captura de payload AJAX ANTES de qualquer navegação.
     // O listener vive durante toda a sessão do contexto e atualiza
