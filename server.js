@@ -19,6 +19,15 @@ const helmetConfig = require('./src/config/helmet');
 const { additionalSecurityHeaders } = require('./src/config/helmet');
 const { setupWebSocket, registerGlobals } = require('./src/config/websocket');
 
+// 🧹 Cleanup periódico de /tmp + memory watchdog (failsafe)
+// Mesmo módulos que o tutts-agents usa. Aqui no backend HTTP os limites
+// são MAIORES (configuráveis via env) porque a carga é diferente:
+// requests grandes, exports, uploads podem fazer RSS picar legitimamente.
+// Por isso o watchdog default só dispara em 1.5GB com 3 verificações,
+// e pode ser tunado via MEMORY_WATCHDOG_WARN_MB / _KILL_MB / _CHECKS.
+const { iniciarCleanupPeriodico, rodarCicloLimpeza } = require('./src/shared/tmp-cleanup');
+const { iniciarMemoryWatchdog } = require('./src/shared/memory-watchdog');
+
 // ─── Middleware ────────────────────────────────────────────
 const { verificarToken, verificarAdmin, verificarAdminOuFinanceiro } = require('./src/middleware/auth');
 const { getClientIP, apiLimiter, loginLimiter, createAccountLimiter } = require('./src/middleware/rateLimiter');
@@ -129,6 +138,73 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/version', (req, res) => {
   res.json({ version: env.SERVER_VERSION, timestamp: new Date().toISOString() });
+});
+
+// ─── /diagnostico-tmp — diagnóstico de memória + /tmp ─────────────────────
+// Útil pra inspecionar vazamentos sem precisar de shell no Railway.
+// Mesma lógica do tutts-agents. Acesso aberto (info não-sensível, sem PII).
+app.get('/diagnostico-tmp', (req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const TMP = os.tmpdir();
+
+    const padroes = [
+      /^playwright_chromiumdev_/,
+      /^\.org\.chromium\.Chromium\./,
+    ];
+
+    let nomes = [];
+    try { nomes = fs.readdirSync(TMP); } catch {}
+
+    const profiles = [];
+    for (const n of nomes) {
+      if (!padroes.some(re => re.test(n))) continue;
+      const full = path.join(TMP, n);
+      try {
+        const st = fs.statSync(full);
+        profiles.push({
+          nome: n,
+          isDir: st.isDirectory(),
+          idadeMin: Math.round((Date.now() - st.mtimeMs) / 60000),
+          tamanhoBytes: st.size,
+        });
+      } catch {}
+    }
+    profiles.sort((a, b) => a.idadeMin - b.idadeMin);
+
+    const mem = process.memoryUsage();
+    const fmtMB = b => Math.round(b / 1024 / 1024) + ' MB';
+
+    res.json({
+      ok: true,
+      memoria: {
+        rss: fmtMB(mem.rss),
+        heapTotal: fmtMB(mem.heapTotal),
+        heapUsed: fmtMB(mem.heapUsed),
+        external: fmtMB(mem.external),
+      },
+      profilesPlaywright: {
+        quantidade: profiles.length,
+        maisAntigosPrimeiro: profiles.slice().sort((a, b) => b.idadeMin - a.idadeMin).slice(0, 10),
+        maisRecentesPrimeiro: profiles.slice(0, 10),
+      },
+      uptime: Math.round(process.uptime()) + 's',
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
+// ─── /diagnostico-tmp/limpar — força ciclo de cleanup agora ───────────────
+app.get('/diagnostico-tmp/limpar', (req, res) => {
+  try {
+    const resultado = rodarCicloLimpeza();
+    res.json({ ok: true, resultado });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
 });
 
 // Health check para testar se a URL do webhook está acessível (GET sem auth)
@@ -622,6 +698,31 @@ initDatabase().then(async () => {
     });
   });
 
+  // 🧹 Cleanup periódico de /tmp (profiles órfãos do Chromium + screenshots)
+  // Roda 1x agora + a cada 30 min. Crucial em runtime longo pra não acumular.
+  iniciarCleanupPeriodico(30 * 60 * 1000);
+
+  // 🛡️ Memory watchdog — failsafe último-recurso. Default conservador
+  // (1GB warn, 1.5GB kill, 3 verificações). Pra ajustar, setar env vars:
+  //   MEMORY_WATCHDOG_WARN_MB=2048
+  //   MEMORY_WATCHDOG_KILL_MB=3072
+  //   MEMORY_WATCHDOG_CHECKS=5
+  // No backend HTTP, sugiro limites maiores que no agents (exports e
+  // uploads grandes podem fazer RSS picar legitimamente).
+  iniciarMemoryWatchdog(async () => {
+    try {
+      logger.info('🛡️ Memory watchdog disparou — encerrando graceful');
+      // Espera HTTP server fechar conexões ativas
+      await new Promise((resolve) => {
+        server.close(() => resolve());
+        // Timeout de 5s pra não pendurar
+        setTimeout(resolve, 5000);
+      });
+    } catch (e) {
+      logger.warn(`⚠️ server.close falhou no watchdog: ${e.message}`);
+    }
+  });
+
   // 🧹 Limpar advisory locks órfãos de deploys anteriores
   await liberarLocksOrfaos(pool);
 
@@ -1022,19 +1123,15 @@ initDatabase().then(async () => {
 
         let imageBase64;
         try {
-          // 2026-04: helper unificado com SIGKILL fallback (resolve "spawn EAGAIN")
-          const { lancarChromiumSeguro } = require('./src/shared/playwright-launch');
-          const { browser, fechar } = await lancarChromiumSeguro({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
-          try {
-            const page = await browser.newPage({ viewport: { width: 670, height: 800 } });
-            await page.setContent(`<!DOCTYPE html><html><body style="margin:0;background:#f8f7ff">${html}</body></html>`, { waitUntil: 'domcontentloaded' });
-            await page.waitForTimeout(300);
-            const el = await page.$('body > div');
-            const buf = await (el || page).screenshot({ type: 'png' });
-            imageBase64 = buf.toString('base64');
-          } finally {
-            await fechar();
-          }
+          const { chromium } = require('playwright');
+          const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
+          const page = await browser.newPage({ viewport: { width: 670, height: 800 } });
+          await page.setContent(`<!DOCTYPE html><html><body style="margin:0;background:#f8f7ff">${html}</body></html>`, { waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(300);
+          const el = await page.$('body > div');
+          const buf = await (el || page).screenshot({ type: 'png' });
+          imageBase64 = buf.toString('base64');
+          await browser.close();
           console.log(`📸 [CRON Disp] Imagem gerada: ${Math.round(imageBase64.length / 1024)}KB`);
         } catch (imgErr) {
           console.error(`❌ [CRON Disp] Erro Playwright:`, imgErr.message);
