@@ -138,13 +138,29 @@ async function fazerLogin(page, overrides) {
 
 /**
  * Configura todos os filtros conforme o uso manual:
- *  - Datas: D-1 (igual data inicial e final)
- *  - Status: Em execução + Concluídos
- *  - Endereços: Com endereços (CE)
- *  - Dados cliente: Com (CDC)
- *  - Dados profissional: Com (CDP)
- *  - Tipo veículo: 5 selecionados (sem Carro Utilitário Expresso)
- *  - Registros: 100 (mas pra puxar tudo, vou usar maior valor disponível)
+ *  - Datas: D-1 (igual data inicial e final), Buscar data = "Data Serviço"
+ *  - Escopo: Todos clientes (T)
+ *  - Endereços: Com endereços (CE) — ⚠️ modal de seleção é tratado SEPARADAMENTE
+ *  - Retorno: Todos (T)
+ *  - Status: Em execução (A) + Concluídos (F)
+ *  - Tipo veículo: 5 selecionados (sem Carro Utilitário Expresso UC)
+ *  - Tipo serviço (multa): Todos (T)
+ *  - Serviço dinâmico: Todos (T)
+ *  - Dados cliente: "Com dados do cliente"
+ *  - Dados profissional: "Com dados do profissional"
+ *  - Registros: 10000 (maior valor disponível)
+ *
+ * 2026-04 BUGFIX MASSIVO: a versão anterior tinha múltiplos bugs descobertos
+ * via inspeção real no console do navegador:
+ *   1. Status: usava input[name="statusOS"] mas é select#status name="status[]"
+ *   2. Status: values eram "E"/"F" mas reais são "A"/"F"
+ *   3. Tipo veículo: usava input[name="T"] mas é select#listaTipoVeiculo
+ *   4. Cliente dados: id era "cliente_dados" ou "cliente" mas é "dadosCliente"
+ *   5. Buscar data: nem era setado (fica em "Data Serviço" por sorte)
+ *   6. Escopo: nem era setado (fica em "Todos" por sorte)
+ *   7. Sem validação pós-set: se algum filtro falha, ninguém percebe
+ *
+ * Esta versão corrige TUDO + adiciona logs de validação por filtro.
  */
 async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
   log(`📋 Configurando filtros pra data ${dataReferencia}`);
@@ -153,8 +169,81 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
   const [ano, mes, dia] = dataReferencia.split('-');
   const dataBR = `${dia}/${mes}/${ano}`;
 
-  await page.evaluate((dt) => {
-    // === Datas ===
+  const validacoes = await page.evaluate((dt) => {
+    // ─── Helpers ─────────────────────────────────────────────────────────
+    // Marca opções por value num <select multiple>, sincroniza UI Bootstrap
+    function setMultiselectByValues(selectId, valoresDesejados) {
+      const sel = document.getElementById(selectId);
+      if (!sel) return { ok: false, motivo: 'select_nao_encontrado', selectId };
+
+      const valoresAplicados = [];
+      // Estratégia 1: marca <option> nativo
+      [...sel.options].forEach(opt => {
+        opt.selected = valoresDesejados.includes(opt.value);
+        if (opt.selected) valoresAplicados.push(opt.value);
+      });
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // Estratégia 2 (fallback UI): clica nos <button> Bootstrap pra sincronizar
+      // O Bootstrap multiselect deixa um <span class="multiselect-native-select">
+      // antes do <select>; o container de botões fica como sibling.
+      const span = sel.closest('span.multiselect-native-select');
+      const btnGroup = span?.parentElement?.querySelector('.btn-group');
+      if (btnGroup) {
+        const btns = btnGroup.querySelectorAll('.multiselect-option');
+        btns.forEach((btn, idx) => {
+          // Cada botão corresponde a uma option na ordem
+          const opt = sel.options[idx];
+          if (!opt) return;
+          const queroAtivo = valoresDesejados.includes(opt.value);
+          const taAtivo = btn.classList.contains('active');
+          if (queroAtivo && !taAtivo) btn.classList.add('active');
+          if (!queroAtivo && taAtivo) btn.classList.remove('active');
+        });
+
+        // Atualiza texto do botão principal ("X selecionados")
+        const txt = btnGroup.querySelector('.multiselect-selected-text');
+        if (txt) {
+          txt.textContent = valoresAplicados.length + ' selecionados';
+        }
+      }
+
+      return { ok: true, valoresAplicados, qtd: valoresAplicados.length };
+    }
+
+    // Marca radio por name+value, dispara click pra sistema reagir
+    function setRadioByValue(name, value) {
+      const radio = document.querySelector(`input[name="${name}"][value="${value}"]`);
+      if (!radio) return { ok: false, motivo: 'radio_nao_encontrado', name, value };
+      radio.checked = true;
+      // Click ativa qualquer JS atrelado ao radio (mostrar/esconder seções, etc)
+      radio.click();
+      return { ok: true };
+    }
+
+    // Marca <select> por substring no texto da option (case-insensitive)
+    function setSelectBySubstring(selectId, substringsExigidas) {
+      const sel = document.getElementById(selectId);
+      if (!sel) return { ok: false, motivo: 'select_nao_encontrado', selectId };
+
+      // Acha primeira option cujo texto contém TODAS as substrings exigidas
+      let opcaoEscolhida = null;
+      for (const opt of sel.options) {
+        const txt = (opt.textContent || '').toLowerCase().trim();
+        const matches = substringsExigidas.every(s => txt.includes(s.toLowerCase()));
+        if (matches) { opcaoEscolhida = opt; break; }
+      }
+      if (!opcaoEscolhida) return { ok: false, motivo: 'option_nao_encontrada', substringsExigidas };
+
+      sel.value = opcaoEscolhida.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true, valor: opcaoEscolhida.value, texto: opcaoEscolhida.textContent.trim() };
+    }
+
+    // Resultado das validações pra logar fora do evaluate
+    const resultados = {};
+
+    // ─── 1. Datas ────────────────────────────────────────────────────────
     if (window.jQuery) {
       jQuery('#data').val(dt);
       jQuery('#dataF').val(dt);
@@ -164,163 +253,123 @@ async function configurarFiltros(page, dataReferencia /* 'YYYY-MM-DD' */) {
       if (di) di.value = dt;
       if (df) df.value = dt;
     }
+    resultados.datas = {
+      ok: true,
+      dataInicial: document.getElementById('data')?.value,
+      dataFinal: document.getElementById('dataF')?.value,
+    };
 
-    // === Endereços: Com endereços (CE) ===
-    const radioEnd = document.querySelector('input[name="endereco"][value="CE"]');
-    if (radioEnd) { radioEnd.checked = true; radioEnd.click(); }
+    // ─── 2. Buscar data: "Data Serviço" ──────────────────────────────────
+    // Default geralmente já é "Data Serviço" mas garantir.
+    resultados.buscarData = setSelectBySubstring('dataOS', ['data', 'serv']);
 
-    // === Dados profissional: "Com dados do profissional" ===
-    // 2026-04 BUGFIX CRÍTICO: o sistema externo (tutts.com.br) usa um
-    // <select> com este name, NÃO um radio. O código antigo procurava
-    // input[name="profissional"][value="CDP"] e nunca achava — então o
-    // select ficava no default "Sem dados do profissional", e a planilha
-    // baixada vinha com cod_prof e nome_prof VAZIOS. Resultado: o módulo
-    // Garantido (e qualquer cruzamento por profissional) ficava todo zerado.
-    //
-    // HTML real:
-    //   <select name="profissional" id="profissional">
-    //     <option>Sem dados do profissional</option>
-    //     <option>Com dados do profissional</option>
-    //   </select>
-    //
-    // Estratégia: marcar a SEGUNDA option (que é "Com dados"), ou achar
-    // pela substring "com" na label, ou por qualquer value que comece com C.
-    // Isso é defensivo pra cobrir variações no value (CDP, 1, "com", etc).
-    (function setarDadosProfissional() {
-      // Tenta primeiro pelo id "profissional" (mais preciso)
-      let sel = document.getElementById('profissional');
-      // Fallback: busca por name
-      if (!sel || sel.tagName !== 'SELECT') {
-        sel = document.querySelector('select[name="profissional"]');
-      }
-      if (!sel) return;  // não achou, deixa quieto
+    // ─── 3. Escopo: Todos clientes (T) ───────────────────────────────────
+    resultados.escopo = setRadioByValue('cliente', 'T');
 
-      // Procura a option "Com dados do profissional" pelo texto (insensitive)
-      let opcaoEscolhida = null;
-      for (const opt of sel.options) {
-        const txt = (opt.textContent || '').toLowerCase().trim();
-        if (txt.startsWith('com') && txt.includes('dado') && txt.includes('profissional')) {
-          opcaoEscolhida = opt;
-          break;
-        }
-      }
-      // Fallback: se tiver 2 options e não achou pelo texto, pega a 2ª
-      // ("Sem" geralmente é a 1ª, "Com" é a 2ª)
-      if (!opcaoEscolhida && sel.options.length >= 2) {
-        opcaoEscolhida = sel.options[1];
-      }
-      if (!opcaoEscolhida) return;
+    // ─── 4. Endereços: Com endereços (CE) ────────────────────────────────
+    // Apenas marca o radio. O modal de seleção (que abre depois) é tratado
+    // por outra função especializada — modalEnderecos() — chamada após este
+    // configurarFiltros() retornar. Isso porque o modal precisa de
+    // interação real do Playwright (esperar modal abrir, clicar botões,
+    // confirmar) — não dá pra fazer dentro de page.evaluate().
+    resultados.enderecos = setRadioByValue('endereco', 'CE');
 
-      sel.value = opcaoEscolhida.value;
-      // Dispara change pra qualquer JS do sistema externo reagir (se tiver)
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    })();
+    // ─── 5. Retorno: Todos (T) ───────────────────────────────────────────
+    resultados.retorno = setRadioByValue('enderecoRetorno', 'T');
 
-    // === Dados cliente: "Com dados do cliente" ===
-    // 2026-04: mesma correção do profissional. O default já é "Com dados",
-    // mas pra consistência (e segurança caso default mude), forçamos.
-    (function setarDadosCliente() {
-      let sel = document.getElementById('cliente_dados') || document.getElementById('cliente');
-      if (!sel || sel.tagName !== 'SELECT') {
-        sel = document.querySelector('select[name="cliente_dados"]') ||
-              document.querySelector('select[name="cliente"]');
-      }
-      if (!sel) {
-        // Fallback pro código antigo (radio) caso o sistema mude de volta
-        const radioCli = document.querySelector('input[name="cliente_dados"][value="CDC"]');
-        if (radioCli) { radioCli.checked = true; radioCli.click(); }
-        return;
-      }
+    // ─── 6. Tipo serviço (multa cancelamento): Todos (T) ─────────────────
+    resultados.servicoMulta = setRadioByValue('servico-multa-cancelamento', 'T');
 
-      let opcaoEscolhida = null;
-      for (const opt of sel.options) {
-        const txt = (opt.textContent || '').toLowerCase().trim();
-        if (txt.startsWith('com') && txt.includes('dado') && txt.includes('cliente')) {
-          opcaoEscolhida = opt;
-          break;
-        }
-      }
-      if (!opcaoEscolhida && sel.options.length >= 2) {
-        opcaoEscolhida = sel.options[1];
-      }
-      if (!opcaoEscolhida) return;
+    // ─── 7. Serviço dinâmico: Todos (T) ──────────────────────────────────
+    resultados.servicoDinamico = setRadioByValue('servicoDinamico', 'T');
 
-      sel.value = opcaoEscolhida.value;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    })();
+    // ─── 8. Status: Em execução (A) + Concluídos (F) ────────────────────
+    // 🔴 BUG CRÍTICO da versão anterior: usava name="statusOS" e values "E"/"F"
+    //    mas o real é select#status com values "A" (Em execução) e "F" (Concluídos)
+    //    Por isso o filtro NUNCA pegou — a planilha vinha com TODOS os status.
+    resultados.status = setMultiselectByValues('status', ['A', 'F']);
 
-    // === Status (serviço): Em execução (E) + Concluídos (F) ===
-    const cbsStatus = document.querySelectorAll('input[name="statusOS"]');
-    let temAlgumStatusMarcado = false;
-    cbsStatus.forEach(cb => {
-      const deveMarcar = (cb.value === 'E' || cb.value === 'F');
-      cb.checked = deveMarcar;
-      if (deveMarcar) temAlgumStatusMarcado = true;
-      const btn = cb.closest('button.multiselect-option');
-      if (btn) {
-        if (deveMarcar) btn.classList.add('active');
-        else btn.classList.remove('active');
-      }
-    });
-    // Atualiza texto do multiselect se houver
-    const multiTxts = document.querySelectorAll('.multiselect-selected-text');
-    multiTxts.forEach(t => {
-      // só mexe nos relevantes
-      if (t.closest && t.closest('.btn-group')) {
-        const dropdown = t.closest('.btn-group').querySelector('input[name="statusOS"]');
-        if (dropdown) t.textContent = '2 selecionados';
-      }
-    });
-
-    // === Tipo veículo (name="T") — desmarcar APENAS Carro Utilitário (Expresso) ===
-    // Descobertas via DevTools (HTML real do sistema):
-    //   - Os checkboxes têm name="T", NÃO "tipoVeiculo"
-    //   - Carro Utilitário (Expresso) tem value="UC"
-    //   - Motofrete (Expresso) tem value="MC"
-    //   - O <label> fica em <label class="form-check-label"> dentro de <span class="form-check">
-    const cbsVeiculo = document.querySelectorAll('input[name="T"]');
-    cbsVeiculo.forEach(cb => {
-      // Pega texto da label (irmã do input dentro do span.form-check)
-      const label = cb.parentElement?.querySelector('label.form-check-label');
-      const txt = (label?.textContent || '').toLowerCase().trim();
-      const ehCarroUtilExpresso =
-        cb.value === 'UC' ||
-        (txt.includes('carro') && txt.includes('utilit') && txt.includes('expresso'));
-
-      cb.checked = !ehCarroUtilExpresso;
-      const btn = cb.closest('button.multiselect-option');
-      if (btn) {
-        if (!ehCarroUtilExpresso) btn.classList.add('active');
-        else btn.classList.remove('active');
-      }
-      // Dispara evento change pra Bootstrap multiselect atualizar
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-
-    // Atualiza texto do dropdown tipo veículo
-    const tvBtnGroup = document.querySelectorAll('input[name="T"]')[0]?.closest('.btn-group');
-    if (tvBtnGroup) {
-      const txtSel = tvBtnGroup.querySelector('.multiselect-selected-text');
-      if (txtSel) {
-        const marcados = tvBtnGroup.querySelectorAll('input[name="T"]:checked').length;
-        txtSel.textContent = marcados + ' selecionados';
+    // ─── 9. Tipo veículo: tudo MENOS Carro Utilitário Expresso (UC) ──────
+    // 🔴 BUG da versão anterior: usava input[name="T"] mas é select#listaTipoVeiculo
+    // Values reais: M=Motofrete, MC=Motofrete(Expresso), U=Carro Util,
+    //               UC=Carro Util(Expresso), D=Tutts Fast, DC=Motofrete-C
+    // Quero todos exceto UC.
+    {
+      const sel = document.getElementById('listaTipoVeiculo');
+      if (sel) {
+        const valoresDesejados = [...sel.options]
+          .filter(o => o.value !== 'UC')
+          .map(o => o.value);
+        resultados.tipoVeiculo = setMultiselectByValues('listaTipoVeiculo', valoresDesejados);
+      } else {
+        resultados.tipoVeiculo = { ok: false, motivo: 'select_listaTipoVeiculo_nao_encontrado' };
       }
     }
 
-    // === Registros por página ===
-    const quantSel = document.getElementById('quantLimite');
-    if (quantSel) {
-      // Tenta pegar a maior opção (geralmente 10000 ou 1000 ou 100)
-      let maior = '100';
-      for (const opt of quantSel.options) {
-        if (parseInt(opt.value, 10) > parseInt(maior, 10)) maior = opt.value;
+    // ─── 10. Dados cliente: "Com dados do cliente" ───────────────────────
+    // 🟡 BUG da versão anterior: id era "cliente_dados" ou "cliente" — mas
+    // o real é "dadosCliente". Default já é "Com dados", mas garantir.
+    resultados.dadosCliente = setSelectBySubstring('dadosCliente', ['com', 'dado', 'cliente']);
+
+    // ─── 11. Dados profissional: "Com dados do profissional" ─────────────
+    // ✅ Já corrigido em sessão anterior, mantendo.
+    resultados.dadosProfissional = setSelectBySubstring('profissional', ['com', 'dado', 'profissional']);
+
+    // ─── 12. Registros por página: maior valor (10000) ───────────────────
+    {
+      const sel = document.getElementById('quantLimite');
+      if (sel) {
+        // Pega a maior opção numérica
+        let maior = 0;
+        for (const opt of sel.options) {
+          const n = parseInt(opt.value, 10);
+          if (!isNaN(n) && n > maior) maior = n;
+        }
+        if (maior > 0) {
+          sel.value = String(maior);
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          resultados.registrosPorPagina = { ok: true, valor: maior };
+        } else {
+          resultados.registrosPorPagina = { ok: false, motivo: 'sem_options_numericas' };
+        }
+      } else {
+        resultados.registrosPorPagina = { ok: false, motivo: 'select_nao_encontrado' };
       }
-      quantSel.value = maior;
     }
+
+    return resultados;
   }, dataBR);
 
-  await page.waitForTimeout(500);
+  // Aguarda Bootstrap multiselect renderizar atualizações de UI
+  await page.waitForTimeout(800);
+
+  // Loga estado de cada filtro pra debug. Se alguma falhou, fica visível
+  // no log do Railway sem precisar abrir DevTools.
+  log('📊 Estado dos filtros:');
+  log(`  • Datas: ${validacoes.datas.dataInicial} → ${validacoes.datas.dataFinal}`);
+  log(`  • Buscar data: ${validacoes.buscarData.ok ? '✅ ' + validacoes.buscarData.texto : '❌ ' + validacoes.buscarData.motivo}`);
+  log(`  • Escopo: ${validacoes.escopo.ok ? '✅ Todos clientes' : '❌ ' + validacoes.escopo.motivo}`);
+  log(`  • Endereços: ${validacoes.enderecos.ok ? '✅ Com endereços' : '❌ ' + validacoes.enderecos.motivo}`);
+  log(`  • Retorno: ${validacoes.retorno.ok ? '✅ Todos' : '❌ ' + validacoes.retorno.motivo}`);
+  log(`  • Tipo serviço (multa): ${validacoes.servicoMulta.ok ? '✅ Todos' : '❌ ' + validacoes.servicoMulta.motivo}`);
+  log(`  • Serviço dinâmico: ${validacoes.servicoDinamico.ok ? '✅ Todos' : '❌ ' + validacoes.servicoDinamico.motivo}`);
+  log(`  • Status: ${validacoes.status.ok ? '✅ ' + validacoes.status.qtd + ' selecionados (' + validacoes.status.valoresAplicados.join(',') + ')' : '❌ ' + validacoes.status.motivo}`);
+  log(`  • Tipo veículo: ${validacoes.tipoVeiculo.ok ? '✅ ' + validacoes.tipoVeiculo.qtd + ' selecionados (' + validacoes.tipoVeiculo.valoresAplicados.join(',') + ')' : '❌ ' + validacoes.tipoVeiculo.motivo}`);
+  log(`  • Dados cliente: ${validacoes.dadosCliente.ok ? '✅ ' + validacoes.dadosCliente.texto : '❌ ' + validacoes.dadosCliente.motivo}`);
+  log(`  • Dados profissional: ${validacoes.dadosProfissional.ok ? '✅ ' + validacoes.dadosProfissional.texto : '❌ ' + validacoes.dadosProfissional.motivo}`);
+  log(`  • Registros/página: ${validacoes.registrosPorPagina.ok ? '✅ ' + validacoes.registrosPorPagina.valor : '❌ ' + validacoes.registrosPorPagina.motivo}`);
+
+  // Detecta falhas críticas e loga warning
+  const falhasCriticas = [];
+  if (!validacoes.status.ok || validacoes.status.qtd !== 2) falhasCriticas.push('status');
+  if (!validacoes.tipoVeiculo.ok) falhasCriticas.push('tipoVeiculo');
+  if (!validacoes.dadosProfissional.ok) falhasCriticas.push('dadosProfissional');
+  if (falhasCriticas.length > 0) {
+    log(`⚠️  ATENÇÃO: filtros críticos com problema: ${falhasCriticas.join(', ')}`);
+  }
+
   log(`✅ Filtros configurados`);
+  return validacoes;
 }
 
 /**
