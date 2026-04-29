@@ -37,6 +37,15 @@ const { pool, testConnection } = require('./src/config/database');
 const { logger } = require('./src/config/logger');
 const { initAgentTables, startAgentWorker, getPoolSnapshot } = require('./src/modules/agent');
 
+// 🧹 Cleanup periódico de /tmp (profiles órfãos do Chromium + screenshots antigos)
+// Necessário pra prevenir o vazamento de /tmp que causa "Target page, context or
+// browser has been closed" depois de ~5h de runtime.
+const { iniciarCleanupPeriodico, rodarCicloLimpeza } = require('./src/shared/tmp-cleanup');
+
+// 🛡️ Memory watchdog — failsafe último-recurso. Se RSS passar de 1.5GB
+// sustentadamente, força restart graceful (Railway sobe nova instância).
+const { iniciarMemoryWatchdog } = require('./src/shared/memory-watchdog');
+
 const HTTP_PORT = Number(process.env.PORT || 8080);
 
 // Estado pra health check
@@ -87,6 +96,80 @@ function iniciarHttpServer() {
       return;
     }
 
+    // ── /diagnostico-tmp — visão de /tmp e memória do worker ────
+    // Útil pra diagnosticar vazamentos sem precisar de shell no Railway.
+    // Lista profiles do Chromium em /tmp + uso de memória do processo.
+    if (req.url === '/diagnostico-tmp' || req.url === '/diag') {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const TMP = os.tmpdir();
+
+        const padroes = [
+          /^playwright_chromiumdev_/,
+          /^\.org\.chromium\.Chromium\./,
+        ];
+
+        let nomes = [];
+        try { nomes = fs.readdirSync(TMP); } catch {}
+
+        const profiles = [];
+        for (const n of nomes) {
+          if (!padroes.some(re => re.test(n))) continue;
+          const full = path.join(TMP, n);
+          try {
+            const st = fs.statSync(full);
+            profiles.push({
+              nome: n,
+              isDir: st.isDirectory(),
+              idadeMin: Math.round((Date.now() - st.mtimeMs) / 60000),
+              tamanhoBytes: st.size,
+            });
+          } catch {}
+        }
+        profiles.sort((a, b) => a.idadeMin - b.idadeMin);
+
+        const mem = process.memoryUsage();
+        const fmtMB = b => Math.round(b / 1024 / 1024) + ' MB';
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          memoria: {
+            rss: fmtMB(mem.rss),
+            heapTotal: fmtMB(mem.heapTotal),
+            heapUsed: fmtMB(mem.heapUsed),
+            external: fmtMB(mem.external),
+          },
+          profilesPlaywright: {
+            quantidade: profiles.length,
+            maisAntigosPrimeiro: profiles.slice().sort((a,b) => b.idadeMin - a.idadeMin).slice(0, 10),
+            maisRecentesPrimeiro: profiles.slice(0, 10),
+          },
+          uptime: Math.round(process.uptime()) + 's',
+        }, null, 2));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, erro: e.message }));
+      }
+      return;
+    }
+
+    // ── /diagnostico-tmp/limpar — força ciclo de cleanup agora ──
+    // Útil pra liberar /tmp manualmente sem esperar o cron.
+    if (req.url === '/diagnostico-tmp/limpar') {
+      try {
+        const resultado = rodarCicloLimpeza();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, resultado }, null, 2));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, erro: e.message }));
+      }
+      return;
+    }
+
     // ── / — landing page simples ────────────────────────────
     if (req.url === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -96,6 +179,8 @@ function iniciarHttpServer() {
         <ul>
           <li><a href="/pool/status">/pool/status</a> — snapshot do pool</li>
           <li><a href="/healthz">/healthz</a> — health check</li>
+          <li><a href="/diagnostico-tmp">/diagnostico-tmp</a> — memória + profiles em /tmp</li>
+          <li><a href="/diagnostico-tmp/limpar">/diagnostico-tmp/limpar</a> — força cleanup agora</li>
         </ul>
       `);
       return;
@@ -107,8 +192,10 @@ function iniciarHttpServer() {
 
   server.listen(HTTP_PORT, '0.0.0.0', () => {
     logger.info(`🌐 HTTP server escutando em :${HTTP_PORT}`);
-    logger.info(`   GET /healthz       → health check`);
-    logger.info(`   GET /pool/status   → snapshot do pool`);
+    logger.info(`   GET /healthz              → health check`);
+    logger.info(`   GET /pool/status          → snapshot do pool`);
+    logger.info(`   GET /diagnostico-tmp      → memória + profiles em /tmp`);
+    logger.info(`   GET /diagnostico-tmp/limpar → força cleanup agora`);
   });
 
   server.on('error', (err) => {
@@ -144,6 +231,25 @@ async function main() {
   // 4. Inicia o pool de agentes
   startAgentWorker(pool);
   _poolIniciado = true;
+
+  // 4.1. Cleanup periódico de /tmp — evita que profiles do Chromium
+  // acumulem e estourem disco. Roda 1x agora + a cada 30 min.
+  iniciarCleanupPeriodico(30 * 60 * 1000);
+
+  // 4.2. Memory watchdog — failsafe último-recurso. Se a memória passar
+  // de 1.5GB sustentadamente (3 verificações), faz restart graceful.
+  // Tenta parar o pool primeiro pra não deixar jobs órfãos.
+  iniciarMemoryWatchdog(async () => {
+    try {
+      const agentPool = require('./src/modules/agent')._agentPool;
+      if (agentPool && agentPool.stopAll) {
+        await agentPool.stopAll();
+        logger.info('✅ Pool parado (watchdog)');
+      }
+    } catch (e) {
+      logger.warn(`⚠️ stopAll falhou no watchdog: ${e.message}`);
+    }
+  });
 
   // 5. Health snapshot a cada 60s no log
   setInterval(() => {
