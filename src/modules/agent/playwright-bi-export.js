@@ -16,6 +16,8 @@ const fs   = require('fs');
 const path = require('path');
 const https = require('https');
 const { logger } = require('../../config/logger');
+// 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
+const { aplicarBloqueio } = require('../../shared/network-blocker');
 
 const SESSION_FILE_DEFAULT = '/tmp/tutts-rpa-bi-import-session.json';
 const SCREENSHOT_DIR = '/tmp/screenshots';
@@ -74,6 +76,13 @@ async function fecharBrowserSeguro(browser) {
 }
 
 async function screenshot(page, etapa) {
+  // 2026-04 egress-fix: skip se SCREENSHOTS_ENABLED=0
+  // Screenshots consomem CPU + Volume + Egress (quando admin abre).
+  // Desligar economiza recurso sem afetar funcionalidade.
+  if (process.env.SCREENSHOTS_ENABLED === '0' ||
+      process.env.SCREENSHOTS_ENABLED === 'false') {
+    return null;
+  }
   try {
     const filename = `BI_${etapa}_${Date.now()}.png`;
     const filepath = path.join(SCREENSHOT_DIR, filename);
@@ -450,6 +459,10 @@ async function executarExportBI({ dataReferencia, onProgresso }) {
     const sessionPath = getSessionFile();
     const sessionExiste = fs.existsSync(sessionPath);
     context = await browser.newContext(sessionExiste ? { storageState: sessionPath } : {});
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'bi-export');
+
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
 
