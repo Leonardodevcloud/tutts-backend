@@ -614,41 +614,139 @@ ${JSON.stringify(payload, null, 2)}
 
 Lembre-se: APENAS o JSON, nada mais.`;
 
-    const response = await fetch(
+    // ─── Helper: detecta erro transitório do Gemini que vale a pena retentar ───
+    // 2026-04: relatos de admin recebendo "high demand" em produção. Antes
+    // qualquer erro do Gemini propagava direto pro usuário sem retry. Agora
+    // retentamos automaticamente erros transitórios (503/429, "high demand",
+    // "overloaded", "unavailable", "quota").
+    function isErroTransitorioGemini(httpStatus, mensagem) {
+      // HTTP transitório
+      if (httpStatus === 503 || httpStatus === 429 || httpStatus === 500) return true;
+      if (httpStatus === 502 || httpStatus === 504) return true;
+      // Mensagem indica sobrecarga (Google pode mandar 200 com error embutido em alguns casos)
+      const msg = (mensagem || '').toLowerCase();
+      if (msg.includes('high demand'))   return true;
+      if (msg.includes('overloaded'))    return true;
+      if (msg.includes('unavailable'))   return true;
+      if (msg.includes('quota'))         return true;
+      if (msg.includes('rate limit'))    return true;
+      if (msg.includes('try again'))     return true;
+      if (msg.includes('temporarily'))   return true;
+      return false;
+    }
+
+    function pausa(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Tenta chamar o Gemini com retry exponencial pra erros transitórios.
+    // Backoff: 1s, 3s, 6s (total no pior caso: ~10s + tempos de request).
+    async function chamarGeminiComRetry(url, body, maxTentativas = 3) {
+      const backoffs = [1000, 3000, 6000];
+      let ultimaCausa = null;
+
+      for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+
+          // Tenta ler body. Se falhar (resposta vazia/inválida), trata como transitório.
+          let payload = null;
+          try {
+            payload = await resp.json();
+          } catch (parseErr) {
+            ultimaCausa = `parse json falhou (HTTP ${resp.status})`;
+            console.warn(`⚠️ Gemini tentativa ${tentativa}/${maxTentativas}: ${ultimaCausa}`);
+            if (tentativa < maxTentativas && resp.status >= 500) {
+              await pausa(backoffs[tentativa - 1] || 6000);
+              continue;
+            }
+            throw new Error(ultimaCausa);
+          }
+
+          // Caso 1: HTTP de erro
+          if (!resp.ok) {
+            const msg = payload?.error?.message || `HTTP ${resp.status}`;
+            ultimaCausa = msg;
+            if (tentativa < maxTentativas && isErroTransitorioGemini(resp.status, msg)) {
+              const espera = backoffs[tentativa - 1] || 6000;
+              console.warn(`⚠️ Gemini tentativa ${tentativa}/${maxTentativas} falhou (transitório): ${msg}. Retentando em ${espera}ms...`);
+              await pausa(espera);
+              continue;
+            }
+            // Não-transitório ou esgotou tentativas → propaga
+            console.error(`❌ Gemini (cliente) tentativa ${tentativa}/${maxTentativas}: ${msg}`);
+            throw new Error('Gemini: ' + msg);
+          }
+
+          // Caso 2: HTTP 200 mas com erro embutido (raro, mas Google às vezes faz isso)
+          if (payload?.error) {
+            const msg = payload.error.message || 'erro desconhecido';
+            ultimaCausa = msg;
+            if (tentativa < maxTentativas && isErroTransitorioGemini(200, msg)) {
+              const espera = backoffs[tentativa - 1] || 6000;
+              console.warn(`⚠️ Gemini tentativa ${tentativa}/${maxTentativas} retornou erro transitório (200): ${msg}. Retentando em ${espera}ms...`);
+              await pausa(espera);
+              continue;
+            }
+            console.error('❌ Gemini (cliente):', payload.error);
+            throw new Error('Gemini: ' + msg);
+          }
+
+          // Sucesso
+          if (tentativa > 1) {
+            console.log(`✅ Gemini sucesso na tentativa ${tentativa} (após erro transitório)`);
+          }
+          return payload;
+
+        } catch (fetchErr) {
+          // Erros de rede (TCP/timeout) — também retentamos
+          ultimaCausa = fetchErr?.message || 'erro de rede';
+          if (tentativa < maxTentativas) {
+            const espera = backoffs[tentativa - 1] || 6000;
+            console.warn(`⚠️ Gemini tentativa ${tentativa}/${maxTentativas} erro de rede: ${ultimaCausa}. Retentando em ${espera}ms...`);
+            await pausa(espera);
+            continue;
+          }
+          throw fetchErr;
+        }
+      }
+
+      // Não deveria chegar aqui mas por garantia
+      throw new Error('Gemini: ' + (ultimaCausa || 'falha após todas as tentativas'));
+    }
+
+    const response = await chamarGeminiComRetry(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
       {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.65,
-            maxOutputTokens: 4096,
-            responseMimeType: 'application/json',
-            // Schema forçado — Gemini 2.0 garante estrutura exata, elimina JSON quebrado
-            responseSchema: {
-              type: 'object',
-              properties: {
-                abertura:      { type: 'string' },
-                visao_geral:   { type: 'string' },
-                evolucao:      { type: 'string' },
-                cobertura:     { type: 'string' },
-                profissionais: { type: 'string' },
-                janela:        { type: 'string' },
-                fechamento:    { type: 'string' },
-              },
-              required: ['abertura', 'visao_geral', 'evolucao', 'cobertura', 'profissionais', 'janela', 'fechamento'],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.65,
+          maxOutputTokens: 4096,
+          responseMimeType: 'application/json',
+          // Schema forçado — Gemini 2.0 garante estrutura exata, elimina JSON quebrado
+          responseSchema: {
+            type: 'object',
+            properties: {
+              abertura:      { type: 'string' },
+              visao_geral:   { type: 'string' },
+              evolucao:      { type: 'string' },
+              cobertura:     { type: 'string' },
+              profissionais: { type: 'string' },
+              janela:        { type: 'string' },
+              fechamento:    { type: 'string' },
             },
+            required: ['abertura', 'visao_geral', 'evolucao', 'cobertura', 'profissionais', 'janela', 'fechamento'],
           },
-        }),
+        },
       }
     );
 
-    const data = await response.json();
-    if (data.error) {
-      console.error('❌ Gemini (cliente):', data.error);
-      throw new Error('Gemini: ' + data.error.message);
-    }
+    // chamarGeminiComRetry já fez .json() e validou. Aqui só usamos o resultado.
+    const data = response;
 
     const texto = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const tokens = data.usageMetadata?.candidatesTokenCount || 0;
@@ -803,6 +901,27 @@ Lembre-se: APENAS o JSON, nada mais.`;
       });
     } catch (error) {
       console.error('❌ Erro ao gerar Raio-X Cliente:', error.message, error.stack);
+
+      // 2026-04: mensagem amigável pra erros transitórios do Gemini que esgotaram
+      // retries. Antes mostrava "Gemini: This model is currently experiencing high
+      // demand..." cru pro admin. Agora orienta a tentar de novo em 30-60s.
+      const msgErr = (error.message || '').toLowerCase();
+      const ehTransitorio =
+        msgErr.includes('high demand') ||
+        msgErr.includes('overloaded') ||
+        msgErr.includes('unavailable') ||
+        msgErr.includes('quota') ||
+        msgErr.includes('rate limit') ||
+        msgErr.includes('try again') ||
+        msgErr.includes('temporarily');
+
+      if (ehTransitorio) {
+        return res.status(503).json({
+          error: 'Servidor de IA está sobrecarregado no momento (Google Gemini). Aguarde 30-60 segundos e clique em "Enviar" novamente. Já tentamos automaticamente 3x antes de avisar.',
+          transitorio: true,
+        });
+      }
+
       res.status(500).json({ error: 'Erro ao gerar relatório cliente: ' + error.message });
     }
   });
