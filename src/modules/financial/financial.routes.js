@@ -965,6 +965,9 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
               }
 
               // ── Normalizar chave Pix pro DICT (mesma lógica do /stark/lote/executar) ──
+              // 🐛 2026-04-30: faltavam os casos de EMAIL e CHAVE ALEATÓRIA (EVP).
+              // Sem eles, chaves email caíam direto no SDK Stark que tentava montar URL
+              // com '@' literal e dava "Invalid URL". Agora trata os 5 tipos.
               const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
               let chaveDict = pixKeyRaw;
               if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
@@ -976,16 +979,29 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
                 if (tel.startsWith('55') && tel.length >= 12)        chaveDict = '+' + tel;
                 else if (tel.length === 10 || tel.length === 11)     chaveDict = '+55' + tel;
                 else                                                 chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+              } else if (pixTipo === 'email' || pixKeyRaw.includes('@')) {
+                chaveDict = pixKeyRaw.toLowerCase().trim();
+              } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pixKeyRaw)) {
+                chaveDict = pixKeyRaw.toLowerCase().trim();
               }
+              // Se nenhum padrão bateu, usa como está (fallback do fluxo manual)
+
+              // Log mascarado (mesma convenção do stark.routes.js)
+              const _pixMask = pixKeyRaw.length > 6 ? pixKeyRaw.slice(0, 3) + '***' + pixKeyRaw.slice(-3) : '***';
+              console.log(`⚡ [Auto-Saque] Saque #${novoSaque.id}: pixTipo="${pixTipo}", chave="${_pixMask}"`);
 
               // ── DICT lookup (verifica que a chave existe e pega o nome) ──
               let dictKey;
               try {
+                // Garantir trim final (defesa em profundidade)
+                if (typeof chaveDict === 'string') chaveDict = chaveDict.trim();
                 dictKey = await starkbank.dictKey.get(chaveDict);
               } catch (errDict) {
                 await autoClient.query('ROLLBACK');
-                modoAutoErro = 'Chave Pix não encontrada no DICT: ' + (errDict.message || 'erro desconhecido');
-                console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou: ${modoAutoErro}. Caindo pra fluxo manual.`);
+                // 🐛 2026-04-30: erro detalhado pra facilitar diagnóstico
+                const errMsg = errDict.message || (errDict.errors ? JSON.stringify(errDict.errors) : 'erro desconhecido');
+                modoAutoErro = 'DICT lookup falhou: ' + errMsg;
+                console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou: ${errMsg}. Tipo="${pixTipo}", chave_normalizada_len=${(chaveDict||'').length}. Caindo pra fluxo manual.`);
                 throw errDict;
               }
 
