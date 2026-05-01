@@ -1,26 +1,13 @@
 /**
  * BI Sub-Router: Dashboards e Métricas
  * Auto-extracted from bi.routes.js monolith
+ *
+ * 🔧 BUGFIX PERFORMANCE (2026-05): cache local removido.
+ * O cache global em src/middleware/cache.js já cobre /api/bi/dashboard-completo
+ * e funciona em conjunto com Cache-Control no browser. Manter dois sistemas
+ * de cache rodando ao mesmo tempo gastava RAM em dobro e nunca compartilhava.
  */
 const express = require('express');
-const crypto = require('crypto');
-
-// Cache in-memory para dashboard-completo (TTL 2 min)
-const dashboardCache = new Map();
-const DASHBOARD_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
-
-function getDashboardCacheKey(query) {
-  const sorted = JSON.stringify(query, Object.keys(query).sort());
-  return crypto.createHash('md5').update(sorted).digest('hex');
-}
-
-// Limpar cache expirado a cada 5 min
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of dashboardCache) {
-    if (now - entry.timestamp > DASHBOARD_CACHE_TTL) dashboardCache.delete(key);
-  }
-}, 5 * 60 * 1000);
 
 function createDashboardRoutes(pool) {
   const router = express.Router();
@@ -274,13 +261,7 @@ router.get('/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 router.get('/bi/dashboard-completo', async (req, res) => {
   try {
-    // === CACHE CHECK ===
-    const cacheKey = getDashboardCacheKey(req.query);
-    const cached = dashboardCache.get(cacheKey);
-    if (cached && (Date.now() - cached.timestamp < DASHBOARD_CACHE_TTL)) {
-      console.log(`📊 Dashboard-completo CACHE HIT (${cacheKey.substring(0,8)})`);
-      return res.json(cached.data);
-    }
+    // 🔧 Cache global (src/middleware/cache.js) já cobre este endpoint.
     const t0Dashboard = Date.now();
     
     let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_prazo_prof, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
@@ -1887,9 +1868,7 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       porHora
     };
     
-    // === CACHE STORE ===
-    dashboardCache.set(cacheKey, { data: responseData, timestamp: Date.now() });
-    console.log(`📊 Dashboard-completo: ${Date.now() - t0Dashboard}ms (cached as ${cacheKey.substring(0,8)})`);
+    console.log(`📊 Dashboard-completo: ${Date.now() - t0Dashboard}ms`);
     
     res.json(responseData);
   } catch (err) {
