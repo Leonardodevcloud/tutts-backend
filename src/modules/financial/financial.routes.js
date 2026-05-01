@@ -998,10 +998,23 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
                 dictKey = await starkbank.dictKey.get(chaveDict);
               } catch (errDict) {
                 await autoClient.query('ROLLBACK');
-                // 🐛 2026-04-30: erro detalhado pra facilitar diagnóstico
+                // 🐛 2026-04-30 (round 2): dump completo do erro pra investigar
+                // SDK Stark às vezes mascara erro real do DICT como "Invalid URL".
                 const errMsg = errDict.message || (errDict.errors ? JSON.stringify(errDict.errors) : 'erro desconhecido');
+                const errCodes = Array.isArray(errDict.errors) ? errDict.errors.map(e => `${e.code || '?'}:${e.message || '?'}`).join('|') : null;
                 modoAutoErro = 'DICT lookup falhou: ' + errMsg;
                 console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou: ${errMsg}. Tipo="${pixTipo}", chave_normalizada_len=${(chaveDict||'').length}. Caindo pra fluxo manual.`);
+                if (errCodes) {
+                  console.warn(`   ↳ stark errors[]: ${errCodes}`);
+                }
+                // Dump completo dos campos relevantes do objeto de erro (sem expor segredo)
+                const errKeys = Object.keys(errDict).filter(k => !['stack','request','response'].includes(k));
+                const errDump = {};
+                for (const k of errKeys) {
+                  try { errDump[k] = typeof errDict[k] === 'object' ? JSON.stringify(errDict[k]).substring(0, 300) : String(errDict[k]).substring(0, 300); }
+                  catch (e) { errDump[k] = '[unstringifiable]'; }
+                }
+                console.warn(`   ↳ err dump:`, errDump);
                 throw errDict;
               }
 
