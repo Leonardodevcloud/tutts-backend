@@ -32,6 +32,55 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   // Exposto globalmente pra worker.js (cron) checar saques_automaticos sem reimportar
   global.__financialConfig = financialConfig;
 
+  // ==================== HELPER: GARANTIR SDK STARK INICIALIZADO ====================
+  // 🐛 FIX 2026-04-30: o auto-saque pode ser disparado ANTES de qualquer admin
+  // abrir a aba "Pix Stark" (que é onde o SDK era originalmente inicializado).
+  // Sem isso, global.__starkbank pode ser null OU pode existir mas com baseUrl
+  // undefined (porque o setUser nunca foi chamado), causando erros tipo
+  // "Invalid URL: undefined/dict-key/...".
+  //
+  // Esta função tenta inicializar o SDK se ainda não foi feito. Idempotente:
+  // se já tá OK, retorna direto. Mesma lógica de stark.routes.js#inicializarStark.
+  function _formatarPrivateKeyStark(key) {
+    if (!key) return key;
+    if (key.includes('\\n')) key = key.replace(/\\n/g, '\n');
+    if (key.includes('-----BEGIN') && !key.includes('\n')) {
+      key = key.replace(/(-----BEGIN [A-Z ]+-----)\s+/, '$1\n').replace(/\s+(-----END [A-Z ]+-----)/, '\n$1');
+    }
+    return key.split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n');
+  }
+
+  function garantirStarkBankInicializado() {
+    // Se já tem global.__starkbank E tem user setado, OK
+    if (global.__starkbank && typeof global.__starkbank.getUser === 'function') {
+      const user = global.__starkbank.getUser();
+      // Considera OK se tem user com environment definido
+      if (user && (user.environment || (user._user && user._user.environment))) {
+        return global.__starkbank;
+      }
+    }
+
+    // Inicializa do zero
+    const projectId = process.env.STARK_PROJECT_ID;
+    const privateKey = process.env.STARK_PRIVATE_KEY;
+    const environment = process.env.STARK_ENVIRONMENT || 'production';
+
+    if (!projectId || !privateKey) {
+      throw new Error('STARK_PROJECT_ID e/ou STARK_PRIVATE_KEY não configuradas no ambiente');
+    }
+
+    const sdk = require('starkbank');
+    const project = new sdk.Project({
+      environment: environment,
+      id: projectId,
+      privateKey: _formatarPrivateKeyStark(privateKey),
+    });
+    sdk.setUser(project);
+    global.__starkbank = sdk;
+    console.log(`✅ [Stark Bank] Inicializado pelo auto-saque (ambiente: ${environment}, project: ${projectId})`);
+    return sdk;
+  }
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -950,13 +999,13 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
               modoAutoErro = erros.join(', ');
               console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} falhou validação: ${modoAutoErro}. Caindo pra fluxo manual.`);
             } else {
-              // ── Inicializar SDK Stark ──
+              // ── Inicializar SDK Stark (idempotente — força init se primeiro request da sessão) ──
+              // 🐛 FIX 2026-04-30: o check antigo só verificava global.__starkbank, mas
+              // se o servidor reiniciou e ninguém abriu a aba "Pix Stark" antes do auto-saque,
+              // o SDK pode ter "user" mas sem environment configurado, gerando "Invalid URL".
               let starkbank;
               try {
-                starkbank = global.__starkbank || require('starkbank');
-                if (!starkbank.getUser || !starkbank.getUser()) {
-                  throw new Error('Stark Bank SDK não inicializado');
-                }
+                starkbank = garantirStarkBankInicializado();
               } catch (errSdk) {
                 await autoClient.query('ROLLBACK');
                 modoAutoErro = 'SDK Stark indisponível: ' + errSdk.message;
