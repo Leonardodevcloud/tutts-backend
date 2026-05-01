@@ -212,13 +212,48 @@ async function notificarResumoDiario(dados) {
   }
 }
 
+/**
+ * Monta mensagem de falha do auto-saque (cai pro fluxo manual)
+ * Formato básico: motoboy + valor + erro + nº do saque
+ */
+function montarMensagemFalhaAutoSaque({ saqueId, motoboyNome, motoboyCod, valor, erro }) {
+  const valorStr = formatarReais(valor);
+  const erroLimpo = String(erro || 'erro desconhecido').slice(0, 200);
+
+  let msg = `⚠️ *Saque automático falhou*\n\n`;
+  msg += `Motoboy: *${motoboyNome}* (cod: ${motoboyCod})\n`;
+  msg += `Valor: *R$ ${valorStr}*\n`;
+  msg += `Erro: ${erroLimpo}\n\n`;
+  msg += `Saque #${saqueId} caiu no fluxo manual (lote do dia)`;
+
+  return msg;
+}
+
+/**
+ * Notifica grupo financeiro quando o auto-saque tentou pagar mas falhou.
+ * Disparado pelo POST /withdrawals quando modoAutoTentado && !modoAutoOk.
+ * Fire-and-forget: nunca propaga exception.
+ */
+async function notificarFalhaAutoSaque({ saqueId, motoboyNome, motoboyCod, valor, erro }) {
+  try {
+    const mensagem = montarMensagemFalhaAutoSaque({ saqueId, motoboyNome, motoboyCod, valor, erro });
+    const resultado = await enviarMensagemWhatsApp(mensagem);
+    return resultado;
+  } catch (error) {
+    console.error('❌ [WhatsApp] Erro ao enviar notificação de falha auto-saque:', error.message);
+    return { enviado: false, motivo: 'excecao', erro: error.message };
+  }
+}
+
 module.exports = {
   notificarLoteGerado,
   notificarLoteFinalizado,
   enviarMensagemWhatsApp,
   notificarResumoDiario,
+  notificarFalhaAutoSaque,
   montarMensagemLoteGerado,
   montarMensagemLoteFinalizado,
   montarMensagemResumoDiario,
+  montarMensagemFalhaAutoSaque,
   LIMIAR_SAQUE_DESTAQUE
 };
