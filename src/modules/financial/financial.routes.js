@@ -2434,9 +2434,13 @@ console.log('✅ Módulo de Auditoria carregado!');
 
   router.get('/financial/saques-status', verificarToken, async (req, res) => {
     try {
+      // 🆕 2026-04-30: retorna também flag 'automaticos' pra frontend do motoboy ignorar
+      // verificação de horário quando auto-saque está ativo (24/7 nesse caso).
       const habilitados = await financialConfig.getBool('saques_habilitados', true);
+      const automaticos = await financialConfig.getBool('saques_automaticos', false);
       res.json({
         habilitados: habilitados,
+        automaticos: automaticos,
         mensagem: habilitados
           ? 'Saques disponíveis normalmente.'
           : 'Saques temporariamente indisponíveis. Tente novamente mais tarde.',
@@ -2445,7 +2449,7 @@ console.log('✅ Módulo de Auditoria carregado!');
       console.error('❌ Erro ao ler saques-status:', err);
       // Falha-aberta: se não conseguimos ler a config, presumimos habilitados
       // (mesma postura do POST /withdrawals — não trava motoboy por bug de leitura).
-      res.json({ habilitados: true, mensagem: 'Saques disponíveis normalmente.' });
+      res.json({ habilitados: true, automaticos: false, mensagem: 'Saques disponíveis normalmente.' });
     }
   });
 
