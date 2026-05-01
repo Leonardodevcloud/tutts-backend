@@ -723,7 +723,15 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
     
     const hasGratuity = gratuity.rows.length > 0;
     let gratuityId = null;
+    // 🆕 2026-04-30: Nova taxa de saque
+    //   - Saques de R$ 15 a R$ 100  → 4,5% + R$ 0,40 (taxa fixa Plific/Stark)
+    //   - Saques acima de R$ 100    → 4,5% (sem taxa fixa)
+    // Cálculo do servidor é a fonte da verdade. Frontend mostra preview, mas
+    // o que vai pra DB e pro motoboy é SEMPRE este aqui.
     let feeAmount = valorArredondado * 0.045; // 4.5%
+    if (valorArredondado >= 15 && valorArredondado <= 100) {
+      feeAmount += 0.40;
+    }
     let finalAmount = valorArredondado - feeAmount;
     // Arredondar valores calculados
     feeAmount = Math.round(feeAmount * 100) / 100;
