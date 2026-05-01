@@ -1551,37 +1551,53 @@ router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, as
 
     const saque = saqueAntes.rows[0];
 
-    // 🔒 SECURITY FIX: Não permitir exclusão de saques já pagos ou em processamento
+    // 🔒 Não permitir exclusão de saques já pagos ou em processamento
+    // EXCEÇÃO 2026-04-30: admin_master pode forçar exclusão (override). Os outros papéis
+    // (admin, admin_financeiro) continuam bloqueados pra evitar bagunça financeira acidental.
     const statusProtegidos = ['pago_stark', 'processando', 'aguardando_pagamento_stark'];
-    if (statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago') {
-      return res.status(400).json({ 
+    const protegido = statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago';
+    const ehMaster = req.user.role === 'admin_master';
+    const forcouExclusao = protegido && ehMaster;
+
+    if (protegido && !ehMaster) {
+      return res.status(400).json({
         error: 'Não é possível excluir um saque com status: ' + (saque.status || saque.stark_status),
-        motivo: 'Saques pagos ou em processamento não podem ser removidos por integridade financeira.'
+        motivo: 'Saques pagos ou em processamento só podem ser removidos por admin_master por integridade financeira.'
       });
     }
 
     // 🔒 SECURITY FIX: Soft delete ao invés de hard delete
+    const motivoExclusao = forcouExclusao
+      ? `Excluído (FORÇADO) por admin_master — status anterior: ${saque.status}`
+      : 'Excluído pelo admin';
     const result = await pool.query(
       `UPDATE withdrawal_requests 
        SET status = 'cancelado', 
            admin_name = COALESCE(admin_name, $2),
-           reject_reason = COALESCE(reject_reason, 'Excluído pelo admin'),
+           reject_reason = COALESCE(reject_reason, $3),
            updated_at = NOW() 
        WHERE id = $1 
        RETURNING *`,
-      [id, req.user.nome || req.user.username || 'Admin']
+      [id, req.user.nome || req.user.username || 'Admin', motivoExclusao]
     );
 
-    // Registrar auditoria
-    await registrarAuditoria(req, 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+    // Registrar auditoria — payload diferenciado quando admin_master força
+    await registrarAuditoria(req, forcouExclusao ? 'WITHDRAWAL_FORCE_DELETE' : 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
       user_cod: saque.user_cod,
       valor: saque.requested_amount,
       status_anterior: saque.status,
-      acao: 'soft_delete_cancelado'
+      stark_status_anterior: saque.stark_status,
+      debito_plific: saque.debito,
+      forcado_por_master: forcouExclusao,
+      acao: forcouExclusao ? 'force_delete_status_protegido' : 'soft_delete_cancelado'
     });
 
-    console.log('🗑️ Saque cancelado (soft delete):', id, 'por', req.user.nome || req.user.username);
-    res.json({ success: true, deleted: result.rows[0] });
+    if (forcouExclusao) {
+      console.warn(`⚠️ [FORCE-DELETE] Saque ${id} (status=${saque.status}, stark=${saque.stark_status}, debito=${saque.debito}, valor=R$${saque.requested_amount}) excluído FORÇADO por admin_master ${req.user.nome || req.user.username || 'id:' + req.user.id}`);
+    } else {
+      console.log('🗑️ Saque cancelado (soft delete):', id, 'por', req.user.nome || req.user.username);
+    }
+    res.json({ success: true, deleted: result.rows[0], forcado: forcouExclusao });
   } catch (error) {
     console.error('❌ Erro ao excluir saque:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
