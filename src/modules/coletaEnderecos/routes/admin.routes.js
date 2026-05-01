@@ -786,9 +786,14 @@ function createColetaAdminRoutes(pool, verificarToken) {
       const { apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id } = req.body || {};
       if (!apelido || !endereco_completo) return res.status(400).json({ error: 'Apelido e endereço completo são obrigatórios' });
 
+      // 🔧 FIX (2026-05): coluna `origem` não existe na tabela — origem é DERIVADA
+      // dinamicamente no SELECT via JOIN com coleta_enderecos_pendentes
+      // (CASE WHEN p.id IS NOT NULL THEN 'motoboy' ELSE 'cliente' END).
+      // Tentar inserir nessa coluna gerava erro 500 ("column origem does not exist").
+      // `vezes_usado` tem DEFAULT 0 na tabela — pode omitir do INSERT.
       const result = await pool.query(`
-        INSERT INTO solicitacao_favoritos (apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id, origem, vezes_usado)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'admin', 0)
+        INSERT INTO solicitacao_favoritos (apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id, apelido
       `, [apelido, endereco_completo, rua || null, numero || null, bairro || null, cidade || null, uf || null, cep || null, 
           latitude ? parseFloat(latitude) : null, longitude ? parseFloat(longitude) : null, 
