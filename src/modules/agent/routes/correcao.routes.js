@@ -17,6 +17,47 @@ const { consultarReceita } = require('../consultar-receita');
 // 2026-04 v4: pré-validação rápida da foto (camera coaching)
 const { validarFotoNfPreview } = require('../validar-foto-nf-preview');
 
+// ── 2026-05: Geocoding helpers para Path B (distância Receita↔GPS) e Path F (CEP) ──
+// Usa Google Geocoding API (mesma chave já usada em historico.routes.js / playwright-agent.js).
+// Falha silenciosa: se geocode falhar, o path correspondente fica sem score (não bloqueia).
+async function geocodarEndereco(enderecoTexto) {
+  const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!key || !enderecoTexto) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(enderecoTexto)}&key=${key}&language=pt-BR&components=country:BR`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    if (data.status === 'OK' && data.results && data.results[0]) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function reverseGeocodeCep(lat, lng) {
+  const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!key || !Number.isFinite(parseFloat(lat)) || !Number.isFinite(parseFloat(lng))) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}&language=pt-BR`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    if (data.status !== 'OK' || !data.results) return null;
+    // Procura postal_code em qualquer um dos results
+    for (const result of data.results) {
+      const comp = (result.address_components || []).find(c => (c.types || []).includes('postal_code'));
+      if (comp && comp.long_name) {
+        return String(comp.long_name).replace(/\D/g, '');
+      }
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -272,16 +313,48 @@ function createCorrecaoRoutes(pool) {
         }
       }
 
-      // ── 3. Cruzar tudo: NF + Receita + Fachada → score combinado ──
+      // ── 3. Cruzar tudo: Receita + Fachada + GPS → 6 paths (2026-05 v2) ──
+      // Novo fluxo: motoboy DIGITA CNPJ (sem foto NF). Receita vira fonte primária.
+      // Em paralelo: geocoda endereço da Receita (Path B) e busca CEP do GPS (Path F).
       let cruzamento = null;
       if (validacaoNF && !validacaoNF.nf_rejeitada) {
+        const receita = validacaoNF.receita;
+        let distanciaReceitaGps;
+        let cepGps;
+
+        // 3a. Geocoda endereço da Receita pra calcular distância até o GPS (Path B)
+        if (receita && receita.ok && receita.endereco && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
+          try {
+            const [geoReceita, cep] = await Promise.all([
+              geocodarEndereco(receita.endereco),
+              reverseGeocodeCep(motoboy_lat, motoboy_lng),
+            ]);
+            cepGps = cep;
+            if (geoReceita) {
+              const { distanciaMetros } = require('../cruzar-validacoes');
+              distanciaReceitaGps = distanciaMetros(geoReceita.lat, geoReceita.lng, motoboy_lat, motoboy_lng);
+              // Anota lat/lng da Receita pra exibir/auditar depois
+              receita.lat = geoReceita.lat;
+              receita.lng = geoReceita.lng;
+              console.log(`[agent] 📍 Receita geocodada: ${geoReceita.lat.toFixed(6)},${geoReceita.lng.toFixed(6)} | distância até GPS: ${distanciaReceitaGps}m`);
+            } else {
+              console.log(`[agent] ⚠️ Não conseguimos geocodar endereço da Receita`);
+            }
+          } catch (geoErr) {
+            console.error(`[agent] ⚠️ Erro geocoding Receita (não-bloqueante):`, geoErr.message);
+          }
+        }
+
         cruzamento = cruzarValidacoes({
-          nf: validacaoNF.dados,
-          receita: validacaoNF.receita,
+          receita,
           fachada: validacaoLoc,
-          localizacao_raw: String(localizacao_raw || '').trim(),  // 2026-04 v2: regra 6 (endereço NF ↔ digitado)
+          localizacao_raw: String(localizacao_raw || '').trim(),
+          motoboy_lat: parseFloat(motoboy_lat),
+          motoboy_lng: parseFloat(motoboy_lng),
+          distancia_receita_gps: distanciaReceitaGps,
+          cep_gps: cepGps,
         });
-        console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | salvar=${cruzamento.pode_salvar_no_banco}`);
+        console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
       }
 
       // JSON pra coluna validacao_localizacao
