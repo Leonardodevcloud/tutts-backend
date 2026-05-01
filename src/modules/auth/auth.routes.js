@@ -154,15 +154,25 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   };
 
   // Salvar refresh token no banco
+  // 🔧 BUGFIX F5-DISCONNECT: NÃO deletar tokens revogados imediatamente.
+  // A grace window precisa enxergar tokens revogados há até 30s para
+  // tolerar requests concorrentes (F5, troca de página, abas duplicadas).
+  // Tokens expirados podem ser deletados sem dó. Tokens revogados há mais
+  // de 60s também — ninguém mais vai precisar deles.
   const salvarRefreshToken = async (userId, refreshToken, req) => {
     try {
       const hashedToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
       const deviceInfo = req.headers['user-agent'] || 'unknown';
       const ipAddress = getClientIP(req);
       
-      // Limpar tokens expirados do usuário
+      // Limpar tokens expirados OU revogados há mais de 60s
+      // (mantém os revogados nos últimos 60s vivos para a grace window)
       await pool.query(
-        'DELETE FROM refresh_tokens WHERE user_id = $1 AND (expires_at < NOW() OR revoked = true)',
+        `DELETE FROM refresh_tokens 
+         WHERE user_id = $1 
+           AND (expires_at < NOW() 
+                OR (revoked = true AND revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '60 seconds')
+                OR (revoked = true AND revoked_at IS NULL))`,
         [userId]
       );
       
@@ -178,21 +188,59 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   };
 
   // Validar refresh token
+  // 🔧 BUGFIX F5-DISCONNECT: implementação real da grace window.
+  // Aceita tokens revogados há até 30 SEGUNDOS, sinalizando jaRevogado=true.
+  // Isso impede que requests concorrentes (F5, troca de página, abas)
+  // disparem cascata de rotações que invalidariam uma das requests.
+  // Combinado com a retenção de 60s no salvarRefreshToken, fica margem
+  // confortável para a network latency.
   const validarRefreshToken = async (refreshToken, userId) => {
     try {
       const hashedToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
       
+      // Busca o token independentemente de revoked, e calcula há quanto tempo foi revogado
       const result = await pool.query(
-        `SELECT id FROM refresh_tokens 
-         WHERE user_id = $1 AND token_hash = $2 AND revoked = false AND expires_at > NOW()`,
+        `SELECT 
+           id, 
+           revoked,
+           revoked_at,
+           expires_at < NOW() AS expirado,
+           CASE 
+             WHEN revoked = true AND revoked_at IS NOT NULL 
+             THEN EXTRACT(EPOCH FROM (NOW() - revoked_at))::int 
+             ELSE NULL 
+           END AS segundos_desde_revogacao
+         FROM refresh_tokens 
+         WHERE user_id = $1 AND token_hash = $2`,
         [userId, hashedToken]
       );
       
       if (result.rows.length === 0) {
-        return { valido: false, erro: 'Refresh token inválido ou expirado' };
+        return { valido: false, erro: 'Refresh token inválido' };
       }
       
-      return { valido: true, tokenId: result.rows[0].id };
+      const row = result.rows[0];
+      
+      if (row.expirado) {
+        return { valido: false, erro: 'Refresh token expirado' };
+      }
+      
+      // Token válido normal (não revogado)
+      if (!row.revoked) {
+        return { valido: true, tokenId: row.id, jaRevogado: false };
+      }
+      
+      // Token revogado — verifica se está dentro da grace window de 30s
+      const GRACE_WINDOW_SEGUNDOS = 30;
+      if (row.segundos_desde_revogacao !== null && row.segundos_desde_revogacao <= GRACE_WINDOW_SEGUNDOS) {
+        // ⚡ Aceita o token (request concorrente que perdeu a corrida)
+        // Sinaliza jaRevogado=true para o handler reemitir só o access token
+        // sem rotacionar o refresh de novo.
+        return { valido: true, tokenId: row.id, jaRevogado: true };
+      }
+      
+      // Revogado fora da grace window — rejeita
+      return { valido: false, erro: 'Refresh token revogado' };
     } catch (error) {
       console.error('Erro ao validar refresh token:', error);
       return { valido: false, erro: 'Erro interno' };
@@ -202,8 +250,9 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   // Revogar refresh token específico
   const revogarRefreshToken = async (tokenId) => {
     try {
+      // 🔧 BUGFIX F5-DISCONNECT: gravar revoked_at para a grace window funcionar
       await pool.query(
-        'UPDATE refresh_tokens SET revoked = true WHERE id = $1',
+        'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, NOW()) WHERE id = $1',
         [tokenId]
       );
     } catch (error) {
@@ -215,7 +264,7 @@ function createAuthRouter(pool, verificarToken, verificarAdmin, registrarAuditor
   const revogarTodosTokens = async (userId) => {
     try {
       const result = await pool.query(
-        'UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false RETURNING id',
+        'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1 AND revoked = false RETURNING id',
         [userId]
       );
       return result.rowCount;
