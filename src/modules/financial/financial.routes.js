@@ -1262,6 +1262,43 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
   }
 });
 
+// ============================================
+// CONTADORES AGREGADOS PARA AS BADGES DA TELA
+// ============================================
+// 🔧 PERFORMANCE FIX (2026-05): a tela de Solicitações precisa mostrar:
+//   - "Todas 12.378" "Atrasados X" "Aguardando Y" "Aprovadas Z" etc.
+// Antes os contadores eram calculados em JavaScript no frontend varrendo
+// a lista inteira de saques (q.filter(s => s.status === 'aprovado').length).
+// Por isso o frontend baixava TODA a tabela sempre — só pra contar.
+// Agora retornamos os números agregados num único SELECT, e o frontend
+// só baixa a página visível (LIMIT 500).
+router.get('/withdrawals/resumo-contadores', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*)::int AS todas,
+        COUNT(*) FILTER (
+          WHERE status = 'aguardando_aprovacao' 
+            AND created_at < NOW() - INTERVAL '1 hour'
+        )::int AS atrasados,
+        COUNT(*) FILTER (WHERE status = 'aguardando_aprovacao')::int AS aguardando,
+        COUNT(*) FILTER (WHERE status = 'aprovado')::int AS aprovadas,
+        COUNT(*) FILTER (WHERE status = 'aprovado_gratuidade')::int AS gratuidade,
+        COUNT(*) FILTER (WHERE status = 'rejeitado')::int AS rejeitadas,
+        COUNT(*) FILTER (WHERE status = 'inativo')::int AS inativos,
+        COUNT(*) FILTER (
+          WHERE status IN ('aprovado','aprovado_gratuidade','rejeitado','inativo')
+            AND created_at >= CURRENT_DATE
+        )::int AS processadas_hoje
+      FROM withdrawal_requests
+    `);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Erro ao buscar contadores:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
 // Listar todos os saques (admin financeiro)
 // Suporta 2 modos:
 //   1) PAGINADO: ?page=1&pageSize=50&status=xxx — retorna { data, total, page, pageSize, totalPages }
@@ -1324,8 +1361,11 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     
     // ════════ MODO LEGADO (validação, conciliação, resumo — sem paginação) ════════
     const comFiltroData = !!(dataInicio && dataFim);
-    // Com filtro de data: sem limite. Sem filtro: usa limit do query ou fallback alto
-    const limiteFiltro = comFiltroData ? null : (parseInt(limit) || 999999);
+    // 🔧 PERFORMANCE FIX (2026-05): default de 500 (era 999999, ou seja, sem limit prático).
+    // Tela operacional precisa só dos saques recentes — contadores vêm do
+    // endpoint /withdrawals/resumo-contadores. Histórico completo se necessário
+    // continua acessível via filtro de data (Caso 1) ou via ?limit=N explícito.
+    const limiteFiltro = comFiltroData ? null : (parseInt(limit) || 500);
     
     let query, params;
     
