@@ -783,23 +783,62 @@ function createColetaAdminRoutes(pool, verificarToken) {
   // Cria um novo endereço na base (admin)
   router.post('/admin/coleta/enderecos-cadastrados', verificarToken, async (req, res) => {
     try {
-      const { apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id } = req.body || {};
+      const body = req.body || {};
+      const { apelido, endereco_completo, grupo_enderecos_id } = body;
+      let { rua, numero, bairro, cidade, uf, cep, latitude, longitude } = body;
       if (!apelido || !endereco_completo) return res.status(400).json({ error: 'Apelido e endereço completo são obrigatórios' });
 
+      // 🔧 FIX (2026-05): coluna `rua` em solicitacao_favoritos é NOT NULL em prod.
+      // Quando o frontend manda só `endereco_completo` (busca Google sem clicar no
+      // botão "Buscar", ou reverse-geocode parcial), os campos individuais vêm null
+      // e o INSERT explode com 23502.
+      // Parseamos o endereco_completo no formato Google:
+      //   "R. Pirangi, 38 - Parque Bela Vista, Salvador - BA, 40280-120, Brasil"
+      // pra preencher o que estiver faltando.
+      if (!rua && endereco_completo) {
+        const partes = String(endereco_completo).split(',').map(s => s.trim()).filter(Boolean);
+        // Parte 0: "R. Pirangi" (ou "R. Pirangi, 38" se sem vírgula entre rua e n°)
+        const parte0 = partes[0] || '';
+        // Tenta separar rua e número da primeira parte
+        const matchNum = parte0.match(/^(.*?)\s+(\d+[A-Za-z]?)$/);
+        if (matchNum) {
+          rua = rua || matchNum[1].trim();
+          numero = numero || matchNum[2].trim();
+        } else {
+          rua = rua || parte0;
+        }
+        // Se segunda parte é um número puro, é o número
+        if (!numero && partes[1] && /^\d+[A-Za-z]?$/.test(partes[1])) {
+          numero = partes[1];
+        }
+        // Tenta extrair CEP de qualquer parte (formato 12345-678 ou 12345678)
+        if (!cep) {
+          const cepMatch = endereco_completo.match(/\b(\d{5}-?\d{3})\b/);
+          if (cepMatch) cep = cepMatch[1].replace(/\D/g, '');
+        }
+        // Tenta extrair UF (2 letras maiúsculas isoladas)
+        if (!uf) {
+          const ufMatch = endereco_completo.match(/\b([A-Z]{2})\b\s*[-,]?\s*\d{5}/);
+          if (ufMatch) uf = ufMatch[1];
+        }
+      }
+      // Garantia final: rua nunca pode ser null/vazio (NOT NULL constraint)
+      if (!rua || !String(rua).trim()) {
+        rua = endereco_completo.split(',')[0].trim() || 'Endereço sem rua';
+      }
+
       // 🔧 FIX (2026-05): coluna `origem` não existe na tabela — origem é DERIVADA
-      // dinamicamente no SELECT via JOIN com coleta_enderecos_pendentes
-      // (CASE WHEN p.id IS NOT NULL THEN 'motoboy' ELSE 'cliente' END).
-      // Tentar inserir nessa coluna gerava erro 500 ("column origem does not exist").
-      // `vezes_usado` tem DEFAULT 0 na tabela — pode omitir do INSERT.
+      // dinamicamente no SELECT via JOIN com coleta_enderecos_pendentes.
+      // `vezes_usado` tem DEFAULT 0 — pode omitir do INSERT.
       const result = await pool.query(`
         INSERT INTO solicitacao_favoritos (apelido, endereco_completo, rua, numero, bairro, cidade, uf, cep, latitude, longitude, grupo_enderecos_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id, apelido
-      `, [apelido, endereco_completo, rua || null, numero || null, bairro || null, cidade || null, uf || null, cep || null, 
+      `, [apelido, endereco_completo, rua, numero || null, bairro || null, cidade || null, uf || null, cep || null, 
           latitude ? parseFloat(latitude) : null, longitude ? parseFloat(longitude) : null, 
           grupo_enderecos_id ? parseInt(grupo_enderecos_id) : null]);
 
-      console.log(`✅ [Coleta Admin] Endereço criado: ${result.rows[0].id} - ${apelido}`);
+      console.log(`✅ [Coleta Admin] Endereço criado: ${result.rows[0].id} - ${apelido} | rua="${rua}" numero="${numero}" cep="${cep}"`);
       res.json({ sucesso: true, endereco: result.rows[0] });
     } catch (err) {
       console.error('❌ Erro ao criar endereço:', err);
