@@ -1,36 +1,45 @@
 /**
  * src/middleware/cache.js
  * Cache middleware para reduzir compute hours no Neon
- * 
+ *
  * COMO FUNCIONA:
  * - Intercepta GETs em endpoints pesados antes de chegarem nas rotas
  * - Cacheia a resposta em memória (node-cache) com TTL por categoria
- * - Invalida tudo quando há operações de escrita (upload, delete, recalcular)
+ * - Invalida SELETIVAMENTE quando há operações de escrita
  * - Zero mudança nos arquivos de rota — é transparente
+ *
+ * 🔧 BUGFIX PERFORMANCE (2026-05):
+ * - Antes: qualquer escrita em /api/bi chamava flushAll() em TODOS os caches.
+ *   Editar uma região derrubava cache de mapa-calor, dashboard, prazos, etc.
+ *   Isso fazia o hit rate cair pra perto de zero em horários de uso pesado.
+ * - Agora: invalidação seletiva por categoria afetada.
+ * - TTL static aumentado de 10min → 30min (esses dados mudam raramente).
+ * - Cache-Control adicionado para o browser também guardar (reduz RTT).
  */
 
 const NodeCache = require('node-cache');
 
 // ─── Caches por categoria ─────────────────────────────────
-const biCache = new NodeCache({ 
+const biCache = new NodeCache({
   stdTTL: 300,        // 5 min — dashboards, analytics, mapa-calor
   checkperiod: 60,
   useClones: false
 });
 
-const staticCache = new NodeCache({ 
-  stdTTL: 600,        // 10 min — cidades, clientes, categorias, prazos
-  checkperiod: 120
+const staticCache = new NodeCache({
+  stdTTL: 1800,       // 🔧 30 min — cidades, clientes, categorias, prazos (eram 10min)
+  checkperiod: 120,
+  useClones: false
 });
 
-const shortCache = new NodeCache({ 
+const shortCache = new NodeCache({
   stdTTL: 30,         // 30s — notificações, contadores
-  checkperiod: 15
+  checkperiod: 15,
+  useClones: false
 });
 
 // ─── Rotas que devem ser cacheadas ────────────────────────
 
-// Cache 5 min: endpoints pesados (muitas queries, aggregations)
 const BI_HEAVY = new Set([
   '/api/bi/dashboard-completo',
   '/api/bi/dashboard-rapido',
@@ -53,7 +62,6 @@ const BI_HEAVY = new Set([
   '/api/bi/entregas-lista',
 ]);
 
-// Cache 10 min: dados que mudam raramente
 const BI_STATIC = new Set([
   '/api/bi/filtros-iniciais',
   '/api/bi/cidades',
@@ -76,18 +84,10 @@ const BI_STATIC = new Set([
   '/api/bi/garantido/status',
 ]);
 
-// Cache 30s: endpoints polled com frequência
 const SHORT_PREFIXES = [
   '/api/notifications/',
   '/api/withdrawals/contadores',
   '/api/withdrawals/pendentes',
-];
-
-// Operações que invalidam o cache
-const WRITE_PATHS = [
-  '/api/bi/entregas/upload',
-  '/api/bi/entregas/recalcular',
-  '/api/bi/entregas/recalcular-prazo-prof',
 ];
 
 // ─── Helpers ──────────────────────────────────────────────
@@ -97,14 +97,41 @@ function cacheKey(req) {
   return `${req.path}:${params}`;
 }
 
-function invalidarTudo() {
-  const k1 = biCache.keys().length;
-  const k2 = staticCache.keys().length;
-  const k3 = shortCache.keys().length;
+function invalidarBiHeavy() {
+  const k = biCache.keys().length;
   biCache.flushAll();
+  console.log(`🗑️ Cache BI HEAVY invalidado: ${k} keys`);
+}
+
+function invalidarBiStatic() {
+  const k = staticCache.keys().length;
   staticCache.flushAll();
+  console.log(`🗑️ Cache BI STATIC invalidado: ${k} keys`);
+}
+
+function invalidarShort() {
+  const k = shortCache.keys().length;
   shortCache.flushAll();
-  console.log(`🗑️ Cache invalidado: ${k1} BI + ${k2} static + ${k3} short`);
+  console.log(`🗑️ Cache SHORT invalidado: ${k} keys`);
+}
+
+function invalidarPath(path, cacheRef) {
+  const cache = cacheRef || biCache;
+  const keys = cache.keys();
+  let removidas = 0;
+  for (const key of keys) {
+    if (key.startsWith(path + ':')) {
+      cache.del(key);
+      removidas++;
+    }
+  }
+  if (removidas > 0) console.log(`🗑️ Cache ${path}: ${removidas} keys removidas`);
+}
+
+function invalidarTudo() {
+  invalidarBiHeavy();
+  invalidarBiStatic();
+  invalidarShort();
 }
 
 // ─── Middleware: servir do cache ───────────────────────────
@@ -114,13 +141,17 @@ function cacheMiddleware(req, res, next) {
 
   const path = req.path;
   let targetCache = null;
+  let browserMaxAge = 0;
 
   if (BI_HEAVY.has(path)) {
     targetCache = biCache;
+    browserMaxAge = 60; // 1min no browser
   } else if (BI_STATIC.has(path)) {
     targetCache = staticCache;
+    browserMaxAge = 600; // 10min no browser
   } else if (SHORT_PREFIXES.some(p => path.startsWith(p))) {
     targetCache = shortCache;
+    browserMaxAge = 0; // não cacheia no browser
   }
 
   if (!targetCache) return next();
@@ -130,15 +161,20 @@ function cacheMiddleware(req, res, next) {
 
   if (cached) {
     console.log(`📦 Cache HIT: ${path}`);
+    if (browserMaxAge > 0) {
+      res.setHeader('Cache-Control', `private, max-age=${browserMaxAge}`);
+    }
     return res.json(cached);
   }
 
-  // Interceptar res.json para salvar no cache
   const originalJson = res.json.bind(res);
   res.json = (data) => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       targetCache.set(ck, data);
       console.log(`💾 Cache STORE: ${path}`);
+      if (browserMaxAge > 0) {
+        res.setHeader('Cache-Control', `private, max-age=${browserMaxAge}`);
+      }
     }
     return originalJson(data);
   };
@@ -146,26 +182,74 @@ function cacheMiddleware(req, res, next) {
   next();
 }
 
-// ─── Middleware: invalidar cache em escritas ───────────────
+// ─── Middleware: invalidar cache em escritas (SELETIVO) ────
 
 function cacheInvalidationMiddleware(req, res, next) {
   if (req.method === 'GET') return next();
 
-  // Escritas que invalidam o cache inteiro:
-  // 1. Uploads/recalculos de entregas (lista fixa)
-  // 2. DELETE em /api/bi/uploads/*
-  // 3. Qualquer POST/PUT/DELETE em /api/bi/regioes — sem isso, edições
-  //    de região não apareciam no frontend (cache STATIC de 10min retornava valor antigo)
-  const isWrite = WRITE_PATHS.includes(req.path) ||
-    (req.method === 'DELETE' && req.path.startsWith('/api/bi/uploads')) ||
-    (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path.startsWith('/api/bi/regioes'));
+  const path = req.path;
+  const method = req.method;
 
-  if (!isWrite) return next();
+  let acao = null;
+
+  // Uploads/recálculos de entregas → derrubam BI HEAVY (dashboards e analytics)
+  if (
+    path === '/api/bi/entregas/upload' ||
+    path === '/api/bi/entregas/recalcular' ||
+    path === '/api/bi/entregas/recalcular-prazo-prof'
+  ) {
+    acao = 'bi_heavy';
+  }
+  // DELETE em uploads → derruba BI HEAVY + lista de uploads (static)
+  else if (method === 'DELETE' && path.startsWith('/api/bi/uploads')) {
+    acao = 'bi_heavy_e_static';
+  }
+  // Operações em regiões/clientes/centros/categorias/prazos/mascaras → só STATIC
+  else if (
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
+    (
+      path.startsWith('/api/bi/regioes') ||
+      path.startsWith('/api/bi/categorias') ||
+      path.startsWith('/api/bi/prazos') ||
+      path.startsWith('/api/bi/prazo-padrao') ||
+      path.startsWith('/api/bi/prazos-prof') ||
+      path.startsWith('/api/bi/prazo-prof-padrao') ||
+      path.startsWith('/api/bi/mascaras') ||
+      path.startsWith('/api/bi/regras-contagem')
+    )
+  ) {
+    acao = 'bi_static';
+  }
+  // Garantido (config) → static + heavy do garantido
+  else if (
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
+    (path.startsWith('/api/bi/garantido/meta') || path.startsWith('/api/bi/garantido/status'))
+  ) {
+    acao = 'bi_static_e_heavy_garantido';
+  }
+
+  if (!acao) return next();
 
   const originalJson = res.json.bind(res);
   res.json = (data) => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      invalidarTudo();
+      try {
+        if (acao === 'bi_heavy') {
+          invalidarBiHeavy();
+        } else if (acao === 'bi_static') {
+          invalidarBiStatic();
+        } else if (acao === 'bi_heavy_e_static') {
+          invalidarBiHeavy();
+          invalidarBiStatic();
+        } else if (acao === 'bi_static_e_heavy_garantido') {
+          invalidarBiStatic();
+          invalidarPath('/api/bi/garantido', biCache);
+          invalidarPath('/api/bi/garantido/semanal', biCache);
+          invalidarPath('/api/bi/garantido/por-cliente', biCache);
+        }
+      } catch (e) {
+        console.error('Erro ao invalidar cache:', e.message);
+      }
     }
     return originalJson(data);
   };
@@ -176,12 +260,26 @@ function cacheInvalidationMiddleware(req, res, next) {
 // ─── Stats (log a cada 30 min) ────────────────────────────
 
 setInterval(() => {
-  const s = biCache.getStats();
-  const total = s.hits + s.misses;
-  const rate = total > 0 ? ((s.hits / total) * 100).toFixed(1) : 0;
-  console.log(`📊 Cache BI — Hits: ${s.hits}, Misses: ${s.misses}, Rate: ${rate}%, Keys: ${biCache.keys().length}`);
+  const sb = biCache.getStats();
+  const ss = staticCache.getStats();
+  const tb = sb.hits + sb.misses;
+  const ts = ss.hits + ss.misses;
+  const rb = tb > 0 ? ((sb.hits / tb) * 100).toFixed(1) : 0;
+  const rs = ts > 0 ? ((ss.hits / ts) * 100).toFixed(1) : 0;
+  console.log(
+    `📊 Cache — BI[hits:${sb.hits} miss:${sb.misses} rate:${rb}% keys:${biCache.keys().length}] ` +
+    `STATIC[hits:${ss.hits} miss:${ss.misses} rate:${rs}% keys:${staticCache.keys().length}]`
+  );
 }, 30 * 60 * 1000);
 
 // ─── Exports ──────────────────────────────────────────────
 
-module.exports = { cacheMiddleware, cacheInvalidationMiddleware, invalidarTudo };
+module.exports = {
+  cacheMiddleware,
+  cacheInvalidationMiddleware,
+  invalidarTudo,
+  invalidarBiHeavy,
+  invalidarBiStatic,
+  invalidarShort,
+  invalidarPath,
+};
