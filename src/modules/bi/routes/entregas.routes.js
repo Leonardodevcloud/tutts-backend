@@ -3,9 +3,24 @@
  * Auto-extracted from bi.routes.js monolith
  */
 const express = require('express');
+// 🚀 PERFORMANCE FIX (2026-05): refresh das matviews após uploads/recálculo
+const { refreshBiMaterializedViews } = require('../../../shared/migrations/bi-materialized-views');
 
 function createEntregasRoutes(pool, atualizarResumos) {
   const router = express.Router();
+
+  // Helper: dispara refresh em background após resposta (não bloqueia)
+  // Debounced 5s — se vários uploads chegam em sequência, refresh só uma vez.
+  let refreshTimer = null;
+  function agendarRefreshMatViews() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      refreshBiMaterializedViews(pool).catch(err => {
+        console.error('⚠️ Falha refresh matviews:', err.message);
+      });
+    }, 5000);
+  }
 
 router.post('/bi/entregas/upload', async (req, res) => {
   try {
@@ -517,6 +532,8 @@ router.post('/bi/entregas/upload', async (req, res) => {
       fora_prazo: foraPrazoCount,
       upload_id: uploadId
     });
+    // 🚀 Refresh das matviews em background (não bloqueia a resposta)
+    agendarRefreshMatViews();
   } catch (err) {
     console.error('❌ Erro no upload:', err);
     res.status(500).json({ error: 'Erro ao fazer upload' });
@@ -639,6 +656,8 @@ router.post('/bi/entregas/recalcular', async (req, res) => {
     console.log(`✅ Recalculado: ${atualizados} entregas`);
     console.log(`   ✅ Dentro: ${dentroPrazoCount} | ❌ Fora: ${foraPrazoCount} | ⚠️ Sem dados: ${semPrazoCount}`);
     res.json({ success: true, atualizados, dentroPrazo: dentroPrazoCount, foraPrazo: foraPrazoCount, semDados: semPrazoCount });
+    // 🚀 Refresh das matviews em background (não bloqueia)
+    agendarRefreshMatViews();
   } catch (err) {
     console.error('❌ Erro ao recalcular:', err);
     res.status(500).json({ error: 'Erro ao recalcular' });
@@ -722,6 +741,8 @@ router.post('/bi/entregas/atualizar-alocado', async (req, res) => {
     
     console.log(`✅ Atualização concluída: ${atualizados} atualizados, ${erros} erros`);
     res.json({ success: true, atualizados, erros });
+    // 🚀 Refresh das matviews em background
+    agendarRefreshMatViews();
   } catch (err) {
     console.error('❌ Erro ao atualizar data_hora_alocado:', err);
     res.status(500).json({ error: 'Erro ao atualizar' });

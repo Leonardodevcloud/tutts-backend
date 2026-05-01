@@ -1388,8 +1388,11 @@ router.delete('/promocoes/:id', verificarToken, verificarAdmin, async (req, res)
 // Listar todas as indicações (admin)
 router.get('/indicacoes', verificarToken, async (req, res) => {
   try {
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 1000
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 1000, 1), 5000);
     const result = await pool.query(
-      'SELECT * FROM indicacoes ORDER BY created_at DESC'
+      'SELECT * FROM indicacoes ORDER BY created_at DESC LIMIT $1',
+      [limite]
     );
     console.log(`📋 [Indicações] Listando ${result.rows.length} indicações`);
     res.json(result.rows);
@@ -1403,9 +1406,10 @@ router.get('/indicacoes', verificarToken, async (req, res) => {
 router.get('/indicacoes/usuario/:userCod', verificarToken, async (req, res) => {
   try {
     const { userCod } = req.params;
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 1000);
     const result = await pool.query(
-      'SELECT * FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC',
-      [userCod]
+      'SELECT * FROM indicacoes WHERE LOWER(user_cod) = LOWER($1) ORDER BY created_at DESC LIMIT $2',
+      [userCod, limite]
     );
     res.json(result.rows);
   } catch (error) {

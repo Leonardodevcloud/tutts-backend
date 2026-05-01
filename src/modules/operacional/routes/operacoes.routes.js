@@ -33,6 +33,10 @@ function createOperacoesRouter(pool) {
       }
       
       query += ` ORDER BY o.criado_em DESC`;
+      // 🔧 PERFORMANCE FIX (2026-05): limit default 500
+      const limite = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
+      params.push(limite);
+      query += ` LIMIT $${params.length}`;
       
       const result = await pool.query(query, params);
       res.json(result.rows);

@@ -51,6 +51,26 @@ async function createPerformanceIndices(pool) {
     // ===== LOJA =====
     'CREATE INDEX IF NOT EXISTS idx_loja_pedidos_status ON loja_pedidos(status)',
     'CREATE INDEX IF NOT EXISTS idx_loja_pedidos_user ON loja_pedidos(user_cod)',
+
+    // ===== BI ENTREGAS — ÍNDICES COMPOSTOS (2026-05) =====
+    // Filtros mais comuns combinam data + cliente + centro_custo
+    // Sem composto, o Postgres faz index scan parcial + filter, queimando compute
+    'CREATE INDEX IF NOT EXISTS idx_bi_entregas_data_cliente ON bi_entregas(data_solicitado, cod_cliente)',
+    'CREATE INDEX IF NOT EXISTS idx_bi_entregas_data_cliente_cc ON bi_entregas(data_solicitado, cod_cliente, centro_custo)',
+    'CREATE INDEX IF NOT EXISTS idx_bi_entregas_data_prof ON bi_entregas(data_solicitado, cod_prof)',
+    // Para o histograma de tempo (queries do dashboard-completo)
+    'CREATE INDEX IF NOT EXISTS idx_bi_entregas_data_tempo ON bi_entregas(data_solicitado) WHERE tempo_execucao_minutos IS NOT NULL',
+    // Para EXTRACT(HOUR FROM data_hora) — não otimiza muito, mas data_hora is not null é comum
+    'CREATE INDEX IF NOT EXISTS idx_bi_entregas_data_hora ON bi_entregas(data_hora) WHERE data_hora IS NOT NULL',
+
+    // ===== REFRESH TOKENS — para a grace window funcionar bem =====
+    // Lookup por user_id + hash + revoked é a query mais comum
+    'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_hash ON refresh_tokens(user_id, token_hash)',
+    'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_revoked_at ON refresh_tokens(revoked, revoked_at) WHERE revoked = true',
+
+    // ===== WITHDRAWAL_REQUESTS — para o /resumo-contadores agregado =====
+    // Conta filtrando por status — composto reduz seq scan em 12k+ linhas
+    "CREATE INDEX IF NOT EXISTS idx_withdrawals_aguardando_created ON withdrawal_requests(created_at) WHERE status = 'aguardando_aprovacao'",
   ];
 
   console.log('⚡ Criando índices de performance...');

@@ -9,6 +9,7 @@ const http = require('http');
 const dns = require('dns');
 const cron = require('node-cron');
 const cookieParser = require('cookie-parser');
+const compression = require('compression');
 
 // ─── Config ───────────────────────────────────────────────
 const env = require('./src/config/env');
@@ -30,7 +31,7 @@ const { iniciarMemoryWatchdog } = require('./src/shared/memory-watchdog');
 
 // ─── Middleware ────────────────────────────────────────────
 const { verificarToken, verificarAdmin, verificarAdminOuFinanceiro } = require('./src/middleware/auth');
-const { getClientIP, apiLimiter, loginLimiter, createAccountLimiter } = require('./src/middleware/rateLimiter');
+const { getClientIP, apiLimiter, loginLimiter, biLimiter, createAccountLimiter } = require('./src/middleware/rateLimiter');
 const { notFoundHandler, globalErrorHandler } = require('./src/middleware/errorHandler');
 const requestLogger = require('./src/middleware/requestLogger');
 const { sanitizeInput } = require("./src/middleware/inputSanitizer");
@@ -47,6 +48,7 @@ const { createAuditLogger } = require('./src/shared/utils/audit');
 const httpRequest = require('./src/shared/utils/httpRequest');
 
 const { createPerformanceIndices } = require('./src/shared/migrations/performance-indices');
+const { createBiMaterializedViews, refreshBiMaterializedViews } = require('./src/shared/migrations/bi-materialized-views');
 
 // ─── Modules ──────────────────────────────────────────────
 const { initScoreRoutes, initScoreTables, initScoreCron } = require('./src/modules/score');
@@ -77,6 +79,21 @@ const { initUberRoutes, initUberTables, startUberWorker } = require('./src/modul
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
 
+// 🚀 PERFORMANCE FIX (2026-05): silencia console.log em produção quando
+// LOG_LEVEL=warn ou error. Mantém console.warn e console.error sempre.
+// Reduz custo de I/O do stdout e tamanho de logs no Railway.
+// Para debug em produção, basta setar LOG_LEVEL=info ou debug nas envvars.
+if (env.IS_PRODUCTION) {
+  const logLevel = (process.env.LOG_LEVEL || 'info').toLowerCase();
+  if (logLevel === 'warn' || logLevel === 'error') {
+    const noop = () => {};
+    console.log = noop;
+    console.debug = noop;
+    console.info = noop;
+    // console.warn e console.error preservados
+  }
+}
+
 const app = express();
 const registrarAuditoria = createAuditLogger(pool);
 
@@ -86,6 +103,16 @@ app.disable('x-powered-by');
 
 // CORS MUST come first
 setupCors(app);
+
+// 🚀 PERFORMANCE FIX (2026-05): gzip compression em TODAS as respostas.
+// Reduz egress em ~80% pra JSON (chave repetida comprime muito).
+// threshold: só comprime payloads >= 1KB (overhead de gzip não compensa em respostas pequenas).
+// level: 6 é o default do gzip (bom balanço entre CPU e taxa de compressão).
+// filter: usa o default do compression (respeita Cache-Control: no-transform).
+app.use(compression({
+  threshold: 1024, // 1KB
+  level: 6,
+}));
 
 // Helmet (after CORS)
 app.use(helmetConfig);
@@ -481,6 +508,10 @@ app.use('/api', initDisponibilidadeRoutes(pool, verificarToken));
 app.use('/api', initFinancialRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP));
 app.use('/api', initSolicitacaoRoutes(pool, verificarToken));
 app.use('/api', initColetaEnderecosRoutes(pool, verificarToken));
+// 🚀 PERFORMANCE FIX (2026-05): rate limiter específico pra BI (60 req/min/IP)
+// Endpoints BI são caros pro Neon — limite agressivo bloqueia scrapers/bots
+// sem afetar uso normal de admins.
+app.use('/api/bi', biLimiter);
 app.use('/api', initBiRoutes(pool, verificarToken));
 app.use('/api', initGerencialRoutes(pool, verificarToken));
 app.use('/api', initTodoRoutes(pool, verificarToken));
@@ -675,6 +706,8 @@ async function initDatabase() {
     try { await initCrmTables(pool); } catch (e) { console.error('⚠️ CRM tables error:', e.message); }
     try { await initUberTables(pool); } catch (e) { console.error('⚠️ Uber tables error:', e.message); }
     await createPerformanceIndices(pool);
+    // 🚀 Materialized views do BI (agregados pré-calculados)
+    try { await createBiMaterializedViews(pool); } catch (e) { console.error('⚠️ Mat views error:', e.message); }
     console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
   } catch (error) {
     console.error('❌ Erro ao criar tabelas:', error.message);

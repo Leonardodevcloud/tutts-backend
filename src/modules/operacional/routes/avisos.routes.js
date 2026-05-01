@@ -21,12 +21,15 @@ function createAvisosRouter(pool) {
   // Listar todos os avisos (para admin)
   router.get('/', async (req, res) => {
     try {
+      // 🔧 PERFORMANCE FIX (2026-05): limit default 500
+      const limite = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
       const result = await pool.query(`
         SELECT a.*, 
           (SELECT COUNT(*) FROM avisos_visualizacoes WHERE aviso_id = a.id) as total_visualizacoes
         FROM avisos a 
         ORDER BY created_at DESC
-      `);
+        LIMIT $1
+      `, [limite]);
       res.json(result.rows);
     } catch (err) {
       console.error('❌ Erro ao listar avisos:', err);

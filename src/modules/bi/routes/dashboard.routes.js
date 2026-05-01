@@ -1848,9 +1848,57 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     }
     
     // Gráficos + Hora a Hora — rodar em paralelo
-    const [dadosGraficos, porHoraQuery] = await Promise.all([
+    // 🚀 PERFORMANCE FIX (2026-05): agregação SQL pros histogramas.
+    // Antes retornava TODAS as linhas (potencialmente milhares) só pra
+    // o frontend fazer .filter() em 6 buckets de tempo + 16 buckets de km.
+    // Agora o Postgres faz a agregação direto (1 query, ~20 linhas total).
+    // dadosGraficos.rows é mantido por compatibilidade (frontend antigo),
+    // mas histogramaTempo / histogramaKm já vêm calculados.
+    const [dadosGraficos, porHoraQuery, histTempoQuery, histKmQuery] = await Promise.all([
       pool.query(`SELECT tempo_execucao_minutos as tempo, distancia as km FROM bi_entregas ${where}`, params),
-      pool.query(`SELECT EXTRACT(HOUR FROM data_hora)::int as hora, COUNT(DISTINCT os) as total_os FROM bi_entregas ${where} AND data_hora IS NOT NULL GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, params)
+      pool.query(`SELECT EXTRACT(HOUR FROM data_hora)::int as hora, COUNT(DISTINCT os) as total_os FROM bi_entregas ${where} AND data_hora IS NOT NULL GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, params),
+      // Histograma de tempo de execução em 6 faixas
+      pool.query(`
+        SELECT 
+          CASE 
+            WHEN tempo_execucao_minutos < 45 THEN '0 a 45 min'
+            WHEN tempo_execucao_minutos < 60 THEN '45-60 min'
+            WHEN tempo_execucao_minutos < 75 THEN '60-75 min'
+            WHEN tempo_execucao_minutos < 90 THEN '75-90 min'
+            WHEN tempo_execucao_minutos < 120 THEN '90 a 120 min'
+            ELSE '> 120 min'
+          END as faixa,
+          COUNT(*)::int as total
+        FROM bi_entregas
+        ${where} AND tempo_execucao_minutos IS NOT NULL
+        GROUP BY faixa
+      `, params),
+      // Histograma de distância em faixas de 5km até 100km
+      pool.query(`
+        SELECT 
+          CASE 
+            WHEN distancia <= 10 THEN '0-10'
+            WHEN distancia <= 15 THEN '11-15'
+            WHEN distancia <= 20 THEN '16-20'
+            WHEN distancia <= 25 THEN '21-25'
+            WHEN distancia <= 30 THEN '26-30'
+            WHEN distancia <= 35 THEN '31-35'
+            WHEN distancia <= 40 THEN '36-40'
+            WHEN distancia <= 45 THEN '41-45'
+            WHEN distancia <= 50 THEN '46-50'
+            WHEN distancia <= 55 THEN '51-55'
+            WHEN distancia <= 60 THEN '56-60'
+            WHEN distancia <= 65 THEN '61-65'
+            WHEN distancia <= 70 THEN '66-70'
+            WHEN distancia <= 75 THEN '71-75'
+            WHEN distancia <= 80 THEN '76-80'
+            ELSE '> 80'
+          END as faixa,
+          COUNT(*)::int as total
+        FROM bi_entregas
+        ${where} AND distancia IS NOT NULL
+        GROUP BY faixa
+      `, params)
     ]);
     
     // Preencher todas as 24 horas (0-23), mesmo as sem dados
@@ -1860,11 +1908,28 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       porHora.push({ hora: h, total: found ? parseInt(found.total_os) : 0 });
     }
     
+    // 🚀 Histogramas pré-agregados (frontend pode usar direto sem refazer .filter)
+    const FAIXAS_TEMPO = ['0 a 45 min', '45-60 min', '60-75 min', '75-90 min', '90 a 120 min', '> 120 min'];
+    const FAIXAS_KM = ['0-10','11-15','16-20','21-25','26-30','31-35','36-40','41-45','46-50','51-55','56-60','61-65','66-70','71-75','76-80','> 80'];
+    const histTempoMap = Object.fromEntries(histTempoQuery.rows.map(r => [r.faixa, parseInt(r.total)]));
+    const histKmMap = Object.fromEntries(histKmQuery.rows.map(r => [r.faixa, parseInt(r.total)]));
+    const histogramaTempo = FAIXAS_TEMPO.map(f => ({ faixa: f, total: histTempoMap[f] || 0 }));
+    const histogramaKm = FAIXAS_KM.map(f => ({ faixa: f, total: histKmMap[f] || 0 }));
+    
     const responseData = { 
       metricas, 
       porCliente, 
       porProfissional, 
-      dadosGraficos: dadosGraficos.rows,
+      // 🚀 PERFORMANCE FIX (2026-05): se frontend pediu modo compact, NÃO envia
+      // o array gigante de dadosGraficos — só os histogramas pré-agregados.
+      // Frontends antigos que ainda dependem do array continuam funcionando
+      // (eles não passam ?compact=1).
+      ...(req.query.compact === '1'
+        ? { dadosGraficos: [] }
+        : { dadosGraficos: dadosGraficos.rows }
+      ),
+      histogramaTempo, // 🚀 novo: pré-agregado no SQL
+      histogramaKm,    // 🚀 novo: pré-agregado no SQL
       porHora
     };
     

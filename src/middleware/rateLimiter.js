@@ -42,6 +42,29 @@ const apiLimiter = rateLimit({
   keyGenerator: (req) => getClientIP(req),
 });
 
+// 🚀 PERFORMANCE FIX (2026-05): rate limiter específico para endpoints de BI
+// (que são caros pro Neon) — 60 req/min/IP. Admins legítimos não passam disso
+// em uso normal; bloqueia scrapers e requests anômalos que queimariam compute.
+const biLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 60,
+  message: { error: 'Muitas requisições de BI. Aguarde um momento.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => getClientIP(req),
+});
+
+// Rate limiter para endpoints públicos/sem auth que podem ser abusados
+// (mapa-calor CS, etc.) — 30 req/min/IP
+const publicLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 30,
+  message: { error: 'Muitas requisições. Aguarde.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => getClientIP(req),
+});
+
 const createAccountLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -57,4 +80,4 @@ const passwordRecoveryLimiter = rateLimit({
   keyGenerator: (req) => getClientIP(req),
 });
 
-module.exports = { getClientIP, loginLimiter, apiLimiter, createAccountLimiter, passwordRecoveryLimiter };
+module.exports = { getClientIP, loginLimiter, apiLimiter, biLimiter, publicLimiter, createAccountLimiter, passwordRecoveryLimiter };

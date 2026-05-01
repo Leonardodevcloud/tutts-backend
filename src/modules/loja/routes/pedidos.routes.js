@@ -27,9 +27,11 @@ function createPedidosRoutes(pool) {
   router.get('/pedidos/user/:userCod', async (req, res) => {
     try {
       const { userCod } = req.params;
+      // 🔧 PERFORMANCE FIX (2026-05): limit default 200
+      const limite = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 1000);
       const result = await pool.query(
-        `SELECT * FROM loja_pedidos WHERE user_cod = $1 ORDER BY created_at DESC`,
-        [userCod]
+        `SELECT * FROM loja_pedidos WHERE user_cod = $1 ORDER BY created_at DESC LIMIT $2`,
+        [userCod, limite]
       );
       res.json(result.rows);
     } catch (err) {
@@ -217,7 +219,12 @@ function createPedidosRoutes(pool) {
   // GET - Listar todas sugestões (admin)
   router.get('/sugestoes', async (req, res) => {
     try {
-      const result = await pool.query(`SELECT * FROM loja_sugestoes ORDER BY created_at DESC`);
+      // 🔧 PERFORMANCE FIX (2026-05): limit default 500
+      const limite = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
+      const result = await pool.query(
+        `SELECT * FROM loja_sugestoes ORDER BY created_at DESC LIMIT $1`,
+        [limite]
+      );
       res.json(result.rows);
     } catch (err) {
       console.error('❌ Erro ao listar sugestões:', err);
@@ -229,9 +236,10 @@ function createPedidosRoutes(pool) {
   router.get('/sugestoes/user/:userCod', async (req, res) => {
     try {
       const { userCod } = req.params;
+      const limite = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 1000);
       const result = await pool.query(
-        `SELECT * FROM loja_sugestoes WHERE user_cod = $1 ORDER BY created_at DESC`,
-        [userCod]
+        `SELECT * FROM loja_sugestoes WHERE user_cod = $1 ORDER BY created_at DESC LIMIT $2`,
+        [userCod, limite]
       );
       res.json(result.rows);
     } catch (err) {

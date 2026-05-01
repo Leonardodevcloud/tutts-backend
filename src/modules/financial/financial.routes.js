@@ -432,9 +432,11 @@ router.get('/financial/logs/:userCod', verificarToken, async (req, res) => {
       }
     }
     
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 500 (era ilimitado)
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
     const result = await pool.query(
-      'SELECT * FROM financial_logs WHERE user_cod = $1 ORDER BY created_at DESC',
-      [userCod]
+      'SELECT * FROM financial_logs WHERE user_cod = $1 ORDER BY created_at DESC LIMIT $2',
+      [userCod, limite]
     );
 
     res.json(result.rows);
@@ -1237,9 +1239,12 @@ router.get('/withdrawals/user/:userCod', verificarToken, async (req, res) => {
       }
     }
     
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 200 (era ilimitado).
+    // Aba "Resumo" e tela do user só precisam dos saques recentes.
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 1000);
     const result = await pool.query(
-      'SELECT * FROM withdrawal_requests WHERE user_cod = $1 ORDER BY created_at DESC',
-      [userCod]
+      'SELECT * FROM withdrawal_requests WHERE user_cod = $1 ORDER BY created_at DESC LIMIT $2',
+      [userCod, limite]
     );
 
     // Adicionar verificação de atraso (mais de 1 hora)
@@ -1871,16 +1876,19 @@ router.get('/withdrawals/dashboard/conciliacao', verificarToken, verificarAdminO
 router.get('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status } = req.query;
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 1000 (era ilimitado)
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 1000, 1), 5000);
     
-    let query = 'SELECT * FROM gratuities ORDER BY created_at DESC';
+    let query, params;
     if (status) {
-      query = 'SELECT * FROM gratuities WHERE status = $1 ORDER BY created_at DESC';
+      query = 'SELECT * FROM gratuities WHERE status = $1 ORDER BY created_at DESC LIMIT $2';
+      params = [status, limite];
+    } else {
+      query = 'SELECT * FROM gratuities ORDER BY created_at DESC LIMIT $1';
+      params = [limite];
     }
 
-    const result = status 
-      ? await pool.query(query, [status])
-      : await pool.query(query);
-
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Erro ao listar gratuidades:', error);
@@ -1900,9 +1908,11 @@ router.get('/gratuities/user/:userCod', verificarToken, async (req, res) => {
       }
     }
     
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 200 (era ilimitado)
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 1000);
     const result = await pool.query(
-      'SELECT * FROM gratuities WHERE user_cod = $1 ORDER BY created_at DESC',
-      [userCod]
+      'SELECT * FROM gratuities WHERE user_cod = $1 ORDER BY created_at DESC LIMIT $2',
+      [userCod, limite]
     );
 
     res.json(result.rows);
@@ -1971,15 +1981,19 @@ router.delete('/gratuities/:id', verificarToken, verificarAdminOuFinanceiro, asy
 router.get('/restricted', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
     const { status } = req.query;
+    // 🔧 PERFORMANCE FIX (2026-05): limit default 1000 (era ilimitado)
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 1000, 1), 5000);
     
-    let query = 'SELECT * FROM restricted_professionals ORDER BY created_at DESC';
+    let query, params;
     if (status) {
-      query = 'SELECT * FROM restricted_professionals WHERE status = $1 ORDER BY created_at DESC';
+      query = 'SELECT * FROM restricted_professionals WHERE status = $1 ORDER BY created_at DESC LIMIT $2';
+      params = [status, limite];
+    } else {
+      query = 'SELECT * FROM restricted_professionals ORDER BY created_at DESC LIMIT $1';
+      params = [limite];
     }
 
-    const result = status 
-      ? await pool.query(query, [status])
-      : await pool.query(query);
+    const result = await pool.query(query, params);
 
     res.json(result.rows);
   } catch (error) {
