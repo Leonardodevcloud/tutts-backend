@@ -8,9 +8,14 @@ function createPedidosRoutes(pool) {
 
   router.get('/pedidos', async (req, res) => {
     try {
-      const result = await pool.query(`
-        SELECT * FROM loja_pedidos ORDER BY created_at DESC
-      `);
+      // 🔧 PERFORMANCE FIX (2026-05): limit default 500 (era ilimitado).
+      // Tela operacional só precisa dos pedidos recentes; histórico completo
+      // pode usar ?limit=N explícito.
+      const limit = Math.min(parseInt(req.query.limit) || 500, 5000);
+      const result = await pool.query(
+        `SELECT * FROM loja_pedidos ORDER BY created_at DESC LIMIT $1`,
+        [limit]
+      );
       res.json(result.rows);
     } catch (err) {
       console.error('❌ Erro ao listar pedidos:', err);
