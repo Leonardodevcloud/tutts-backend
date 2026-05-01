@@ -1619,70 +1619,83 @@ router.patch('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, asy
   }
 });
 
-// Excluir saque (🔒 SECURITY FIX: Soft delete + proteção de status)
+// Excluir saque (HARD DELETE com snapshot em auditoria)
 router.delete('/withdrawals/:id', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
+    await client.query('BEGIN');
 
-    // Buscar dados antes para auditoria e validação
-    const saqueAntes = await pool.query('SELECT * FROM withdrawal_requests WHERE id = $1', [id]);
+    // Buscar dados antes para snapshot na auditoria (o registro vai sumir do banco)
+    const saqueAntes = await client.query('SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE', [id]);
 
     if (saqueAntes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Saque não encontrado' });
     }
 
     const saque = saqueAntes.rows[0];
 
-    // 🔒 Não permitir exclusão de saques já pagos ou em processamento
-    // EXCEÇÃO 2026-04-30: admin_master pode forçar exclusão (override). Os outros papéis
-    // (admin, admin_financeiro) continuam bloqueados pra evitar bagunça financeira acidental.
+    // 🔒 Permissão: status protegidos só admin_master pode excluir
     const statusProtegidos = ['pago_stark', 'processando', 'aguardando_pagamento_stark'];
     const protegido = statusProtegidos.includes(saque.status) || saque.stark_status === 'processando' || saque.stark_status === 'pago';
     const ehMaster = req.user.role === 'admin_master';
     const forcouExclusao = protegido && ehMaster;
 
     if (protegido && !ehMaster) {
+      await client.query('ROLLBACK');
       return res.status(400).json({
         error: 'Não é possível excluir um saque com status: ' + (saque.status || saque.stark_status),
         motivo: 'Saques pagos ou em processamento só podem ser removidos por admin_master por integridade financeira.'
       });
     }
 
-    // 🔒 SECURITY FIX: Soft delete ao invés de hard delete
-    const motivoExclusao = forcouExclusao
-      ? `Excluído (FORÇADO) por admin_master — status anterior: ${saque.status}`
-      : 'Excluído pelo admin';
-    const result = await pool.query(
-      `UPDATE withdrawal_requests 
-       SET status = 'cancelado', 
-           admin_name = COALESCE(admin_name, $2),
-           reject_reason = COALESCE(reject_reason, $3),
-           updated_at = NOW() 
-       WHERE id = $1 
-       RETURNING *`,
-      [id, req.user.nome || req.user.username || 'Admin', motivoExclusao]
-    );
+    // 🆕 2026-04-30: HARD DELETE de verdade.
+    // Antes era soft-delete (UPDATE status = 'cancelado'), mas o saque continuava
+    // aparecendo na listagem após F5. Agora apaga mesmo, com snapshot em audit_logs
+    // pra preservar trilha.
 
-    // Registrar auditoria — payload diferenciado quando admin_master força
-    await registrarAuditoria(req, forcouExclusao ? 'WITHDRAWAL_FORCE_DELETE' : 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
-      user_cod: saque.user_cod,
-      valor: saque.requested_amount,
-      status_anterior: saque.status,
-      stark_status_anterior: saque.stark_status,
-      debito_plific: saque.debito,
-      forcado_por_master: forcouExclusao,
-      acao: forcouExclusao ? 'force_delete_status_protegido' : 'soft_delete_cancelado'
-    });
+    // 1) Limpar registros dependentes em outras tabelas (sem FK formal mas relacionadas)
+    const itensRemovidos = await client.query('DELETE FROM stark_lote_itens WHERE withdrawal_id = $1 RETURNING id', [id]);
+    const idempRemovida  = await client.query('DELETE FROM withdrawal_idempotency WHERE withdrawal_id = $1 RETURNING id', [id]);
+
+    // 2) Apagar o saque
+    const result = await client.query('DELETE FROM withdrawal_requests WHERE id = $1 RETURNING *', [id]);
+
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({ error: 'Falha inesperada ao deletar saque' });
+    }
+
+    await client.query('COMMIT');
+
+    // 3) Registrar auditoria FORA da transação (não trava o delete se auditoria falhar)
+    try {
+      await registrarAuditoria(req, forcouExclusao ? 'WITHDRAWAL_FORCE_DELETE' : 'WITHDRAWAL_DELETE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', id, {
+        // Snapshot completo pra preservar trilha — o registro sumiu do banco
+        snapshot: saque,
+        forcado_por_master: forcouExclusao,
+        itens_lote_removidos: itensRemovidos.rows.length,
+        idempotency_removida: idempRemovida.rows.length,
+        acao: forcouExclusao ? 'hard_delete_status_protegido' : 'hard_delete'
+      });
+    } catch (errAud) {
+      console.warn('⚠️ Falha ao registrar auditoria do delete:', errAud.message);
+    }
 
     if (forcouExclusao) {
-      console.warn(`⚠️ [FORCE-DELETE] Saque ${id} (status=${saque.status}, stark=${saque.stark_status}, debito=${saque.debito}, valor=R$${saque.requested_amount}) excluído FORÇADO por admin_master ${req.user.nome || req.user.username || 'id:' + req.user.id}`);
+      console.warn(`⚠️ [FORCE-DELETE] Saque ${id} (status=${saque.status}, stark=${saque.stark_status}, debito=${saque.debito}, valor=R$${saque.requested_amount}) HARD DELETED por admin_master ${req.user.nome || req.user.username || 'id:' + req.user.id}. Itens lote: ${itensRemovidos.rows.length}, idemp: ${idempRemovida.rows.length}`);
     } else {
-      console.log('🗑️ Saque cancelado (soft delete):', id, 'por', req.user.nome || req.user.username);
+      console.log(`🗑️ Saque ${id} HARD DELETED por ${req.user.nome || req.user.username}. Itens lote: ${itensRemovidos.rows.length}, idemp: ${idempRemovida.rows.length}`);
     }
+
     res.json({ success: true, deleted: result.rows[0], forcado: forcouExclusao });
   } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (e) { /* ignore */ }
     console.error('❌ Erro ao excluir saque:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: 'Erro interno do servidor: ' + error.message });
+  } finally {
+    client.release();
   }
 });
 
