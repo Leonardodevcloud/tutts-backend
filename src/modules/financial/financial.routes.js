@@ -24,6 +24,14 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   const limitesRouter = createLimitesRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES);
   router.use('/', limitesRouter);
 
+  // ==================== HELPER DE CONFIGURAÇÃO (financial_config) ====================
+  // 2026-04: cache TTL 30s pra leitura. Usado pelo POST /withdrawals (kill switch
+  // e modo auto) e pelos endpoints GET/PUT /financial/config abaixo.
+  const { createFinancialConfig } = require('./financial.config');
+  const financialConfig = createFinancialConfig(pool);
+  // Exposto globalmente pra worker.js (cron) checar saques_automaticos sem reimportar
+  global.__financialConfig = financialConfig;
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -488,6 +496,25 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
   try {
     const { userCod, userName, cpf, pixKey, requestedAmount } = req.body;
 
+    // ==================== 🛡️ KILL SWITCH: saques_habilitados ====================
+    // 2026-04: admin pode desabilitar todos os saques via /financial/config.
+    // Sempre validar no backend (frontend é UX, não pode confiar).
+    try {
+      const habilitados = await financialConfig.getBool('saques_habilitados', true);
+      if (!habilitados) {
+        client.release();
+        console.log(`🚫 [Saque] Solicitação bloqueada: saques desabilitados globalmente. User: ${userCod} (${userName})`);
+        return res.status(503).json({
+          error: 'Saques temporariamente indisponíveis. Tente novamente mais tarde.',
+          saques_desabilitados: true,
+        });
+      }
+    } catch (errCfg) {
+      // Se o helper de config falhar (DB fora?), por segurança DEIXA passar.
+      // Falha aberta aqui é menos pior do que travar todos os saques por bug.
+      console.warn('⚠️ [Saque] Falha ao ler saques_habilitados, permitindo por segurança:', errCfg.message);
+    }
+
     // ==================== 🔒 SECURITY FIX: VALIDAÇÃO DE VALOR ====================
     const valorSaque = parseFloat(requestedAmount);
     if (!requestedAmount || isNaN(valorSaque) || !isFinite(valorSaque)) {
@@ -845,6 +872,196 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
     }
     // ==================== FIM AUTO DÉBITO PLIFIC ====================
 
+    // ==================== ⚡ MODO AUTO-SAQUE (Stark imediato) ====================
+    // 2026-04: Quando saques_automaticos=true E auto-débito Plific deu OK,
+    // dispara o pagamento Stark Bank IMEDIATAMENTE (sem cron, sem revisão admin).
+    //
+    // Comportamento:
+    //   - Se Stark OK → status = 'aprovado' / 'aprovado_gratuidade' + stark_status='processando'
+    //   - Se Stark falhar → MANTÉM status='aguardando_pagamento_stark' (fallback pro fluxo manual)
+    //     O cron de 8-18h vai pegar normalmente. NÃO reverte débito Plific.
+    //   - Se saques_automaticos=false → não faz nada, fluxo manual normal
+    //
+    // Decisão: cada saque vira um "lote individual" pra reaproveitar tracking de
+    // stark_lotes/stark_lote_itens (consistência com fluxo manual).
+    let modoAutoTentado = false;
+    let modoAutoOk = false;
+    let modoAutoErro = null;
+
+    if (novoSaque.status === 'aguardando_pagamento_stark' && novoSaque.debito === true) {
+      let saquesAutomaticos = false;
+      try {
+        saquesAutomaticos = await financialConfig.getBool('saques_automaticos', false);
+      } catch (errCfg) {
+        // Se config falhar, NÃO entra em modo auto (default seguro = manual)
+        console.warn('⚠️ [Auto-Saque] Falha ao ler saques_automaticos, fluxo manual:', errCfg.message);
+      }
+
+      if (saquesAutomaticos) {
+        modoAutoTentado = true;
+        console.log(`⚡ [Auto-Saque] Iniciando pagamento Stark imediato pra saque #${novoSaque.id}`);
+
+        // Lock dedicado pra evitar race com cron rodando ao mesmo tempo
+        const autoClient = await pool.connect();
+        try {
+          await autoClient.query('BEGIN');
+
+          // Re-check com FOR UPDATE — garante que não vamos pagar duas vezes
+          const lockSaque = await autoClient.query(
+            `SELECT w.*, ufd.pix_tipo,
+               COALESCE(ufd.cpf, w.cpf) as cpf_real,
+               COALESCE(ufd.pix_key, w.pix_key) as pix_key_real
+             FROM withdrawal_requests w
+             LEFT JOIN user_financial_data ufd ON w.user_cod = ufd.user_cod
+             WHERE w.id = $1
+               AND w.status = 'aguardando_pagamento_stark'
+               AND w.debito = true
+               AND (w.stark_status IS NULL OR w.stark_status = 'erro')
+             FOR UPDATE OF w`,
+            [novoSaque.id]
+          );
+
+          if (lockSaque.rows.length === 0) {
+            // Alguém (cron?) já pegou esse saque. Aborta sem erro.
+            await autoClient.query('ROLLBACK');
+            console.log(`ℹ️  [Auto-Saque] Saque #${novoSaque.id} já está sendo processado por outro fluxo, abortando modo auto`);
+          } else {
+            const s = lockSaque.rows[0];
+            const cpf = (s.cpf_real || s.cpf || '').replace(/\D/g, '');
+            const pixKeyRaw = (s.pix_key_real || s.pix_key || '').trim();
+            const pixTipo = (s.pix_tipo || '').toLowerCase();
+
+            // Validações mínimas (mesmas do /stark/lote/executar)
+            const erros = [];
+            if (!cpf || cpf.length !== 11) erros.push('CPF inválido');
+            if (!pixKeyRaw)                erros.push('Chave Pix vazia');
+            if (parseFloat(s.final_amount) <= 0) erros.push('Valor inválido');
+
+            if (erros.length > 0) {
+              await autoClient.query('ROLLBACK');
+              modoAutoErro = erros.join(', ');
+              console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} falhou validação: ${modoAutoErro}. Caindo pra fluxo manual.`);
+            } else {
+              // ── Inicializar SDK Stark ──
+              let starkbank;
+              try {
+                starkbank = global.__starkbank || require('starkbank');
+                if (!starkbank.getUser || !starkbank.getUser()) {
+                  throw new Error('Stark Bank SDK não inicializado');
+                }
+              } catch (errSdk) {
+                await autoClient.query('ROLLBACK');
+                modoAutoErro = 'SDK Stark indisponível: ' + errSdk.message;
+                console.error(`❌ [Auto-Saque] ${modoAutoErro}`);
+                throw errSdk;
+              }
+
+              // ── Normalizar chave Pix pro DICT (mesma lógica do /stark/lote/executar) ──
+              const pixSoDigitos = pixKeyRaw.replace(/\D/g, '');
+              let chaveDict = pixKeyRaw;
+              if (pixTipo === 'cpf' || (!pixTipo && pixSoDigitos.length === 11 && !pixKeyRaw.includes('@') && !pixKeyRaw.startsWith('+'))) {
+                chaveDict = pixSoDigitos;
+              } else if (pixTipo === 'cnpj' || (!pixTipo && pixSoDigitos.length === 14)) {
+                chaveDict = pixSoDigitos;
+              } else if (pixTipo === 'telefone' || pixTipo === 'phone' || pixKeyRaw.startsWith('+55')) {
+                let tel = pixSoDigitos;
+                if (tel.startsWith('55') && tel.length >= 12)        chaveDict = '+' + tel;
+                else if (tel.length === 10 || tel.length === 11)     chaveDict = '+55' + tel;
+                else                                                 chaveDict = pixKeyRaw.startsWith('+') ? pixKeyRaw : '+55' + tel;
+              }
+
+              // ── DICT lookup (verifica que a chave existe e pega o nome) ──
+              let dictKey;
+              try {
+                dictKey = await starkbank.dictKey.get(chaveDict);
+              } catch (errDict) {
+                await autoClient.query('ROLLBACK');
+                modoAutoErro = 'Chave Pix não encontrada no DICT: ' + (errDict.message || 'erro desconhecido');
+                console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou: ${modoAutoErro}. Caindo pra fluxo manual.`);
+                throw errDict;
+              }
+
+              // ── Criar lote individual pra esse saque (consistência com fluxo manual) ──
+              const valorFinal = parseFloat(s.final_amount);
+              const loteResult = await autoClient.query(`
+                INSERT INTO stark_lotes (
+                  quantidade, valor_total, saldo_antes, status,
+                  executado_por_id, executado_por_nome
+                ) VALUES (1, $1, 0, 'processando', 0, 'Sistema (Auto-Saque)')
+                RETURNING id
+              `, [valorFinal]);
+              const loteId = loteResult.rows[0].id;
+
+              // ── Montar transfer ──
+              const transferData = {
+                amount:      Math.round(valorFinal * 100), // Stark espera centavos
+                taxId:       cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4'),
+                name:        (dictKey.name || s.user_name || 'Profissional').slice(0, 80),
+                bankCode:    dictKey.bankCode,
+                branchCode:  dictKey.branchCode,
+                accountNumber: dictKey.accountNumber,
+                accountType: dictKey.accountType || 'checking',
+                tags:        ['auto-saque', `withdrawal-${s.id}`, `motoboy-${s.user_cod}`],
+              };
+
+              // ── Disparar transfer ──
+              let transferCriada;
+              try {
+                const resultados = await starkbank.transfer.create([transferData]);
+                transferCriada = resultados[0];
+              } catch (errTransfer) {
+                // Marca lote como erro, ROLLBACK do INSERT do lote, deixa saque no fluxo manual
+                await autoClient.query('ROLLBACK');
+                modoAutoErro = 'Stark transfer falhou: ' + (errTransfer.errors ? JSON.stringify(errTransfer.errors) : errTransfer.message);
+                console.error(`❌ [Auto-Saque] Saque #${novoSaque.id} transfer Stark falhou: ${modoAutoErro}. Caindo pra fluxo manual.`);
+                throw errTransfer;
+              }
+
+              // ── Sucesso! Atualizar saque + criar item de lote ──
+              const novoStatus = s.has_gratuity ? 'aprovado_gratuidade' : 'aprovado';
+              await autoClient.query(`
+                UPDATE withdrawal_requests
+                SET status = $1,
+                    approved_at = NOW(),
+                    lancamento_at = NOW(),
+                    stark_status = 'processando',
+                    stark_transfer_id = $2,
+                    stark_lote_id = $3,
+                    stark_enviado_em = NOW(),
+                    admin_name = 'Sistema (Auto-Saque)',
+                    updated_at = NOW()
+                WHERE id = $4
+              `, [novoStatus, transferCriada.id, loteId, s.id]);
+
+              await autoClient.query(`
+                INSERT INTO stark_lote_itens (lote_id, withdrawal_id, stark_transfer_id, valor, status)
+                VALUES ($1, $2, $3, $4, 'processando')
+              `, [loteId, s.id, transferCriada.id, valorFinal]);
+
+              await autoClient.query('COMMIT');
+
+              novoSaque.status = novoStatus;
+              novoSaque.stark_status = 'processando';
+              novoSaque.stark_transfer_id = transferCriada.id;
+              novoSaque.stark_lote_id = loteId;
+
+              modoAutoOk = true;
+              console.log(`✅ [Auto-Saque] Saque #${novoSaque.id} pago via Stark (transfer ${transferCriada.id}, lote ${loteId})`);
+            }
+          }
+        } catch (errAuto) {
+          try { await autoClient.query('ROLLBACK'); } catch(_) {}
+          // Se modoAutoErro já foi setado acima, mantém. Senão, usa a mensagem do exception.
+          if (!modoAutoErro) modoAutoErro = errAuto.message || 'erro desconhecido';
+          // ⚠️ Importante: NÃO propaga erro pro motoboy. Saque fica em
+          // 'aguardando_pagamento_stark' e o cron pega normalmente.
+        } finally {
+          autoClient.release();
+        }
+      }
+    }
+    // ==================== FIM MODO AUTO-SAQUE ====================
+
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', novoSaque.id, {
       valor: valorArredondado,
@@ -853,6 +1070,9 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       gratuidade: hasGratuity,
       restrito: isRestricted,
       auto_debito: novoSaque.debito === true ? 'ok' : 'falha',
+      auto_saque_tentado: modoAutoTentado,
+      auto_saque_ok: modoAutoOk,
+      auto_saque_erro: modoAutoErro,
       status_final: novoSaque.status
     });
 
@@ -2053,6 +2273,101 @@ console.log('✅ Módulo de Auditoria carregado!');
 // =====================================================
 // SISTEMA DE SOLICITAÇÃO DE CORRIDAS - INTEGRAÇÃO TUTTS
 // =====================================================
+
+  // ════════════════════════════════════════════════════════════════════
+  // CONFIGURAÇÕES DO MÓDULO FINANCEIRO (admin master only)
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // GET  /api/financial/config — retorna todas as chaves
+  // PUT  /api/financial/config — atualiza uma chave (body: { chave, valor })
+  //
+  // Permissão: 'admin' ou 'admin_master' (não admin_financeiro — config é decisão
+  // estratégica, pagamento é operacional). Auditoria via registrarAuditoria.
+  //
+  // Chaves conhecidas:
+  //   saques_habilitados (bool) — kill switch de solicitação de saque
+  //   saques_automaticos (bool) — modo auto: solicitação → débito → Stark imediato
+  //
+  // Modal de confirmação no frontend exige usuário digitar "CONFIRMAR" pra LIGAR
+  // saques_automaticos. Backend valida via header X-Confirm-Auto-Saque (defesa em
+  // profundidade).
+
+  function _ehAdminOuMaster(req) {
+    const role = req.user && req.user.role;
+    return role === 'admin' || role === 'admin_master';
+  }
+
+  router.get('/financial/config', verificarToken, async (req, res) => {
+    if (!_ehAdminOuMaster(req)) {
+      return res.status(403).json({ error: 'Apenas admin pode ler configurações financeiras' });
+    }
+    try {
+      const tudo = await financialConfig.getAll();
+      res.json({ ok: true, config: tudo });
+    } catch (err) {
+      console.error('❌ Erro ao ler financial_config:', err);
+      res.status(500).json({ error: 'Erro ao ler configurações' });
+    }
+  });
+
+  router.put('/financial/config', verificarToken, async (req, res) => {
+    if (!_ehAdminOuMaster(req)) {
+      return res.status(403).json({ error: 'Apenas admin pode alterar configurações financeiras' });
+    }
+
+    try {
+      const { chave, valor } = req.body || {};
+
+      // Whitelist de chaves alteráveis. Outras chaves rejeitam — evita gravar lixo.
+      const CHAVES_PERMITIDAS = new Set([
+        'saques_habilitados',
+        'saques_automaticos',
+      ]);
+      if (!chave || !CHAVES_PERMITIDAS.has(chave)) {
+        return res.status(400).json({ error: 'Chave de configuração inválida ou não permitida' });
+      }
+
+      // Validação: ambas chaves são booleanas → só aceita 'true' ou 'false' como string
+      const valorNorm = String(valor).trim().toLowerCase();
+      if (valorNorm !== 'true' && valorNorm !== 'false') {
+        return res.status(400).json({ error: 'Valor inválido (esperado: "true" ou "false")' });
+      }
+
+      // 🛡️ Proteção extra ao LIGAR saques_automaticos: exige header X-Confirm-Auto-Saque
+      // O frontend envia esse header só depois do usuário digitar "CONFIRMAR" no modal.
+      if (chave === 'saques_automaticos' && valorNorm === 'true') {
+        const confirm = req.headers['x-confirm-auto-saque'] || '';
+        if (String(confirm).toUpperCase() !== 'SIM') {
+          return res.status(428).json({
+            error: 'Ligar saques automáticos exige confirmação explícita. Envie o header X-Confirm-Auto-Saque: SIM.',
+            requer_confirmacao: true,
+          });
+        }
+      }
+
+      const usuario = req.user.fullName || req.user.username || `id:${req.user.id}`;
+      await financialConfig.set(chave, valorNorm, usuario);
+
+      // Auditoria
+      try {
+        await registrarAuditoria(req, 'FINANCIAL_CONFIG_UPDATE', AUDIT_CATEGORIES.FINANCIAL, 'financial_config', chave, {
+          chave,
+          valor_novo: valorNorm,
+          alterado_por: usuario,
+        });
+      } catch (errAud) {
+        console.warn('⚠️ Falha ao registrar auditoria de config:', errAud.message);
+      }
+
+      // Log claro na produção pra ficar fácil rastrear no Railway
+      console.log(`⚙️  [FIN-CONFIG] ${usuario} alterou ${chave}=${valorNorm}`);
+
+      res.json({ ok: true, chave, valor: valorNorm });
+    } catch (err) {
+      console.error('❌ Erro ao atualizar financial_config:', err);
+      res.status(500).json({ error: 'Erro ao atualizar configuração' });
+    }
+  });
 
   return router;
 }
