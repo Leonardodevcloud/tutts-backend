@@ -1030,21 +1030,41 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
               const loteId = loteResult.rows[0].id;
 
               // ── Montar transfer ──
+              // 🐛 FIX 2026-04-30: alinhar com o fluxo manual (stark.routes.js).
+              // Diferenças que estavam causando "invalidJson":
+              //   1. taxId era do CPF cadastrado, deveria ser do DICT (taxIdMismatch quando
+              //      a chave Pix pertence a outra pessoa — caso de chave aleatória)
+              //   2. faltavam fallbacks pra dictKey.ispb / branchCode / accountNumber
+              //   3. faltava externalId (idempotência da Stark)
+              //   4. faltava usar new starkbank.Transfer(...) — algumas versões do SDK
+              //      validam o objeto através do construtor.
+              // Usa taxId do DICT (titular real da chave). Fallback pro cadastrado se DICT
+              // não retornar (raro). Mesmo padrão do stark.routes.js linha 574.
+              const cpfFormatado = cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+              const taxIdFinal = dictKey.taxId || cpfFormatado;
+              if (dictKey.taxId && dictKey.taxId !== cpfFormatado) {
+                const _maskCadastro = cpfFormatado.slice(0, 3) + '***' + cpfFormatado.slice(-2);
+                const _maskDict     = String(dictKey.taxId).slice(0, 3) + '***' + String(dictKey.taxId).slice(-2);
+                console.warn(`⚠️ [Auto-Saque] CPF divergente saque #${novoSaque.id}: cadastro=${_maskCadastro}, DICT=${_maskDict} (${dictKey.name}). Usando DICT.`);
+              }
               const transferData = {
-                amount:      Math.round(valorFinal * 100), // Stark espera centavos
-                taxId:       cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4'),
-                name:        (dictKey.name || s.user_name || 'Profissional').slice(0, 80),
-                bankCode:    dictKey.bankCode,
-                branchCode:  dictKey.branchCode,
-                accountNumber: dictKey.accountNumber,
-                accountType: dictKey.accountType || 'checking',
-                tags:        ['auto-saque', `withdrawal-${s.id}`, `motoboy-${s.user_cod}`],
+                amount:        Math.round(valorFinal * 100),
+                name:          (s.user_name || dictKey.name || 'Profissional').slice(0, 80),
+                taxId:         taxIdFinal,
+                bankCode:      dictKey.ispb || '20018183',
+                branchCode:    dictKey.branchCode || '0001',
+                accountNumber: dictKey.accountNumber || chaveDict,
+                accountType:   dictKey.accountType || 'checking',
+                externalId:    `tutts-saque-${s.id}`,
+                tags:          ['auto-saque', `lote:${loteId}`, `saque:${s.id}`, `motoboy:${s.user_cod}`],
               };
 
               // ── Disparar transfer ──
               let transferCriada;
               try {
-                const resultados = await starkbank.transfer.create([transferData]);
+                // Usa new starkbank.Transfer() pra alinhar com fluxo manual
+                const transferObj = new starkbank.Transfer(transferData);
+                const resultados = await starkbank.transfer.create([transferObj]);
                 transferCriada = resultados[0];
               } catch (errTransfer) {
                 // Marca lote como erro, ROLLBACK do INSERT do lote, deixa saque no fluxo manual
