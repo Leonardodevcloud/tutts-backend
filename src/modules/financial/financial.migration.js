@@ -239,6 +239,34 @@ async function initFinancialTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_limit_lib_user_ciclo ON withdrawal_limit_liberacoes(user_cod, ciclo_inicio, status)`).catch(() => {});
     console.log('✅ Índices withdrawal_limit_liberacoes criados/verificados');
 
+    // ==================== TABELA: FINANCIAL_CONFIG ====================
+    // 2026-04: Toggles de configuração do módulo financeiro.
+    //   - saques_habilitados: kill switch global de solicitações de saque
+    //   - saques_automaticos: liga modo auto (solicitação → débito → Stark imediato sem admin)
+    // Cada chave armazena valor como TEXT (use 'true'/'false' pra booleans).
+    // Auditoria via tabela admin_audit_log (registrarAuditoria) — não duplicamos histórico aqui.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS financial_config (
+        chave VARCHAR(64) PRIMARY KEY,
+        valor TEXT NOT NULL,
+        descricao TEXT,
+        updated_by VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Tabela financial_config verificada');
+
+    // Seed das chaves padrão (idempotente)
+    await pool.query(`
+      INSERT INTO financial_config (chave, valor, descricao) VALUES
+        ('saques_habilitados', 'true',  'Quando false, motoboys recebem 403 ao solicitar saque (kill switch).'),
+        ('saques_automaticos', 'false', 'Quando true, saques aprovados pagam automaticamente via Stark Bank sem revisão admin.')
+      ON CONFLICT (chave) DO NOTHING
+    `).catch((e) => {
+      console.warn('⚠️ Seed financial_config falhou (pode ser race em deploy concorrente):', e.message);
+    });
+    console.log('✅ Seed financial_config aplicado (se ainda não existia)');
+
 }
 
 module.exports = { initFinancialTables };
