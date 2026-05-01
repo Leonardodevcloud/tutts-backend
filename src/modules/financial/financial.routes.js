@@ -81,6 +81,18 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
     return sdk;
   }
 
+  // ==================== HELPER: NOTIFICAÇÃO WHATSAPP DE FALHA AUTO-SAQUE ====================
+  // 🆕 2026-04-30: quando o auto-saque falha e cai pro fluxo manual, notifica
+  // o grupo do financeiro no WhatsApp. Reusa o whatsapp.service.js que já existe
+  // e a env var EVOLUTION_GROUP_ID que já tá configurada (mesmo grupo das
+  // notificações de lote gerado / finalizado / resumo diário).
+  //
+  // Config necessária no Railway (já existe pra outras notificações):
+  //   - EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE
+  //   - EVOLUTION_GROUP_ID (mesmo grupo do financeiro)
+  //   - WHATSAPP_NOTIF_ATIVO=true
+  const { notificarFalhaAutoSaque } = require('./routes/whatsapp.service');
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -1167,6 +1179,20 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       }
     }
     // ==================== FIM MODO AUTO-SAQUE ====================
+
+    // 🆕 2026-04-30: Notificar grupo financeiro no WhatsApp APENAS quando
+    // o auto-saque foi tentado MAS falhou (caiu pro fluxo manual).
+    // Não notifica quando saques_automaticos=false ou quando deu sucesso.
+    // Fire-and-forget — sem await pra não atrasar resposta pro motoboy.
+    if (modoAutoTentado && !modoAutoOk) {
+      notificarFalhaAutoSaque({
+        saqueId: novoSaque.id,
+        motoboyNome: novoSaque.user_name || `Prof ${novoSaque.user_cod}`,
+        motoboyCod: novoSaque.user_cod,
+        valor: novoSaque.final_amount,
+        erro: modoAutoErro
+      }).catch(() => {}); // silencioso (helper já trata internamente)
+    }
 
     // Registrar auditoria
     await registrarAuditoria(req, 'WITHDRAWAL_CREATE', AUDIT_CATEGORIES.FINANCIAL, 'withdrawals', novoSaque.id, {
