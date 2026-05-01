@@ -2297,6 +2297,36 @@ console.log('✅ Módulo de Auditoria carregado!');
     return role === 'admin' || role === 'admin_master';
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  // STATUS PÚBLICO DE SAQUES (qualquer usuário autenticado)
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // GET /api/financial/saques-status — retorna { habilitados, mensagem }
+  //
+  // Endpoint pro frontend do MOTOBOY consultar antes de mostrar o botão de
+  // solicitar saque. Não expõe outras configs do financeiro.
+  //
+  // Permissão: qualquer user autenticado (motoboy ou admin).
+  // Cache: financialConfig.getBool já cacheia por 30s, então rajada de motoboys
+  // chegando ao mesmo tempo gera 1 query no DB.
+
+  router.get('/financial/saques-status', verificarToken, async (req, res) => {
+    try {
+      const habilitados = await financialConfig.getBool('saques_habilitados', true);
+      res.json({
+        habilitados: habilitados,
+        mensagem: habilitados
+          ? 'Saques disponíveis normalmente.'
+          : 'Saques temporariamente indisponíveis. Tente novamente mais tarde.',
+      });
+    } catch (err) {
+      console.error('❌ Erro ao ler saques-status:', err);
+      // Falha-aberta: se não conseguimos ler a config, presumimos habilitados
+      // (mesma postura do POST /withdrawals — não trava motoboy por bug de leitura).
+      res.json({ habilitados: true, mensagem: 'Saques disponíveis normalmente.' });
+    }
+  });
+
   router.get('/financial/config', verificarToken, async (req, res) => {
     if (!_ehAdminOuMaster(req)) {
       return res.status(403).json({ error: 'Apenas admin pode ler configurações financeiras' });
