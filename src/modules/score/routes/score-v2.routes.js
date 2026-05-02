@@ -31,6 +31,8 @@ const {
   avaliarMotoboy,
   rodarSorteiosMensais,
 } = require('../score-v2.service');
+// 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
+const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
 
 function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
@@ -69,16 +71,12 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // ============================================================
   router.get('/score-v2/admin/regioes-disponiveis', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      // Pega regiões distintas do CRM com pelo menos 1 motoboy ativo
-      const result = await pool.query(`
-        SELECT DISTINCT regiao,
-          COUNT(*)::int AS total_motoboys
-        FROM crm_leads_capturados
-        WHERE regiao IS NOT NULL AND regiao <> ''
-        GROUP BY regiao
-        ORDER BY regiao
-      `);
-      res.json(result.rows);
+      // 🚀 Usa helper que retorna regiões CRM + Planilha (deduplicadas)
+      const regioes = await listarRegioesCompletas(pool);
+      // Mapeia pro formato esperado pelo frontend ({ regiao, total_motoboys })
+      // Como vem do helper sem contagem, fica null (admin não usa esse campo)
+      const result = regioes.map(r => ({ regiao: r, total_motoboys: null }));
+      res.json(result);
     } catch (err) {
       console.error('❌ [Score v2] /regioes-disponiveis:', err);
       res.status(500).json({ error: 'Erro', details: err.message });

@@ -23,6 +23,11 @@
 
 'use strict';
 
+// 🚀 2026-05: usa o helper compartilhado que já tem cascata
+//   CRM → Planilha Google Sheets → disponibilidade_linhas → users
+// (mesmo que outros módulos como avisos.routes.js já usam)
+const { buscarProfissional } = require('../../shared/utils/profissionaisLookup');
+
 // ============================================================
 // CONSTANTES
 // ============================================================
@@ -356,56 +361,28 @@ function isoWeek(date) {
  * Retorno: { nivel, stats, progresso, mudou, bonus_lancado, regiao_configurada }
  */
 async function avaliarMotoboy(pool, codProf) {
-  // 1. Identifica motoboy + região
-  // 🔧 FIX: regiao NÃO está em users — vem de crm_leads_capturados.
-  // Faz LEFT JOIN pra pegar nome do users (mais confiável) e regiao do CRM.
-  // Tenta variações de tipos (cod_profissional pode ser VARCHAR ou INT).
+  // 1. Identifica motoboy + região via helper compartilhado
+  // 🚀 2026-05: usa profissionaisLookup.buscarProfissional() que faz
+  // cascata CRM → Planilha Google Sheets → disponibilidade_linhas → users.
+  // Mesma fonte usada por avisos, promo-novatos, indicações.
   let nome = null;
   let regiao = null;
+  let fonte = null;
+
   try {
-    const profQ = await pool.query(`
-      SELECT u.full_name AS nome_user, c.nome AS nome_crm, c.regiao
-      FROM users u
-      LEFT JOIN crm_leads_capturados c ON LOWER(c.cod) = LOWER(u.cod_profissional)
-      WHERE LOWER(u.cod_profissional) = LOWER($1)
-      LIMIT 1
-    `, [String(codProf)]);
-    if (profQ.rows.length > 0) {
-      nome = profQ.rows[0].nome_user || profQ.rows[0].nome_crm;
-      regiao = profQ.rows[0].regiao;
+    const prof = await buscarProfissional(pool, codProf);
+    if (prof) {
+      nome = prof.nome;
+      regiao = prof.regiao || prof.cidade;
+      fonte = prof.origem;
     }
   } catch (err) {
-    console.warn('[score-v2] users JOIN crm falhou:', err.message);
+    console.warn('[score-v2] buscarProfissional falhou:', err.message);
   }
 
-  // Fallback 1: só CRM (caso o motoboy não tenha row em users)
-  if (!nome) {
-    try {
-      const crmQ = await pool.query(
-        `SELECT nome, regiao FROM crm_leads_capturados WHERE LOWER(cod) = LOWER($1) LIMIT 1`,
-        [String(codProf)]
-      );
-      if (crmQ.rows.length > 0) {
-        nome = crmQ.rows[0].nome;
-        regiao = crmQ.rows[0].regiao;
-      }
-    } catch (err) {
-      console.warn('[score-v2] CRM fallback falhou:', err.message);
-    }
-  }
+  console.log(`[score-v2] cod=${codProf} fonte=${fonte} nome="${nome}" regiao="${regiao}"`);
 
-  // Fallback 2: só users (caso o motoboy não esteja no CRM)
-  if (!nome) {
-    try {
-      const usersQ = await pool.query(
-        `SELECT full_name AS nome FROM users WHERE LOWER(cod_profissional) = LOWER($1) LIMIT 1`,
-        [String(codProf)]
-      );
-      if (usersQ.rows.length > 0) nome = usersQ.rows[0].nome;
-    } catch (_) {}
-  }
-
-  if (!nome) {
+  if (!nome && !regiao) {
     return { erro: 'profissional_nao_encontrado', cod_prof: codProf };
   }
 
