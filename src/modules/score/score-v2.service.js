@@ -43,6 +43,18 @@ const NIVEL_3 = {
 const HORA_CORTE_NOTURNO = 16; // "após 16h"
 const JANELA_DIAS = 28;
 
+/**
+ * 🔧 Helper de normalização de região pra SQL.
+ * Match case + acento + espaço insensitive.
+ * Use assim:
+ *   `WHERE ${SQL_NORM_REGIAO('coluna')} = ${SQL_NORM_REGIAO('$1::text')}`
+ */
+const ACENTOS_DE = 'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ';
+const ACENTOS_PARA = 'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy';
+function SQL_NORM_REGIAO(expr) {
+  return `TRIM(UPPER(translate(${expr}, '${ACENTOS_DE}', '${ACENTOS_PARA}')))`;
+}
+
 // ============================================================
 // CÁLCULO DE NÍVEL (rolling 28d)
 // ============================================================
@@ -263,7 +275,8 @@ async function lancarBonusSeAplicavel(pool, { codProf, nomeProf, regiao, nivel }
 
   // Busca config da região (pra teto customizado)
   const cfg = await pool.query(
-    `SELECT saque_teto_n2, saque_teto_n3, ativo FROM score_config_regiao WHERE UPPER(regiao) = UPPER($1)`,
+    `SELECT saque_teto_n2, saque_teto_n3, ativo FROM score_config_regiao
+     WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}`,
     [regiao || '']
   );
   if (cfg.rows.length === 0 || !cfg.rows[0].ativo) {
@@ -397,20 +410,34 @@ async function avaliarMotoboy(pool, codProf) {
   }
 
   // 2. Confere se a região tem score ativo
+  // 🔧 FIX (2026-05): match agressivo case + acentos + espaços via SQL_NORM_REGIAO.
+  // Antes só fazia UPPER(); falhava com "Salvador " vs "Salvador" ou "Goiânia" vs "GOIANIA".
   let regiaoConfigurada = false;
+  let regiaoConfig = null;
   if (regiao) {
-    const cfg = await pool.query(
-      `SELECT ativo, niveis_ativos FROM score_config_regiao WHERE UPPER(regiao) = UPPER($1)`,
-      [regiao]
-    );
+    const cfg = await pool.query(`
+      SELECT id, regiao, ativo, niveis_ativos FROM score_config_regiao
+      WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}
+      LIMIT 1
+    `, [regiao]);
     regiaoConfigurada = cfg.rows.length > 0 && cfg.rows[0].ativo === true;
+    if (cfg.rows.length > 0) regiaoConfig = cfg.rows[0];
+    console.log(`[score-v2] cod=${codProf} regiao_motoboy="${regiao}" config_match=${cfg.rows.length > 0 ? `id${cfg.rows[0].id} regiao="${cfg.rows[0].regiao}" ativo=${cfg.rows[0].ativo}` : 'NENHUM'}`);
+  } else {
+    console.log(`[score-v2] cod=${codProf} sem regiao no CRM`);
   }
 
   if (!regiaoConfigurada) {
     return {
       regiao_configurada: false,
       regiao,
-      mensagem: 'Score não está disponível na sua região',
+      mensagem: regiao
+        ? `Score não está ativo para a região "${regiao}"`
+        : 'Sua região não está cadastrada no sistema',
+      debug: {
+        regiao_motoboy: regiao,
+        config_encontrada: regiaoConfig,
+      },
     };
   }
 
@@ -488,7 +515,7 @@ async function rodarSorteiosMensais(pool, mesRef) {
         const candidatos = await pool.query(`
           SELECT cod_prof, nome_prof
           FROM score_nivel_motoboy
-          WHERE UPPER(regiao) = UPPER($1)
+          WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}
             AND nivel_atual = $2
         `, [r.regiao, nivel]);
 
