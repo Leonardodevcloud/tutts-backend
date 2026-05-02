@@ -30,7 +30,7 @@ const express = require('express');
 const {
   avaliarMotoboy,
   rodarSorteiosMensais,
-} = require('./score-v2.service');
+} = require('../score-v2.service');
 
 function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
