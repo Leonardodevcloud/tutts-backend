@@ -47,7 +47,8 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       const resultado = await avaliarMotoboy(pool, codProf);
       res.json(resultado);
     } catch (err) {
-      console.error('❌ [Score v2] /meu-nivel:', err);
+      console.error('❌ [Score v2] /meu-nivel cod=' + (req.user?.codProfissional || '?') + ':', err.message);
+      console.error(err.stack);
       res.status(500).json({ error: 'Erro ao calcular nível', details: err.message });
     }
   });

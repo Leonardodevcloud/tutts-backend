@@ -65,15 +65,22 @@ const JANELA_DIAS = 28;
  *   }
  */
 async function calcularNivelMotoboy(pool, codProf) {
-  // Query única que retorna 3 contagens da janela 28d:
-  //   total_entregas: total de OS finalizadas
-  //   dias_16h: dias distintos com pelo menos 1 entrega solicitada após 16h
-  //   pct_prazo: % de OS dentro do prazo
+  // Query única que retorna 3 contagens da janela 28d.
+  // 🔧 FIX (2026-05): protege parse + INTERVAL explícito (evita ambiguidade do parser)
+  const codProfInt = parseInt(codProf, 10);
+  if (!Number.isFinite(codProfInt)) {
+    console.warn('[score-v2] cod_prof não é número:', codProf);
+    return {
+      nivel: 1,
+      stats: { entregas: 0, dias_16h: 0, pct_prazo: 0 },
+      progresso: montarProgresso({ entregas: 0, dias_16h: 0, pct_prazo: 0 }, 2),
+    };
+  }
   const result = await pool.query(`
     SELECT
       COUNT(*)::int AS total_entregas,
       COUNT(DISTINCT data_solicitado) FILTER (
-        WHERE EXTRACT(HOUR FROM hora_solicitado) >= $2
+        WHERE hora_solicitado IS NOT NULL AND EXTRACT(HOUR FROM hora_solicitado) >= $2
       )::int AS dias_16h,
       CASE 
         WHEN COUNT(*) > 0 THEN
@@ -81,10 +88,10 @@ async function calcularNivelMotoboy(pool, codProf) {
         ELSE 0
       END AS pct_prazo
     FROM bi_entregas
-    WHERE cod_prof = $1::int
-      AND data_solicitado >= CURRENT_DATE - ($3::int - 1)
+    WHERE cod_prof = $1
+      AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
       AND data_solicitado <= CURRENT_DATE
-  `, [codProf, HORA_CORTE_NOTURNO, JANELA_DIAS]);
+  `, [codProfInt, HORA_CORTE_NOTURNO]);
 
   const stats = {
     entregas: parseInt(result.rows[0].total_entregas) || 0,
@@ -203,16 +210,17 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
     ].slice(-20); // mantém só últimas 20
   }
 
+  // 🔧 FIX (2026-05): timestamps via parâmetro explícito (evita SQL dinâmico frágil)
+  const subidaTs = subiu ? new Date() : null;
+  const descidaTs = desceu ? new Date() : null;
+
   await pool.query(`
     INSERT INTO score_nivel_motoboy (
       cod_prof, nome_prof, regiao, nivel_atual,
       entregas_periodo, dias_16h_periodo, pct_prazo,
       avaliado_em, ultima_subida_em, ultima_descida_em, historico_mudancas
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, NOW(),
-      ${subiu ? 'NOW()' : 'NULL'},
-      ${desceu ? 'NOW()' : 'NULL'},
-      $8::jsonb
+      $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10::jsonb
     )
     ON CONFLICT (cod_prof) DO UPDATE SET
       nome_prof = EXCLUDED.nome_prof,
@@ -222,12 +230,13 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
       dias_16h_periodo = EXCLUDED.dias_16h_periodo,
       pct_prazo = EXCLUDED.pct_prazo,
       avaliado_em = NOW(),
-      ${subiu ? 'ultima_subida_em = NOW(),' : ''}
-      ${desceu ? 'ultima_descida_em = NOW(),' : ''}
-      historico_mudancas = $8::jsonb
+      ultima_subida_em = COALESCE(EXCLUDED.ultima_subida_em, score_nivel_motoboy.ultima_subida_em),
+      ultima_descida_em = COALESCE(EXCLUDED.ultima_descida_em, score_nivel_motoboy.ultima_descida_em),
+      historico_mudancas = EXCLUDED.historico_mudancas
   `, [
     String(codProf), nomeProf, regiao, nivel,
     stats.entregas, stats.dias_16h, stats.pct_prazo,
+    subidaTs, descidaTs,
     JSON.stringify(novoHistorico),
   ]);
 
@@ -335,24 +344,57 @@ function isoWeek(date) {
  */
 async function avaliarMotoboy(pool, codProf) {
   // 1. Identifica motoboy + região
-  const profQ = await pool.query(`
-    SELECT cod_profissional AS cod_prof, full_name AS nome, regiao
-    FROM users
-    WHERE cod_profissional = $1
-    LIMIT 1
-  `, [String(codProf)]);
-  if (profQ.rows.length === 0) {
-    // Fallback: tenta no CRM
-    const crmQ = await pool.query(
-      `SELECT codigo AS cod_prof, nome, regiao FROM crm_leads_capturados WHERE codigo = $1 LIMIT 1`,
-      [String(codProf)]
-    );
-    if (crmQ.rows.length === 0) {
-      return { erro: 'profissional_nao_encontrado' };
+  // 🔧 FIX: regiao NÃO está em users — vem de crm_leads_capturados.
+  // Faz LEFT JOIN pra pegar nome do users (mais confiável) e regiao do CRM.
+  // Tenta variações de tipos (cod_profissional pode ser VARCHAR ou INT).
+  let nome = null;
+  let regiao = null;
+  try {
+    const profQ = await pool.query(`
+      SELECT u.full_name AS nome_user, c.nome AS nome_crm, c.regiao
+      FROM users u
+      LEFT JOIN crm_leads_capturados c ON LOWER(c.codigo) = LOWER(u.cod_profissional)
+      WHERE LOWER(u.cod_profissional) = LOWER($1)
+      LIMIT 1
+    `, [String(codProf)]);
+    if (profQ.rows.length > 0) {
+      nome = profQ.rows[0].nome_user || profQ.rows[0].nome_crm;
+      regiao = profQ.rows[0].regiao;
     }
-    profQ.rows = crmQ.rows;
+  } catch (err) {
+    console.warn('[score-v2] users JOIN crm falhou:', err.message);
   }
-  const { nome, regiao } = profQ.rows[0];
+
+  // Fallback 1: só CRM (caso o motoboy não tenha row em users)
+  if (!nome) {
+    try {
+      const crmQ = await pool.query(
+        `SELECT nome, regiao FROM crm_leads_capturados WHERE LOWER(codigo) = LOWER($1) LIMIT 1`,
+        [String(codProf)]
+      );
+      if (crmQ.rows.length > 0) {
+        nome = crmQ.rows[0].nome;
+        regiao = crmQ.rows[0].regiao;
+      }
+    } catch (err) {
+      console.warn('[score-v2] CRM fallback falhou:', err.message);
+    }
+  }
+
+  // Fallback 2: só users (caso o motoboy não esteja no CRM)
+  if (!nome) {
+    try {
+      const usersQ = await pool.query(
+        `SELECT full_name AS nome FROM users WHERE LOWER(cod_profissional) = LOWER($1) LIMIT 1`,
+        [String(codProf)]
+      );
+      if (usersQ.rows.length > 0) nome = usersQ.rows[0].nome;
+    } catch (_) {}
+  }
+
+  if (!nome) {
+    return { erro: 'profissional_nao_encontrado', cod_prof: codProf };
+  }
 
   // 2. Confere se a região tem score ativo
   let regiaoConfigurada = false;
