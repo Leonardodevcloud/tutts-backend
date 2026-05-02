@@ -35,15 +35,18 @@ const { buscarProfissional, listarProfissionais } = require('../../shared/utils/
 // 🚀 2026-05: defaults aplicados quando a config da região NÃO tem valores customizados.
 // Baseados em dados reais (top performers tinham 5-15 dias após-16h, não 20).
 // Esses valores podem ser sobrescritos por região via score_config_regiao.
+//
+// 🔧 2026-05 v2: dias_16h_min agora é QTD TOTAL de entregas após 16h
+// (não mais "dias distintos com pelo menos 1"). Nome mantido pra compat com banco.
 const NIVEL_2_DEFAULT = {
   entregas_min: 80,
-  dias_16h_min: 8,
-  pct_prazo_min: 80, // simples ≥80% (tirei a faixa 85-90 que deixava gente em buraco)
+  dias_16h_min: 15, // qtd total de entregas após 16h no período (28d)
+  pct_prazo_min: 80,
 };
 
 const NIVEL_3_DEFAULT = {
   entregas_min: 150,
-  dias_16h_min: 12,
+  dias_16h_min: 20, // qtd total de entregas após 16h no período (28d)
   pct_prazo_min: 88,
 };
 
@@ -123,7 +126,7 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
   const result = await pool.query(`
     SELECT
       COUNT(*)::int AS total_entregas,
-      COUNT(DISTINCT data_solicitado) FILTER (
+      COUNT(*) FILTER (
         WHERE hora_solicitado IS NOT NULL AND EXTRACT(HOUR FROM hora_solicitado) >= $2
       )::int AS dias_16h,
       CASE 
@@ -136,6 +139,8 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
       AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
       AND data_solicitado <= CURRENT_DATE
   `, [codProfInt, HORA_CORTE_NOTURNO]);
+  // 🔧 2026-05: dias_16h agora é QUANTIDADE TOTAL de entregas após 16h
+  // (não mais "dias distintos"). Nome da chave/coluna mantido pra não migrar banco.
 
   const stats = {
     entregas: parseInt(result.rows[0].total_entregas) || 0,
@@ -184,7 +189,7 @@ function montarProgresso(stats, alvo, thresholds) {
     },
     {
       metrica: 'dias_16h',
-      label: 'Dias com entregas após 16h',
+      label: 'Entregas após 16h',
       atual: stats.dias_16h,
       meta: config.dias_16h_min,
       ok: stats.dias_16h >= config.dias_16h_min,

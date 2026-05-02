@@ -193,10 +193,10 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         saque_teto_n3 = 500,
         // 🚀 2026-05: thresholds configuráveis (defaults se não vier)
         n2_min_entregas = 80,
-        n2_min_dias_16h = 8,
+        n2_min_dias_16h = 15,
         n2_min_pct_prazo = 80,
         n3_min_entregas = 150,
-        n3_min_dias_16h = 12,
+        n3_min_dias_16h = 20,
         n3_min_pct_prazo = 88,
       } = req.body || {};
 
@@ -249,8 +249,8 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         regiao.trim(), ativo, JSON.stringify(niveisValidos),
         parseFloat(sorteio_valor_n2), parseFloat(sorteio_valor_n3),
         parseFloat(saque_teto_n2), parseFloat(saque_teto_n3),
-        intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 8), pct(n2_min_pct_prazo, 80),
-        intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 12), pct(n3_min_pct_prazo, 88),
+        intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 15), pct(n2_min_pct_prazo, 80),
+        intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 20), pct(n3_min_pct_prazo, 88),
         req.user.userId || req.user.email || 'admin',
       ]);
 

@@ -45,14 +45,15 @@ async function initScoreV2Tables(pool) {
     )
   `);
   // 🚀 2026-05: thresholds configuráveis por região (ALTER pra reinicialização idempotente)
-  // Defaults baseados em dados reais (top performers tinham 5-15 dias após-16h, não 20)
+  // 🔧 2026-05 v2: dias_16h_min agora é QTD TOTAL de entregas após 16h (não mais "dias distintos").
+  // Nome de coluna mantido pra não migrar; valor default aumentado (12 dias ≠ 60 entregas).
   await pool.query(`
     ALTER TABLE score_config_regiao
       ADD COLUMN IF NOT EXISTS n2_min_entregas INT DEFAULT 80,
-      ADD COLUMN IF NOT EXISTS n2_min_dias_16h INT DEFAULT 8,
+      ADD COLUMN IF NOT EXISTS n2_min_dias_16h INT DEFAULT 15,
       ADD COLUMN IF NOT EXISTS n2_min_pct_prazo DECIMAL(5,2) DEFAULT 80.00,
       ADD COLUMN IF NOT EXISTS n3_min_entregas INT DEFAULT 150,
-      ADD COLUMN IF NOT EXISTS n3_min_dias_16h INT DEFAULT 12,
+      ADD COLUMN IF NOT EXISTS n3_min_dias_16h INT DEFAULT 20,
       ADD COLUMN IF NOT EXISTS n3_min_pct_prazo DECIMAL(5,2) DEFAULT 88.00
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_cfg_ativo ON score_config_regiao(ativo) WHERE ativo = true').catch(() => {});
