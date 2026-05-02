@@ -51,7 +51,7 @@ const { createPerformanceIndices } = require('./src/shared/migrations/performanc
 const { createBiMaterializedViews, refreshBiMaterializedViews } = require('./src/shared/migrations/bi-materialized-views');
 
 // ─── Modules ──────────────────────────────────────────────
-const { initScoreRoutes, initScoreTables, initScoreCron } = require('./src/modules/score');
+const { initScoreRoutes, initScoreTables, initScoreCron, initScoreV2Tables, createScoreV2Routes, scoreV2Service } = require('./src/modules/score');
 const { initAuditRoutes, initAuditTables } = require('./src/modules/audit');
 const { initCrmRoutes, initCrmTables } = require('./src/modules/crm');
 const { initSocialRoutes, initSocialTables } = require('./src/modules/social');
@@ -416,6 +416,8 @@ app.use('/api', createBootstrapRoutes(pool, verificarToken, verificarAdmin, veri
 
 // Score
 app.use('/api/score', initScoreRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+// 🚀 Score v2 (2026-05) — reestruturação completa por região + janela 28d rolling
+app.use('/api', createScoreV2Routes(pool, verificarToken, verificarAdmin));
 
 // Audit
 app.use('/api/audit', initAuditRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
@@ -696,6 +698,8 @@ async function initDatabase() {
     try { await initSocialTables(pool); } catch (e) { console.error('⚠️ Social tables error:', e.message); }
     try { await initOperacionalTables(pool); } catch (e) { console.error('⚠️ Operacional tables error:', e.message); }
     try { await initScoreTables(pool); } catch (e) { console.error('⚠️ Score tables error:', e.message); }
+    // 🚀 Score v2 (2026-05) — novas 4 tabelas
+    try { await initScoreV2Tables(pool); } catch (e) { console.error('⚠️ Score v2 tables error:', e.message); }
     try { await initAuditTables(pool); } catch (e) { console.error('⚠️ Audit tables error:', e.message); }
     try { await initCsTables(pool); } catch (e) { console.error('⚠️ CS tables error:', e.message); }
     try { await initAgentTables(pool); } catch (e) { console.error('⚠️ Agent tables error:', e.message); }
@@ -769,7 +773,24 @@ initDatabase().then(async () => {
   if (process.env.WORKER_ENABLED === 'true') {
     console.log('⏰ Crons desativados no server (rodando no worker separado)');
   } else {
-    // initScoreCron(cron, pool); // 🔒 Desativado — gratuidades do score não são mais aplicadas automaticamente
+    // initScoreCron(cron, pool); // 🔒 Desativado — gratuidades do score v1 não são mais aplicadas automaticamente
+
+    // 🚀 Score v2 (2026-05): cron mensal de sorteio
+    // Roda dia 1 do mês 00:05, sorteia 1 vencedor por (região, nível) ativo
+    // do MÊS ANTERIOR. UNIQUE constraint protege contra dupla execução.
+    cron.schedule('5 0 1 * *', withCronLock(pool, 'scoreV2Sorteio', async () => {
+      try {
+        const agora = new Date();
+        // Mês ANTERIOR (sorteio do que terminou)
+        const mesAnt = new Date(agora.getFullYear(), agora.getMonth() - 1, 1);
+        const mesRef = `${mesAnt.getFullYear()}-${String(mesAnt.getMonth() + 1).padStart(2, '0')}`;
+        console.log(`🎲 [Cron Score v2] Disparando sorteio mensal para ${mesRef}...`);
+        const resultados = await scoreV2Service.rodarSorteiosMensais(pool, mesRef);
+        console.log(`🎲 [Cron Score v2] Sorteios concluídos: ${resultados.length} vencedores`);
+      } catch (err) {
+        console.error('❌ [Cron Score v2] Erro no sorteio:', err);
+      }
+    }), { timezone: 'America/Bahia' });
 
     // ════════════════════════════════════════════════════════════
     // WhatsApp module — import compartilhado para todos os crons
