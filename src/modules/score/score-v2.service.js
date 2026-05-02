@@ -366,7 +366,7 @@ async function avaliarMotoboy(pool, codProf) {
     const profQ = await pool.query(`
       SELECT u.full_name AS nome_user, c.nome AS nome_crm, c.regiao
       FROM users u
-      LEFT JOIN crm_leads_capturados c ON LOWER(c.codigo) = LOWER(u.cod_profissional)
+      LEFT JOIN crm_leads_capturados c ON LOWER(c.cod) = LOWER(u.cod_profissional)
       WHERE LOWER(u.cod_profissional) = LOWER($1)
       LIMIT 1
     `, [String(codProf)]);
@@ -382,7 +382,7 @@ async function avaliarMotoboy(pool, codProf) {
   if (!nome) {
     try {
       const crmQ = await pool.query(
-        `SELECT nome, regiao FROM crm_leads_capturados WHERE LOWER(codigo) = LOWER($1) LIMIT 1`,
+        `SELECT nome, regiao FROM crm_leads_capturados WHERE LOWER(cod) = LOWER($1) LIMIT 1`,
         [String(codProf)]
       );
       if (crmQ.rows.length > 0) {
