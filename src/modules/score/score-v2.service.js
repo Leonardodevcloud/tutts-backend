@@ -32,18 +32,44 @@ const { buscarProfissional, listarProfissionais } = require('../../shared/utils/
 // CONSTANTES
 // ============================================================
 
-const NIVEL_2 = {
-  entregas_min: 150,
-  dias_16h_min: 15,
-  pct_prazo_min: 85,
-  pct_prazo_max: 90, // exclusivo (<90)
+// 🚀 2026-05: defaults aplicados quando a config da região NÃO tem valores customizados.
+// Baseados em dados reais (top performers tinham 5-15 dias após-16h, não 20).
+// Esses valores podem ser sobrescritos por região via score_config_regiao.
+const NIVEL_2_DEFAULT = {
+  entregas_min: 80,
+  dias_16h_min: 8,
+  pct_prazo_min: 80, // simples ≥80% (tirei a faixa 85-90 que deixava gente em buraco)
 };
 
-const NIVEL_3 = {
-  entregas_min: 200,
-  dias_16h_min: 20,
-  pct_prazo_min: 90, // ≥90
+const NIVEL_3_DEFAULT = {
+  entregas_min: 150,
+  dias_16h_min: 12,
+  pct_prazo_min: 88,
 };
+
+// Aliases legados (mantidos pra exports/compat — não usar internamente)
+const NIVEL_2 = NIVEL_2_DEFAULT;
+const NIVEL_3 = NIVEL_3_DEFAULT;
+
+/**
+ * Resolve thresholds a partir da config da região.
+ * Se algum campo está NULL/undefined na config, usa o default.
+ * Se config inteira está faltando (null), retorna defaults puros.
+ */
+function resolverThresholds(cfg) {
+  return {
+    n2: {
+      entregas_min: cfg?.n2_min_entregas != null ? parseInt(cfg.n2_min_entregas, 10) : NIVEL_2_DEFAULT.entregas_min,
+      dias_16h_min: cfg?.n2_min_dias_16h != null ? parseInt(cfg.n2_min_dias_16h, 10) : NIVEL_2_DEFAULT.dias_16h_min,
+      pct_prazo_min: cfg?.n2_min_pct_prazo != null ? parseFloat(cfg.n2_min_pct_prazo) : NIVEL_2_DEFAULT.pct_prazo_min,
+    },
+    n3: {
+      entregas_min: cfg?.n3_min_entregas != null ? parseInt(cfg.n3_min_entregas, 10) : NIVEL_3_DEFAULT.entregas_min,
+      dias_16h_min: cfg?.n3_min_dias_16h != null ? parseInt(cfg.n3_min_dias_16h, 10) : NIVEL_3_DEFAULT.dias_16h_min,
+      pct_prazo_min: cfg?.n3_min_pct_prazo != null ? parseFloat(cfg.n3_min_pct_prazo) : NIVEL_3_DEFAULT.pct_prazo_min,
+    },
+  };
+}
 
 const HORA_CORTE_NOTURNO = 16; // "após 16h"
 const JANELA_DIAS = 28;
@@ -81,16 +107,17 @@ function SQL_NORM_REGIAO(expr) {
  *     }
  *   }
  */
-async function calcularNivelMotoboy(pool, codProf) {
-  // Query única que retorna 3 contagens da janela 28d.
-  // 🔧 FIX (2026-05): protege parse + INTERVAL explícito (evita ambiguidade do parser)
+async function calcularNivelMotoboy(pool, codProf, cfg = null) {
+  // Resolve thresholds (config da região OU defaults)
+  const thresholds = resolverThresholds(cfg);
+
   const codProfInt = parseInt(codProf, 10);
   if (!Number.isFinite(codProfInt)) {
     console.warn('[score-v2] cod_prof não é número:', codProf);
     return {
       nivel: 1,
       stats: { entregas: 0, dias_16h: 0, pct_prazo: 0 },
-      progresso: montarProgresso({ entregas: 0, dias_16h: 0, pct_prazo: 0 }, 2),
+      progresso: montarProgresso({ entregas: 0, dias_16h: 0, pct_prazo: 0 }, 2, thresholds),
     };
   }
   const result = await pool.query(`
@@ -116,19 +143,19 @@ async function calcularNivelMotoboy(pool, codProf) {
     pct_prazo: parseFloat(result.rows[0].pct_prazo) || 0,
   };
 
-  // Determina nível
+  // 🚀 2026-05: lógica nova SEM faixa (≥80% = N2, ≥88% sobe pra N3)
+  // Quem tem entregas/dias suficientes mas % menor que pct_prazo_min do N2 → fica N1
   let nivel = 1;
   if (
-    stats.entregas >= NIVEL_3.entregas_min &&
-    stats.dias_16h >= NIVEL_3.dias_16h_min &&
-    stats.pct_prazo >= NIVEL_3.pct_prazo_min
+    stats.entregas >= thresholds.n3.entregas_min &&
+    stats.dias_16h >= thresholds.n3.dias_16h_min &&
+    stats.pct_prazo >= thresholds.n3.pct_prazo_min
   ) {
     nivel = 3;
   } else if (
-    stats.entregas >= NIVEL_2.entregas_min &&
-    stats.dias_16h >= NIVEL_2.dias_16h_min &&
-    stats.pct_prazo >= NIVEL_2.pct_prazo_min &&
-    stats.pct_prazo < NIVEL_2.pct_prazo_max
+    stats.entregas >= thresholds.n2.entregas_min &&
+    stats.dias_16h >= thresholds.n2.dias_16h_min &&
+    stats.pct_prazo >= thresholds.n2.pct_prazo_min
   ) {
     nivel = 2;
   }
@@ -136,16 +163,16 @@ async function calcularNivelMotoboy(pool, codProf) {
   // Calcula progresso pro PRÓXIMO nível (mostrar barra ao motoboy)
   let progresso = null;
   if (nivel === 1) {
-    progresso = montarProgresso(stats, 2);
+    progresso = montarProgresso(stats, 2, thresholds);
   } else if (nivel === 2) {
-    progresso = montarProgresso(stats, 3);
+    progresso = montarProgresso(stats, 3, thresholds);
   }
 
-  return { nivel, stats, progresso };
+  return { nivel, stats, progresso, thresholds };
 }
 
-function montarProgresso(stats, alvo) {
-  const config = alvo === 3 ? NIVEL_3 : NIVEL_2;
+function montarProgresso(stats, alvo, thresholds) {
+  const config = alvo === 3 ? thresholds.n3 : thresholds.n2;
   const reqs = [
     {
       metrica: 'entregas',
@@ -153,7 +180,7 @@ function montarProgresso(stats, alvo) {
       atual: stats.entregas,
       meta: config.entregas_min,
       ok: stats.entregas >= config.entregas_min,
-      pct: Math.min(100, Math.round((stats.entregas / config.entregas_min) * 100)),
+      pct: Math.min(100, Math.round((stats.entregas / Math.max(config.entregas_min, 1)) * 100)),
     },
     {
       metrica: 'dias_16h',
@@ -161,32 +188,18 @@ function montarProgresso(stats, alvo) {
       atual: stats.dias_16h,
       meta: config.dias_16h_min,
       ok: stats.dias_16h >= config.dias_16h_min,
-      pct: Math.min(100, Math.round((stats.dias_16h / config.dias_16h_min) * 100)),
+      pct: Math.min(100, Math.round((stats.dias_16h / Math.max(config.dias_16h_min, 1)) * 100)),
     },
-  ];
-  if (alvo === 3) {
-    reqs.push({
+    {
       metrica: 'pct_prazo',
       label: '% no prazo',
       atual: stats.pct_prazo,
       meta: config.pct_prazo_min,
       ok: stats.pct_prazo >= config.pct_prazo_min,
-      pct: Math.min(100, Math.round((stats.pct_prazo / config.pct_prazo_min) * 100)),
+      pct: Math.min(100, Math.round((stats.pct_prazo / Math.max(config.pct_prazo_min, 1)) * 100)),
       sufixo: '%',
-    });
-  } else {
-    // N2 tem faixa: precisa estar entre 85 e 90
-    reqs.push({
-      metrica: 'pct_prazo',
-      label: '% no prazo (entre 85% e 90%)',
-      atual: stats.pct_prazo,
-      meta: config.pct_prazo_min,
-      ok: stats.pct_prazo >= config.pct_prazo_min && stats.pct_prazo < config.pct_prazo_max,
-      pct: Math.min(100, Math.round((stats.pct_prazo / config.pct_prazo_min) * 100)),
-      sufixo: '%',
-      faixa: true,
-    });
-  }
+    },
+  ];
   return { proximo_nivel: alvo, requisitos: reqs };
 }
 
@@ -392,8 +405,9 @@ async function avaliarMotoboy(pool, codProf) {
   let regiaoConfigurada = false;
   let regiaoConfig = null;
   if (regiao) {
+    // 🚀 Puxa TODAS as colunas da config (incluindo thresholds customizados)
     const cfg = await pool.query(`
-      SELECT id, regiao, ativo, niveis_ativos FROM score_config_regiao
+      SELECT * FROM score_config_regiao
       WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}
       LIMIT 1
     `, [regiao]);
@@ -418,8 +432,8 @@ async function avaliarMotoboy(pool, codProf) {
     };
   }
 
-  // 3. Calcula nível atual
-  const { nivel, stats, progresso } = await calcularNivelMotoboy(pool, codProf);
+  // 3. Calcula nível atual usando thresholds da região
+  const { nivel, stats, progresso, thresholds } = await calcularNivelMotoboy(pool, codProf, regiaoConfig);
 
   // 4. Persiste (snapshot + histórico de mudanças)
   const persistencia = await persistirNivelMotoboy(pool, {
@@ -440,6 +454,12 @@ async function avaliarMotoboy(pool, codProf) {
     nivel,
     stats,
     progresso,
+    thresholds, // 🚀 enviado pro frontend mostrar critérios reais da região no roadmap
+    // Valores monetários da config (pro roadmap mostrar)
+    sorteio_valor_n2: regiaoConfig?.sorteio_valor_n2 != null ? Number(regiaoConfig.sorteio_valor_n2) : 50,
+    sorteio_valor_n3: regiaoConfig?.sorteio_valor_n3 != null ? Number(regiaoConfig.sorteio_valor_n3) : 150,
+    saque_teto_n2: regiaoConfig?.saque_teto_n2 != null ? Number(regiaoConfig.saque_teto_n2) : 500,
+    saque_teto_n3: regiaoConfig?.saque_teto_n3 != null ? Number(regiaoConfig.saque_teto_n3) : 500,
     mudou: persistencia.mudou,
     subiu: persistencia.subiu,
     desceu: persistencia.desceu,

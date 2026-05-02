@@ -191,6 +191,13 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         sorteio_valor_n3 = 150,
         saque_teto_n2 = 500,
         saque_teto_n3 = 500,
+        // 🚀 2026-05: thresholds configuráveis (defaults se não vier)
+        n2_min_entregas = 80,
+        n2_min_dias_16h = 8,
+        n2_min_pct_prazo = 80,
+        n3_min_entregas = 150,
+        n3_min_dias_16h = 12,
+        n3_min_pct_prazo = 88,
       } = req.body || {};
 
       if (!regiao || !regiao.trim()) {
@@ -199,19 +206,30 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       if (!Array.isArray(niveis_ativos) || niveis_ativos.length === 0) {
         return res.status(400).json({ error: 'niveis_ativos deve ser array não-vazio' });
       }
-      // Valida que niveis_ativos só tem 2 e/ou 3
       const niveisValidos = niveis_ativos.filter(n => n === 2 || n === 3);
       if (niveisValidos.length === 0) {
         return res.status(400).json({ error: 'niveis_ativos deve conter 2 e/ou 3' });
       }
+
+      // Valida thresholds (sanity)
+      const intMin0 = (v, fb) => {
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) && n >= 0 ? n : fb;
+      };
+      const pct = (v, fb) => {
+        const n = parseFloat(v);
+        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : fb;
+      };
 
       const result = await pool.query(`
         INSERT INTO score_config_regiao (
           regiao, ativo, niveis_ativos,
           sorteio_valor_n2, sorteio_valor_n3,
           saque_teto_n2, saque_teto_n3,
+          n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
+          n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
           criado_por
-        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8)
+        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (regiao) DO UPDATE SET
           ativo = EXCLUDED.ativo,
           niveis_ativos = EXCLUDED.niveis_ativos,
@@ -219,16 +237,24 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           sorteio_valor_n3 = EXCLUDED.sorteio_valor_n3,
           saque_teto_n2 = EXCLUDED.saque_teto_n2,
           saque_teto_n3 = EXCLUDED.saque_teto_n3,
+          n2_min_entregas = EXCLUDED.n2_min_entregas,
+          n2_min_dias_16h = EXCLUDED.n2_min_dias_16h,
+          n2_min_pct_prazo = EXCLUDED.n2_min_pct_prazo,
+          n3_min_entregas = EXCLUDED.n3_min_entregas,
+          n3_min_dias_16h = EXCLUDED.n3_min_dias_16h,
+          n3_min_pct_prazo = EXCLUDED.n3_min_pct_prazo,
           atualizado_em = NOW()
         RETURNING *
       `, [
         regiao.trim(), ativo, JSON.stringify(niveisValidos),
         parseFloat(sorteio_valor_n2), parseFloat(sorteio_valor_n3),
         parseFloat(saque_teto_n2), parseFloat(saque_teto_n3),
+        intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 8), pct(n2_min_pct_prazo, 80),
+        intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 12), pct(n3_min_pct_prazo, 88),
         req.user.userId || req.user.email || 'admin',
       ]);
 
-      console.log(`✅ [Score v2] Config salva: ${regiao} (níveis ${niveisValidos.join(',')})`);
+      console.log(`✅ [Score v2] Config salva: ${regiao} (níveis ${niveisValidos.join(',')}) thresholds N2:${n2_min_entregas}/${n2_min_dias_16h}/${n2_min_pct_prazo}% N3:${n3_min_entregas}/${n3_min_dias_16h}/${n3_min_pct_prazo}%`);
 
       // 🚀 Dispara pré-avaliação em BACKGROUND (não bloqueia resposta).
       // Avalia todos os motoboys da região pra popular score_nivel_motoboy.
