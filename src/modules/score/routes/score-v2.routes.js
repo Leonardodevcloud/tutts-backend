@@ -67,6 +67,66 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   });
 
   // ============================================================
+  // MOTOBOY: lista das próprias entregas dos últimos 28 dias
+  // ============================================================
+  // Retorna entregas com status de prazo + agrupamento por dia.
+  // Usado na tela do motoboy pra ele ver detalhe das corridas.
+  router.get('/score-v2/minhas-entregas', verificarToken, async (req, res) => {
+    try {
+      const codProf = req.user.codProfissional || req.user.cod_profissional;
+      if (!codProf) {
+        return res.status(400).json({ error: 'Usuário sem cod_profissional' });
+      }
+      const codProfInt = parseInt(codProf, 10);
+      if (!Number.isFinite(codProfInt)) {
+        return res.json({ entregas: [], resumo_dia: [] });
+      }
+
+      // Lista detalhada
+      const entregas = await pool.query(`
+        SELECT 
+          os, num_pedido, data_solicitado, hora_solicitado,
+          cidade, bairro, endereco, nome_cliente, nome_fantasia,
+          dentro_prazo, tempo_execucao_minutos, distancia, valor_prof,
+          data_chegada, hora_chegada, data_saida, hora_saida
+        FROM bi_entregas
+        WHERE cod_prof = $1
+          AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
+          AND data_solicitado <= CURRENT_DATE
+        ORDER BY data_solicitado DESC, hora_solicitado DESC
+        LIMIT 500
+      `, [codProfInt]);
+
+      // Resumo agrupado por dia (pra cards do tipo timeline)
+      const resumoDia = await pool.query(`
+        SELECT 
+          data_solicitado AS dia,
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE dentro_prazo = true)::int AS no_prazo,
+          COUNT(*) FILTER (WHERE dentro_prazo = false)::int AS fora_prazo,
+          COUNT(*) FILTER (
+            WHERE hora_solicitado IS NOT NULL 
+              AND EXTRACT(HOUR FROM hora_solicitado) >= 16
+          )::int AS apos_16h
+        FROM bi_entregas
+        WHERE cod_prof = $1
+          AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
+          AND data_solicitado <= CURRENT_DATE
+        GROUP BY data_solicitado
+        ORDER BY data_solicitado DESC
+      `, [codProfInt]);
+
+      res.json({
+        entregas: entregas.rows,
+        resumo_dia: resumoDia.rows,
+      });
+    } catch (err) {
+      console.error('❌ [Score v2] /minhas-entregas:', err.message);
+      res.status(500).json({ error: 'Erro', details: err.message });
+    }
+  });
+
+  // ============================================================
   // ADMIN: regiões disponíveis (do CRM, ainda não configuradas)
   // ============================================================
   router.get('/score-v2/admin/regioes-disponiveis', verificarToken, verificarAdmin, async (req, res) => {
