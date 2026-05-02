@@ -559,14 +559,14 @@ async function rodarSorteiosMensais(pool, mesRef) {
  *
  * Match de região é case+acento+espaço insensitive (mesmo helper SQL).
  *
- * Em vez de processar 1000 motoboys em paralelo (estoura o pool), processa
- * em batches de 10. Total controlado por MAX_MOTOBOYS (default 500).
+ * Em vez de processar 5000 motoboys em paralelo (estoura o pool), processa
+ * em batches de 25. Total controlado por MAX_MOTOBOYS (default 5000).
  *
  * Retorno: { regiao, total_encontrados, processados, niveis: {1,2,3} }
  */
 async function avaliarRegiaoCompleta(pool, regiao, opts = {}) {
-  const MAX_MOTOBOYS = opts.maxMotoboys || 500;
-  const BATCH_SIZE = opts.batchSize || 10;
+  const MAX_MOTOBOYS = opts.maxMotoboys || 5000;
+  const BATCH_SIZE = opts.batchSize || 25;
 
   console.log(`🔄 [Score v2] Pré-avaliando regiao="${regiao}" (max ${MAX_MOTOBOYS}, batch ${BATCH_SIZE})`);
 

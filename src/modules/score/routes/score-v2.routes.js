@@ -328,26 +328,50 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   router.get('/score-v2/admin/motoboys-por-nivel', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { regiao, nivel } = req.query;
+      const limit = Math.min(parseInt(req.query.limit) || 1000, 5000);
+      const offset = Math.max(parseInt(req.query.offset) || 0, 0);
       const params = [];
       let where = '1=1';
       if (regiao) {
         params.push(regiao);
-        where += ` AND UPPER(regiao) = UPPER($${params.length})`;
+        // 🔧 FIX 2026-05: match case+acento+espaço insensitive (igual ao service)
+        where += ` AND TRIM(UPPER(translate(regiao,
+          'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ',
+          'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy')))
+          = TRIM(UPPER(translate($${params.length}::text,
+          'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ',
+          'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy')))`;
       }
       if (nivel) {
         params.push(parseInt(nivel));
         where += ` AND nivel_atual = $${params.length}`;
       }
+
+      // Contagem total (pra UI mostrar paginação)
+      const totalQ = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM score_nivel_motoboy WHERE ${where}`,
+        params
+      );
+      const total = totalQ.rows[0].total;
+
+      // Página atual
+      const paramsComLimit = [...params, limit, offset];
       const result = await pool.query(`
         SELECT cod_prof, nome_prof, regiao, nivel_atual,
           entregas_periodo, dias_16h_periodo, pct_prazo,
           avaliado_em, ultima_subida_em, ultima_descida_em
         FROM score_nivel_motoboy
         WHERE ${where}
-        ORDER BY nivel_atual DESC, entregas_periodo DESC
-        LIMIT 500
-      `, params);
-      res.json(result.rows);
+        ORDER BY nivel_atual DESC, entregas_periodo DESC, nome_prof
+        LIMIT $${paramsComLimit.length - 1} OFFSET $${paramsComLimit.length}
+      `, paramsComLimit);
+
+      res.json({
+        total,
+        limit,
+        offset,
+        rows: result.rows,
+      });
     } catch (err) {
       console.error('❌ [Score v2] /motoboys-por-nivel:', err);
       res.status(500).json({ error: 'Erro', details: err.message });
