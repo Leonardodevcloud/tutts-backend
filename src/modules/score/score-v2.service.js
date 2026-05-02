@@ -441,15 +441,19 @@ async function avaliarMotoboy(pool, codProf) {
   const { nivel, stats, progresso, thresholds } = await calcularNivelMotoboy(pool, codProf, regiaoConfig);
 
   // 4. Persiste (snapshot + histórico de mudanças)
+  // 🔧 FIX: usa a grafia canônica da config (regiaoConfig.regiao) em vez da do CRM/planilha,
+  // que pode ter variações como "GOIANIA" vs "Goiânia". Isso garante que todo motoboy da
+  // mesma região salva com o mesmo texto, e contagens/filtros ficam consistentes.
+  const regiaoCanonica = regiaoConfig?.regiao || regiao;
   const persistencia = await persistirNivelMotoboy(pool, {
-    codProf, nomeProf: nome, regiao, nivel, stats,
+    codProf, nomeProf: nome, regiao: regiaoCanonica, nivel, stats,
   });
 
   // 5. Se está em nível 2 ou 3, tenta lançar bônus do período (idempotente)
   let bonusLancado = null;
   if (nivel >= 2) {
     bonusLancado = await lancarBonusSeAplicavel(pool, {
-      codProf, nomeProf: nome, regiao, nivel,
+      codProf, nomeProf: nome, regiao: regiaoCanonica, nivel,
     });
   }
 

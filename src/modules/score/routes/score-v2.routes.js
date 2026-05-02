@@ -159,11 +159,18 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       `);
 
       // Pra cada config, pega contagem de motoboys por nível
+      // 🔧 FIX 2026-05: usa match case+acento+espaço insensitive (igual ao service).
+      // Antes só fazia UPPER() — ficava "Goiânia" != "GOIANIA" e contagem dava errado.
       const enriquecido = await Promise.all(result.rows.map(async (cfg) => {
         const counts = await pool.query(`
           SELECT nivel_atual, COUNT(*)::int AS total
           FROM score_nivel_motoboy
-          WHERE UPPER(regiao) = UPPER($1)
+          WHERE TRIM(UPPER(translate(regiao,
+            'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ',
+            'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy')))
+            = TRIM(UPPER(translate($1::text,
+            'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ',
+            'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy')))
           GROUP BY nivel_atual
         `, [cfg.regiao]);
         const porNivel = { 1: 0, 2: 0, 3: 0 };
