@@ -26,7 +26,7 @@
 // 🚀 2026-05: usa o helper compartilhado que já tem cascata
 //   CRM → Planilha Google Sheets → disponibilidade_linhas → users
 // (mesmo que outros módulos como avisos.routes.js já usam)
-const { buscarProfissional } = require('../../shared/utils/profissionaisLookup');
+const { buscarProfissional, listarProfissionais } = require('../../shared/utils/profissionaisLookup');
 
 // ============================================================
 // CONSTANTES
@@ -546,6 +546,92 @@ async function rodarSorteiosMensais(pool, mesRef) {
   return resultados;
 }
 
+// ============================================================
+// PRÉ-AVALIAÇÃO EM MASSA (popular score_nivel_motoboy de uma região)
+// ============================================================
+
+/**
+ * Avalia TODOS os motoboys de uma região (CRM + Planilha) de uma vez.
+ *
+ * Usado quando o admin salva uma config nova: dispara em background pra
+ * popular score_nivel_motoboy com todo mundo da região, sem esperar
+ * cada motoboy abrir a tela.
+ *
+ * Match de região é case+acento+espaço insensitive (mesmo helper SQL).
+ *
+ * Em vez de processar 1000 motoboys em paralelo (estoura o pool), processa
+ * em batches de 10. Total controlado por MAX_MOTOBOYS (default 500).
+ *
+ * Retorno: { regiao, total_encontrados, processados, niveis: {1,2,3} }
+ */
+async function avaliarRegiaoCompleta(pool, regiao, opts = {}) {
+  const MAX_MOTOBOYS = opts.maxMotoboys || 500;
+  const BATCH_SIZE = opts.batchSize || 10;
+
+  console.log(`🔄 [Score v2] Pré-avaliando regiao="${regiao}" (max ${MAX_MOTOBOYS}, batch ${BATCH_SIZE})`);
+
+  // 1. Lista todos os profissionais (CRM + Planilha)
+  let todos;
+  try {
+    todos = await listarProfissionais(pool);
+  } catch (err) {
+    console.error('[Score v2] Falha ao listar profissionais:', err.message);
+    return { erro: err.message };
+  }
+
+  // 2. Filtra os da região (normalizando p/ comparar)
+  const normalizar = (s) => String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .trim()
+    .toUpperCase();
+  const regiaoAlvo = normalizar(regiao);
+
+  const daRegiao = todos.filter(p => {
+    const r = normalizar(p.regiao || p.cidade || '');
+    return r === regiaoAlvo;
+  });
+
+  console.log(`  📋 ${daRegiao.length} motoboys encontrados em "${regiao}" (de ${todos.length} total)`);
+
+  if (daRegiao.length === 0) {
+    return { regiao, total_encontrados: 0, processados: 0, niveis: { 1: 0, 2: 0, 3: 0 } };
+  }
+
+  const limitados = daRegiao.slice(0, MAX_MOTOBOYS);
+  const niveis = { 1: 0, 2: 0, 3: 0 };
+  let processados = 0;
+  let erros = 0;
+
+  // 3. Processa em batches paralelos pra não estourar o pool
+  for (let i = 0; i < limitados.length; i += BATCH_SIZE) {
+    const batch = limitados.slice(i, i + BATCH_SIZE);
+    const resultados = await Promise.allSettled(
+      batch.map(p => avaliarMotoboy(pool, p.codigo))
+    );
+    for (const r of resultados) {
+      processados++;
+      if (r.status === 'rejected') {
+        erros++;
+        continue;
+      }
+      const nivel = r.value?.nivel;
+      if (nivel === 3) niveis[3]++;
+      else if (nivel === 2) niveis[2]++;
+      else niveis[1]++;
+    }
+  }
+
+  console.log(`  ✅ ${processados} processados (${erros} erros) — N1: ${niveis[1]}, N2: ${niveis[2]}, N3: ${niveis[3]}`);
+
+  return {
+    regiao,
+    total_encontrados: daRegiao.length,
+    processados,
+    erros,
+    niveis,
+  };
+}
+
 module.exports = {
   // Constantes
   NIVEL_2,
@@ -558,6 +644,7 @@ module.exports = {
   lancarBonusSeAplicavel,
   // Pipeline alto nível
   avaliarMotoboy,
+  avaliarRegiaoCompleta,
   // Sorteio
   rodarSorteiosMensais,
 };

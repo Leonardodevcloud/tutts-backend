@@ -29,6 +29,7 @@
 const express = require('express');
 const {
   avaliarMotoboy,
+  avaliarRegiaoCompleta,
   rodarSorteiosMensais,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
@@ -228,10 +229,47 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       ]);
 
       console.log(`✅ [Score v2] Config salva: ${regiao} (níveis ${niveisValidos.join(',')})`);
-      res.json({ sucesso: true, configuracao: result.rows[0] });
+
+      // 🚀 Dispara pré-avaliação em BACKGROUND (não bloqueia resposta).
+      // Avalia todos os motoboys da região pra popular score_nivel_motoboy.
+      // Só dispara se a config está ativa (sem ponto se inativa).
+      if (ativo) {
+        setImmediate(async () => {
+          try {
+            console.log(`🚀 [Score v2] Disparando pré-avaliação em background para "${regiao}"...`);
+            const r = await avaliarRegiaoCompleta(pool, regiao.trim());
+            console.log(`✅ [Score v2] Pré-avaliação concluída:`, r);
+          } catch (err) {
+            console.error(`❌ [Score v2] Pré-avaliação falhou:`, err.message);
+          }
+        });
+      }
+
+      res.json({
+        sucesso: true,
+        configuracao: result.rows[0],
+        info: ativo ? 'Pré-avaliação iniciada em background — recarregue em alguns segundos' : null,
+      });
     } catch (err) {
       console.error('❌ [Score v2] POST /configuracoes:', err);
       res.status(500).json({ error: 'Erro ao salvar', details: err.message });
+    }
+  });
+
+  // ============================================================
+  // ADMIN: re-avaliar TODOS os motoboys de uma região (manual)
+  // ============================================================
+  router.post('/score-v2/admin/reavaliar-regiao', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { regiao } = req.body || {};
+      if (!regiao || !regiao.trim()) {
+        return res.status(400).json({ error: 'Região é obrigatória' });
+      }
+      const resultado = await avaliarRegiaoCompleta(pool, regiao.trim());
+      res.json({ sucesso: true, ...resultado });
+    } catch (err) {
+      console.error('❌ [Score v2] /reavaliar-regiao:', err);
+      res.status(500).json({ error: 'Erro', details: err.message });
     }
   });
 
