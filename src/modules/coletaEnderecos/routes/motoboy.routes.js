@@ -615,6 +615,12 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
       const { q } = req.query;
       const termo = q && q.trim() ? `%${q.trim()}%` : null;
 
+      // 🚀 2026-05: paginação inteligente (default 50, máx 200)
+      // Aceita page (1-based) e limit, retorna { rows, total, page, limit, hasMore }
+      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+      const page = Math.max(parseInt(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
       // Descobre regiões permitidas (via CRM). Se não tem, só mostra pendentes dele.
       const regioesPermitidas = await regioesDoMotoboy(pool, cod);
       const gruposIds = regioesPermitidas
@@ -622,15 +628,27 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
         .filter(Boolean);
 
       let enderecosGrupo = { rows: [] };
+      let total = 0;
       if (gruposIds.length > 0) {
         const gruposPlaceholders = gruposIds.map((_, i) => `$${i + 1}`).join(',');
-        const paramsEnderecos = [...gruposIds];
+        const paramsBase = [...gruposIds];
         let filtroTermo = '';
         if (termo) {
-          paramsEnderecos.push(termo);
-          filtroTermo = ` AND (f.apelido ILIKE $${paramsEnderecos.length} OR f.endereco_completo ILIKE $${paramsEnderecos.length})`;
+          paramsBase.push(termo);
+          filtroTermo = ` AND (f.apelido ILIKE $${paramsBase.length} OR f.endereco_completo ILIKE $${paramsBase.length})`;
         }
 
+        // Conta total (pra UI mostrar "X de Y" e habilitar paginação)
+        const countQ = await pool.query(`
+          SELECT COUNT(*)::int AS total
+          FROM solicitacao_favoritos f
+          WHERE f.grupo_enderecos_id IN (${gruposPlaceholders})
+            ${filtroTermo}
+        `, paramsBase);
+        total = countQ.rows[0].total;
+
+        // Página atual (passa limit/offset como params adicionais)
+        const paramsPagina = [...paramsBase, limit, offset];
         enderecosGrupo = await pool.query(`
           SELECT f.id, f.apelido, f.endereco_completo, f.cidade, f.uf,
                  f.latitude, f.longitude, f.vezes_usado, f.ultimo_uso,
@@ -647,8 +665,8 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
           WHERE f.grupo_enderecos_id IN (${gruposPlaceholders})
             ${filtroTermo}
           ORDER BY f.vezes_usado DESC, f.ultimo_uso DESC NULLS LAST
-          LIMIT 100
-        `, paramsEnderecos);
+          LIMIT $${paramsPagina.length - 1} OFFSET $${paramsPagina.length}
+        `, paramsPagina);
       }
 
       // 2026-04: motoboy não cadastra mais endereços (função desativada).
@@ -657,7 +675,11 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
 
       res.json({
         aprovados: enderecosGrupo.rows,
-        meus_pendentes: meusPendentes.rows
+        meus_pendentes: meusPendentes.rows,
+        total,
+        page,
+        limit,
+        hasMore: offset + enderecosGrupo.rows.length < total,
       });
     } catch (err) {
       console.error('❌ Erro ao listar endereços motoboy:', err);
