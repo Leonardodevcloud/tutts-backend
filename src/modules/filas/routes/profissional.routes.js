@@ -204,7 +204,9 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
       const eu = minhaPosicao.rows[0];
       if (eu.status === 'em_rota') {
         const minutosEmRota = Math.round((Date.now() - new Date(eu.saida_rota_at).getTime()) / 60000);
-        return res.json({ success: true, na_fila: true, status: 'em_rota', minutos_em_rota: minutosEmRota, saida_rota_at: eu.saida_rota_at, corrida_unica: eu.corrida_unica || false, posicao_original: eu.posicao_original || null, notas_liberadas: parseInt(eu.notas_liberadas) || 0, cooldown_restante: Math.max(0, 15 - minutosEmRota) });
+        // 🚀 2026-05: bairros tagueados pelo admin (array de strings, podem repetir)
+        const bairrosArr = Array.isArray(eu.bairros) ? eu.bairros : (typeof eu.bairros === 'string' ? (() => { try { return JSON.parse(eu.bairros); } catch (_) { return []; } })() : []);
+        return res.json({ success: true, na_fila: true, status: 'em_rota', minutos_em_rota: minutosEmRota, saida_rota_at: eu.saida_rota_at, corrida_unica: eu.corrida_unica || false, posicao_original: eu.posicao_original || null, notas_liberadas: parseInt(eu.notas_liberadas) || 0, cooldown_restante: Math.max(0, 15 - minutosEmRota), bairros: bairrosArr });
       }
       
       const total = await pool.query('SELECT COUNT(*) FROM filas_posicoes WHERE central_id = $1 AND status = $2', [eu.central_id, 'aguardando']);
