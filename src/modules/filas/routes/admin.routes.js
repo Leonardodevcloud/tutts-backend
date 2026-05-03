@@ -384,9 +384,14 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         SET posicao = $3,
             corrida_unica = FALSE,
             posicao_original = NULL,
-            motivo_posicao = 'movido_ultimo'
+            motivo_posicao = 'movido_ultimo',
+            bairros = '[]'::jsonb,
+            notas_liberadas = 0,
+            primeira_nota_at = NULL
         WHERE cod_profissional = $1 AND central_id = $2
       `, [cod_profissional, central_id, novaPosicao]);
+      // 🔧 2026-05: limpa tags de bairro + reseta contador de notas ao mover pro final.
+      // Quando ele voltar pro topo, vai trabalhar com bairros novos definidos pelo admin.
       
       const central = await pool.query('SELECT nome FROM filas_centrais WHERE id = $1', [central_id]);
       
@@ -836,6 +841,123 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     } catch (error) {
       console.error('❌ Erro ao anular penalidade:', error);
       res.status(500).json({ error: 'Erro ao anular penalidade' });
+    }
+  });
+
+  // 🚀 2026-05: Admin coloca motoboy vinculado direto na fila
+  // Sem checagem de GPS / penalidade (admin tem autoridade pra ignorar)
+  router.post('/colocar-na-fila', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id } = req.body;
+      if (!cod_profissional || !central_id) {
+        return res.status(400).json({ error: 'cod_profissional e central_id são obrigatórios' });
+      }
+
+      // 1. Confirma vínculo
+      const vinc = await pool.query(`
+        SELECT v.cod_profissional, v.nome_profissional, c.nome AS central_nome
+        FROM filas_vinculos v
+        JOIN filas_centrais c ON c.id = v.central_id
+        WHERE v.cod_profissional = $1 AND v.central_id = $2 AND v.ativo = true AND c.ativa = true
+      `, [cod_profissional, central_id]);
+      if (vinc.rows.length === 0) {
+        return res.status(403).json({ error: 'Motoboy não está vinculado a esta central' });
+      }
+      const nome_profissional = vinc.rows[0].nome_profissional;
+      const central_nome = vinc.rows[0].central_nome;
+
+      // 2. Confere se já está na fila / em rota
+      const ja = await pool.query(
+        'SELECT * FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2',
+        [cod_profissional, central_id]
+      );
+      if (ja.rows.length > 0) {
+        const reg = ja.rows[0];
+        if (reg.status === 'aguardando') {
+          return res.status(400).json({ error: 'Motoboy já está aguardando na fila', posicao: reg.posicao });
+        }
+        if (reg.status === 'em_rota') {
+          return res.status(400).json({ error: 'Motoboy ainda está em rota — finalize antes de recolocar' });
+        }
+      }
+
+      // 3. Calcula última posição + 1
+      const ultPos = await pool.query(
+        'SELECT COALESCE(MAX(posicao), 0) AS max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2',
+        [central_id, 'aguardando']
+      );
+      const novaPosicao = parseInt(ultPos.rows[0].max_pos) + 1;
+
+      // 4. Insert ou update (caso exista linha residual)
+      if (ja.rows.length > 0) {
+        await pool.query(`
+          UPDATE filas_posicoes
+          SET status = 'aguardando',
+              posicao = $1,
+              entrada_fila_at = NOW(),
+              latitude_checkin = NULL,
+              longitude_checkin = NULL,
+              corrida_unica = FALSE,
+              posicao_original = NULL,
+              notas_liberadas = 0,
+              primeira_nota_at = NULL,
+              bairros = '[]'::jsonb,
+              motivo_posicao = 'colocado_admin',
+              updated_at = NOW()
+          WHERE cod_profissional = $2 AND central_id = $3
+        `, [novaPosicao, cod_profissional, central_id]);
+      } else {
+        await pool.query(`
+          INSERT INTO filas_posicoes
+            (central_id, cod_profissional, nome_profissional, status, posicao, motivo_posicao)
+          VALUES ($1, $2, $3, 'aguardando', $4, 'colocado_admin')
+        `, [central_id, cod_profissional, nome_profissional, novaPosicao]);
+      }
+
+      // 5. Histórico
+      await pool.query(`
+        INSERT INTO filas_historico
+          (central_id, central_nome, cod_profissional, nome_profissional, acao, observacao, admin_cod, admin_nome)
+        VALUES ($1, $2, $3, $4, 'colocado_admin', $5, $6, $7)
+      `, [central_id, central_nome, cod_profissional, nome_profissional,
+        `Colocado na fila pelo admin (posição ${novaPosicao})`,
+        req.user.codProfissional, req.user.nome]);
+
+      res.json({ success: true, posicao: novaPosicao, central: central_nome, nome: nome_profissional });
+
+      registrarAuditoria(req, 'COLOCAR_NA_FILA', 'admin', 'filas_posicoes', null,
+        { cod_profissional, central_id, posicao: novaPosicao }).catch(() => {});
+
+    } catch (error) {
+      console.error('❌ Erro ao colocar na fila:', error);
+      res.status(500).json({ error: 'Erro ao colocar na fila' });
+    }
+  });
+
+  // 🚀 2026-05: Listar vinculados disponíveis pra colocar na fila (não estão aguardando nem em rota)
+  router.get('/vinculados-disponiveis/:central_id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const central_id = parseInt(req.params.central_id);
+      if (!central_id) return res.status(400).json({ error: 'central_id inválido' });
+
+      const r = await pool.query(`
+        SELECT v.cod_profissional, v.nome_profissional
+        FROM filas_vinculos v
+        WHERE v.central_id = $1
+          AND v.ativo = true
+          AND NOT EXISTS (
+            SELECT 1 FROM filas_posicoes fp
+            WHERE fp.cod_profissional = v.cod_profissional
+              AND fp.central_id = v.central_id
+              AND fp.status IN ('aguardando', 'em_rota')
+          )
+        ORDER BY v.nome_profissional
+      `, [central_id]);
+
+      res.json({ success: true, vinculados: r.rows });
+    } catch (error) {
+      console.error('❌ Erro ao listar vinculados disponíveis:', error);
+      res.status(500).json({ error: 'Erro ao listar vinculados' });
     }
   });
 
