@@ -179,11 +179,6 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`ALTER TABLE solicitacoes_pontos ADD COLUMN IF NOT EXISTS razao_social VARCHAR(500)`).catch(e => console.log('⚠️ razao_social em solicitacoes_pontos:', e.message));
     console.log('✅ Coluna razao_social em solicitacoes_pontos verificada');
 
-    // 🚀 2026-05: categoria padrão por cliente (M, U, D, MC, UC, DC) + categoria registrada na corrida
-    await pool.query(`ALTER TABLE clientes_solicitacao ADD COLUMN IF NOT EXISTS categoria_padrao VARCHAR(10) DEFAULT NULL`).catch(e => console.log('⚠️ categoria_padrao em clientes_solicitacao:', e.message));
-    await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS categoria VARCHAR(10) DEFAULT NULL`).catch(e => console.log('⚠️ categoria em solicitacoes_corrida:', e.message));
-    console.log('✅ Colunas categoria_padrao + categoria verificadas');
-
     // Migration 2026-04: separação razao_social vs nome_fantasia (eram um campo só, viraram dois)
     // - nome_fantasia (NOVO, obrigatório no form): nome popular do estabelecimento (ex: "Auto Peças do João")
     // - razao_social (já existia, agora opcional): razão social fiscal (ex: "JOÃO MOREIRA AUTO PEÇAS LTDA")
