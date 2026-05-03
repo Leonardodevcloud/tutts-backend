@@ -59,7 +59,8 @@ router.post('/solicitacao/login', async (req, res) => {
         empresa: clienteData.empresa,
         forma_pagamento_padrao: clienteData.forma_pagamento_padrao,
         endereco_partida_padrao: clienteData.endereco_partida_padrao,
-        centro_custo_padrao: clienteData.centro_custo_padrao
+        centro_custo_padrao: clienteData.centro_custo_padrao,
+        categoria_padrao: clienteData.categoria_padrao || null
       }
     });
   } catch (err) {
@@ -80,6 +81,7 @@ router.get('/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
       forma_pagamento_padrao: req.clienteSolicitacao.forma_pagamento_padrao,
       endereco_partida_padrao: req.clienteSolicitacao.endereco_partida_padrao,
       centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao,
+      categoria_padrao: req.clienteSolicitacao.categoria_padrao || null,
       grupo_enderecos_id: req.clienteSolicitacao.grupo_enderecos_id || null
     }
   });
@@ -100,10 +102,19 @@ router.get('/solicitacao/maps-key', verificarTokenSolicitacao, (req, res) => {
 // Atualizar configurações do cliente (partida padrão, etc)
 router.patch('/solicitacao/configuracoes', verificarTokenSolicitacao, async (req, res) => {
   try {
-    const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao, limpar_endereco_padrao } = req.body;
+    const { forma_pagamento_padrao, endereco_partida_padrao, centro_custo_padrao, limpar_endereco_padrao, categoria_padrao } = req.body;
     
     console.log('💾 Salvando configurações para cliente:', req.clienteSolicitacao.id);
     console.log('📍 Endereço partida:', endereco_partida_padrao, '| limpar:', limpar_endereco_padrao);
+    console.log('🏷️ Categoria padrão:', categoria_padrao);
+
+    // Validação categoria — só aceita as 6 fixas (M, U, D, MC, UC, DC) ou null/'' pra limpar
+    const CATEGORIAS_VALIDAS = ['M', 'U', 'D', 'MC', 'UC', 'DC'];
+    let catNorm = categoria_padrao;
+    if (catNorm !== undefined && catNorm !== null && catNorm !== '' && !CATEGORIAS_VALIDAS.includes(catNorm)) {
+      return res.status(400).json({ error: 'Categoria inválida. Aceitas: ' + CATEGORIAS_VALIDAS.join(', ') });
+    }
+    if (catNorm === '') catNorm = null; // string vazia = limpar
     
     // Se limpar_endereco_padrao=true, setar null explicitamente (COALESCE não permite)
     if (limpar_endereco_padrao) {
@@ -111,17 +122,19 @@ router.patch('/solicitacao/configuracoes', verificarTokenSolicitacao, async (req
         UPDATE clientes_solicitacao 
         SET endereco_partida_padrao = NULL,
             forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
-            centro_custo_padrao = COALESCE($2, centro_custo_padrao)
+            centro_custo_padrao = COALESCE($2, centro_custo_padrao),
+            categoria_padrao = CASE WHEN $4::text = '__NOOP__' THEN categoria_padrao ELSE $4 END
         WHERE id = $3
-      `, [forma_pagamento_padrao, centro_custo_padrao, req.clienteSolicitacao.id]);
+      `, [forma_pagamento_padrao, centro_custo_padrao, req.clienteSolicitacao.id, catNorm === undefined ? '__NOOP__' : catNorm]);
     } else {
       await pool.query(`
         UPDATE clientes_solicitacao 
         SET forma_pagamento_padrao = COALESCE($1, forma_pagamento_padrao),
             endereco_partida_padrao = COALESCE($2, endereco_partida_padrao),
-            centro_custo_padrao = COALESCE($3, centro_custo_padrao)
+            centro_custo_padrao = COALESCE($3, centro_custo_padrao),
+            categoria_padrao = CASE WHEN $5::text = '__NOOP__' THEN categoria_padrao ELSE $5 END
         WHERE id = $4
-      `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id]);
+      `, [forma_pagamento_padrao, endereco_partida_padrao ? JSON.stringify(endereco_partida_padrao) : null, centro_custo_padrao, req.clienteSolicitacao.id, catNorm === undefined ? '__NOOP__' : catNorm]);
     }
     
     console.log('✅ Configurações salvas com sucesso');
@@ -153,6 +166,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       valor_rota_profissional,
       valor_rota_servico,
       sem_profissional,  // NOVO - Modo teste (não dispara para motoboys)
+      categoria,         // 🚀 2026-05 - sigla categoria/modalidade (M, U, D, MC, UC, DC)
       pontos // Array de pontos
     } = req.body;
     
@@ -266,6 +280,16 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     if (valor_rota_servico) payloadTutts.valorRotaServico = String(valor_rota_servico);
     if (ordenar) payloadTutts.ordenar = 'true';
     if (sem_profissional) payloadTutts.semProfissional = 'S';
+
+    // 🚀 2026-05: categoria — usa enviada na requisição, ou cai no padrão do cliente
+    const CATEGORIAS_VALIDAS = ['M', 'U', 'D', 'MC', 'UC', 'DC'];
+    const categoriaFinal = categoria || req.clienteSolicitacao.categoria_padrao || null;
+    if (categoriaFinal) {
+      if (!CATEGORIAS_VALIDAS.includes(categoriaFinal)) {
+        return res.status(400).json({ error: 'Categoria inválida. Aceitas: ' + CATEGORIAS_VALIDAS.join(', ') });
+      }
+      payloadTutts.categoria = categoriaFinal;
+    }
     
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
     console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
@@ -292,8 +316,9 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         ordenar, codigo_profissional, valor_rota_profissional, valor_rota_servico,
         tutts_os_numero, tutts_distancia, tutts_duracao, tutts_valor, tutts_url_rastreamento,
         status, erro_mensagem,
-        profissional_nome, profissional_foto, profissional_telefone, profissional_placa
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        profissional_nome, profissional_foto, profissional_telefone, profissional_placa,
+        categoria
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
       RETURNING id
     `, [
       req.clienteSolicitacao.id,
@@ -319,7 +344,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       profissional_nome || null,
       profissional_foto || null,
       profissional_telefone || null,
-      profissional_placa || null
+      profissional_placa || null,
+      categoriaFinal || null
     ]);
     
     const solicitacaoId = solicitacao.rows[0].id;
