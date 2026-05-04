@@ -140,23 +140,25 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // ============================================================
   router.get('/score-v2/admin/regioes-disponiveis', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      // 🔧 FIX 2026-05: agora retorna SÓ regiões com motoboys avaliados (≥1),
-      // com contagem real e ordenado DESC. Esconde regiões vazias e dados "lixo"
-      // (DDD, DDD 05, etc) sem motoboys associados — limpa MUITO a UI admin.
+      // 🔧 FIX 2026-05: agora retorna SÓ regiões com motoboys cadastrados (≥1),
+      // com contagem real e ordenado DESC. Esconde regiões vazias/lixo.
       //
-      // Regiões já com config salva (score_config_regiao) são EXCLUÍDAS da lista
-      // (mantém comportamento atual — frontend separa "sem score" vs "com score").
+      // Conta motoboys via crm_leads_capturados (fonte real) — não via score_nivel_motoboy
+      // (essa só tem registros de regiões já configuradas, daria empty).
+      //
+      // Excluí regiões já configuradas (NOT IN score_config_regiao) — frontend separa
+      // "sem score" vs "com score".
       const result = await pool.query(`
         SELECT
-          ${SQL_NORM_REGIAO_INLINE('regiao')} AS regiao_norm,
-          MIN(regiao) AS regiao,
+          MIN(COALESCE(NULLIF(TRIM(regiao), ''), NULLIF(TRIM(cidade), ''))) AS regiao,
           COUNT(*)::int AS total_motoboys
-        FROM score_nivel_motoboy
-        WHERE regiao IS NOT NULL AND regiao <> ''
-          AND ${SQL_NORM_REGIAO_INLINE('regiao')} NOT IN (
+        FROM crm_leads_capturados
+        WHERE COALESCE(regiao, cidade) IS NOT NULL
+          AND COALESCE(TRIM(regiao), TRIM(cidade)) <> ''
+          AND ${SQL_NORM_REGIAO_INLINE("COALESCE(NULLIF(TRIM(regiao), ''), TRIM(cidade))")} NOT IN (
             SELECT ${SQL_NORM_REGIAO_INLINE('regiao')} FROM score_config_regiao
           )
-        GROUP BY ${SQL_NORM_REGIAO_INLINE('regiao')}
+        GROUP BY ${SQL_NORM_REGIAO_INLINE("COALESCE(NULLIF(TRIM(regiao), ''), TRIM(cidade))")}
         HAVING COUNT(*) >= 1
         ORDER BY total_motoboys DESC, regiao ASC
       `);
