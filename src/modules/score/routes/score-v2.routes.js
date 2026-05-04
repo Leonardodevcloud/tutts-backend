@@ -35,6 +35,14 @@ const {
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
 const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
 
+// Helper SQL pra normalizar região (case + acento + espaço insensitive).
+// Replicado do service pra evitar circular import. Mesma lógica.
+const _ACENTOS_DE = 'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿ';
+const _ACENTOS_PARA = 'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy';
+function SQL_NORM_REGIAO_INLINE(expr) {
+  return `TRIM(UPPER(translate(${expr}, '${_ACENTOS_DE}', '${_ACENTOS_PARA}')))`;
+}
+
 function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
 
@@ -132,12 +140,32 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // ============================================================
   router.get('/score-v2/admin/regioes-disponiveis', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      // 🚀 Usa helper que retorna regiões CRM + Planilha (deduplicadas)
-      const regioes = await listarRegioesCompletas(pool);
-      // Mapeia pro formato esperado pelo frontend ({ regiao, total_motoboys })
-      // Como vem do helper sem contagem, fica null (admin não usa esse campo)
-      const result = regioes.map(r => ({ regiao: r, total_motoboys: null }));
-      res.json(result);
+      // 🔧 FIX 2026-05: agora retorna SÓ regiões com motoboys avaliados (≥1),
+      // com contagem real e ordenado DESC. Esconde regiões vazias e dados "lixo"
+      // (DDD, DDD 05, etc) sem motoboys associados — limpa MUITO a UI admin.
+      //
+      // Regiões já com config salva (score_config_regiao) são EXCLUÍDAS da lista
+      // (mantém comportamento atual — frontend separa "sem score" vs "com score").
+      const result = await pool.query(`
+        SELECT
+          ${SQL_NORM_REGIAO_INLINE('regiao')} AS regiao_norm,
+          MIN(regiao) AS regiao,
+          COUNT(*)::int AS total_motoboys
+        FROM score_nivel_motoboy
+        WHERE regiao IS NOT NULL AND regiao <> ''
+          AND ${SQL_NORM_REGIAO_INLINE('regiao')} NOT IN (
+            SELECT ${SQL_NORM_REGIAO_INLINE('regiao')} FROM score_config_regiao
+          )
+        GROUP BY ${SQL_NORM_REGIAO_INLINE('regiao')}
+        HAVING COUNT(*) >= 1
+        ORDER BY total_motoboys DESC, regiao ASC
+      `);
+
+      // Retorna { regiao, total_motoboys } pro frontend
+      res.json(result.rows.map(r => ({
+        regiao: r.regiao,
+        total_motoboys: r.total_motoboys
+      })));
     } catch (err) {
       console.error('❌ [Score v2] /regioes-disponiveis:', err);
       res.status(500).json({ error: 'Erro', details: err.message });
