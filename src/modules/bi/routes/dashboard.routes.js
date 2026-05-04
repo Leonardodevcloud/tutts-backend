@@ -1,13 +1,26 @@
 /**
  * BI Sub-Router: Dashboards e Métricas
  * Auto-extracted from bi.routes.js monolith
- *
- * 🔧 BUGFIX PERFORMANCE (2026-05): cache local removido.
- * O cache global em src/middleware/cache.js já cobre /api/bi/dashboard-completo
- * e funciona em conjunto com Cache-Control no browser. Manter dois sistemas
- * de cache rodando ao mesmo tempo gastava RAM em dobro e nunca compartilhava.
  */
 const express = require('express');
+const crypto = require('crypto');
+
+// Cache in-memory para dashboard-completo (TTL 2 min)
+const dashboardCache = new Map();
+const DASHBOARD_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+function getDashboardCacheKey(query) {
+  const sorted = JSON.stringify(query, Object.keys(query).sort());
+  return crypto.createHash('md5').update(sorted).digest('hex');
+}
+
+// Limpar cache expirado a cada 5 min
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of dashboardCache) {
+    if (now - entry.timestamp > DASHBOARD_CACHE_TTL) dashboardCache.delete(key);
+  }
+}, 5 * 60 * 1000);
 
 function createDashboardRoutes(pool) {
   const router = express.Router();
@@ -261,7 +274,13 @@ router.get('/bi/dashboard', async (req, res) => {
 // Dashboard BI COMPLETO - Retorna todas as métricas de uma vez
 router.get('/bi/dashboard-completo', async (req, res) => {
   try {
-    // 🔧 Cache global (src/middleware/cache.js) já cobre este endpoint.
+    // === CACHE CHECK ===
+    const cacheKey = getDashboardCacheKey(req.query);
+    const cached = dashboardCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < DASHBOARD_CACHE_TTL)) {
+      console.log(`📊 Dashboard-completo CACHE HIT (${cacheKey.substring(0,8)})`);
+      return res.json(cached.data);
+    }
     const t0Dashboard = Date.now();
     
     let { data_inicio, data_fim, cod_prof, categoria, status_prazo, status_prazo_prof, status_retorno, cidade, clientes_sem_filtro_cc } = req.query;
@@ -1848,57 +1867,9 @@ router.get('/bi/dashboard-completo', async (req, res) => {
     }
     
     // Gráficos + Hora a Hora — rodar em paralelo
-    // 🚀 PERFORMANCE FIX (2026-05): agregação SQL pros histogramas.
-    // Antes retornava TODAS as linhas (potencialmente milhares) só pra
-    // o frontend fazer .filter() em 6 buckets de tempo + 16 buckets de km.
-    // Agora o Postgres faz a agregação direto (1 query, ~20 linhas total).
-    // dadosGraficos.rows é mantido por compatibilidade (frontend antigo),
-    // mas histogramaTempo / histogramaKm já vêm calculados.
-    const [dadosGraficos, porHoraQuery, histTempoQuery, histKmQuery] = await Promise.all([
+    const [dadosGraficos, porHoraQuery] = await Promise.all([
       pool.query(`SELECT tempo_execucao_minutos as tempo, distancia as km FROM bi_entregas ${where}`, params),
-      pool.query(`SELECT EXTRACT(HOUR FROM data_hora)::int as hora, COUNT(DISTINCT os) as total_os FROM bi_entregas ${where} AND data_hora IS NOT NULL GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, params),
-      // Histograma de tempo de execução em 6 faixas
-      pool.query(`
-        SELECT 
-          CASE 
-            WHEN tempo_execucao_minutos < 45 THEN '0 a 45 min'
-            WHEN tempo_execucao_minutos < 60 THEN '45-60 min'
-            WHEN tempo_execucao_minutos < 75 THEN '60-75 min'
-            WHEN tempo_execucao_minutos < 90 THEN '75-90 min'
-            WHEN tempo_execucao_minutos < 120 THEN '90 a 120 min'
-            ELSE '> 120 min'
-          END as faixa,
-          COUNT(*)::int as total
-        FROM bi_entregas
-        ${where} AND tempo_execucao_minutos IS NOT NULL
-        GROUP BY faixa
-      `, params),
-      // Histograma de distância em faixas de 5km até 100km
-      pool.query(`
-        SELECT 
-          CASE 
-            WHEN distancia <= 10 THEN '0-10'
-            WHEN distancia <= 15 THEN '11-15'
-            WHEN distancia <= 20 THEN '16-20'
-            WHEN distancia <= 25 THEN '21-25'
-            WHEN distancia <= 30 THEN '26-30'
-            WHEN distancia <= 35 THEN '31-35'
-            WHEN distancia <= 40 THEN '36-40'
-            WHEN distancia <= 45 THEN '41-45'
-            WHEN distancia <= 50 THEN '46-50'
-            WHEN distancia <= 55 THEN '51-55'
-            WHEN distancia <= 60 THEN '56-60'
-            WHEN distancia <= 65 THEN '61-65'
-            WHEN distancia <= 70 THEN '66-70'
-            WHEN distancia <= 75 THEN '71-75'
-            WHEN distancia <= 80 THEN '76-80'
-            ELSE '> 80'
-          END as faixa,
-          COUNT(*)::int as total
-        FROM bi_entregas
-        ${where} AND distancia IS NOT NULL
-        GROUP BY faixa
-      `, params)
+      pool.query(`SELECT EXTRACT(HOUR FROM data_hora)::int as hora, COUNT(DISTINCT os) as total_os FROM bi_entregas ${where} AND data_hora IS NOT NULL GROUP BY EXTRACT(HOUR FROM data_hora) ORDER BY hora`, params)
     ]);
     
     // Preencher todas as 24 horas (0-23), mesmo as sem dados
@@ -1908,32 +1879,17 @@ router.get('/bi/dashboard-completo', async (req, res) => {
       porHora.push({ hora: h, total: found ? parseInt(found.total_os) : 0 });
     }
     
-    // 🚀 Histogramas pré-agregados (frontend pode usar direto sem refazer .filter)
-    const FAIXAS_TEMPO = ['0 a 45 min', '45-60 min', '60-75 min', '75-90 min', '90 a 120 min', '> 120 min'];
-    const FAIXAS_KM = ['0-10','11-15','16-20','21-25','26-30','31-35','36-40','41-45','46-50','51-55','56-60','61-65','66-70','71-75','76-80','> 80'];
-    const histTempoMap = Object.fromEntries(histTempoQuery.rows.map(r => [r.faixa, parseInt(r.total)]));
-    const histKmMap = Object.fromEntries(histKmQuery.rows.map(r => [r.faixa, parseInt(r.total)]));
-    const histogramaTempo = FAIXAS_TEMPO.map(f => ({ faixa: f, total: histTempoMap[f] || 0 }));
-    const histogramaKm = FAIXAS_KM.map(f => ({ faixa: f, total: histKmMap[f] || 0 }));
-    
     const responseData = { 
       metricas, 
       porCliente, 
       porProfissional, 
-      // 🚀 PERFORMANCE FIX (2026-05): se frontend pediu modo compact, NÃO envia
-      // o array gigante de dadosGraficos — só os histogramas pré-agregados.
-      // Frontends antigos que ainda dependem do array continuam funcionando
-      // (eles não passam ?compact=1).
-      ...(req.query.compact === '1'
-        ? { dadosGraficos: [] }
-        : { dadosGraficos: dadosGraficos.rows }
-      ),
-      histogramaTempo, // 🚀 novo: pré-agregado no SQL
-      histogramaKm,    // 🚀 novo: pré-agregado no SQL
+      dadosGraficos: dadosGraficos.rows,
       porHora
     };
     
-    console.log(`📊 Dashboard-completo: ${Date.now() - t0Dashboard}ms`);
+    // === CACHE STORE ===
+    dashboardCache.set(cacheKey, { data: responseData, timestamp: Date.now() });
+    console.log(`📊 Dashboard-completo: ${Date.now() - t0Dashboard}ms (cached as ${cacheKey.substring(0,8)})`);
     
     res.json(responseData);
   } catch (err) {
@@ -2352,6 +2308,114 @@ router.get('/bi/entregas-lista', async (req, res) => {
 });
 
 // Lista de cidades disponíveis
+
+// 🚀 2026-05: Acompanhamento Periódico — série temporal agregada por dia/semana/mês
+// Endpoint: GET /bi/serie-temporal?granularidade=dia|semana|mes&data_inicio=&data_fim=&cod_cliente=
+// Retorna:
+//   - kpis: { total_entregas, pct_no_prazo, qtd_retornos, total_anterior, pct_anterior, ret_anterior }
+//   - serie: [{ periodo: '2026-01-01', total_entregas, no_prazo, fora_prazo, valor_total, valor_prof, retornos, pct_prazo, ticket_medio }]
+//   - porCliente: [{ cod_cliente, nome_cliente, total_entregas, pct_prazo, faturamento, tempo_medio, retornos }]
+router.get('/bi/serie-temporal', async (req, res) => {
+  try {
+    const { granularidade = 'dia', data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
+    const granu = ['dia', 'semana', 'mes'].includes(granularidade) ? granularidade : 'dia';
+    const trunc = granu === 'dia' ? 'day' : granu === 'semana' ? 'week' : 'month';
+
+    let where = 'WHERE 1=1';
+    const params = [];
+    let idx = 1;
+    if (data_inicio) { where += ` AND data_solicitado >= $${idx++}`; params.push(data_inicio); }
+    if (data_fim) { where += ` AND data_solicitado <= $${idx++}`; params.push(data_fim); }
+    if (cod_cliente) {
+      const cls = String(cod_cliente).split(',').map(c => parseInt(c)).filter(n => !isNaN(n));
+      if (cls.length) { where += ` AND cod_cliente = ANY($${idx++}::int[])`; params.push(cls); }
+    }
+    if (centro_custo) { where += ` AND centro_custo = $${idx++}`; params.push(centro_custo); }
+
+    // KPIs do período (3 cards: total entregas, % no prazo, qtd retornos)
+    const kpisQ = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+        SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos
+      FROM bi_entregas ${where}
+    `, params);
+    const k = kpisQ.rows[0] || { total_entregas: 0, no_prazo: 0, retornos: 0 };
+    const pctPrazo = k.total_entregas > 0 ? (k.no_prazo / k.total_entregas) * 100 : 0;
+
+    // Série temporal agrupada
+    const serieQ = await pool.query(`
+      SELECT
+        DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
+        COUNT(*)::int AS total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
+        SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
+        SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
+        SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+        AVG(NULLIF(tempo_execucao_minutos, 0))::int AS tempo_medio_min
+      FROM bi_entregas ${where}
+      GROUP BY DATE_TRUNC('${trunc}', data_solicitado)
+      ORDER BY periodo
+    `, params);
+
+    const serie = serieQ.rows.map(r => ({
+      periodo: r.periodo,
+      total_entregas: r.total_entregas,
+      no_prazo: r.no_prazo,
+      fora_prazo: r.fora_prazo,
+      valor_total: parseFloat(r.valor_total) || 0,
+      valor_prof: parseFloat(r.valor_prof) || 0,
+      retornos: r.retornos,
+      pct_prazo: r.total_entregas > 0 ? (r.no_prazo / r.total_entregas * 100) : 0,
+      ticket_medio: r.total_entregas > 0 ? (parseFloat(r.valor_total) / r.total_entregas) : 0,
+      tempo_medio_min: r.tempo_medio_min || 0,
+    }));
+
+    // Por cliente (mesma agregação, agrupada por cliente — pra tabela)
+    const porClienteQ = await pool.query(`
+      SELECT
+        cod_cliente,
+        MAX(nome_cliente) AS nome_cliente,
+        COUNT(*)::int AS total_entregas,
+        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+        SUM(COALESCE(valor, 0))::numeric(12,2) AS faturamento,
+        SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+        AVG(NULLIF(tempo_execucao_minutos, 0))::int AS tempo_medio_min
+      FROM bi_entregas ${where}
+      GROUP BY cod_cliente
+      HAVING COUNT(*) > 0
+      ORDER BY total_entregas DESC
+      LIMIT 100
+    `, params);
+
+    const porCliente = porClienteQ.rows.map(r => ({
+      cod_cliente: r.cod_cliente,
+      nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
+      total_entregas: r.total_entregas,
+      no_prazo: r.no_prazo,
+      pct_prazo: r.total_entregas > 0 ? (r.no_prazo / r.total_entregas * 100) : 0,
+      faturamento: parseFloat(r.faturamento) || 0,
+      ticket_medio: r.total_entregas > 0 ? (parseFloat(r.faturamento) / r.total_entregas) : 0,
+      retornos: r.retornos,
+      tempo_medio_min: r.tempo_medio_min || 0,
+    }));
+
+    res.json({
+      granularidade: granu,
+      kpis: {
+        total_entregas: k.total_entregas,
+        pct_no_prazo: parseFloat(pctPrazo.toFixed(2)),
+        qtd_retornos: k.retornos,
+      },
+      serie,
+      porCliente,
+    });
+  } catch (err) {
+    console.error('❌ Erro /bi/serie-temporal:', err);
+    res.status(500).json({ error: 'Erro ao buscar série temporal', details: err.message });
+  }
+});
 
   return router;
 }
