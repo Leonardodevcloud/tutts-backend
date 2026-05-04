@@ -2311,15 +2311,15 @@ router.get('/bi/entregas-lista', async (req, res) => {
 
 // 🚀 2026-05: Acompanhamento Periódico — série temporal agregada por dia/semana/mês
 // Endpoint: GET /bi/serie-temporal?granularidade=dia|semana|mes&data_inicio=&data_fim=&cod_cliente=
-// Retorna:
-//   - kpis: { total_entregas, pct_no_prazo, qtd_retornos, total_anterior, pct_anterior, ret_anterior }
-//   - serie: [{ periodo: '2026-01-01', total_entregas, no_prazo, fora_prazo, valor_total, valor_prof, retornos, pct_prazo, ticket_medio }]
-//   - porCliente: [{ cod_cliente, nome_cliente, total_entregas, pct_prazo, faturamento, tempo_medio, retornos }]
+// 🔧 FIX 2026-05 v2:
+//   - generate_series pra preencher dias zerados (antes pulavam dias sem entregas, criava gaps)
+//   - +metricas: total_os, fora_prazo, valor_prof, fat_total, tempo_alocacao, tempo_coleta, total_entregadores, media_ent_prof
 router.get('/bi/serie-temporal', async (req, res) => {
   try {
-    const { granularidade = 'dia', data_inicio, data_fim, cod_cliente, centro_custo } = req.query;
+    const { granularidade = 'dia', data_inicio, data_fim, cod_cliente, centro_custo, categoria, regiao } = req.query;
     const granu = ['dia', 'semana', 'mes'].includes(granularidade) ? granularidade : 'dia';
     const trunc = granu === 'dia' ? 'day' : granu === 'semana' ? 'week' : 'month';
+    const interval = granu === 'dia' ? '1 day' : granu === 'semana' ? '1 week' : '1 month';
 
     let where = 'WHERE 1=1';
     const params = [];
@@ -2327,10 +2327,16 @@ router.get('/bi/serie-temporal', async (req, res) => {
     if (data_inicio) { where += ` AND data_solicitado >= $${idx++}`; params.push(data_inicio); }
     if (data_fim) { where += ` AND data_solicitado <= $${idx++}`; params.push(data_fim); }
     if (cod_cliente) {
-      const cls = String(cod_cliente).split(',').map(c => parseInt(c)).filter(n => !isNaN(n));
+      const cls = String(cod_cliente).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n));
       if (cls.length) { where += ` AND cod_cliente = ANY($${idx++}::int[])`; params.push(cls); }
     }
-    if (centro_custo) { where += ` AND centro_custo = $${idx++}`; params.push(centro_custo); }
+    if (centro_custo) {
+      const ccs = String(centro_custo).split(',').map(c => c.trim()).filter(c => c);
+      if (ccs.length === 1) { where += ` AND centro_custo = $${idx++}`; params.push(ccs[0]); }
+      else if (ccs.length > 1) { where += ` AND centro_custo = ANY($${idx++}::text[])`; params.push(ccs); }
+    }
+    if (categoria) { where += ` AND categoria = $${idx++}`; params.push(categoria); }
+    if (regiao) { where += ` AND (cidade ILIKE $${idx} OR estado ILIKE $${idx})`; params.push('%' + regiao + '%'); idx++; }
 
     // KPIs do período (3 cards: total entregas, % no prazo, qtd retornos)
     const kpisQ = await pool.query(`
@@ -2343,45 +2349,106 @@ router.get('/bi/serie-temporal', async (req, res) => {
     const k = kpisQ.rows[0] || { total_entregas: 0, no_prazo: 0, retornos: 0 };
     const pctPrazo = k.total_entregas > 0 ? (k.no_prazo / k.total_entregas) * 100 : 0;
 
-    // Série temporal agrupada
-    const serieQ = await pool.query(`
-      SELECT
-        DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
-        COUNT(*)::int AS total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
-        SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
-        SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
-        SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
-        AVG(NULLIF(tempo_execucao_minutos, 0))::int AS tempo_medio_min
+    // Descobre range de datas pra preencher zeros
+    // Se não tem filtro de data, usa MIN/MAX da tabela respeitando outros filtros
+    const rangeQ = await pool.query(`
+      SELECT MIN(data_solicitado)::date AS dmin, MAX(data_solicitado)::date AS dmax
       FROM bi_entregas ${where}
-      GROUP BY DATE_TRUNC('${trunc}', data_solicitado)
-      ORDER BY periodo
     `, params);
+    const dmin = data_inicio || (rangeQ.rows[0]?.dmin);
+    const dmax = data_fim || (rangeQ.rows[0]?.dmax);
 
-    const serie = serieQ.rows.map(r => ({
-      periodo: r.periodo,
-      total_entregas: r.total_entregas,
-      no_prazo: r.no_prazo,
-      fora_prazo: r.fora_prazo,
-      valor_total: parseFloat(r.valor_total) || 0,
-      valor_prof: parseFloat(r.valor_prof) || 0,
-      retornos: r.retornos,
-      pct_prazo: r.total_entregas > 0 ? (r.no_prazo / r.total_entregas * 100) : 0,
-      ticket_medio: r.total_entregas > 0 ? (parseFloat(r.valor_total) / r.total_entregas) : 0,
-      tempo_medio_min: r.tempo_medio_min || 0,
-    }));
+    // Série temporal agrupada — agora com TODAS as métricas + preenchimento de zeros via generate_series
+    let serie = [];
+    if (dmin && dmax) {
+      const serieParams = [...params, dmin, dmax];
+      const serieQ = await pool.query(`
+        WITH agregado AS (
+          SELECT
+            DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
+            COUNT(DISTINCT os)::int AS total_os,
+            COUNT(*)::int AS total_entregas,
+            SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+            SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
+            SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
+            SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
+            SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+            AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
+            -- tempo de alocação = data_chegada/hora - data_hora_alocado
+            AVG(EXTRACT(EPOCH FROM ((data_chegada + hora_chegada) - data_hora_alocado))/60)
+              FILTER (WHERE data_chegada IS NOT NULL AND data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
+            -- tempo de coleta = data_saida/hora - data_chegada/hora (na P1 == ponto de coleta)
+            AVG(EXTRACT(EPOCH FROM ((data_saida + hora_saida) - (data_chegada + hora_chegada)))/60)
+              FILTER (WHERE data_saida IS NOT NULL AND data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
+            COUNT(DISTINCT cod_prof)::int AS total_entregadores
+          FROM bi_entregas ${where}
+          GROUP BY DATE_TRUNC('${trunc}', data_solicitado)
+        )
+        SELECT
+          gs::date AS periodo,
+          COALESCE(a.total_os, 0)::int AS total_os,
+          COALESCE(a.total_entregas, 0)::int AS total_entregas,
+          COALESCE(a.no_prazo, 0)::int AS no_prazo,
+          COALESCE(a.fora_prazo, 0)::int AS fora_prazo,
+          COALESCE(a.valor_total, 0)::numeric(12,2) AS valor_total,
+          COALESCE(a.valor_prof, 0)::numeric(12,2) AS valor_prof,
+          COALESCE(a.retornos, 0)::int AS retornos,
+          COALESCE(a.tempo_medio_min, 0)::numeric(10,2) AS tempo_medio_min,
+          COALESCE(a.tempo_alocacao_min, 0)::numeric(10,2) AS tempo_alocacao_min,
+          COALESCE(a.tempo_coleta_min, 0)::numeric(10,2) AS tempo_coleta_min,
+          COALESCE(a.total_entregadores, 0)::int AS total_entregadores
+        FROM generate_series(
+          DATE_TRUNC('${trunc}', $${idx}::date),
+          DATE_TRUNC('${trunc}', $${idx + 1}::date),
+          '${interval}'::interval
+        ) gs
+        LEFT JOIN agregado a ON a.periodo = gs::date
+        ORDER BY periodo
+      `, serieParams);
 
-    // Por cliente (mesma agregação, agrupada por cliente — pra tabela)
+      serie = serieQ.rows.map(r => {
+        const ent = r.total_entregas;
+        const valor = parseFloat(r.valor_total) || 0;
+        const valorProf = parseFloat(r.valor_prof) || 0;
+        return {
+          periodo: r.periodo,
+          total_os: r.total_os,
+          total_entregas: ent,
+          no_prazo: r.no_prazo,
+          fora_prazo: r.fora_prazo,
+          valor_total: valor,
+          valor_prof: valorProf,
+          fat_total: valor - valorProf, // faturamento líquido (cliente paga - profissional recebe)
+          retornos: r.retornos,
+          pct_prazo: ent > 0 ? (r.no_prazo / ent * 100) : 0,
+          ticket_medio: ent > 0 ? (valor / ent) : 0,
+          tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
+          tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
+          tempo_coleta_min: parseFloat(r.tempo_coleta_min) || 0,
+          total_entregadores: r.total_entregadores,
+          media_ent_prof: r.total_entregadores > 0 ? (ent / r.total_entregadores) : 0,
+        };
+      });
+    }
+
+    // Por cliente (mesma agregação, agrupada por cliente — pra tabela e drilldown)
     const porClienteQ = await pool.query(`
       SELECT
         cod_cliente,
         MAX(nome_cliente) AS nome_cliente,
+        COUNT(DISTINCT os)::int AS total_os,
         COUNT(*)::int AS total_entregas,
         SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
         SUM(COALESCE(valor, 0))::numeric(12,2) AS faturamento,
+        SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
         SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
-        AVG(NULLIF(tempo_execucao_minutos, 0))::int AS tempo_medio_min
+        AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
+        AVG(EXTRACT(EPOCH FROM ((data_chegada + hora_chegada) - data_hora_alocado))/60)
+          FILTER (WHERE data_chegada IS NOT NULL AND data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
+        AVG(EXTRACT(EPOCH FROM ((data_saida + hora_saida) - (data_chegada + hora_chegada)))/60)
+          FILTER (WHERE data_saida IS NOT NULL AND data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
+        COUNT(DISTINCT cod_prof)::int AS total_entregadores
       FROM bi_entregas ${where}
       GROUP BY cod_cliente
       HAVING COUNT(*) > 0
@@ -2389,17 +2456,31 @@ router.get('/bi/serie-temporal', async (req, res) => {
       LIMIT 100
     `, params);
 
-    const porCliente = porClienteQ.rows.map(r => ({
-      cod_cliente: r.cod_cliente,
-      nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
-      total_entregas: r.total_entregas,
-      no_prazo: r.no_prazo,
-      pct_prazo: r.total_entregas > 0 ? (r.no_prazo / r.total_entregas * 100) : 0,
-      faturamento: parseFloat(r.faturamento) || 0,
-      ticket_medio: r.total_entregas > 0 ? (parseFloat(r.faturamento) / r.total_entregas) : 0,
-      retornos: r.retornos,
-      tempo_medio_min: r.tempo_medio_min || 0,
-    }));
+    const porCliente = porClienteQ.rows.map(r => {
+      const ent = r.total_entregas;
+      const valor = parseFloat(r.faturamento) || 0;
+      const valorProf = parseFloat(r.valor_prof) || 0;
+      return {
+        cod_cliente: r.cod_cliente,
+        nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
+        total_os: r.total_os,
+        total_entregas: ent,
+        no_prazo: r.no_prazo,
+        fora_prazo: r.fora_prazo,
+        pct_prazo: ent > 0 ? (r.no_prazo / ent * 100) : 0,
+        faturamento: valor,
+        valor_total: valor,
+        valor_prof: valorProf,
+        fat_total: valor - valorProf,
+        ticket_medio: ent > 0 ? (valor / ent) : 0,
+        retornos: r.retornos,
+        tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
+        tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
+        tempo_coleta_min: parseFloat(r.tempo_coleta_min) || 0,
+        total_entregadores: r.total_entregadores,
+        media_ent_prof: r.total_entregadores > 0 ? (ent / r.total_entregadores) : 0,
+      };
+    });
 
     res.json({
       granularidade: granu,
