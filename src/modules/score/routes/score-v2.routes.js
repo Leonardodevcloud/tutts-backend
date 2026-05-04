@@ -149,10 +149,15 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // ============================================================
   router.get('/score-v2/admin/configuracoes', verificarToken, verificarAdmin, async (req, res) => {
     try {
+      // 🔧 FIX 2026-05: SELECT incluindo os 6 thresholds configuráveis.
+      // Antes faltavam — o frontend recebia config sem eles e caía sempre nos defaults hardcoded
+      // (80/15/80% e 150/20/88%), dando a falsa sensação de que "não salvava".
       const result = await pool.query(`
         SELECT id, regiao, ativo, niveis_ativos,
           sorteio_valor_n2, sorteio_valor_n3,
           saque_teto_n2, saque_teto_n3,
+          n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
+          n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
           criado_em, atualizado_em, criado_por
         FROM score_config_regiao
         ORDER BY regiao
