@@ -2482,6 +2482,62 @@ router.get('/bi/serie-temporal', async (req, res) => {
       };
     });
 
+    // 🚀 2026-05: porClientePeriodo — agrupa por cliente × período pivotado.
+    // Usado pra tabela quando granularidade = semana/mês (cria colunas dinâmicas Sem 1, Sem 2...).
+    // Pra dia, retornamos vazio — 30 colunas no eixo X seria inviável.
+    let porClientePeriodo = [];
+    if (granu !== 'dia') {
+      const cpQ = await pool.query(`
+        SELECT
+          cod_cliente,
+          MAX(nome_cliente) AS nome_cliente,
+          DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
+          COUNT(DISTINCT os)::int AS total_os,
+          COUNT(*)::int AS total_entregas,
+          SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+          SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
+          SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
+          SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
+          SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+          AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
+          AVG(EXTRACT(EPOCH FROM ((data_chegada + hora_chegada) - data_hora_alocado))/60)
+            FILTER (WHERE data_chegada IS NOT NULL AND data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
+          AVG(EXTRACT(EPOCH FROM ((data_saida + hora_saida) - (data_chegada + hora_chegada)))/60)
+            FILTER (WHERE data_saida IS NOT NULL AND data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
+          COUNT(DISTINCT cod_prof)::int AS total_entregadores
+        FROM bi_entregas ${where}
+        GROUP BY cod_cliente, DATE_TRUNC('${trunc}', data_solicitado)
+        HAVING COUNT(*) > 0
+        ORDER BY cod_cliente, periodo
+      `, params);
+
+      porClientePeriodo = cpQ.rows.map(r => {
+        const ent = r.total_entregas;
+        const valor = parseFloat(r.valor_total) || 0;
+        const valorProf = parseFloat(r.valor_prof) || 0;
+        return {
+          cod_cliente: r.cod_cliente,
+          nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
+          periodo: r.periodo,
+          total_os: r.total_os,
+          total_entregas: ent,
+          no_prazo: r.no_prazo,
+          fora_prazo: r.fora_prazo,
+          valor_total: valor,
+          valor_prof: valorProf,
+          fat_total: valor - valorProf,
+          retornos: r.retornos,
+          pct_prazo: ent > 0 ? (r.no_prazo / ent * 100) : 0,
+          ticket_medio: ent > 0 ? (valor / ent) : 0,
+          tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
+          tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
+          tempo_coleta_min: parseFloat(r.tempo_coleta_min) || 0,
+          total_entregadores: r.total_entregadores,
+          media_ent_prof: r.total_entregadores > 0 ? (ent / r.total_entregadores) : 0,
+        };
+      });
+    }
+
     res.json({
       granularidade: granu,
       kpis: {
@@ -2491,6 +2547,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
       },
       serie,
       porCliente,
+      porClientePeriodo,
     });
   } catch (err) {
     console.error('❌ Erro /bi/serie-temporal:', err);
