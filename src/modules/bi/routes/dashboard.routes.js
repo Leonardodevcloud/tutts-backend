@@ -2321,12 +2321,58 @@ router.get('/bi/serie-temporal', async (req, res) => {
     const trunc = granu === 'dia' ? 'day' : granu === 'semana' ? 'week' : 'month';
     const interval = granu === 'dia' ? '1 day' : granu === 'semana' ? '1 week' : '1 month';
 
-    // 🔍 Log diagnóstico — mostra o que chegou no backend pra debugar filtros
+    // 🚀 2026-05 v7: filtro de região agora EXPANDE em cod_cliente via bi_regioes
+    // (regiao no BI é tabela de mapeamento, não filtro por cidade/estado da entrega).
+    // Padrão replica chatIa.routes.js linhas 1368-1396.
+    let codClientesFinais = [];
+    let centroCustosRegiao = []; // Centro_custos vindos da região (pra cruzar com cliente_centro_map)
+    let clienteCentroMap = {}; // { cod_cliente: [cc1, cc2] } pra filtrar dentro da região
+
+    // 1) cod_cliente vindo direto do filtro principal (CSV)
+    if (cod_cliente) {
+      codClientesFinais = String(cod_cliente).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n));
+    }
+
+    // 2) regiao expande em lista de clientes — só se NÃO houver cod_cliente já passado
+    //    (mesma lógica do chatIa: se o usuário escolheu região E clientes específicos,
+    //    o cod_cliente prevalece; região é só um atalho pra "todos os clientes da região")
+    let nomeRegiao = null;
+    if (regiao && codClientesFinais.length === 0) {
+      try {
+        const rr = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(regiao)]);
+        if (rr.rows.length > 0) {
+          nomeRegiao = rr.rows[0].nome;
+          const itens = typeof rr.rows[0].clientes === 'string' ? JSON.parse(rr.rows[0].clientes) : rr.rows[0].clientes;
+          if (Array.isArray(itens) && itens.length > 0) {
+            codClientesFinais = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
+            // Monta mapa cliente → centros_custo da região (pra filtrar dentro)
+            itens.forEach(i => {
+              const cod = parseInt(typeof i === 'number' ? i : i.cod_cliente);
+              if (isNaN(cod)) return;
+              if (!clienteCentroMap[cod]) clienteCentroMap[cod] = [];
+              if (i.centro_custo) {
+                clienteCentroMap[cod].push(i.centro_custo);
+                centroCustosRegiao.push(i.centro_custo);
+              }
+            });
+          }
+        }
+      } catch (errRegiao) {
+        console.error('[serie-temporal] erro ao expandir regiao:', errRegiao.message);
+      }
+    }
+
+    // 🔍 Log diagnóstico
     console.log('[serie-temporal] filtros:', JSON.stringify({
       granularidade: granu, data_inicio, data_fim,
-      cod_cliente_qtd: cod_cliente ? String(cod_cliente).split(',').length : 0,
-      cod_cliente_preview: cod_cliente ? String(cod_cliente).substring(0, 80) : null,
-      centro_custo, categoria, regiao
+      cod_cliente_input: cod_cliente ? String(cod_cliente).substring(0, 80) : null,
+      regiao_id: regiao,
+      regiao_nome: nomeRegiao,
+      cod_clientes_finais_qtd: codClientesFinais.length,
+      cod_clientes_finais_preview: codClientesFinais.slice(0, 10),
+      cliente_centro_map_size: Object.keys(clienteCentroMap).length,
+      centro_custo_input: centro_custo,
+      categoria,
     }));
 
     let where = 'WHERE 1=1';
@@ -2334,17 +2380,33 @@ router.get('/bi/serie-temporal', async (req, res) => {
     let idx = 1;
     if (data_inicio) { where += ` AND data_solicitado >= $${idx++}`; params.push(data_inicio); }
     if (data_fim) { where += ` AND data_solicitado <= $${idx++}`; params.push(data_fim); }
-    if (cod_cliente) {
-      const cls = String(cod_cliente).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n));
-      if (cls.length) { where += ` AND cod_cliente = ANY($${idx++}::int[])`; params.push(cls); }
+
+    // Aplica cod_cliente final (já expandido se veio só por regiao)
+    if (codClientesFinais.length > 0) {
+      where += ` AND cod_cliente = ANY($${idx++}::int[])`;
+      params.push(codClientesFinais);
     }
+
+    // 🔧 FIX: centro_custo do filtro principal — se veio explícito, aplica.
+    // Se veio APENAS via expansão de região, o filtro é (cod_cliente, centro_custo) PAR
+    // pra evitar que cliente A com CC1 puxe entregas de CC2 que pertence a outra região.
     if (centro_custo) {
       const ccs = String(centro_custo).split(',').map(c => c.trim()).filter(c => c);
       if (ccs.length === 1) { where += ` AND centro_custo = $${idx++}`; params.push(ccs[0]); }
       else if (ccs.length > 1) { where += ` AND centro_custo = ANY($${idx++}::text[])`; params.push(ccs); }
+    } else if (regiao && Object.keys(clienteCentroMap).length > 0 && centroCustosRegiao.length > 0) {
+      // Filtro por par (cliente, centro_custo) — usa concat pra match exato
+      const pares = [];
+      Object.entries(clienteCentroMap).forEach(([cod, ccs]) => {
+        ccs.forEach(cc => pares.push(cod + '|' + cc));
+      });
+      if (pares.length > 0) {
+        where += ` AND (cod_cliente::text || '|' || COALESCE(centro_custo, '')) = ANY($${idx++}::text[])`;
+        params.push(pares);
+      }
     }
+
     if (categoria) { where += ` AND categoria = $${idx++}`; params.push(categoria); }
-    if (regiao) { where += ` AND (cidade ILIKE $${idx} OR estado ILIKE $${idx})`; params.push('%' + regiao + '%'); idx++; }
 
     // KPIs do período (3 cards: total entregas, % no prazo, qtd retornos)
     const kpisQ = await pool.query(`
