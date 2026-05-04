@@ -2316,63 +2316,50 @@ router.get('/bi/entregas-lista', async (req, res) => {
 //   - +metricas: total_os, fora_prazo, valor_prof, fat_total, tempo_alocacao, tempo_coleta, total_entregadores, media_ent_prof
 router.get('/bi/serie-temporal', async (req, res) => {
   try {
-    const { granularidade = 'dia', data_inicio, data_fim, cod_cliente, centro_custo, categoria, regiao } = req.query;
+    const {
+      granularidade = 'dia',
+      data_inicio, data_fim,
+      cod_cliente, centro_custo, clientes_sem_filtro_cc,
+      categoria, cidade,
+      status_prazo, status_retorno,
+      regiao // deprecated — frontend agora expande regiao via Xa() antes de enviar
+    } = req.query;
     const granu = ['dia', 'semana', 'mes'].includes(granularidade) ? granularidade : 'dia';
     const trunc = granu === 'dia' ? 'day' : granu === 'semana' ? 'week' : 'month';
     const interval = granu === 'dia' ? '1 day' : granu === 'semana' ? '1 week' : '1 month';
 
-    // 🚀 2026-05 v7: filtro de região agora EXPANDE em cod_cliente via bi_regioes
-    // (regiao no BI é tabela de mapeamento, não filtro por cidade/estado da entrega).
-    // Padrão replica chatIa.routes.js linhas 1368-1396.
-    let codClientesFinais = [];
-    let centroCustosRegiao = []; // Centro_custos vindos da região (pra cruzar com cliente_centro_map)
-    let clienteCentroMap = {}; // { cod_cliente: [cc1, cc2] } pra filtrar dentro da região
-
-    // 1) cod_cliente vindo direto do filtro principal (CSV)
+    // 🚀 v8: a expansão de regiao agora vem do frontend (Xa()) via cod_cliente já expandido.
+    // Mantemos fallback de expandir aqui se vier `regiao` solto (compat retro).
+    let codClientes = [];
     if (cod_cliente) {
-      codClientesFinais = String(cod_cliente).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n));
-    }
-
-    // 2) regiao expande em lista de clientes — só se NÃO houver cod_cliente já passado
-    //    (mesma lógica do chatIa: se o usuário escolheu região E clientes específicos,
-    //    o cod_cliente prevalece; região é só um atalho pra "todos os clientes da região")
-    let nomeRegiao = null;
-    if (regiao && codClientesFinais.length === 0) {
+      codClientes = String(cod_cliente).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n));
+    } else if (regiao) {
       try {
-        const rr = await pool.query('SELECT nome, clientes FROM bi_regioes WHERE id = $1', [parseInt(regiao)]);
+        const rr = await pool.query('SELECT clientes FROM bi_regioes WHERE id = $1', [parseInt(regiao)]);
         if (rr.rows.length > 0) {
-          nomeRegiao = rr.rows[0].nome;
           const itens = typeof rr.rows[0].clientes === 'string' ? JSON.parse(rr.rows[0].clientes) : rr.rows[0].clientes;
           if (Array.isArray(itens) && itens.length > 0) {
-            codClientesFinais = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
-            // Monta mapa cliente → centros_custo da região (pra filtrar dentro)
-            itens.forEach(i => {
-              const cod = parseInt(typeof i === 'number' ? i : i.cod_cliente);
-              if (isNaN(cod)) return;
-              if (!clienteCentroMap[cod]) clienteCentroMap[cod] = [];
-              if (i.centro_custo) {
-                clienteCentroMap[cod].push(i.centro_custo);
-                centroCustosRegiao.push(i.centro_custo);
-              }
-            });
+            codClientes = [...new Set(itens.map(i => typeof i === 'number' ? i : parseInt(i.cod_cliente)).filter(c => !isNaN(c)))];
           }
         }
-      } catch (errRegiao) {
-        console.error('[serie-temporal] erro ao expandir regiao:', errRegiao.message);
-      }
+      } catch (errR) { console.error('[serie-temporal] erro expandir regiao fallback:', errR.message); }
     }
+
+    const ccs = centro_custo ? String(centro_custo).split(',').map(c => c.trim()).filter(c => c) : [];
+    const semFiltroCC = clientes_sem_filtro_cc
+      ? String(clientes_sem_filtro_cc).split(',').map(c => parseInt(c.trim())).filter(n => !isNaN(n))
+      : [];
 
     // 🔍 Log diagnóstico
     console.log('[serie-temporal] filtros:', JSON.stringify({
       granularidade: granu, data_inicio, data_fim,
-      cod_cliente_input: cod_cliente ? String(cod_cliente).substring(0, 80) : null,
-      regiao_id: regiao,
-      regiao_nome: nomeRegiao,
-      cod_clientes_finais_qtd: codClientesFinais.length,
-      cod_clientes_finais_preview: codClientesFinais.slice(0, 10),
-      cliente_centro_map_size: Object.keys(clienteCentroMap).length,
-      centro_custo_input: centro_custo,
-      categoria,
+      cod_clientes_qtd: codClientes.length,
+      cod_clientes_preview: codClientes.slice(0, 10),
+      ccs_qtd: ccs.length,
+      ccs_preview: ccs.slice(0, 5),
+      sem_filtro_cc_qtd: semFiltroCC.length,
+      sem_filtro_cc_preview: semFiltroCC.slice(0, 5),
+      categoria, cidade, status_prazo, status_retorno
     }));
 
     let where = 'WHERE 1=1';
@@ -2381,32 +2368,36 @@ router.get('/bi/serie-temporal', async (req, res) => {
     if (data_inicio) { where += ` AND data_solicitado >= $${idx++}`; params.push(data_inicio); }
     if (data_fim) { where += ` AND data_solicitado <= $${idx++}`; params.push(data_fim); }
 
-    // Aplica cod_cliente final (já expandido se veio só por regiao)
-    if (codClientesFinais.length > 0) {
+    if (codClientes.length > 0) {
       where += ` AND cod_cliente = ANY($${idx++}::int[])`;
-      params.push(codClientesFinais);
+      params.push(codClientes);
     }
 
-    // 🔧 FIX: centro_custo do filtro principal — se veio explícito, aplica.
-    // Se veio APENAS via expansão de região, o filtro é (cod_cliente, centro_custo) PAR
-    // pra evitar que cliente A com CC1 puxe entregas de CC2 que pertence a outra região.
-    if (centro_custo) {
-      const ccs = String(centro_custo).split(',').map(c => c.trim()).filter(c => c);
-      if (ccs.length === 1) { where += ` AND centro_custo = $${idx++}`; params.push(ccs[0]); }
-      else if (ccs.length > 1) { where += ` AND centro_custo = ANY($${idx++}::text[])`; params.push(ccs); }
-    } else if (regiao && Object.keys(clienteCentroMap).length > 0 && centroCustosRegiao.length > 0) {
-      // Filtro por par (cliente, centro_custo) — usa concat pra match exato
-      const pares = [];
-      Object.entries(clienteCentroMap).forEach(([cod, ccs]) => {
-        ccs.forEach(cc => pares.push(cod + '|' + cc));
-      });
-      if (pares.length > 0) {
-        where += ` AND (cod_cliente::text || '|' || COALESCE(centro_custo, '')) = ANY($${idx++}::text[])`;
-        params.push(pares);
+    // 🔧 Lógica do BI-CC-LOCAL: alguns clientes ficam isentos do filtro de CC
+    // (porque o CC selecionado não pertence a eles). Esses caem em `clientes_sem_filtro_cc`.
+    // Aplicamos: (cod_cliente IN clientes_sem_filtro_cc) OR (centro_custo IN ccs)
+    if (ccs.length > 0) {
+      if (semFiltroCC.length > 0) {
+        where += ` AND (cod_cliente = ANY($${idx++}::int[]) OR centro_custo = ANY($${idx++}::text[]))`;
+        params.push(semFiltroCC);
+        params.push(ccs);
+      } else {
+        if (ccs.length === 1) { where += ` AND centro_custo = $${idx++}`; params.push(ccs[0]); }
+        else { where += ` AND centro_custo = ANY($${idx++}::text[])`; params.push(ccs); }
       }
     }
 
-    if (categoria) { where += ` AND categoria = $${idx++}`; params.push(categoria); }
+    if (categoria) {
+      // categoria pode vir como CSV
+      const cats = String(categoria).split(',').map(c => c.trim()).filter(c => c);
+      if (cats.length === 1) { where += ` AND categoria = $${idx++}`; params.push(cats[0]); }
+      else if (cats.length > 1) { where += ` AND categoria = ANY($${idx++}::text[])`; params.push(cats); }
+    }
+    if (cidade) { where += ` AND cidade ILIKE $${idx++}`; params.push('%' + cidade + '%'); }
+    if (status_prazo === 'no_prazo') { where += ' AND dentro_prazo = true'; }
+    else if (status_prazo === 'fora_prazo') { where += ' AND dentro_prazo = false'; }
+    if (status_retorno === 'com_retorno') { where += " AND motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%'"; }
+    else if (status_retorno === 'sem_retorno') { where += " AND (motivo IS NULL OR LOWER(motivo) NOT LIKE '%retorn%')"; }
 
     // KPIs do período (3 cards: total entregas, % no prazo, qtd retornos)
     const kpisQ = await pool.query(`
