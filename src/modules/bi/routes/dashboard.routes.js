@@ -2321,6 +2321,14 @@ router.get('/bi/serie-temporal', async (req, res) => {
     const trunc = granu === 'dia' ? 'day' : granu === 'semana' ? 'week' : 'month';
     const interval = granu === 'dia' ? '1 day' : granu === 'semana' ? '1 week' : '1 month';
 
+    // 🔍 Log diagnóstico — mostra o que chegou no backend pra debugar filtros
+    console.log('[serie-temporal] filtros:', JSON.stringify({
+      granularidade: granu, data_inicio, data_fim,
+      cod_cliente_qtd: cod_cliente ? String(cod_cliente).split(',').length : 0,
+      cod_cliente_preview: cod_cliente ? String(cod_cliente).substring(0, 80) : null,
+      centro_custo, categoria, regiao
+    }));
+
     let where = 'WHERE 1=1';
     const params = [];
     let idx = 1;
@@ -2453,7 +2461,6 @@ router.get('/bi/serie-temporal', async (req, res) => {
       GROUP BY cod_cliente
       HAVING COUNT(*) > 0
       ORDER BY total_entregas DESC
-      LIMIT 100
     `, params);
 
     const porCliente = porClienteQ.rows.map(r => {
