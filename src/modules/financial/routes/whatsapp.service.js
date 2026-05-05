@@ -500,10 +500,15 @@ async function enviarImagemResumoDiario(dados) {
 function montarMensagemFalhaAutoSaque({ saqueId, motoboyNome, motoboyCod, valor, erro }) {
   const valorStr = formatarReais(valor);
   const erroLimpo = String(erro || 'erro desconhecido').slice(0, 200);
+  // 🆕 2026-05: destaca quando foi após retries esgotados (Stark instável)
+  const retryEsgotado = /após \d+ tentativas/i.test(erroLimpo);
 
   let msg = `⚠️ *Saque automático falhou*\n\n`;
   msg += `Motoboy: *${motoboyNome}* (cod: ${motoboyCod})\n`;
   msg += `Valor: *R$ ${valorStr}*\n`;
+  if (retryEsgotado) {
+    msg += `🔄 *Stark Bank instável* (retries esgotados)\n`;
+  }
   msg += `Erro: ${erroLimpo}\n\n`;
   msg += `Saque #${saqueId} caiu no fluxo manual (lote do dia)`;
 
