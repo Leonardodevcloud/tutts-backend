@@ -93,6 +93,88 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   //   - WHATSAPP_NOTIF_ATIVO=true
   const { notificarFalhaAutoSaque } = require('./routes/whatsapp.service');
 
+// ============================================================
+// HELPER: dictKeyGetWithRetry — 2026-05
+// ============================================================
+// Wrap em starkbank.dictKey.get() com retry exponencial pra erros transientes
+// (5xx da Stark, timeout de rede). NÃO retenta em erros permanentes (4xx, chave
+// inválida, auth) — só desperdiçaria tempo.
+//
+// Política: 3 tentativas, esperas de 1s e 6s entre elas. Tempo máximo: ~7s.
+// Importante: DICT lookup é READ-ONLY na Stark (não cria nada), retry é SEGURO.
+// JAMAIS aplicar essa lógica em transfer.create — esse movimenta dinheiro.
+// ============================================================
+// Esperas ENTRE tentativas. Array de length N = (N+1) tentativas total.
+// [1s, 6s] = 3 tentativas, gastando até ~7s total (1+6) se todas falharem.
+// Atende o budget de 10s combinado com o usuário.
+const STARK_DICT_RETRY_DELAYS_MS = [1000, 6000];
+
+function isStarkErroTransiente(err) {
+  if (!err) return false;
+  // 1) Timeout / network error (Node)
+  const msg = String(err.message || '').toLowerCase();
+  if (msg.includes('timeout') || msg.includes('econnreset') || msg.includes('etimedout') ||
+      msg.includes('enotfound') || msg.includes('econnrefused') || msg.includes('socket hang up')) {
+    return true;
+  }
+  // 2) HTTP 5xx — Stark pode mandar como err.status, err.statusCode, ou em err.errors[]
+  const status = err.status || err.statusCode || (err.response && err.response.status);
+  if (status && status >= 500 && status < 600) return true;
+  // 3) Stark às vezes embute em err.errors[].code === 'internalServerError' (caso "Houston, we have a problem!")
+  if (Array.isArray(err.errors)) {
+    for (const e of err.errors) {
+      if (e && (e.code === 'internalServerError' || e.code === 'badGateway' ||
+                e.code === 'serviceUnavailable' || e.code === 'gatewayTimeout')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function dictKeyGetWithRetry(starkbank, chave, contextoLog = '') {
+  const total = STARK_DICT_RETRY_DELAYS_MS.length + 1; // length=2 → total=3 tentativas
+  let ultimoErro = null;
+  for (let tentativa = 1; tentativa <= total; tentativa++) {
+    try {
+      const inicio = Date.now();
+      const result = await starkbank.dictKey.get(chave);
+      if (tentativa > 1) {
+        console.log(`✅ [DICT-Retry] ${contextoLog} sucesso na tentativa ${tentativa}/${total} (${Date.now() - inicio}ms)`);
+      }
+      return result;
+    } catch (err) {
+      ultimoErro = err;
+      const transiente = isStarkErroTransiente(err);
+      const ehUltima = tentativa === total;
+      const errMsg = (err.message || '').slice(0, 120);
+
+      if (!transiente) {
+        // Erro permanente (chave inválida, 4xx, etc) — não adianta retentar
+        if (tentativa > 1) {
+          console.warn(`⚠️ [DICT-Retry] ${contextoLog} erro PERMANENTE na tentativa ${tentativa}/${total}: ${errMsg}. Abortando retries.`);
+        }
+        throw err;
+      }
+
+      if (ehUltima) {
+        console.warn(`❌ [DICT-Retry] ${contextoLog} esgotou ${total} tentativas. Último erro: ${errMsg}`);
+        // Marcar erro pra notificação saber que foi após retries esgotados
+        err.__retryEsgotado = true;
+        err.__totalTentativas = total;
+        throw err;
+      }
+
+      const espera = STARK_DICT_RETRY_DELAYS_MS[tentativa - 1];
+      console.warn(`⚠️ [DICT-Retry] ${contextoLog} tentativa ${tentativa}/${total} falhou (${errMsg}). Aguardando ${espera}ms antes de retentar...`);
+      await new Promise(resolve => setTimeout(resolve, espera));
+    }
+  }
+  // Inalcançável (loop sempre termina via return ou throw), mas TS-safe
+  throw ultimoErro;
+}
+
+
   // Rate limiter para saques
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -1054,19 +1136,29 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
               console.log(`⚡ [Auto-Saque] Saque #${novoSaque.id}: pixTipo="${pixTipo}", chave="${_pixMask}"`);
 
               // ── DICT lookup (verifica que a chave existe e pega o nome) ──
+              // 🆕 2026-05: dictKeyGetWithRetry — até 3 tentativas com backoff (1s, 6s)
+              // pra cobrir instabilidade transiente da Stark (HTTP 5xx, timeout, "Houston").
+              // Retry é SEGURO aqui: dictKey.get é read-only, não movimenta dinheiro.
               let dictKey;
               try {
                 // Garantir trim final (defesa em profundidade)
                 if (typeof chaveDict === 'string') chaveDict = chaveDict.trim();
-                dictKey = await starkbank.dictKey.get(chaveDict);
+                dictKey = await dictKeyGetWithRetry(starkbank, chaveDict, `Saque #${novoSaque.id}`);
               } catch (errDict) {
                 await autoClient.query('ROLLBACK');
                 // 🐛 2026-04-30 (round 2): dump completo do erro pra investigar
                 // SDK Stark às vezes mascara erro real do DICT como "Invalid URL".
+                // 🆕 2026-05: distingue erro após retries esgotados (5xx Stark recorrente)
+                // vs erro permanente (chave inválida, 4xx) pra mensagem WhatsApp ficar clara.
                 const errMsg = errDict.message || (errDict.errors ? JSON.stringify(errDict.errors) : 'erro desconhecido');
                 const errCodes = Array.isArray(errDict.errors) ? errDict.errors.map(e => `${e.code || '?'}:${e.message || '?'}`).join('|') : null;
-                modoAutoErro = 'DICT lookup falhou: ' + errMsg;
-                console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou: ${errMsg}. Tipo="${pixTipo}", chave_normalizada_len=${(chaveDict||'').length}. Caindo pra fluxo manual.`);
+                const retryEsgotado = errDict.__retryEsgotado === true;
+                const totalTent = errDict.__totalTentativas || 1;
+                modoAutoErro = retryEsgotado
+                  ? `DICT lookup falhou após ${totalTent} tentativas (Stark instável): ${errMsg}`
+                  : 'DICT lookup falhou: ' + errMsg;
+                const sufixo = retryEsgotado ? ` (após ${totalTent} tentativas)` : '';
+                console.warn(`⚠️ [Auto-Saque] Saque #${novoSaque.id} DICT falhou${sufixo}: ${errMsg}. Tipo="${pixTipo}", chave_normalizada_len=${(chaveDict||'').length}. Caindo pra fluxo manual.`);
                 if (errCodes) {
                   console.warn(`   ↳ stark errors[]: ${errCodes}`);
                 }
