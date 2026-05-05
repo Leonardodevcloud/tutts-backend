@@ -73,21 +73,6 @@ function startAgentWorker(pool) {
     agentPool.register(slaCaptureAgent);
     agentPool.register(agentCorrecaoAgent);
 
-    // Injeta coletarOsEmExecucao no detector aqui — único ponto onde
-    // playwright-sla-capture é importado no topo, APÓS todos os outros
-    // módulos já estarem no cache. Elimina dependência circular.
-    const { coletarOsEmExecucao } = require('./playwright-sla-capture');
-    slaDetectorAgent.tickGlobal = (function(tickGlobalOriginal, coletar) {
-      return async function(pool, ctx) {
-        return tickGlobalOriginal.call(
-          slaDetectorAgent,
-          pool,
-          ctx,
-          coletar
-        );
-      };
-    }(slaDetectorAgent.tickGlobal, coletarOsEmExecucao));
-
     agentPool.register(slaDetectorAgent);
 
     // Etapa A — performance
