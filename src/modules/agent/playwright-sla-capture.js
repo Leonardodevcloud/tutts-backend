@@ -1,267 +1,1231 @@
 /**
- * sla-capture.service.js
- * Orquestra o fluxo de captura de SLA:
- *   1. Recebe trigger da extensão (via route)
- *   2. Enfileira em sla_capturas (UNIQUE os_numero = dedup automático)
- *   3. Worker pega pendentes e chama processarCaptura()
- *   4. processarCaptura: Playwright → parse pontos → Evolution → WhatsApp
- *   5. Retry 3x com backoff (2s / 5s / 10s), depois marca 'falhou' e alerta admin
+ * playwright-sla-capture.js
+ * Captura pontos de uma OS abrindo o modal de endereços via Playwright headless.
+ *
+ * ARQUITETURA:
+ *   - Sessão ISOLADA do agent-worker (arquivo/credencial separados)
+ *   - Login com SISTEMA_EXTERNO_SLA_EMAIL / SISTEMA_EXTERNO_SLA_SENHA
+ *   - Navega pra /acompanhamento-servicos, ativa aba "Em execução"
+ *   - Localiza OS via botão END. (com fallback pra busca autocomplete jQuery UI)
+ *   - Clica no botão, aguarda modal abrir, extrai endereços via DOM:
+ *       .btn-corrigir-endereco[data-ponto="N"] + span#end-antigo-{idEndereco}
+ *   - Fecha modal e libera recursos
+ *
+ * IMPORTANTE:
+ *   - Credencial precisa ser diferente da do agent E da do operador,
+ *     senão o MAP invalida sessões quando múltiplas abas estão abertas.
+ *   - Mutex interno garante 1 captura por vez nesta sessão.
+ *   - Como roda headless no servidor, abrir modal NÃO causa problema
+ *     pro operador (ao contrário da extensão v7.15 que abria no browser dele).
  */
 
 'use strict';
 
+const { chromium } = require('playwright');
+const fs   = require('fs');
+const path = require('path');
 const { logger } = require('../../config/logger');
-const { capturarPontosOS } = require('./playwright-sla-capture');
+// 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
+const { aplicarBloqueio } = require('../../shared/network-blocker');
 
-// ── Config ───────────────────────────────────────────────────────────────────
-const MAX_TENTATIVAS = 3;
-const BACKOFF_DELAYS_MS = [2_000, 5_000, 10_000]; // após tentativa 1, 2, 3
+// getSessionFile() pode ser sobrescrito por chamada (ver setOverrides abaixo).
+// Default: arquivo único pra compatibilidade com chamadas legadas (sem pool).
+const SESSION_FILE_DEFAULT = '/tmp/tutts-sla-session.json';
+
+// Overrides por chamada — setados pelo agent-pool antes de cada job.
+// Seguro porque o browser-pool garante SÓ 1 chamada dessas funções por vez
+// dentro do mesmo processo Node.
+let _sessionFileOverride = null;
+let _credentialsOverride = null;
+// 2026-05: browser persistente por slot — quando definido, chromium.launch() é pulado
+let _browserOverride = null;
+
+function getSessionFile() {
+  return _sessionFileOverride || SESSION_FILE_DEFAULT;
+}
+
+function setOverrides(opts) {
+  _sessionFileOverride = (opts && opts.sessionFile) || null;
+  _credentialsOverride = (opts && opts.credentials) || null;
+  _browserOverride     = (opts && opts.browser) || null;
+}
+
+function clearOverrides() {
+  _sessionFileOverride = null;
+  _credentialsOverride = null;
+  _browserOverride     = null;
+}
+
+// Retorna { browser, _ehOverride }. Se _browserOverride ativo, reutiliza sem fechar.
+async function _getBrowser() {
+  if (_browserOverride) {
+    return { browser: _browserOverride, _ehOverride: true };
+  }
+  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTS);
+  return { browser, _ehOverride: false };
+}
+const META_FILE    = '/tmp/tutts-sla-meta.json';     // 🆕 payload AJAX do endpoint alvo
+const NETWORK_LOG_FILE = '/tmp/tutts-sla-network.json'; // 🆕 dump de TODAS as chamadas pro tutts.com.br
+const TIMEOUT      = 25000;
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CAPTURA DE PAYLOAD AJAX (pra alimentar o sla-detector)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Intercepta TODAS as chamadas HTTP do navegador pra tutts.com.br durante a
+ * sessão Playwright e:
+ *
+ *   1. Loga um sumário de cada uma (método + URL + tamanho do body)
+ *   2. Salva as primeiras N chamadas POST num arquivo /tmp/tutts-sla-network.json
+ *      pra inspeção via endpoint admin de debug
+ *   3. Quando reconhece a chamada do endpoint de "acompanhamento" (qualquer
+ *      endpoint que devolva a lista de OS em execução), salva o payload em
+ *      META_FILE pra o sla-detector usar
+ *
+ * Por que: não tenho 100% de certeza qual endpoint exato a página de
+ * acompanhamento usa pra listar as OS — pode ser `viewServicoAcompanhamento`,
+ * pode ser outro. Capturando TUDO eu descubro em runtime e o detector usa o
+ * endpoint certo, sem hardcode.
+ */
+function instalarCapturaPayload(context) {
+  // Padrões de URL que SUSPEITAMOS serem o endpoint da listagem de OS
+  // (ordem importa — o primeiro que matchar vira o META oficial)
+  const PADROES_ALVO = [
+    /viewServicoAcompanhamento/i,
+    /listaServico/i,
+    /servicosEmExecucao/i,
+    /acompanhamento.*ajax/i,
+  ];
+
+  const networkLog = [];
+  const MAX_LOG_ENTRIES = 50;
+  let metaSalvo = false;
+
+  context.on('request', async (request) => {
+    try {
+      const url = request.url();
+      const method = request.method();
+
+      // Só interessa tutts.com.br
+      if (!url.includes('tutts.com.br')) return;
+
+      // Ignora estáticos óbvios
+      if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ico)(\?|$)/i.test(url)) return;
+
+      const postData = method === 'POST' ? request.postData() : null;
+      const headers = request.headers();
+      const contentType = headers['content-type'] || null;
+      const isXhr = headers['x-requested-with'] === 'XMLHttpRequest';
+
+      const entry = {
+        ts: new Date().toISOString(),
+        method,
+        url,
+        contentType,
+        isXhr,
+        bodyBytes: postData ? postData.length : 0,
+        bodyPreview: postData ? postData.slice(0, 200) : null,
+      };
+
+      // Log resumido no console
+      log(`🌐 ${method} ${isXhr ? '(XHR)' : '     '} ${url.replace('https://tutts.com.br/expresso/expressoat/', '...')} ${postData ? `[${postData.length}b]` : ''}`);
+
+      // Adiciona ao network log (cap em MAX_LOG_ENTRIES)
+      if (networkLog.length < MAX_LOG_ENTRIES) {
+        networkLog.push(entry);
+        try {
+          fs.writeFileSync(
+            NETWORK_LOG_FILE,
+            JSON.stringify({ capturedAt: new Date().toISOString(), entries: networkLog }, null, 2),
+            'utf8'
+          );
+        } catch (_) {}
+      }
+
+      // Se for um POST com body que casa com algum padrão alvo, salva como meta
+      if (method === 'POST' && postData && !metaSalvo) {
+        const matchPadrao = PADROES_ALVO.find(re => re.test(url));
+        if (matchPadrao) {
+          let idFuncionario = null;
+          try {
+            const params = new URLSearchParams(postData);
+            idFuncionario = params.get('idFuncionario');
+          } catch (_) {}
+
+          const meta = {
+            capturedAt: new Date().toISOString(),
+            url,
+            method,
+            postData,
+            idFuncionario,
+            contentType,
+            matchedPattern: matchPadrao.source,
+          };
+          fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), 'utf8');
+          metaSalvo = true;
+          log(`📋 Payload AJAX capturado — endpoint=${url.split('/').slice(-2).join('/')} | idFuncionario=${idFuncionario || '(vazio)'} | bytes=${postData.length}`);
+        }
+      }
+    } catch (err) {
+      log(`⚠️ Listener network: ${err.message}`);
+    }
+  });
+}
+
+const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
+const ACOMP_URL = () =>
+  process.env.SISTEMA_EXTERNO_ACOMPANHAMENTO_URL ||
+  'https://tutts.com.br/expresso/expressoat/acompanhamento-servicos';
+
+// ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
+// Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
+// Manter dois sistemas de lock causava deadlock: o lock global liberava
+// mas o mutex interno ainda estava preso até timeout (2min).
+//
+// Estas funções viraram no-op pra não quebrar chamadas existentes. Toda
+// serialização de Playwright agora passa pelos workers (sla-capture-worker,
+// sla-detector-worker, agent-worker) que já envolvem em withBrowserLock.
+async function acquireMutex(_quem) {
+  return; // no-op
+}
+
+function releaseMutex() {
+  return; // no-op
+}
+
+/**
+ * Watchdog — executa uma promise com timeout absoluto. Se a promise não
+ * resolver em `ms` milissegundos, lança erro com a mensagem `nome`.
+ *
+ * Uso: await comTimeout(operacaoQueTalvezTrave(), 60_000, 'capturarPontosOS')
+ *
+ * IMPORTANTE: isso NÃO cancela a promise original (JS não tem cancellation).
+ * Mas como estamos sempre num try/finally que faz browser.close(), a Promise
+ * pendurada vai morrer junto com o browser eventualmente.
+ */
+function comTimeout(promise, ms, nome) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(`${nome}: timeout após ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Mata um browser de forma robusta — primeiro tenta close gracioso (5s),
+ * depois force-kill no processo. Evita Chromium zombie.
+ */
+async function fecharBrowserSeguro(browser) {
+  if (!browser) return;
+  try {
+    // Tenta fechar normalmente com timeout curto
+    await comTimeout(browser.close(), 5_000, 'browser.close');
+  } catch (e) {
+    log(`⚠️ browser.close() falhou ou pendurou: ${e.message} — tentando kill`);
+    try {
+      // Pega o processo subjacente do Chromium e mata
+      const proc = browser.process && browser.process();
+      if (proc && typeof proc.kill === 'function') {
+        proc.kill('SIGKILL');
+        log(`💀 Chromium pid=${proc.pid} morto via SIGKILL`);
+      }
+    } catch (e2) {
+      log(`⚠️ Falha no kill do browser: ${e2.message}`);
+    }
+  }
+}
 
 function log(msg) {
-  logger.info(`[sla-capture-service] ${msg}`);
+  logger.info(`[sla-capture-playwright] ${msg}`);
 }
 
-function logErr(msg) {
-  logger.error(`[sla-capture-service] ${msg}`);
+// ─────────────────────────────────────────────────────────────────────────
+// Args do Chromium pra rodar de forma robusta em container Linux
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Em Docker/Railway, Chromium pode acumular processos zombie e vazar
+// recursos. Esses args reduzem footprint e desabilitam features que
+// frequentemente travam em ambiente headless sem display:
+//
+//   --no-sandbox             roda sem sandbox (Docker já é sandbox)
+//   --disable-dev-shm-usage  não usa /dev/shm (que é só 64MB no Docker)
+//   --disable-gpu            sem GPU em headless
+//   --disable-software-rasterizer
+//   --disable-background-networking  evita XHRs em background
+//   --disable-default-apps
+//   --disable-extensions
+//   --disable-sync
+//   --disable-translate
+//   --hide-scrollbars
+//   --metrics-recording-only
+//   --mute-audio
+//   --no-first-run
+//   --safebrowsing-disable-auto-update
+//   --no-default-browser-check
+//   --disable-ipc-flooding-protection
+//   --disable-renderer-backgrounding
+//   --disable-backgrounding-occluded-windows
+//   --disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process
+//   --single-process          ⚠️ NÃO USAR — instável, mas reduz processos
+//
+// O `timeout` no launch garante que se o próprio launch travar, lança erro
+// em vez de pendurar pra sempre.
+
+const CHROMIUM_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000, // 30s pra subir o browser, senão erro
+  args: [
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--safebrowsing-disable-auto-update',
+    '--no-default-browser-check',
+  ],
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LOGIN
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function isLoggedIn(page) {
+  const url = page.url();
+  if (!url.includes('/expresso') || url.includes('loginFuncionarioNovo')) return false;
+  try {
+    await page
+      .locator('#pills-em-execucao-tab, #search-type, button.btn-modal')
+      .first()
+      .waitFor({ state: 'visible', timeout: 8000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fazerLogin(page, overrides) {
+  // overrides opcional: { email, senha } — usado pelo agent-pool quando há
+  // múltiplas contas (1 por slot). Se ausente, cai no env padrão (compat).
+  const email = (overrides && overrides.email) || process.env.SISTEMA_EXTERNO_SLA_EMAIL;
+  const senha = (overrides && overrides.senha) || process.env.SISTEMA_EXTERNO_SLA_SENHA;
+
+  if (!email || !senha) {
+    throw new Error(
+      'SISTEMA_EXTERNO_SLA_EMAIL / SISTEMA_EXTERNO_SLA_SENHA não configuradas no Railway.'
+    );
+  }
+
+  log(`🔐 Login SLA (${overrides ? 'override' : 'env padrão'}): ${email}`);
+
+  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await page.waitForTimeout(1500);
+
+  const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
+  if (!temEmail) {
+    throw new Error(`Página de login não carregou. URL: ${page.url()}`);
+  }
+
+  await page.fill('#loginEmail', email);
+  await page.fill('input[type="password"]', senha);
+  await page.locator('input[name="logar"]').first().click();
+
+  await page.waitForURL((url) => !url.toString().includes('loginFuncionarioNovo'), {
+    timeout: TIMEOUT,
+  });
+  log(`✅ Login SLA OK — URL: ${page.url()}`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ENFILEIRAMENTO (chamado pela route)
+// PARSERS — HTML → texto → pontos (portados da extensão v7.15)
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Insere um registro pendente de captura.
- * UNIQUE em os_numero garante idempotência — se já existir, retorna o existente.
+ * Parser 814 — endereço até o 1º CEP, nomeCliente após "Nome Cliente:"
+ */
+function parseEntrega814(texto) {
+  if (!texto) return null;
+  const t = texto.replace(/\s+/g, ' ').trim();
+
+  let endereco = t;
+  const cepMatch = t.match(/\d{5}-?\d{3}/);
+  if (cepMatch) {
+    endereco = t.substring(0, cepMatch.index + cepMatch[0].length).trim();
+  }
+
+  let nomeCliente = null;
+  const nomeMatch = t.match(/Nome\s*Cliente:\s*(.+?)(?:,|\s+Peso:|\s+Tel:|$)/i);
+  if (nomeMatch) {
+    nomeCliente = nomeMatch[1].trim();
+  }
+
+  return { endereco, nomeCliente };
+}
+
+/**
+ * Parser 767 — endereço até o 1º CEP, cliente após o ÚLTIMO CEP, nota após "Nº nota:"
+ */
+function parseEntrega767(texto) {
+  if (!texto) return null;
+  const t = texto.replace(/\s+/g, ' ').trim();
+
+  const mNota = t.match(/(?:PARA\s+)?N[ºo°]\s*nota:?\s*(\S+)/i);
+  if (!mNota) {
+    return { endereco: t, nomeCliente: null, nota: null };
+  }
+
+  const nota = mNota[1].replace(/[,.;]+$/, '').trim();
+  const antesNotaRaw = t.substring(0, mNota.index).trim();
+  const antesNota = antesNotaRaw.replace(/\s*PARA\s*$/i, '').trim();
+
+  const cepRegex = /\d{5}-?\d{3}/g;
+  const ceps = [];
+  let m;
+  while ((m = cepRegex.exec(antesNota)) !== null) {
+    ceps.push({ start: m.index, end: m.index + m[0].length });
+  }
+
+  if (ceps.length === 0) {
+    return { endereco: antesNota, nomeCliente: null, nota };
+  }
+
+  const endereco = antesNota.substring(0, ceps[0].end).trim();
+  let nomeCliente = antesNota.substring(ceps[ceps.length - 1].end).trim();
+  nomeCliente = nomeCliente.replace(/^[\s,\-–]+/, '').trim();
+
+  return { endereco, nomeCliente: nomeCliente || null, nota };
+}
+
+// ── Termos discriminativos do Ponto 1 do 767 (Galba Novas de Castro) ────────
+const TERMOS_PONTO1_767 = ['GALBA', 'NOVAS DE CASTRO', '57061-510', '57061510'];
+
+function ponto1Bate767(texto) {
+  if (!texto) return false;
+  const up = String(texto).toUpperCase();
+  return TERMOS_PONTO1_767.some((termo) => up.includes(termo.toUpperCase()));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// API PÚBLICA
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Captura os pontos de uma OS via Playwright + AJAX direto.
  *
- * @returns { inserido: boolean, registro: Object }
+ * @param {Object} params
+ * @param {String} params.os_numero - Número da OS (7 dígitos)
+ * @param {String} params.cliente_cod - '814' ou '767'
+ * @returns {Promise<{ pontos: Array, textoBrutoModal: String }>}
  */
-async function enfileirarCaptura(pool, payload) {
-  const { os_numero, cliente_cod, cod_rastreio, link_rastreio, profissional, origem_ip } = payload;
-
-  // Validação mínima
-  if (!/^\d{7}$/.test(String(os_numero || ''))) {
-    throw new Error('os_numero deve ter exatamente 7 dígitos');
-  }
-  if (!['814', '767'].includes(String(cliente_cod))) {
-    throw new Error('cliente_cod deve ser 814 ou 767');
-  }
-
-  const { rows } = await pool.query(
-    `
-    INSERT INTO sla_capturas
-      (os_numero, cliente_cod, cod_rastreio, link_rastreio, profissional, origem_ip, status, proximo_retry_em)
-    VALUES ($1, $2, $3, $4, $5, $6, 'pendente', NOW())
-    ON CONFLICT (os_numero) DO NOTHING
-    RETURNING *;
-    `,
-    [
-      String(os_numero).trim(),
-      String(cliente_cod).trim(),
-      cod_rastreio || null,
-      link_rastreio || null,
-      profissional || null,
-      origem_ip || null,
-    ]
-  );
-
-  if (rows.length > 0) {
-    log(`📥 Enfileirada OS ${os_numero} (cliente ${cliente_cod})`);
-    return { inserido: true, registro: rows[0] };
-  }
-
-  // Já existe — retorna o existente
-  const { rows: existentes } = await pool.query(
-    `SELECT * FROM sla_capturas WHERE os_numero = $1`,
-    [String(os_numero).trim()]
-  );
-  return { inserido: false, registro: existentes[0] || null };
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
-// EVOLUTION API — envio WhatsApp
-// ═════════════════════════════════════════════════════════════════════════════
-
-function getGrupoIdPorCliente(clienteCod) {
-  if (clienteCod === '814') return process.env.EVOLUTION_GROUP_ID_814;
-  if (clienteCod === '767') return process.env.EVOLUTION_GROUP_ID_767;
-  return null;
-}
-
-async function enviarRastreioWhatsApp({ texto, clienteCod }) {
-  const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
-  const apiKey = process.env.EVOLUTION_API_KEY;
-  const instancia = process.env.EVOLUTION_INSTANCE;
-  const grupoId = getGrupoIdPorCliente(clienteCod);
-
-  if (!baseUrl || !apiKey || !instancia) {
-    throw new Error('EVOLUTION_API_URL / EVOLUTION_API_KEY / EVOLUTION_INSTANCE não configuradas');
-  }
-  if (!grupoId) {
-    throw new Error(`Grupo não configurado pra cliente ${clienteCod} (EVOLUTION_GROUP_ID_${clienteCod})`);
-  }
-
-  const url = `${baseUrl}/message/sendText/${instancia}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: apiKey,
-    },
-    body: JSON.stringify({ number: grupoId, text: texto }),
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(`Evolution API erro ${response.status}: ${JSON.stringify(data)}`);
-  }
-
-  return { ok: true, data };
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MONTAGEM DA MENSAGEM (mesmo formato da extensão v7.15)
-// ═════════════════════════════════════════════════════════════════════════════
-
-function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod }) {
-  const blocos = [`📦 *NOVO RASTREIO*`, `🧾 *OS:* ${os_numero}`];
-
-  if (link_rastreio) {
-    blocos.push(`🔗 *Link:* ${link_rastreio}`);
-  }
-
-  pontos.forEach((pe) => {
-    if (pontos.length > 1) blocos.push(`*Ponto ${pe.numero}*`);
-    if (pe.endereco) blocos.push(`📍 *Endereço:* ${pe.endereco}`);
-    if (pe.nomeCliente) blocos.push(`🏪 *Cliente:* ${pe.nomeCliente}`);
-    if (cliente_cod === '767' && pe.nota) {
-      blocos.push(`🧾 *NF:* ${pe.nota}`);
-    }
-  });
-
-  return blocos.join('\n\n');
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// PROCESSAMENTO (chamado pelo worker)
+// GARANTIR SESSÃO (substitui o hack de capturar OS dummy '0000001')
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Processa UM registro pendente. Já vem marcado como 'processando'.
- * Atualiza pra 'enviado' ou re-enfileira com backoff.
+ * Função dedicada a APENAS:
+ *   1. Garantir que existe uma sessão Playwright válida em getSessionFile()
+ *   2. Garantir que o META_FILE com o payload AJAX está atualizado
+ *
+ * Sem buscar nenhuma OS, sem clicar em nada, sem ruído.
+ *
+ * Fluxo:
+ *   - Abre browser headless
+ *   - Tenta reusar getSessionFile(); se inválido, faz login completo
+ *   - Visita /acompanhamento-servicos — isso dispara automaticamente o XHR
+ *     pro endpoint viewServicoAcompanhamento, e o listener instalado por
+ *     instalarCapturaPayload(context) escreve o META_FILE
+ *   - Salva storageState atualizado
+ *   - Fecha tudo
+ *
+ * Usado pelo sla-detector-worker no startup e no auto-relogin, em vez do
+ * hack antigo de chamar capturarPontosOS({ os_numero: '0000001' }).
+ *
+ * Retorna: { ok: true, sessaoSalva: bool, payloadCapturado: bool }
+ *          ou throw em caso de falha de login.
  */
-async function processarCaptura(pool, registro) {
-  const { id, os_numero, cliente_cod, link_rastreio, tentativas } = registro;
-  const tentativaAtual = (tentativas || 0) + 1;
+async function garantirSessao() {
+  await acquireMutex('garantirSessao');
 
-  log(`🔍 Processando OS ${os_numero} (cliente ${cliente_cod}, tentativa ${tentativaAtual}/${MAX_TENTATIVAS})`);
+  // 🔧 CRÍTICO (2026-04): browser/context declarados ANTES do try, mas só
+  // INICIALIZADOS dentro dele. Se `chromium.launch()` ou `newContext()` falhar
+  // (SIGTRAP, EAGAIN, OOM), o finally precisa ter acesso pra fechar o que
+  // foi (parcialmente) criado. Antes do fix, launch fora do try deixava
+  // Chromium zumbi quando falhava no meio da inicialização.
+  let browser = null;
+  let _browserEhOverride1 = false;
+  let context = null;
+  let payloadAntes = null;
+
+  // Snapshot do mtime do META_FILE pra detectar se a captura efetivamente atualizou
+  try {
+    if (fs.existsSync(META_FILE)) {
+      payloadAntes = fs.statSync(META_FILE).mtimeMs;
+    }
+  } catch (_) {}
 
   try {
-    // 1. Captura pontos via Playwright
-    // Nota: o browser persistente (2026-05) é injetado via setOverrides({ browser })
-    // pelo sla-capture.agent.js ANTES desta chamada. O service não precisa saber.
-    const resultado = await capturarPontosOS({ os_numero, cliente_cod });
+    ({ browser, _ehOverride: _browserEhOverride1 } = await _getBrowser());
 
-    // Cliente 767 pode ser pulado se Ponto 1 não bater com Galba
-    if (resultado.skipped) {
-      log(`⊘ OS ${os_numero} pulada: ${resultado.motivo}`);
-      await pool.query(
-        `UPDATE sla_capturas
-         SET status = 'ignorado',
-             erro = $1,
-             tentativas = $2,
-             pontos_json = $3,
-             atualizado_em = NOW()
-         WHERE id = $4`,
-        [
-          resultado.motivo,
-          tentativaAtual,
-          resultado.debugInfo ? JSON.stringify(resultado.debugInfo) : null,
-          id,
-        ]
-      );
-      return { sucesso: true, ignorado: true };
-    }
-
-    const pontos = resultado.pontos;
-    if (!pontos || pontos.length === 0) {
-      throw new Error('Sem pontos de entrega (Ponto >= 2) encontrados.');
-    }
-
-    // 2. Monta mensagem
-    const texto = montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod });
-
-    // 3. Envia via Evolution
-    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod });
-
-    // 4. Marca como enviado
-    await pool.query(
-      `UPDATE sla_capturas
-       SET status = 'enviado',
-           tentativas = $1,
-           pontos_json = $2,
-           mensagem_enviada = $3,
-           enviado_em = NOW(),
-           atualizado_em = NOW()
-       WHERE id = $4`,
-      [tentativaAtual, JSON.stringify(pontos), texto, id]
-    );
-
-    log(`✅ OS ${os_numero} enviada no grupo ${cliente_cod}`);
-    return { sucesso: true };
-  } catch (err) {
-    const mensagemErro = err.message || String(err);
-    logErr(`❌ OS ${os_numero} falhou (tentativa ${tentativaAtual}): ${mensagemErro}`);
-
-    if (tentativaAtual >= MAX_TENTATIVAS) {
-      // Esgotou retries — marca como falhou e alerta admin
-      await pool.query(
-        `UPDATE sla_capturas
-         SET status = 'falhou',
-             erro = $1,
-             tentativas = $2,
-             atualizado_em = NOW()
-         WHERE id = $3`,
-        [mensagemErro, tentativaAtual, id]
-      );
-
-      // Notifica admins via WebSocket (se disponível)
+    if (fs.existsSync(getSessionFile())) {
       try {
-        if (typeof global.broadcastToAdmins === 'function') {
-          global.broadcastToAdmins('sla_capture_falhou', {
-            os_numero,
-            cliente_cod,
-            erro: mensagemErro,
-            tentativas: tentativaAtual,
-          });
-        }
-      } catch (_) {}
-
-      return { sucesso: false, esgotado: true, erro: mensagemErro };
+        context = await browser.newContext({ storageState: getSessionFile() });
+      } catch {
+        context = await browser.newContext();
+      }
+    } else {
+      context = await browser.newContext();
     }
 
-    // Ainda tem retry — reenfileira com backoff
-    const delayMs = BACKOFF_DELAYS_MS[Math.min(tentativaAtual - 1, BACKOFF_DELAYS_MS.length - 1)];
-    const proximoRetry = new Date(Date.now() + delayMs);
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/capturarPontos');
 
-    await pool.query(
-      `UPDATE sla_capturas
-       SET status = 'pendente',
-           erro = $1,
-           tentativas = $2,
-           proximo_retry_em = $3,
-           atualizado_em = NOW()
-       WHERE id = $4`,
-      [mensagemErro, tentativaAtual, proximoRetry, id]
-    );
+    // 🔑 Listener de captura de payload — mesma função usada pelo capturarPontosOS
+    instalarCapturaPayload(context);
 
-    log(`⏳ OS ${os_numero} re-enfileirada (próximo retry em ${delayMs}ms)`);
-    return { sucesso: false, esgotado: false, erro: mensagemErro };
+    const page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
+    log('🔓 garantirSessao: navegando pra acompanhamento-servicos');
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1500);
+
+    if (!(await isLoggedIn(page))) {
+      log('🔓 garantirSessao: sessão inválida, fazendo login completo');
+      await fazerLogin(page, _credentialsOverride);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
+    } else {
+      log('🔓 garantirSessao: sessão reaproveitada do disco');
+    }
+
+    // 🔧 FIX (2026-04): A página de acompanhamento faz LAZY LOAD do XHR
+    // viewServicoAcompanhamento — só dispara quando o usuário ativa a aba
+    // "Em execução". Sem esse clique, o listener instalarCapturaPayload
+    // nunca pega o body e o META_FILE não é gerado.
+    log('🖱️ garantirSessao: ativando aba "Em execução" pra disparar o XHR');
+    try {
+      const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+      const visivel = await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false);
+      if (visivel) {
+        await abaEmExecucao.click();
+        log('🖱️ garantirSessao: aba clicada, aguardando XHR...');
+        // Espera explícita pelo XHR alvo — até 10s.
+        // Se vier antes disso, segue em frente. Se não vier, loga aviso.
+        try {
+          await page.waitForResponse(
+            (resp) =>
+              /viewServicoAcompanhamento/i.test(resp.url()) &&
+              resp.request().method() === 'POST',
+            { timeout: 10000 }
+          );
+          log('🖱️ garantirSessao: XHR viewServicoAcompanhamento detectado');
+        } catch (e) {
+          log(`⚠️ garantirSessao: XHR não veio em 10s (${e.message})`);
+        }
+      } else {
+        log('⚠️ garantirSessao: aba "Em execução" não visível na página');
+      }
+    } catch (e) {
+      log(`⚠️ garantirSessao: falha ao clicar na aba: ${e.message}`);
+    }
+
+    // Tempo extra pra garantir que o listener.on('request') escreveu o META
+    await page.waitForTimeout(1500);
+
+    // Persiste storageState atualizado
+    try {
+      await context.storageState({ path: getSessionFile() });
+      log('💾 garantirSessao: storageState salvo');
+    } catch (e) {
+      log(`⚠️ garantirSessao: falha ao salvar storageState: ${e.message}`);
+    }
+
+    // Verifica se o META_FILE foi atualizado pelo listener
+    let payloadCapturado = false;
+    try {
+      if (fs.existsSync(META_FILE)) {
+        const novoMtime = fs.statSync(META_FILE).mtimeMs;
+        payloadCapturado = !payloadAntes || novoMtime > payloadAntes;
+      }
+    } catch (_) {}
+
+    if (payloadCapturado) {
+      log('✅ garantirSessao: payload AJAX capturado com sucesso');
+    } else {
+      log('⚠️ garantirSessao: payload AJAX NÃO foi capturado nesta sessão');
+      log('    A página de acompanhamento talvez não tenha disparado o XHR no load.');
+      log('    Próximo tick do detector vai usar payload antigo (se existir) ou fallback.');
+    }
+
+    return { ok: true, sessaoSalva: true, payloadCapturado };
+
+  } finally {
+    try {
+      if (context) await comTimeout(context.close(), 3_000, 'context.close');
+    } catch (_) {}
+    if (!_browserEhOverride1) await fecharBrowserSeguro(browser);
+    releaseMutex();
   }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// COLETAR OS EM EXECUÇÃO — retorna lista pronta de OS pra alimentar o detector
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Abre browser, garante sessão, navega pra acompanhamento, clica na aba
+ * "Em execução", e EXTRAI as OS diretamente do DOM (tr[data-order-id]).
+ *
+ * 🔧 HISTÓRIA DESSA FUNÇÃO (2026-04-13):
+ *   Descobri via instrumentação que o endpoint viewServicoAcompanhamento
+ *   SEMPRE retorna HTML (content-type: text/html), nunca JSON. Eu tinha
+ *   interpretado errado o `instalarCapturaPayload` — ele captura o REQUEST
+ *   (postData), não o RESPONSE. O servidor PHP responde com fragmentos HTML
+ *   pra serem inseridos na página via $.html().
+ *
+ *   Então em vez de interceptar rede, a abordagem certa é:
+ *   1. Clicar na aba "Em execução" → JS do MAP carrega a tabela no DOM
+ *   2. Extrair os <tr[data-order-id]> do DOM com page.evaluate
+ *   3. Pra paginar: clicar no link "Próx." do paginador e repetir
+ *
+ *   Os dados vêm nos atributos HTML:
+ *     tr[data-order-id]                        → os_numero
+ *     button[data-title-os] (dentro do tr)    → cliente_cod
+ *     button[data-motoboy] (dentro do tr)     → cod_profissional
+ *     a[href*="rastreamento?cod="]            → cod_rastreio
+ *     [data-balloon] attributes concatenados  → _balloon (pra filtros)
+ *     div.osEmExecucao.alert text              → total esperado "(149)"
+ *
+ * Usa o mesmo mutex de capturarPontosOS — sem concorrência de Chromium.
+ *
+ * Retorna:
+ *   { ok, ordens: [...], totalEsperado, paginas, duracaoMs, diag }
+ *   ou: { ok: false, motivo, sessaoExpirada, diag }
+ */
+async function coletarOsEmExecucao() {
+  const TEMPO_MAX_MS = 90_000;
+  const MAX_PAGINAS_SANITY = 100; // 1000 OS com 10/página = 100 páginas
+
+  await acquireMutex('coletarOsEmExecucao');
+  const t0 = Date.now();
+
+  const diag = { etapas: [], paginasColetadas: [] };
+  function etapa(nome, extra) {
+    const evento = { etapa: nome, t: Date.now() - t0, ...(extra || {}) };
+    diag.etapas.push(evento);
+    log(`📍 [coletarOs] ${nome}${extra ? ' ' + JSON.stringify(extra) : ''}`);
+  }
+
+  let browser, _browserEhOverride2 = false, context, page;
+  const todasOsMap = new Map(); // dedupe por os_numero
+  let totalEsperado = null;
+
+  try {
+    etapa('start');
+    ({ browser, _ehOverride: _browserEhOverride2 } = await _getBrowser());
+    etapa('browser_launched');
+
+    if (fs.existsSync(getSessionFile())) {
+      try {
+        context = await browser.newContext({ storageState: getSessionFile() });
+        etapa('context_with_storage');
+      } catch (e) {
+        etapa('context_storage_failed', { erro: e.message });
+        context = await browser.newContext();
+      }
+    } else {
+      context = await browser.newContext();
+      etapa('context_no_storage');
+    }
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/coletarOs');
+
+    page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+    etapa('page_created');
+
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    etapa('goto_done', { url: page.url() });
+    await page.waitForTimeout(800);
+
+    if (!(await isLoggedIn(page))) {
+      etapa('login_needed');
+      await fazerLogin(page, _credentialsOverride);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
+      etapa('login_done');
+    }
+
+    // Ativa aba "Em execução"
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    if (!(await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false))) {
+      etapa('aba_nao_visivel');
+      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, diag };
+    }
+    await abaEmExecucao.click();
+    etapa('aba_clicada');
+
+    // Aguarda a tabela de em-execução renderizar (tr com data-order-id)
+    try {
+      await page.waitForSelector('#pills-em-execucao tr[data-order-id]', { timeout: 15000 });
+      etapa('tabela_renderizada');
+    } catch (e) {
+      etapa('tabela_timeout', { erro: e.message });
+      // Às vezes a tabela vem vazia (0 OS) — verifica o contador
+      const texto = await page.locator('#pills-em-execucao').innerText().catch(() => '');
+      if (/Serviço.*execução.*\(0\)/i.test(texto)) {
+        etapa('zero_os');
+        return { ok: true, ordens: [], totalEsperado: 0, paginas: 0, duracaoMs: Date.now() - t0, diag };
+      }
+      return { ok: false, motivo: 'tabela_nao_renderizou', sessaoExpirada: true, diag };
+    }
+
+    await page.waitForTimeout(500);
+
+    // Salva storageState atualizado
+    try { await context.storageState({ path: getSessionFile() }); } catch (_) {}
+
+    // Extrai o total esperado do texto "Serviço(s) em execução (149)"
+    try {
+      const totalTexto = await page.locator('#pills-em-execucao .osEmExecucao.alert').first().innerText({ timeout: 2000 });
+      const m = totalTexto.match(/\((\d+)\)/);
+      if (m) totalEsperado = parseInt(m[1], 10);
+    } catch (_) {}
+    etapa('total_esperado', { totalEsperado });
+
+    // Função que extrai OS do DOM atual e acumula no Map
+    async function extrairOsAtuais() {
+      const extraidas = await page.evaluate(() => {
+        const rows = document.querySelectorAll('#pills-em-execucao tr[data-order-id]');
+        return Array.from(rows).map(tr => {
+          const os_numero = tr.getAttribute('data-order-id') || '';
+
+          // cliente_cod — button com data-title-os
+          let cliente_cod = null;
+          const clienteBtn = tr.querySelector('button[data-title-os]');
+          if (clienteBtn) cliente_cod = clienteBtn.getAttribute('data-title-os') || null;
+
+          // cod_profissional — button com data-motoboy
+          let cod_profissional = null;
+          const motoboyBtn = tr.querySelector('button[data-motoboy]');
+          if (motoboyBtn) cod_profissional = motoboyBtn.getAttribute('data-motoboy') || null;
+
+          // cod_rastreio + link_rastreio — do link de rastreamento
+          // rastLink.href (propriedade) retorna o URL ABSOLUTO resolvido
+          // pelo browser. Ex: '../../rastreamento?cod=AAEKJIK-23'
+          //              →  'https://tutts.com.br/expresso/rastreamento?cod=AAEKJIK-23'
+          let cod_rastreio = null;
+          let link_rastreio = null;
+          const rastLink = tr.querySelector('a[href*="rastreamento?cod="]');
+          if (rastLink) {
+            link_rastreio = rastLink.href || null; // URL absoluto resolvido
+            const hrefAttr = rastLink.getAttribute('href') || '';
+            const m = hrefAttr.match(/cod=([^&"'\s]+)/);
+            if (m) cod_rastreio = m[1];
+          }
+
+          // _balloon — concatena TODOS os data-balloon dentro do tr + texto visível
+          const balloons = Array.from(tr.querySelectorAll('[data-balloon]'))
+            .map(el => el.getAttribute('data-balloon') || '')
+            .filter(Boolean);
+          const textoVisivel = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+          const balloon = (balloons.join(' | ') + ' | ' + textoVisivel).toUpperCase();
+
+          return { os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio, _balloon: balloon };
+        });
+      });
+
+      let novos = 0;
+      for (const o of extraidas) {
+        if (!o.os_numero) continue;
+        if (!todasOsMap.has(o.os_numero)) {
+          todasOsMap.set(o.os_numero, o);
+          novos++;
+        }
+      }
+      return { extraidas: extraidas.length, novos };
+    }
+
+    // Primeira página
+    const r1 = await extrairOsAtuais();
+    diag.paginasColetadas.push({ pagina: 1, ...r1 });
+    etapa('pagina_extraida', { pagina: 1, ...r1, acumulado: todasOsMap.size });
+
+    // 📄 PAGINAÇÃO via clique no "Próx." do paginador
+    for (let pagina = 2; pagina <= MAX_PAGINAS_SANITY; pagina++) {
+      if (Date.now() - t0 > TEMPO_MAX_MS) {
+        etapa('timeout_estourou', { coletado: todasOsMap.size });
+        break;
+      }
+
+      if (totalEsperado != null && todasOsMap.size >= totalEsperado) {
+        etapa('alcancou_total', { coletado: todasOsMap.size, esperado: totalEsperado });
+        break;
+      }
+
+      // Acha o link "Próx." — link do paginador cujo texto contém "Próx"
+      // (ou ordem alternativa: link do paginador com número da página atual+1)
+      const proximoHandle = await page.evaluateHandle(() => {
+        const paginador = document.querySelector('#em-execucao, #pills-em-execucao .pagination');
+        if (!paginador) return null;
+        // Primeiro tenta "Próx."
+        const links = Array.from(paginador.querySelectorAll('a.page-link'));
+        const proxLink = links.find(a => /pr[oó]x/i.test(a.textContent || ''));
+        if (proxLink) {
+          // Verifica se o <li> pai está disabled
+          const li = proxLink.closest('li');
+          if (li && li.classList.contains('disabled')) return null;
+          return proxLink;
+        }
+        return null;
+      });
+
+      const elemento = proximoHandle.asElement();
+      if (!elemento) {
+        etapa('sem_proximo', { coletado: todasOsMap.size });
+        break;
+      }
+
+      // Clica no "Próx."
+      try {
+        await elemento.click();
+      } catch (e) {
+        etapa('erro_click_proximo', { erro: e.message });
+        break;
+      }
+
+      // Aguarda a tabela renderizar novamente — os tr[data-order-id] antigos
+      // são substituídos, então espera por re-render (timer simples + DOM check)
+      await page.waitForTimeout(1200);
+      // Verifica se ainda tem linhas (se não, a paginação quebrou)
+      const ainda = await page.locator('#pills-em-execucao tr[data-order-id]').count().catch(() => 0);
+      if (ainda === 0) {
+        etapa('tabela_vazia_apos_click', { pagina });
+        break;
+      }
+
+      const rN = await extrairOsAtuais();
+      diag.paginasColetadas.push({ pagina, ...rN });
+      etapa('pagina_extraida', { pagina, ...rN, acumulado: todasOsMap.size });
+
+      // Se a última página não trouxe nada novo, para
+      if (rN.novos === 0) {
+        etapa('pagina_sem_novos', { pagina });
+        break;
+      }
+    }
+
+  } catch (err) {
+    log(`❌ [coletarOs] Erro: ${err.message}`);
+    return { ok: false, motivo: err.message, sessaoExpirada: false, diag };
+  } finally {
+    try { if (page) await comTimeout(page.close(), 3_000, 'page.close'); } catch (_) {}
+    try { if (context) await comTimeout(context.close(), 3_000, 'context.close'); } catch (_) {}
+    if (!_browserEhOverride2) await fecharBrowserSeguro(browser);
+    releaseMutex();
+  }
+
+  const ordens = Array.from(todasOsMap.values());
+  const duracaoMs = Date.now() - t0;
+  log(`✅ [coletarOs] ${ordens.length} OS extraídas em ${diag.paginasColetadas.length} página(s) (${duracaoMs}ms)`);
+
+  return {
+    ok: true,
+    ordens,
+    totalEsperado,
+    paginas: diag.paginasColetadas.length,
+    duracaoMs,
+    diag,
+  };
+}
+
+
+
+
+async function capturarPontosOS({ os_numero, cliente_cod }) {
+  if (!process.env.SISTEMA_EXTERNO_URL) {
+    throw new Error('SISTEMA_EXTERNO_URL não configurada.');
+  }
+  if (!/^\d{7}$/.test(String(os_numero || ''))) {
+    throw new Error(`os_numero inválido: ${os_numero}`);
+  }
+  if (!['814', '767'].includes(String(cliente_cod))) {
+    throw new Error(`cliente_cod inválido: ${cliente_cod} (esperado 814 ou 767)`);
+  }
+
+  await acquireMutex(`capturarPontosOS(${os_numero})`);
+
+  let browser = null;
+  let _browserEhOverride3 = false;
+  let context = null;
+
+  try {
+    ({ browser, _ehOverride: _browserEhOverride3 } = await _getBrowser());
+
+    // Reusa cookies se possível
+    if (fs.existsSync(getSessionFile())) {
+      try {
+        context = await browser.newContext({ storageState: getSessionFile() });
+      } catch {
+        context = await browser.newContext();
+      }
+    } else {
+      context = await browser.newContext();
+    }
+
+    // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
+    await aplicarBloqueio(context, 'sla-capture/3');
+
+    // 🆕 Instala captura de payload AJAX ANTES de qualquer navegação.
+    // O listener vive durante toda a sessão do contexto e atualiza
+    // /tmp/tutts-sla-meta.json toda vez que a página chamar o endpoint
+    // viewServicoAcompanhamento (que acontece automaticamente no load
+    // da página de acompanhamento e no clique da aba "Em execução").
+    instalarCapturaPayload(context);
+
+    const page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
+    // Navega pra página de acompanhamento — timeout maior pro caso de MAP lento
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1000);
+
+    // Confirma sessão — se não, relogin
+    if (!(await isLoggedIn(page))) {
+      await fazerLogin(page, _credentialsOverride);
+      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1500);
+    }
+
+    // Persiste cookies pra próxima captura reaproveitar
+    try {
+      await context.storageState({ path: getSessionFile() });
+    } catch (_) {}
+
+    // ── Passo 1: ativa aba "Em execução" ──────────────────────────────────
+    log(`📌 Localizando OS ${os_numero} — ativando aba Em execução`);
+    const abaEmExecucao = page.locator('#pills-em-execucao-tab');
+    if (await abaEmExecucao.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await abaEmExecucao.click();
+      await page.waitForTimeout(800);
+    }
+
+    // ── Passo 2: tenta achar o botão da OS no DOM direto ─────────────────
+    // (mesmo seletor robusto do playwright-agent: data-id OU data-text-id)
+    const btnSelector =
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], ` +
+      `button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`;
+
+    let btnCount = await page.locator(btnSelector).count();
+
+    // ── Passo 3: se não achou, usa a busca do sistema (barra + autocomplete jQuery UI) ──
+    if (btnCount === 0) {
+      log(`🔍 OS ${os_numero} não está no DOM — usando barra de pesquisa`);
+
+      // Expande a barra "Pesquisar serviços" se estiver recolhida
+      const barraPesquisa = page.locator('text=Pesquisar serviços').first();
+      if (await barraPesquisa.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await barraPesquisa.click();
+        await page.waitForTimeout(500);
+      }
+
+      // Seleciona "Serviço" no dropdown #search-type
+      const selectPesquisa = page.locator('#search-type');
+      if (await selectPesquisa.isVisible({ timeout: 3000 }).catch(() => false)) {
+        try {
+          await selectPesquisa.selectOption({ label: 'Serviço' });
+          await page.waitForTimeout(500);
+        } catch (_) {
+          // Opção pode ter label diferente — ignora e segue
+        }
+      }
+
+      // Preenche o input do autocomplete
+      const inputBusca = page
+        .locator('#search-autocomplete-input, input[placeholder*="número do serviço"]')
+        .first();
+
+      let inputVisivel = false;
+      try {
+        await inputBusca.waitFor({ state: 'visible', timeout: 8000 });
+        inputVisivel = true;
+      } catch {
+        inputVisivel = false;
+      }
+
+      if (!inputVisivel) {
+        // Sessão provavelmente morreu — força re-login e retry
+        log('⚠️ Campo de busca não apareceu — forçando re-login');
+        try {
+          if (fs.existsSync(getSessionFile())) fs.unlinkSync(getSessionFile());
+        } catch (_) {}
+        await fazerLogin(page, _credentialsOverride);
+        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(2000);
+        try {
+          await context.storageState({ path: getSessionFile() });
+        } catch (_) {}
+
+        // Reativa aba execução
+        const abaRetry = page.locator('#pills-em-execucao-tab');
+        if (await abaRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await abaRetry.click();
+          await page.waitForTimeout(800);
+        }
+
+        // Re-expande barra + seleciona tipo
+        const barraRetry = page.locator('text=Pesquisar serviços').first();
+        if (await barraRetry.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await barraRetry.click();
+          await page.waitForTimeout(500);
+        }
+        const selectRetry = page.locator('#search-type');
+        if (await selectRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
+          try {
+            await selectRetry.selectOption({ label: 'Serviço' });
+            await page.waitForTimeout(500);
+          } catch (_) {}
+        }
+
+        await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+      }
+
+      await inputBusca.fill(String(os_numero));
+      await page.waitForTimeout(1500); // aguardar jQuery UI autocomplete
+
+      // Clica no item do autocomplete que bate com a OS
+      const autoItem = page
+        .locator('.ui-menu-item .ui-menu-item-wrapper')
+        .filter({ hasText: String(os_numero) })
+        .first();
+
+      if (await autoItem.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await autoItem.click();
+      } else {
+        // Fallback: primeiro item visível, ou Enter
+        const anyAutoItem = page.locator('.ui-menu-item-wrapper:visible').first();
+        if (await anyAutoItem.isVisible({ timeout: 1500 }).catch(() => false)) {
+          await anyAutoItem.click();
+        } else {
+          await inputBusca.press('Enter');
+        }
+      }
+
+      await page.waitForTimeout(2000);
+
+      // Aguarda o botão aparecer no DOM (não precisa ser visível no viewport)
+      try {
+        await page.waitForSelector(btnSelector, { state: 'attached', timeout: TIMEOUT });
+      } catch (_) {
+        throw new Error(
+          `OS ${os_numero} não encontrada mesmo após pesquisa por autocomplete. ` +
+          `Pode já ter sido finalizada/cancelada no MAP.`
+        );
+      }
+
+      btnCount = await page.locator(btnSelector).count();
+    }
+
+    if (btnCount === 0) {
+      throw new Error(`OS ${os_numero} não encontrada na tela mesmo após pesquisa.`);
+    }
+
+    // ── Passo 4: scroll + clica no botão END. pra abrir modal de endereços ──
+    const btnEnd = page.locator(btnSelector).first();
+    await btnEnd.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+
+    log(`📌 Abrindo modal de endereços da OS ${os_numero}`);
+    await btnEnd.click({ force: true });
+
+    // Aguarda modal aparecer
+    try {
+      await page.waitForSelector(
+        '.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in',
+        { state: 'visible', timeout: TIMEOUT }
+      );
+    } catch (_) {
+      throw new Error(`Modal de endereços não abriu para OS ${os_numero}`);
+    }
+    await page.waitForTimeout(600); // aguarda conteúdo terminar de carregar
+
+    // ── Passo 5: extrai pontos via DOM estruturado ────────────────────────
+    // Estrutura esperada (do playwright-agent):
+    //   <button class="btn-corrigir-endereco"
+    //           data-ponto="N"
+    //           data-id-endereco="X"
+    //           data-lat="..." data-lon="...">
+    //   <span id="end-antigo-{X}">{endereço}</span>
+    const pontosBrutos = await page.evaluate(() => {
+      const btns = document.querySelectorAll('.btn-corrigir-endereco[data-ponto]');
+      const resultado = [];
+      btns.forEach((btn) => {
+        const numero = parseInt(btn.getAttribute('data-ponto') || '0', 10);
+        if (!numero || numero < 1 || numero > 9) return;
+
+        const idEnd = btn.getAttribute('data-id-endereco');
+        let texto = '';
+
+        // Estratégia 1: span#end-antigo-{id} + contexto completo do container
+        if (idEnd) {
+          const span = document.getElementById('end-antigo-' + idEnd);
+          if (span) {
+            // Pega o container do ponto inteiro pra ter NF + nome cliente
+            let container = span.parentElement;
+            // Sobe até achar um elemento que contenha "Ponto"
+            for (let i = 0; i < 5 && container; i++) {
+              if ((container.textContent || '').includes('Ponto')) break;
+              container = container.parentElement;
+            }
+            if (container) {
+              const full = (container.textContent || '').replace(/\s+/g, ' ').trim();
+              // Extrai texto entre "Ponto N" e "Corrigir|Ver ponto|Chegou"
+              const pontoRe = new RegExp('Ponto\\s*' + numero + '\\s+([\\s\\S]*?)(?:Corrigir|Ver ponto|Chegou|$)', 'i');
+              const pm = full.match(pontoRe);
+              if (pm && pm[1].trim().length > 10) {
+                texto = pm[1].replace(/\s+/g, ' ').trim();
+              }
+            }
+            // Fallback: só o span se container não deu certo
+            if (!texto || texto.length < 5) {
+              texto = (span.textContent || '').trim();
+            }
+          }
+        }
+
+        // Estratégia 2: fallback — pega o container do ponto e extrai texto
+        if (!texto || texto.length < 5) {
+          let container = btn.parentElement;
+          while (container && !container.textContent.includes('Ponto')) {
+            container = container.parentElement;
+            if (container && container.classList.contains('modal-body')) break;
+          }
+          if (container) {
+            const fullText = container.textContent || '';
+            const regex = /Ponto\s*\d+\s*([\s\S]*?)(?:PEC|Corrigir|$)/i;
+            const m = fullText.match(regex);
+            if (m) {
+              texto = m[1].replace(/\s+/g, ' ').trim().substring(0, 500);
+            }
+          }
+        }
+
+        if (texto) {
+          resultado.push({ numero, texto });
+        }
+      });
+      // Garante ordem por número do ponto
+      return resultado.sort((a, b) => a.numero - b.numero);
+    });
+
+    // Fecha o modal (pra não deixar lixo visual em debug/screenshots futuros)
+    try {
+      await page.evaluate(() => {
+        const modal = document.querySelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in');
+        if (modal) {
+          const btnClose = modal.querySelector('button[data-dismiss="modal"], .close, .modal-header .close');
+          if (btnClose) btnClose.click();
+        }
+      });
+      await page.waitForTimeout(300);
+    } catch (_) {}
+
+    log(`📋 OS ${os_numero}: ${pontosBrutos.length} ponto(s) extraído(s) do modal`);
+
+    // Metadata de debug retornado junto com o resultado
+    const debugInfo = {
+      pontosBrutos,
+      fonte: 'modal_enderecos_dom',
+    };
+
+    if (pontosBrutos.length === 0) {
+      const err = new Error(`Nenhum ponto extraído do modal de endereços (OS ${os_numero}).`);
+      err.debugInfo = debugInfo;
+      throw err;
+    }
+
+    // Aplica parser específico do cliente
+    let pontosParsed;
+    if (cliente_cod === '814') {
+      pontosParsed = pontosBrutos
+        .filter((pt) => pt.numero >= 2)
+        .map((pt) => ({ numero: pt.numero, ...(parseEntrega814(pt.texto) || {}) }));
+    } else {
+      // 767: só dispara se Ponto 1 bater com Galba
+      const ponto1 = pontosBrutos.find((pt) => pt.numero === 1);
+      if (!ponto1 || !ponto1Bate767(ponto1.texto)) {
+        return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767', debugInfo };
+      }
+      pontosParsed = pontosBrutos
+        .filter((pt) => pt.numero >= 2)
+        .map((pt) => ({ numero: pt.numero, ...(parseEntrega767(pt.texto) || {}) }));
+    }
+
+    if (pontosParsed.length === 0) {
+      return { pontos: [], skipped: true, motivo: 'sem_pontos_entrega', debugInfo };
+    }
+
+    return { pontos: pontosParsed, skipped: false, debugInfo };
+  } finally {
+    try {
+      if (context) await comTimeout(context.close(), 3_000, 'context.close');
+    } catch (_) {}
+    if (!_browserEhOverride3) await fecharBrowserSeguro(browser);
+    releaseMutex();
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// 🔧 CRÍTICO (2026-04): Wrappers `*ComWatchdog` REMOVIDOS.
+//
+// Antes existiam wrappers `comTimeout(fn(), 90s, ...)` que envolviam as funções
+// inteiras. O problema: `comTimeout` faz `Promise.race`, e quando o timeout
+// dispara, a função INTERNA continua rodando (JS não cancela Promise) — mas
+// o lock global `withBrowserLock` libera porque a Promise rejeitou.
+//
+// Resultado: o próximo job pegava o lock e tentava `chromium.launch()` em
+// CIMA do anterior ainda fechando, causando SIGTRAP / "Target page, context
+// or browser has been closed".
+//
+// A garantia de não-trava agora vem de duas camadas:
+//   1. Timeouts INTERNOS do Playwright em cada operação (TIMEOUT=25s,
+//      NAV_TIMEOUT=45s, page.setDefaultTimeout) — qualquer operação individual
+//      lança erro se demorar muito.
+//   2. `fecharBrowserSeguro` no `finally` de cada função (close gracioso 5s,
+//      depois SIGKILL no processo). Garante que quando a função retorna
+//      (sucesso ou erro), o Chromium ESTÁ MORTO.
+//
+// Resultado: quando o lock global libera, o browser do job anterior já se foi.
+
 module.exports = {
-  enfileirarCaptura,
-  processarCaptura,
-  // expostos pra testes
-  _internal: { montarMensagemRastreio, enviarRastreioWhatsApp, getGrupoIdPorCliente },
+  // Overrides para uso pelo agent-pool (multi-conta)
+  setOverrides,
+  clearOverrides,
+  capturarPontosOS,
+  garantirSessao,
+  coletarOsEmExecucao,
+  // Aliases mantidos pra compatibilidade com import antigo
+  _semWatchdog: {
+    capturarPontosOS,
+    garantirSessao,
+    coletarOsEmExecucao,
+  },
+  // expostos pra testes unitários
+  _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
 };
