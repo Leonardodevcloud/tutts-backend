@@ -288,7 +288,11 @@ async function detectarOsNovas(pool, coletarOsEmExecucao) {
   // Neste ponto o módulo playwright-sla-capture já está 100% no cache
   // (o ciclo circular se resolve antes da primeira chamada real).
   if (typeof coletarOsEmExecucao !== 'function') {
-    coletarOsEmExecucao = require('./playwright-sla-capture').coletarOsEmExecucao;
+    const pw = require('./playwright-sla-capture');
+    const keys = Object.keys(pw);
+    log('[diag] exports de playwright-sla-capture: ' + JSON.stringify(keys));
+    coletarOsEmExecucao = pw.coletarOsEmExecucao;
+    log('[diag] tipo coletarOsEmExecucao: ' + typeof coletarOsEmExecucao);
   }
   try {
     const result = await coletarOsEmExecucao();
