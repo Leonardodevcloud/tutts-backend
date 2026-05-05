@@ -14,7 +14,16 @@
 
 const { defineAgent } = require('../core/agent-base');
 const slaDetectorService = require('../sla-detector.service');
-const playwrightSlaCapture = require('../playwright-sla-capture');
+// Lazy require — evita dependência circular na inicialização do módulo.
+// playwright-sla-capture ← sla-capture.service ← sla-capture.agent ← agent-pool
+// Resolvendo na hora da execução (dentro de tickGlobal) o ciclo não ocorre.
+let _playwrightSlaCapture = null;
+function getPlaywrightSlaCapture() {
+  if (!_playwrightSlaCapture) {
+    _playwrightSlaCapture = require('../playwright-sla-capture');
+  }
+  return _playwrightSlaCapture;
+}
 
 // Cron: a cada 2 minutos, Seg-Sex 08-18h, Sáb 08-12h, TZ Bahia.
 // Mesma janela que o worker antigo.
@@ -41,6 +50,7 @@ module.exports = defineAgent({
     const creds = ctx.sessao.credenciaisDoSlot(0);
     const sessionFile = ctx.sessao.caminhoSessao(0);
 
+    const playwrightSlaCapture = getPlaywrightSlaCapture();
     playwrightSlaCapture.setOverrides({
       sessionFile,
       credentials: { email: creds.email, senha: creds.senha },
