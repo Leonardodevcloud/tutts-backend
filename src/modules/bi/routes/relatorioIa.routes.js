@@ -50,7 +50,14 @@ router.get('/bi/relatorio-ia', async (req, res) => {
     }
     
     // 1. Buscar métricas gerais (EXPANDIDO)
+    // 🔧 PADRÃO PBIX: ValorTotal usa DISTINCT ON (os) ORDER BY ponto ASC (= FIRSTNONBLANK do DAX)
+    //   pra pegar 1 valor por OS, alinhado com Power BI.
     const metricasQuery = await pool.query(`
+      WITH os_val AS (
+        SELECT DISTINCT ON (os) os, valor, valor_prof
+        FROM bi_entregas ${whereClause} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      )
       SELECT 
         COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN os END) as total_os,
         COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as total_entregas,
@@ -58,8 +65,8 @@ router.get('/bi/relatorio-ia', async (req, res) => {
         SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = false THEN 1 ELSE 0 END) as entregas_fora_prazo,
         ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
               NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 2) as taxa_prazo,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor_total,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_prof,
+        (SELECT COALESCE(SUM(valor), 0) FROM os_val) as valor_total,
+        (SELECT COALESCE(SUM(valor_prof), 0) FROM os_val) as valor_prof,
         ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 AND tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 2) as tempo_medio_entrega,
         ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_execucao_minutos > 0 AND tempo_execucao_minutos <= 300 THEN tempo_execucao_minutos END), 2) as tempo_medio_alocacao,
         ROUND(AVG(CASE WHEN COALESCE(ponto, 1) = 1 AND tempo_entrega_prof_minutos > 0 AND tempo_entrega_prof_minutos <= 300 THEN tempo_entrega_prof_minutos END), 2) as tempo_medio_coleta,
@@ -81,57 +88,90 @@ router.get('/bi/relatorio-ia', async (req, res) => {
     const metricas = metricasQuery.rows[0];
     
     // 2. Buscar dados por dia
+    // 🔧 PADRÃO PBIX: valor agregado usa DISTINCT ON (os) ORDER BY ponto ASC pra somar 1x por OS
     const porDiaQuery = await pool.query(`
+      WITH os_val AS (
+        SELECT DISTINCT ON (os) os, data_solicitado, valor
+        FROM bi_entregas ${whereClause} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      ),
+      fat_dia AS (
+        SELECT data_solicitado, SUM(COALESCE(valor, 0)) AS valor
+        FROM os_val GROUP BY data_solicitado
+      )
       SELECT 
-        data_solicitado as data,
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
-        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
-              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor,
-        COUNT(DISTINCT CASE WHEN COALESCE(ponto, 1) >= 2 THEN cod_prof END) as profissionais
-      FROM bi_entregas
+        e.data_solicitado as data,
+        COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas,
+        SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = true THEN 1 ELSE 0 END) as no_prazo,
+        ROUND(SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa,
+        COALESCE(MAX(f.valor), 0) as valor,
+        COUNT(DISTINCT CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN e.cod_prof END) as profissionais
+      FROM bi_entregas e
+      LEFT JOIN fat_dia f ON f.data_solicitado = e.data_solicitado
       ${whereClause}
-      GROUP BY data_solicitado
-      ORDER BY data_solicitado
+      GROUP BY e.data_solicitado
+      ORDER BY e.data_solicitado
     `, params);
     
     // 3. Buscar top clientes (com mais dados)
+    // 🔧 PADRÃO PBIX: valor agregado usa DISTINCT ON (os) pra somar 1x por OS
     const topClientesQuery = await pool.query(`
+      WITH os_val AS (
+        SELECT DISTINCT ON (os) os, cod_cliente, valor
+        FROM bi_entregas ${whereClause} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      ),
+      fat_cli AS (
+        SELECT cod_cliente, SUM(COALESCE(valor, 0)) AS valor
+        FROM os_val GROUP BY cod_cliente
+      )
       SELECT 
-        nome_fantasia as cliente,
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
-              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor ELSE 0 END), 0) as valor,
-        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio,
-        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia END), 1) as km_medio,
-        SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND (
-          LOWER(ocorrencia) LIKE '%cliente fechado%' OR 
-          LOWER(ocorrencia) LIKE '%clienteaus%' OR 
-          LOWER(ocorrencia) LIKE '%cliente ausente%'
+        e.nome_fantasia as cliente,
+        COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        COALESCE(MAX(f.valor), 0) as valor,
+        ROUND(AVG(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN e.tempo_execucao_minutos END), 1) as tempo_medio,
+        ROUND(AVG(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN e.distancia END), 1) as km_medio,
+        SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND (
+          LOWER(e.ocorrencia) LIKE '%cliente fechado%' OR 
+          LOWER(e.ocorrencia) LIKE '%clienteaus%' OR 
+          LOWER(e.ocorrencia) LIKE '%cliente ausente%'
         ) THEN 1 ELSE 0 END) as retornos
-      FROM bi_entregas
+      FROM bi_entregas e
+      LEFT JOIN fat_cli f ON f.cod_cliente = e.cod_cliente
       ${whereClause}
-      GROUP BY nome_fantasia
-      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
+      GROUP BY e.nome_fantasia, e.cod_cliente
+      ORDER BY COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) DESC
       LIMIT 10
     `, params);
     
     // 4. Buscar top profissionais (com mais dados)
+    // 🔧 PADRÃO PBIX: valor_prof agregado usa DISTINCT ON (os) pra somar 1x por OS
     const topProfsQuery = await pool.query(`
+      WITH os_val AS (
+        SELECT DISTINCT ON (os) os, cod_prof, valor_prof
+        FROM bi_entregas ${whereClause} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      ),
+      fat_prof AS (
+        SELECT cod_prof, SUM(COALESCE(valor_prof, 0)) AS valor_prof
+        FROM os_val GROUP BY cod_prof
+      )
       SELECT 
-        nome_prof as profissional,
-        COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) as entregas,
-        ROUND(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 AND dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
-              NULLIF(COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
-        ROUND(AVG(CASE WHEN COALESCE(ponto, 1) >= 2 THEN tempo_execucao_minutos END), 1) as tempo_medio,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN distancia ELSE 0 END), 0) as km_total,
-        COALESCE(SUM(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END), 0) as valor_recebido
-      FROM bi_entregas
+        e.nome_prof as profissional,
+        COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) as entregas,
+        ROUND(SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 AND e.dentro_prazo = true THEN 1 ELSE 0 END)::numeric / 
+              NULLIF(COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END), 0) * 100, 1) as taxa_prazo,
+        ROUND(AVG(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN e.tempo_execucao_minutos END), 1) as tempo_medio,
+        COALESCE(SUM(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN e.distancia ELSE 0 END), 0) as km_total,
+        COALESCE(MAX(f.valor_prof), 0) as valor_recebido
+      FROM bi_entregas e
+      LEFT JOIN fat_prof f ON f.cod_prof = e.cod_prof
       ${whereClause}
-      GROUP BY nome_prof
-      ORDER BY COUNT(CASE WHEN COALESCE(ponto, 1) >= 2 THEN 1 END) DESC
+      GROUP BY e.nome_prof, e.cod_prof
+      ORDER BY COUNT(CASE WHEN COALESCE(e.ponto, 1) >= 2 THEN 1 END) DESC
       LIMIT 10
     `, params);
     
@@ -273,7 +313,8 @@ router.get('/bi/relatorio-ia', async (req, res) => {
         media_profissionais_por_dia: mediaProfissionaisDia,
         profissionais_ideais_por_dia: porDiaQuery.rows.length > 0 ? Math.ceil((parseInt(metricas.total_entregas) / porDiaQuery.rows.length) / 10) : 0,
         media_entregas_por_profissional_dia: mediaProfissionaisDia > 0 ? ((parseInt(metricas.total_entregas) / porDiaQuery.rows.length) / mediaProfissionaisDia).toFixed(1) : 0,
-        ticket_medio: parseInt(metricas.total_entregas) > 0 ? (parseFloat(metricas.valor_total) / parseInt(metricas.total_entregas)).toFixed(2) : 0
+        // 🔧 PADRÃO PBIX: TicketMedio = (ValorTotal - ValorProfissional) / QtdEntregas (LÍQUIDO)
+        ticket_medio: parseInt(metricas.total_entregas) > 0 ? (((parseFloat(metricas.valor_total) || 0) - (parseFloat(metricas.valor_prof) || 0)) / parseInt(metricas.total_entregas)).toFixed(2) : 0
       },
       tendencia: {
         variacao_taxa: tendencia.toFixed(1),
