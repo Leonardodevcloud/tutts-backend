@@ -2417,6 +2417,17 @@ router.get('/bi/serie-temporal', async (req, res) => {
     if (status_retorno === 'com_retorno') { where += " AND motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%'"; }
     else if (status_retorno === 'sem_retorno') { where += " AND (motivo IS NULL OR LOWER(motivo) NOT LIKE '%retorn%')"; }
 
+    // 🔧 FIX BI-SERIE-AMBIGUOUS (2026-05): porClienteQ e porClientePeriodoQ fazem
+    // LEFT JOIN com CTE `fat_cli`/`fat_cli_periodo` que também tem cod_cliente, data_solicitado,
+    // valor, valor_prof. Aplicar ${where} cru (sem alias) gera "column reference is ambiguous".
+    // Solução: derivar whereE com prefixo `e.` nas colunas que podem colidir.
+    // Importante: não trocar nomes que aparecem dentro de strings literais
+    // (ex: '%retorn%') — usamos limites de palavra (\b) e listamos só colunas seguras.
+    const whereE = where.replace(
+      /\b(cod_cliente|data_solicitado|valor|valor_prof|ponto|os|cod_prof|centro_custo|categoria|cidade|dentro_prazo|motivo|tempo_execucao_minutos|data_chegada|hora_chegada|data_hora_alocado|data_saida|hora_saida|nome_cliente)\b/g,
+      'e.$1'
+    );
+
     // KPIs do período (3 cards: total entregas, % no prazo, qtd retornos)
     const kpisQ = await pool.query(`
       SELECT
@@ -2559,7 +2570,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
         COUNT(DISTINCT e.cod_prof)::int AS total_entregadores
       FROM bi_entregas e
       LEFT JOIN fat_cli f ON f.cod_cliente = e.cod_cliente
-      ${where}
+      ${whereE}
       GROUP BY e.cod_cliente, f.faturamento, f.valor_prof
       HAVING COUNT(*) > 0
       ORDER BY total_entregas DESC
@@ -2633,7 +2644,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
         LEFT JOIN fat_cli_periodo f
           ON f.cod_cliente = e.cod_cliente
           AND f.periodo = DATE_TRUNC('${trunc}', e.data_solicitado)::date
-        ${where}
+        ${whereE}
         GROUP BY e.cod_cliente, DATE_TRUNC('${trunc}', e.data_solicitado), f.valor_total, f.valor_prof
         HAVING COUNT(*) > 0
         ORDER BY e.cod_cliente, periodo
