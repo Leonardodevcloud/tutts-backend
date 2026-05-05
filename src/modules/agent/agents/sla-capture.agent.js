@@ -27,7 +27,14 @@
 const { defineAgent } = require('../core/agent-base');
 const { criarBrowserSession } = require('../core/browser-session');
 const slaCaptureService = require('../sla-capture.service');
-const playwrightSlaCapture = require('../playwright-sla-capture');
+// Lazy require — quebra dependência circular com playwright-sla-capture
+let _playwrightSlaCapture = null;
+function getPlaywrightSlaCapture() {
+  if (!_playwrightSlaCapture) {
+    _playwrightSlaCapture = require('../playwright-sla-capture');
+  }
+  return _playwrightSlaCapture;
+}
 
 const SLOTS = Number(process.env.POOL_SLA_CAPTURE_SLOTS || 3);
 
@@ -122,7 +129,7 @@ module.exports = defineAgent({
     }
 
     // Injeta browser persistente + credenciais + sessionFile via overrides
-    playwrightSlaCapture.setOverrides({
+    getPlaywrightSlaCapture().setOverrides({
       sessionFile,
       credentials: { email: creds.email, senha: creds.senha },
       browser: browserVivo,  // null = modo legado (usa chromium.launch normal)
@@ -140,7 +147,7 @@ module.exports = defineAgent({
       }
       throw err;
     } finally {
-      playwrightSlaCapture.clearOverrides();
+      getPlaywrightSlaCapture().clearOverrides();
     }
   },
 
