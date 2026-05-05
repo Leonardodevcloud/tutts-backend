@@ -4,28 +4,89 @@
  * Agente de captura de pontos de OS (rastreio WhatsApp).
  * Paralelizado: N slots, 1 conta SLA por slot.
  *
- * Substitui o `sla-capture-worker.js` antigo.
+ * 2026-05: BROWSER PERSISTENTE
+ * ─────────────────────────────
+ * PROBLEMA: a cada job, playwright-sla-capture.js abria E fechava um
+ * Chromium. Com ~270 ticks/2h, esgotava recursos IPC do kernel Linux
+ * (semáforos POSIX, pipes) → próximo launch recebia SIGTRAP.
+ *
+ * SOLUÇÃO: BrowserSession — 1 browser por slot, vivo durante toda a
+ * vida do processo. A cada job, cria um context novo (leve) em vez de
+ * um browser novo (pesado). Máximo de POOL_SLA_CAPTURE_SLOTS browsers
+ * ativos no sistema (default 2) em vez de centenas por hora.
+ *
+ * O browser é injetado no playwright-sla-capture via setOverrides({ browser })
+ * — o mesmo mecanismo que já existe para sessionFile e credentials.
+ * A função _getBrowser() no playwright-sla-capture verifica _browserOverride
+ * e, quando presente, pula o chromium.launch() e usa o browser persistente.
+ * O finally de cada função checa _browserEhOverride* e pula o close().
  */
 
 'use strict';
 
 const { defineAgent } = require('../core/agent-base');
+const { criarBrowserSession } = require('../core/browser-session');
 const slaCaptureService = require('../sla-capture.service');
 const playwrightSlaCapture = require('../playwright-sla-capture');
 
 const SLOTS = Number(process.env.POOL_SLA_CAPTURE_SLOTS || 3);
 
+const SLA_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--safebrowsing-disable-auto-update',
+    '--no-default-browser-check',
+  ],
+};
+
 module.exports = defineAgent({
   nome: 'sla-capture',
   slots: SLOTS,
-  sessionStrategy: 'isolada',  // 1 conta SLA por slot
-  envPrefix: 'SISTEMA_EXTERNO_SLA',  // usa SISTEMA_EXTERNO_SLA_EMAIL_N
-  intervalo: 5_000,            // 5s entre ticks quando fila vazia
+  sessionStrategy: 'isolada',
+  envPrefix: 'SISTEMA_EXTERNO_SLA',
+  intervalo: 5_000,
 
   habilitado: () => (process.env.SLA_CAPTURE_ATIVO || 'false').toLowerCase() === 'true',
 
+  // Chamado 1x por slot ao entrar no loop. Cria o browser persistente.
+  onSlotStart: async (_pool, ctx) => {
+    ctx.log('🔧 Criando BrowserSession persistente...');
+    const browserSession = criarBrowserSession({
+      nome: `sla-capture-slot-${ctx.slotIdx}`,
+      launchOpts: SLA_LAUNCH_OPTS,
+    });
+    ctx.log('✅ BrowserSession pronta (browser lancado no 1o job)');
+    return { browserSession };
+  },
+
+  // Chamado ao encerrar o loop (shutdown). Fecha o browser do slot.
+  onSlotStop: async (_pool, ctx) => {
+    const { browserSession } = ctx.slotState || {};
+    if (browserSession) {
+      try { await browserSession.fechar(); } catch (_) {}
+    }
+  },
+
   buscarPendentes: async (pool, _limite) => {
-    // FOR UPDATE SKIP LOCKED garante que slots não pegam mesmo registro
     const { rows } = await pool.query(`
       SELECT * FROM sla_capturas
       WHERE status = 'pendente'
@@ -47,30 +108,43 @@ module.exports = defineAgent({
   processar: async (pool, registro, ctx) => {
     ctx.log(`📨 Processando OS ${registro.os_numero} (cliente ${registro.cliente_cod})`);
 
-    // Configura overrides ANTES de chamar — credenciais e arquivo de sessão
-    // do slot atual (slotIdx 0 → conta 1, slotIdx 1 → conta 2, etc.)
     const creds = ctx.sessao.credenciaisDoSlot(ctx.slotIdx);
     const sessionFile = ctx.sessao.caminhoSessao(ctx.slotIdx);
 
+    // Recupera o browser persistente deste slot
+    const { browserSession } = ctx.slotState || {};
+
+    // O BrowserSession garante que o browser está vivo (relança se crashou)
+    // e expõe o objeto browser interno via .obterBrowser()
+    let browserVivo = null;
+    if (browserSession) {
+      browserVivo = await browserSession.obterBrowser();
+    }
+
+    // Injeta browser persistente + credenciais + sessionFile via overrides
     playwrightSlaCapture.setOverrides({
       sessionFile,
       credentials: { email: creds.email, senha: creds.senha },
+      browser: browserVivo,  // null = modo legado (usa chromium.launch normal)
     });
 
     try {
-      // O service interno faz: garantirSessao + capturarPontosOS + enviar WhatsApp + atualizar DB
       await slaCaptureService.processarCaptura(pool, registro);
       ctx.log(`✅ OS ${registro.os_numero} processada`);
+    } catch (err) {
+      // Se o browser morreu durante o job, notifica o BrowserSession
+      // pra recriar no próximo uso
+      if (browserSession && browserVivo && !browserVivo.isConnected()) {
+        ctx.log('⚠️ Browser morreu durante job — BrowserSession vai recriar');
+        browserSession._marcarMorto();
+      }
+      throw err;
     } finally {
-      // Limpa overrides pra não vazar pro próximo job (defensivo, embora o
-      // browser-pool garanta serialização dentro do slot)
       playwrightSlaCapture.clearOverrides();
     }
   },
 
   onErro: async (pool, registro, err) => {
-    // Devolve pra fila com retry conservativo (10s).
-    // A lógica de retry/falha definitiva fica no service — aqui é só rede de segurança.
     if (registro?.id) {
       try {
         await pool.query(
