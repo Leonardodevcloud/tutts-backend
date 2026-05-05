@@ -801,15 +801,23 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
   // ==================== PENALIDADES (ADMIN) ====================
 
   // Listar penalidades ativas de uma central
+  // 🆕 2026-05: agora retorna 'tipo' (automatica/manual), motivo_admin, aplicado_por_nome
+  // pro front mostrar badge e quem aplicou (motivo NÃO é exposto pro motoboy, só pro admin)
   router.get('/penalidades/:central_id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const result = await pool.query(`
-        SELECT * FROM filas_penalidades 
+        SELECT id, central_id, cod_profissional, nome_profissional, saidas_hoje,
+               bloqueado_ate, anulado_por, anulado_em, data_ref, created_at, updated_at,
+               COALESCE(tipo, 'automatica') AS tipo,
+               motivo_admin,
+               aplicado_por_cod, aplicado_por_nome
+        FROM filas_penalidades 
         WHERE central_id = $1 AND bloqueado_ate > NOW() AND anulado_em IS NULL
         ORDER BY bloqueado_ate DESC
       `, [req.params.central_id]);
       res.json({ success: true, penalidades: result.rows });
     } catch (error) {
+      console.error('❌ Erro ao listar penalidades:', error);
       res.status(500).json({ error: 'Erro ao listar penalidades' });
     }
   });
@@ -841,6 +849,144 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     } catch (error) {
       console.error('❌ Erro ao anular penalidade:', error);
       res.status(500).json({ error: 'Erro ao anular penalidade' });
+    }
+  });
+
+  // ==================== 🆕 2026-05: APLICAR PUNIÇÃO MANUAL ====================
+  // Admin aplica penalidade direto num motoboy vinculado à central.
+  // Regras:
+  //   - Tempo: minutos (qualquer valor entre 1 e 10080 = 7 dias). Front oferece chips
+  //     fixos (30/60/120/240/480/1440/2880) + opção 'Personalizado'.
+  //   - Motoboy precisa estar vinculado à central (validação anti-erro).
+  //   - Motivo é OPCIONAL (texto livre, só pro registro interno; nunca é exposto pro motoboy).
+  //   - Se motoboy está na fila → remove (igual gatilho automático de mover-ultimo).
+  //   - UPSERT: se já tem penalidade hoje, mantém o MAIOR bloqueio (não diminui punição
+  //     automática preexistente). saidas_hoje é PRESERVADO (punição manual não deve
+  //     resetar contador automático). Tipo vira 'manual' se for o caso novo, senão preserva.
+  //   - Notifica motoboy via WebSocket (sem expor motivo).
+  router.post('/aplicar-penalidade', verificarToken, verificarAdmin, async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const { cod_profissional, central_id, minutos, motivo } = req.body || {};
+
+      // ── Validações ──
+      if (!cod_profissional || !central_id) {
+        return res.status(400).json({ error: 'cod_profissional e central_id são obrigatórios' });
+      }
+      const minutosNum = parseInt(minutos);
+      if (!Number.isFinite(minutosNum) || minutosNum < 1 || minutosNum > 10080) {
+        return res.status(400).json({ error: 'minutos deve ser inteiro entre 1 e 10080 (7 dias)' });
+      }
+      const motivoLimpo = (typeof motivo === 'string' ? motivo : '').trim().slice(0, 500) || null;
+
+      await client.query('BEGIN');
+
+      // Verificar vínculo (motoboy precisa estar vinculado à central)
+      const vinculo = await client.query(
+        `SELECT v.cod_profissional, v.nome_profissional, c.nome AS central_nome
+         FROM filas_vinculos v
+         JOIN filas_centrais c ON c.id = v.central_id
+         WHERE v.cod_profissional = $1 AND v.central_id = $2 AND v.ativo = true`,
+        [cod_profissional, central_id]
+      );
+      if (vinculo.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Motoboy não vinculado a esta central' });
+      }
+      const nome_profissional = vinculo.rows[0].nome_profissional;
+      const central_nome = vinculo.rows[0].central_nome;
+
+      const novoBloqueadoAte = new Date(Date.now() + minutosNum * 60 * 1000);
+
+      // UPSERT: respeita o MAIOR bloqueio existente. Se já tem penalidade hoje
+      // (automática ou manual) e admin aplica uma menor, MANTÉM a maior.
+      // Se admin aplica uma maior, ATUALIZA.
+      // Tipo: vira 'manual' se for novo OU se a manual foi maior; senão preserva.
+      const upsert = await client.query(`
+        INSERT INTO filas_penalidades (
+          central_id, cod_profissional, nome_profissional, saidas_hoje,
+          bloqueado_ate, data_ref, tipo, motivo_admin, aplicado_por_cod, aplicado_por_nome
+        ) VALUES ($1, $2, $3, 0, $4, CURRENT_DATE, 'manual', $5, $6, $7)
+        ON CONFLICT (cod_profissional, central_id, data_ref) DO UPDATE SET
+          bloqueado_ate = GREATEST(EXCLUDED.bloqueado_ate, filas_penalidades.bloqueado_ate),
+          tipo = CASE WHEN EXCLUDED.bloqueado_ate >= filas_penalidades.bloqueado_ate
+                      THEN 'manual'
+                      ELSE COALESCE(filas_penalidades.tipo, 'automatica') END,
+          motivo_admin = CASE WHEN EXCLUDED.bloqueado_ate >= filas_penalidades.bloqueado_ate
+                              THEN EXCLUDED.motivo_admin
+                              ELSE filas_penalidades.motivo_admin END,
+          aplicado_por_cod = CASE WHEN EXCLUDED.bloqueado_ate >= filas_penalidades.bloqueado_ate
+                                  THEN EXCLUDED.aplicado_por_cod
+                                  ELSE filas_penalidades.aplicado_por_cod END,
+          aplicado_por_nome = CASE WHEN EXCLUDED.bloqueado_ate >= filas_penalidades.bloqueado_ate
+                                   THEN EXCLUDED.aplicado_por_nome
+                                   ELSE filas_penalidades.aplicado_por_nome END,
+          anulado_em = NULL,
+          anulado_por = NULL,
+          updated_at = NOW()
+        RETURNING id, bloqueado_ate, tipo
+      `, [central_id, cod_profissional, nome_profissional, novoBloqueadoAte,
+          motivoLimpo, req.user.codProfissional, req.user.nome]);
+
+      const bloqueadoAteFinal = upsert.rows[0].bloqueado_ate;
+      const aumentou = new Date(bloqueadoAteFinal).getTime() >= novoBloqueadoAte.getTime() - 1000;
+
+      // Remover da fila se estiver (mesmo padrão do gatilho automático)
+      const removido = await client.query(
+        `DELETE FROM filas_posicoes WHERE cod_profissional = $1 AND central_id = $2 RETURNING id`,
+        [cod_profissional, central_id]
+      );
+      const estavaNaFila = removido.rows.length > 0;
+
+      // Histórico (motivo NÃO é incluído na observação visível na timeline padrão;
+      // fica em audit log via registrarAuditoria mais abaixo)
+      await client.query(`
+        INSERT INTO filas_historico (
+          central_id, central_nome, cod_profissional, nome_profissional,
+          acao, observacao, admin_cod, admin_nome
+        ) VALUES ($1, $2, $3, $4, 'penalidade_manual', $5, $6, $7)
+      `, [central_id, central_nome, cod_profissional, nome_profissional,
+          `Punição manual de ${minutosNum} min aplicada${estavaNaFila ? ' (removido da fila)' : ''}`,
+          req.user.codProfissional, req.user.nome]);
+
+      await client.query('COMMIT');
+
+      // 🔔 WebSocket — avisa motoboy em tempo real (sem expor motivo)
+      if (typeof global.sendToUser === 'function') {
+        global.sendToUser(cod_profissional, 'FILA_PUNIDO_ADMIN', {
+          central_id,
+          central_nome,
+          bloqueado_ate: bloqueadoAteFinal,
+          minutos_bloqueio: minutosNum,
+          mensagem: 'Você foi bloqueado da fila pela administração.'
+        });
+      }
+
+      res.json({
+        success: true,
+        penalidade: {
+          id: upsert.rows[0].id,
+          bloqueado_ate: bloqueadoAteFinal,
+          tipo: upsert.rows[0].tipo,
+          minutos: minutosNum,
+          ja_havia_penalidade_maior: !aumentou,
+          removido_da_fila: estavaNaFila
+        }
+      });
+
+      // 🔒 Auditoria registra motivo (acesso restrito) — fora do response pra fire-and-forget
+      registrarAuditoria(req, 'APLICAR_PENALIDADE_MANUAL', 'admin', 'filas_penalidades',
+        upsert.rows[0].id,
+        { cod_profissional, central_id, minutos: minutosNum, motivo: motivoLimpo,
+          removido_da_fila: estavaNaFila }
+      ).catch(() => {});
+
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch(_) {}
+      console.error('❌ Erro ao aplicar penalidade manual:', error);
+      res.status(500).json({ error: 'Erro ao aplicar penalidade' });
+    } finally {
+      client.release();
     }
   });
 
