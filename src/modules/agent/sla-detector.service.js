@@ -27,14 +27,7 @@
  *   e o detector só chama a função pronta.
  */
 
-// Lazy require — quebra dependência circular com playwright-sla-capture
-let _coletarOsEmExecucao = null;
-function getColetarOsEmExecucao() {
-  if (!_coletarOsEmExecucao) {
-    _coletarOsEmExecucao = require('./playwright-sla-capture').coletarOsEmExecucao;
-  }
-  return _coletarOsEmExecucao;
-}
+// coletarOsEmExecucao injetada via detectarOsNovas(pool, coletarFn) — sem import direto
 const { logger } = require('../../config/logger');
 
 const DEBUG = process.env.SLA_DETECTOR_DEBUG === 'true';
@@ -290,9 +283,9 @@ async function inserirNaFila(pool, ordens) {
  *   { ok: false, sessaoExpirada: true,  motivo }  ← worker vai forçar relogin
  *   { ok: false, sessaoExpirada: false, motivo }  ← outro erro
  */
-async function detectarOsNovas(pool) {
+async function detectarOsNovas(pool, coletarOsEmExecucao) {
   try {
-    const result = await getColetarOsEmExecucao()();
+    const result = await coletarOsEmExecucao();
 
     if (!result.ok) {
       log(`⚠️ coletarOsEmExecucao falhou: ${result.motivo}`);
