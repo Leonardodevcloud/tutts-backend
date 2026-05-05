@@ -284,6 +284,12 @@ async function inserirNaFila(pool, ordens) {
  *   { ok: false, sessaoExpirada: false, motivo }  ← outro erro
  */
 async function detectarOsNovas(pool, coletarOsEmExecucao) {
+  // Se não recebeu coletarOsEmExecucao como parâmetro, faz require direto.
+  // Neste ponto o módulo playwright-sla-capture já está 100% no cache
+  // (o ciclo circular se resolve antes da primeira chamada real).
+  if (typeof coletarOsEmExecucao !== 'function') {
+    coletarOsEmExecucao = require('./playwright-sla-capture').coletarOsEmExecucao;
+  }
   try {
     const result = await coletarOsEmExecucao();
 
