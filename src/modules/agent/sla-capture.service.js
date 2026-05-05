@@ -157,6 +157,8 @@ async function processarCaptura(pool, registro) {
 
   try {
     // 1. Captura pontos via Playwright
+    // Nota: o browser persistente (2026-05) é injetado via setOverrides({ browser })
+    // pelo sla-capture.agent.js ANTES desta chamada. O service não precisa saber.
     const resultado = await capturarPontosOS({ os_numero, cliente_cod });
 
     // Cliente 767 pode ser pulado se Ponto 1 não bater com Galba
