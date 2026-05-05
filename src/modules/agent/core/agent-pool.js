@@ -133,7 +133,38 @@ function _startAgente(pool, agente) {
  */
 async function _loopSlot(pool, agente, sessao, slotIdx) {
   agente._slotsAtivos++;
+
+  // Estado privado do slot — pode ser preenchido pelo onSlotStart e lido
+  // pelo processar() via ctx.slotState. Uso principal: browser persistente.
+  let slotState = {};
   log(agente.nome, `▶️ slot lógico ${slotIdx} entrou no loop`);
+
+  // Hook de inicialização do slot (ex: criar browser persistente)
+  if (typeof agente.onSlotStart === 'function') {
+    try {
+      const ctxInit = {
+        slotIdx,
+        log: (msg) => log(agente.nome, `slot[${slotIdx}] ${msg}`),
+        sessao,
+        slotState,
+      };
+      const ret = await agente.onSlotStart(pool, ctxInit);
+      if (ret && typeof ret === 'object') slotState = ret;
+    } catch (err) {
+      logErr(agente.nome, `slot[${slotIdx}] onSlotStart falhou: ${err.message}`);
+    }
+  }
+
+  // Hook de encerramento do slot
+  async function _chamarOnSlotStop() {
+    if (typeof agente.onSlotStop === 'function') {
+      try {
+        await agente.onSlotStop(pool, { slotIdx, slotState });
+      } catch (err) {
+        logErr(agente.nome, `slot[${slotIdx}] onSlotStop falhou: ${err.message}`);
+      }
+    }
+  }
 
   try {
     while (agente._ativo) {
@@ -162,6 +193,7 @@ async function _loopSlot(pool, agente, sessao, slotIdx) {
             slotIdx,         // slot lógico do agente (pra credenciais)
             log:       (msg) => log(agente.nome, `slot[${slotIdx}] ${msg}`),
             sessao,
+            slotState,       // estado persistente do slot (ex: browser)
             ehParaParar: () => !agente._ativo,
           };
           await agente.processar(pool, registro, ctx);
@@ -189,6 +221,7 @@ async function _loopSlot(pool, agente, sessao, slotIdx) {
   } finally {
     agente._slotsAtivos--;
     log(agente.nome, `⏹️ slot lógico ${slotIdx} saiu do loop`);
+    await _chamarOnSlotStop();
   }
 }
 
