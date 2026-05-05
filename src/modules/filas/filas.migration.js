@@ -128,6 +128,11 @@ async function initFilasTables(pool) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_filas_penalidades_unico 
       ON filas_penalidades (cod_profissional, central_id, data_ref)
   `).catch(() => {});
+  // 🆕 2026-05: campos pra distinguir punição automática vs aplicada manualmente pelo admin
+  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'automatica'`).catch(() => {});
+  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS motivo_admin TEXT`).catch(() => {});
+  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS aplicado_por_cod VARCHAR(50)`).catch(() => {});
+  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS aplicado_por_nome VARCHAR(255)`).catch(() => {});
   console.log('✅ Tabela filas_penalidades verificada');
 
   // 🗺️ Regiões de rotas
