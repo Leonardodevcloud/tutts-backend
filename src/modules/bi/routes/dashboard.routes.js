@@ -2362,7 +2362,9 @@ router.get('/bi/serie-temporal', async (req, res) => {
       categoria, cidade, status_prazo, status_retorno
     }));
 
-    let where = 'WHERE 1=1';
+    // 🔧 PADRÃO PBIX: filtro base ponto >= 2 (exclui coletas/Ponto 1)
+    // Alinhado com QtdEntregas DAX = COUNT WHERE Ponto_Entrega <> "Ponto 1"
+    let where = 'WHERE COALESCE(ponto, 1) >= 2';
     const params = [];
     let idx = 1;
     if (data_inicio) { where += ` AND data_solicitado >= $${idx++}`; params.push(data_inicio); }
@@ -2420,19 +2422,33 @@ router.get('/bi/serie-temporal', async (req, res) => {
     const dmax = data_fim || (rangeQ.rows[0]?.dmax);
 
     // Série temporal agrupada — agora com TODAS as métricas + preenchimento de zeros via generate_series
+    // 🔧 PADRÃO PBIX: ValorTotal usa DISTINCT ON (os) ORDER BY ponto ASC (= FIRSTNONBLANK do DAX)
+    //   pra evitar somar o mesmo valor da OS múltiplas vezes (uma vez por entrega).
+    // O CTE os_val pega 1 valor por OS, depois agrupa por período pra somar.
     let serie = [];
     if (dmin && dmax) {
       const serieParams = [...params, dmin, dmax];
       const serieQ = await pool.query(`
-        WITH agregado AS (
+        WITH os_val AS (
+          SELECT DISTINCT ON (os) os, data_solicitado, valor, valor_prof
+          FROM bi_entregas ${where} AND os IS NOT NULL
+          ORDER BY os, ponto ASC
+        ),
+        fat_periodo AS (
+          SELECT
+            DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
+            SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
+            SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof
+          FROM os_val
+          GROUP BY DATE_TRUNC('${trunc}', data_solicitado)
+        ),
+        agregado AS (
           SELECT
             DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
             COUNT(DISTINCT os)::int AS total_os,
             COUNT(*)::int AS total_entregas,
             SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
             SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
-            SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
-            SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
             SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
             AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
             -- tempo de alocação = data_chegada/hora - data_hora_alocado
@@ -2451,8 +2467,8 @@ router.get('/bi/serie-temporal', async (req, res) => {
           COALESCE(a.total_entregas, 0)::int AS total_entregas,
           COALESCE(a.no_prazo, 0)::int AS no_prazo,
           COALESCE(a.fora_prazo, 0)::int AS fora_prazo,
-          COALESCE(a.valor_total, 0)::numeric(12,2) AS valor_total,
-          COALESCE(a.valor_prof, 0)::numeric(12,2) AS valor_prof,
+          COALESCE(f.valor_total, 0)::numeric(12,2) AS valor_total,
+          COALESCE(f.valor_prof, 0)::numeric(12,2) AS valor_prof,
           COALESCE(a.retornos, 0)::int AS retornos,
           COALESCE(a.tempo_medio_min, 0)::numeric(10,2) AS tempo_medio_min,
           COALESCE(a.tempo_alocacao_min, 0)::numeric(10,2) AS tempo_alocacao_min,
@@ -2464,6 +2480,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
           '${interval}'::interval
         ) gs
         LEFT JOIN agregado a ON a.periodo = gs::date
+        LEFT JOIN fat_periodo f ON f.periodo = gs::date
         ORDER BY periodo
       `, serieParams);
 
@@ -2471,6 +2488,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
         const ent = r.total_entregas;
         const valor = parseFloat(r.valor_total) || 0;
         const valorProf = parseFloat(r.valor_prof) || 0;
+        const fatLiquido = valor - valorProf;
         return {
           periodo: r.periodo,
           total_os: r.total_os,
@@ -2479,10 +2497,11 @@ router.get('/bi/serie-temporal', async (req, res) => {
           fora_prazo: r.fora_prazo,
           valor_total: valor,
           valor_prof: valorProf,
-          fat_total: valor - valorProf, // faturamento líquido (cliente paga - profissional recebe)
+          fat_total: fatLiquido, // faturamento líquido (cliente paga - profissional recebe)
           retornos: r.retornos,
           pct_prazo: ent > 0 ? (r.no_prazo / ent * 100) : 0,
-          ticket_medio: ent > 0 ? (valor / ent) : 0,
+          // 🔧 PADRÃO PBIX: TicketMedio = (ValorTotal - ValorProfissional) / QtdEntregas (LÍQUIDO)
+          ticket_medio: ent > 0 ? (fatLiquido / ent) : 0,
           tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
           tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
           tempo_coleta_min: parseFloat(r.tempo_coleta_min) || 0,
@@ -2493,25 +2512,40 @@ router.get('/bi/serie-temporal', async (req, res) => {
     }
 
     // Por cliente (mesma agregação, agrupada por cliente — pra tabela e drilldown)
+    // 🔧 PADRÃO PBIX: faturamento usa DISTINCT ON (os) ORDER BY ponto ASC (FIRSTNONBLANK)
     const porClienteQ = await pool.query(`
+      WITH os_val AS (
+        SELECT DISTINCT ON (os) os, cod_cliente, valor, valor_prof
+        FROM bi_entregas ${where} AND os IS NOT NULL
+        ORDER BY os, ponto ASC
+      ),
+      fat_cli AS (
+        SELECT cod_cliente,
+          SUM(COALESCE(valor, 0))::numeric(12,2) AS faturamento,
+          SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof
+        FROM os_val
+        GROUP BY cod_cliente
+      )
       SELECT
-        cod_cliente,
-        MAX(nome_cliente) AS nome_cliente,
-        COUNT(DISTINCT os)::int AS total_os,
+        e.cod_cliente,
+        MAX(e.nome_cliente) AS nome_cliente,
+        COUNT(DISTINCT e.os)::int AS total_os,
         COUNT(*)::int AS total_entregas,
-        SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
-        SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
-        SUM(COALESCE(valor, 0))::numeric(12,2) AS faturamento,
-        SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
-        SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
-        AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
-        AVG(EXTRACT(EPOCH FROM ((data_chegada + hora_chegada) - data_hora_alocado))/60)
-          FILTER (WHERE data_chegada IS NOT NULL AND data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
-        AVG(EXTRACT(EPOCH FROM ((data_saida + hora_saida) - (data_chegada + hora_chegada)))/60)
-          FILTER (WHERE data_saida IS NOT NULL AND data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
-        COUNT(DISTINCT cod_prof)::int AS total_entregadores
-      FROM bi_entregas ${where}
-      GROUP BY cod_cliente
+        SUM(CASE WHEN e.dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+        SUM(CASE WHEN e.dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
+        COALESCE(f.faturamento, 0)::numeric(12,2) AS faturamento,
+        COALESCE(f.valor_prof, 0)::numeric(12,2) AS valor_prof,
+        SUM(CASE WHEN e.motivo IS NOT NULL AND LOWER(e.motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+        AVG(NULLIF(e.tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
+        AVG(EXTRACT(EPOCH FROM ((e.data_chegada + e.hora_chegada) - e.data_hora_alocado))/60)
+          FILTER (WHERE e.data_chegada IS NOT NULL AND e.data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
+        AVG(EXTRACT(EPOCH FROM ((e.data_saida + e.hora_saida) - (e.data_chegada + e.hora_chegada)))/60)
+          FILTER (WHERE e.data_saida IS NOT NULL AND e.data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
+        COUNT(DISTINCT e.cod_prof)::int AS total_entregadores
+      FROM bi_entregas e
+      LEFT JOIN fat_cli f ON f.cod_cliente = e.cod_cliente
+      ${where}
+      GROUP BY e.cod_cliente, f.faturamento, f.valor_prof
       HAVING COUNT(*) > 0
       ORDER BY total_entregas DESC
     `, params);
@@ -2520,6 +2554,7 @@ router.get('/bi/serie-temporal', async (req, res) => {
       const ent = r.total_entregas;
       const valor = parseFloat(r.faturamento) || 0;
       const valorProf = parseFloat(r.valor_prof) || 0;
+      const fatLiquido = valor - valorProf;
       return {
         cod_cliente: r.cod_cliente,
         nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
@@ -2531,8 +2566,9 @@ router.get('/bi/serie-temporal', async (req, res) => {
         faturamento: valor,
         valor_total: valor,
         valor_prof: valorProf,
-        fat_total: valor - valorProf,
-        ticket_medio: ent > 0 ? (valor / ent) : 0,
+        fat_total: fatLiquido,
+        // 🔧 PADRÃO PBIX: TicketMedio = (ValorTotal - ValorProfissional) / QtdEntregas (LÍQUIDO)
+        ticket_medio: ent > 0 ? (fatLiquido / ent) : 0,
         retornos: r.retornos,
         tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
         tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
@@ -2545,36 +2581,54 @@ router.get('/bi/serie-temporal', async (req, res) => {
     // 🚀 2026-05: porClientePeriodo — agrupa por cliente × período pivotado.
     // Usado pra tabela quando granularidade = semana/mês (cria colunas dinâmicas Sem 1, Sem 2...).
     // Pra dia, retornamos vazio — 30 colunas no eixo X seria inviável.
+    // 🔧 PADRÃO PBIX: faturamento usa DISTINCT ON (os) ORDER BY ponto ASC (FIRSTNONBLANK)
     let porClientePeriodo = [];
     if (granu !== 'dia') {
       const cpQ = await pool.query(`
+        WITH os_val AS (
+          SELECT DISTINCT ON (os) os, cod_cliente, data_solicitado, valor, valor_prof
+          FROM bi_entregas ${where} AND os IS NOT NULL
+          ORDER BY os, ponto ASC
+        ),
+        fat_cli_periodo AS (
+          SELECT cod_cliente, DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
+            SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
+            SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof
+          FROM os_val
+          GROUP BY cod_cliente, DATE_TRUNC('${trunc}', data_solicitado)
+        )
         SELECT
-          cod_cliente,
-          MAX(nome_cliente) AS nome_cliente,
-          DATE_TRUNC('${trunc}', data_solicitado)::date AS periodo,
-          COUNT(DISTINCT os)::int AS total_os,
+          e.cod_cliente,
+          MAX(e.nome_cliente) AS nome_cliente,
+          DATE_TRUNC('${trunc}', e.data_solicitado)::date AS periodo,
+          COUNT(DISTINCT e.os)::int AS total_os,
           COUNT(*)::int AS total_entregas,
-          SUM(CASE WHEN dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
-          SUM(CASE WHEN dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
-          SUM(COALESCE(valor, 0))::numeric(12,2) AS valor_total,
-          SUM(COALESCE(valor_prof, 0))::numeric(12,2) AS valor_prof,
-          SUM(CASE WHEN motivo IS NOT NULL AND LOWER(motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
-          AVG(NULLIF(tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
-          AVG(EXTRACT(EPOCH FROM ((data_chegada + hora_chegada) - data_hora_alocado))/60)
-            FILTER (WHERE data_chegada IS NOT NULL AND data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
-          AVG(EXTRACT(EPOCH FROM ((data_saida + hora_saida) - (data_chegada + hora_chegada)))/60)
-            FILTER (WHERE data_saida IS NOT NULL AND data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
-          COUNT(DISTINCT cod_prof)::int AS total_entregadores
-        FROM bi_entregas ${where}
-        GROUP BY cod_cliente, DATE_TRUNC('${trunc}', data_solicitado)
+          SUM(CASE WHEN e.dentro_prazo = true THEN 1 ELSE 0 END)::int AS no_prazo,
+          SUM(CASE WHEN e.dentro_prazo = false THEN 1 ELSE 0 END)::int AS fora_prazo,
+          COALESCE(f.valor_total, 0)::numeric(12,2) AS valor_total,
+          COALESCE(f.valor_prof, 0)::numeric(12,2) AS valor_prof,
+          SUM(CASE WHEN e.motivo IS NOT NULL AND LOWER(e.motivo) LIKE '%retorn%' THEN 1 ELSE 0 END)::int AS retornos,
+          AVG(NULLIF(e.tempo_execucao_minutos, 0))::numeric(10,2) AS tempo_medio_min,
+          AVG(EXTRACT(EPOCH FROM ((e.data_chegada + e.hora_chegada) - e.data_hora_alocado))/60)
+            FILTER (WHERE e.data_chegada IS NOT NULL AND e.data_hora_alocado IS NOT NULL)::numeric(10,2) AS tempo_alocacao_min,
+          AVG(EXTRACT(EPOCH FROM ((e.data_saida + e.hora_saida) - (e.data_chegada + e.hora_chegada)))/60)
+            FILTER (WHERE e.data_saida IS NOT NULL AND e.data_chegada IS NOT NULL)::numeric(10,2) AS tempo_coleta_min,
+          COUNT(DISTINCT e.cod_prof)::int AS total_entregadores
+        FROM bi_entregas e
+        LEFT JOIN fat_cli_periodo f
+          ON f.cod_cliente = e.cod_cliente
+          AND f.periodo = DATE_TRUNC('${trunc}', e.data_solicitado)::date
+        ${where}
+        GROUP BY e.cod_cliente, DATE_TRUNC('${trunc}', e.data_solicitado), f.valor_total, f.valor_prof
         HAVING COUNT(*) > 0
-        ORDER BY cod_cliente, periodo
+        ORDER BY e.cod_cliente, periodo
       `, params);
 
       porClientePeriodo = cpQ.rows.map(r => {
         const ent = r.total_entregas;
         const valor = parseFloat(r.valor_total) || 0;
         const valorProf = parseFloat(r.valor_prof) || 0;
+        const fatLiquido = valor - valorProf;
         return {
           cod_cliente: r.cod_cliente,
           nome_cliente: r.nome_cliente || ('cod ' + r.cod_cliente),
@@ -2585,10 +2639,11 @@ router.get('/bi/serie-temporal', async (req, res) => {
           fora_prazo: r.fora_prazo,
           valor_total: valor,
           valor_prof: valorProf,
-          fat_total: valor - valorProf,
+          fat_total: fatLiquido,
           retornos: r.retornos,
           pct_prazo: ent > 0 ? (r.no_prazo / ent * 100) : 0,
-          ticket_medio: ent > 0 ? (valor / ent) : 0,
+          // 🔧 PADRÃO PBIX: TicketMedio = (ValorTotal - ValorProfissional) / QtdEntregas (LÍQUIDO)
+          ticket_medio: ent > 0 ? (fatLiquido / ent) : 0,
           tempo_medio_min: parseFloat(r.tempo_medio_min) || 0,
           tempo_alocacao_min: parseFloat(r.tempo_alocacao_min) || 0,
           tempo_coleta_min: parseFloat(r.tempo_coleta_min) || 0,
