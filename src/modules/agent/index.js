@@ -30,6 +30,11 @@ const initSlaCaptureTables  = require('./sla-capture.migration');
 const initLiberacaoTables   = require('./liberacao.migration');  // 2026-04 v3: novo módulo
 const agentPool             = require('./core/agent-pool');
 
+// Pré-carrega playwright-sla-capture ANTES dos agentes para evitar
+// dependência circular: quando os agentes fizerem lazy require deste módulo
+// durante o tickGlobal/processarCaptura, ele já estará 100% no cache do Node.
+require('./playwright-sla-capture');
+
 // ── Agentes ──────────────────────────────────────────────────
 const slaCaptureAgent     = require('./agents/sla-capture.agent');
 const agentCorrecaoAgent  = require('./agents/agent-correcao.agent');
