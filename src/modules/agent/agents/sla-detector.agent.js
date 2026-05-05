@@ -1,16 +1,12 @@
 /**
  * agents/sla-detector.agent.js
- * ─────────────────────────────────────────────────────────────────────────
- * Agente detector — varre listagem de OS em execução e enfileira em
- * sla_capturas as novas. Modo cron (não item-por-item, varredura global).
  *
- * NÃO PARALELIZA — varredura global, 1 slot só faz sentido.
- * Compartilha sessão com sla-capture (mesma conta SLA).
+ * Varre OS em execução a cada 2 min e enfileira em sla_capturas.
  *
- * 2026-05: removido setOverrides daqui.
- * coletarOsEmExecucao() já usa SISTEMA_EXTERNO_SLA_EMAIL/SENHA do env
- * diretamente quando não há override — não precisa de acoplamento com
- * playwright-sla-capture aqui, o que causava dependência circular.
+ * 2026-05: dependência circular resolvida por injeção.
+ * Este agente faz o lazy require de playwright-sla-capture e passa
+ * coletarOsEmExecucao como parâmetro pro service — o service não importa
+ * playwright-sla-capture de forma alguma, cortando o ciclo na raiz.
  */
 
 'use strict';
@@ -32,9 +28,14 @@ module.exports = defineAgent({
 
   tickGlobal: async (pool, ctx) => {
     ctx.log('🔍 Iniciando varredura de OS em execução');
-    // coletarOsEmExecucao() usa SISTEMA_EXTERNO_SLA_EMAIL/SENHA do env.
-    // Não precisa de setOverrides — sem acoplamento direto com playwright-sla-capture.
-    const resultado = await slaDetectorService.detectarOsNovas(pool);
+
+    // Lazy require aqui — único ponto de contato com playwright-sla-capture.
+    // Executado dentro do tickGlobal (não no topo do módulo), quando todos os
+    // módulos já estão 100% carregados, sem risco de ciclo.
+    const { coletarOsEmExecucao } = require('../playwright-sla-capture');
+
+    // Injeta a função no service — sem acoplamento de import lá
+    const resultado = await slaDetectorService.detectarOsNovas(pool, coletarOsEmExecucao);
     ctx.log(`✅ Varredura concluída: ${JSON.stringify(resultado)}`);
   },
 });
