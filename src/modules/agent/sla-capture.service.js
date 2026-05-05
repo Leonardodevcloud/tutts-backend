@@ -11,7 +11,16 @@
 'use strict';
 
 const { logger } = require('../../config/logger');
-const { capturarPontosOS } = require('./playwright-sla-capture');
+// Lazy require — quebra dependência circular:
+// sla-capture.service → playwright-sla-capture → (resolve tudo antes)
+// Sem lazy: no boot o módulo ainda não terminou de exportar → capturarPontosOS = undefined
+let _capturarPontosOS = null;
+function getCapturarPontosOS() {
+  if (!_capturarPontosOS) {
+    _capturarPontosOS = require('./playwright-sla-capture').capturarPontosOS;
+  }
+  return _capturarPontosOS;
+}
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const MAX_TENTATIVAS = 3;
@@ -159,7 +168,7 @@ async function processarCaptura(pool, registro) {
     // 1. Captura pontos via Playwright
     // Nota: o browser persistente (2026-05) é injetado via setOverrides({ browser })
     // pelo sla-capture.agent.js ANTES desta chamada. O service não precisa saber.
-    const resultado = await capturarPontosOS({ os_numero, cliente_cod });
+    const resultado = await getCapturarPontosOS()({ os_numero, cliente_cod });
 
     // Cliente 767 pode ser pulado se Ponto 1 não bater com Galba
     if (resultado.skipped) {
