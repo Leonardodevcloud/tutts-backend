@@ -1024,11 +1024,20 @@ router.get('/bi/dashboard-completo', async (req, res) => {
         });
         // ===== FIM CALCULAR T. ENTREGA PROF =====
         
-        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto, que tem o valor da OS)
-        const linhaValor = linhasOS.reduce((maior, atual) => {
-          const pontoAtual = parseInt(atual.ponto) || 0;
-          const pontoMaior = parseInt(maior?.ponto) || 0;
-          return pontoAtual > pontoMaior ? atual : maior;
+        // 🔧 FIX PBIX: Para VALORES, usar FIRSTNONBLANK (= linha de MENOR ponto, primeira não-nula)
+        // Equivale a: SELECT DISTINCT ON (os) ... ORDER BY os, ponto ASC
+        // Antes pegava a linha de MAIOR ponto, o que dava valores divergentes do Power BI.
+        const linhaValor = linhasOS.reduce((menor, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 999;
+          const pontoMenor = parseInt(menor?.ponto) || 999;
+          // Pega a linha com MENOR ponto que tem valor não-nulo (FIRSTNONBLANK)
+          const valorAtual = parseFloat(atual?.valor);
+          const valorMenor = parseFloat(menor?.valor);
+          // Se a atual tem valor e a menor não tem, usa atual
+          if (!isNaN(valorAtual) && (isNaN(valorMenor) || pontoAtual < pontoMenor)) {
+            return atual;
+          }
+          return menor;
         }, linhasOS[0]);
         
         somaValor += parseFloat(linhaValor?.valor) || 0;
@@ -1313,11 +1322,18 @@ router.get('/bi/dashboard-completo', async (req, res) => {
         const linhasParaProcessar = linhasEntrega.length > 0 ? linhasEntrega : 
           (linhasOS.length > 1 ? linhasOS.slice(1) : linhasOS);
         
-        // Para VALORES: soma apenas 1x por OS (pega a linha com maior ponto)
-        const linhaValor = linhasOS.reduce((maior, atual) => {
-          const pontoAtual = parseInt(atual.ponto) || 0;
-          const pontoMaior = parseInt(maior?.ponto) || 0;
-          return pontoAtual > pontoMaior ? atual : maior;
+        // 🔧 FIX PBIX: Para VALORES, usar FIRSTNONBLANK (= linha de MENOR ponto, primeira não-nula)
+        // Equivale a: SELECT DISTINCT ON (os) ... ORDER BY os, ponto ASC
+        // Antes pegava a linha de MAIOR ponto, o que dava valores divergentes do Power BI.
+        const linhaValor = linhasOS.reduce((menor, atual) => {
+          const pontoAtual = parseInt(atual.ponto) || 999;
+          const pontoMenor = parseInt(menor?.ponto) || 999;
+          const valorAtual = parseFloat(atual?.valor);
+          const valorMenor = parseFloat(menor?.valor);
+          if (!isNaN(valorAtual) && (isNaN(valorMenor) || pontoAtual < pontoMenor)) {
+            return atual;
+          }
+          return menor;
         }, linhasOS[0]);
         
         c.soma_valor += parseFloat(linhaValor?.valor) || 0;
@@ -2424,7 +2440,6 @@ router.get('/bi/serie-temporal', async (req, res) => {
     // Série temporal agrupada — agora com TODAS as métricas + preenchimento de zeros via generate_series
     // 🔧 PADRÃO PBIX: ValorTotal usa DISTINCT ON (os) ORDER BY ponto ASC (= FIRSTNONBLANK do DAX)
     //   pra evitar somar o mesmo valor da OS múltiplas vezes (uma vez por entrega).
-    // O CTE os_val pega 1 valor por OS, depois agrupa por período pra somar.
     let serie = [];
     if (dmin && dmax) {
       const serieParams = [...params, dmin, dmax];
