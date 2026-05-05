@@ -3,15 +3,15 @@
  *
  * Varre OS em execução a cada 2 min e enfileira em sla_capturas.
  *
- * 2026-05: coletarOsEmExecucao é injetada pelo index.js via wrapper
- * do tickGlobal — zero imports de playwright-sla-capture aqui.
- * Elimina dependência circular definitivamente.
+ * 2026-05: usa sla-capture-api.js (wrapper sem ciclo) em vez de
+ * importar playwright-sla-capture diretamente.
  */
 
 'use strict';
 
 const { defineAgent } = require('../core/agent-base');
 const slaDetectorService = require('../sla-detector.service');
+const slaCaptureApi = require('../sla-capture-api');
 
 const CRON_DEFAULT = '*/2 8-18 * * 1-5';
 
@@ -25,10 +25,14 @@ module.exports = defineAgent({
 
   habilitado: () => (process.env.SLA_DETECTOR_ATIVO || 'false').toLowerCase() === 'true',
 
-  // coletarOsEmExecucao é injetada pelo index.js como 3o parâmetro
-  tickGlobal: async (pool, ctx, coletarOsEmExecucao) => {
+  tickGlobal: async (pool, ctx) => {
     ctx.log('🔍 Iniciando varredura de OS em execução');
-    const resultado = await slaDetectorService.detectarOsNovas(pool, coletarOsEmExecucao);
+    // slaCaptureApi.coletarOsEmExecucao usa getter — busca do cache do Node
+    // no momento da chamada, quando playwright-sla-capture já está completo
+    const resultado = await slaDetectorService.detectarOsNovas(
+      pool,
+      slaCaptureApi.coletarOsEmExecucao
+    );
     ctx.log(`✅ Varredura concluída: ${JSON.stringify(resultado)}`);
   },
 });
