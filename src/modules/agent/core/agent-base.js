@@ -101,6 +101,9 @@ function defineAgent(spec) {
     apenasUmTick:     spec.apenasUmTick === true,
     cronExpression:   spec.cronExpression || null,
     timezone:         spec.timezone || 'America/Bahia',
+    // 2026-05: hooks de ciclo de vida do slot (browser persistente)
+    onSlotStart:      spec.onSlotStart || null,
+    onSlotStop:       spec.onSlotStop  || null,
 
     // Estado interno (preenchido pelo pool)
     _ativo:    false,
