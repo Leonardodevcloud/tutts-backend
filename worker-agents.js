@@ -35,6 +35,11 @@ process.env.AGENTS_RUN_HERE = 'true';
 const http = require('http');
 const { pool, testConnection } = require('./src/config/database');
 const { logger } = require('./src/config/logger');
+// Pré-carrega playwright-sla-capture aqui, antes de qualquer outro módulo do agent.
+// Garante que o módulo esteja 100% no cache quando os agentes fizerem require
+// (via lazy getter ou sla-capture-api), eliminando o carregamento parcial
+// que causava "coletarOsEmExecucao is not a function".
+require('./src/modules/agent/playwright-sla-capture');
 const { initAgentTables, startAgentWorker, getPoolSnapshot } = require('./src/modules/agent');
 
 // 🧹 Cleanup periódico de /tmp (profiles órfãos do Chromium + screenshots antigos)
