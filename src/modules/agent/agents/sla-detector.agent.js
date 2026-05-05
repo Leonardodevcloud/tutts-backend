@@ -27,12 +27,29 @@ module.exports = defineAgent({
 
   tickGlobal: async (pool, ctx) => {
     ctx.log('🔍 Iniciando varredura de OS em execução');
-    // slaCaptureApi.coletarOsEmExecucao usa getter — busca do cache do Node
-    // no momento da chamada, quando playwright-sla-capture já está completo
-    const resultado = await slaDetectorService.detectarOsNovas(
-      pool,
-      slaCaptureApi.coletarOsEmExecucao
-    );
-    ctx.log(`✅ Varredura concluída: ${JSON.stringify(resultado)}`);
+
+    // Tenta via getter do sla-capture-api primeiro
+    let fnColetar = slaCaptureApi.coletarOsEmExecucao;
+    ctx.log('[diag] tipo via getter: ' + typeof fnColetar);
+
+    // Fallback: require direto se getter falhou
+    if (typeof fnColetar !== 'function') {
+      ctx.log('[diag] getter falhou — require direto');
+      try {
+        const pw = require('../playwright-sla-capture');
+        fnColetar = pw.coletarOsEmExecucao;
+        ctx.log('[diag] após require direto: ' + typeof fnColetar);
+      } catch (e) {
+        ctx.log('[diag] require direto falhou: ' + e.message);
+      }
+    }
+
+    if (typeof fnColetar !== 'function') {
+      ctx.log('[diag] FALHA TOTAL: coletarOsEmExecucao indisponível');
+      return;
+    }
+
+    const resultado = await slaDetectorService.detectarOsNovas(pool, fnColetar);
+    ctx.log('✅ Varredura concluída: ' + JSON.stringify(resultado));
   },
 });
