@@ -1,8 +1,6 @@
 /**
  * BI Monitoramento - Aba "Hora a Hora"
- *
- * Distribuição de OS por hora do dia (0..23).
- * Identifica horário de pico (h com mais OS) e janela 8h-18h.
+ * v2: montarWhere async.
  */
 const express = require('express');
 const { montarWhere } = require('./dashboard.routes');
@@ -12,7 +10,7 @@ function createHoraAHoraRoutes(pool) {
 
   router.get('/bi-monitoramento/hora-a-hora', async (req, res) => {
     try {
-      const { where, params } = montarWhere(req.query);
+      const { where, params } = await montarWhere(pool, req.query);
 
       const horasQuery = await pool.query(`
         SELECT
@@ -27,7 +25,6 @@ function createHoraAHoraRoutes(pool) {
         ORDER BY hora
       `, params);
 
-      // Garante 24 horas (preenche zeros)
       const mapa = new Map(horasQuery.rows.map(r => [Number(r.hora), r]));
       const horas = [];
       for (let h = 0; h < 24; h++) {
@@ -41,22 +38,17 @@ function createHoraAHoraRoutes(pool) {
         });
       }
 
-      // Estatísticas auxiliares
       const totalOs = horas.reduce((s, h) => s + h.total_os, 0);
       const osPico = horas.slice(8, 19).reduce((s, h) => s + h.total_os, 0);
       const foraPico = totalOs - osPico;
 
-      // Hora de pico (a com mais OS)
       let horaPico = null, maxOs = -1;
       for (const h of horas) {
         if (h.total_os > maxOs) { maxOs = h.total_os; horaPico = h.hora; }
       }
 
-      // Média de OS por hora dentro do pico (8h-18h)
       const horasDentroPico = horas.slice(8, 19).filter(h => h.total_os > 0).length;
-      const mediaPorHoraPico = horasDentroPico > 0
-        ? Math.round(osPico / horasDentroPico)
-        : 0;
+      const mediaPorHoraPico = horasDentroPico > 0 ? Math.round(osPico / horasDentroPico) : 0;
 
       res.json({
         horas,
@@ -73,7 +65,7 @@ function createHoraAHoraRoutes(pool) {
       });
     } catch (err) {
       console.error('❌ [bi-monitoramento] Erro hora-a-hora:', err);
-      res.status(500).json({ error: 'Erro ao carregar hora a hora' });
+      res.status(500).json({ error: 'Erro ao carregar hora a hora', detail: err.message });
     }
   });
 
