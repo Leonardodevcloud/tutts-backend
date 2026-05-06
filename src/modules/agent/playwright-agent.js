@@ -65,6 +65,65 @@ function log(msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Retry para falhas transitórias do sistema externo (tutts.com.br/expresso)
+// O alvo são picos de instabilidade ocasionais que duram poucos segundos:
+// page.goto travando 45s ou waitForSelector estourando 25s. Em vez de marcar
+// a OS como 'falhou' direto, espera DELAY_MS e tenta mais 1 vez.
+// Detecção: TimeoutError do Playwright (mensagem contém "Timeout NNms exceeded"
+// ou "timeout").
+// ─────────────────────────────────────────────────────────────────────────
+function ehErroDeTimeout(err) {
+  if (!err) return false;
+  const nome = err.name || '';
+  const msg  = String(err.message || '');
+  if (nome === 'TimeoutError') return true;
+  if (/timeout/i.test(msg) && /(exceeded|after|excedido|após)/i.test(msg)) return true;
+  return false;
+}
+
+/**
+ * Executa fn() até MAX_TENTATIVAS vezes em caso de TimeoutError.
+ * - label: rótulo legível pro log (ex: "page.goto ACOMP_URL")
+ * - delayMs: pausa entre tentativas (default 5000)
+ *
+ * Em caso de sucesso, devolve o resultado.
+ * Em caso de falha não-timeout, propaga imediatamente sem retry (não vale a pena
+ * retentar erro de seletor inválido, credencial errada, etc).
+ * Em caso de timeout repetido, propaga o ÚLTIMO erro com a mensagem prefixada
+ * por "[após N tentativa(s)]" pra ficar evidente no banco.
+ */
+async function comRetryTimeout(fn, label, opts) {
+  const MAX_TENTATIVAS = (opts && opts.tentativas) || 2;
+  const DELAY_MS = (opts && opts.delayMs) || 5000;
+
+  let ultimoErro = null;
+  for (let i = 1; i <= MAX_TENTATIVAS; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      ultimoErro = err;
+      const ehTimeout = ehErroDeTimeout(err);
+
+      // Erro que não é timeout? não vale retentar
+      if (!ehTimeout) throw err;
+
+      // Última tentativa? prefixa e propaga
+      if (i === MAX_TENTATIVAS) {
+        const prefixo = `[após ${MAX_TENTATIVAS} tentativa(s) de ${label}]`;
+        err.message = `${prefixo} ${err.message}`;
+        throw err;
+      }
+
+      // Tem retry sobrando — loga e tenta de novo
+      log(`⚠️ [retry] ${label} timeout na tentativa ${i}/${MAX_TENTATIVAS}, aguardando ${DELAY_MS}ms e tentando de novo...`);
+      await new Promise(r => setTimeout(r, DELAY_MS));
+    }
+  }
+  // unreachable — safeguard
+  throw ultimoErro || new Error(`comRetryTimeout: falhou sem erro registrado em ${label}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Gestão de recursos: watchdog de promises + fechamento seguro de browser
 // Mesmo padrão usado em playwright-sla-capture.js — evita Chromium zombie
 // que leva a "pthread_create: Resource temporarily unavailable" em containers
@@ -254,7 +313,10 @@ async function fazerLogin(page, overrides) {
 
   log(`🔐 Login (${overrides ? 'override' : 'env padrão'}): ${email}`);
 
-  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  await comRetryTimeout(
+    () => page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+    'page.goto LOGIN_URL'
+  );
   await page.waitForTimeout(1500);
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
@@ -344,7 +406,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     log('📌 Passo 1: Autenticação');
     reportar('login', 15);
 
-    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    await comRetryTimeout(
+      () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+      'page.goto ACOMP_URL (entrada)'
+    );
     await page.waitForTimeout(2000);
 
     if (!(await isLoggedIn(page))) {
@@ -353,7 +418,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         log('🗑️  Sessão inválida removida');
       }
       await fazerLogin(page, _credentialsOverride);
-      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+      await comRetryTimeout(
+        () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+        'page.goto ACOMP_URL (após login)'
+      );
       await page.waitForTimeout(2000);
       await context.storageState({ path: getSessionFile() });
       log('💾 Sessão salva');
@@ -437,7 +505,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           log('🗑️  Sessão removida');
         }
         await fazerLogin(page, _credentialsOverride);
-        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+        await comRetryTimeout(
+          () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+          'page.goto ACOMP_URL (re-login fallback)'
+        );
         await page.waitForTimeout(2000);
         await context.storageState({ path: getSessionFile() });
         log('💾 Sessão renovada');
@@ -492,9 +563,14 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       await page.waitForTimeout(2000); // Aguardar resultado carregar
 
       // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
-      await page.waitForSelector(
-        `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
-        { state: 'attached', timeout: TIMEOUT }
+      // Retry: às vezes o sistema externo demora mais que TIMEOUT pra renderizar
+      // o resultado da busca — tenta de novo depois de 5s antes de marcar falhou
+      await comRetryTimeout(
+        () => page.waitForSelector(
+          `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
+          { state: 'attached', timeout: TIMEOUT }
+        ),
+        `waitForSelector btn END (OS ${os_numero})`
       );
     }
 
@@ -653,11 +729,16 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     log('📌 Passo 3: Abrindo modal de endereços');
     await btnEnd.click({ force: true });
 
-    // Aguardar modal abrir
-    await page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in', {
-      state: 'visible',
-      timeout: TIMEOUT,
-    });
+    // Aguardar modal abrir — com retry: se não abriu em 25s, espera 3s e
+    // re-checa (modal pode aparecer com latência maior em momento de pico)
+    await comRetryTimeout(
+      () => page.waitForSelector('.modal.show, .modal.in, #modalPadrao.show, #modalPadrao.in', {
+        state: 'visible',
+        timeout: TIMEOUT,
+      }),
+      `waitForSelector modal endereços (OS ${os_numero})`,
+      { delayMs: 3000 }
+    );
 
     await page.waitForTimeout(800);
 
@@ -989,7 +1070,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       }
 
       log(`📌 URL: ${urlEdicao}`);
-      await page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await comRetryTimeout(
+        () => page.goto(urlEdicao, { waitUntil: 'domcontentloaded', timeout: 20000 }),
+        `page.goto urlEdicao (OS ${os_numero})`
+      );
       await page.waitForTimeout(1500);
 
       // ── Passo 8: Atualizar endereço no input do ponto ───────────────────────
@@ -1405,7 +1489,10 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
             await page.bringToFront().catch(() => {});
           }
 
-          await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+          await comRetryTimeout(
+            () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+            'page.goto ACOMP_URL (fallback fetchResumoServico)'
+          );
           await page.waitForTimeout(1500);
 
           const abaExec = page.locator('#pills-em-execucao-tab');
