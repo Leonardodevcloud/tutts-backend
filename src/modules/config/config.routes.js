@@ -393,15 +393,68 @@ router.get('/submissions/busca', verificarToken, async (req, res) => {
   }
 });
 
-// GET - Ranking de Retorno (aprovações agrupadas por profissional)
+// Helpers compartilhados pros endpoints de ranking
+// ─────────────────────────────────────────────
+// Mapeia categoria (slug) -> condição SQL no campo `motivo`
+// Mantém valores reais usados no formulário do frontend:
+//   "Ajuste de Retorno" | "Ajuste de Pedágio" | "Ajustes Simões Filho e Camaçari"
+// Para Ponto 1 não há motivo dedicado — a heurística atual é motivo ILIKE '%Ponto 1%'
+const CATEGORIA_FILTROS = {
+  retorno:  `LOWER(TRIM(motivo)) = 'ajuste de retorno'`,
+  pedagio:  `LOWER(TRIM(motivo)) = 'ajuste de pedágio'`,
+  simoes:   `LOWER(TRIM(motivo)) = 'ajustes simões filho e camaçari'`,
+  ponto1:   `motivo ILIKE '%ponto 1%'`,
+  all:      `1=1`
+};
+
+const CATEGORIA_LABELS = {
+  retorno:  'Ajuste de Retorno',
+  pedagio:  'Ajuste de Pedágio',
+  simoes:   'Ajustes Simões Filho e Camaçari',
+  ponto1:   'Ponto 1',
+  all:      'Todas as categorias'
+};
+
+/**
+ * Constrói o filtro de data (string SQL) e os params para anexar no WHERE.
+ * Aceita:
+ *  - dataInicio + dataFim (ISO YYYY-MM-DD): tem prioridade
+ *  - periodo: today | week | month | all
+ * Retorna { sql: ' AND ...', params: [...] } com placeholders $N começando em startIdx.
+ */
+function buildDateFilter(query, startIdx) {
+  const { periodo, dataInicio, dataFim } = query;
+  let sql = '';
+  const params = [];
+  let i = startIdx;
+
+  if (dataInicio && dataFim) {
+    // Filtro custom — inclui o dia final completo (até 23:59:59)
+    sql = ` AND created_at >= $${i++} AND created_at < ($${i++}::date + INTERVAL '1 day')`;
+    params.push(dataInicio, dataFim);
+  } else if (periodo === 'today') {
+    sql = ` AND created_at >= CURRENT_DATE`;
+  } else if (periodo === 'week') {
+    sql = ` AND created_at >= DATE_TRUNC('week', CURRENT_DATE)`;
+  } else if (periodo === 'month') {
+    sql = ` AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
+  }
+  // 'all' (default) = sem filtro
+  return { sql, params };
+}
+
+// GET - Ranking de Solicitações (aprovações por profissional, filtrado por categoria)
+// Query params:
+//   - categoria: retorno | pedagio | simoes | ponto1 | all (default: retorno)
+//   - periodo: today | week | month | all (atalho)
+//   - dataInicio + dataFim: ISO YYYY-MM-DD (override do periodo)
 router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
   try {
-    const { periodo } = req.query;
-    let dateFilter = '';
-    if (periodo === 'today') dateFilter = `AND created_at >= CURRENT_DATE`;
-    else if (periodo === 'week') dateFilter = `AND created_at >= DATE_TRUNC('week', CURRENT_DATE)`;
-    else if (periodo === 'month') dateFilter = `AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
-    // 'all' = sem filtro de data
+    const categoria = String(req.query.categoria || 'retorno').toLowerCase();
+    const filtroCategoria = CATEGORIA_FILTROS[categoria] || CATEGORIA_FILTROS.retorno;
+    const labelCategoria = CATEGORIA_LABELS[categoria] || CATEGORIA_LABELS.retorno;
+
+    const { sql: dateFilter, params } = buildDateFilter(req.query, 1);
 
     const result = await pool.query(`
       SELECT 
@@ -409,18 +462,64 @@ router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
         MAX(user_name) as user_name,
         COUNT(*) as total,
         json_agg(json_build_object(
-          'id', id, 'ordemServico', ordem_servico, 'created_at', created_at,
+          'id', id, 'ordemServico', ordem_servico, 'created_at', created_at, 'motivo', motivo,
           'temImagem', CASE WHEN imagem_comprovante IS NOT NULL AND imagem_comprovante != '' THEN true ELSE false END
         ) ORDER BY created_at DESC) as solicitacoes
       FROM submissions
-      WHERE status = 'aprovado' AND LOWER(TRIM(motivo)) = 'ajuste de retorno' ${dateFilter}
+      WHERE status = 'aprovado'
+        AND ${filtroCategoria}
+        ${dateFilter}
       GROUP BY user_cod
       ORDER BY total DESC
-    `);
+    `, params);
 
-    res.json({ ranking: result.rows });
+    res.json({
+      categoria,
+      categoria_label: labelCategoria,
+      ranking: result.rows
+    });
   } catch (error) {
     console.error('❌ Erro ranking retorno:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// GET - Resumo do Ranking (totais por categoria + total geral, no mesmo período)
+// Usado pelos 4 cards no topo da aba Ranking (retorno / pedágio / simões / ponto1).
+// Aceita os mesmos filtros de período do ranking-retorno.
+router.get('/submissions/ranking-resumo', verificarToken, async (req, res) => {
+  try {
+    const { sql: dateFilter, params } = buildDateFilter(req.query, 1);
+
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE LOWER(TRIM(motivo)) = 'ajuste de retorno')              AS retorno,
+        COUNT(*) FILTER (WHERE LOWER(TRIM(motivo)) = 'ajuste de pedágio')              AS pedagio,
+        COUNT(*) FILTER (WHERE LOWER(TRIM(motivo)) = 'ajustes simões filho e camaçari') AS simoes,
+        COUNT(*) FILTER (WHERE motivo ILIKE '%ponto 1%')                                AS ponto1,
+        COUNT(DISTINCT user_cod) AS total_profissionais,
+        COUNT(*) AS total_geral
+      FROM submissions
+      WHERE status = 'aprovado'
+        ${dateFilter}
+    `, params);
+
+    const r = result.rows[0] || {};
+    const total = parseInt(r.total_geral || 0, 10);
+    const pct = (n) => total > 0 ? Math.round((parseInt(n || 0, 10) / total) * 1000) / 10 : 0;
+
+    res.json({
+      total_geral: total,
+      total_profissionais: parseInt(r.total_profissionais || 0, 10),
+      categorias: {
+        retorno:  { total: parseInt(r.retorno || 0, 10),  pct: pct(r.retorno),  label: CATEGORIA_LABELS.retorno },
+        pedagio:  { total: parseInt(r.pedagio || 0, 10),  pct: pct(r.pedagio),  label: CATEGORIA_LABELS.pedagio },
+        simoes:   { total: parseInt(r.simoes || 0, 10),   pct: pct(r.simoes),   label: CATEGORIA_LABELS.simoes },
+        ponto1:   { total: parseInt(r.ponto1 || 0, 10),   pct: pct(r.ponto1),   label: CATEGORIA_LABELS.ponto1 }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Erro ranking resumo:', error);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
