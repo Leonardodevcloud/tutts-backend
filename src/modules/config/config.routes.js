@@ -155,6 +155,14 @@ router.get('/admin-permissions/:codProfissional', verificarToken, async (req, re
 
   // ==================== SUBMISSÕES ====================
 
+// ─────────────────────────────────────────────────────────────────────────
+// Janela de tempo pra solicitar (Retorno, Pedágio, Simões Filho).
+// Cruza com bi_entregas: se a OS está no BI e foi solicitada há mais que essa
+// janela, bloqueia. Se a OS não está no BI ainda (BI atualiza diariamente),
+// passa direto pra não atrapalhar quem solicita no mesmo dia da entrega.
+// ─────────────────────────────────────────────────────────────────────────
+const JANELA_SOLICITACAO_HORAS = 24;
+
 router.post('/submissions', verificarToken, async (req, res) => {
   try {
     const { ordemServico, motivo, subcategoria, imagemComprovante, imagens, coordenadas, validacao_ia, tentativas_foto } = req.body;
@@ -174,6 +182,45 @@ router.post('/submissions', verificarToken, async (req, res) => {
     
     const sanitizedOrdemServico = ordemServico.toString().trim().substring(0, 50);
     const sanitizedMotivo = motivo.toString().trim().substring(0, 1000);
+
+    // ── Janela de 24h: cruza com BI pra bloquear OS antigas ──
+    // Aplica a TODAS as categorias (Retorno, Pedágio, Simões Filho).
+    // Pula a checagem se a OS não tem formato numérico (alguns motoboys digitam
+    // texto livre em casos especiais — preserva esse comportamento).
+    const osNum = parseInt(sanitizedOrdemServico, 10);
+    if (!isNaN(osNum) && osNum > 0) {
+      try {
+        // Pega a data_hora mais recente da OS no BI (uma OS pode ter múltiplos pontos)
+        const biCheck = await pool.query(
+          `SELECT MAX(data_hora) as data_hora_bi
+           FROM bi_entregas
+           WHERE os = $1
+             AND data_hora IS NOT NULL`,
+          [osNum]
+        );
+        const dataHoraBi = biCheck.rows[0]?.data_hora_bi;
+
+        if (dataHoraBi) {
+          const horasAtras = (Date.now() - new Date(dataHoraBi).getTime()) / 1000 / 3600;
+          console.log(`[janela-os] OS ${osNum} | data_hora=${dataHoraBi} | horas_atras=${horasAtras.toFixed(1)}h | janela=${JANELA_SOLICITACAO_HORAS}h`);
+          if (horasAtras > JANELA_SOLICITACAO_HORAS) {
+            return res.status(400).json({
+              error: 'janela_expirada',
+              os: sanitizedOrdemServico,
+              os_data_hora: dataHoraBi,
+              horas_atras: Math.round(horasAtras * 10) / 10,
+              janela_horas: JANELA_SOLICITACAO_HORAS,
+              mensagem: `Esta OS foi gerada há ${Math.round(horasAtras)}h. A janela para solicitar ajuste é de ${JANELA_SOLICITACAO_HORAS} horas.`
+            });
+          }
+        } else {
+          console.log(`[janela-os] OS ${osNum} não encontrada no BI — liberando (BI pode não estar atualizado ainda)`);
+        }
+      } catch (biErr) {
+        // Se a query do BI falhar, NÃO bloqueia o motoboy — segue o fluxo
+        console.error('[janela-os] Erro consultando BI (não-bloqueante):', biErr.message);
+      }
+    }
 
     // ── Anti-fraude: verificar fotos duplicadas via pHash ──
     const fotosParaVerificar = [];
@@ -471,7 +518,10 @@ router.get('/submissions/ranking-retorno', verificarToken, async (req, res) => {
         ${dateFilter}
       GROUP BY user_cod
       ORDER BY total DESC
+      LIMIT 5000
     `, params);
+
+    console.log(`[ranking] categoria=${categoria} | profs=${result.rows.length} | totalSolicitacoes=${result.rows.reduce((s, r) => s + parseInt(r.total, 10), 0)}`);
 
     res.json({
       categoria,
@@ -912,6 +962,7 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
   });
 
   // POST - Motoboy contesta uma rejeição
+  // Janela: 24h após a rejeição (campo updated_at é setado ao rejeitar — linha ~815)
   router.post('/submissions/:id/contestar', verificarToken, async (req, res) => {
     try {
       const submissionId = parseInt(req.params.id);
@@ -923,6 +974,24 @@ router.delete('/submissions/:id', verificarToken, async (req, res) => {
       if (sub.rows.length === 0) return res.status(404).json({ error: 'Submissão não encontrada' });
       if (sub.rows[0].status !== 'rejeitado') return res.status(400).json({ error: 'Só é possível contestar solicitações rejeitadas' });
       if (sub.rows[0].contestacao_status === 'encerrada_rejeitada') return res.status(400).json({ error: 'Contestação já encerrada definitivamente' });
+
+      // ── Janela de 24h após rejeição ──
+      // updated_at é setado quando admin muda o status (linha ~815). Se já passou
+      // mais que JANELA_SOLICITACAO_HORAS desde isso, bloqueia.
+      const rejeitadoEm = sub.rows[0].updated_at;
+      if (rejeitadoEm) {
+        const horasDesdeRejeicao = (Date.now() - new Date(rejeitadoEm).getTime()) / 1000 / 3600;
+        console.log(`[janela-contestacao] sub=${submissionId} | rejeitado_em=${rejeitadoEm} | horas_atras=${horasDesdeRejeicao.toFixed(1)}h | janela=${JANELA_SOLICITACAO_HORAS}h`);
+        if (horasDesdeRejeicao > JANELA_SOLICITACAO_HORAS) {
+          return res.status(400).json({
+            error: 'janela_contestacao_expirada',
+            rejeitado_em: rejeitadoEm,
+            horas_atras: Math.round(horasDesdeRejeicao * 10) / 10,
+            janela_horas: JANELA_SOLICITACAO_HORAS,
+            mensagem: `Esta solicitação foi rejeitada há ${Math.round(horasDesdeRejeicao)}h. A janela para contestar é de ${JANELA_SOLICITACAO_HORAS} horas após a rejeição.`
+          });
+        }
+      }
 
       await pool.query(
         `UPDATE submissions SET contestacao_status = 'aberta', contestacao_aberta_em = NOW(), contestacao_lida = true, updated_at = NOW() WHERE id = $1`,
