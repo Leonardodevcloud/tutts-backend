@@ -146,7 +146,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     try {
       const [dataRes, countRes] = await Promise.all([
         pool.query(
-          `SELECT id, os_numero, ponto, status, detalhe_erro,
+          `SELECT id, os_numero, ponto, status, detalhe_erro, erro,
+                  finalizado_em, etapa_atual, progresso, screenshot_path,
                   criado_em, processado_em, validado_por, validado_em,
                   usuario_id, usuario_nome, endereco_antigo, endereco_corrigido,
                   cod_profissional, frete_recalculado,
@@ -190,7 +191,8 @@ function createHistoricoRoutes(pool, verificarAdmin) {
                 endereco_antigo, endereco_corrigido,
                 latitude, longitude,
                 motoboy_lat, motoboy_lng,
-                localizacao_raw, detalhe_erro,
+                localizacao_raw, detalhe_erro, erro,
+                finalizado_em, etapa_atual, progresso, screenshot_path,
                 criado_em, processado_em,
                 validado_por, validado_em,
                 usuario_nome, cod_profissional,
