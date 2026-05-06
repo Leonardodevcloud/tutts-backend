@@ -1,22 +1,17 @@
 /**
  * BI Monitoramento - Aba "Por Profissional"
  *
- * Lista motoboys com KPIs operacionais.
- * SEM valor_total e valor_prof.
+ * v2: usa montarWhere async + TEMPO_ENTREGA_EXPR pra tempo correto.
  */
 const express = require('express');
-const { montarWhere, RETORNO_FILTRO } = require('./dashboard.routes');
+const { montarWhere, RETORNO_FILTRO, TEMPO_ENTREGA_EXPR } = require('./dashboard.routes');
 
 function createProfissionaisRoutes(pool) {
   const router = express.Router();
 
-  /**
-   * GET /api/bi-monitoramento/profissionais
-   * Aceita os mesmos filtros do dashboard.
-   */
   router.get('/bi-monitoramento/profissionais', async (req, res) => {
     try {
-      const { where, params } = montarWhere(req.query);
+      const { where, params } = await montarWhere(pool, req.query);
 
       const profissionaisQuery = await pool.query(`
         SELECT
@@ -29,7 +24,7 @@ function createProfissionaisRoutes(pool) {
           ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) /
                 NULLIF(COUNT(*) FILTER (WHERE dentro_prazo IS NOT NULL), 0), 1) as taxa_prazo,
           COUNT(*) FILTER (WHERE ${RETORNO_FILTRO}) as retornos,
-          ROUND(AVG(tempo_execucao_minutos)::numeric, 1) as tempo_medio,
+          ROUND(AVG(${TEMPO_ENTREGA_EXPR})::numeric, 1) as tempo_medio,
           ROUND(SUM(distancia)::numeric, 2) as km_total,
           COUNT(DISTINCT cod_cliente) as total_clientes,
           MAX(data_solicitado) as ultima_entrega
@@ -41,7 +36,7 @@ function createProfissionaisRoutes(pool) {
       res.json({ profissionais: profissionaisQuery.rows });
     } catch (err) {
       console.error('❌ [bi-monitoramento] Erro profissionais:', err);
-      res.status(500).json({ error: 'Erro ao carregar profissionais' });
+      res.status(500).json({ error: 'Erro ao carregar profissionais', detail: err.message });
     }
   });
 
