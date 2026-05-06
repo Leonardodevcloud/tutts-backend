@@ -66,6 +66,7 @@ const { initFinancialRoutes, initFinancialTables } = require('./src/modules/fina
 const { initSolicitacaoRoutes, initSolicitacaoTables } = require('./src/modules/solicitacao');
 const { initColetaEnderecosRoutes, initColetaEnderecosTables } = require('./src/modules/coletaEnderecos');
 const { initBiRoutes, initBiTables } = require('./src/modules/bi');
+const { initBiMonitoramentoRoutes, initBiMonitoramentoTables } = require('./src/modules/bi-monitoramento');
 const { initTodoRoutes, initTodoTables, initTodoCron } = require('./src/modules/todo');
 const { initMiscRoutes, initMiscTables } = require('./src/modules/misc');
 const { initCsRoutes, initCsTables } = require('./src/modules/cs');
@@ -516,6 +517,7 @@ app.use('/api', initColetaEnderecosRoutes(pool, verificarToken));
 // sem afetar uso normal de admins.
 app.use('/api/bi', biLimiter);
 app.use('/api', initBiRoutes(pool, verificarToken));
+app.use('/api', initBiMonitoramentoRoutes(pool, verificarToken, verificarAdmin));
 app.use('/api', initGerencialRoutes(pool, verificarToken));
 app.use('/api', initTodoRoutes(pool, verificarToken));
 app.use('/api', initMiscRoutes(pool, verificarToken));
