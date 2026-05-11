@@ -2,20 +2,71 @@
  * agents/liberar-ponto.agent.js
  * Worker do pool — processa fila liberacoes_pontos.
  * 1 slot, conta exclusiva (SISTEMA_EXTERNO_LIBERACAO_*).
+ *
+ * 2026-05 fix-eagain: BROWSER PERSISTENTE
+ * Mesmo padrão do sla-capture e agent-correcao. Reduz chromium.launch()
+ * de ~N por hora para 1 por vida do worker, eliminando acúmulo de zumbis
+ * que causava "spawn EAGAIN".
  */
 
 'use strict';
 
 const { defineAgent } = require('../core/agent-base');
+const { criarBrowserSession } = require('../core/browser-session');
 const playwrightLib   = require('../playwright-liberar-ponto');
 
 const SLOTS = Number(process.env.POOL_LIBERACAO_SLOTS || 1);
+
+const LIBERACAO_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--safebrowsing-disable-auto-update',
+    '--no-default-browser-check',
+  ],
+};
 
 module.exports = defineAgent({
   nome: 'liberar-ponto',
   slots: SLOTS,
   sessionStrategy: 'isolada',  // 1 sessão por slot (mesmo padrão do agent-correcao)
   intervalo: 10_000,
+
+  // 2026-05 fix-eagain: BrowserSession persistente por slot
+  onSlotStart: async (_pool, ctx) => {
+    ctx.log('🔧 Criando BrowserSession persistente...');
+    const browserSession = criarBrowserSession({
+      nome: `liberar-ponto-slot-${ctx.slotIdx}`,
+      launchOpts: LIBERACAO_LAUNCH_OPTS,
+    });
+    ctx.log('✅ BrowserSession pronta');
+    return { browserSession };
+  },
+
+  onSlotStop: async (_pool, ctx) => {
+    const { browserSession } = ctx.slotState || {};
+    if (browserSession) {
+      try { await browserSession.fechar(); } catch (_) {}
+    }
+  },
 
   buscarPendentes: async (pool, _limite) => {
     const { rows } = await pool.query(`
@@ -40,8 +91,23 @@ module.exports = defineAgent({
 
     // Aplica credenciais e session file por slot (gerenciado por core/agent-base)
     const overrides = ctx.overrides || {};
-    if (overrides.credentials || overrides.sessionFile) {
-      playwrightLib.setOverrides(overrides);
+
+    // 2026-05 fix-eagain: recupera o browser persistente do slot
+    const { browserSession } = ctx.slotState || {};
+    let browserVivo = null;
+    if (browserSession) {
+      try {
+        browserVivo = await browserSession.obterBrowser();
+      } catch (e) {
+        ctx.log(`⚠️ BrowserSession.obterBrowser falhou: ${e.message} — fallback pra launch direto`);
+      }
+    }
+
+    if (overrides.credentials || overrides.sessionFile || browserVivo) {
+      playwrightLib.setOverrides({
+        ...overrides,
+        browser: browserVivo,
+      });
     }
 
     let resultado;
@@ -55,6 +121,13 @@ module.exports = defineAgent({
           ).catch(() => {});
         },
       });
+    } catch (err) {
+      // Se browser persistente morreu durante job, marca pra recriação
+      if (browserSession && browserVivo && !browserVivo.isConnected()) {
+        ctx.log('⚠️ Browser morreu durante job — BrowserSession vai recriar');
+        browserSession._marcarMorto();
+      }
+      throw err;
     } finally {
       playwrightLib.clearOverrides();
     }
