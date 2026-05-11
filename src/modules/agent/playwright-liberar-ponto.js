@@ -35,13 +35,21 @@ const SESSION_FILE_DEFAULT = '/tmp/tutts-rpa-liberacao-session.json';
 
 let _sessionFileOverride = null;
 let _credentialsOverride = null;
+// 2026-05 fix-eagain: browser persistente por slot — quando setado,
+// chromium.launch() é pulado e o close() vira no-op.
+let _browserOverride = null;
 
 function getSessionFile() { return _sessionFileOverride || SESSION_FILE_DEFAULT; }
 function setOverrides(opts) {
   _sessionFileOverride = (opts && opts.sessionFile) || null;
   _credentialsOverride = (opts && opts.credentials) || null;
+  _browserOverride     = (opts && opts.browser) || null;
 }
-function clearOverrides() { _sessionFileOverride = null; _credentialsOverride = null; }
+function clearOverrides() {
+  _sessionFileOverride = null;
+  _credentialsOverride = null;
+  _browserOverride     = null;
+}
 
 const SCREENSHOT_DIR = '/tmp/screenshots';
 const TIMEOUT        = 25000;
@@ -366,15 +374,23 @@ async function executarLiberacaoOS({ os_numero, onProgresso }) {
   let browser = null;
   let context = null;
   let page = null;
+  // 2026-05 fix-eagain: rastreia se browser veio de override
+  let browserEhOverride = false;
 
   try {
     log(`🚀 OS ${os_numero} | Iniciando liberação`);
     reportar('iniciando', 5);
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
+    if (_browserOverride) {
+      browser = _browserOverride;
+      browserEhOverride = true;
+      log('♻️ Usando browser persistente (BrowserSession)');
+    } else {
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      });
+    }
 
     // Reusa sessão se existir
     const sessionPath = getSessionFile();
@@ -440,7 +456,18 @@ async function executarLiberacaoOS({ os_numero, onProgresso }) {
       screenshot_path: ss,
     };
   } finally {
-    await fecharBrowserSeguro(browser);
+    // 2026-05 fix-eagain: se browser veio de override, fecha apenas o context.
+    if (browserEhOverride) {
+      if (context) {
+        try {
+          await comTimeout(context.close(), 3_000, 'context.close');
+        } catch (e) {
+          log(`⚠️ context.close pendurou: ${e.message}`);
+        }
+      }
+    } else {
+      await fecharBrowserSeguro(browser);
+    }
   }
 }
 
