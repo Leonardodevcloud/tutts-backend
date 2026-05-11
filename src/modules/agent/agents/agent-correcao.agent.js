@@ -2,20 +2,60 @@
  * agents/agent-correcao.agent.js
  * ─────────────────────────────────────────────────────────────────────────
  * Agente de correção automática de endereços (RPA via Playwright).
- * Substitui o `agent-worker.js` antigo.
  *
- * IMPORTANTE: Adicionado FOR UPDATE SKIP LOCKED na query — antes não tinha,
- * agora é obrigatório porque múltiplos slots concorrem pela mesma fila.
+ * IMPORTANTE: FOR UPDATE SKIP LOCKED na query pra paralelismo seguro entre slots.
+ *
+ * 2026-05 fix-eagain: BROWSER PERSISTENTE
+ * ─────────────────────────────────────────
+ * Antes, cada job chamava chromium.launch() / browser.close(). Em containers
+ * Linux, cada ciclo deixa filhos órfãos do Chromium; se Node estiver como
+ * PID 1 sem dumb-init, os zumbis acumulam até estourar pids.max do cgroup
+ * e dar "spawn EAGAIN". Mesmo com dumb-init, picos de carga consomem PIDs
+ * desnecessariamente.
+ *
+ * Solução: 1 browser por slot, vivo durante toda a vida do worker (mesmo
+ * padrão já validado no sla-capture). A cada job cria-se um context novo
+ * (leve), em vez de um browser novo (pesado). Reduz launches/hora de ~N
+ * pra ~1, eliminando a fonte do EAGAIN.
  */
 
 'use strict';
 
 const { defineAgent } = require('../core/agent-base');
+const { criarBrowserSession } = require('../core/browser-session');
 const { normalizeLocation } = require('../location-normalizer');
 const playwrightAgent = require('../playwright-agent');
 const { haversineKm, RAIO_MAXIMO_KM } = require('../routes/correcao.routes');
 
 const SLOTS = Number(process.env.POOL_AGENT_CORRECAO_SLOTS || 2);
+
+// Mesmas opções de launch do sla-capture (conservadoras pra container)
+const CORRECAO_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--safebrowsing-disable-auto-update',
+    '--no-default-browser-check',
+  ],
+};
 
 module.exports = defineAgent({
   nome: 'agent-correcao',
@@ -23,8 +63,27 @@ module.exports = defineAgent({
   sessionStrategy: 'isolada',  // 1 conta por slot
   intervalo: 10_000,           // 10s entre ticks quando fila vazia
 
+  // 2026-05 fix-eagain: cria BrowserSession persistente por slot.
+  // Browser sobe lazy no 1o job (não bloqueia o startup do worker).
+  onSlotStart: async (_pool, ctx) => {
+    ctx.log('🔧 Criando BrowserSession persistente...');
+    const browserSession = criarBrowserSession({
+      nome: `agent-correcao-slot-${ctx.slotIdx}`,
+      launchOpts: CORRECAO_LAUNCH_OPTS,
+    });
+    ctx.log('✅ BrowserSession pronta (browser lancado no 1o job)');
+    return { browserSession };
+  },
+
+  // Encerra browser ao parar o slot (shutdown graceful)
+  onSlotStop: async (_pool, ctx) => {
+    const { browserSession } = ctx.slotState || {};
+    if (browserSession) {
+      try { await browserSession.fechar(); } catch (_) {}
+    }
+  },
+
   buscarPendentes: async (pool, _limite) => {
-    // FOR UPDATE SKIP LOCKED — paralelismo seguro entre slots
     const { rows } = await pool.query(`
       SELECT * FROM ajustes_automaticos
       WHERE status = 'pendente'
@@ -57,7 +116,7 @@ module.exports = defineAgent({
          WHERE id = $2`,
         [`Normalização: ${err.message}`.slice(0, 500), registro.id]
       );
-      return; // erro já tratado, não relançar
+      return;
     }
 
     await pool.query(
@@ -89,13 +148,26 @@ module.exports = defineAgent({
       [registro.id]
     );
 
-    // 3. Configura overrides do Playwright (credenciais e arquivo de sessão deste slot)
+    // 3. Configura overrides do Playwright (credenciais, sessão deste slot, browser persistente)
     const creds = ctx.sessao.credenciaisDoSlot(ctx.slotIdx);
     const sessionFile = ctx.sessao.caminhoSessao(ctx.slotIdx);
+
+    // 2026-05 fix-eagain: recupera o browser persistente do slot
+    const { browserSession } = ctx.slotState || {};
+    let browserVivo = null;
+    if (browserSession) {
+      try {
+        browserVivo = await browserSession.obterBrowser();
+      } catch (e) {
+        // Falha no launch da sessão — segue sem override (modo legado)
+        ctx.log(`⚠️ BrowserSession.obterBrowser falhou: ${e.message} — fallback pra launch direto`);
+      }
+    }
 
     playwrightAgent.setOverrides({
       sessionFile,
       credentials: { email: creds.email, senha: creds.senha },
+      browser: browserVivo,  // null = fallback pra launch normal
     });
 
     let resultado;
@@ -113,6 +185,13 @@ module.exports = defineAgent({
           ).catch(() => {});
         },
       });
+    } catch (err) {
+      // Se browser persistente morreu durante job, marca pra recriação
+      if (browserSession && browserVivo && !browserVivo.isConnected()) {
+        ctx.log('⚠️ Browser morreu durante job — BrowserSession vai recriar');
+        browserSession._marcarMorto();
+      }
+      throw err;
     } finally {
       playwrightAgent.clearOverrides();
     }
@@ -134,8 +213,6 @@ module.exports = defineAgent({
         updates.push(`endereco_antigo = $${params.length + 1}`);
         params.push(resultado.endereco_antigo);
       }
-      // 2026-04: gravar campos do Playwright que estavam sendo ignorados
-      // (causavam: status "Frete pendente" e ausência do comparativo Antes/Depois)
       if (typeof resultado.frete_recalculado === 'boolean') {
         updates.push(`frete_recalculado = $${params.length + 1}`);
         params.push(resultado.frete_recalculado);
@@ -155,7 +232,6 @@ module.exports = defineAgent({
         params
       );
 
-      // Salvar coords antigas se vieram
       if (resultado.endereco_antigo_lat && resultado.endereco_antigo_lng) {
         await pool.query(
           `UPDATE ajustes_automaticos SET endereco_antigo_lat = $1, endereco_antigo_lng = $2 WHERE id = $3`,
