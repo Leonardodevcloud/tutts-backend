@@ -30,6 +30,9 @@ const SESSION_FILE_DEFAULT = '/tmp/tutts-rpa-session.json';
 
 let _sessionFileOverride = null;
 let _credentialsOverride = null;
+// 2026-05 fix-eagain: browser persistente por slot — quando setado,
+// chromium.launch() é pulado e o close() vira no-op (BrowserSession gerencia).
+let _browserOverride = null;
 
 function getSessionFile() {
   return _sessionFileOverride || SESSION_FILE_DEFAULT;
@@ -38,11 +41,13 @@ function getSessionFile() {
 function setOverrides(opts) {
   _sessionFileOverride = (opts && opts.sessionFile) || null;
   _credentialsOverride = (opts && opts.credentials) || null;
+  _browserOverride     = (opts && opts.browser) || null;
 }
 
 function clearOverrides() {
   _sessionFileOverride = null;
   _credentialsOverride = null;
+  _browserOverride     = null;
 }
 
 const SCREENSHOT_DIR = '/tmp/screenshots';
@@ -367,22 +372,31 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
   let browser = null;
   let context = null;
   let page = null;
+  // 2026-05 fix-eagain: rastreia se browser veio de override (BrowserSession).
+  // Se sim, NÃO fechamos no finally — só o context.
+  let browserEhOverride = false;
 
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--mute-audio',
-        '--no-first-run',
-      ],
-    });
+    if (_browserOverride) {
+      browser = _browserOverride;
+      browserEhOverride = true;
+      log('♻️ Usando browser persistente (BrowserSession)');
+    } else {
+      browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--mute-audio',
+          '--no-first-run',
+        ],
+      });
+    }
 
     let contextOptions = {};
     if (fs.existsSync(getSessionFile())) {
@@ -1548,7 +1562,20 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
     return { sucesso: false, erro: `Erro inesperado: ${err.message}`, screenshot: ss };
   } finally {
-    await fecharBrowserSeguro(browser);
+    // 2026-05 fix-eagain: se browser veio de override, fechamos APENAS o context
+    // (o BrowserSession mantém o browser vivo entre jobs). Senão, fluxo legado:
+    // fecha o browser inteiro (que fecha contexts automaticamente).
+    if (browserEhOverride) {
+      if (context) {
+        try {
+          await comTimeout(context.close(), 3_000, 'context.close');
+        } catch (e) {
+          log(`⚠️ context.close pendurou: ${e.message}`);
+        }
+      }
+    } else {
+      await fecharBrowserSeguro(browser);
+    }
   }
 }
 
