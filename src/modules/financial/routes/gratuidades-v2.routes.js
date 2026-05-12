@@ -3,21 +3,21 @@
  * ─────────────────────────────────────────────────────────────────────────
  * Endpoints novos da listagem redesenhada de gratuidades.
  *
- * Endpoints (montados como sub-router em /financial/gratuities):
- *   GET /listar          → listagem paginada com filtros (status, created_by,
- *                          motivo, busca, periodo, page, pageSize)
- *   GET /kpis            → 4 KPIs do cabeçalho (ativas, expiradas_mes,
- *                          valor_ativo, total_mes)
- *   GET /created-by      → distinct dos cadastrantes (alimenta filtro)
+ * Semântica de status (revisada na v3):
  *
- * O endpoint legado GET /gratuities continua existindo no financial.routes.js
- * pra compatibilidade com outros consumidores (Score v2, scripts, etc).
+ *   ATIVA      → status='ativa' AND remaining > 0 AND expires_at > NOW()
+ *   UTILIZADA  → remaining = 0  (consumida pelo motoboy)
+ *   EXPIRADA   → status='ativa' AND remaining > 0 AND expires_at <= NOW()
+ *                OR status = 'expirada_prazo'
+ *   REMOVIDA   → status = 'removida' (soft-delete pelo admin)
  *
- * Padrões seguidos:
- *   - SQL parameterizado ($1, $2)
- *   - Limite máximo de pageSize=100 pra prevenir abuso
- *   - Filtros opcionais (todos nullable) compostos via condicionais
- *   - COUNT(*) em query separada pra paginação correta
+ * O legado tinha `status='expirada'` quando remaining chegava a 0. Mantemos
+ * compatibilidade: esse status legado é tratado como UTILIZADA na UI.
+ *
+ * Endpoints:
+ *   GET /listar          → paginada com filtros
+ *   GET /kpis            → 4 cards
+ *   GET /created-by      → distinct dos cadastrantes
  */
 
 'use strict';
@@ -31,19 +31,32 @@ function createGratuidadesV2Routes(
 ) {
   const router = express.Router();
 
+  // SQL helper — CASE que computa status_ui (string da semântica acima).
+  // Usado em SELECT e WHERE.
+  const STATUS_UI_EXPR = `
+    CASE
+      WHEN status = 'removida' THEN 'removida'
+      WHEN status = 'expirada_prazo' THEN 'expirada'
+      WHEN remaining = 0 THEN 'utilizada'
+      WHEN status = 'expirada' THEN 'utilizada'
+      WHEN expires_at IS NOT NULL AND expires_at < NOW() THEN 'expirada'
+      ELSE 'ativa'
+    END
+  `;
+
   // ═══════════════════════════════════════════════════════════════════════
-  // GET /listar — listagem paginada com filtros
+  // GET /listar — listagem paginada
   // ═══════════════════════════════════════════════════════════════════════
   router.get('/listar', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
       const {
-        status,        // 'ativa' | 'expirada' | 'parcial' | 'removida' | 'todas'
-        createdBy,     // nome exato do cadastrante (filtro de igualdade)
-        motivo,        // motivo (filtro LIKE, normalizado)
-        busca,         // texto livre (cod, nome, motivo)
-        periodo,       // 'hoje' | 'semana' | 'mes' | '30d' | null
-        dataIni,       // ISO opcional (substitui periodo)
-        dataFim,       // ISO opcional
+        status,        // 'ativa' | 'utilizada' | 'expirada' | 'removida' | 'todas'
+        createdBy,
+        motivo,
+        busca,
+        periodo,
+        dataIni,
+        dataFim,
       } = req.query;
 
       const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
@@ -53,29 +66,17 @@ function createGratuidadesV2Routes(
       );
       const offset = (page - 1) * pageSize;
 
-      // Construção dinâmica de WHERE
       const conds = [];
       const params = [];
       let i = 1;
 
-      // Status — semântica especial: 'ativa' = ativa com remaining>0,
-      // 'parcial' = ativa mas remaining<quantity, 'expirada' = remaining=0
-      // ou status='expirada', 'removida' = soft-deleted
+      // Filtro de status usa o status_ui (CASE) — assim batemos exatamente
+      // com o que o usuário vê na tela
       if (status && status !== 'todas') {
-        if (status === 'ativa') {
-          conds.push(`(status = 'ativa' AND remaining = quantity)`);
-        } else if (status === 'parcial') {
-          conds.push(`(status = 'ativa' AND remaining > 0 AND remaining < quantity)`);
-        } else if (status === 'expirada') {
-          conds.push(`(status = 'expirada' OR (status = 'ativa' AND remaining = 0))`);
-        } else if (status === 'removida') {
-          conds.push(`status = 'removida'`);
-        } else {
-          conds.push(`status = $${i++}`);
-          params.push(status);
-        }
+        conds.push(`(${STATUS_UI_EXPR}) = $${i++}`);
+        params.push(String(status));
       } else {
-        // Sem filtro: excluímos 'removida' por default (soft-delete invisível)
+        // Default: excluir removidas
         conds.push(`status <> 'removida'`);
       }
 
@@ -91,39 +92,28 @@ function createGratuidadesV2Routes(
 
       if (busca) {
         const termo = `%${String(busca).trim()}%`;
-        conds.push(`(
-          user_cod ILIKE $${i} OR
-          user_name ILIKE $${i} OR
-          reason ILIKE $${i}
-        )`);
+        conds.push(`(user_cod ILIKE $${i} OR user_name ILIKE $${i} OR reason ILIKE $${i})`);
         params.push(termo);
         i++;
       }
 
-      // Período: aplica em created_at
+      // Período
       let dataInicio = null;
       let dataFimResolvido = null;
-
       if (dataIni) dataInicio = new Date(dataIni);
       if (dataFim) dataFimResolvido = new Date(dataFim);
-
       if (!dataInicio && periodo) {
         const agora = new Date();
         if (periodo === 'hoje') {
           dataInicio = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
         } else if (periodo === 'semana') {
-          const d = new Date(agora);
-          d.setDate(d.getDate() - 7);
-          dataInicio = d;
+          const d = new Date(agora); d.setDate(d.getDate() - 7); dataInicio = d;
         } else if (periodo === 'mes') {
           dataInicio = new Date(agora.getFullYear(), agora.getMonth(), 1);
         } else if (periodo === '30d') {
-          const d = new Date(agora);
-          d.setDate(d.getDate() - 30);
-          dataInicio = d;
+          const d = new Date(agora); d.setDate(d.getDate() - 30); dataInicio = d;
         }
       }
-
       if (dataInicio) {
         conds.push(`created_at >= $${i++}`);
         params.push(dataInicio.toISOString());
@@ -135,14 +125,12 @@ function createGratuidadesV2Routes(
 
       const whereSql = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
 
-      // Total pra paginação (sem LIMIT/OFFSET) — query separada
       const totalResult = await pool.query(
         `SELECT COUNT(*)::int AS total FROM gratuities ${whereSql}`,
         params
       );
       const total = totalResult.rows[0].total;
 
-      // Dados paginados (com LIMIT/OFFSET nos params subsequentes)
       const dadosParams = params.slice();
       dadosParams.push(pageSize, offset);
 
@@ -158,15 +146,14 @@ function createGratuidadesV2Routes(
           status,
           created_by,
           created_at,
+          expires_at,
           expired_at,
-          -- Status computado pra UI (não confunde com coluna status crua)
+          -- Dias restantes até expirar (negativo se já passou)
           CASE
-            WHEN status = 'removida' THEN 'removida'
-            WHEN status = 'expirada' THEN 'expirada'
-            WHEN remaining = 0 THEN 'expirada'
-            WHEN remaining < quantity THEN 'parcial'
-            ELSE 'ativa'
-          END AS status_ui
+            WHEN expires_at IS NULL THEN NULL
+            ELSE EXTRACT(DAY FROM (expires_at - NOW()))::int
+          END AS dias_para_expirar,
+          (${STATUS_UI_EXPR}) AS status_ui
         FROM gratuities
         ${whereSql}
         ORDER BY created_at DESC
@@ -189,20 +176,39 @@ function createGratuidadesV2Routes(
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  // GET /kpis — 4 cards do cabeçalho
+  // GET /kpis — 4 cards do cabeçalho (com semântica nova)
   // ═══════════════════════════════════════════════════════════════════════
   router.get('/kpis', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      // Tudo numa query só com FILTER — mais rápido que 4 roundtrips
+      // ATIVA  = ativa, remaining > 0, dentro do prazo
+      // UTILIZADA = remaining=0 (consumida) — neste mês
+      // EXPIRADA = passou prazo sem usar — neste mês
+      // valor_ativo = soma value*remaining das ATIVAS
+      // total_mes = soma value*quantity das criadas neste mês
       const { rows } = await pool.query(`
         SELECT
-          COUNT(*) FILTER (WHERE status = 'ativa' AND remaining > 0)::int AS ativas,
+          COUNT(*) FILTER (
+            WHERE status = 'ativa'
+              AND remaining > 0
+              AND (expires_at IS NULL OR expires_at > NOW())
+          )::int AS ativas,
           COUNT(*) FILTER (
             WHERE created_at >= DATE_TRUNC('month', NOW())
-              AND (status = 'expirada' OR (status = 'ativa' AND remaining = 0))
+              AND (remaining = 0 OR status = 'expirada')
+              AND status <> 'expirada_prazo'
+              AND status <> 'removida'
+          )::int AS utilizadas_mes,
+          COUNT(*) FILTER (
+            WHERE created_at >= DATE_TRUNC('month', NOW())
+              AND (
+                status = 'expirada_prazo'
+                OR (status = 'ativa' AND remaining > 0 AND expires_at IS NOT NULL AND expires_at < NOW())
+              )
           )::int AS expiradas_mes,
           COALESCE(SUM(value * remaining) FILTER (
-            WHERE status = 'ativa' AND remaining > 0
+            WHERE status = 'ativa'
+              AND remaining > 0
+              AND (expires_at IS NULL OR expires_at > NOW())
           ), 0)::numeric AS valor_ativo,
           COALESCE(SUM(value * quantity) FILTER (
             WHERE created_at >= DATE_TRUNC('month', NOW())
@@ -219,11 +225,10 @@ function createGratuidadesV2Routes(
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  // GET /created-by — distinct dos cadastrantes (alimenta filtro)
+  // GET /created-by
   // ═══════════════════════════════════════════════════════════════════════
   router.get('/created-by', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
     try {
-      // Pega os 30 dos últimos 6 meses pra evitar listar gente que não está mais no time
       const { rows } = await pool.query(`
         SELECT DISTINCT created_by
           FROM gratuities
