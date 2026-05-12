@@ -77,6 +77,74 @@ function resolverThresholds(cfg) {
 const HORA_CORTE_NOTURNO = 16; // "após 16h"
 const JANELA_DIAS = 28;
 
+// ============================================================
+// 🆕 2026-05 v3: PERÍODO DE CARÊNCIA PÓS-SUBIDA
+// ============================================================
+// Motoboy que sobe de nível precisa MANTER o nível por 7 dias antes de
+// receber bônus. Conta a partir do timestamp EXATO da subida
+// (score_nivel_motoboy.ultima_subida_em).
+//
+// Comportamento:
+//   - SOBE: gera ultima_subida_em = NOW(). Por 7 dias não recebe bônus.
+//   - DESCE: gratuidade já lançada do mês corrente NÃO é revogada
+//            (mas próximas avaliações não vão lançar enquanto não voltar a subir).
+//   - RETROATIVO: motoboys com ultima_subida_em IS NULL (subida anterior
+//     ao tracking) são considerados FORA da carência (subida "antiga").
+//
+// Override via env CARENCIA_SCORE_DIAS pra testes.
+const CARENCIA_SCORE_DIAS = parseInt(process.env.CARENCIA_SCORE_DIAS, 10) || 7;
+const CARENCIA_SCORE_MS = CARENCIA_SCORE_DIAS * 24 * 60 * 60 * 1000;
+
+/**
+ * Calcula estado de carência de um motoboy.
+ *
+ * @param {Date|null} ultimaSubidaEm  timestamp da última subida (ou null)
+ * @returns {object}
+ *   em_carencia: bool     — true se ainda dentro do período
+ *   libera_em:   ISOString|null — quando libera (NOW + remaining ms)
+ *   dias_restantes: int   — dias inteiros até liberar (0 se já liberou)
+ *   ms_restantes:   int   — ms exatos até liberar (pra contagem regressiva)
+ *   motivo: string        — 'liberado' | 'sem_subida_registrada' | 'em_carencia'
+ */
+function calcularCarencia(ultimaSubidaEm) {
+  // Sem registro de subida — assume liberado (motoboy antigo, retroativo)
+  if (!ultimaSubidaEm) {
+    return {
+      em_carencia: false,
+      libera_em: null,
+      dias_restantes: 0,
+      ms_restantes: 0,
+      motivo: 'sem_subida_registrada',
+    };
+  }
+
+  const subiu = new Date(ultimaSubidaEm);
+  const liberaEm = new Date(subiu.getTime() + CARENCIA_SCORE_MS);
+  const agora = new Date();
+  const msRestantes = liberaEm.getTime() - agora.getTime();
+
+  if (msRestantes <= 0) {
+    return {
+      em_carencia: false,
+      libera_em: liberaEm.toISOString(),
+      dias_restantes: 0,
+      ms_restantes: 0,
+      motivo: 'liberado',
+    };
+  }
+
+  // Dias inteiros restantes (arredonda pra cima — 1.5 dias = "faltam 2 dias")
+  const diasRestantes = Math.ceil(msRestantes / (24 * 60 * 60 * 1000));
+
+  return {
+    em_carencia: true,
+    libera_em: liberaEm.toISOString(),
+    dias_restantes: diasRestantes,
+    ms_restantes: msRestantes,
+    motivo: 'em_carencia',
+  };
+}
+
 /**
  * 🔧 Helper de normalização de região pra SQL.
  * Match case + acento + espaço insensitive.
@@ -296,6 +364,31 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
 async function lancarBonusSeAplicavel(pool, { codProf, nomeProf, regiao, nivel }) {
   if (nivel < 2) return { lancado: false, motivo: 'nivel_insuficiente' };
 
+  // 🆕 2026-05 v3: respeita carência de 7 dias após subida.
+  // Lê ultima_subida_em da tabela score_nivel_motoboy.
+  //
+  // Por que aqui (não no avaliarMotoboy):
+  //   - Mantém calcularCarencia como pure-function reutilizável.
+  //   - Garante que TODA chamada de lançamento passa pela checagem
+  //     (ex: cron mensal de gratuidades, retroação manual via admin).
+  //   - Idempotência preservada: o UNIQUE (cod_prof, periodo, tipo) ainda
+  //     impede duplicação, então segurança em depth.
+  const subidaRow = await pool.query(
+    `SELECT ultima_subida_em FROM score_nivel_motoboy WHERE cod_prof = $1`,
+    [String(codProf)]
+  );
+  const ultimaSubida = subidaRow.rows[0]?.ultima_subida_em || null;
+  const carencia = calcularCarencia(ultimaSubida);
+
+  if (carencia.em_carencia) {
+    return {
+      lancado: false,
+      motivo: 'em_carencia',
+      dias_restantes: carencia.dias_restantes,
+      libera_em: carencia.libera_em,
+    };
+  }
+
   // Busca config da região (pra teto customizado)
   const cfg = await pool.query(
     `SELECT saque_teto_n2, saque_teto_n3, ativo FROM score_config_regiao
@@ -449,13 +542,23 @@ async function avaliarMotoboy(pool, codProf) {
     codProf, nomeProf: nome, regiao: regiaoCanonica, nivel, stats,
   });
 
-  // 5. Se está em nível 2 ou 3, tenta lançar bônus do período (idempotente)
+  // 5. Se está em nível 2 ou 3, tenta lançar bônus do período (idempotente).
+  // 2026-05 v3: pode bater na carência de 7 dias e retornar lancado:false
+  // com motivo:'em_carencia' — o frontend usa isso pra mostrar contagem regressiva.
   let bonusLancado = null;
   if (nivel >= 2) {
     bonusLancado = await lancarBonusSeAplicavel(pool, {
       codProf, nomeProf: nome, regiao: regiaoCanonica, nivel,
     });
   }
+
+  // 6. Estado de carência (sempre retorna — útil pra frontend mesmo no N1)
+  // 🆕 2026-05 v3: lê ultima_subida_em recém-atualizada e calcula remaining
+  const subidaRow = await pool.query(
+    `SELECT ultima_subida_em FROM score_nivel_motoboy WHERE cod_prof = $1`,
+    [String(codProf)]
+  );
+  const carencia = calcularCarencia(subidaRow.rows[0]?.ultima_subida_em || null);
 
   return {
     regiao_configurada: true,
@@ -474,6 +577,8 @@ async function avaliarMotoboy(pool, codProf) {
     desceu: persistencia.desceu,
     nivel_anterior: persistencia.de,
     bonus: bonusLancado,
+    // 🆕 2026-05 v3: estado de carência (frontend mostra contagem regressiva)
+    carencia,
   };
 }
 
@@ -667,10 +772,12 @@ module.exports = {
   NIVEL_3,
   HORA_CORTE_NOTURNO,
   JANELA_DIAS,
+  CARENCIA_SCORE_DIAS,
   // Calculo
   calcularNivelMotoboy,
   persistirNivelMotoboy,
   lancarBonusSeAplicavel,
+  calcularCarencia,
   // Pipeline alto nível
   avaliarMotoboy,
   avaliarRegiaoCompleta,
