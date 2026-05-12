@@ -24,6 +24,20 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   const limitesRouter = createLimitesRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES);
   router.use('/', limitesRouter);
 
+  // ==================== SUB-ROUTER: GRATUIDADES V2 (listagem paginada + KPIs) ====================
+  // 2026-05: redesign — listagem com filtros, KPIs no topo, abas
+  const { createGratuidadesV2Routes } = require('./routes/gratuidades-v2.routes');
+  const gratuidadesV2Router = createGratuidadesV2Routes(pool, verificarToken, verificarAdminOuFinanceiro);
+  router.use('/gratuities', gratuidadesV2Router);
+
+  // ==================== SUB-ROUTER: GRATUIDADES MOTIVOS (CRUD pré-definidos) ====================
+  // 2026-05: motivos pré-definidos gerenciados via modal
+  const { createGratuidadesMotivosRoutes } = require('./routes/gratuidades-motivos.routes');
+  const gratuidadesMotivosRouter = createGratuidadesMotivosRoutes(
+    pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES
+  );
+  router.use('/gratuities', gratuidadesMotivosRouter);
+
   // ==================== HELPER DE CONFIGURAÇÃO (financial_config) ====================
   // 2026-04: cache TTL 30s pra leitura. Usado pelo POST /withdrawals (kill switch
   // e modo auto) e pelos endpoints GET/PUT /financial/config abaixo.
@@ -2017,13 +2031,17 @@ router.get('/gratuities/user/:userCod', verificarToken, async (req, res) => {
 // Criar gratuidade
 router.post('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
   try {
-    const { userCod, userName, quantity, value, reason, createdBy } = req.body;
+    const { userCod, userName, quantity, value, createdBy } = req.body;
+    // 2026-05: normaliza motivo pra UPPERCASE/TRIM (consistência com gratuities_motivos)
+    const reason = req.body.reason
+      ? String(req.body.reason).trim().toUpperCase().slice(0, 500) || null
+      : null;
 
     const result = await pool.query(
       `INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by) 
        VALUES ($1, $2, $3, $4, $5, $6, 'ativa', $7) 
        RETURNING *`,
-      [userCod, userName || null, quantity, quantity, value, reason || null, createdBy || null]
+      [userCod, userName || null, quantity, quantity, value, reason, createdBy || null]
     );
 
     res.status(201).json(result.rows[0]);
