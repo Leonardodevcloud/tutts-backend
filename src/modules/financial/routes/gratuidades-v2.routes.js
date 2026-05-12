@@ -245,6 +245,41 @@ function createGratuidadesV2Routes(
     }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // GET /lookup-user/:cod — busca rápida de motoboy por código
+  // ═══════════════════════════════════════════════════════════════════════
+  // 2026-05 v3: substitui o lookup antigo via `A.find()` que dependia do
+  // array `submissions` carregado no app.js. Esse era enviesado (só pegava
+  // motoboys com submissão recente). Agora vai direto na tabela users.
+  //
+  // Endpoint específico (vs reusar GET /users que é admin-only) — financeiro
+  // precisa cadastrar gratuidade sem ser admin master.
+  router.get('/lookup-user/:cod', verificarToken, verificarAdminOuFinanceiro, async (req, res) => {
+    try {
+      const cod = String(req.params.cod || '').trim();
+      if (cod.length < 1) {
+        return res.json(null);
+      }
+      const { rows } = await pool.query(`
+        SELECT cod_profissional, full_name, role
+          FROM users
+         WHERE LOWER(cod_profissional) = LOWER($1)
+         LIMIT 1
+      `, [cod]);
+      if (rows.length === 0) {
+        return res.json(null);
+      }
+      res.json({
+        codProfissional: rows[0].cod_profissional,
+        fullName: rows[0].full_name,
+        role: rows[0].role,
+      });
+    } catch (err) {
+      console.error('❌ Erro em /gratuities/lookup-user:', err);
+      res.status(500).json({ error: 'Erro interno do servidor' });
+    }
+  });
+
   return router;
 }
 
