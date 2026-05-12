@@ -38,6 +38,15 @@ function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro,
   );
   router.use('/gratuities', gratuidadesMotivosRouter);
 
+  // ==================== SUB-ROUTER: ISENÇÕES DE SAQUE ====================
+  // 2026-05 v3: motoboys com isenção permanente entram na conta de saques
+  // gratuitos quando não têm gratuidade disponível.
+  const { createExemptionsRoutes } = require('./routes/exemptions.routes');
+  const exemptionsRouter = createExemptionsRoutes(
+    pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES
+  );
+  router.use('/exemptions', exemptionsRouter);
+
   // ==================== HELPER DE CONFIGURAÇÃO (financial_config) ====================
   // 2026-04: cache TTL 30s pra leitura. Usado pelo POST /withdrawals (kill switch
   // e modo auto) e pelos endpoints GET/PUT /financial/config abaixo.
@@ -875,13 +884,25 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
     const isRestricted = restricted.rows.length > 0;
 
     // 🔒 SECURITY FIX: Verificar gratuidade COM LOCK (FOR UPDATE) para evitar race condition
+    // 2026-05 v3: filtro adicional `expires_at > NOW()` — gratuidades vencidas não consomem
     const gratuity = await client.query(
-      "SELECT * FROM gratuities WHERE user_cod = $1 AND status = 'ativa' AND remaining > 0 ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
+      `SELECT * FROM gratuities
+        WHERE user_cod = $1
+          AND status = 'ativa'
+          AND remaining > 0
+          AND (expires_at IS NULL OR expires_at > NOW())
+        ORDER BY expires_at ASC NULLS LAST, created_at ASC
+        LIMIT 1
+        FOR UPDATE`,
       [userCod]
     );
     
-    const hasGratuity = gratuity.rows.length > 0;
+    let hasGratuity = gratuity.rows.length > 0;
     let gratuityId = null;
+    // 2026-05 v3: rastreia se a "gratuidade" foi na verdade aplicada por
+    // ISENÇÃO. Comportamento idêntico (fee=0, has_gratuity=true) mas
+    // gratuity_id fica NULL e auditoria registra o exemption_id.
+    let exemptionId = null;
     // 🆕 2026-04-30: Nova taxa de saque
     //   - Saques de R$ 15 a R$ 100  → 4,5% + R$ 0,40 (taxa fixa Plific/Stark)
     //   - Saques acima de R$ 100    → 4,5% (sem taxa fixa)
@@ -913,6 +934,25 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
           'UPDATE gratuities SET remaining = $1 WHERE id = $2',
           [newRemaining, gratuityId]
         );
+      }
+    } else {
+      // 2026-05 v3: SEM gratuidade disponível → tenta isenção permanente.
+      // Isenção tem efeito IDÊNTICO à gratuidade (fee=0, conta como gratuito
+      // do mês), mas é permanente até admin desativar. Sem LOCK necessário
+      // (não decrementa nada — só lê).
+      const exemption = await client.query(
+        `SELECT id, motivo FROM withdrawal_exemptions
+          WHERE user_cod = $1 AND ativa = TRUE
+          LIMIT 1`,
+        [userCod]
+      );
+      if (exemption.rows.length > 0) {
+        exemptionId = exemption.rows[0].id;
+        hasGratuity = true;          // saque vira aprovado_gratuidade
+        // gratuityId fica NULL — distingue isenção de gratuidade real
+        feeAmount = 0;
+        finalAmount = valorArredondado;
+        console.log(`💎 Isenção #${exemptionId} (${exemption.rows[0].motivo}) aplicada em saque do user_cod=${userCod}`);
       }
     }
 
