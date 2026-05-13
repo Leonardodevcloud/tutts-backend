@@ -408,13 +408,56 @@ function parseEntrega767(texto) {
   return { endereco, nomeCliente: nomeCliente || null, nota };
 }
 
-// ── Termos discriminativos do Ponto 1 do 767 (Galba Novas de Castro) ────────
+// ── Termos discriminativos do Ponto 1 do 767 (legado — só pra retrocompatibilidade) ────────
+//
+// 2026-05 v3: passou a ser CONFIGURÁVEL via rastreio_clientes_config.termos_filtro.
+// Antes era hardcoded só pro 767. Agora qualquer cliente pode ter palavras-chave.
+// A função `ponto1Bate767` permanece exportada pra testes legados mas o fluxo
+// de captura usa `escolherConfigPorTexto` que é genérica.
 const TERMOS_PONTO1_767 = ['GALBA', 'NOVAS DE CASTRO', '57061-510', '57061510'];
 
 function ponto1Bate767(texto) {
   if (!texto) return false;
   const up = String(texto).toUpperCase();
   return TERMOS_PONTO1_767.some((termo) => up.includes(termo.toUpperCase()));
+}
+
+/**
+ * 🆕 2026-05 v3: Decide qual config (das múltiplas registradas pra esse cliente)
+ * uma OS pertence, baseado no texto do Ponto 1.
+ *
+ * Regras:
+ *   - Recebe lista de entries (cada uma com `filtrosBalao` e `evolutionGroupId`).
+ *   - Se um cadastro tem `filtrosBalao` vazio → MATCH catch-all (pega tudo deste cliente).
+ *     Útil pro 814 que não filtra.
+ *   - Se um cadastro tem `filtrosBalao` preenchido → MATCH só se o texto contém
+ *     alguma das palavras.
+ *   - Premissa do usuário: "palavras-chave não se sobrepõem" — então retorna
+ *     o PRIMEIRO match que encontrar (com prioridade pra cadastros com filtros
+ *     ANTES de catch-all, pra evitar que catch-all engula tudo).
+ *   - Retorna null se nenhum bateu → OS é descartada.
+ *
+ * @param {string} texto — texto do Ponto 1 (extraído do modal de endereços)
+ * @param {Array}  entries — config do cliente (de carregarConfig do detector)
+ * @returns {object|null} a entry que bateu, ou null
+ */
+function escolherConfigPorTexto(texto, entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  const up = String(texto || '').toUpperCase();
+
+  // Primeiro tenta cadastros COM palavras-chave (mais específicos)
+  const comFiltros = entries.filter(e => Array.isArray(e.filtrosBalao) && e.filtrosBalao.length > 0);
+  for (const entry of comFiltros) {
+    const bateu = entry.filtrosBalao.some(termo => up.includes(String(termo).toUpperCase()));
+    if (bateu) return entry;
+  }
+
+  // Depois tenta catch-all (sem filtros — pega tudo)
+  const semFiltros = entries.find(e => !Array.isArray(e.filtrosBalao) || e.filtrosBalao.length === 0);
+  if (semFiltros) return semFiltros;
+
+  // Nenhum bateu
+  return null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -855,15 +898,31 @@ async function coletarOsEmExecucao() {
 
 
 
-async function capturarPontosOS({ os_numero, cliente_cod }) {
+/**
+ * 🆕 2026-05 v3: nova assinatura aceita `configEntries` opcional, que é o
+ * array de cadastros do cliente vindo de carregarConfig() do detector.
+ * Quando passado, a função usa as palavras-chave configuradas pra decidir
+ * qual cadastro a OS pertence (e portanto qual grupo Evolution receberá
+ * a mensagem). Retorna a entry escolhida em `configMatched` do resultado.
+ *
+ * Retrocompat: se `configEntries` for null/vazio, mantém o comportamento
+ * antigo (hardcoded ponto1Bate767 pro 767, sem filtro pro 814).
+ */
+async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
   if (!process.env.SISTEMA_EXTERNO_URL) {
     throw new Error('SISTEMA_EXTERNO_URL não configurada.');
   }
   if (!/^\d{7}$/.test(String(os_numero || ''))) {
     throw new Error(`os_numero inválido: ${os_numero}`);
   }
-  if (!['814', '767'].includes(String(cliente_cod))) {
-    throw new Error(`cliente_cod inválido: ${cliente_cod} (esperado 814 ou 767)`);
+  // 2026-05 v3: aceita QUALQUER cliente_cod cadastrado em rastreio_clientes_config.
+  // Antes era restrito a '814' e '767' hardcoded. Agora 814/767 continuam tendo
+  // parsers específicos (parseEntrega814/parseEntrega767), mas se outro cliente
+  // aparecer com configEntries definido, usa parseEntrega767 como fallback genérico
+  // (que extrai endereço, nome, NF — campos universais).
+  const codStr = String(cliente_cod);
+  if (!['814', '767'].includes(codStr) && (!configEntries || configEntries.length === 0)) {
+    throw new Error(`cliente_cod inválido: ${cliente_cod} (esperado 814 ou 767, ou configEntries pra cliente customizado)`);
   }
 
   await acquireMutex(`capturarPontosOS(${os_numero})`);
@@ -1157,28 +1216,61 @@ async function capturarPontosOS({ os_numero, cliente_cod }) {
       throw err;
     }
 
-    // Aplica parser específico do cliente
+    // 🆕 2026-05 v3: filtro genérico via configEntries (palavras-chave do banco).
+    //
+    // Comportamento:
+    //   - Se configEntries foi passado E tem pelo menos uma entry:
+    //       Usa escolherConfigPorTexto pra decidir qual cadastro a OS pertence
+    //       (baseado no Ponto 1). Se nenhum bater, OS é descartada.
+    //       Quando uma config bate, retornamos `configMatched` no payload.
+    //   - Se configEntries NÃO foi passado (chamada legada):
+    //       Mantém comportamento hardcoded — 814 pega tudo, 767 exige Galba.
+    //
+    // Justificativa de design: o ponto 1 contém o endereço de coleta. O usuário
+    // (Tutts) cadastra palavras-chave que aparecem nesse endereço pra discriminar
+    // operações. Ex: '767 + GALBA' (operação A), '767 + JOAO' (operação B).
+    const ponto1 = pontosBrutos.find((pt) => pt.numero === 1);
+
     let pontosParsed;
-    if (cliente_cod === '814') {
-      pontosParsed = pontosBrutos
-        .filter((pt) => pt.numero >= 2)
-        .map((pt) => ({ numero: pt.numero, ...(parseEntrega814(pt.texto) || {}) }));
-    } else {
-      // 767: só dispara se Ponto 1 bater com Galba
-      const ponto1 = pontosBrutos.find((pt) => pt.numero === 1);
-      if (!ponto1 || !ponto1Bate767(ponto1.texto)) {
-        return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767', debugInfo };
+    let configMatched = null;
+
+    if (Array.isArray(configEntries) && configEntries.length > 0) {
+      // Fluxo NOVO: decide via configEntries
+      configMatched = escolherConfigPorTexto(ponto1 ? ponto1.texto : '', configEntries);
+      if (!configMatched) {
+        return {
+          pontos: [], skipped: true,
+          motivo: 'nenhum_filtro_bateu',
+          debugInfo,
+        };
       }
+      // Escolhe parser apropriado: 814 usa parser próprio, demais (767 e custom)
+      // usam parseEntrega767 (que é o mais completo — endereço, nome, NF)
+      const parser = cliente_cod === '814' ? parseEntrega814 : parseEntrega767;
       pontosParsed = pontosBrutos
         .filter((pt) => pt.numero >= 2)
-        .map((pt) => ({ numero: pt.numero, ...(parseEntrega767(pt.texto) || {}) }));
+        .map((pt) => ({ numero: pt.numero, ...(parser(pt.texto) || {}) }));
+    } else {
+      // Fluxo LEGADO (retrocompat): 814 sem filtro, 767 com hardcoded Galba
+      if (cliente_cod === '814') {
+        pontosParsed = pontosBrutos
+          .filter((pt) => pt.numero >= 2)
+          .map((pt) => ({ numero: pt.numero, ...(parseEntrega814(pt.texto) || {}) }));
+      } else {
+        if (!ponto1 || !ponto1Bate767(ponto1.texto)) {
+          return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767', debugInfo };
+        }
+        pontosParsed = pontosBrutos
+          .filter((pt) => pt.numero >= 2)
+          .map((pt) => ({ numero: pt.numero, ...(parseEntrega767(pt.texto) || {}) }));
+      }
     }
 
     if (pontosParsed.length === 0) {
       return { pontos: [], skipped: true, motivo: 'sem_pontos_entrega', debugInfo };
     }
 
-    return { pontos: pontosParsed, skipped: false, debugInfo };
+    return { pontos: pontosParsed, skipped: false, debugInfo, configMatched };
   } finally {
     try {
       if (context) await comTimeout(context.close(), 3_000, 'context.close');
@@ -1227,5 +1319,5 @@ module.exports = {
     coletarOsEmExecucao,
   },
   // expostos pra testes unitários
-  _internal: { parseEntrega814, parseEntrega767, ponto1Bate767 },
+  _internal: { parseEntrega814, parseEntrega767, ponto1Bate767, escolherConfigPorTexto },
 };
