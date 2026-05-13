@@ -41,6 +41,8 @@ function createRastreioClientesRouter(pool, deps = {}) {
       if (!cliente_cod || !nome_exibicao || !evolution_group_id) {
         return res.status(400).json({ ok: false, erro: 'campos_obrigatorios' });
       }
+      // 2026-05 v3: termos_filtro são as palavras-chave que decidem se a
+      // OS pertence a este cadastro. Vazio = pega tudo deste cliente.
       const termos = Array.isArray(termos_filtro) && termos_filtro.length ? termos_filtro : null;
       const { rows } = await pool.query(
         `INSERT INTO rastreio_clientes_config
@@ -48,10 +50,12 @@ function createRastreioClientesRouter(pool, deps = {}) {
          VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
         [String(cliente_cod), nome_exibicao, ativo !== false, evolution_group_id, termos, observacoes || null]
       );
-      await audit(req, 'criar_cliente', { cliente_cod });
+      await audit(req, 'criar_cliente', { cliente_cod, evolution_group_id });
       res.json({ ok: true, cliente: rows[0] });
     } catch (e) {
-      if (e.code === '23505') return res.status(409).json({ ok: false, erro: 'cliente_ja_existe' });
+      // 2026-05 v3: agora o UNIQUE é composto (cliente_cod + evolution_group_id).
+      // Se duplicar essa combinação, retornamos erro específico.
+      if (e.code === '23505') return res.status(409).json({ ok: false, erro: 'cliente_grupo_ja_existe' });
       res.status(500).json({ ok: false, erro: e.message });
     }
   });
@@ -71,7 +75,11 @@ function createRastreioClientesRouter(pool, deps = {}) {
       if (!rows[0]) return res.status(404).json({ ok: false, erro: 'nao_encontrado' });
       await audit(req, 'editar_cliente', { id, cliente_cod: rows[0].cliente_cod });
       res.json({ ok: true, cliente: rows[0] });
-    } catch (e) { res.status(500).json({ ok: false, erro: e.message }); }
+    } catch (e) {
+      // Pode dar 23505 se editar pra um grupo que já existe pro mesmo cliente
+      if (e.code === '23505') return res.status(409).json({ ok: false, erro: 'cliente_grupo_ja_existe' });
+      res.status(500).json({ ok: false, erro: e.message });
+    }
   });
 
   router.delete('/config/:id', verificarToken, verificarAdmin, async (req, res) => {
