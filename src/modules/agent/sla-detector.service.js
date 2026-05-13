@@ -79,9 +79,18 @@ let _configCacheAt = 0;
  * Carrega config de clientes monitorados + filtros de _balloon.
  * Cache de 1 minuto pra evitar hit no banco a cada tick.
  *
- * Schema da tabela rastreio_clientes_config (confirmado 2026-04-13):
+ * Schema da tabela rastreio_clientes_config (2026-05 v3):
  *   id, cliente_cod, nome_exibicao, ativo, evolution_group_id,
  *   termos_filtro (ARRAY), observacoes, criado_em, atualizado_em
+ *
+ * 🆕 2026-05 v3: agora MÚLTIPLAS linhas por cliente_cod são permitidas
+ * (UNIQUE composto em cliente_cod+evolution_group_id). A função retorna:
+ *
+ *   config[cliente_cod] = [
+ *     { id, ativo, nomeExibicao, filtrosBalao, evolutionGroupId },
+ *     { id, ativo, nomeExibicao, filtrosBalao, evolutionGroupId },
+ *     ...
+ *   ]
  *
  * Tolerante a variações de schema: se a coluna `termos_filtro` não existir,
  * tenta descobrir dinamicamente (pode ser filtros_balao, filtros, etc).
@@ -112,17 +121,21 @@ async function carregarConfig(pool) {
     log(`⚙️ Colunas da tabela: [${colNames.join(', ')}] | coluna de filtros: ${colFiltros || '(nenhuma)'}`);
   }
 
-  // Monta a query — inclui nome_exibicao se existir (útil pros logs)
-  const selectCols = ['cliente_cod', 'ativo'];
+  // Monta a query — inclui nome_exibicao e evolution_group_id se existirem
+  const selectCols = ['id', 'cliente_cod', 'ativo'];
   if (colNames.includes('nome_exibicao')) selectCols.push('nome_exibicao');
+  if (colNames.includes('evolution_group_id')) selectCols.push('evolution_group_id');
   if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
 
   const { rows } = await pool.query(
     `SELECT ${selectCols.join(', ')}
        FROM rastreio_clientes_config
-      WHERE ativo = true`
+      WHERE ativo = true
+      ORDER BY cliente_cod, id`
   );
 
+  // 2026-05 v3: agora um cliente pode ter MÚLTIPLAS entradas (uma por
+  // segmento/grupo). config[cod] vira um ARRAY de configs.
   const config = {};
   for (const row of rows) {
     const cod = String(row.cliente_cod);
@@ -131,7 +144,6 @@ async function carregarConfig(pool) {
     if (Array.isArray(raw)) {
       filtros = raw.map(f => String(f).toUpperCase().trim()).filter(Boolean);
     } else if (typeof raw === 'string' && raw.length > 0) {
-      // Pode ser JSON stringificado ou CSV
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
@@ -141,11 +153,17 @@ async function carregarConfig(pool) {
         filtros = raw.split(',').map(f => f.toUpperCase().trim()).filter(Boolean);
       }
     }
-    config[cod] = {
+
+    const entry = {
+      id: row.id,
       ativo: row.ativo,
       nomeExibicao: row.nome_exibicao || null,
+      evolutionGroupId: row.evolution_group_id || null,
       filtrosBalao: filtros,
     };
+
+    if (!config[cod]) config[cod] = [];
+    config[cod].push(entry);
   }
 
   _configCache = config;
@@ -154,9 +172,12 @@ async function carregarConfig(pool) {
   if (DEBUG) {
     const codigos = Object.keys(config);
     log(`⚙️ Config carregada: ${codigos.length} cliente(s) ativo(s) — [${codigos.join(', ')}]`);
-    for (const [cod, cfg] of Object.entries(config)) {
-      const nome = cfg.nomeExibicao ? ` (${cfg.nomeExibicao})` : '';
-      log(`   • ${cod}${nome}: filtros=[${cfg.filtrosBalao.join(', ') || '(nenhum — pega todas)'}]`);
+    for (const [cod, entries] of Object.entries(config)) {
+      log(`   • ${cod}: ${entries.length} cadastro(s)`);
+      for (const e of entries) {
+        const nome = e.nomeExibicao ? ` "${e.nomeExibicao}"` : '';
+        log(`     - id=${e.id}${nome} grupo=${e.evolutionGroupId} filtros=[${e.filtrosBalao.join(', ') || '(nenhum — pega todas)'}]`);
+      }
     }
   }
 
@@ -191,8 +212,12 @@ function filtrarMonitorados(ordens, config) {
 
   for (const ordem of ordens) {
     const clienteCod = String(ordem.cliente_cod || '');
-    const cfg = config[clienteCod];
-    if (!cfg || !cfg.ativo) continue;
+    // 2026-05 v3: config[clienteCod] agora é um ARRAY de configs.
+    // Pelo menos uma precisa estar ativa pra que a OS seja monitorada.
+    const entries = config[clienteCod];
+    if (!Array.isArray(entries) || entries.length === 0) continue;
+    const algumAtivo = entries.some(e => e.ativo);
+    if (!algumAtivo) continue;
 
     // Regras de EXCLUSÃO hardcoded (categoria, modalidade, etc)
     const balloon = String(ordem._balloon || '').toUpperCase();
