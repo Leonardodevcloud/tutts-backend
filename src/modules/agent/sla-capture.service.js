@@ -25,6 +25,8 @@ function getCapturarPontosOS() {
 // ── Config ───────────────────────────────────────────────────────────────────
 const MAX_TENTATIVAS = 3;
 const BACKOFF_DELAYS_MS = [2_000, 5_000, 10_000]; // após tentativa 1, 2, 3
+// 🆕 2026-05 v3: liga logs verbosos do fluxo de configEntries / configMatched
+const DEBUG_VERBOSE = String(process.env.SLA_CAPTURE_DEBUG || '').toLowerCase() === 'true';
 
 function log(msg) {
   logger.info(`[sla-capture-service] ${msg}`);
@@ -90,23 +92,31 @@ async function enfileirarCaptura(pool, payload) {
 // EVOLUTION API — envio WhatsApp
 // ═════════════════════════════════════════════════════════════════════════════
 
-function getGrupoIdPorCliente(clienteCod) {
+/**
+ * 2026-05 v3: aceita `grupoIdOverride` opcional. Quando passado, ignora
+ * env vars e usa o ID fornecido (vem do cadastro em rastreio_clientes_config).
+ * Fallback pras env vars antigas (EVOLUTION_GROUP_ID_814/767) pra retrocompat.
+ */
+function getGrupoIdPorCliente(clienteCod, grupoIdOverride) {
+  if (grupoIdOverride && String(grupoIdOverride).trim()) {
+    return String(grupoIdOverride).trim();
+  }
   if (clienteCod === '814') return process.env.EVOLUTION_GROUP_ID_814;
   if (clienteCod === '767') return process.env.EVOLUTION_GROUP_ID_767;
   return null;
 }
 
-async function enviarRastreioWhatsApp({ texto, clienteCod }) {
+async function enviarRastreioWhatsApp({ texto, clienteCod, grupoIdOverride }) {
   const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
   const apiKey = process.env.EVOLUTION_API_KEY;
   const instancia = process.env.EVOLUTION_INSTANCE;
-  const grupoId = getGrupoIdPorCliente(clienteCod);
+  const grupoId = getGrupoIdPorCliente(clienteCod, grupoIdOverride);
 
   if (!baseUrl || !apiKey || !instancia) {
     throw new Error('EVOLUTION_API_URL / EVOLUTION_API_KEY / EVOLUTION_INSTANCE não configuradas');
   }
   if (!grupoId) {
-    throw new Error(`Grupo não configurado pra cliente ${clienteCod} (EVOLUTION_GROUP_ID_${clienteCod})`);
+    throw new Error(`Grupo não configurado pra cliente ${clienteCod} (cadastre em rastreio_clientes_config ou defina EVOLUTION_GROUP_ID_${clienteCod})`);
   }
 
   const url = `${baseUrl}/message/sendText/${instancia}`;
@@ -165,12 +175,32 @@ async function processarCaptura(pool, registro) {
   log(`🔍 Processando OS ${os_numero} (cliente ${cliente_cod}, tentativa ${tentativaAtual}/${MAX_TENTATIVAS})`);
 
   try {
+    // 🆕 2026-05 v3: carrega configEntries do cliente ANTES de capturar pontos.
+    // Vem como array (1+ cadastros) — passado pro playwright pra ele decidir
+    // qual cadastro a OS pertence (baseado em palavras-chave do ponto 1).
+    let configEntries = null;
+    try {
+      const carregarConfig = require('./sla-detector.service').carregarConfig;
+      const config = await carregarConfig(pool);
+      configEntries = Array.isArray(config[cliente_cod]) ? config[cliente_cod] : null;
+      if (DEBUG_VERBOSE) {
+        log(`📋 configEntries pra ${cliente_cod}: ${configEntries ? configEntries.length + ' cadastro(s)' : 'nenhum'}`);
+      }
+    } catch (e) {
+      logErr(`⚠️ Falha ao carregar configEntries de ${cliente_cod}: ${e.message}. Seguindo com fluxo legado.`);
+    }
+
     // 1. Captura pontos via Playwright
     // Nota: o browser persistente (2026-05) é injetado via setOverrides({ browser })
     // pelo sla-capture.agent.js ANTES desta chamada. O service não precisa saber.
-    const resultado = await getCapturarPontosOS()({ os_numero, cliente_cod });
+    const resultado = await getCapturarPontosOS()({
+      os_numero,
+      cliente_cod,
+      configEntries,  // 🆕 2026-05 v3
+    });
 
-    // Cliente 767 pode ser pulado se Ponto 1 não bater com Galba
+    // Cliente 767 (ou cliente customizado) pode ser pulado se Ponto 1 não bater
+    // com nenhuma palavra-chave configurada
     if (resultado.skipped) {
       log(`⊘ OS ${os_numero} pulada: ${resultado.motivo}`);
       await pool.query(
@@ -199,8 +229,15 @@ async function processarCaptura(pool, registro) {
     // 2. Monta mensagem
     const texto = montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod });
 
-    // 3. Envia via Evolution
-    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod });
+    // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
+    // ou fallback pra env var legada se não houver match.
+    const grupoIdOverride = resultado.configMatched
+      ? resultado.configMatched.evolutionGroupId
+      : null;
+    if (resultado.configMatched && DEBUG_VERBOSE) {
+      log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
+    }
+    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
 
     // 4. Marca como enviado
     await pool.query(
