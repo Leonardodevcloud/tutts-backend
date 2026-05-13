@@ -2,14 +2,29 @@
 
 /**
  * rastreio-clientes.migration.js
- * Cria tabela rastreio_clientes_config + seed inicial 814/767.
+ *
+ * 2026-05 v3: removido UNIQUE de cliente_cod sozinho. Agora um mesmo
+ * cliente_cod pode ter múltiplas linhas, cada uma com seu próprio
+ * evolution_group_id + termos_filtro distintos. Útil quando o cliente
+ * tem operações segmentadas (ex: 767 GALBA vai pro grupo X, 767 JOAO
+ * vai pro grupo Y).
+ *
+ * Schema:
+ *   - UNIQUE (cliente_cod, evolution_group_id) — impede duplicação do
+ *     mesmo grupo dentro do mesmo cliente.
+ *   - INDEX (cliente_cod, ativo) — usado pelo detector.
+ *
+ * Migração de bancos existentes (idempotente):
+ *   - Drop constraint UNIQUE em cliente_cod se existir (nome conhecido
+ *     gerado pelo Postgres é `rastreio_clientes_config_cliente_cod_key`)
+ *   - Cria UNIQUE composto se não existir
  */
 
 async function initRastreioClientesTables(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS rastreio_clientes_config (
       id SERIAL PRIMARY KEY,
-      cliente_cod VARCHAR(10) UNIQUE NOT NULL,
+      cliente_cod VARCHAR(10) NOT NULL,
       nome_exibicao VARCHAR(100) NOT NULL,
       ativo BOOLEAN DEFAULT TRUE,
       evolution_group_id VARCHAR(120) NOT NULL,
@@ -19,7 +34,37 @@ async function initRastreioClientesTables(pool) {
       atualizado_em TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  // 2026-05 v3: remove UNIQUE antigo (cliente_cod sozinho).
+  // O nome default que o Postgres atribuiu quando criou era
+  // 'rastreio_clientes_config_cliente_cod_key'. Caso a constraint não
+  // exista (db fresco), o IF EXISTS silencia o erro.
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
+      DROP CONSTRAINT IF EXISTS rastreio_clientes_config_cliente_cod_key
+  `).catch((e) => {
+    console.warn('[rastreio-clientes] drop constraint legacy:', e.message);
+  });
+
+  // UNIQUE composto: impede duplicar mesmo cliente+grupo
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'rastreio_clientes_config_cliente_grupo_unique'
+      ) THEN
+        ALTER TABLE rastreio_clientes_config
+          ADD CONSTRAINT rastreio_clientes_config_cliente_grupo_unique
+          UNIQUE (cliente_cod, evolution_group_id);
+      END IF;
+    END $$;
+  `).catch((e) => {
+    console.warn('[rastreio-clientes] add unique composto:', e.message);
+  });
+
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_rcc_ativo ON rastreio_clientes_config(ativo);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_rcc_cliente_ativo ON rastreio_clientes_config(cliente_cod, ativo);`);
 
   // Seed: insere 814 e 767 se a tabela estiver vazia
   const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM rastreio_clientes_config');
