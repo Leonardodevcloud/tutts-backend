@@ -136,6 +136,7 @@ app.use(express.json({
     if (req.originalUrl && (
       req.originalUrl.includes('/stark/webhook') ||
       req.originalUrl.includes('/uber/webhook') ||
+      req.originalUrl.includes('/logistics/webhook') ||
       req.originalUrl.includes('/cs/webhook')
     )) {
       req.rawBody = buf.toString('utf8');
@@ -411,6 +412,10 @@ app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res) =>
 // por HMAC dentro dele mesmo) precisa ser montado AQUI, antes desses middlewares.
 const { createUberWebhookRoutes } = require('./src/modules/uber/routes/webhook.routes');
 app.use('/api/uber/webhook', createUberWebhookRoutes(pool));
+
+// Logistics Hub - webhook canonico (publico, validado por HMAC dentro do adapter)
+const { createLogisticsWebhookRouter } = require('./src/modules/logistics');
+app.use('/api/logistics/webhook', createLogisticsWebhookRouter(pool));
 
 // 🔒 SECURITY FIX (AUDIT-10): Rotas de init/overrides extraídas para módulo próprio
 const { createBootstrapRoutes } = require('./src/modules/bootstrap/bootstrap.routes');

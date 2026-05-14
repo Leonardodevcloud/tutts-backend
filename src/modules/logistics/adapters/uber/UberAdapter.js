@@ -35,6 +35,7 @@ const {
 } = require('./uber.parser');
 const { nativeToCanonical } = require('./uber.status-map');
 const { classifyUberError } = require('./uber.errors');
+const { validarAssinaturaUber, parsePayloadUber, detectarTipoEvento } = require('./uber.webhook');
 
 const UBER_API_BASE = 'https://api.uber.com/v1/customers';
 
@@ -317,15 +318,48 @@ class UberAdapter extends LogisticsProviderAdapter {
   }
 
   // ════════════════════════════════════════════════════════════
-  // Webhook (stubs — implementação real Fase 1B.2)
+  // Webhook
   // ════════════════════════════════════════════════════════════
 
+  /**
+   * Valida assinatura HMAC-SHA256 do webhook Uber.
+   * Sandbox aceita tudo; produção valida contra rawBody.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
   async validateWebhookSignature(req) {
-    throw new Error('UberAdapter.validateWebhookSignature: Fase 1B.2');
+    const result = validarAssinaturaUber(req, {
+      webhookSecret: this.webhookSecret,
+      sandboxMode: this.sandboxMode,
+    });
+    if (!result.valid) {
+      console.warn(`⚠️ [UberAdapter] webhook rejeitado: ${result.motivo}`);
+    } else if (result.sandbox) {
+      console.log('🤖 [UberAdapter] webhook aceito (sandbox, sem validar assinatura)');
+    }
+    // Anexa o motivo no req pra o WebhookDispatcher logar
+    req._webhookValidation = result;
+    return result.valid;
   }
 
+  /**
+   * Converte payload bruto do webhook Uber em CanonicalEvent.
+   * Retorna null se não há delivery_id ou é evento sem ação.
+   *
+   * @param {Object} payload - req.body
+   * @returns {import('../../contracts/CanonicalTypes').CanonicalEvent | null}
+   */
   parseWebhookEvent(payload) {
-    throw new Error('UberAdapter.parseWebhookEvent: Fase 1B.2');
+    return parsePayloadUber(payload);
+  }
+
+  /**
+   * Tipo do evento (delivery_status | courier_update | refund_request).
+   * Exposto pra o WebhookDispatcher poder logar/rotear.
+   */
+  webhookEventKind(payload) {
+    return detectarTipoEvento(payload);
   }
 
   acknowledgeWebhook(res) {
