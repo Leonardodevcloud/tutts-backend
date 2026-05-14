@@ -784,6 +784,7 @@ initDatabase().then(async () => {
   startAntiFraudeWorker(pool);
   startPerformanceWorker(pool);
   startUberWorker(pool);
+  startLogisticsWorker(pool); // Logistics Hub - PollingWorker (controlado por logistics_worker_state)
   // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
   if (process.env.WORKER_ENABLED === 'true') {
     console.log('⏰ Crons desativados no server (rodando no worker separado)');
