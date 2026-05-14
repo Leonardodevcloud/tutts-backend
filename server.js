@@ -76,6 +76,8 @@ const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = re
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
 const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gerencial');
 const { initUberRoutes, initUberTables, startUberWorker } = require('./src/modules/uber');
+// Logistics Hub - Fase 0: setup, contratos, tabelas. Operacoes ainda nao ligadas.
+const { initLogisticsRoutes, initLogisticsTables, startLogisticsWorker } = require('./src/modules/logistics');
 const { initFeedbackRoutes, initFeedbackTables } = require('./src/modules/feedback');
 
 // ─── Bootstrap ────────────────────────────────────────────
@@ -569,6 +571,8 @@ app.use('/api/rastreio-clientes', initRastreioClientesRoutes(pool, { verificarTo
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 app.use('/api/uber', initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+// Logistics Hub: rotas operacionais retornam 501 nesta fase; so /providers e /health funcionam.
+app.use('/api/logistics', initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 app.use('/api/feedback', initFeedbackRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
 // ═══════════════════════════════════════════════════════════════════
@@ -713,6 +717,7 @@ async function initDatabase() {
     try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
     try { await initCrmTables(pool); } catch (e) { console.error('⚠️ CRM tables error:', e.message); }
     try { await initUberTables(pool); } catch (e) { console.error('⚠️ Uber tables error:', e.message); }
+    try { await initLogisticsTables(pool); } catch (e) { console.error('Logistics tables error:', e.message); }
     try { await initFeedbackTables(pool); } catch (e) { console.error('⚠️ Feedback tables error:', e.message); }
     await createPerformanceIndices(pool);
     // 🚀 Materialized views do BI (agregados pré-calculados)

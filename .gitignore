@@ -21,3 +21,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Backups locais Fase 0
+_backup-logistics-*/
+*.bak-*
