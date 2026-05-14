@@ -1,0 +1,359 @@
+/**
+ * MÓDULO LOGISTICS — UberAdapter
+ *
+ * Implementação concreta de LogisticsProviderAdapter para Uber Direct.
+ *
+ * Responsabilidades:
+ *  - Traduzir CanonicalQuoteRequest → body Uber Direct (via uber.parser)
+ *  - Chamar Uber Direct API (auth via uber.auth)
+ *  - Traduzir resposta Uber → CanonicalQuote / CanonicalDelivery
+ *  - Mapear status nativo → CanonicalStatus (via uber.status-map)
+ *  - Classificar erros para acionabilidade (via uber.errors)
+ *
+ * O que NÃO faz:
+ *  - Persistir em uber_entregas ou logistics_deliveries (responsabilidade do Orchestrator)
+ *  - Falar com a Mapp (responsabilidade do MappClient via Orchestrator)
+ *  - Validar regras de negócio (responsabilidade do DispatchRuleMatcher)
+ *
+ * O comportamento HTTP/auth/payload é cópia verbatim de uber.service.js:
+ *  - uberCriarCotacao (linhas 227-273) → createQuote
+ *  - uberCriarEntrega (linhas 292-382) → createDelivery
+ *  - uberCancelarEntrega (linhas 384-399) → cancelDelivery
+ *  - uberConsultarEntrega (linhas 401-413) → getDelivery
+ *
+ * Fase 1B.1: webhook validation + parseWebhookEvent ficam como stubs
+ * (implementação real na Fase 1B.2).
+ */
+
+const httpRequest = require('../../../../shared/utils/httpRequest');
+const { LogisticsProviderAdapter } = require('../../contracts/LogisticsProviderAdapter');
+const { CanonicalStatus } = require('../../contracts/CanonicalStatus');
+const { obterTokenUber } = require('./uber.auth');
+const {
+  montarBodyQuote,
+  montarBodyDelivery,
+} = require('./uber.parser');
+const { nativeToCanonical } = require('./uber.status-map');
+const { classifyUberError } = require('./uber.errors');
+
+const UBER_API_BASE = 'https://api.uber.com/v1/customers';
+
+class UberAdapter extends LogisticsProviderAdapter {
+  // ════════════════════════════════════════════════════════════
+  // Identidade
+  // ════════════════════════════════════════════════════════════
+
+  get providerCode() {
+    return 'uber';
+  }
+
+  get displayName() {
+    return 'Uber Direct';
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Capabilities
+  // ════════════════════════════════════════════════════════════
+
+  capabilities() {
+    return {
+      ...super.capabilities(),
+      supportsQuote: true,
+      supportsCancel: true,
+      supportsRedispatch: true,
+      supportsRealtimeTracking: true,
+      vehicleTypes: ['motorcycle', 'car', 'bicycle', 'scooter', 'walker', 'van'],
+      coverageRegion: ['BR'],
+      webhookAuthScheme: 'hmac-sha256',
+      requiresExternalRefAsString: false,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Health check
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Healthcheck: tenta obter um access_token. Se conseguir, a auth está OK
+   * e o provider é considerado disponível.
+   */
+  async healthCheck() {
+    const t0 = Date.now();
+    try {
+      const token = await obterTokenUber(this.pool);
+      const latencyMs = Date.now() - t0;
+      return {
+        ok: !!token,
+        latencyMs,
+        msg: 'OAuth token obtido com sucesso',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - t0,
+        msg: err.message,
+        errorCode: 'auth_failed',
+      };
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Authenticate (pre-flight do Orchestrator)
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Chamado pelo Orchestrator antes de createQuote/createDelivery.
+   * Para Uber, garante que temos token válido em cache.
+   */
+  async authenticate() {
+    await obterTokenUber(this.pool);  // garante cache
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // createQuote
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Cria cotação no Uber Direct.
+   * Traduz de CanonicalQuoteRequest para o dialeto Uber, chama API,
+   * retorna CanonicalQuote.
+   *
+   * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
+   * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalQuote>}
+   */
+  async createQuote(req) {
+    super.createQuote && super.createQuote;  // valida shape via assertValidQuoteRequest
+
+    const customerId = this.config.customer_id;
+    if (!customerId) {
+      throw new Error('UberAdapter: customer_id não configurado em logistics_providers.config');
+    }
+
+    const token = await obterTokenUber(this.pool);
+    const url = `${UBER_API_BASE}/${customerId}/delivery_quotes`;
+    const body = montarBodyQuote(req);
+
+    const resp = await httpRequest(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = resp.json();
+
+    if (!resp.ok) {
+      const errInfo = classifyUberError(resp, data);
+      console.error(`❌ [UberAdapter] createQuote falhou (${errInfo.category}/${errInfo.code}):`, errInfo.message);
+      const err = new Error(`Erro cotação Uber: ${errInfo.message}`);
+      err.category = errInfo.category;
+      err.code = errInfo.code;
+      err.retriable = errInfo.retriable;
+      err.httpStatus = errInfo.httpStatus;
+      throw err;
+    }
+
+    const vehicleType = req.vehicleType && req.vehicleType !== 'auto' ? req.vehicleType : 'auto';
+    console.log(`✅ [UberAdapter] cotação criada: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min | ${vehicleType}`);
+
+    // CanonicalQuote
+    return {
+      quoteId: data.id,
+      providerCode: this.providerCode,
+      valor: data.fee / 100,
+      etaMinutos: data.duration,
+      vehicleType,
+      expiresAt: data.expires ? new Date(data.expires) : new Date(Date.now() + 5 * 60_000),
+      rawProvider: data,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // createDelivery
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Cria delivery no Uber a partir de uma quote.
+   *
+   * @param {import('../../contracts/CanonicalTypes').CanonicalQuote} quote
+   * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
+   * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalDelivery>}
+   */
+  async createDelivery(quote, req) {
+    const customerId = this.config.customer_id;
+    if (!customerId) {
+      throw new Error('UberAdapter: customer_id não configurado');
+    }
+
+    const token = await obterTokenUber(this.pool);
+    const url = `${UBER_API_BASE}/${customerId}/deliveries`;
+    const body = montarBodyDelivery(quote.quoteId, req, this.config);
+
+    const resp = await httpRequest(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = resp.json();
+
+    if (!resp.ok) {
+      const errInfo = classifyUberError(resp, data);
+      console.error(`❌ [UberAdapter] createDelivery falhou (${errInfo.category}/${errInfo.code}):`, errInfo.message);
+      const err = new Error(`Erro criar entrega Uber: ${errInfo.message}`);
+      err.category = errInfo.category;
+      err.code = errInfo.code;
+      err.retriable = errInfo.retriable;
+      err.httpStatus = errInfo.httpStatus;
+      throw err;
+    }
+
+    console.log(`✅ [UberAdapter] entrega criada: ${data.id} | status=${data.status}`);
+
+    // CanonicalDelivery
+    return {
+      externalDeliveryId: data.id,
+      providerCode: this.providerCode,
+      statusCanonico: nativeToCanonical(data.status),
+      statusNative: data.status,
+      trackingUrl: data.tracking_url || null,
+      courier: data.courier ? this._extractCourier(data.courier) : null,
+      rawProvider: data,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // cancelDelivery
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Cancela uma delivery ativa no Uber.
+   *
+   * @param {string} externalDeliveryId
+   * @returns {Promise<{ok: boolean, msg?: string}>}
+   */
+  async cancelDelivery(externalDeliveryId) {
+    const customerId = this.config.customer_id;
+    if (!customerId) {
+      throw new Error('UberAdapter: customer_id não configurado');
+    }
+
+    const token = await obterTokenUber(this.pool);
+    const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}/cancel`;
+
+    const resp = await httpRequest(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({}),
+    });
+
+    const data = resp.json();
+
+    if (resp.ok) {
+      console.log(`✅ [UberAdapter] delivery ${externalDeliveryId} cancelada`);
+      return { ok: true };
+    }
+
+    const errInfo = classifyUberError(resp, data);
+    console.warn(`⚠️ [UberAdapter] cancel falhou (${errInfo.category}):`, errInfo.message);
+    return { ok: false, msg: errInfo.message };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // getDelivery
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Consulta estado atual da delivery no Uber (sync manual quando webhook falha).
+   *
+   * @param {string} externalDeliveryId
+   * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalDelivery>}
+   */
+  async getDelivery(externalDeliveryId) {
+    const customerId = this.config.customer_id;
+    if (!customerId) {
+      throw new Error('UberAdapter: customer_id não configurado');
+    }
+
+    const token = await obterTokenUber(this.pool);
+    const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}`;
+
+    const resp = await httpRequest(url, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    const data = resp.json();
+
+    if (!resp.ok) {
+      const errInfo = classifyUberError(resp, data);
+      const err = new Error(`Erro consultar entrega Uber: ${errInfo.message}`);
+      err.category = errInfo.category;
+      throw err;
+    }
+
+    return {
+      externalDeliveryId: data.id,
+      providerCode: this.providerCode,
+      statusCanonico: nativeToCanonical(data.status),
+      statusNative: data.status,
+      trackingUrl: data.tracking_url || null,
+      courier: data.courier ? this._extractCourier(data.courier) : null,
+      rawProvider: data,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Status translation
+  // ════════════════════════════════════════════════════════════
+
+  nativeToCanonical(nativeStatus) {
+    return nativeToCanonical(nativeStatus);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Webhook (stubs — implementação real Fase 1B.2)
+  // ════════════════════════════════════════════════════════════
+
+  async validateWebhookSignature(req) {
+    throw new Error('UberAdapter.validateWebhookSignature: Fase 1B.2');
+  }
+
+  parseWebhookEvent(payload) {
+    throw new Error('UberAdapter.parseWebhookEvent: Fase 1B.2');
+  }
+
+  acknowledgeWebhook(res) {
+    // Uber espera 200 com JSON {received: true}
+    res.status(200).json({ received: true });
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Helpers privados
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Extrai info de courier do payload Uber em formato canônico.
+   * Uber retorna { name, phone_number, vehicle_make, vehicle_model, vehicle_license_plate, ... }
+   */
+  _extractCourier(uberCourier) {
+    if (!uberCourier || typeof uberCourier !== 'object') return null;
+    return {
+      name: uberCourier.name || null,
+      phone: uberCourier.phone_number || null,
+      plate: uberCourier.vehicle_license_plate || null,
+      vehicle: [uberCourier.vehicle_make, uberCourier.vehicle_model].filter(Boolean).join(' ') || null,
+      photo: uberCourier.img_href || null,
+      rating: uberCourier.rating || null,
+      lat: uberCourier.location?.lat || null,
+      lng: uberCourier.location?.lng || null,
+    };
+  }
+}
+
+module.exports = { UberAdapter };

@@ -1,54 +1,32 @@
 /**
  * MÓDULO LOGISTICS — Index
  *
- * Ponto de entrada do módulo. Exporta:
- *  - initLogisticsTables(pool)  — cria/migra tabelas + backfill (idempotente)
- *  - initLogisticsRoutes(...)    — monta o master router /api/logistics/*
- *  - startLogisticsWorker(pool)  — Fase 1: inicia polling Mapp
+ * Ponto de entrada. Fase 1B.1: agora registra UberAdapter no Registry,
+ * que passa a ser instanciado para o provider 'uber' (desde que esteja
+ * ativo=true em logistics_providers).
  *
- * Fase 0:
- *  - initLogisticsTables: COMPLETO (cria 7 tabelas + backfill)
- *  - initLogisticsRoutes: COMPLETO mas rotas operacionais retornam 501
- *  - startLogisticsWorker: STUB (loga e dorme — worker Uber legado continua rodando)
+ * Exporta:
+ *  - initLogisticsTables(pool)  — migration + backfill (idempotente)
+ *  - initLogisticsRoutes(...)    — master router /api/logistics/*
+ *  - startLogisticsWorker(pool)  — Fase 1C: inicia polling Mapp
  */
 
 const { initLogisticsTables } = require('./logistics.migration');
 const { createLogisticsRouter } = require('./logistics.routes');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
 const { getEventLogger } = require('./core/EventLogger');
+const { UberAdapter } = require('./adapters/uber/UberAdapter');
 
-/**
- * Inicializa as rotas do módulo.
- * Chamado a partir de server.js:
- *
- *   app.use('/api/logistics', initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
- *
- * Também inicializa o ProviderRegistry (que lê linhas de logistics_providers e
- * tenta instanciar adapters cujas classes foram registradas via registry.registerClass).
- *
- * Na Fase 0, nenhuma classe de adapter é registrada — o registry fica vazio,
- * mas a tabela já tem 'uber' como linha cadastrada (ativo=false).
- */
 function initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
-  // Garante que o registry e o logger sejam instanciados (singletons)
   const registry = getProviderRegistry(pool);
   getEventLogger(pool);
 
-  // ────────────────────────────────────────────────────────
-  // FASE 1: registrar AdapterClasses aqui antes do .initialize()
-  // ────────────────────────────────────────────────────────
-  // Ex (na Fase 1):
-  //   const { UberAdapter } = require('./adapters/uber/UberAdapter');
-  //   registry.registerClass('uber', UberAdapter);
-  //
-  // Ex (na Fase 3):
-  //   const { NinetyNineAdapter } = require('./adapters/ninety_nine/NinetyNineAdapter');
-  //   registry.registerClass('noventanove', NinetyNineAdapter);
+  // ── Fase 1B.1: registra a classe do UberAdapter ────────────
+  // O Registry vai instanciar quando logistics_providers.ativo='uber' = true.
+  // Pode ficar false durante a Fase 1B — endpoints retornam erro claro nesse caso.
+  registry.registerClass('uber', UberAdapter);
 
-  // Inicializa o registry (lê providers do banco). Fire-and-forget porque
-  // não queremos travar o startup do server caso o banco esteja lento.
-  // O singleton garante idempotência: chamadas subsequentes a get() esperam
-  // implicitamente porque _initialized vira true ao final.
+  // Carrega providers do banco e instancia ativos
   registry.initialize().catch(err => {
     console.error('❌ [logistics] erro ao inicializar ProviderRegistry:', err.message);
   });
@@ -57,23 +35,12 @@ function initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAudi
 }
 
 /**
- * Worker stub (Fase 0).
- *
- * Na Fase 1, este worker fará o que o startUberWorker atual faz:
- *  1. Polling Mapp para listar OS abertas (status=0)
- *  2. Para cada OS, consulta DispatchRuleMatcher
- *  3. Chama Orchestrator.tentarDespacho()
- *  4. Verifica timeouts e promove para fallback_queue
- *
- * Aqui só loga e fica em standby — sem mexer no fluxo Uber atual.
+ * Worker stub (Fase 1B.1). Implementação real fica na Fase 1C.
  */
 function startLogisticsWorker(pool) {
-  console.log('🛌 [logistics worker] em standby (Fase 0) — worker Uber legado continua ativo');
-  // Retorna handle compatível com startUberWorker pra simetria de API
+  console.log('🛌 [logistics worker] em standby (Fase 1B.1) — worker Uber legado continua ativo');
   return {
-    parar: () => {
-      console.log('🛌 [logistics worker] standby — nada a parar');
-    },
+    parar: () => console.log('🛌 [logistics worker] standby — nada a parar'),
   };
 }
 
