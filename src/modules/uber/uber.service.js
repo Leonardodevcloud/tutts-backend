@@ -15,6 +15,13 @@ const {
   truncarTexto,
 } = require('./uber.shared');
 
+// ─── Fase 1A: facade para o hub logistics ─────────────────────
+// As funções obterTokenUber e mapp* abaixo agora delegam para o módulo
+// logistics. Mantemos a assinatura idêntica pra não quebrar call sites
+// (index.js, admin.routes.js, este próprio arquivo).
+const { obterTokenUber: _obterTokenUberHub } = require('../logistics/adapters/uber/uber.auth');
+const { getMappClient } = require('../logistics/core/MappClient');
+
 // ════════════════════════════════════════════════════════════
 // CONFIGURAÇÃO - buscar config do banco
 // ════════════════════════════════════════════════════════════
@@ -27,62 +34,24 @@ async function obterConfig(pool) {
 // ════════════════════════════════════════════════════════════
 // OAUTH2 - Token de acesso Uber Direct
 // ════════════════════════════════════════════════════════════
+// Fase 1A: implementação real migrada para
+// src/modules/logistics/adapters/uber/uber.auth.js
+// Esta função é facade — delega para o hub.
 
 async function obterTokenUber(pool) {
-  // 1. Verificar token cacheado no banco
-  const { rows } = await pool.query(`
-    SELECT access_token, expires_at FROM uber_oauth_token
-    WHERE expires_at > NOW() + INTERVAL '2 minutes'
-    ORDER BY id DESC LIMIT 1
-  `);
-
-  if (rows.length > 0) {
-    return rows[0].access_token;
-  }
-
-  // 2. Solicitar novo token
-  const config = await obterConfig(pool);
-  if (!config || !config.client_id || !config.client_secret) {
-    throw new Error('Credenciais Uber Direct não configuradas');
-  }
-
-  const body = new URLSearchParams({
-    client_id: config.client_id,
-    client_secret: config.client_secret,
-    grant_type: 'client_credentials',
-    scope: UBER_SCOPE,
-  }).toString();
-
-  const resp = await httpRequest(UBER_AUTH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-
-  const data = resp.json();
-
-  if (!resp.ok || !data.access_token) {
-    console.error('❌ [Uber] Erro ao obter token OAuth:', data);
-    throw new Error(`Erro OAuth Uber: ${data.error || 'desconhecido'}`);
-  }
-
-  // 3. Salvar no banco (expires_in vem em segundos)
-  const expiresAt = new Date(Date.now() + (data.expires_in - 60) * 1000);
-  await pool.query(`
-    INSERT INTO uber_oauth_token (access_token, expires_at)
-    VALUES ($1, $2)
-  `, [data.access_token, expiresAt]);
-
-  // Limpar tokens antigos
-  await pool.query(`DELETE FROM uber_oauth_token WHERE expires_at < NOW()`).catch(() => {});
-
-  console.log('✅ [Uber] Token OAuth renovado, expira em', data.expires_in, 'seg');
-  return data.access_token;
+  return _obterTokenUberHub(pool);
 }
 
 // ════════════════════════════════════════════════════════════
 // MAPP API - Chamadas ao sistema Tutts/Mapp
 // ════════════════════════════════════════════════════════════
+// Fase 1A: implementação real migrada para
+// src/modules/logistics/core/MappClient.js
+// As funções abaixo são facades — mantêm assinatura idêntica (pool, ...args)
+// e delegam para o MappClient singleton.
+//
+// As 2 funções de envelope (respostaOK/payload) são síncronas e puras, sem
+// estado — inlined aqui pra evitar precisar de pool só pra checar envelope.
 
 /**
  * Verifica se uma resposta da API Mapp foi sucesso.
@@ -92,7 +61,6 @@ async function obterTokenUber(pool) {
 function mappRespostaOK(resp) {
   if (!resp || typeof resp !== 'object') return false;
   if (String(resp.status) !== '200') return false;
-  // O envelope interno tem o boolean status === true quando deu certo
   if (resp.dados?.status === true) return true;
   if (resp.dados?.status === 'true') return true;
   return false;
@@ -107,107 +75,27 @@ function mappPayload(resp) {
 }
 
 async function mappListarServicos(pool, status = 0, ultimoId = 0) {
-  const config = await obterConfig(pool);
-  if (!config || !config.mapp_api_url || !config.mapp_api_token) {
-    throw new Error('Configuração Mapp não definida');
-  }
-
-  const url = `${config.mapp_api_url}/integracao-app-externos/listarServicos?status=${status}&ultimoId=${ultimoId}`;
-  const resp = await httpRequest(url, {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-  });
-
-  const data = resp.json();
-  if (data.status === '401') {
-    throw new Error('Token Mapp inválido ou integração desativada');
-  }
-
-  // FIX: A API Mapp retorna estrutura double-nested { dados: { dados: { servicos: [...] } } }
-  // Aceitamos os dois formatos pra robustez (caso a Mapp normalize no futuro).
-  const servicos = data?.dados?.dados?.servicos || data?.dados?.servicos || [];
-  return Array.isArray(servicos) ? servicos : [];
+  return getMappClient(pool).listarServicos(status, ultimoId);
 }
 
 async function mappAlterarStatus(pool, codigoOS, status) {
-  const config = await obterConfig(pool);
-  const url = `${config.mapp_api_url}/integracao-app-externos/alterarStatus`;
-
-  const resp = await httpRequest(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-    body: JSON.stringify({ codigoOS, status }),
-  });
-
-  const data = resp.json();
-  console.log(`📡 [Mapp] alterarStatus OS=${codigoOS} → ${status}:`, data.msgUsuario);
-  return data;
+  return getMappClient(pool).alterarStatus(codigoOS, status);
 }
 
 async function mappVincularMotorista(pool, codigoOS, profissional) {
-  const config = await obterConfig(pool);
-  const url = `${config.mapp_api_url}/integracao-app-externos/vincularMotorista`;
-
-  const resp = await httpRequest(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-    body: JSON.stringify({ codigoOS, profissional }),
-  });
-
-  const data = resp.json();
-  console.log(`📡 [Mapp] vincularMotorista OS=${codigoOS}:`, data.msgUsuario);
-  return data;
+  return getMappClient(pool).vincularMotorista(codigoOS, profissional);
 }
 
 async function mappInformarChegada(pool, codigoOS, ponto, lat, long) {
-  const config = await obterConfig(pool);
-  const url = `${config.mapp_api_url}/integracao-app-externos/informarChegada`;
-
-  const payload = { codigoOS, ponto };
-  if (lat && long) { payload.lat = lat; payload.long = long; }
-
-  const resp = await httpRequest(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-    body: JSON.stringify(payload),
-  });
-
-  const data = resp.json();
-  console.log(`📡 [Mapp] informarChegada OS=${codigoOS} ponto=${ponto}:`, data.msgUsuario);
-  return data;
+  return getMappClient(pool).informarChegada(codigoOS, ponto, lat, long);
 }
 
 async function mappFinalizarEndereco(pool, codigoOS, ponto, lat, long) {
-  const config = await obterConfig(pool);
-  const url = `${config.mapp_api_url}/integracao-app-externos/informarFinalizacaoEndereco`;
-
-  const payload = { codigoOS, ponto };
-  if (lat && long) { payload.lat = lat; payload.long = long; }
-
-  const resp = await httpRequest(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-    body: JSON.stringify(payload),
-  });
-
-  const data = resp.json();
-  console.log(`📡 [Mapp] finalizarEndereco OS=${codigoOS} ponto=${ponto}:`, data.msgUsuario);
-  return data;
+  return getMappClient(pool).finalizarEndereco(codigoOS, ponto, lat, long);
 }
 
 async function mappFinalizarServico(pool, codigoOS) {
-  const config = await obterConfig(pool);
-  const url = `${config.mapp_api_url}/integracao-app-externos/finalizarServico`;
-
-  const resp = await httpRequest(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${config.mapp_api_token}` },
-    body: JSON.stringify({ codigoOS }),
-  });
-
-  const data = resp.json();
-  console.log(`📡 [Mapp] finalizarServico OS=${codigoOS}:`, data.msgUsuario);
-  return data;
+  return getMappClient(pool).finalizarServico(codigoOS);
 }
 
 // ════════════════════════════════════════════════════════════
