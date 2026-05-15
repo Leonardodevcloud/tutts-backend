@@ -19,6 +19,7 @@
 
 const express = require('express');
 const httpRequest = require('../../../shared/utils/httpRequest');
+const { resolverMotoboyCentral } = require('../maquinas.shared');
 
 function createMaquinasClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -195,11 +196,13 @@ function createMaquinasClienteRoutes(pool, helpers) {
            m.identificador,
            m.marca,
            mm.motoboy_codigo,
+           mm.motoboy_codigo_tutts,
            mm.motoboy_nome,
+           mm.vinculado_central,
            mm.despachada_em,
            mm.despachada_por,
            EXTRACT(EPOCH FROM (NOW() - mm.despachada_em))/60 AS minutos_em_campo,
-           -- pendente = passou do horário limite local (assumindo timezone do servidor)
+           -- pendente = passou do horário limite local (timezone do servidor)
            CASE
              WHEN (CURRENT_TIME) >= $2::time THEN true
              ELSE false
@@ -279,13 +282,14 @@ function createMaquinasClienteRoutes(pool, helpers) {
         console.warn('⚠️ [MAQUINAS] Erro ao buscar profissionais Tutts:', e.message);
       }
 
-      // 2. Buscar quem ESTÁ com máquina (deste cliente)
+      // 2. Buscar quem ESTÁ com máquina (deste cliente) — checa o codigo Tutts
+      //    porque o select de motoboys vem da API Tutts
       const ocupados = await pool.query(
-        `SELECT DISTINCT motoboy_codigo FROM maquinas_movimentacoes
-         WHERE cliente_id = $1 AND restituida_em IS NULL`,
+        `SELECT DISTINCT motoboy_codigo_tutts FROM maquinas_movimentacoes
+         WHERE cliente_id = $1 AND restituida_em IS NULL AND motoboy_codigo_tutts IS NOT NULL`,
         [clienteId]
       );
-      const codigosOcupados = new Set(ocupados.rows.map(r => String(r.motoboy_codigo)));
+      const codigosOcupados = new Set(ocupados.rows.map(r => String(r.motoboy_codigo_tutts)));
 
       // 3. Filtrar livres
       const livres = profissionais.filter(p => !codigosOcupados.has(String(p.codigo)));
@@ -303,12 +307,20 @@ function createMaquinasClienteRoutes(pool, helpers) {
     try {
       const clienteId = req.clienteSolicitacao.id;
       const maquinaId = parseInt(req.body.maquina_id, 10);
-      const motoboyCodigo = String(req.body.motoboy_codigo || '').trim();
-      const motoboyNome = String(req.body.motoboy_nome || '').trim();
+      const motoboyCodigoTutts = String(req.body.motoboy_codigo || '').trim();
+      const motoboyNomeTutts = String(req.body.motoboy_nome || '').trim();
 
       if (!maquinaId) return res.status(400).json({ error: 'maquina_id obrigatório' });
-      if (!motoboyCodigo) return res.status(400).json({ error: 'motoboy_codigo obrigatório' });
-      if (!motoboyNome) return res.status(400).json({ error: 'motoboy_nome obrigatório' });
+      if (!motoboyCodigoTutts) return res.status(400).json({ error: 'motoboy_codigo obrigatório' });
+      if (!motoboyNomeTutts) return res.status(400).json({ error: 'motoboy_nome obrigatório' });
+
+      // 🔗 Cross-reference com cadastro da Central (users.role='motoboy')
+      // Resolve pelo NOME normalizado já que o código da API Tutts não bate
+      // com o cod_profissional da Central.
+      const central = await resolverMotoboyCentral(pool, motoboyNomeTutts);
+      const codigoFinal = central ? central.cod_profissional : motoboyCodigoTutts;
+      const nomeFinal = central ? central.full_name : motoboyNomeTutts;
+      const vinculadoCentral = !!central;
 
       await client.query('BEGIN');
 
@@ -336,40 +348,49 @@ function createMaquinasClienteRoutes(pool, helpers) {
       }
 
       // 2. Validar que motoboy não tem outra máquina (regra: 1 por vez)
+      //    Checa por ambos: codigo final (Central) e codigo Tutts (segurança extra)
       const ocupado = await client.query(
         `SELECT mm.id, m.identificador, m.marca
          FROM maquinas_movimentacoes mm
          JOIN maquinas m ON m.id = mm.maquina_id
-         WHERE mm.motoboy_codigo = $1::text
-           AND mm.cliente_id = $2
+         WHERE (mm.motoboy_codigo = $1::text OR mm.motoboy_codigo_tutts = $2::text)
+           AND mm.cliente_id = $3
            AND mm.restituida_em IS NULL
          LIMIT 1`,
-        [motoboyCodigo, clienteId]
+        [codigoFinal, motoboyCodigoTutts, clienteId]
       );
       if (ocupado.rows.length > 0) {
         await client.query('ROLLBACK');
         const o = ocupado.rows[0];
         return res.status(409).json({
           error: 'motoboy_com_maquina',
-          mensagem: `${motoboyNome} já está com a máquina ${o.identificador} ${o.marca}. Restitua antes de despachar outra.`,
+          mensagem: `${nomeFinal} já está com a máquina ${o.identificador} ${o.marca}. Restitua antes de despachar outra.`,
         });
       }
 
-      // 3. Despachar
+      // 3. Despachar — grava com vínculo resolvido
       const mov = await client.query(
         `INSERT INTO maquinas_movimentacoes
-           (maquina_id, cliente_id, motoboy_codigo, motoboy_nome, despachada_por)
-         VALUES ($1, $2, $3, $4, $5)
+           (maquina_id, cliente_id, motoboy_codigo, motoboy_codigo_tutts,
+            motoboy_nome, despachada_por, vinculado_central)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, despachada_em`,
-        [maquinaId, clienteId, motoboyCodigo, motoboyNome, obterAtendenteId(req)]
+        [maquinaId, clienteId, codigoFinal, motoboyCodigoTutts,
+         nomeFinal, obterAtendenteId(req), vinculadoCentral]
       );
 
       await client.query('COMMIT');
-      console.log(`🚚 [MAQUINAS] Despachou ${mq.rows[0].identificador} ${mq.rows[0].marca} → ${motoboyNome} (${motoboyCodigo}) cliente=${clienteId}`);
+      console.log(`🚚 [MAQUINAS] Despachou ${mq.rows[0].identificador} ${mq.rows[0].marca} → ${nomeFinal} (Central=${codigoFinal}, Tutts=${motoboyCodigoTutts}, vinculado=${vinculadoCentral}) cliente=${clienteId}`);
       res.status(201).json({
         ok: true,
         movimentacao_id: mov.rows[0].id,
         despachada_em: mov.rows[0].despachada_em,
+        vinculado_central: vinculadoCentral,
+        // Se não vinculado, frontend deve avisar que o bloqueio do saque
+        // emergencial NÃO vai ativar pra esse motoboy específico.
+        aviso_vinculo: vinculadoCentral
+          ? null
+          : `${motoboyNomeTutts} não foi encontrado no cadastro da Central. O bloqueio do saque emergencial não vai funcionar pra esse motoboy específico até que ele seja cadastrado.`,
         maquina: { id: maquinaId, identificador: mq.rows[0].identificador, marca: mq.rows[0].marca },
       });
     } catch (err) {

@@ -197,7 +197,7 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
     // já que o objetivo é proteger o cliente (loja) mesmo se um admin tentar
     // liberar o saque em nome do motoboy.
     try {
-      const maquinaPendente = await verificarMaquinaPendente(pool, userCod);
+      const maquinaPendente = await verificarMaquinaPendente(pool, userCod, userName);
       if (maquinaPendente) {
         client.release();
         console.log(`🔒 [MÁQUINA PENDENTE] ${userCod} (${userName}) bloqueado — máquina ${maquinaPendente.identificador} ${maquinaPendente.marca} da loja ${maquinaPendente.cliente_nome} desde ${maquinaPendente.despachada_em}`);

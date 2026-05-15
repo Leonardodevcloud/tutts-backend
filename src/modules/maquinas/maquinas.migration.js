@@ -65,6 +65,29 @@ async function initMaquinasTables(pool) {
   `).catch(() => {});
   console.log('✅ Índices maquinas criados');
 
+  // 🚀 Migration 2026-05-15: cross-reference com users da Central
+  // ────────────────────────────────────────────────────────────────────────
+  // O `codigo` da API Tutts NÃO bate com `cod_profissional` em users (Central).
+  // Solução: ao despachar, resolver pelo NOME normalizado e salvar
+  // motoboy_codigo já no formato da Central.
+  //
+  //  - motoboy_codigo        → cod_profissional Central (quando achou) ou Tutts (fallback)
+  //  - motoboy_codigo_tutts  → SEMPRE o código que veio da API Tutts (auditoria)
+  //  - vinculado_central     → true se cruzou com sucesso, false caso contrário
+  //
+  // Quando vinculado_central = false, o bloqueio do saque emergencial NÃO ativa
+  // pra esse motoboy específico (ele provavelmente não tem conta na Central).
+  // A UI avisa o atendente disso na hora do despacho.
+  await pool.query(`
+    ALTER TABLE maquinas_movimentacoes
+    ADD COLUMN IF NOT EXISTS motoboy_codigo_tutts VARCHAR(50)
+  `).catch(e => console.log('⚠️ motoboy_codigo_tutts:', e.message));
+  await pool.query(`
+    ALTER TABLE maquinas_movimentacoes
+    ADD COLUMN IF NOT EXISTS vinculado_central BOOLEAN DEFAULT false
+  `).catch(e => console.log('⚠️ vinculado_central:', e.message));
+  console.log('✅ Colunas motoboy_codigo_tutts e vinculado_central verificadas');
+
   // Coluna nova em clientes_solicitacao — horário limite (default 17:00)
   await pool.query(`
     ALTER TABLE clientes_solicitacao
