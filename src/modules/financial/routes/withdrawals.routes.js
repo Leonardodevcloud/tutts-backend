@@ -1,8 +1,11 @@
 /**
  * Sub-Router: Withdrawals + Conciliação
  * ⚡ PERFORMANCE V3: Cache em memória + queries sem JOIN pesado
+ * 🚀 MÁQUINAS (2026-05): bloqueio de saque emergencial enquanto motoboy estiver
+ *    com máquina de pagamento da loja em mãos. Retorna HTTP 423 (Locked).
  */
 const express = require('express');
+const { verificarMaquinaPendente } = require('../../maquinas/maquinas.shared');
 
 function createWithdrawalsRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, helpers) {
   const router = express.Router();
@@ -185,6 +188,34 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
         client.release();
         return res.status(403).json({ error: 'Você só pode criar saques para sua própria conta' });
       }
+    }
+
+    // =============== 🚀 BLOQUEIO: MÁQUINA EM MÃOS (2026-05) ===============
+    // Se o motoboy estiver com uma máquina de pagamento da loja sem restituir,
+    // o saque emergencial fica bloqueado. Frontend renderiza modal de alerta
+    // com dados da máquina + loja. Admin/financeiro NÃO bypassam o bloqueio,
+    // já que o objetivo é proteger o cliente (loja) mesmo se um admin tentar
+    // liberar o saque em nome do motoboy.
+    try {
+      const maquinaPendente = await verificarMaquinaPendente(pool, userCod);
+      if (maquinaPendente) {
+        client.release();
+        console.log(`🔒 [MÁQUINA PENDENTE] ${userCod} (${userName}) bloqueado — máquina ${maquinaPendente.identificador} ${maquinaPendente.marca} da loja ${maquinaPendente.cliente_nome} desde ${maquinaPendente.despachada_em}`);
+        return res.status(423).json({
+          error: 'maquina_pendente',
+          mensagem: 'Você está com uma máquina da loja em uso. Faça a devolução para acessar seus valores.',
+          maquina: {
+            identificador: maquinaPendente.identificador,
+            marca: maquinaPendente.marca,
+            loja: maquinaPendente.cliente_nome,
+            despachada_em: maquinaPendente.despachada_em,
+            telefone_loja: maquinaPendente.cliente_telefone || null,
+          },
+        });
+      }
+    } catch (errMaq) {
+      // Falha do check NÃO bloqueia o saque — apenas loga (fail-open por escolha)
+      console.warn('⚠️ [MÁQUINA PENDENTE] check falhou (fail-open):', errMaq.message);
     }
 
     await client.query('BEGIN');
