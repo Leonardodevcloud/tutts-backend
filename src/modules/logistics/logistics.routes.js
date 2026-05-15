@@ -1,9 +1,9 @@
 /**
- * MÓDULO LOGISTICS — Routes (Fase 1B.1)
+ * MÓDULO LOGISTICS — Routes (Fase 2)
  *
  * Master router para /api/logistics/*.
  *
- * Endpoints funcionais nesta fase:
+ * Endpoints funcionais:
  *   GET    /health
  *   GET    /providers
  *   GET    /providers/:code
@@ -14,12 +14,18 @@
  *   GET    /deliveries                        ← lista (lê uber_entregas)
  *   GET    /deliveries/:id                    ← detalhe
  *   POST   /deliveries/:id/cancel             ← cancela
+ *   POST   /deliveries/:id/redispatch         ← redespacho (Fase 2)
  *   POST   /_test/dispatch-os/:codigoOS       ← teste end-to-end
+ *   POST   /_admin/resync-deliveries          ← re-roda backfill (Fase 2)
+ *   GET    /dispatch-rules                    ← lista regras (Fase 2)
+ *   GET    /dispatch-rules/:id                ← detalhe regra (Fase 2)
+ *   POST   /dispatch-rules                    ← cria regra (Fase 2)
+ *   PUT    /dispatch-rules/:id                ← atualiza regra (Fase 2)
+ *   DELETE /dispatch-rules/:id                ← remove regra (Fase 2)
  *
- * Pendentes (501 até Fase seguinte):
- *   PUT    /providers/:code           — config (Fase 2)
- *   GET    /dispatch-rules            — CRUD regras (Fase 2)
- *   POST   /deliveries/:id/redispatch — redespacho (Fase 2)
+ * Pendentes (501):
+ *   PUT    /providers/:code           — config via API (Fase 5)
+ *   GET    /deliveries/:id/tracking   — tracking detalhado (Fase 5)
  *   GET    /metrics, /events          — dashboard (Fase 4)
  *
  * Webhook (/api/logistics/webhook/:provider) é montado em server.js
@@ -31,6 +37,8 @@ const { getProviderRegistry } = require('./core/ProviderRegistry');
 const { getDispatchOrchestrator } = require('./core/DispatchOrchestrator');
 const { getMappClient } = require('./core/MappClient');
 const { EventSource } = require('./core/EventLogger');
+const { createDispatchRulesRoutes } = require('./routes/dispatch-rules.routes');
+const { initLogisticsBackfill } = require('./logistics.backfill');
 
 function notImplemented(fase) {
   return (req, res) => res.status(501).json({
@@ -355,15 +363,95 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // ───────────────────────────────────────────────────────────
-  // Endpoints pendentes (501)
+  // POST /deliveries/:id/redispatch  — cancela e recria entrega (Fase 2)
+  // body: { providerCode?, vehicleType?, motivo? }
   // ───────────────────────────────────────────────────────────
-  router.put('/providers/:code', verificarToken, verificarAdmin, notImplemented('Fase 2'));
-  router.get('/dispatch-rules', verificarToken, notImplemented('Fase 2'));
-  router.post('/dispatch-rules', verificarToken, verificarAdmin, notImplemented('Fase 2'));
-  router.put('/dispatch-rules/:id', verificarToken, verificarAdmin, notImplemented('Fase 2'));
-  router.delete('/dispatch-rules/:id', verificarToken, verificarAdmin, notImplemented('Fase 2'));
-  router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, notImplemented('Fase 2'));
-  router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 1B.2'));
+  router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const entregaId = parseInt(req.params.id, 10);
+      const { providerCode = 'uber', vehicleType = null, motivo } = req.body || {};
+
+      const orch = getDispatchOrchestrator(pool);
+
+      // 1. Busca a entrega original
+      const { rows } = await pool.query('SELECT * FROM uber_entregas WHERE id = $1', [entregaId]);
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Entrega não encontrada' });
+      }
+      const original = rows[0];
+      const codigoOS = original.codigo_os;
+
+      // 2. Cancela a entrega atual (sem reabrir Mapp ainda — vamos redespachar já)
+      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_uber)) {
+        await orch.cancel(entregaId, {
+          motivo: motivo || 'Redespacho solicitado',
+          canceladoPor: 'operador',
+          reabrirMapp: false,        // não reabre — vamos despachar de novo agora
+          eventSource: EventSource.API,
+        });
+      }
+
+      // 3. Busca o serviço atualizado na Mapp e despacha de novo
+      const servicos = await getMappClient(pool).listarServicos(0, 0);
+      const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+      if (!servico) {
+        // A OS não está mais aberta na Mapp — reabre só pra registrar e avisa
+        await getMappClient(pool).alterarStatus(codigoOS, 0).catch(() => {});
+        return res.status(409).json({
+          error: `OS ${codigoOS} não está mais disponível na Mapp para redespacho`,
+          entrega_cancelada: entregaId,
+        });
+      }
+
+      const novoRegistro = await orch.dispatch(servico, {
+        providerCode,
+        vehicleType,
+        regraId: original.regra_id || null,
+        eventSource: EventSource.API,
+      });
+
+      if (!novoRegistro) {
+        return res.status(409).json({
+          error: 'Redespacho falhou (OS já tem entrega ativa ou erro no despacho)',
+          entrega_cancelada: entregaId,
+        });
+      }
+
+      res.json({
+        success: true,
+        entrega_anterior: entregaId,
+        entrega_nova: novoRegistro.id,
+        registro: novoRegistro,
+      });
+    } catch (err) {
+      console.error('[logistics/routes] POST /deliveries/:id/redispatch erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // POST /_admin/resync-deliveries  — re-roda o backfill sob demanda (Fase 2)
+  // ───────────────────────────────────────────────────────────
+  router.post('/_admin/resync-deliveries', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const resultado = await initLogisticsBackfill(pool);
+      res.json({ success: true, ...resultado });
+    } catch (err) {
+      console.error('[logistics/routes] resync-deliveries erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // CRUD de dispatch-rules (Fase 2) — sub-router dedicado
+  // ───────────────────────────────────────────────────────────
+  router.use(createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+
+  // ───────────────────────────────────────────────────────────
+  // Endpoints ainda pendentes
+  // ───────────────────────────────────────────────────────────
+  router.put('/providers/:code', verificarToken, verificarAdmin, notImplemented('Fase 5'));
+  router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 5'));
   router.get('/metrics', verificarToken, notImplemented('Fase 4'));
   router.get('/events', verificarToken, notImplemented('Fase 4'));
 
