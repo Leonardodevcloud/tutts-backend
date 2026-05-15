@@ -429,6 +429,38 @@ function createMaquinasClienteRoutes(pool, helpers) {
     }
   });
 
+  // GET /api/maquinas/historico/filtros — listas pros selects de filtro
+  // Retorna motoboys e máquinas que JÁ tiveram movimentação (sem repetir)
+  router.get('/maquinas/historico/filtros', verificarTokenSolicitacao, async (req, res) => {
+    try {
+      const clienteId = req.clienteSolicitacao.id;
+      const [motoboys, maquinas] = await Promise.all([
+        pool.query(
+          `SELECT DISTINCT motoboy_codigo, motoboy_nome
+             FROM maquinas_movimentacoes
+            WHERE cliente_id = $1
+            ORDER BY motoboy_nome ASC`,
+          [clienteId]
+        ),
+        pool.query(
+          `SELECT DISTINCT m.id, m.identificador, m.marca
+             FROM maquinas m
+             JOIN maquinas_movimentacoes mm ON mm.maquina_id = m.id
+            WHERE m.cliente_id = $1
+            ORDER BY m.identificador ASC`,
+          [clienteId]
+        ),
+      ]);
+      res.json({
+        motoboys: motoboys.rows,
+        maquinas: maquinas.rows,
+      });
+    } catch (err) {
+      console.error('❌ [MAQUINAS] Erro filtros:', err.message);
+      res.status(500).json({ error: 'Erro ao listar filtros', detalhe: err.message });
+    }
+  });
+
   // GET /api/maquinas/historico — log de movimentações (com filtros opcionais)
   router.get('/maquinas/historico', verificarTokenSolicitacao, async (req, res) => {
     try {
