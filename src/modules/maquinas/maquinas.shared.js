@@ -32,50 +32,73 @@ const SQL_NORM = `lower(translate(
 
 /**
  * Resolve um nome de motoboy vindo da API Tutts para um registro em `users`
- * (cadastro da Central). Tenta match exato normalizado, depois fallback
- * pelos dois primeiros nomes. Retorna null se não achou ou se houver
- * ambiguidade (>1 match).
+ * (cadastro da Central). Estratégia em 3 camadas:
+ *   0) Match direto por cod_profissional (muito comum — códigos batem)
+ *   1) Match exato por nome normalizado
+ *   2) Fallback pelos dois primeiros nomes
+ *
+ * Aceita QUALQUER role em users (motoboys na Central usam role='user').
+ * Retorna null se não achou ou se houver ambiguidade (>1 match).
  */
-async function resolverMotoboyCentral(pool, nomeTutts) {
+async function resolverMotoboyCentral(pool, nomeTutts, codigoTutts) {
+  // 0) Match direto pelo código Tutts == cod_profissional Central
+  //    (caso muito comum — em vários clientes os códigos foram sincronizados)
+  if (codigoTutts) {
+    const r0 = await pool.query(
+      `SELECT cod_profissional, full_name
+         FROM users
+        WHERE cod_profissional = $1::text
+        LIMIT 1`,
+      [String(codigoTutts)]
+    );
+    if (r0.rows.length === 1) {
+      console.log(`[MAQUINAS/cross-ref] Match direto por código: ${codigoTutts} → ${r0.rows[0].full_name}`);
+      return r0.rows[0];
+    }
+  }
+
   const nomeNorm = normalizarNome(nomeTutts);
   if (!nomeNorm) return null;
 
-  // 1) Match exato normalizado
+  // 1) Match exato por nome normalizado (sem filtro de role)
   const r1 = await pool.query(
     `SELECT cod_profissional, full_name
        FROM users
-      WHERE role = 'motoboy'
-        AND ${SQL_NORM.replace('$NAME$', 'full_name')} = $1
+      WHERE ${SQL_NORM.replace('$NAME$', 'full_name')} = $1
       LIMIT 2`,
     [nomeNorm]
   );
-  if (r1.rows.length === 1) return r1.rows[0];
+  if (r1.rows.length === 1) {
+    console.log(`[MAQUINAS/cross-ref] Match por nome: "${nomeTutts}" → ${r1.rows[0].full_name} (${r1.rows[0].cod_profissional})`);
+    return r1.rows[0];
+  }
   if (r1.rows.length > 1) {
     console.warn(`[MAQUINAS/cross-ref] AMBIGUIDADE para "${nomeTutts}" — ${r1.rows.length} matches exatos. Vínculo recusado.`);
     return null;
   }
 
-  // 2) Fallback: dois primeiros nomes (cobre sobrenomes adicionais)
-  //    "JOÃO SILVA" Tutts → casa com "João Silva Santos" Central
+  // 2) Fallback: dois primeiros nomes
   const partes = nomeNorm.split(' ').filter(p => p.length > 1);
   if (partes.length >= 2) {
     const prefixo = partes.slice(0, 2).join(' ');
     const r2 = await pool.query(
       `SELECT cod_profissional, full_name
          FROM users
-        WHERE role = 'motoboy'
-          AND ${SQL_NORM.replace('$NAME$', 'full_name')} LIKE $1
+        WHERE ${SQL_NORM.replace('$NAME$', 'full_name')} LIKE $1
         LIMIT 2`,
       [`${prefixo}%`]
     );
-    if (r2.rows.length === 1) return r2.rows[0];
+    if (r2.rows.length === 1) {
+      console.log(`[MAQUINAS/cross-ref] Match por prefixo "${prefixo}": "${nomeTutts}" → ${r2.rows[0].full_name}`);
+      return r2.rows[0];
+    }
     if (r2.rows.length > 1) {
-      console.warn(`[MAQUINAS/cross-ref] AMBIGUIDADE pelo prefixo "${prefixo}" para "${nomeTutts}". Vínculo recusado.`);
+      console.warn(`[MAQUINAS/cross-ref] AMBIGUIDADE pelo prefixo "${prefixo}". Vínculo recusado.`);
       return null;
     }
   }
 
-  console.warn(`[MAQUINAS/cross-ref] Motoboy "${nomeTutts}" NÃO encontrado em users (role=motoboy). Despacho prosseguirá sem vínculo Central.`);
+  console.warn(`[MAQUINAS/cross-ref] Motoboy "${nomeTutts}" (Tutts ${codigoTutts}) NÃO encontrado em users. Despacho prosseguirá sem vínculo Central.`);
   return null;
 }
 

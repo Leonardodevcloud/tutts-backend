@@ -314,10 +314,9 @@ function createMaquinasClienteRoutes(pool, helpers) {
       if (!motoboyCodigoTutts) return res.status(400).json({ error: 'motoboy_codigo obrigatório' });
       if (!motoboyNomeTutts) return res.status(400).json({ error: 'motoboy_nome obrigatório' });
 
-      // 🔗 Cross-reference com cadastro da Central (users.role='motoboy')
-      // Resolve pelo NOME normalizado já que o código da API Tutts não bate
-      // com o cod_profissional da Central.
-      const central = await resolverMotoboyCentral(pool, motoboyNomeTutts);
+      // 🔗 Cross-reference com cadastro da Central (users)
+      // Tenta em 3 camadas: código direto → nome exato → prefixo nome+sobrenome
+      const central = await resolverMotoboyCentral(pool, motoboyNomeTutts, motoboyCodigoTutts);
       const codigoFinal = central ? central.cod_profissional : motoboyCodigoTutts;
       const nomeFinal = central ? central.full_name : motoboyNomeTutts;
       const vinculadoCentral = !!central;
