@@ -11,6 +11,7 @@ const express = require('express');
 const { createSolicitacaoHelpers } = require('../solicitacao/solicitacao.shared');
 const { createMaquinasClienteRoutes } = require('./routes/cliente.routes');
 const { createMaquinasAdminRoutes } = require('./routes/admin.routes');
+const { createMaquinasMotoboyRoutes } = require('./routes/motoboy.routes');
 
 function createMaquinasRouter(pool, verificarToken) {
   const router = express.Router();
@@ -18,6 +19,7 @@ function createMaquinasRouter(pool, verificarToken) {
 
   router.use(createMaquinasClienteRoutes(pool, solicitacaoHelpers));
   router.use(createMaquinasAdminRoutes(pool, verificarToken));
+  router.use(createMaquinasMotoboyRoutes(pool, verificarToken));
 
   return router;
 }
