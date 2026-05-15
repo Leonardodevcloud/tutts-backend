@@ -49,6 +49,26 @@ class DispatchOrchestrator {
     this.mapp = getMappClient(pool);
     this.cache = getQuoteCache();
     this.matcher = getDispatchRuleMatcher(pool);
+    // Fase 4: seletor de estratégia multi-provider. Instanciado lazy (depois
+    // que `this` está completo) pra o selector poder receber o orchestrator.
+    this._strategySelector = null;
+  }
+
+  /**
+   * StrategySelector lazy-inicializado (Fase 4).
+   * Lazy porque o selector recebe `this` (o orchestrator) — não dá pra
+   * instanciar no meio do constructor sem `this` estar pronto.
+   */
+  get strategySelector() {
+    if (!this._strategySelector) {
+      const { StrategySelector } = require('./StrategySelector');
+      this._strategySelector = new StrategySelector({
+        orchestrator: this,
+        registry: this.registry,
+        events: this.events,
+      });
+    }
+    return this._strategySelector;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -464,25 +484,67 @@ class DispatchOrchestrator {
     }
 
     const regra = decisao.regra;
-    const providerCode = regra.providers_preferidos?.[0] || 'uber';
     const vehicleType = regra.vehicle_type_preferido || null;
+
+    // ─── Fase 4: decisão de provider via StrategySelector ───
+    // Antes (Fases 1-3): providerCode = regra.providers_preferidos[0] (fixo).
+    // Agora: o selector decide conforme regra.estrategia (provider_unico,
+    // melhor_preco, melhor_eta, fallback).
+    const escolha = await this.strategySelector.decidir(servico, regra, { eventSource });
+
+    if (escolha.tipo === 'erro') {
+      console.warn(`⚠️ [Orchestrator] OS ${codigoOS}: selector não achou provider viável (${escolha.motivo})`);
+      this.events.log({
+        providerCode: 'none',
+        eventType: EventType.DISPATCH_FAILED,
+        eventSource,
+        codigoOS,
+        erro: `Estratégia falhou: ${escolha.motivo} — ${escolha.detalhe || ''}`,
+        processado: false,
+      }).catch(() => {});
+      return { decision: `rejeitado_estrategia_${escolha.motivo}`, regra };
+    }
+
+    // ─── fallback_chain: tenta cada provider em ordem até um aceitar ───
+    if (escolha.tipo === 'fallback_chain') {
+      return await this._dispatchComFallback(codigoOS, servico, regra, escolha.chain, vehicleType, eventSource);
+    }
+
+    // ─── direto: um provider escolhido (provider_unico, melhor_preco, melhor_eta) ───
+    const providerCode = escolha.providerCode;
+    // melhor_preco/melhor_eta já cotaram — reusa a cotação do selector
+    let quoteReuso = escolha.quoteReuso || null;
 
     // 2. Validação de margem (se a regra exige)
     const exigeMargemAbs = regra.margem_minima_aceita != null;
     const exigeMargemPct = regra.margem_pct_minima != null;
-    let quoteReuso = null;
 
     if (exigeMargemAbs || exigeMargemPct) {
       let cotResult;
-      try {
-        cotResult = await this.quote(codigoOS, {
-          providerCode,
-          vehicleType,
-          servicoMapp: servico,
-          eventSource,
-        });
-      } catch (err) {
-        return { decision: 'cotacao_falhou', regra, erro: err.message };
+
+      // Se o selector já cotou (melhor_preco/eta), reusa pra validar margem.
+      // Senão (provider_unico), cota agora.
+      if (quoteReuso && quoteReuso.quote) {
+        const valorCliente = parseFloat(servico.valorServico) || 0;
+        const valorProvider = parseFloat(quoteReuso.quote.valor) || 0;
+        const margem = valorCliente - valorProvider;
+        cotResult = {
+          cotacao: quoteReuso.quote,
+          request: quoteReuso.request,
+          margem,
+          margem_pct: valorCliente > 0 ? (margem / valorCliente) * 100 : 0,
+        };
+      } else {
+        try {
+          cotResult = await this.quote(codigoOS, {
+            providerCode,
+            vehicleType,
+            servicoMapp: servico,
+            eventSource,
+          });
+        } catch (err) {
+          return { decision: 'cotacao_falhou', regra, erro: err.message };
+        }
       }
 
       const margemAbsMin = parseFloat(regra.margem_minima_aceita);
@@ -527,7 +589,90 @@ class DispatchOrchestrator {
       return { decision: 'despacho_falhou_ou_duplicado', regra };
     }
 
-    return { decision: 'despachado', regra, registro };
+    return { decision: 'despachado', regra, registro, providerCode, estrategia: escolha._estrategia || regra.estrategia };
+  }
+
+  /**
+   * Despacha tentando uma cadeia de providers em ordem (estratégia 'fallback').
+   * Tenta o primeiro; se falhar (cotação ou despacho), tenta o próximo.
+   * Para no primeiro que conseguir.
+   *
+   * @private
+   * @param {number|string} codigoOS
+   * @param {Object} servico - serviço Mapp
+   * @param {Object} regra
+   * @param {string[]} chain - providers ativos em ordem de preferência
+   * @param {string|null} vehicleType
+   * @param {string} eventSource
+   * @returns {Promise<Object>} decisão final
+   */
+  async _dispatchComFallback(codigoOS, servico, regra, chain, vehicleType, eventSource) {
+    const tentativas = [];
+
+    for (let i = 0; i < chain.length; i++) {
+      const providerCode = chain[i];
+      const ehUltimo = i === chain.length - 1;
+
+      console.log(`🔄 [Orchestrator] OS ${codigoOS}: fallback tentativa ${i + 1}/${chain.length} — ${providerCode}`);
+
+      try {
+        // Valida margem se a regra exige (cota e checa)
+        let quoteReuso = null;
+        const exigeMargem = regra.margem_minima_aceita != null || regra.margem_pct_minima != null;
+
+        if (exigeMargem) {
+          const cotResult = await this.quote(codigoOS, {
+            providerCode, vehicleType, servicoMapp: servico, eventSource,
+          });
+          const margemAbsMin = regra.margem_minima_aceita != null ? parseFloat(regra.margem_minima_aceita) : -Infinity;
+          const margemPctMin = regra.margem_pct_minima != null ? parseFloat(regra.margem_pct_minima) : -Infinity;
+
+          if (cotResult.margem < margemAbsMin || cotResult.margem_pct < margemPctMin) {
+            tentativas.push({ providerCode, resultado: 'rejeitado_margem' });
+            console.log(`💸 [Orchestrator] OS ${codigoOS}: ${providerCode} rejeitado por margem — próximo da cadeia`);
+            continue; // tenta o próximo
+          }
+          quoteReuso = { quote: cotResult.cotacao, request: cotResult.request };
+        }
+
+        const registro = await this.dispatch(servico, {
+          providerCode, vehicleType, regraId: regra.id, quoteReuso, eventSource,
+        });
+
+        if (registro) {
+          console.log(`✅ [Orchestrator] OS ${codigoOS}: fallback teve sucesso no ${providerCode} (tentativa ${i + 1})`);
+          this.events.log({
+            providerCode,
+            eventType: 'strategy_decided',
+            eventSource,
+            codigoOS,
+            payload: { estrategia: 'fallback', vencedor: providerCode, tentativa: i + 1, tentativas_anteriores: tentativas },
+          }).catch(() => {});
+          return { decision: 'despachado', regra, registro, providerCode, estrategia: 'fallback' };
+        }
+
+        // dispatch retornou null (OS já ativa, etc) — não adianta tentar outro
+        tentativas.push({ providerCode, resultado: 'despacho_null' });
+        return { decision: 'despacho_falhou_ou_duplicado', regra, tentativas };
+
+      } catch (err) {
+        tentativas.push({ providerCode, resultado: 'erro', erro: err.message, categoria: err.category });
+        console.warn(`⚠️ [Orchestrator] OS ${codigoOS}: ${providerCode} falhou (${err.category || 'erro'}) — ${ehUltimo ? 'fim da cadeia' : 'próximo'}`);
+        // continua o loop pro próximo da cadeia
+      }
+    }
+
+    // Todos da cadeia falharam
+    console.error(`❌ [Orchestrator] OS ${codigoOS}: fallback esgotou a cadeia [${chain.join(', ')}] sem sucesso`);
+    this.events.log({
+      providerCode: 'none',
+      eventType: EventType.DISPATCH_FAILED,
+      eventSource,
+      codigoOS,
+      erro: `Fallback esgotou cadeia: ${JSON.stringify(tentativas)}`,
+      processado: false,
+    }).catch(() => {});
+    return { decision: 'rejeitado_fallback_esgotado', regra, tentativas };
   }
 
   // ════════════════════════════════════════════════════════════

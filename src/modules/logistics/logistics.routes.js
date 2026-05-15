@@ -1,5 +1,5 @@
 /**
- * MÓDULO LOGISTICS — Routes (Fase 2)
+ * MÓDULO LOGISTICS — Routes (Fase 4)
  *
  * Master router para /api/logistics/*.
  *
@@ -23,6 +23,10 @@
  *   PUT    /dispatch-rules/:id                ← atualiza regra (Fase 2)
  *   DELETE /dispatch-rules/:id                ← remove regra (Fase 2)
  *
+ *   GET    /metrics                          ← dashboard agregado (Fase 4)
+ *   GET    /events                           ← feed de eventos (Fase 4)
+ *   GET    /events/timeline/:codigoOS         ← timeline de uma OS (Fase 4)
+ *
  * Pendentes (501):
  *   PUT    /providers/:code           — config via API (Fase 5)
  *   GET    /deliveries/:id/tracking   — tracking detalhado (Fase 5)
@@ -38,6 +42,7 @@ const { getDispatchOrchestrator } = require('./core/DispatchOrchestrator');
 const { getMappClient } = require('./core/MappClient');
 const { EventSource } = require('./core/EventLogger');
 const { createDispatchRulesRoutes } = require('./routes/dispatch-rules.routes');
+const { createDashboardRoutes } = require('./routes/dashboard.routes');
 const { initLogisticsBackfill } = require('./logistics.backfill');
 
 function notImplemented(fase) {
@@ -448,12 +453,15 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.use(createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
   // ───────────────────────────────────────────────────────────
+  // Dashboard /metrics e /events (Fase 4) — sub-router dedicado
+  // ───────────────────────────────────────────────────────────
+  router.use(createDashboardRoutes(pool, verificarToken, verificarAdmin));
+
+  // ───────────────────────────────────────────────────────────
   // Endpoints ainda pendentes
   // ───────────────────────────────────────────────────────────
   router.put('/providers/:code', verificarToken, verificarAdmin, notImplemented('Fase 5'));
   router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 5'));
-  router.get('/metrics', verificarToken, notImplemented('Fase 4'));
-  router.get('/events', verificarToken, notImplemented('Fase 4'));
 
   return router;
 }
