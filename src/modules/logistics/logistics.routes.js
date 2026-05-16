@@ -27,10 +27,10 @@
  *   GET    /events                           ← feed de eventos (Fase 4)
  *   GET    /events/timeline/:codigoOS         ← timeline de uma OS (Fase 4)
  *
+ *   PUT    /providers/:code                   ← config do provider via API (Fase 5)
+ *
  * Pendentes (501):
- *   PUT    /providers/:code           — config via API (Fase 5)
  *   GET    /deliveries/:id/tracking   — tracking detalhado (Fase 5)
- *   GET    /metrics, /events          — dashboard (Fase 4)
  *
  * Webhook (/api/logistics/webhook/:provider) é montado em server.js
  * separadamente (público) — Fase 1B.2.
@@ -458,9 +458,130 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.use(createDashboardRoutes(pool, verificarToken, verificarAdmin));
 
   // ───────────────────────────────────────────────────────────
+  // PUT /providers/:code  — configura o provider (Fase 5)
+  // É o equivalente do hub ao PUT /uber/config: o painel salva aqui.
+  //  - merge da config (chave de segredo vazia = preserva a atual)
+  //  - atualiza ativo / sandbox_mode / prioridade / webhook_secret
+  //  - registry.reload(code) → adapter sobe/cai NA HORA, sem restart
+  // body: { ativo?, sandbox_mode?, prioridade?, webhook_secret?, config? }
+  // ───────────────────────────────────────────────────────────
+  router.put('/providers/:code', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const code = req.params.code;
+      const { ativo, sandbox_mode, prioridade, config, webhook_secret } = req.body || {};
+
+      const atual = await pool.query(
+        'SELECT * FROM logistics_providers WHERE provider_code = $1',
+        [code]
+      );
+      if (atual.rows.length === 0) {
+        return res.status(404).json({ error: 'Provider nao encontrado' });
+      }
+      const row = atual.rows[0];
+
+      // Detector de máscara — string só de bolinhas/asteriscos/traços (placeholder
+      // de campo de segredo). Mesma lógica do PUT /uber/config.
+      const ehMascara = (v) =>
+        typeof v === 'string' && /^[•·●○*–\-\u2022\u00b7]+$/.test(v.trim());
+      // Segredo só é gravado se for valor REAL — não vazio, não máscara.
+      const valorSecretoValido = (v) =>
+        typeof v === 'string' && v.trim() !== '' && !ehMascara(v);
+
+      // Chaves de config tratadas como SEGREDO: vazio = preserva a atual.
+      // Cobre uber (client_secret/mapp_api_token) e 99 (api_key/webhook_password).
+      const SECRET_KEYS = [
+        'api_key', 'client_secret', 'mapp_api_token',
+        'webhook_secret', 'webhook_password',
+      ];
+
+      // Merge da config: parte do que já existe, aplica só o que veio.
+      const configFinal = { ...(row.config || {}) };
+      let configMudou = false;
+      if (config && typeof config === 'object' && !Array.isArray(config)) {
+        for (const [k, v] of Object.entries(config)) {
+          if (SECRET_KEYS.includes(k)) {
+            // segredo: só sobrescreve com valor real; vazio/máscara → preserva
+            if (valorSecretoValido(v)) { configFinal[k] = v.trim(); configMudou = true; }
+          } else {
+            // campo comum: sobrescreve como veio (permite inclusive limpar)
+            configFinal[k] = v;
+            configMudou = true;
+          }
+        }
+      }
+
+      // UPDATE dinâmico — só toca no que foi enviado.
+      const campos = [];
+      const valores = [];
+      let idx = 1;
+
+      if (typeof ativo === 'boolean') {
+        campos.push(`ativo = $${idx++}`); valores.push(ativo);
+      }
+      if (typeof sandbox_mode === 'boolean') {
+        campos.push(`sandbox_mode = $${idx++}`); valores.push(sandbox_mode);
+      }
+      if (prioridade !== undefined && prioridade !== null && Number.isFinite(Number(prioridade))) {
+        campos.push(`prioridade = $${idx++}`); valores.push(parseInt(prioridade, 10));
+      }
+      if (configMudou) {
+        campos.push(`config = $${idx++}::jsonb`); valores.push(JSON.stringify(configFinal));
+      }
+      // webhook_secret é coluna top-level (uber usa HMAC; 99 não) — só grava valor real
+      if (valorSecretoValido(webhook_secret)) {
+        campos.push(`webhook_secret = $${idx++}`); valores.push(webhook_secret.trim());
+      }
+
+      if (campos.length === 0) {
+        return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+      }
+
+      campos.push('updated_at = NOW()');
+      valores.push(code);
+
+      await pool.query(
+        `UPDATE logistics_providers SET ${campos.join(', ')} WHERE provider_code = $${idx}`,
+        valores
+      );
+
+      // Recarrega o adapter no registry: instancia se ativo, descarta se inativo.
+      // Sem isso a mudança só valeria no próximo restart do backend.
+      await registry.reload(code).catch(err => {
+        console.error(`[logistics/routes] reload de '${code}' falhou:`, err.message);
+      });
+
+      if (registrarAuditoria) {
+        await registrarAuditoria(req, 'ATUALIZAR_PROVIDER_LOGISTICS', 'config',
+          'logistics_providers', row.id,
+          { provider: code, campos_atualizados: campos.length - 1 })
+          .catch(() => {});
+      }
+
+      // Estado pós-reload — o painel usa pra mostrar se o adapter realmente subiu.
+      const depois = await pool.query(
+        `SELECT provider_code, display_name, ativo, sandbox_mode, prioridade
+           FROM logistics_providers WHERE provider_code = $1`,
+        [code]
+      );
+      const p = depois.rows[0];
+
+      res.json({
+        success: true,
+        provider: { ...p, instanciado: registry.has(code) },
+        // Marcado ativo mas o adapter não subiu = config provavelmente incompleta.
+        aviso: (p.ativo && !registry.has(code))
+          ? 'Provider marcado como ativo, mas o adapter nao foi instanciado — confira se a config esta completa (ex: api_key da 99) e veja os logs do Railway.'
+          : null,
+      });
+    } catch (err) {
+      console.error('[logistics/routes] erro PUT /providers/:code:', err.message);
+      res.status(500).json({ error: 'Erro ao atualizar provider' });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
   // Endpoints ainda pendentes
   // ───────────────────────────────────────────────────────────
-  router.put('/providers/:code', verificarToken, verificarAdmin, notImplemented('Fase 5'));
   router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 5'));
 
   return router;
