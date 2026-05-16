@@ -130,12 +130,12 @@ async function validarWhatsApp(raw) {
  * Não-bloqueante por natureza — quem chama deve tratar como "best effort".
  *
  * @param {object} args
- *   - telefone        (string) número bruto do cliente
- *   - nomeCliente     (string) nome do cliente da conta (empresa), vai em negrito
- *   - osNumero        (string|number) número da OS Tutts
- *   - urlRastreamento (string) URL tutts.com.br/rastreamento?cod=...
+ *   - telefone         (string) número bruto do destinatário
+ *   - nomeDestinatario (string) nome fantasia do ponto de entrega, vai em negrito
+ *   - osNumero         (string|number) número da OS Tutts
+ *   - urlRastreamento  (string) URL tutts.com.br/rastreamento?cod=...
  */
-async function enviarRastreioCliente({ telefone, nomeCliente, osNumero, urlRastreamento }) {
+async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, urlRastreamento }) {
   const fmt = validarFormatoBR(telefone);
   if (!fmt.ok) {
     return { enviado: false, motivo: 'telefone_invalido', detalhe: fmt.motivo };
@@ -149,9 +149,10 @@ async function enviarRastreioCliente({ telefone, nomeCliente, osNumero, urlRastr
     return { enviado: false, motivo: 'evolution_nao_configurada' };
   }
 
-  // Saudação com o nome do cliente (empresa da conta) em *negrito* do WhatsApp.
-  const saud = nomeCliente
-    ? `Olá, *${nomeCliente}*! 👋`
+  // Saudação com o nome do destinatário da entrega (nome fantasia do ponto)
+  // em *negrito* do WhatsApp. É quem está com o celular e vai receber a mercadoria.
+  const saud = nomeDestinatario
+    ? `Olá, *${nomeDestinatario}*! 👋`
     : 'Olá! 👋';
   const linhaPedido = osNumero
     ? `Seu pedido *${osNumero}* já foi registrado e está a caminho.`
@@ -160,8 +161,7 @@ async function enviarRastreioCliente({ telefone, nomeCliente, osNumero, urlRastr
     `${saud}\n\n` +
     `${linhaPedido}\n\n` +
     `Acompanhe a entrega *ao vivo* pelo link abaixo:\n` +
-    `${urlRastreamento}\n\n` +
-    `Qualquer dúvida, é só chamar. 🛵`;
+    `${urlRastreamento}`;
 
   try {
     const url = `${cfg.baseUrl}/message/sendText/${cfg.instancia}`;

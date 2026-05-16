@@ -436,7 +436,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
 
         // Pega o ÚLTIMO ponto (entrega final) com telefone preenchido
         const pontoRow = await pool.query(
-          `SELECT telefone, nome_fantasia, procurar_por
+          `SELECT telefone, nome_fantasia
              FROM solicitacoes_pontos
             WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
             ORDER BY ordem DESC
@@ -446,14 +446,9 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         const ponto = pontoRow.rows[0];
 
         if (urlRastreio && ponto && ponto.telefone) {
-          // Nome do cliente = empresa dona da conta (ex: "Envia Peças"), não o
-          // nome fantasia do ponto de entrega.
-          const nomeClienteConta = req.clienteSolicitacao.empresa
-            || req.clienteSolicitacao.nome
-            || null;
           const envio = await enviarRastreioCliente({
             telefone: ponto.telefone,
-            nomeCliente: nomeClienteConta,
+            nomeDestinatario: ponto.nome_fantasia || null,
             osNumero: resultado.Sucesso,
             urlRastreamento: urlRastreio,
           });
@@ -523,25 +518,27 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
 
     // Permite sobrescrever o telefone (caso o atendente queira corrigir no reenvio)
     let telefoneDestino = req.body.telefone;
-    // Nome do cliente = empresa dona da conta (ex: "Envia Peças")
-    const nomeClienteConta = req.clienteSolicitacao.empresa || req.clienteSolicitacao.nome || null;
-    if (!telefoneDestino) {
+    let nomeDestinatario = null;
+    {
       const pontoRow = await pool.query(
-        `SELECT telefone
+        `SELECT telefone, nome_fantasia
            FROM solicitacoes_pontos
           WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
           ORDER BY ordem DESC LIMIT 1`,
         [solicitacaoId]
       );
-      if (pontoRow.rows.length === 0) {
-        return res.status(409).json({ error: 'Nenhum telefone cadastrado nesta entrega' });
+      if (pontoRow.rows.length > 0) {
+        nomeDestinatario = pontoRow.rows[0].nome_fantasia || null;
+        if (!telefoneDestino) telefoneDestino = pontoRow.rows[0].telefone;
       }
-      telefoneDestino = pontoRow.rows[0].telefone;
+    }
+    if (!telefoneDestino) {
+      return res.status(409).json({ error: 'Nenhum telefone cadastrado nesta entrega' });
     }
 
     const envio = await enviarRastreioCliente({
       telefone: telefoneDestino,
-      nomeCliente: nomeClienteConta,
+      nomeDestinatario,
       osNumero: os.tutts_os_numero,
       urlRastreamento: os.tutts_url_rastreamento,
     });
