@@ -131,12 +131,11 @@ async function validarWhatsApp(raw) {
  *
  * @param {object} args
  *   - telefone        (string) número bruto do cliente
- *   - nomeFantasia    (string) nome da loja/destino
+ *   - nomeCliente     (string) nome do cliente da conta (empresa), vai em negrito
  *   - osNumero        (string|number) número da OS Tutts
  *   - urlRastreamento (string) URL tutts.com.br/rastreamento?cod=...
- *   - nomeCliente     (string, opcional) saudação personalizada
  */
-async function enviarRastreioCliente({ telefone, nomeFantasia, osNumero, urlRastreamento, nomeCliente }) {
+async function enviarRastreioCliente({ telefone, nomeCliente, osNumero, urlRastreamento }) {
   const fmt = validarFormatoBR(telefone);
   if (!fmt.ok) {
     return { enviado: false, motivo: 'telefone_invalido', detalhe: fmt.motivo };
@@ -150,15 +149,19 @@ async function enviarRastreioCliente({ telefone, nomeFantasia, osNumero, urlRast
     return { enviado: false, motivo: 'evolution_nao_configurada' };
   }
 
-  const saud = nomeCliente ? `Olá, ${String(nomeCliente).split(' ')[0]}!` : 'Olá!';
-  const loja = nomeFantasia ? ` da *${nomeFantasia}*` : '';
+  // Saudação com o nome do cliente (empresa da conta) em *negrito* do WhatsApp.
+  const saud = nomeCliente
+    ? `Olá, *${nomeCliente}*! 👋`
+    : 'Olá! 👋';
+  const linhaPedido = osNumero
+    ? `Seu pedido *${osNumero}* já foi registrado e está a caminho.`
+    : 'Seu pedido já foi registrado e está a caminho.';
   const texto =
     `${saud}\n\n` +
-    `Sua entrega${loja} já foi registrada` +
-    (osNumero ? ` (pedido ${osNumero})` : '') + '.\n\n' +
-    `Acompanhe em tempo real onde está a sua mercadoria pelo link abaixo:\n` +
+    `${linhaPedido}\n\n` +
+    `Acompanhe a entrega *ao vivo* pelo link abaixo:\n` +
     `${urlRastreamento}\n\n` +
-    `Você consegue ver o trajeto do entregador ao vivo. 🛵`;
+    `Qualquer dúvida, é só chamar. 🛵`;
 
   try {
     const url = `${cfg.baseUrl}/message/sendText/${cfg.instancia}`;

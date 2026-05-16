@@ -446,10 +446,14 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         const ponto = pontoRow.rows[0];
 
         if (urlRastreio && ponto && ponto.telefone) {
+          // Nome do cliente = empresa dona da conta (ex: "Envia Peças"), não o
+          // nome fantasia do ponto de entrega.
+          const nomeClienteConta = req.clienteSolicitacao.empresa
+            || req.clienteSolicitacao.nome
+            || null;
           const envio = await enviarRastreioCliente({
             telefone: ponto.telefone,
-            nomeFantasia: ponto.nome_fantasia || null,
-            nomeCliente: ponto.procurar_por || null,
+            nomeCliente: nomeClienteConta,
             osNumero: resultado.Sucesso,
             urlRastreamento: urlRastreio,
           });
@@ -519,10 +523,11 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
 
     // Permite sobrescrever o telefone (caso o atendente queira corrigir no reenvio)
     let telefoneDestino = req.body.telefone;
-    let nomeFantasia = null, nomeCliente = null;
+    // Nome do cliente = empresa dona da conta (ex: "Envia Peças")
+    const nomeClienteConta = req.clienteSolicitacao.empresa || req.clienteSolicitacao.nome || null;
     if (!telefoneDestino) {
       const pontoRow = await pool.query(
-        `SELECT telefone, nome_fantasia, procurar_por
+        `SELECT telefone
            FROM solicitacoes_pontos
           WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
           ORDER BY ordem DESC LIMIT 1`,
@@ -532,14 +537,11 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
         return res.status(409).json({ error: 'Nenhum telefone cadastrado nesta entrega' });
       }
       telefoneDestino = pontoRow.rows[0].telefone;
-      nomeFantasia = pontoRow.rows[0].nome_fantasia;
-      nomeCliente = pontoRow.rows[0].procurar_por;
     }
 
     const envio = await enviarRastreioCliente({
       telefone: telefoneDestino,
-      nomeFantasia,
-      nomeCliente,
+      nomeCliente: nomeClienteConta,
       osNumero: os.tutts_os_numero,
       urlRastreamento: os.tutts_url_rastreamento,
     });
