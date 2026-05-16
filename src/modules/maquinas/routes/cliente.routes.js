@@ -203,11 +203,18 @@ function createMaquinasClienteRoutes(pool, helpers) {
            mm.despachada_em,
            mm.despachada_por,
            EXTRACT(EPOCH FROM (NOW() - mm.despachada_em))/60 AS minutos_em_campo,
-           -- pendente = passou do horário limite local (timezone do servidor)
-           CASE
-             WHEN (CURRENT_TIME) >= $2::time THEN true
-             ELSE false
-           END AS pendente_apos_limite
+           -- PENDENTE = a máquina não foi restituída e o horário limite
+           -- do DIA DO DESPACHO (no fuso de Brasília) já passou.
+           -- Comparamos "agora" com a data do despacho + horário limite, tudo
+           -- convertido para America/Sao_Paulo (servidor Railway roda em UTC).
+           (
+             (NOW() AT TIME ZONE 'America/Sao_Paulo')
+             >=
+             (
+               date_trunc('day', mm.despachada_em AT TIME ZONE 'America/Sao_Paulo')
+               + $2::time
+             )
+           ) AS pendente_apos_limite
          FROM maquinas_movimentacoes mm
          JOIN maquinas m ON m.id = mm.maquina_id
          WHERE mm.cliente_id = $1 AND mm.restituida_em IS NULL
