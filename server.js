@@ -811,6 +811,21 @@ initDatabase().then(async () => {
       }
     }), { timezone: 'America/Bahia' });
 
+    // 🆕 Score v2 (2026-05 v4): avaliação SEMANAL de níveis
+    // Roda todo SÁBADO às 12h (horário da Bahia). Recalcula o nível de
+    // todos os motoboys de todas as regiões ativas, sobre os últimos 28 dias.
+    // O nível do motoboy só muda aqui — entre uma avaliação e outra fica
+    // congelado (GET /meu-nivel só lê). withCronLock evita dupla execução.
+    cron.schedule('0 12 * * 6', withCronLock(pool, 'scoreV2AvaliacaoSemanal', async () => {
+      try {
+        console.log('📅 [Cron Score v2] Disparando avaliação semanal de níveis...');
+        const resumo = await scoreV2Service.avaliarTodasRegioes(pool);
+        console.log(`📅 [Cron Score v2] Avaliação concluída — ${resumo.regioes} regiões, ${resumo.processados} motoboys, ${resumo.mudancas.length} mudanças`);
+      } catch (err) {
+        console.error('❌ [Cron Score v2] Erro na avaliação semanal:', err);
+      }
+    }), { timezone: 'America/Bahia' });
+
     // ════════════════════════════════════════════════════════════
     // WhatsApp module — import compartilhado para todos os crons
     // ════════════════════════════════════════════════════════════

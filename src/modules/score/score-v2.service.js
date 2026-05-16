@@ -98,17 +98,22 @@ const CARENCIA_SCORE_MS = CARENCIA_SCORE_DIAS * 24 * 60 * 60 * 1000;
 /**
  * Calcula estado de carência de um motoboy.
  *
- * @param {Date|null} ultimaSubidaEm  timestamp da última subida (ou null)
+ * 🆕 2026-05 v4: a carência conta a partir de `nivel_desde` — timestamp de
+ * quando o motoboy ENTROU no nível atual. QUALQUER mudança de nível (subida
+ * OU descida) reseta nivel_desde, então a carência é reiniciada tanto ao
+ * subir quanto ao cair (regra: cai N3→N2 precisa de nova carência no N2).
+ *
+ * @param {Date|null} nivelDesde  timestamp de entrada no nível atual (ou null)
  * @returns {object}
  *   em_carencia: bool     — true se ainda dentro do período
- *   libera_em:   ISOString|null — quando libera (NOW + remaining ms)
+ *   libera_em:   ISOString|null — quando libera
  *   dias_restantes: int   — dias inteiros até liberar (0 se já liberou)
- *   ms_restantes:   int   — ms exatos até liberar (pra contagem regressiva)
+ *   ms_restantes:   int   — ms exatos até liberar
  *   motivo: string        — 'liberado' | 'sem_subida_registrada' | 'em_carencia'
  */
-function calcularCarencia(ultimaSubidaEm) {
-  // Sem registro de subida — assume liberado (motoboy antigo, retroativo)
-  if (!ultimaSubidaEm) {
+function calcularCarencia(nivelDesde) {
+  // Sem registro — assume liberado (motoboy antigo, retroativo)
+  if (!nivelDesde) {
     return {
       em_carencia: false,
       libera_em: null,
@@ -118,8 +123,8 @@ function calcularCarencia(ultimaSubidaEm) {
     };
   }
 
-  const subiu = new Date(ultimaSubidaEm);
-  const liberaEm = new Date(subiu.getTime() + CARENCIA_SCORE_MS);
+  const entrou = new Date(nivelDesde);
+  const liberaEm = new Date(entrou.getTime() + CARENCIA_SCORE_MS);
   const agora = new Date();
   const msRestantes = liberaEm.getTime() - agora.getTime();
 
@@ -133,7 +138,6 @@ function calcularCarencia(ultimaSubidaEm) {
     };
   }
 
-  // Dias inteiros restantes (arredonda pra cima — 1.5 dias = "faltam 2 dias")
   const diasRestantes = Math.ceil(msRestantes / (24 * 60 * 60 * 1000));
 
   return {
@@ -144,6 +148,22 @@ function calcularCarencia(ultimaSubidaEm) {
     motivo: 'em_carencia',
   };
 }
+
+/**
+ * 🆕 2026-05 v4: calcula há quantos dias o motoboy está no nível atual.
+ * Usado pra elegibilidade do sorteio (mínimo 20 dias).
+ *
+ * @param {Date|null} nivelDesde
+ * @returns {number} dias inteiros no nível (0 se sem registro)
+ */
+function diasNoNivel(nivelDesde) {
+  if (!nivelDesde) return 9999; // sem registro = motoboy antigo, considera elegível
+  const ms = Date.now() - new Date(nivelDesde).getTime();
+  return Math.floor(ms / (24 * 60 * 60 * 1000));
+}
+
+// 🆕 2026-05 v4: mínimo de dias no nível pra concorrer ao sorteio
+const SORTEIO_DIAS_MIN_NIVEL = parseInt(process.env.SORTEIO_DIAS_MIN_NIVEL, 10) || 20;
 
 /**
  * 🔧 Helper de normalização de região pra SQL.
@@ -316,14 +336,17 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
   // 🔧 FIX (2026-05): timestamps via parâmetro explícito (evita SQL dinâmico frágil)
   const subidaTs = subiu ? new Date() : null;
   const descidaTs = desceu ? new Date() : null;
+  // 🆕 2026-05 v4: nivel_desde reseta em QUALQUER mudança (subida ou descida).
+  // Se não mudou, mantém o valor atual (COALESCE no UPDATE abaixo).
+  const nivelDesdeTs = mudou ? new Date() : null;
 
   await pool.query(`
     INSERT INTO score_nivel_motoboy (
       cod_prof, nome_prof, regiao, nivel_atual,
       entregas_periodo, dias_16h_periodo, pct_prazo,
-      avaliado_em, ultima_subida_em, ultima_descida_em, historico_mudancas
+      avaliado_em, ultima_subida_em, ultima_descida_em, nivel_desde, historico_mudancas
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10::jsonb
+      $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, COALESCE($10, NOW()), $11::jsonb
     )
     ON CONFLICT (cod_prof) DO UPDATE SET
       nome_prof = EXCLUDED.nome_prof,
@@ -335,11 +358,12 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
       avaliado_em = NOW(),
       ultima_subida_em = COALESCE(EXCLUDED.ultima_subida_em, score_nivel_motoboy.ultima_subida_em),
       ultima_descida_em = COALESCE(EXCLUDED.ultima_descida_em, score_nivel_motoboy.ultima_descida_em),
+      nivel_desde = COALESCE($10, score_nivel_motoboy.nivel_desde),
       historico_mudancas = EXCLUDED.historico_mudancas
   `, [
     String(codProf), nomeProf, regiao, nivel,
     stats.entregas, stats.dias_16h, stats.pct_prazo,
-    subidaTs, descidaTs,
+    subidaTs, descidaTs, nivelDesdeTs,
     JSON.stringify(novoHistorico),
   ]);
 
@@ -364,21 +388,15 @@ async function persistirNivelMotoboy(pool, { codProf, nomeProf, regiao, nivel, s
 async function lancarBonusSeAplicavel(pool, { codProf, nomeProf, regiao, nivel }) {
   if (nivel < 2) return { lancado: false, motivo: 'nivel_insuficiente' };
 
-  // 🆕 2026-05 v3: respeita carência de 7 dias após subida.
-  // Lê ultima_subida_em da tabela score_nivel_motoboy.
-  //
-  // Por que aqui (não no avaliarMotoboy):
-  //   - Mantém calcularCarencia como pure-function reutilizável.
-  //   - Garante que TODA chamada de lançamento passa pela checagem
-  //     (ex: cron mensal de gratuidades, retroação manual via admin).
-  //   - Idempotência preservada: o UNIQUE (cod_prof, periodo, tipo) ainda
-  //     impede duplicação, então segurança em depth.
+  // 🆕 2026-05 v4: respeita carência de 7 dias a partir de nivel_desde.
+  // nivel_desde reseta em QUALQUER mudança de nível — então cair de N3 pra N2
+  // também reinicia a carência (regra confirmada: cai pro N2 → nova carência).
   const subidaRow = await pool.query(
-    `SELECT ultima_subida_em FROM score_nivel_motoboy WHERE cod_prof = $1`,
+    `SELECT nivel_desde FROM score_nivel_motoboy WHERE cod_prof = $1`,
     [String(codProf)]
   );
-  const ultimaSubida = subidaRow.rows[0]?.ultima_subida_em || null;
-  const carencia = calcularCarencia(ultimaSubida);
+  const nivelDesde = subidaRow.rows[0]?.nivel_desde || null;
+  const carencia = calcularCarencia(nivelDesde);
 
   if (carencia.em_carencia) {
     return {
@@ -552,13 +570,32 @@ async function avaliarMotoboy(pool, codProf) {
     });
   }
 
-  // 6. Estado de carência (sempre retorna — útil pra frontend mesmo no N1)
-  // 🆕 2026-05 v3: lê ultima_subida_em recém-atualizada e calcula remaining
+  // 6. Estado de carência + dias no nível
+  // 🆕 2026-05 v4: usa nivel_desde (reseta em qualquer mudança de nível).
   const subidaRow = await pool.query(
-    `SELECT ultima_subida_em FROM score_nivel_motoboy WHERE cod_prof = $1`,
+    `SELECT nivel_desde FROM score_nivel_motoboy WHERE cod_prof = $1`,
     [String(codProf)]
   );
-  const carencia = calcularCarencia(subidaRow.rows[0]?.ultima_subida_em || null);
+  const nivelDesde = subidaRow.rows[0] ? subidaRow.rows[0].nivel_desde : null;
+  const carencia = calcularCarencia(nivelDesde);
+  const dias_no_nivel = diasNoNivel(nivelDesde);
+  const elegivel_sorteio = nivel >= 2 && dias_no_nivel >= SORTEIO_DIAS_MIN_NIVEL;
+
+  // 7. 🆕 2026-05 v4: grava snapshot semanal (idempotente via UNIQUE)
+  try {
+    const semanaRef = `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+    await pool.query(`
+      INSERT INTO score_snapshots_semanais
+        (cod_prof, nome_prof, regiao, nivel, entregas, entregas_16h, pct_prazo, semana_referencia)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (cod_prof, semana_referencia) DO UPDATE SET
+        nivel = EXCLUDED.nivel, entregas = EXCLUDED.entregas,
+        entregas_16h = EXCLUDED.entregas_16h, pct_prazo = EXCLUDED.pct_prazo,
+        avaliado_em = NOW()
+    `, [String(codProf), nome, regiaoCanonica, nivel, stats.entregas, stats.dias_16h, stats.pct_prazo, semanaRef]);
+  } catch (errSnap) {
+    console.warn('[score-v2] snapshot semanal falhou (não-crítico):', errSnap.message);
+  }
 
   return {
     regiao_configurada: true,
@@ -579,6 +616,10 @@ async function avaliarMotoboy(pool, codProf) {
     bonus: bonusLancado,
     // 🆕 2026-05 v3: estado de carência (frontend mostra contagem regressiva)
     carencia,
+    // 🆕 2026-05 v4: dias no nível + elegibilidade do sorteio
+    dias_no_nivel,
+    elegivel_sorteio,
+    sorteio_dias_min: SORTEIO_DIAS_MIN_NIVEL,
   };
 }
 
@@ -621,14 +662,19 @@ async function rodarSorteiosMensais(pool, mesRef) {
           ? parseFloat(r.sorteio_valor_n3) || 150
           : parseFloat(r.sorteio_valor_n2) || 50;
 
-        // Lista candidatos: motoboys da região que ESTÃO no nível agora
-        // (o ideal seria ter snapshot do fim do mês — TODO: cron de fechamento)
+        // Lista candidatos: motoboys da região no nível há SORTEIO_DIAS_MIN_NIVEL+ dias.
+        // 🆕 2026-05 v4: nivel_desde garante que só concorre quem está ESTÁVEL
+        // no nível há pelo menos 20 dias (quem subiu/oscilou recente fica de fora).
         const candidatos = await pool.query(`
           SELECT cod_prof, nome_prof
           FROM score_nivel_motoboy
           WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}
             AND nivel_atual = $2
-        `, [r.regiao, nivel]);
+            AND (
+              nivel_desde IS NULL
+              OR nivel_desde <= (NOW() - ($3 || ' days')::interval)
+            )
+        `, [r.regiao, nivel, String(SORTEIO_DIAS_MIN_NIVEL)]);
 
         if (candidatos.rows.length === 0) {
           console.log(`  ⏭️ ${r.regiao} N${nivel}: 0 candidatos`);
@@ -766,6 +812,159 @@ async function avaliarRegiaoCompleta(pool, regiao, opts = {}) {
   };
 }
 
+// ============================================================
+// 🆕 2026-05 v4: LEITURA DO NÍVEL (sem recalcular)
+// ============================================================
+// O GET /meu-nivel passa a SÓ LER o nível congelado da última avaliação
+// de sábado. O nível não muda quando o motoboy abre a tela — só no cron
+// semanal. A barra de progresso continua sendo calculada ao vivo (mostra
+// "se a avaliação fosse agora..."), mas o NÍVEL é estável.
+
+async function lerNivelMotoboy(pool, codProf) {
+  // 1. Identifica motoboy + região
+  let nome = null, regiao = null;
+  try {
+    const prof = await buscarProfissional(pool, codProf);
+    if (prof) { nome = prof.nome; regiao = prof.regiao || prof.cidade; }
+  } catch (err) {
+    console.warn('[score-v2] buscarProfissional falhou:', err.message);
+  }
+  if (!nome && !regiao) {
+    return { erro: 'profissional_nao_encontrado', cod_prof: codProf };
+  }
+
+  // 2. Config da região
+  let regiaoConfig = null;
+  if (regiao) {
+    const cfg = await pool.query(`
+      SELECT * FROM score_config_regiao
+      WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')} LIMIT 1
+    `, [regiao]);
+    if (cfg.rows.length > 0) regiaoConfig = cfg.rows[0];
+  }
+  if (!regiaoConfig || regiaoConfig.ativo !== true) {
+    return {
+      regiao_configurada: false,
+      regiao,
+      mensagem: regiao
+        ? `Score não está ativo para a região "${regiao}"`
+        : 'Sua região não está cadastrada no sistema',
+    };
+  }
+
+  const thresholds = resolverThresholds(regiaoConfig);
+
+  // 3. Lê o nível CONGELADO (última avaliação semanal)
+  const row = await pool.query(
+    `SELECT nivel_atual, entregas_periodo, dias_16h_periodo, pct_prazo,
+            avaliado_em, nivel_desde, ultima_subida_em
+       FROM score_nivel_motoboy WHERE cod_prof = $1`,
+    [String(codProf)]
+  );
+
+  // Motoboy ainda não avaliado (nunca rodou o cron pra ele) — nível 1 provisório
+  const nivel = row.rows[0] ? row.rows[0].nivel_atual : 1;
+  const nivelDesde = row.rows[0] ? row.rows[0].nivel_desde : null;
+  const avaliadoEm = row.rows[0] ? row.rows[0].avaliado_em : null;
+
+  // 4. Stats AO VIVO (pra barra de progresso — mostra situação atual)
+  const { stats: statsAoVivo } = await calcularNivelMotoboy(pool, codProf, regiaoConfig);
+
+  // Progresso pro próximo nível (baseado no nível CONGELADO + stats ao vivo)
+  let progresso = null;
+  if (nivel === 1) progresso = montarProgresso(statsAoVivo, 2, thresholds);
+  else if (nivel === 2) progresso = montarProgresso(statsAoVivo, 3, thresholds);
+
+  const carencia = calcularCarencia(nivelDesde);
+  const dias_no_nivel = diasNoNivel(nivelDesde);
+  const elegivel_sorteio = nivel >= 2 && dias_no_nivel >= SORTEIO_DIAS_MIN_NIVEL;
+
+  return {
+    regiao_configurada: true,
+    regiao,
+    nivel,
+    // stats congelados da última avaliação + stats ao vivo (pra barra)
+    stats: {
+      entregas: row.rows[0] ? row.rows[0].entregas_periodo : statsAoVivo.entregas,
+      dias_16h: row.rows[0] ? row.rows[0].dias_16h_periodo : statsAoVivo.dias_16h,
+      pct_prazo: row.rows[0] ? Number(row.rows[0].pct_prazo) : statsAoVivo.pct_prazo,
+    },
+    stats_ao_vivo: statsAoVivo,
+    progresso,
+    thresholds,
+    sorteio_valor_n2: regiaoConfig.sorteio_valor_n2 != null ? Number(regiaoConfig.sorteio_valor_n2) : 50,
+    sorteio_valor_n3: regiaoConfig.sorteio_valor_n3 != null ? Number(regiaoConfig.sorteio_valor_n3) : 150,
+    saque_teto_n2: regiaoConfig.saque_teto_n2 != null ? Number(regiaoConfig.saque_teto_n2) : 500,
+    saque_teto_n3: regiaoConfig.saque_teto_n3 != null ? Number(regiaoConfig.saque_teto_n3) : 500,
+    carencia,
+    dias_no_nivel,
+    elegivel_sorteio,
+    sorteio_dias_min: SORTEIO_DIAS_MIN_NIVEL,
+    avaliado_em: avaliadoEm,
+    // sinaliza pro frontend que o nível é semanal (avaliado aos sábados)
+    avaliacao_semanal: true,
+  };
+}
+
+// ============================================================
+// 🆕 2026-05 v4: AVALIAÇÃO DE TODAS AS REGIÕES (cron semanal)
+// ============================================================
+// Chamado pelo cron de sábado 12h. Percorre cada região ativa e roda
+// avaliarRegiaoCompleta. Retorna lista de quem mudou de nível — preparado
+// pra disparar notificação no futuro (quando houver telefone do motoboy).
+
+async function avaliarTodasRegioes(pool) {
+  console.log('📅 [Score v2] Avaliação semanal — iniciando...');
+  const regioes = await pool.query(
+    `SELECT regiao FROM score_config_regiao WHERE ativo = true`
+  );
+  const resumo = { regioes: 0, processados: 0, mudancas: [] };
+
+  for (const r of regioes.rows) {
+    try {
+      // Snapshot dos níveis ANTES (pra detectar quem mudou)
+      const antes = await pool.query(
+        `SELECT cod_prof, nivel_atual FROM score_nivel_motoboy
+          WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}`,
+        [r.regiao]
+      );
+      const mapaAntes = {};
+      antes.rows.forEach(x => { mapaAntes[String(x.cod_prof)] = x.nivel_atual; });
+
+      const res = await avaliarRegiaoCompleta(pool, r.regiao);
+      resumo.regioes++;
+      resumo.processados += res.processados || 0;
+
+      // Detecta mudanças (compara depois com antes)
+      const depois = await pool.query(
+        `SELECT cod_prof, nome_prof, nivel_atual FROM score_nivel_motoboy
+          WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}`,
+        [r.regiao]
+      );
+      for (const x of depois.rows) {
+        const antesNivel = mapaAntes[String(x.cod_prof)] || 1;
+        if (antesNivel !== x.nivel_atual) {
+          resumo.mudancas.push({
+            cod_prof: x.cod_prof,
+            nome: x.nome_prof,
+            regiao: r.regiao,
+            de: antesNivel,
+            para: x.nivel_atual,
+            tipo: x.nivel_atual > antesNivel ? 'subiu' : 'desceu',
+          });
+        }
+      }
+    } catch (err) {
+      console.error(`❌ [Score v2] Avaliação semanal ${r.regiao}:`, err.message);
+    }
+  }
+
+  console.log(`📅 [Score v2] Avaliação semanal concluída — ${resumo.regioes} regiões, ${resumo.processados} motoboys, ${resumo.mudancas.length} mudanças de nível`);
+  // 🔔 TODO (notificação): quando houver telefone do motoboy cadastrado,
+  // percorrer resumo.mudancas e disparar mensagem via Evolution aqui.
+  return resumo;
+}
+
 module.exports = {
   // Constantes
   NIVEL_2,
@@ -778,9 +977,12 @@ module.exports = {
   persistirNivelMotoboy,
   lancarBonusSeAplicavel,
   calcularCarencia,
+  diasNoNivel,
   // Pipeline alto nível
   avaliarMotoboy,
   avaliarRegiaoCompleta,
+  avaliarTodasRegioes,
+  lerNivelMotoboy,
   // Sorteio
   rodarSorteiosMensais,
 };

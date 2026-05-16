@@ -30,6 +30,8 @@ const express = require('express');
 const {
   avaliarMotoboy,
   avaliarRegiaoCompleta,
+  avaliarTodasRegioes,
+  lerNivelMotoboy,
   rodarSorteiosMensais,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
@@ -47,24 +49,47 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
 
   // ============================================================
-  // MOTOBOY: meu nível em tempo real
+  // MOTOBOY: meu nível (LEITURA — nível congelado da avaliação semanal)
   // ============================================================
+  // 🆕 2026-05 v4: NÃO recalcula mais o nível a cada abertura. Lê o nível
+  // congelado da última avaliação de sábado. A barra de progresso vem
+  // ao vivo (stats_ao_vivo), mas o nível só muda no cron semanal.
   router.get('/score-v2/meu-nivel', verificarToken, async (req, res) => {
     try {
       const codProf = req.user.codProfissional || req.user.cod_profissional;
       if (!codProf) {
         return res.status(400).json({ error: 'Usuário sem cod_profissional' });
       }
-      const resultado = await avaliarMotoboy(pool, codProf);
+      const resultado = await lerNivelMotoboy(pool, codProf);
       res.json(resultado);
     } catch (err) {
       console.error('❌ [Score v2] /meu-nivel cod=' + (req.user?.codProfissional || '?') + ':', err.message);
       console.error(err.stack);
-      res.status(500).json({ error: 'Erro ao calcular nível', details: err.message });
+      res.status(500).json({ error: 'Erro ao ler nível', details: err.message });
     }
   });
 
-  // Permitir admin consultar nível de qualquer motoboy (debug)
+  // MOTOBOY: histórico de evolução (snapshots semanais)
+  router.get('/score-v2/minha-evolucao', verificarToken, async (req, res) => {
+    try {
+      const codProf = req.user.codProfissional || req.user.cod_profissional;
+      if (!codProf) return res.status(400).json({ error: 'Usuário sem cod_profissional' });
+      const r = await pool.query(
+        `SELECT nivel, entregas, entregas_16h, pct_prazo, semana_referencia, avaliado_em
+           FROM score_snapshots_semanais
+          WHERE cod_prof = $1
+          ORDER BY avaliado_em DESC
+          LIMIT 12`,
+        [String(codProf)]
+      );
+      res.json({ evolucao: r.rows });
+    } catch (err) {
+      console.error('❌ [Score v2] /minha-evolucao:', err.message);
+      res.status(500).json({ error: 'Erro ao buscar evolução', details: err.message });
+    }
+  });
+
+  // Permitir admin consultar nível de qualquer motoboy (debug — recalcula)
   router.get('/score-v2/admin/avaliar/:codProf', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const resultado = await avaliarMotoboy(pool, req.params.codProf);
@@ -72,6 +97,18 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
     } catch (err) {
       console.error('❌ [Score v2] /admin/avaliar:', err);
       res.status(500).json({ error: 'Erro', details: err.message });
+    }
+  });
+
+  // 🆕 2026-05 v4: ADMIN — rodar avaliação semanal AGORA (manual / fallback do cron)
+  router.post('/score-v2/admin/avaliar-agora', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      console.log(`🔄 [Score v2] Avaliação manual disparada por ${req.user?.nome || 'admin'}`);
+      const resultado = await avaliarTodasRegioes(pool);
+      res.json({ ok: true, ...resultado });
+    } catch (err) {
+      console.error('❌ [Score v2] /admin/avaliar-agora:', err.message);
+      res.status(500).json({ error: 'Erro ao avaliar', details: err.message });
     }
   });
 

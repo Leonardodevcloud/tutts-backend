@@ -85,7 +85,47 @@ async function initScoreV2Tables(pool) {
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_nivel_regiao ON score_nivel_motoboy(regiao)').catch(() => {});
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_nivel_atual ON score_nivel_motoboy(nivel_atual) WHERE nivel_atual > 1').catch(() => {});
+
+  // 🆕 2026-05 v4: nivel_desde — timestamp de quando o motoboy ENTROU no nível atual.
+  // QUALQUER mudança de nível (subida OU descida) reseta este campo.
+  // É a base de cálculo da carência de bônus (7d) e da elegibilidade do sorteio (20d).
+  // Retroativo: motoboys existentes recebem COALESCE(ultima_subida_em, avaliado_em, NOW())
+  // pra não serem penalizados (não "zera" a carência de todo mundo no deploy).
+  await pool.query(`
+    ALTER TABLE score_nivel_motoboy
+    ADD COLUMN IF NOT EXISTS nivel_desde TIMESTAMP
+  `).catch(e => console.log('⚠️ nivel_desde:', e.message));
+  await pool.query(`
+    UPDATE score_nivel_motoboy
+       SET nivel_desde = COALESCE(ultima_subida_em, avaliado_em, NOW())
+     WHERE nivel_desde IS NULL
+  `).catch(e => console.log('⚠️ backfill nivel_desde:', e.message));
+  console.log('  ✅ score_nivel_motoboy.nivel_desde');
   console.log('  ✅ score_nivel_motoboy');
+
+  // ============================================================
+  // 5. SNAPSHOTS SEMANAIS (histórico de evolução)
+  // ============================================================
+  // 🆕 2026-05 v4: a cada avaliação de sábado, grava um retrato do motoboy.
+  // Alimenta o histórico de evolução na tela ("há 3 semanas: 60 entregas").
+  // semana_referencia no formato ISO: 'AAAA-Www' (ex: '2026-W20').
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS score_snapshots_semanais (
+      id SERIAL PRIMARY KEY,
+      cod_prof VARCHAR(50) NOT NULL,
+      nome_prof VARCHAR(255),
+      regiao VARCHAR(100),
+      nivel INT NOT NULL,
+      entregas INT DEFAULT 0,
+      entregas_16h INT DEFAULT 0,
+      pct_prazo DECIMAL(5,2) DEFAULT 0,
+      semana_referencia VARCHAR(10) NOT NULL,
+      avaliado_em TIMESTAMP DEFAULT NOW(),
+      UNIQUE(cod_prof, semana_referencia)
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_snap_prof ON score_snapshots_semanais(cod_prof, avaliado_em DESC)').catch(() => {});
+  console.log('  ✅ score_snapshots_semanais');
 
   // ============================================================
   // 3. SORTEIOS MENSAIS
