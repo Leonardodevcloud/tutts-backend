@@ -94,6 +94,37 @@ async function initMaquinasTables(pool) {
     ADD COLUMN IF NOT EXISTS horario_limite_maquinas TIME DEFAULT '17:00'
   `).catch(e => console.log('⚠️ horario_limite_maquinas em clientes_solicitacao:', e.message));
   console.log('✅ Coluna horario_limite_maquinas verificada em clientes_solicitacao');
+
+  // 🚀 2026-05: liberações pontuais feitas pelo admin da Central.
+  // Permite que um motoboy com máquina em mãos faça UM saque emergencial
+  // sem precisar restituir a máquina. Liberação é consumida no próximo saque.
+  //
+  //  - movimentacao_id  → qual máquina-em-campo está sendo "perdoada"
+  //  - consumida        → false enquanto a liberação não foi usada num saque
+  //  - consumida_em     → quando o motoboy efetivamente sacou usando ela
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS maquinas_liberacoes (
+      id SERIAL PRIMARY KEY,
+      movimentacao_id INT NOT NULL REFERENCES maquinas_movimentacoes(id) ON DELETE CASCADE,
+      motoboy_codigo VARCHAR(50) NOT NULL,
+      motoboy_nome VARCHAR(255) NOT NULL,
+      liberado_por_id INT,
+      liberado_por_nome VARCHAR(255),
+      consumida BOOLEAN DEFAULT false,
+      consumida_em TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('✅ Tabela maquinas_liberacoes verificada');
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_maqlib_mov ON maquinas_liberacoes(movimentacao_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_maqlib_motoboy ON maquinas_liberacoes(motoboy_codigo)`).catch(() => {});
+  // Índice parcial: liberações ativas (não consumidas) — checado a cada saque
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_maqlib_ativa
+    ON maquinas_liberacoes(motoboy_codigo)
+    WHERE consumida = false
+  `).catch(() => {});
+  console.log('✅ Índices maquinas_liberacoes criados');
 }
 
 module.exports = { initMaquinasTables };

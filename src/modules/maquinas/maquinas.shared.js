@@ -190,8 +190,43 @@ function formatar(r) {
   };
 }
 
+/**
+ * Verifica se existe uma liberação ativa (não consumida) para a movimentação
+ * indicada. Se existir, marca como consumida e retorna true — o saque deve
+ * passar desta vez. Caso contrário retorna false.
+ *
+ * Chamado pelo bloqueio do /withdrawals: se há máquina pendente MAS há
+ * liberação ativa, o admin já autorizou — consome e libera.
+ *
+ * @param {Pool} pool
+ * @param {number} movimentacaoId - id da maquinas_movimentacoes pendente
+ * @returns {Promise<boolean>} true se havia liberação e foi consumida
+ */
+async function consumirLiberacaoSeExistir(pool, movimentacaoId) {
+  if (!movimentacaoId) return false;
+  // UPDATE ... RETURNING garante atomicidade: consome só 1, sem corrida
+  const r = await pool.query(
+    `UPDATE maquinas_liberacoes
+        SET consumida = true, consumida_em = NOW()
+      WHERE id = (
+        SELECT id FROM maquinas_liberacoes
+         WHERE movimentacao_id = $1 AND consumida = false
+         ORDER BY created_at ASC
+         LIMIT 1
+      )
+      RETURNING id`,
+    [movimentacaoId]
+  );
+  if (r.rows.length > 0) {
+    console.log(`🔓 [MAQUINAS] Liberação ${r.rows[0].id} consumida (movimentacao ${movimentacaoId})`);
+    return true;
+  }
+  return false;
+}
+
 module.exports = {
   normalizarNome,
   resolverMotoboyCentral,
   verificarMaquinaPendente,
+  consumirLiberacaoSeExistir,
 };

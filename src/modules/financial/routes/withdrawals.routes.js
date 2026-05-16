@@ -5,7 +5,7 @@
  *    com máquina de pagamento da loja em mãos. Retorna HTTP 423 (Locked).
  */
 const express = require('express');
-const { verificarMaquinaPendente } = require('../../maquinas/maquinas.shared');
+const { verificarMaquinaPendente, consumirLiberacaoSeExistir } = require('../../maquinas/maquinas.shared');
 
 function createWithdrawalsRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, helpers) {
   const router = express.Router();
@@ -199,19 +199,27 @@ router.post('/withdrawals', verificarToken, helpers.withdrawalCreateLimiter, asy
     try {
       const maquinaPendente = await verificarMaquinaPendente(pool, userCod, userName);
       if (maquinaPendente) {
-        client.release();
-        console.log(`🔒 [MÁQUINA PENDENTE] ${userCod} (${userName}) bloqueado — máquina ${maquinaPendente.identificador} ${maquinaPendente.marca} da loja ${maquinaPendente.cliente_nome} desde ${maquinaPendente.despachada_em}`);
-        return res.status(423).json({
-          error: 'maquina_pendente',
-          mensagem: 'Você está com uma máquina da loja em uso. Faça a devolução para acessar seus valores.',
-          maquina: {
-            identificador: maquinaPendente.identificador,
-            marca: maquinaPendente.marca,
-            loja: maquinaPendente.cliente_nome,
-            despachada_em: maquinaPendente.despachada_em,
-            telefone_loja: maquinaPendente.cliente_telefone || null,
-          },
-        });
+        // Antes de barrar: o admin da Central pode ter liberado este saque.
+        // consumirLiberacaoSeExistir marca a liberação como usada (atômico).
+        const liberado = await consumirLiberacaoSeExistir(pool, maquinaPendente.movimentacao_id);
+        if (liberado) {
+          console.log(`✅ [MÁQUINA PENDENTE] ${userCod} tinha máquina mas saque foi LIBERADO pelo admin — prossegue`);
+          // não retorna — deixa o saque seguir o fluxo normal abaixo
+        } else {
+          client.release();
+          console.log(`🔒 [MÁQUINA PENDENTE] ${userCod} (${userName}) bloqueado — máquina ${maquinaPendente.identificador} ${maquinaPendente.marca} da loja ${maquinaPendente.cliente_nome} desde ${maquinaPendente.despachada_em}`);
+          return res.status(423).json({
+            error: 'maquina_pendente',
+            mensagem: 'Você está com uma máquina da loja em uso. Faça a devolução para acessar seus valores.',
+            maquina: {
+              identificador: maquinaPendente.identificador,
+              marca: maquinaPendente.marca,
+              loja: maquinaPendente.cliente_nome,
+              despachada_em: maquinaPendente.despachada_em,
+              telefone_loja: maquinaPendente.cliente_telefone || null,
+            },
+          });
+        }
       }
     } catch (errMaq) {
       // Falha do check NÃO bloqueia o saque — apenas loga (fail-open por escolha)
