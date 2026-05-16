@@ -105,6 +105,22 @@ async function initAuthTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_used_2fa_used_at ON used_2fa_codes(used_at)`);
 
   console.log('✅ Tabelas de 2FA verificadas');
+
+  // ==================== CADASTRO DO MOTOBOY (2026-05) ====================
+  // 🆕 Atualização cadastral obrigatória: selfie + WhatsApp.
+  // O motoboy (role='user') só acessa a Central após completar.
+  //   - foto_selfie         → imagem base64/data URL (mesmo padrão de solicitação)
+  //   - whatsapp            → número validado via Evolution
+  //   - cadastro_completo   → false enquanto não enviou os dois
+  //   - cadastro_completo_em → quando concluiu
+  await pool.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS foto_selfie TEXT,
+      ADD COLUMN IF NOT EXISTS whatsapp VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS cadastro_completo BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS cadastro_completo_em TIMESTAMP
+  `).catch(e => console.log('⚠️ Colunas de cadastro em users:', e.message));
+  console.log('✅ Colunas de cadastro do motoboy verificadas em users');
 }
 
 module.exports = { initAuthTables };

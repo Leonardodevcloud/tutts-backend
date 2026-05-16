@@ -61,6 +61,8 @@ const { initRoteirizadorRoutes, initRoteirizadorTables } = require('./src/module
 const { initFilasRoutes, initFilasTables } = require('./src/modules/filas');
 const { initConfigRoutes, initConfigTables } = require('./src/modules/config');
 const { initAuthRoutes, initAuthTables } = require('./src/modules/auth');
+// 🆕 2026-05: módulo perfil — cadastro obrigatório do motoboy (selfie + WhatsApp)
+const { createPerfilRoutes } = require('./src/modules/perfil');
 const { initDisponibilidadeRoutes, initDisponibilidadeTables } = require('./src/modules/disponibilidade');
 const { initFinancialRoutes, initFinancialTables } = require('./src/modules/financial');
 const { initSolicitacaoRoutes, initSolicitacaoTables } = require('./src/modules/solicitacao');
@@ -520,6 +522,8 @@ app.use('/api', initDisponibilidadeRoutes(pool, verificarToken));
 app.use('/api', initFinancialRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP));
 app.use('/api', initSolicitacaoRoutes(pool, verificarToken));
 app.use('/api', initMaquinasRoutes(pool, verificarToken));
+// 🆕 2026-05: cadastro obrigatório do motoboy (selfie + WhatsApp)
+app.use('/api', createPerfilRoutes(pool, verificarToken));
 app.use('/api', initColetaEnderecosRoutes(pool, verificarToken));
 // 🚀 PERFORMANCE FIX (2026-05): rate limiter específico pra BI (60 req/min/IP)
 // Endpoints BI são caros pro Neon — limite agressivo bloqueia scrapers/bots

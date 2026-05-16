@@ -496,7 +496,7 @@ router.post('/users/login', loginLimiter, async (req, res) => {
 
     // Buscar usuário no banco
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, password, setor_id, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      'SELECT id, cod_profissional, full_name, role, password, setor_id, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs, COALESCE(cadastro_completo, false) as cadastro_completo FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
@@ -667,7 +667,8 @@ router.post('/users/refresh-token', async (req, res) => {
     const result = await pool.query(
       `SELECT id, cod_profissional, full_name, role, setor_id, 
               COALESCE(allowed_modules, '[]') as allowed_modules, 
-              COALESCE(allowed_tabs, '{}') as allowed_tabs 
+              COALESCE(allowed_tabs, '{}') as allowed_tabs,
+              COALESCE(cadastro_completo, false) as cadastro_completo
        FROM users WHERE id = $1`,
       [decoded.id]
     );
@@ -727,7 +728,8 @@ router.post('/users/refresh-token', async (req, res) => {
         role: user.role,
         setor_id: user.setor_id,
         allowed_modules: user.allowed_modules,
-        allowed_tabs: user.allowed_tabs
+        allowed_tabs: user.allowed_tabs,
+        cadastro_completo: user.cadastro_completo === true
       }
     });
   } catch (error) {
@@ -1004,7 +1006,8 @@ router.post('/users/2fa/authenticate', async (req, res) => {
     const userResult = await pool.query(
       `SELECT id, cod_profissional, full_name, role, setor_id, 
               COALESCE(allowed_modules, '[]') as allowed_modules, 
-              COALESCE(allowed_tabs, '{}') as allowed_tabs 
+              COALESCE(allowed_tabs, '{}') as allowed_tabs,
+              COALESCE(cadastro_completo, false) as cadastro_completo
        FROM users WHERE id = $1`,
       [userId]
     );
