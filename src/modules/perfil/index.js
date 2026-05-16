@@ -9,6 +9,7 @@
  *   GET  /api/perfil/status-cadastro   → estado atual (lê do banco)
  *   POST /api/perfil/validar-whatsapp  → confere se o número tem WhatsApp
  *   POST /api/perfil/completar-cadastro → salva selfie + whatsapp, libera acesso
+ *   GET  /api/perfil/fotos?codigos=... → mapa cod→thumbnail (pra listas admin)
  */
 
 'use strict';
@@ -19,6 +20,31 @@ const {
   validarFormatoBR,
   validarWhatsApp,
 } = require('../solicitacao/whatsapp-rastreio.service');
+
+// sharp é usado pra gerar a miniatura da selfie (já é dependência do projeto)
+let sharp = null;
+try { sharp = require('sharp'); } catch (e) { console.warn('⚠️ [PERFIL] sharp indisponível — thumbnails desativados'); }
+
+/**
+ * Gera uma miniatura (~96px, JPEG) a partir de uma data URL base64.
+ * Retorna a data URL da miniatura, ou null se falhar / sharp ausente.
+ * Usada nas listas de admin — muito mais leve que a foto cheia.
+ */
+async function gerarThumbnail(dataUrl) {
+  if (!sharp || !dataUrl) return null;
+  try {
+    const base64 = String(dataUrl).replace(/^data:image\/[a-z]+;base64,/, '');
+    const buf = Buffer.from(base64, 'base64');
+    const out = await sharp(buf)
+      .resize(96, 96, { fit: 'cover' })
+      .jpeg({ quality: 70 })
+      .toBuffer();
+    return 'data:image/jpeg;base64,' + out.toString('base64');
+  } catch (err) {
+    console.warn('⚠️ [PERFIL] gerarThumbnail falhou:', err.message);
+    return null;
+  }
+}
 
 function createPerfilRoutes(pool, verificarToken) {
   const router = express.Router();
@@ -118,15 +144,19 @@ function createPerfilRoutes(pool, verificarToken) {
       }
       // Se Evolution estiver fora, segue (não trava o cadastro do motoboy)
 
-      // 4. Salva tudo
+      // 4. Gera a miniatura (best-effort — se falhar, salva sem thumb)
+      const thumb = await gerarThumbnail(foto_selfie);
+
+      // 5. Salva tudo
       await pool.query(
         `UPDATE users
             SET foto_selfie = $1,
-                whatsapp = $2,
+                foto_thumb = $2,
+                whatsapp = $3,
                 cadastro_completo = true,
                 cadastro_completo_em = NOW()
-          WHERE id = $3`,
-        [foto_selfie, numeroNormalizado, req.user.id]
+          WHERE id = $4`,
+        [foto_selfie, thumb, numeroNormalizado, req.user.id]
       );
 
       console.log(`✅ [PERFIL] Cadastro completo — ${req.user.nome} (cod ${req.user.codProfissional}) — WhatsApp ${numeroNormalizado}`);
@@ -135,6 +165,77 @@ function createPerfilRoutes(pool, verificarToken) {
     } catch (err) {
       console.error('❌ [PERFIL] completar-cadastro:', err.message);
       res.status(500).json({ error: 'Erro ao salvar cadastro', detalhe: err.message });
+    }
+  });
+
+  // ── GET /perfil/fotos?codigos=123,456 ──────────────────────────
+  // Retorna mapa { cod_profissional: thumbnail } dos motoboys pedidos.
+  // Usado pelas listas de admin (Usuários, Saques) pra mostrar a foto.
+  // Geração lazy: quem completou o cadastro antes do thumb existir tem
+  // só foto_selfie — aqui geramos a miniatura na hora e salvamos.
+  router.get('/perfil/fotos', verificarToken, async (req, res) => {
+    try {
+      const raw = String(req.query.codigos || '').trim();
+      if (!raw) return res.json({ fotos: {} });
+
+      // sanitiza: só dígitos, máximo 200 códigos por chamada
+      const codigos = raw.split(',')
+        .map(c => c.trim())
+        .filter(c => /^\d+$/.test(c))
+        .slice(0, 200);
+      if (codigos.length === 0) return res.json({ fotos: {} });
+
+      const r = await pool.query(
+        `SELECT cod_profissional, foto_thumb, foto_selfie
+           FROM users
+          WHERE cod_profissional = ANY($1::text[])
+            AND (foto_thumb IS NOT NULL OR foto_selfie IS NOT NULL)`,
+        [codigos]
+      );
+
+      const fotos = {};
+      for (const row of r.rows) {
+        if (row.foto_thumb) {
+          fotos[row.cod_profissional] = row.foto_thumb;
+        } else if (row.foto_selfie) {
+          // retroativo: gera o thumb agora e persiste pra não repetir
+          const thumb = await gerarThumbnail(row.foto_selfie);
+          if (thumb) {
+            fotos[row.cod_profissional] = thumb;
+            pool.query(
+              `UPDATE users SET foto_thumb = $1 WHERE cod_profissional = $2`,
+              [thumb, row.cod_profissional]
+            ).catch(() => {});
+          } else {
+            // sharp indisponível — devolve a foto cheia mesmo
+            fotos[row.cod_profissional] = row.foto_selfie;
+          }
+        }
+      }
+      res.json({ fotos });
+    } catch (err) {
+      console.error('❌ [PERFIL] fotos:', err.message);
+      res.status(500).json({ error: 'Erro ao buscar fotos', detalhe: err.message });
+    }
+  });
+
+  // ── GET /perfil/foto/:codProfissional ──────────────────────────
+  // Foto CHEIA de um motoboy (ex: admin clica pra ver grande).
+  router.get('/perfil/foto/:codProfissional', verificarToken, async (req, res) => {
+    try {
+      const cod = String(req.params.codProfissional || '').trim();
+      if (!/^\d+$/.test(cod)) return res.status(400).json({ error: 'Código inválido' });
+      const r = await pool.query(
+        `SELECT foto_selfie FROM users WHERE cod_profissional = $1`,
+        [cod]
+      );
+      if (r.rows.length === 0 || !r.rows[0].foto_selfie) {
+        return res.status(404).json({ error: 'Sem foto' });
+      }
+      res.json({ foto: r.rows[0].foto_selfie });
+    } catch (err) {
+      console.error('❌ [PERFIL] foto:', err.message);
+      res.status(500).json({ error: 'Erro ao buscar foto', detalhe: err.message });
     }
   });
 

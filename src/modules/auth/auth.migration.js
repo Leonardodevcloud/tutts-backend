@@ -110,12 +110,14 @@ async function initAuthTables(pool) {
   // 🆕 Atualização cadastral obrigatória: selfie + WhatsApp.
   // O motoboy (role='user') só acessa a Central após completar.
   //   - foto_selfie         → imagem base64/data URL (mesmo padrão de solicitação)
+  //   - foto_thumb          → miniatura ~96px da selfie (pra listas, leve)
   //   - whatsapp            → número validado via Evolution
   //   - cadastro_completo   → false enquanto não enviou os dois
   //   - cadastro_completo_em → quando concluiu
   await pool.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS foto_selfie TEXT,
+      ADD COLUMN IF NOT EXISTS foto_thumb TEXT,
       ADD COLUMN IF NOT EXISTS whatsapp VARCHAR(20),
       ADD COLUMN IF NOT EXISTS cadastro_completo BOOLEAN DEFAULT false,
       ADD COLUMN IF NOT EXISTS cadastro_completo_em TIMESTAMP
