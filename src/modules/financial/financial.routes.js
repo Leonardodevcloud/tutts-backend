@@ -1524,8 +1524,13 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
     
     // Caso 1: Filtro por data (aba validação/conciliação) — SEM LIMIT
     if (comFiltroData) {
+      // 🆕 2026-05 FIX: 'aprovacao' → approved_at. A aba Conciliação mostra
+      // "Realizado" a partir de approved_at; o filtro "Data Realização" tem
+      // que bater nessa MESMA coluna (antes usava 'lancamento' → lancamento_at,
+      // que pode divergir de approved_at em re-lançamentos → linhas "vazavam").
       const coluna = tipoFiltro === 'lancamento' ? 'w.lancamento_at' 
                    : tipoFiltro === 'debito' ? 'w.debito_plific_at' 
+                   : (tipoFiltro === 'aprovacao' || tipoFiltro === 'realizacao') ? 'w.approved_at'
                    : 'w.created_at';
       
       if (status) {
