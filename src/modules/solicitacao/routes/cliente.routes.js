@@ -5,6 +5,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
+const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -419,6 +420,55 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       }
     }
     
+    // 🚀 RASTREIO AUTOMÁTICO (2026-05): se a OS foi criada com sucesso, envia
+    // o link de rastreamento pro WhatsApp do cliente do ponto de entrega.
+    // Best-effort — nunca derruba a criação da OS.
+    if (resultado.Sucesso) {
+      try {
+        // Busca a OS já atualizada (URL de rastreio pode ter vindo no UPDATE de status)
+        const osRow = await pool.query(
+          `SELECT tutts_url_rastreamento, tutts_os_numero FROM solicitacoes_corrida WHERE id = $1`,
+          [solicitacaoId]
+        );
+        const urlRastreio = osRow.rows[0]?.tutts_url_rastreamento
+          || resultado.detalhes?.urlRastreamento
+          || null;
+
+        // Pega o ÚLTIMO ponto (entrega final) com telefone preenchido
+        const pontoRow = await pool.query(
+          `SELECT telefone, nome_fantasia, procurar_por
+             FROM solicitacoes_pontos
+            WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
+            ORDER BY ordem DESC
+            LIMIT 1`,
+          [solicitacaoId]
+        );
+        const ponto = pontoRow.rows[0];
+
+        if (urlRastreio && ponto && ponto.telefone) {
+          const envio = await enviarRastreioCliente({
+            telefone: ponto.telefone,
+            nomeFantasia: ponto.nome_fantasia || null,
+            nomeCliente: ponto.procurar_por || null,
+            osNumero: resultado.Sucesso,
+            urlRastreamento: urlRastreio,
+          });
+          // Registra o resultado do envio na própria OS (auditoria leve)
+          await pool.query(
+            `UPDATE solicitacoes_corrida
+                SET rastreio_enviado = $1, rastreio_enviado_em = CASE WHEN $1 THEN NOW() ELSE NULL END
+              WHERE id = $2`,
+            [!!envio.enviado, solicitacaoId]
+          ).catch(() => {});
+          console.log(`📨 [rastreio-auto] OS ${resultado.Sucesso}: ${envio.enviado ? 'enviado' : 'falhou (' + envio.motivo + ')'}`);
+        } else {
+          console.log(`📭 [rastreio-auto] OS ${resultado.Sucesso}: sem ${!urlRastreio ? 'URL de rastreio' : 'telefone do cliente'} — envio pulado`);
+        }
+      } catch (errRastreio) {
+        console.warn('⚠️ [rastreio-auto] erro não-crítico:', errRastreio.message);
+      }
+    }
+
     res.json({
       sucesso: true,
       solicitacao_id: solicitacaoId,
@@ -430,6 +480,81 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
   } catch (err) {
     console.error('❌ Erro ao solicitar corrida:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao solicitar corrida', detalhe: err.message });
+  }
+});
+
+// 🚀 VALIDAR WHATSAPP (2026-05): chamado no blur do campo telefone na aba Nova
+// Retorna { numero, tem_whatsapp, formato_ok, motivo }
+router.post('/solicitacao/validar-whatsapp', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const { telefone } = req.body;
+    if (!telefone) return res.status(400).json({ error: 'telefone obrigatório' });
+    const resultado = await validarWhatsApp(telefone);
+    res.json(resultado);
+  } catch (err) {
+    console.error('❌ [validar-whatsapp]', err.message);
+    res.status(500).json({ error: 'Erro ao validar', detalhe: err.message });
+  }
+});
+
+// 🚀 REENVIAR RASTREIO (2026-05): botão manual na aba Ativas
+router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const solicitacaoId = parseInt(req.params.id, 10);
+    if (isNaN(solicitacaoId)) return res.status(400).json({ error: 'ID inválido' });
+
+    // OS precisa pertencer a este cliente
+    const osRow = await pool.query(
+      `SELECT id, tutts_url_rastreamento, tutts_os_numero
+         FROM solicitacoes_corrida
+        WHERE id = $1 AND cliente_id = $2`,
+      [solicitacaoId, req.clienteSolicitacao.id]
+    );
+    if (osRow.rows.length === 0) return res.status(404).json({ error: 'Solicitação não encontrada' });
+    const os = osRow.rows[0];
+
+    if (!os.tutts_url_rastreamento) {
+      return res.status(409).json({ error: 'Esta OS ainda não tem link de rastreamento disponível' });
+    }
+
+    // Permite sobrescrever o telefone (caso o atendente queira corrigir no reenvio)
+    let telefoneDestino = req.body.telefone;
+    let nomeFantasia = null, nomeCliente = null;
+    if (!telefoneDestino) {
+      const pontoRow = await pool.query(
+        `SELECT telefone, nome_fantasia, procurar_por
+           FROM solicitacoes_pontos
+          WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
+          ORDER BY ordem DESC LIMIT 1`,
+        [solicitacaoId]
+      );
+      if (pontoRow.rows.length === 0) {
+        return res.status(409).json({ error: 'Nenhum telefone cadastrado nesta entrega' });
+      }
+      telefoneDestino = pontoRow.rows[0].telefone;
+      nomeFantasia = pontoRow.rows[0].nome_fantasia;
+      nomeCliente = pontoRow.rows[0].procurar_por;
+    }
+
+    const envio = await enviarRastreioCliente({
+      telefone: telefoneDestino,
+      nomeFantasia,
+      nomeCliente,
+      osNumero: os.tutts_os_numero,
+      urlRastreamento: os.tutts_url_rastreamento,
+    });
+
+    if (envio.enviado) {
+      await pool.query(
+        `UPDATE solicitacoes_corrida SET rastreio_enviado = true, rastreio_enviado_em = NOW() WHERE id = $1`,
+        [solicitacaoId]
+      ).catch(() => {});
+      return res.json({ ok: true, numero: envio.numero });
+    }
+    res.status(502).json({ error: 'Falha ao enviar', motivo: envio.motivo, detalhe: envio.detalhe });
+  } catch (err) {
+    console.error('❌ [enviar-rastreio]', err.message);
+    res.status(500).json({ error: 'Erro ao enviar rastreio', detalhe: err.message });
   }
 });
 

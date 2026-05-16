@@ -220,6 +220,17 @@ async function initSolicitacaoTables(pool) {
     `).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_webhook_logs_os ON webhook_tutts_logs(os_numero)`).catch(() => {});
     console.log('✅ Tabela webhook_tutts_logs verificada');
+
+    // 🚀 2026-05: rastreamento de envio do link pro cliente (WhatsApp)
+    await pool.query(`
+      ALTER TABLE solicitacoes_corrida
+      ADD COLUMN IF NOT EXISTS rastreio_enviado BOOLEAN DEFAULT false
+    `).catch(e => console.log('⚠️ rastreio_enviado:', e.message));
+    await pool.query(`
+      ALTER TABLE solicitacoes_corrida
+      ADD COLUMN IF NOT EXISTS rastreio_enviado_em TIMESTAMP
+    `).catch(e => console.log('⚠️ rastreio_enviado_em:', e.message));
+    console.log('✅ Colunas rastreio_enviado verificadas');
 }
 
 module.exports = { initSolicitacaoTables };
