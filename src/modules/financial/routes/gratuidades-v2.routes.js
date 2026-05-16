@@ -23,6 +23,8 @@
 'use strict';
 
 const express = require('express');
+// 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
+const { TZ_NEGOCIO, sqlDataInicio, sqlDataFim } = require('../financial.shared');
 
 function createGratuidadesV2Routes(
   pool,
@@ -97,30 +99,34 @@ function createGratuidadesV2Routes(
         i++;
       }
 
-      // Período
-      let dataInicio = null;
-      let dataFimResolvido = null;
-      if (dataIni) dataInicio = new Date(dataIni);
-      if (dataFim) dataFimResolvido = new Date(dataFim);
-      if (!dataInicio && periodo) {
-        const agora = new Date();
-        if (periodo === 'hoje') {
-          dataInicio = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
-        } else if (periodo === 'semana') {
-          const d = new Date(agora); d.setDate(d.getDate() - 7); dataInicio = d;
-        } else if (periodo === 'mes') {
-          dataInicio = new Date(agora.getFullYear(), agora.getMonth(), 1);
-        } else if (periodo === '30d') {
-          const d = new Date(agora); d.setDate(d.getDate() - 30); dataInicio = d;
-        }
+      // ── Período / filtro de datas ──────────────────────────────────────
+      // 🆕 2026-05: datas tratadas no fuso de Salvador/BA (helpers sqlData*).
+      // Corrige (1) o mix de D±1 e (2) o bug do dataFim que, com `<=`, excluía
+      // os registros do próprio dia final (qualquer hora > 00:00).
+      const hojeLocal = new Date().toLocaleDateString('en-CA', { timeZone: TZ_NEGOCIO }); // 'YYYY-MM-DD'
+      const menosDias = (n) => {
+        const d = new Date(hojeLocal + 'T12:00:00Z');
+        d.setUTCDate(d.getUTCDate() - n);
+        return d.toISOString().slice(0, 10);
+      };
+
+      let dataIniStr = dataIni ? String(dataIni).slice(0, 10) : null;
+      const dataFimStr = dataFim ? String(dataFim).slice(0, 10) : null;
+
+      if (!dataIniStr && periodo) {
+        if (periodo === 'hoje')        dataIniStr = hojeLocal;
+        else if (periodo === 'semana') dataIniStr = menosDias(7);
+        else if (periodo === 'mes')    dataIniStr = hojeLocal.slice(0, 7) + '-01';
+        else if (periodo === '30d')    dataIniStr = menosDias(30);
       }
-      if (dataInicio) {
-        conds.push(`created_at >= $${i++}`);
-        params.push(dataInicio.toISOString());
+
+      if (dataIniStr) {
+        conds.push(sqlDataInicio('created_at', i++));
+        params.push(dataIniStr);
       }
-      if (dataFimResolvido) {
-        conds.push(`created_at <= $${i++}`);
-        params.push(dataFimResolvido.toISOString());
+      if (dataFimStr) {
+        conds.push(sqlDataFim('created_at', i++));
+        params.push(dataFimStr);
       }
 
       const whereSql = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';

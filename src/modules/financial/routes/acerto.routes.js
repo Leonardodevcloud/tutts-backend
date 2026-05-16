@@ -16,6 +16,8 @@
 const express = require('express');
 const XLSX = require('xlsx');
 const crypto = require('crypto');
+// 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
+const { sqlDataInicio, sqlDataFim } = require('../financial.shared');
 
 // ==================== VALIDAÇÃO DE FORMATO PIX ====================
 function validarFormatoPix(chave) {
@@ -1049,14 +1051,14 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         where += " AND l.status != 'aguardando'";
       }
 
-      // Filtro por data
+      // Filtro por data — 🆕 2026-05: correção de fuso (Salvador/BA)
       if (data_inicio) {
         params.push(data_inicio);
-        where += ' AND l.created_at >= $' + params.length + '::date';
+        where += ' AND ' + sqlDataInicio('l.created_at', params.length);
       }
       if (data_fim) {
         params.push(data_fim);
-        where += ' AND l.created_at < ($' + params.length + "::date + interval '1 day')";
+        where += ' AND ' + sqlDataFim('l.created_at', params.length);
       }
 
       // Filtro por lote específico

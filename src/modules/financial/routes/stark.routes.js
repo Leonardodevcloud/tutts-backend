@@ -15,6 +15,8 @@
  */
 
 const express = require('express');
+// 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
+const { sqlDataInicio, sqlDataFim } = require('../financial.shared');
 
 // 📱 WhatsApp — import seguro (não derruba o backend se falhar)
 let notificarLoteGerado, notificarLoteFinalizado, enviarMensagemWhatsApp, notificarResumoDiario, LIMIAR_SAQUE_DESTAQUE;
@@ -336,11 +338,11 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
 
       if (data_inicio) {
         params.push(data_inicio);
-        whereExtra += ' AND w.approved_at >= $' + params.length + '::date';
+        whereExtra += ' AND ' + sqlDataInicio('w.approved_at', params.length);
       }
       if (data_fim) {
         params.push(data_fim);
-        whereExtra += ' AND w.approved_at < ($' + params.length + '::date + interval \'1 day\')';
+        whereExtra += ' AND ' + sqlDataFim('w.approved_at', params.length);
       }
 
       // Buscar APENAS saques marcados como 'em_lote' (marcados via /stark/lote/marcar)
@@ -1520,7 +1522,7 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
     try {
       const dataAlvo = req.query.data || new Date().toISOString().split('T')[0];
 
-      // Mesma lógica do endpoint /withdrawals (UTC, sem conversão de timezone)
+      // 🆕 2026-05: filtro de data com correção de fuso (Salvador/BA)
       const resumo = await pool.query(`
         SELECT 
           COUNT(*) as total_recebidas,
@@ -1531,8 +1533,8 @@ function createStarkRoutes(pool, verificarToken, verificarAdminOuFinanceiro, reg
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado' OR (status = 'pago_stark' AND has_gratuity = false)), 0) as valor_sem_gratuidade,
           COALESCE(SUM(requested_amount) FILTER (WHERE status = 'aprovado_gratuidade' OR (status = 'pago_stark' AND has_gratuity = true)), 0) as valor_com_gratuidade
         FROM withdrawal_requests
-        WHERE created_at >= $1::date
-          AND created_at < ($1::date + INTERVAL '1 day')
+        WHERE ${sqlDataInicio('created_at', 1)}
+          AND ${sqlDataFim('created_at', 1)}
       `, [dataAlvo]);
 
       const r = resumo.rows[0];

@@ -5,6 +5,8 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+// 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
+const { sqlDataInicio, sqlDataFim } = require('./financial.shared');
 
 function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP) {
   const router = express.Router();
@@ -622,12 +624,12 @@ router.get('/withdrawals/historico', verificarToken, verificarAdminOuFinanceiro,
     
     if (data_inicio) {
       params.push(data_inicio);
-      whereConditions.push(`w.created_at >= $${params.length}::date`);
+      whereConditions.push(sqlDataInicio('w.created_at', params.length));
     }
     
     if (data_fim) {
       params.push(data_fim);
-      whereConditions.push(`w.created_at <= $${params.length}::date + interval '1 day'`);
+      whereConditions.push(sqlDataFim('w.created_at', params.length));
     }
     
     const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
@@ -1533,7 +1535,7 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
             r.reason as restriction_reason
           FROM withdrawal_requests w
           LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-          WHERE w.status = $1 AND ${coluna} >= $2::date AND ${coluna} < ($3::date + INTERVAL '1 day')
+          WHERE w.status = $1 AND ${sqlDataInicio(coluna, 2)} AND ${sqlDataFim(coluna, 3)}
           ORDER BY w.created_at DESC
         `;
         params = [status, dataInicio, dataFim];
@@ -1544,7 +1546,7 @@ router.get('/withdrawals', verificarToken, verificarAdminOuFinanceiro, async (re
             r.reason as restriction_reason
           FROM withdrawal_requests w
           LEFT JOIN restricted_professionals r ON w.user_cod = r.user_cod AND r.status = 'ativo'
-          WHERE ${coluna} >= $1::date AND ${coluna} < ($2::date + INTERVAL '1 day')
+          WHERE ${sqlDataInicio(coluna, 1)} AND ${sqlDataFim(coluna, 2)}
           ORDER BY w.created_at DESC
         `;
         params = [dataInicio, dataFim];
@@ -2077,11 +2079,18 @@ router.post('/gratuities', verificarToken, verificarAdminOuFinanceiro, async (re
       ? String(req.body.reason).trim().toUpperCase().slice(0, 500) || null
       : null;
 
+    // 🆕 2026-05 FIX: o front manda createdBy=null de propósito (esperava que o
+    // backend resolvesse pelo req.user). Sem este fallback, a coluna ficava NULL
+    // e a listagem mostrava "—" em "Cadastrado por". Agora cai no usuário logado.
+    const cadastradoPor = (createdBy && String(createdBy).trim())
+      || (req.user && (req.user.nome || req.user.codProfissional))
+      || null;
+
     const result = await pool.query(
       `INSERT INTO gratuities (user_cod, user_name, quantity, remaining, value, reason, status, created_by) 
        VALUES ($1, $2, $3, $4, $5, $6, 'ativa', $7) 
        RETURNING *`,
-      [userCod, userName || null, quantity, quantity, value, reason, createdBy || null]
+      [userCod, userName || null, quantity, quantity, value, reason, cadastradoPor]
     );
 
     res.status(201).json(result.rows[0]);

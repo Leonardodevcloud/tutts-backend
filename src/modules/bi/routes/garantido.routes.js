@@ -532,9 +532,15 @@ router.get('/bi/garantido/semanal', async (req, res) => {
 });
 
 // GET /api/bi/garantido/por-cliente - Resumo por cliente do garantido
+// 🆕 2026-05 FIX (Bug 3): o frontend renderCliente() espera
+//   { dados: [ { cod_cliente_garantido, nome_cliente_garantido, profissionais: [...] } ] }
+// O endpoint antigo devolvia { dados: [ { onde_rodou, negociado, produzido, complemento } ] }
+// — sem `cod_cliente_garantido` e sem `profissionais`. Resultado: cabeçalho "Cliente"
+// sem código e tabela vazia (c.profissionais?.map → undefined). Agora monta a quebra
+// por profissional, agrupada por cliente.
 router.get('/bi/garantido/por-cliente', async (req, res) => {
   try {
-    const { data_inicio, data_fim } = req.query;
+    const { data_inicio, data_fim, cod_cliente, cod_prof } = req.query;
     
     // Buscar dados da planilha
     const sheetUrl = 'https://docs.google.com/spreadsheets/d/1ohUOrfXmhEQ9jD_Ferzd1pAE5w2PhJTJumd6ILAeehE/export?format=csv';
@@ -599,7 +605,8 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       mascaras[String(m.cod_cliente)] = m.mascara;
     });
     
-    // Agrupar por cliente do garantido
+    // Agrupar: cliente → profissional
+    // porCliente[codCliente] = { cod, nome, profs: { profKey: {...} } }
     const porCliente = {};
     const chavesProcessadas = new Set();
     
@@ -608,6 +615,7 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       const cols = parseCSVLine(line);
       const codCliente = cols[0];
       const dataStr = cols[1];
+      const profissionalNome = cols[2] || '(Vazio)';
       const codProf = cols[3] || '';
       const valorNegociado = parseFloat(cols[4]?.replace(',', '.')) || 0;
       const statusPlanilha = (cols[5] || '').trim().toLowerCase();
@@ -627,73 +635,94 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
+      // Filtros
       if (data_inicio && dataFormatada < data_inicio) continue;
       if (data_fim && dataFormatada > data_fim) continue;
+      if (cod_cliente && String(codCliente) !== String(cod_cliente)) continue;
+      if (cod_prof && String(codProf) !== String(cod_prof)) continue;
       
-      // Buscar produção TOTAL do profissional no dia
-      // E também o centro de custo onde rodou (para cliente 767)
+      // Buscar produção TOTAL do profissional no dia (mesma lógica do /bi/garantido)
       let valorProduzido = 0;
-      let centroCusto = null;
+      let entregas = 0;
       
       if (codProf) {
         const producaoResult = await pool.query(`
           SELECT 
             COALESCE(SUM(valor_os), 0) as valor_produzido,
-            MAX(centro_custo) as centro_custo
+            COALESCE(SUM(entregas_os), 0) as total_entregas
           FROM (
             SELECT 
               os, 
               MAX(CASE WHEN COALESCE(ponto, 1) >= 2 THEN valor_prof ELSE 0 END) as valor_os,
-              MAX(centro_custo) as centro_custo
+              COUNT(*) FILTER (WHERE COALESCE(ponto, 1) >= 2) as entregas_os
             FROM bi_entregas
             WHERE cod_prof = $1 AND data_solicitado::date = $2::date
             GROUP BY os
           ) os_dados
         `, [parseInt(codProf), dataFormatada]);
         valorProduzido = parseFloat(producaoResult.rows[0]?.valor_produzido) || 0;
-        centroCusto = producaoResult.rows[0]?.centro_custo;
+        entregas = parseInt(producaoResult.rows[0]?.total_entregas) || 0;
       }
       
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
-      // Determinar a chave de agrupamento
-      // Cliente 949: agrupa apenas pelo cliente (exceção)
-      // Todos os outros: cod_cliente - nome_cliente (ou máscara) - centro_custo
-      let clienteKey;
-      const nomeCliente = mascaras[codCliente] || clientesNomes[codCliente] || `Cliente ${codCliente}`;
-      
-      if (codCliente === '949') {
-        clienteKey = `${codCliente} - ${nomeCliente}`;
-      } else if (centroCusto) {
-        clienteKey = `${codCliente} - ${nomeCliente} - ${centroCusto}`;
-      } else {
-        clienteKey = `${codCliente} - ${nomeCliente}`;
+      // Cliente (agrupa pelo código — 1 card por cliente, como o renderCliente espera)
+      const codClienteKey = String(codCliente || 'sem_cliente');
+      if (!porCliente[codClienteKey]) {
+        porCliente[codClienteKey] = {
+          cod_cliente_garantido: codCliente || '',
+          nome_cliente_garantido: mascaras[codCliente] || clientesNomes[codCliente] || '',
+          profs: {},
+        };
       }
       
-      if (!porCliente[clienteKey]) {
-        porCliente[clienteKey] = { negociado: 0, produzido: 0, complemento: 0 };
+      // Profissional dentro do cliente (agrega todos os dias do período)
+      const profKey = codProf || `nome:${profissionalNome}`;
+      const prof = porCliente[codClienteKey].profs;
+      if (!prof[profKey]) {
+        prof[profKey] = {
+          profissional: profissionalNome,
+          cod_prof: codProf,
+          entregas: 0,
+          valor_negociado: 0,
+          valor_produzido: 0,
+          complemento: 0,
+        };
       }
-      
-      porCliente[clienteKey].negociado += valorNegociado;
-      porCliente[clienteKey].produzido += valorProduzido;
-      porCliente[clienteKey].complemento += complemento;
+      prof[profKey].entregas       += entregas;
+      prof[profKey].valor_negociado += valorNegociado;
+      prof[profKey].valor_produzido += valorProduzido;
+      prof[profKey].complemento     += complemento; // complemento por dia, somado
     }
     
-    // Formatar e calcular totais
-    const resultado = Object.entries(porCliente)
-      .map(([cliente, valores]) => ({
-        onde_rodou: cliente,
-        ...valores
-      }))
-      .sort((a, b) => b.complemento - a.complemento);
+    // Formatar saída no shape esperado pelo frontend
+    const dados = Object.values(porCliente)
+      .map(c => {
+        const profissionais = Object.values(c.profs)
+          .sort((a, b) => b.complemento - a.complemento);
+        return {
+          cod_cliente_garantido: c.cod_cliente_garantido,
+          nome_cliente_garantido: c.nome_cliente_garantido,
+          profissionais,
+          // agregados do cliente (úteis pra exibir total no card, se quiser)
+          total_entregas: profissionais.reduce((s, p) => s + p.entregas, 0),
+          total_negociado: profissionais.reduce((s, p) => s + p.valor_negociado, 0),
+          total_produzido: profissionais.reduce((s, p) => s + p.valor_produzido, 0),
+          total_complemento: profissionais.reduce((s, p) => s + p.complemento, 0),
+        };
+      })
+      .filter(c => c.profissionais.length > 0)
+      .sort((a, b) => b.total_complemento - a.total_complemento);
     
     const totais = {
-      total_negociado: resultado.reduce((sum, r) => sum + r.negociado, 0),
-      total_produzido: resultado.reduce((sum, r) => sum + r.produzido, 0),
-      total_complemento: resultado.reduce((sum, r) => sum + r.complemento, 0)
+      total_negociado: dados.reduce((s, c) => s + c.total_negociado, 0),
+      total_produzido: dados.reduce((s, c) => s + c.total_produzido, 0),
+      total_complemento: dados.reduce((s, c) => s + c.total_complemento, 0),
     };
     
-    res.json({ dados: resultado, totais });
+    console.log(`📊 Garantido por-cliente: ${dados.length} clientes, ${dados.reduce((s, c) => s + c.profissionais.length, 0)} profissionais`);
+    
+    res.json({ dados, totais });
   } catch (error) {
     console.error('Erro ao buscar garantido por cliente:', error);
     res.status(500).json({ error: 'Erro ao buscar dados por cliente' });
