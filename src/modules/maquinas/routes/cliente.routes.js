@@ -195,6 +195,7 @@ function createMaquinasClienteRoutes(pool, helpers) {
            mm.maquina_id,
            m.identificador,
            m.marca,
+           m.observacao,
            mm.motoboy_codigo,
            mm.motoboy_codigo_tutts,
            mm.motoboy_nome,
@@ -325,7 +326,7 @@ function createMaquinasClienteRoutes(pool, helpers) {
 
       // 1. Validar máquina pertence ao cliente, está ativa, não está em campo
       const mq = await client.query(
-        `SELECT m.id, m.identificador, m.marca, m.ativa,
+        `SELECT m.id, m.identificador, m.marca, m.observacao, m.ativa,
            EXISTS (SELECT 1 FROM maquinas_movimentacoes mm
                    WHERE mm.maquina_id = m.id AND mm.restituida_em IS NULL) AS em_campo
          FROM maquinas m
@@ -390,7 +391,7 @@ function createMaquinasClienteRoutes(pool, helpers) {
         aviso_vinculo: vinculadoCentral
           ? null
           : `${motoboyNomeTutts} não foi encontrado no cadastro da Central. O bloqueio do saque emergencial não vai funcionar pra esse motoboy específico até que ele seja cadastrado.`,
-        maquina: { id: maquinaId, identificador: mq.rows[0].identificador, marca: mq.rows[0].marca },
+        maquina: { id: maquinaId, identificador: mq.rows[0].identificador, marca: mq.rows[0].marca, observacao: mq.rows[0].observacao },
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -443,7 +444,7 @@ function createMaquinasClienteRoutes(pool, helpers) {
           [clienteId]
         ),
         pool.query(
-          `SELECT DISTINCT m.id, m.identificador, m.marca
+          `SELECT DISTINCT m.id, m.identificador, m.marca, m.observacao
              FROM maquinas m
              JOIN maquinas_movimentacoes mm ON mm.maquina_id = m.id
             WHERE m.cliente_id = $1
@@ -489,7 +490,7 @@ function createMaquinasClienteRoutes(pool, helpers) {
 
       const result = await pool.query(
         `SELECT
-           mm.id, mm.maquina_id, m.identificador, m.marca,
+           mm.id, mm.maquina_id, m.identificador, m.marca, m.observacao,
            mm.motoboy_codigo, mm.motoboy_nome,
            mm.despachada_em, mm.despachada_por,
            mm.restituida_em, mm.restituida_por, mm.observacao_restituicao,
