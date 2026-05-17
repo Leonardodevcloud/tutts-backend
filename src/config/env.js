@@ -72,8 +72,7 @@ if (!env.ORS_API_KEY) {
   console.warn('⚠️ ORS_API_KEY não configurada - Roteirizador não funcionará');
 }
 
-if (!env.UBER_CLIENT_ID || !env.UBER_CLIENT_SECRET) {
-  console.warn('⚠️ Credenciais Uber Direct não configuradas - Módulo Uber via config no banco');
-}
+// Fase 6 — credenciais de provider agora vivem em logistics_providers,
+// não em env vars. Aviso de UBER_CLIENT_ID/SECRET removido.
 
 module.exports = env;

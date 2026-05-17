@@ -349,11 +349,11 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
                   eta_minutos, uber_quote_id, uber_delivery_id, tracking_url,
                   endereco_coleta, endereco_entrega, regra_id, tentativas, erro_ultimo,
                   cancelado_por, cancelado_motivo, created_at, updated_at
-           FROM _legacy_uber_entregas ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+           FROM uber_entregas ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
           params
         );
         const { rows: countRows } = await pool.query(
-          `SELECT COUNT(*) AS total FROM _legacy_uber_entregas ${whereSql}`, params);
+          `SELECT COUNT(*) AS total FROM uber_entregas ${whereSql}`, params);
         return res.json({
           success: true,
           total: parseInt(countRows[0].total, 10),
@@ -408,7 +408,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const id = parseInt(req.params.id, 10);
 
       if (LOGISTICS_READ_SOURCE === 'legado') {
-        const { rows } = await pool.query('SELECT * FROM _legacy_uber_entregas WHERE id = $1', [id]);
+        const { rows } = await pool.query('SELECT * FROM uber_entregas WHERE id = $1', [id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
         return res.json({ success: true, entrega: { ...rows[0], provider_code: 'uber' } });
       }
@@ -499,7 +499,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const orch = getDispatchOrchestrator(pool);
 
       // 1. Busca a entrega original
-      const { rows } = await pool.query('SELECT * FROM logistics_deliveries WHERE id = $1', [entregaId]);
+      const { rows } = await pool.query('SELECT * FROM uber_entregas WHERE id = $1', [entregaId]);
       if (rows.length === 0) {
         return res.status(404).json({ error: 'Entrega não encontrada' });
       }
@@ -507,7 +507,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const codigoOS = original.codigo_os;
 
       // 2. Cancela a entrega atual (sem reabrir Mapp ainda — vamos redespachar já)
-      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_native)) {
+      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_uber)) {
         await orch.cancel(entregaId, {
           motivo: motivo || 'Redespacho solicitado',
           canceladoPor: 'operador',

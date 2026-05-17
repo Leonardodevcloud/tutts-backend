@@ -146,7 +146,7 @@ class DispatchRuleMatcher {
     // pra que o Orchestrator continue funcionando independente da fonte.
     try {
       const { rows } = await this.pool.query(`
-        SELECT * FROM _legacy_uber_regras_cliente
+        SELECT * FROM uber_regras_cliente
         WHERE ativo = true AND usar_uber = true
         ORDER BY id ASC
       `);

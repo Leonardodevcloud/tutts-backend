@@ -76,7 +76,7 @@ async function backfillDeliveries(pool) {
   const { rows: existeTabela } = await pool.query(`
     SELECT EXISTS (
       SELECT 1 FROM information_schema.tables
-      WHERE table_schema = current_schema() AND table_name = '_legacy_uber_entregas'
+      WHERE table_schema = current_schema() AND table_name = 'uber_entregas'
     ) AS existe
   `);
 
@@ -86,7 +86,7 @@ async function backfillDeliveries(pool) {
   }
 
   // 2. Conta origem
-  const { rows: [{ total }] } = await pool.query('SELECT COUNT(*)::int AS total FROM _legacy_uber_entregas');
+  const { rows: [{ total }] } = await pool.query('SELECT COUNT(*)::int AS total FROM uber_entregas');
 
   if (total === 0) {
     console.log('ℹ️  [logistics/backfill] uber_entregas vazia — nada a copiar');
@@ -165,7 +165,7 @@ async function backfillDeliveries(pool) {
       ue.cancelado_motivo,
       ue.created_at,
       ue.updated_at
-    FROM _legacy_uber_entregas ue
+    FROM uber_entregas ue
     WHERE NOT EXISTS (
       SELECT 1 FROM logistics_deliveries ld
       WHERE ld.provider_code = 'uber'
@@ -192,7 +192,7 @@ async function backfillDeliveries(pool) {
 async function garantirColunaRegraId(pool) {
   try {
     await pool.query(`
-      ALTER TABLE _legacy_uber_entregas ADD COLUMN IF NOT EXISTS regra_id INTEGER
+      ALTER TABLE uber_entregas ADD COLUMN IF NOT EXISTS regra_id INTEGER
     `);
   } catch (err) {
     // Se uber_entregas não existe, ignora — backfillDeliveries já trata isso

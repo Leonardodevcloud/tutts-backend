@@ -9,9 +9,9 @@
  *  2. ProviderRegistry.get(provider) → adapter
  *  3. adapter.validateWebhookSignature(req) → valida HMAC/auth
  *  4. adapter.parseWebhookEvent(body) → CanonicalEvent
- *  5. Localiza entrega em logistics_deliveries pelo external_delivery_id
+ *  5. Localiza entrega em uber_entregas pelo external_delivery_id
  *  6. IDEMPOTÊNCIA: se status já processado, ignora
- *  7. Atualiza logistics_deliveries
+ *  7. Atualiza uber_entregas
  *  8. Dispara ação Mapp conforme statusCanonico (via STATUS_TO_MAPP_ACTION)
  *  9. Loga tudo em logistics_events
  * 10. adapter.acknowledgeWebhook(res) → resposta no formato que o provider espera
@@ -20,8 +20,7 @@
  *  - uber.service.js:processarWebhookStatus (linhas 944-1033)
  *  - uber.service.js:processarWebhookCourier (linhas 1038-1132)
  *
- * Fase 6: escreve direto em logistics_deliveries (tabela primária do hub).
- * (linha original Opção A — escolha do
+ * IMPORTANTE: este código escreve em uber_entregas (Opção A — escolha do
  * usuário pra Fase 1). Quando a Fase 2 migrar pra logistics_deliveries,
  * só os nomes de tabela/coluna mudam aqui.
  */
@@ -157,7 +156,7 @@ class WebhookDispatcher {
   async _processarEvento(providerCode, adapter, evento) {
     // Localiza a entrega local pelo external_delivery_id
     const { rows } = await this.pool.query(
-      'SELECT * FROM logistics_deliveries WHERE external_delivery_id = $1',
+      'SELECT * FROM uber_entregas WHERE uber_delivery_id = $1',
       [evento.externalDeliveryId]
     );
 
@@ -180,23 +179,23 @@ class WebhookDispatcher {
     const novoStatusCanonico = evento.statusCanonico;
 
     // IDEMPOTÊNCIA: se já processamos esse status, ignora
-    if (entrega.status_native === novoStatusNative) {
+    if (entrega.status_uber === novoStatusNative) {
       console.log(`⊘ [WebhookDispatcher] OS ${codigoOS}: status ${novoStatusNative} duplicado, ignorado`);
       return;
     }
 
-    console.log(`📡 [WebhookDispatcher] OS ${codigoOS}: ${entrega.status_native} → ${novoStatusNative} (${novoStatusCanonico})`);
+    console.log(`📡 [WebhookDispatcher] OS ${codigoOS}: ${entrega.status_uber} → ${novoStatusNative} (${novoStatusCanonico})`);
 
     // Atualiza status local (+ backfill tracking_url se faltava)
     if (evento.trackingUrl && !entrega.tracking_url) {
       await this.pool.query(
-        'UPDATE logistics_deliveries SET status_native = $1, status_canonico = $2, tracking_url = $3, updated_at = NOW() WHERE id = $4',
-        [novoStatusNative, novoStatusCanonico, evento.trackingUrl, entrega.id]
+        'UPDATE uber_entregas SET status_uber = $1, tracking_url = $2, updated_at = NOW() WHERE id = $3',
+        [novoStatusNative, evento.trackingUrl, entrega.id]
       );
     } else {
       await this.pool.query(
-        'UPDATE logistics_deliveries SET status_native = $1, status_canonico = $2, updated_at = NOW() WHERE id = $3',
-        [novoStatusNative, novoStatusCanonico, entrega.id]
+        'UPDATE uber_entregas SET status_uber = $1, updated_at = NOW() WHERE id = $2',
+        [novoStatusNative, entrega.id]
       );
     }
 
@@ -245,7 +244,7 @@ class WebhookDispatcher {
           // DELIVERED → finaliza ponto 2 (auto-finaliza serviço)
           await this.mapp.finalizarEndereco(codigoOS, acao.ponto || 2, lat, lng);
           await this.pool.query(
-            'UPDATE logistics_deliveries SET finalizado_at = NOW(), updated_at = NOW() WHERE id = $1',
+            'UPDATE uber_entregas SET finalizado_at = NOW(), updated_at = NOW() WHERE id = $1',
             [entrega.id]
           );
           break;
@@ -254,8 +253,8 @@ class WebhookDispatcher {
           // CANCELED / RETURNED / FAILED / FALLBACK_QUEUE → reabre na Mapp
           await this.mapp.alterarStatus(codigoOS, acao.status != null ? acao.status : 0);
           await this.pool.query(
-            'UPDATE logistics_deliveries SET cancelado_por = $1, cancelado_motivo = $2, updated_at = NOW() WHERE id = $3',
-            ['provider', `Status: ${evento.statusNative}`, entrega.id]
+            'UPDATE uber_entregas SET cancelado_por = $1, cancelado_motivo = $2, updated_at = NOW() WHERE id = $3',
+            ['uber', `Status: ${evento.statusNative}`, entrega.id]
           );
           break;
 
@@ -270,7 +269,7 @@ class WebhookDispatcher {
     } catch (erro) {
       console.error(`❌ [WebhookDispatcher] erro ação Mapp '${acao.type}' OS ${codigoOS}:`, erro.message);
       await this.pool.query(
-        'UPDATE logistics_deliveries SET erro_ultimo = $1, updated_at = NOW() WHERE id = $2',
+        'UPDATE uber_entregas SET erro_ultimo = $1, updated_at = NOW() WHERE id = $2',
         [`Erro ação ${acao.type}: ${erro.message}`, entrega.id]
       ).catch(() => {});
     }
@@ -285,23 +284,17 @@ class WebhookDispatcher {
     const codigoOS = entrega.codigo_os;
     const courier = evento.courier;
 
-    // Vincula motorista na Mapp se é a primeira vez (entrega ainda sem courier)
-    if (courier?.name && !(entrega.courier_data && entrega.courier_data.name)) {
+    // Vincula motorista na Mapp se é a primeira vez (entrega ainda sem entregador_nome)
+    if (courier?.name && !entrega.entregador_nome) {
       await this.pool.query(`
-        UPDATE logistics_deliveries SET
-          courier_data = $1,
-          status_native = 'entregador_atribuido', status_canonico = 'COURIER_ASSIGNED',
-          updated_at = NOW()
-        WHERE id = $2
+        UPDATE uber_entregas SET
+          entregador_nome = $1, entregador_telefone = $2, entregador_placa = $3,
+          entregador_veiculo = $4, entregador_foto = $5, entregador_rating = $6,
+          status_uber = 'entregador_atribuido', updated_at = NOW()
+        WHERE id = $7
       `, [
-        JSON.stringify({
-          name:    courier.name,
-          phone:   courier.phone,
-          plate:   courier.plate,
-          vehicle: courier.vehicle,
-          photo:   courier.photo,
-          rating:  courier.rating,
-        }),
+        courier.name, courier.phone, courier.plate,
+        courier.vehicle, courier.photo, courier.rating,
         entrega.id,
       ]);
 
@@ -311,9 +304,9 @@ class WebhookDispatcher {
     // Salva posição no tracking
     if (evento.location?.lat && evento.location?.lng) {
       await this.pool.query(`
-        INSERT INTO logistics_tracking (codigo_os, provider_code, delivery_id, external_delivery_id, latitude, longitude, status_native)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-      `, [codigoOS, providerCode, entrega.id, evento.externalDeliveryId, evento.location.lat, evento.location.lng, evento.statusNative])
+        INSERT INTO uber_tracking (codigo_os, uber_delivery_id, latitude, longitude, status_uber)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [codigoOS, evento.externalDeliveryId, evento.location.lat, evento.location.lng, evento.statusNative])
         .catch(e => console.error('[WebhookDispatcher] erro ao gravar tracking:', e.message));
 
       // Broadcast WebSocket (mantém compat com frontend atual)
@@ -353,7 +346,7 @@ class WebhookDispatcher {
         const payload = this.mapp.payload(respMapp);
         if (payload.idMotoboy) {
           await this.pool.query(
-            'UPDATE logistics_deliveries SET id_motoboy_mapp = $1, updated_at = NOW() WHERE id = $2',
+            'UPDATE uber_entregas SET id_motoboy_mapp = $1, updated_at = NOW() WHERE id = $2',
             [payload.idMotoboy, entrega.id]
           );
         }
