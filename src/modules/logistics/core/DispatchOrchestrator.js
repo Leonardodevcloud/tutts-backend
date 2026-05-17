@@ -18,7 +18,14 @@
  * O que NÃO faz:
  *  - Falar HTTP com Uber (responsabilidade do UberAdapter)
  *  - Validar HMAC de webhook (responsabilidade do WebhookDispatcher — Fase 1B.2)
- *  - Escrever em logistics_deliveries (Fase 2)
+ *
+ * 🆕 2026-05 Fase 5 — DUAL-WRITE:
+ *  - dispatch() continua escrevendo em uber_entregas EXATAMENTE como antes
+ *    (fonte de verdade pra UI/painel). NADA do comportamento legado muda.
+ *  - ADICIONALMENTE espelha o registro em logistics_deliveries (tabela
+ *    canônica). É best-effort: se o espelho falhar, loga e segue — o
+ *    despacho NÃO é afetado. Quando a paridade for validada, uma fase
+ *    futura inverte a leitura pra logistics_deliveries e remove o legado.
  *
  * Comportamento extraído de:
  *  - uber.service.js:cotarParaUber (linhas 668-719) → quote()
@@ -342,6 +349,22 @@ class DispatchOrchestrator {
 
       console.log(`✅ [Orchestrator] OS ${codigoOS} despachada → ${providerCode} delivery_id=${delivery.externalDeliveryId}`);
 
+      // 9. 🆕 Fase 5 DUAL-WRITE — espelha em logistics_deliveries (best-effort).
+      // Relê o registro pra pegar o estado final (delivery_id, tracking_url, status).
+      let registroFinal = registro;
+      try {
+        const { rows } = await this.pool.query('SELECT * FROM uber_entregas WHERE id = $1', [registro.id]);
+        if (rows[0]) registroFinal = rows[0];
+      } catch (e) { /* usa o registro em memória se a releitura falhar */ }
+
+      await this._espelharEmLogisticsDeliveries({
+        registro: registroFinal,
+        providerCode,
+        quote,
+        delivery,
+        vehicleType: opts.vehicleType,
+      });
+
       return {
         ...registro,
         uber_delivery_id: delivery.externalDeliveryId,
@@ -371,6 +394,132 @@ class DispatchOrchestrator {
       });
 
       return null;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // 🆕 2026-05 Fase 5 — DUAL-WRITE: espelho em logistics_deliveries
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Espelha um registro de uber_entregas na tabela canônica
+   * logistics_deliveries. Best-effort: NUNCA lança — em caso de erro,
+   * loga e retorna. O despacho legado não pode ser afetado por isto.
+   *
+   * Usa o mesmo mapeamento do logistics.backfill.js. Idempotente:
+   * ON CONFLICT (provider_code, codigo_os, external_delivery_id) atualiza.
+   *
+   * @param {Object} ctx
+   * @param {Object} ctx.registro     - linha de uber_entregas (após o despacho)
+   * @param {string} ctx.providerCode
+   * @param {Object} ctx.quote        - CanonicalQuote usada
+   * @param {Object} ctx.delivery     - retorno do adapter.createDelivery
+   * @param {string} [ctx.vehicleType]
+   */
+  async _espelharEmLogisticsDeliveries(ctx) {
+    try {
+      const { registro, providerCode, quote, delivery, vehicleType } = ctx;
+
+      // Status nativo → canônico. O adapter já devolve delivery.statusCanonico.
+      const statusCanonico = delivery?.statusCanonico || 'DISPATCHED';
+      const statusNative = delivery?.statusNative || registro.status_uber || null;
+      const externalDeliveryId = delivery?.externalDeliveryId || registro.uber_delivery_id || null;
+
+      // Valores comuns ao INSERT e ao UPDATE.
+      const vals = {
+        codigo_os:          registro.codigo_os,
+        provider_code:      providerCode,
+        external_delivery_id: externalDeliveryId,
+        external_quote_id:  quote?.quoteId || registro.uber_quote_id || null,
+        status_canonico:    statusCanonico,
+        status_native:      statusNative,
+        valor_servico:      registro.valor_servico,
+        valor_provider:     quote?.valor != null ? quote.valor : registro.valor_uber,
+        valor_profissional: registro.valor_profissional,
+        eta_minutos:        quote?.etaMinutos != null ? quote.etaMinutos : registro.eta_minutos,
+        vehicle_type:       vehicleType || quote?.vehicleType || null,
+        endereco_coleta:    registro.endereco_coleta,
+        endereco_entrega:   registro.endereco_entrega,
+        latitude_coleta:    registro.latitude_coleta,
+        longitude_coleta:   registro.longitude_coleta,
+        latitude_entrega:   registro.latitude_entrega,
+        longitude_entrega:  registro.longitude_entrega,
+        pontos:             registro.pontos != null ? JSON.stringify(registro.pontos) : '[]',
+        obs:                registro.obs,
+        tracking_url:       delivery?.trackingUrl || registro.tracking_url || null,
+        raw_provider_payload: delivery?.rawPayload != null ? JSON.stringify(delivery.rawPayload) : null,
+        regra_id:           registro.regra_id,
+        tentativas:         registro.tentativas || 0,
+        erro_ultimo:        registro.erro_ultimo || null,
+        created_at:         registro.created_at || new Date(),
+      };
+
+      // Idempotência sem depender de UNIQUE constraint (mesma técnica do
+      // logistics.backfill.js): procura um registro existente pra esta
+      // (provider_code, codigo_os, external_delivery_id) e decide UPDATE x INSERT.
+      const { rows: existentes } = await this.pool.query(`
+        SELECT id FROM logistics_deliveries
+        WHERE provider_code = $1 AND codigo_os = $2
+          AND COALESCE(external_delivery_id, '') = COALESCE($3, '')
+        LIMIT 1
+      `, [providerCode, vals.codigo_os, externalDeliveryId]);
+
+      if (existentes.length > 0) {
+        await this.pool.query(`
+          UPDATE logistics_deliveries SET
+            external_quote_id    = $2,
+            status_canonico      = $3,
+            status_native        = $4,
+            valor_provider       = $5,
+            eta_minutos          = $6,
+            vehicle_type         = $7,
+            tracking_url         = $8,
+            raw_provider_payload = $9,
+            tentativas           = $10,
+            erro_ultimo          = $11,
+            updated_at           = NOW()
+          WHERE id = $1
+        `, [
+          existentes[0].id,
+          vals.external_quote_id, vals.status_canonico, vals.status_native,
+          vals.valor_provider, vals.eta_minutos, vals.vehicle_type,
+          vals.tracking_url, vals.raw_provider_payload,
+          vals.tentativas, vals.erro_ultimo,
+        ]);
+        console.log(`🪞 [Orchestrator] dual-write OK (update): OS ${vals.codigo_os} em logistics_deliveries`);
+      } else {
+        await this.pool.query(`
+          INSERT INTO logistics_deliveries (
+            codigo_os, provider_code, external_delivery_id, external_quote_id,
+            status_canonico, status_native,
+            valor_servico, valor_provider, valor_profissional, eta_minutos,
+            vehicle_type,
+            endereco_coleta, endereco_entrega,
+            latitude_coleta, longitude_coleta, latitude_entrega, longitude_entrega,
+            pontos, obs, tracking_url, raw_provider_payload,
+            regra_id, tentativas, erro_ultimo,
+            created_at, updated_at
+          ) VALUES (
+            $1,$2,$3,$4, $5,$6, $7,$8,$9,$10, $11,
+            $12,$13, $14,$15,$16,$17, $18,$19,$20,$21,
+            $22,$23,$24, $25, NOW()
+          )
+        `, [
+          vals.codigo_os, vals.provider_code, vals.external_delivery_id, vals.external_quote_id,
+          vals.status_canonico, vals.status_native,
+          vals.valor_servico, vals.valor_provider, vals.valor_profissional, vals.eta_minutos,
+          vals.vehicle_type,
+          vals.endereco_coleta, vals.endereco_entrega,
+          vals.latitude_coleta, vals.longitude_coleta, vals.latitude_entrega, vals.longitude_entrega,
+          vals.pontos, vals.obs, vals.tracking_url, vals.raw_provider_payload,
+          vals.regra_id, vals.tentativas, vals.erro_ultimo,
+          vals.created_at,
+        ]);
+        console.log(`🪞 [Orchestrator] dual-write OK (insert): OS ${vals.codigo_os} em logistics_deliveries`);
+      }
+    } catch (err) {
+      // Best-effort: o espelho NUNCA derruba o despacho legado.
+      console.error(`⚠️ [Orchestrator] dual-write falhou (OS ${ctx?.registro?.codigo_os}): ${err.message} — despacho legado segue normal`);
     }
   }
 
@@ -439,6 +588,22 @@ class DispatchOrchestrator {
       externalDeliveryId: entrega.uber_delivery_id,
       payload: { motivo, cancelado_por: canceladoPor, reabriu_mapp: reabrirMapp },
     });
+
+    // 🆕 Fase 5 DUAL-WRITE — reflete o cancelamento no espelho canônico.
+    // Best-effort: não derruba o cancelamento legado se falhar.
+    try {
+      await this.pool.query(`
+        UPDATE logistics_deliveries
+        SET status_canonico = 'CANCELED',
+            cancelado_por    = $1,
+            cancelado_motivo = $2,
+            updated_at       = NOW()
+        WHERE provider_code = 'uber' AND codigo_os = $3
+          AND COALESCE(external_delivery_id, '') = COALESCE($4, '')
+      `, [canceladoPor, motivo, entrega.codigo_os, entrega.uber_delivery_id || null]);
+    } catch (err) {
+      console.error(`⚠️ [Orchestrator] dual-write do cancel falhou (OS ${entrega.codigo_os}): ${err.message}`);
+    }
 
     return { ok: true, entregaId };
   }
