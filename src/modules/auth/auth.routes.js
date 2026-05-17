@@ -1167,6 +1167,84 @@ router.get('/users', verificarToken, verificarAdmin, async (req, res) => {
   }
 });
 
+// ==================== CONTAS BLOQUEADAS POR TENTATIVAS ====================
+
+// Listar contas bloqueadas por múltiplas tentativas de login falhas (ADMIN)
+// Faz JOIN com users para trazer nome/role e calcula minutos restantes.
+router.get('/users/blocked-accounts', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        ba.id,
+        ba.cod_profissional,
+        ba.blocked_until,
+        ba.reason,
+        ba.attempts_count,
+        ba.created_at,
+        u.full_name,
+        u.role,
+        GREATEST(0, CEIL(EXTRACT(EPOCH FROM (ba.blocked_until - NOW())) / 60))::int AS minutos_restantes,
+        (ba.blocked_until > NOW()) AS ativo
+      FROM blocked_accounts ba
+      LEFT JOIN users u ON LOWER(u.cod_profissional) = LOWER(ba.cod_profissional)
+      ORDER BY (ba.blocked_until > NOW()) DESC, ba.blocked_until DESC
+    `);
+    console.log(`🔒 ${result.rows.length} registro(s) de bloqueio listado(s) para ${req.user.codProfissional}`);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Erro ao listar contas bloqueadas:', error);
+    res.status(500).json({ error: 'Erro ao listar contas bloqueadas: ' + error.message });
+  }
+});
+
+// Desbloquear conta: remove o bloqueio e limpa as tentativas de login (ADMIN)
+router.post('/users/unblock-account', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const { codProfissional } = req.body;
+
+    if (!codProfissional) {
+      return res.status(400).json({ error: 'Código profissional é obrigatório' });
+    }
+
+    // Remover o registro de bloqueio
+    const delBlock = await pool.query(
+      'DELETE FROM blocked_accounts WHERE LOWER(cod_profissional) = LOWER($1) RETURNING id',
+      [codProfissional]
+    );
+
+    if (delBlock.rowCount === 0) {
+      return res.status(404).json({ error: 'Nenhum bloqueio encontrado para este código' });
+    }
+
+    // Limpar tentativas de login para zerar o contador (evita re-bloqueio imediato)
+    const delAttempts = await pool.query(
+      'DELETE FROM login_attempts WHERE LOWER(cod_profissional) = LOWER($1)',
+      [codProfissional]
+    );
+
+    await registrarAuditoria(req, 'ACCOUNT_UNBLOCKED', AUDIT_CATEGORIES.AUTH, 'blocked_accounts', codProfissional, {
+      tentativas_limpas: delAttempts.rowCount,
+      desbloqueado_por: req.user.codProfissional
+    });
+
+    securityLogger.securityEvent('ACCOUNT_UNBLOCKED', {
+      codProfissional,
+      tentativasLimpas: delAttempts.rowCount,
+      admin: req.user.codProfissional
+    });
+
+    console.log(`🔓 Conta ${codProfissional} desbloqueada por ${req.user.codProfissional} (${delAttempts.rowCount} tentativas limpas)`);
+    res.json({
+      message: 'Conta desbloqueada com sucesso',
+      cod_profissional: codProfissional,
+      tentativas_limpas: delAttempts.rowCount
+    });
+  } catch (error) {
+    console.error('❌ Erro ao desbloquear conta:', error);
+    res.status(500).json({ error: 'Erro ao desbloquear conta: ' + error.message });
+  }
+});
+
 // Resetar senha
 router.post('/users/reset-password', verificarToken, verificarAdmin, async (req, res) => {
   try {
