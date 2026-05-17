@@ -78,7 +78,7 @@ const { initRastreioClientesRoutes, initRastreioClientesTables } = require('./sr
 const { initAntiFraudeRoutes, initAntiFraudeTables, startAntiFraudeWorker } = require('./src/modules/antifraude');
 const { initPerformanceRoutes, initPerformanceTables, startPerformanceWorker } = require('./src/modules/performance');
 const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gerencial');
-// 🆕 Fase 6 — módulo uber legado removido (sunset). Hub Logístico assumiu.
+const { initUberRoutes, initUberTables, startUberWorker } = require('./src/modules/uber');
 // Logistics Hub - Fase 0: setup, contratos, tabelas. Operacoes ainda nao ligadas.
 const { initLogisticsRoutes, initLogisticsTables, startLogisticsWorker } = require('./src/modules/logistics');
 const { initFeedbackRoutes, initFeedbackTables } = require('./src/modules/feedback');
@@ -138,6 +138,7 @@ app.use(express.json({
     // Preservar raw body apenas para rotas de webhook (performance)
     if (req.originalUrl && (
       req.originalUrl.includes('/stark/webhook') ||
+      req.originalUrl.includes('/uber/webhook') ||
       req.originalUrl.includes('/logistics/webhook') ||
       req.originalUrl.includes('/cs/webhook')
     )) {
@@ -407,7 +408,13 @@ app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res) =>
   req.app.handle(req, res);
 });
 
-// 🆕 Fase 6 — webhook /api/uber/webhook removido junto do módulo uber legado.
+// 🪝 Webhooks Uber Direct — montados ANTES de qualquer auth global
+// 🔒 SECURITY FIX: middlewares globais como `app.use('/api', verificarToken, ...)`
+// (linhas mais abaixo) interceptam TODA request /api/* e abortam com 401 antes de
+// chegar no router /api/uber. Por isso o sub-router de webhook (público, validado
+// por HMAC dentro dele mesmo) precisa ser montado AQUI, antes desses middlewares.
+const { createUberWebhookRoutes } = require('./src/modules/uber/routes/webhook.routes');
+app.use('/api/uber/webhook', createUberWebhookRoutes(pool));
 
 // Logistics Hub - webhook canonico (publico, validado por HMAC dentro do adapter)
 const { createLogisticsWebhookRouter } = require('./src/modules/logistics');
@@ -574,6 +581,7 @@ app.use('/api/agent', verificarToken, initAgentRoutes(pool, verificarToken, veri
 app.use('/api/rastreio-clientes', initRastreioClientesRoutes(pool, { verificarToken, verificarAdmin, registrarAuditoria }));
 app.use('/api/antifraude', verificarToken, verificarAdmin, initAntiFraudeRoutes(pool, verificarAdmin));
 app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
+app.use('/api/uber', initUberRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 // Logistics Hub: rotas operacionais retornam 501 nesta fase; so /providers e /health funcionam.
 app.use('/api/logistics', initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 app.use('/api/feedback', initFeedbackRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
@@ -720,6 +728,7 @@ async function initDatabase() {
     try { await initPerformanceTables(pool); } catch (e) { console.error('⚠️ Performance tables error:', e.message); }
     try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
     try { await initCrmTables(pool); } catch (e) { console.error('⚠️ CRM tables error:', e.message); }
+    try { await initUberTables(pool); } catch (e) { console.error('⚠️ Uber tables error:', e.message); }
     try { await initLogisticsTables(pool); } catch (e) { console.error('Logistics tables error:', e.message); }
     try { await initFeedbackTables(pool); } catch (e) { console.error('⚠️ Feedback tables error:', e.message); }
     await createPerformanceIndices(pool);
@@ -781,6 +790,7 @@ initDatabase().then(async () => {
   startAgentWorker(pool);
   startAntiFraudeWorker(pool);
   startPerformanceWorker(pool);
+  startUberWorker(pool);
   startLogisticsWorker(pool); // Logistics Hub - PollingWorker (controlado por logistics_worker_state)
   // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
   if (process.env.WORKER_ENABLED === 'true') {

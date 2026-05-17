@@ -50,8 +50,8 @@ function createChatIaRoutes(pool) {
     'coleta_enderecos_pendentes', 'coleta_motoboy_ganhos', 'coleta_regioes',
     // Social
     'social_profiles',
-    // Hub Logístico (Fase 6 — substituiu o uber legado)
-    'logistics_deliveries', 'logistics_dispatch_rules', 'logistics_providers'
+    // Uber
+    'uber_entregas', 'uber_config', 'uber_regras_cliente'
   ];
 
   // ==================== MIGRATION: TABELA DE CONTEXTO ====================

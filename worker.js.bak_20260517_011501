@@ -21,7 +21,8 @@ const { withCronLock, liberarLocksOrfaos } = require('./src/shared/utils/cronMut
 // ─── Score ────────────────────────────────────────────────
 const { aplicarGratuidadeProfissional } = require('./src/modules/score/score.service');
 
-// 🆕 Fase 6 — Uber worker legado removido. O PollingWorker do Hub assumiu.
+// ─── Uber Direct Worker ───────────────────────────────────
+const { startUberWorker } = require('./src/modules/uber');
 
 // ─── Auth cleanup ─────────────────────────────────────────
 const bcrypt = require('bcrypt');
@@ -621,8 +622,14 @@ cron.schedule('0 9-13 * * 1-5', withCronLock(pool, 'alertaDisp', alertarDisponib
     // 🧹 Limpar advisory locks órfãos de deploys anteriores
     await liberarLocksOrfaos(pool);
 
-    // 🆕 Fase 6 — polling do Uber legado removido (Hub Logístico assumiu).
-    if (false) {
+    // 🛵 Uber Direct: polling worker (substitui o setInterval que rodava no server.js)
+    if (process.env.WORKER_ENABLED === 'true') {
+      try {
+        startUberWorker(pool);
+        console.log('🛵 [Worker] Uber Direct polling iniciado');
+      } catch (err) {
+        console.error('❌ [Worker] Falha ao iniciar Uber polling:', err.message);
+      }
     }
 
     console.log('');
@@ -638,6 +645,7 @@ cron.schedule('0 9-13 * * 1-5', withCronLock(pool, 'alertaDisp', alertarDisponib
     console.log('     ⏰ Resumo diário     — Seg-Sex 19h | Sáb 13h 🔒');
     console.log('     ⏰ Filas reset       — Seg-Sáb 19h 🔒');
     console.log('     ⏰ Disp alerta WA   — Seg-Sex 9h-13h (1h) 🔒');
+    console.log('     🛵 Uber polling      — a cada N seg (config no banco)');
     console.log('  🔒 = protegido por CronMutex (xact lock)');
     console.log('══════════════════════════════════════════');
     console.log('');

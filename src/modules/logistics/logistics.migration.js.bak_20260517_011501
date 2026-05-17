@@ -402,28 +402,6 @@ async function initLogisticsTables(pool) {
     }
   }
 
-  // ──────────────────────────────────────────────────────────────────
-  // 🆕 FASE 6 — SUNSET: renomeia as tabelas uber_* para _legacy_uber_*
-  // ──────────────────────────────────────────────────────────────────
-  // O Hub Logístico (logistics_*) é a única fonte. As tabelas uber_*
-  // viram arquivo morto, prefixadas com _legacy_. NÃO são dropadas —
-  // ficam intactas e o rename é reversível. Idempotente: ALTER TABLE
-  // IF EXISTS pula se a tabela já não existir (re-deploy seguro).
-  const tabelasLegado = [
-    'uber_entregas', 'uber_regras_cliente', 'uber_config',
-    'uber_webhooks_log', 'uber_tracking', 'uber_oauth_token',
-  ];
-  for (const tab of tabelasLegado) {
-    try {
-      await pool.query(`ALTER TABLE IF EXISTS ${tab} RENAME TO _legacy_${tab}`);
-      console.log(`🗄️  [logistics] Fase 6 sunset: ${tab} → _legacy_${tab}`);
-    } catch (e) {
-      // se _legacy_ já existe (rename já feito), o ALTER de uma tabela
-      // inexistente é no-op via IF EXISTS; outros erros só logam.
-      console.log(`   [logistics] sunset ${tab}: ${e.message}`);
-    }
-  }
-
   console.log('🎯 [logistics] migration Fase 0 concluída');
 }
 
