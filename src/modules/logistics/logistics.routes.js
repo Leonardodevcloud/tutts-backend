@@ -554,6 +554,135 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // ───────────────────────────────────────────────────────────
   router.use(createDashboardRoutes(pool, verificarToken, verificarAdmin));
 
+  // ═══════════════════════════════════════════════════════════
+  // 🆕 2026-05 FASE 6 — Endpoints portados de /api/uber/* pro hub.
+  // Leem logistics_deliveries (canônico). Mantêm o MESMO shape de
+  // resposta dos endpoints /uber/* legados — assim o frontend só
+  // troca o caminho da URL, sem mudar como consome os dados.
+  // ═══════════════════════════════════════════════════════════
+
+  // GET /dashboard/metricas — agregados do período (porta /uber/metricas)
+  router.get('/dashboard/metricas', verificarToken, async (req, res) => {
+    try {
+      const { data_inicio, data_fim } = req.query;
+      const inicio = data_inicio || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+      const fim = data_fim || new Date().toISOString().slice(0, 10);
+
+      // status terminal no canônico: DELIVERED / CANCELED. Mantém as chaves
+      // de resposta legadas (valor_*_uber) pro frontend não precisar mudar.
+      const { rows: [metricas] } = await pool.query(`
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE status_canonico = 'DELIVERED') AS entregues,
+          COUNT(*) FILTER (WHERE status_canonico = 'CANCELED' OR cancelado_por IS NOT NULL) AS cancelados,
+          COUNT(*) FILTER (WHERE status_native = 'fallback_fila') AS fallback,
+          COUNT(*) FILTER (WHERE status_canonico NOT IN ('DELIVERED','CANCELED')
+                             AND status_native IS DISTINCT FROM 'fallback_fila'
+                             AND cancelado_por IS NULL) AS em_andamento,
+          COALESCE(AVG(valor_provider), 0) AS valor_medio_uber,
+          COALESCE(AVG(eta_minutos), 0) AS eta_medio,
+          COALESCE(SUM(valor_provider), 0) AS custo_total_uber
+        FROM logistics_deliveries
+        WHERE created_at >= $1 AND created_at <= $2
+      `, [inicio, fim + ' 23:59:59']);
+
+      res.json({ success: true, metricas, periodo: { inicio, fim } });
+    } catch (err) {
+      console.error('[logistics/routes] GET /dashboard/metricas erro:', err.message);
+      res.status(500).json({ error: 'Erro ao calcular métricas' });
+    }
+  });
+
+  // GET /dashboard/margem-clientes — margem por cliente (porta /uber/dashboard/margem-clientes)
+  router.get('/dashboard/margem-clientes', verificarToken, async (req, res) => {
+    try {
+      const { periodo = '7d', inicio, fim } = req.query;
+      const dataFim = fim ? new Date(fim + ' 23:59:59') : new Date();
+      let dataInicio;
+      if (periodo === '1d')      { dataInicio = new Date(); dataInicio.setHours(0,0,0,0); }
+      else if (periodo === '30d') { dataInicio = new Date(); dataInicio.setDate(dataInicio.getDate() - 30); }
+      else if (periodo === 'custom' && inicio) { dataInicio = new Date(inicio + ' 00:00:00'); }
+      else { dataInicio = new Date(); dataInicio.setDate(dataInicio.getDate() - 7); }
+
+      const { rows: porCliente } = await pool.query(`
+        SELECT
+          COALESCE(r.cliente_nome, 'Manual / sem regra') AS cliente,
+          ld.regra_id,
+          COUNT(*) AS qtd,
+          COUNT(*) FILTER (WHERE ld.status_canonico = 'CANCELED') AS cancelados,
+          COALESCE(SUM(ld.valor_servico), 0)::numeric AS receita_total,
+          COALESCE(SUM(ld.valor_provider), 0)::numeric AS custo_uber_total,
+          COALESCE(SUM(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_total,
+          COALESCE(AVG(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_media
+        FROM logistics_deliveries ld
+        LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+        WHERE ld.created_at BETWEEN $1 AND $2 AND ld.valor_provider IS NOT NULL
+        GROUP BY r.cliente_nome, ld.regra_id
+        ORDER BY margem_total DESC
+      `, [dataInicio, dataFim]);
+
+      const { rows: porDia } = await pool.query(`
+        SELECT DATE(ld.created_at) AS dia, COUNT(*) AS qtd,
+               COALESCE(SUM(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem
+        FROM logistics_deliveries ld
+        WHERE ld.created_at BETWEEN $1 AND $2 AND ld.valor_provider IS NOT NULL
+        GROUP BY DATE(ld.created_at) ORDER BY dia ASC
+      `, [dataInicio, dataFim]);
+
+      const { rows: [totais] } = await pool.query(`
+        SELECT COUNT(*)::int AS qtd_total,
+               COALESCE(SUM(valor_servico), 0)::numeric AS receita,
+               COALESCE(SUM(valor_provider), 0)::numeric AS custo,
+               COALESCE(SUM(valor_servico - valor_provider), 0)::numeric AS margem
+        FROM logistics_deliveries
+        WHERE created_at BETWEEN $1 AND $2 AND valor_provider IS NOT NULL
+      `, [dataInicio, dataFim]);
+
+      res.json({
+        success: true,
+        periodo: { tipo: periodo, inicio: dataInicio, fim: dataFim },
+        totais,
+        por_cliente: porCliente.map(r => ({
+          ...r,
+          margem_pct: r.receita_total > 0
+            ? (parseFloat(r.margem_total) / parseFloat(r.receita_total)) * 100 : 0,
+          taxa_cancelamento: r.qtd > 0
+            ? (parseFloat(r.cancelados) / parseFloat(r.qtd)) * 100 : 0,
+        })),
+        por_dia: porDia,
+      });
+    } catch (err) {
+      console.error('[logistics/routes] GET /dashboard/margem-clientes erro:', err.message);
+      res.status(500).json({ error: 'Erro ao buscar dashboard de margem' });
+    }
+  });
+
+  // GET /tracking/ativas — entregas em andamento + última posição (porta /uber/tracking/ativas)
+  router.get('/tracking/ativas', verificarToken, async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT ld.*, r.cliente_nome AS cliente_nome_regra,
+          (SELECT jsonb_build_object('lat', t.latitude, 'lng', t.longitude, 'at', t.created_at)
+           FROM logistics_tracking t
+           WHERE t.codigo_os = ld.codigo_os
+           ORDER BY t.created_at DESC LIMIT 1) AS ultima_posicao
+        FROM logistics_deliveries ld
+        LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+        WHERE ld.status_canonico NOT IN ('DELIVERED','CANCELED','FAILED','RETURNED')
+          AND ld.cancelado_por IS NULL
+        ORDER BY ld.created_at DESC
+      `);
+      res.json({
+        success: true,
+        total: rows.length,
+        entregas: rows.map(r => ({ ...mapearCanonicoParaLegado(r), ultima_posicao: r.ultima_posicao })),
+      });
+    } catch (err) {
+      console.error('[logistics/routes] GET /tracking/ativas erro:', err.message);
+      res.status(500).json({ error: 'Erro ao buscar entregas ativas' });
+    }
+  });
+
   // ───────────────────────────────────────────────────────────
   // PUT /providers/:code  — configura o provider (Fase 5)
   // É o equivalente do hub ao PUT /uber/config: o painel salva aqui.
