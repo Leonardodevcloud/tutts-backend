@@ -54,6 +54,67 @@ function notImplemented(fase) {
   });
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// 🆕 2026-05 FASE 6 — READ-FLIP: leitura a partir de logistics_deliveries
+// ────────────────────────────────────────────────────────────────────────
+// Controlado por env LOGISTICS_READ_SOURCE:
+//   'canonico' (default) → lê logistics_deliveries (tabela do hub)
+//   'legado'             → lê uber_entregas (comportamento pré-Fase 6)
+// O flag torna o read-flip 100% reversível sem redeploy.
+//
+// mapearCanonicoParaLegado(): logistics_deliveries devolve nomes canônicos
+// (status_canonico, valor_provider, courier_data JSONB...). O frontend
+// espera o shape legado (status_uber, valor_uber, entregador_*). Esta
+// função traduz, pra o front não precisar mudar nada.
+const LOGISTICS_READ_SOURCE = process.env.LOGISTICS_READ_SOURCE || 'canonico';
+
+function mapearCanonicoParaLegado(ld) {
+  const courier = ld.courier_data || {};
+  return {
+    id:                 ld.id,
+    codigo_os:          ld.codigo_os,
+    provider_code:      ld.provider_code,
+    // status: o front usa status_uber; status_native guarda o status
+    // nativo do provider (o dual-write grava ld.status_native = status_uber).
+    status_uber:        ld.status_native || ld.status_canonico,
+    status_canonico:    ld.status_canonico,
+    valor_servico:      ld.valor_servico,
+    valor_uber:         ld.valor_provider,        // legado: valor_uber
+    valor_provider:     ld.valor_provider,
+    valor_profissional: ld.valor_profissional,
+    eta_minutos:        ld.eta_minutos,
+    vehicle_type:       ld.vehicle_type,
+    uber_quote_id:      ld.external_quote_id,     // legado: uber_quote_id
+    uber_delivery_id:   ld.external_delivery_id,  // legado: uber_delivery_id
+    tracking_url:       ld.tracking_url,
+    endereco_coleta:    ld.endereco_coleta,
+    endereco_entrega:   ld.endereco_entrega,
+    latitude_coleta:    ld.latitude_coleta,
+    longitude_coleta:   ld.longitude_coleta,
+    latitude_entrega:   ld.latitude_entrega,
+    longitude_entrega:  ld.longitude_entrega,
+    pontos:             ld.pontos,
+    obs:                ld.obs,
+    regra_id:           ld.regra_id,
+    cliente_nome_regra: ld.cliente_nome_regra || null, // vem do JOIN
+    tentativas:         ld.tentativas,
+    erro_ultimo:        ld.erro_ultimo,
+    finalizado_at:      ld.finalizado_at,
+    cancelado_por:      ld.cancelado_por,
+    cancelado_motivo:   ld.cancelado_motivo,
+    // courier_data JSONB → campos entregador_* legados
+    entregador_nome:      courier.name || null,
+    entregador_telefone:  courier.phone || null,
+    entregador_placa:     courier.plate || null,
+    entregador_veiculo:   courier.vehicle || null,
+    entregador_documento: courier.document || null,
+    entregador_foto:      courier.photo || null,
+    entregador_rating:    courier.rating || null,
+    created_at:         ld.created_at,
+    updated_at:         ld.updated_at,
+  };
+}
+
 function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
   const registry = getProviderRegistry(pool);
@@ -262,51 +323,76 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // ───────────────────────────────────────────────────────────
-  // GET /deliveries  — lista (lê uber_entregas)
-  // query: ?provider=uber&status=enviado_uber&codigo_os=123&limit=50&offset=0
+  // GET /deliveries  — lista
+  // 🆕 Fase 6 read-flip: lê logistics_deliveries (canônico) por padrão;
+  //    LOGISTICS_READ_SOURCE='legado' volta a ler uber_entregas.
+  // query: ?provider=uber&status=...&codigo_os=123&limit=50&offset=0
   // ───────────────────────────────────────────────────────────
   router.get('/deliveries', verificarToken, async (req, res) => {
     try {
+      const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+      const offset = parseInt(req.query.offset, 10) || 0;
+
+      // ── Caminho LEGADO (rollback) — lê uber_entregas ──
+      if (LOGISTICS_READ_SOURCE === 'legado') {
+        const where = [];
+        const params = [];
+        let i = 1;
+        if (req.query.status) { where.push(`status_uber = $${i++}`); params.push(req.query.status); }
+        if (req.query.codigo_os) { where.push(`codigo_os = $${i++}`); params.push(parseInt(req.query.codigo_os, 10)); }
+        if (req.query.provider && req.query.provider !== 'uber') {
+          return res.json({ success: true, total: 0, entregas: [] });
+        }
+        const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+        const { rows } = await pool.query(
+          `SELECT id, codigo_os, status_uber, valor_servico, valor_profissional, valor_uber,
+                  eta_minutos, uber_quote_id, uber_delivery_id, tracking_url,
+                  endereco_coleta, endereco_entrega, regra_id, tentativas, erro_ultimo,
+                  cancelado_por, cancelado_motivo, created_at, updated_at
+           FROM uber_entregas ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+          params
+        );
+        const { rows: countRows } = await pool.query(
+          `SELECT COUNT(*) AS total FROM uber_entregas ${whereSql}`, params);
+        return res.json({
+          success: true,
+          total: parseInt(countRows[0].total, 10),
+          entregas: rows.map(r => ({ ...r, provider_code: 'uber' })),
+        });
+      }
+
+      // ── Caminho CANÔNICO (padrão Fase 6) — lê logistics_deliveries ──
       const where = [];
       const params = [];
       let i = 1;
-
+      // status: aceita tanto o nativo (status_native) quanto o canônico
       if (req.query.status) {
-        where.push(`status_uber = $${i++}`); params.push(req.query.status);
+        where.push(`(ld.status_native = $${i} OR ld.status_canonico = $${i})`);
+        params.push(req.query.status); i++;
       }
       if (req.query.codigo_os) {
-        where.push(`codigo_os = $${i++}`); params.push(parseInt(req.query.codigo_os, 10));
+        where.push(`ld.codigo_os = $${i++}`); params.push(parseInt(req.query.codigo_os, 10));
       }
-      // provider filter — na Fase 1B só temos uber, mas já preparado pro futuro:
-      // se passar provider != 'uber', retorna vazio.
-      if (req.query.provider && req.query.provider !== 'uber') {
-        return res.json({ success: true, total: 0, entregas: [] });
+      if (req.query.provider) {
+        where.push(`ld.provider_code = $${i++}`); params.push(req.query.provider);
       }
-
-      const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-      const offset = parseInt(req.query.offset, 10) || 0;
       const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
-        `SELECT id, codigo_os, status_uber, valor_servico, valor_profissional, valor_uber,
-                eta_minutos, uber_quote_id, uber_delivery_id, tracking_url,
-                endereco_coleta, endereco_entrega, regra_id, tentativas, erro_ultimo,
-                cancelado_por, cancelado_motivo, created_at, updated_at
-         FROM uber_entregas ${whereSql}
-         ORDER BY id DESC
-         LIMIT ${limit} OFFSET ${offset}`,
+        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
+         FROM logistics_deliveries ld
+         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         ${whereSql}
+         ORDER BY ld.id DESC LIMIT ${limit} OFFSET ${offset}`,
         params
       );
-
       const { rows: countRows } = await pool.query(
-        `SELECT COUNT(*) AS total FROM uber_entregas ${whereSql}`,
-        params
-      );
+        `SELECT COUNT(*) AS total FROM logistics_deliveries ld ${whereSql}`, params);
 
       res.json({
         success: true,
         total: parseInt(countRows[0].total, 10),
-        entregas: rows.map(r => ({ ...r, provider_code: 'uber' })),
+        entregas: rows.map(mapearCanonicoParaLegado),
       });
     } catch (err) {
       console.error('[logistics/routes] GET /deliveries erro:', err.message);
@@ -315,16 +401,27 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // ───────────────────────────────────────────────────────────
-  // GET /deliveries/:id  — detalhe
+  // GET /deliveries/:id  — detalhe (read-flip Fase 6)
   // ───────────────────────────────────────────────────────────
   router.get('/deliveries/:id', verificarToken, async (req, res) => {
     try {
+      const id = parseInt(req.params.id, 10);
+
+      if (LOGISTICS_READ_SOURCE === 'legado') {
+        const { rows } = await pool.query('SELECT * FROM uber_entregas WHERE id = $1', [id]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
+        return res.json({ success: true, entrega: { ...rows[0], provider_code: 'uber' } });
+      }
+
       const { rows } = await pool.query(
-        'SELECT * FROM uber_entregas WHERE id = $1',
-        [parseInt(req.params.id, 10)]
+        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
+         FROM logistics_deliveries ld
+         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         WHERE ld.id = $1`,
+        [id]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
-      res.json({ success: true, entrega: { ...rows[0], provider_code: 'uber' } });
+      res.json({ success: true, entrega: mapearCanonicoParaLegado(rows[0]) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
