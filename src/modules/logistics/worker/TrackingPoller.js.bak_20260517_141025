@@ -44,16 +44,10 @@ const WORKER_NAME = 'noventanove_tracking';
 
 const DEFAULT_INTERVALO_SEG = 30;
 
-// Status que o poller acompanha. Inclui DISPATCHED de propósito: a doc da 99
-// avisa que o webhook NÃO tem entrega garantida ("use the order details API").
-// Se o DriverAccepted se perder, a entrega ficaria presa em DISPATCHED pra
-// sempre. Pollando o /detail desde DISPATCHED, o poller descobre o courier
-// (status waiting/delivering) e avança a entrega mesmo sem o webhook — vira a
-// rede de segurança do webhook, não só rastreador de posição.
-// Antes de DISPATCHED (PENDING/QUOTED) não há pedido na 99 — nada a consultar.
-// Depois de DELIVERED/CANCELED/RETURNED/FAILED a entrega saiu do mapa.
+// Entregas EM TRÂNSITO — courier já atribuído e ainda não finalizou.
+// Antes de COURIER_ASSIGNED não há entregador (nada a rastrear); depois de
+// DELIVERED/CANCELED/RETURNED/FAILED a entrega saiu do mapa.
 const STATUS_EM_TRANSITO = [
-  'DISPATCHED',
   'COURIER_ASSIGNED',
   'PICKUP_EN_ROUTE',
   'ARRIVED_PICKUP',
@@ -168,62 +162,20 @@ function startTrackingPoller(pool) {
     };
   }
 
-  // Ordem dos status canônicos — usada pra saber se o /detail revelou um
-  // avanço em relação ao que o hub tem. Só avançamos pra frente; o poller
-  // nunca regride status (regressão é responsabilidade do webhook/cancelamento).
-  const ORDEM_STATUS = [
-    'PENDING', 'QUOTED', 'DISPATCHED', 'COURIER_ASSIGNED',
-    'PICKUP_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP',
-    'DROPOFF_EN_ROUTE', 'ARRIVED_DROPOFF', 'DELIVERED',
-  ];
-  function indiceStatus(s) {
-    const i = ORDEM_STATUS.indexOf(s);
-    return i === -1 ? -1 : i;
-  }
-
   /**
-   * Processa uma entrega: consulta a 99 e despacha o que for novidade.
+   * Processa uma entrega: consulta a 99, monta o evento e despacha.
+   * Só envia ao dispatcher quando há novidade (1ª vez ou posição mudou) —
+   * evita encher logistics_tracking de linhas idênticas com o entregador parado.
    *
-   * Faz DUAS coisas (a 99 não garante entrega do webhook — a doc manda usar o
-   * /detail como fonte de verdade):
-   *  1. STATUS: se o /detail revela um status mais avançado que o do hub,
-   *     emite um 'status_change' — isso dispara a ação Mapp correspondente.
-   *     É a rede de segurança pra webhook perdido.
-   *  2. POSIÇÃO: se há courier com lat/lng nova, emite 'courier_update'.
-   *
-   * Só envia ao dispatcher quando há novidade real — evita ação Mapp repetida
-   * e linha de tracking duplicada.
-   *
-   * @returns {Promise<'avancou'|'posicao'|'sem_novidade'|'sem_courier'>}
+   * @returns {Promise<'enviado'|'sem_novidade'|'sem_courier'>}
    */
   async function processarEntrega(adapter, entrega) {
     const det = await adapter.getDelivery(entrega.external_delivery_id);
-
-    let avancou = false;
-
-    // ─── 1. STATUS — rede de segurança do webhook ───
-    // Se o /detail reporta status mais à frente do que o hub registrou,
-    // emite status_change. O WebhookDispatcher cuida da idempotência e da
-    // ação Mapp. Terminais (DELIVERED) também passam por aqui.
-    const idxDetail = indiceStatus(det.statusCanonico);
-    const idxHub = indiceStatus(entrega.status_canonico);
-    if (det.statusCanonico && idxDetail > idxHub && idxDetail !== -1) {
-      await dispatcher.processarEventoCanonico(PROVIDER_CODE, {
-        eventType: 'status_change',
-        externalDeliveryId: det.externalDeliveryId,
-        statusCanonico: det.statusCanonico,
-        statusNative: det.statusNative,
-        trackingUrl: det.trackingUrl || null,
-        rawProvider: det.rawProvider || null,
-      });
-      avancou = true;
-    }
-
-    // ─── 2. POSIÇÃO / courier ───
     const evento = montarEventoCourier(det);
+
+    // Sem courier ainda (a 99 ainda está procurando entregador) — nada a fazer.
     if (!evento.courier && !evento.location) {
-      // Sem entregador ainda (a 99 ainda procura) — status pode ter avançado.
-      return avancou ? 'avancou' : 'sem_courier';
+      return 'sem_courier';
     }
 
     const chave = String(entrega.id);
@@ -233,15 +185,15 @@ function startTrackingPoller(pool) {
     const primeiraVez = !ultimasPosicoes.has(chave);
     const posMudou = posAtual !== ultimasPosicoes.get(chave);
 
-    // Envia courier_update quando: 1ª vez vendo o courier (vincula motorista
+    // Envia quando: 1ª vez vendo a entrega (garante a vinculação do motorista
     // na Mapp) OU a posição mudou. Posição idêntica repetida → ignora.
-    if (primeiraVez || posMudou) {
-      await dispatcher.processarEventoCanonico(PROVIDER_CODE, evento);
-      ultimasPosicoes.set(chave, posAtual);
-      return 'posicao';
+    if (!primeiraVez && !posMudou) {
+      return 'sem_novidade';
     }
 
-    return avancou ? 'avancou' : 'sem_novidade';
+    await dispatcher.processarEventoCanonico(PROVIDER_CODE, evento);
+    ultimasPosicoes.set(chave, posAtual);
+    return 'enviado';
   }
 
   /** Um ciclo completo do poller. */
@@ -296,14 +248,13 @@ function startTrackingPoller(pool) {
         return;
       }
 
-      let avancos = 0, posicoes = 0, semNovidade = 0, semCourier = 0, erros = 0;
+      let enviados = 0, semNovidade = 0, semCourier = 0, erros = 0;
 
       for (const entrega of entregas) {
         if (parado) break;
         try {
           const r = await processarEntrega(adapter, entrega);
-          if (r === 'avancou') avancos++;
-          else if (r === 'posicao') posicoes++;
+          if (r === 'enviado') enviados++;
           else if (r === 'sem_novidade') semNovidade++;
           else semCourier++;
         } catch (err) {
@@ -320,8 +271,8 @@ function startTrackingPoller(pool) {
 
       await marcarCiclo();
 
-      if (avancos > 0 || posicoes > 0 || erros > 0) {
-        console.log(`📍 [TrackingPoller] ciclo: ${avancos} status avançado(s), ${posicoes} posição(ões) nova(s), ${semNovidade} sem novidade, ${semCourier} sem entregador, ${erros} erro(s) — ${entregas.length} entrega(s) acompanhada(s)`);
+      if (enviados > 0 || erros > 0) {
+        console.log(`📍 [TrackingPoller] ciclo: ${enviados} posição(ões) atualizada(s), ${semNovidade} sem novidade, ${semCourier} sem entregador, ${erros} erro(s) — ${entregas.length} entrega(s) em trânsito`);
       }
 
     } catch (error) {

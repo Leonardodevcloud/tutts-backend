@@ -1,37 +1,29 @@
 /**
  * NINETYNINE ADAPTER — Webhook handling (API 99Entrega)
  *
- * ⚠️ REESCRITO 2026-05 — antes este handler validava Basic Auth da "99 Corp
- * API". A 99Entrega assina os webhooks com HMAC-SHA256 (igual à Uber), só que:
- *  - Header: `X-Webhook-Signature`
- *  - Digest em BASE64 (a Uber usa hex)
+ * ⚠️ REESCRITO 2026-05 (rev. 2) — alinhado à doc OFICIAL de webhook da
+ * 99Entrega (https://entrega-api.99app.com/docs/en/webhook.html). A rev.1
+ * lia os campos no nível errado e DESCARTAVA todos os webhooks. Corrigido:
  *
- * Faz duas coisas:
- *  1. validarAssinatura99(req)     → confere o HMAC-SHA256 do rawBody
- *  2. parsePayload99(payload)      → traduz o evento → CanonicalEvent
+ *  - O payload do webhook tem shape FIXO:
+ *      { event, event_id, message, timestamp }
+ *    onde `message` é uma STRING JSON (precisa de JSON.parse) — os ids
+ *    (order_id / external_order_id / old_order_id / new_order_id) ficam
+ *    DENTRO de message, não no nível raiz. A rev.1 procurava no raiz e
+ *    sempre achava null → todo webhook virava no-op.
+ *  - `DriverCanceled` usa `old_order_id` (não `order_id`) + `new_order_id`.
+ *  - O webhook NÃO traz dados do entregador (nem nome) — só ids. Removido o
+ *    extrairCourierDeWebhook (era código morto). Identidade/posição do
+ *    courier só saem de GET /v2/order/detail (TrackingPoller).
+ *  - Assinatura: a doc se contradiz (texto diz Base64, exemplo Python usa
+ *    hexdigest). validarAssinatura99 aceita AMBOS — compara contra o digest
+ *    em hex E em base64.
  *
- * Os 9 eventos da 99Entrega (ver noventanove.status-map):
+ * Os 9 eventos (ver noventanove.status-map):
  *   DriverAccepted, DriverArrived, DriverBeginCharge, DriverCanceled,
  *   BroadcastTimeout, OrderCompleted, OrderClosed, SendBack, SendBackCompleted
  *
- * PONTOS QUE MUDAM A ARQUITETURA (anotados do README-99-AUTH):
- *
- *  ⚠️ O webhook da 99 NÃO traz posição do entregador. Os 9 eventos são só
- *     marcos de status. lat/lng do entregador só saem de GET /v2/order/detail.
- *     Por isso parsePayload99 nunca devolve `location` — o tracking ao vivo da
- *     99 é por polling, não por webhook.
- *
- *  ⚠️ DriverCanceled pode trazer `new_order_id`: a 99 reatribuiu o pedido a
- *     outro entregador e gerou um id novo. Nesse caso o pedido NÃO está morto —
- *     parsePayload99 devolve eventType 'status_change' com statusCanonico
- *     DISPATCHED e o campo `reassignedExternalDeliveryId`. O WebhookDispatcher
- *     usa esse campo pra atualizar logistics_deliveries.external_delivery_id.
- *
- * A doc da 99Entrega não fixa o shape EXATO do payload do evento. O parser
- * abaixo é defensivo — tenta vários caminhos pros campos. Quando o webhook
- * real chegar no sandbox, conferir e ajustar os caminhos.
- *
- * Doc: https://entrega-api.99app.com/docs/en/
+ * Doc: https://entrega-api.99app.com/docs/en/webhook.html
  */
 
 const crypto = require('crypto');
@@ -49,12 +41,16 @@ const SIGNATURE_HEADERS = [
 ];
 
 /**
- * Valida a assinatura HMAC-SHA256 (base64) de um webhook da 99Entrega.
+ * Valida a assinatura HMAC-SHA256 de um webhook da 99Entrega.
  *
- * Regras (mesma política do uber.webhook):
+ * ⚠️ A doc da 99 se contradiz: a seção 4.1 diz "Base64 encoding", mas o
+ * exemplo Python usa `.hexdigest()` (hex). Pra não depender de adivinhação,
+ * comparamos a assinatura recebida contra os DOIS formatos (hex e base64).
+ *
+ * Política (mesma do uber.webhook):
  *  - sandbox_mode = true → aceita tudo (retorna true)
  *  - produção sem secret → rejeita
- *  - produção com secret → valida HMAC-SHA256(base64) contra req.rawBody
+ *  - produção com secret → valida HMAC-SHA256 (hex OU base64) contra rawBody
  *
  * @param {import('express').Request} req - precisa ter req.rawBody
  * @param {Object} opts
@@ -89,133 +85,117 @@ function validarAssinatura99(req, opts = {}) {
     return { valid: false, motivo: 'raw_body_nao_capturado' };
   }
 
-  // HMAC-SHA256 em BASE64 (a 99Entrega usa base64; a Uber usa hex)
-  const expected = crypto
-    .createHmac('sha256', webhookSecret)
-    .update(rawBody, 'utf8')
-    .digest('base64');
+  // Calcula o HMAC nos dois formatos — a doc da 99 é ambígua quanto a isso.
+  const hmac = crypto.createHmac('sha256', webhookSecret).update(rawBody, 'utf8');
+  const esperadoHex    = hmac.copy().digest('hex');
+  const esperadoBase64 = crypto.createHmac('sha256', webhookSecret)
+    .update(rawBody, 'utf8').digest('base64');
 
-  const sigBuf = Buffer.from(String(signature), 'utf8');
-  const expBuf = Buffer.from(expected, 'utf8');
-
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-    return { valid: false, motivo: 'assinatura_invalida' };
+  const recebida = String(signature);
+  if (_comparaSeguro(recebida, esperadoHex) || _comparaSeguro(recebida, esperadoBase64)) {
+    return { valid: true, motivo: 'assinatura_valida' };
   }
-
-  return { valid: true, motivo: 'assinatura_valida' };
+  return { valid: false, motivo: 'assinatura_invalida' };
 }
 
 /**
- * Extrai o nome do evento do payload (defensivo — vários caminhos possíveis).
+ * Comparação de strings em tempo constante (timingSafeEqual exige buffers de
+ * mesmo tamanho — checa o length antes pra não lançar).
+ * @private
+ */
+function _comparaSeguro(a, b) {
+  const ba = Buffer.from(String(a), 'utf8');
+  const bb = Buffer.from(String(b), 'utf8');
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+/**
+ * Extrai e parseia o `message` do webhook da 99Entrega.
  *
+ * O webhook tem shape fixo { event, event_id, message, timestamp }, e o
+ * `message` é uma STRING JSON. Defensivo: se `message` já vier como objeto
+ * (alguns clients/proxies parseiam), usa direto; se vier string, faz parse.
+ *
+ * @param {Object} payload - req.body do webhook
+ * @returns {Object} o conteúdo de message como objeto (ou {} se não der)
+ */
+function parsearMessage(payload) {
+  const msg = payload && payload.message;
+  if (msg == null) return {};
+  if (typeof msg === 'object') return msg;        // já parseado
+  if (typeof msg === 'string') {
+    try { return JSON.parse(msg); }
+    catch (_) { return {}; }
+  }
+  return {};
+}
+
+/**
+ * Extrai o nome do evento do payload do webhook.
  * @param {Object} payload
- * @returns {string|null} nome do evento (ex: 'DriverAccepted')
+ * @returns {string|null} ex: 'DriverAccepted'
  */
 function extrairNomeEvento(payload) {
-  return (
-    payload?.event ||
-    payload?.event_type ||
-    payload?.type ||
-    payload?.notify_type ||
-    payload?.data?.event ||
-    payload?.data?.event_type ||
-    null
-  );
-}
-
-/**
- * Extrai o order_id do payload (defensivo).
- *
- * @param {Object} payload
- * @returns {string|null}
- */
-function extrairOrderId(payload) {
-  const id = (
-    payload?.order_id ||
-    payload?.orderId ||
-    payload?.data?.order_id ||
-    payload?.data?.orderId ||
-    payload?.order?.order_id ||
-    payload?.order?.id ||
-    payload?.id ||
-    null
-  );
-  return id != null ? String(id) : null;
-}
-
-/**
- * Extrai o new_order_id (presente em DriverCanceled quando há reatribuição).
- *
- * @param {Object} payload
- * @returns {string|null}
- */
-function extrairNewOrderId(payload) {
-  const id = (
-    payload?.new_order_id ||
-    payload?.newOrderId ||
-    payload?.data?.new_order_id ||
-    payload?.data?.newOrderId ||
-    null
-  );
-  return id != null ? String(id) : null;
-}
-
-/**
- * Extrai courier canônico do payload do webhook (DriverAccepted traz a
- * identidade do entregador). ⚠️ A 99Entrega NÃO manda lat/lng no webhook —
- * por isso este courier nunca tem posição (lat/lng ficam null de propósito).
- *
- * @param {Object} payload
- * @returns {Object|null} courier canônico (sem location)
- */
-function extrairCourierDeWebhook(payload) {
-  const d =
-    payload?.driver_info ||
-    payload?.driver ||
-    payload?.data?.driver_info ||
-    payload?.data?.driver ||
-    null;
-
-  if (!d || typeof d !== 'object') return null;
-
-  return {
-    name:    d.name || d.driver_name || d.full_name || null,
-    phone:   d.phone || d.phone_number || d.mobile || null,
-    plate:   d.plate || d.license_plate || d.car_plate || null,
-    vehicle: d.vehicle || d.car_model || d.model || null,
-    photo:   d.photo || d.avatar || d.img || null,
-    rating:  d.rating != null ? d.rating : null,
-    lat:     null,  // 99Entrega não envia posição via webhook
-    lng:     null,
-  };
+  return (payload && (payload.event || payload.event_type)) || null;
 }
 
 /**
  * Converte um payload de webhook da 99Entrega em CanonicalEvent.
  *
  * Regras de classificação:
- *  - Sem order_id → null (não dá pra localizar a entrega local).
+ *  - Sem order_id (em message) → null (não dá pra localizar a entrega local).
  *  - OrderClosed / SendBack → eventType 'other' (informativo, sem ação Mapp).
- *  - DriverCanceled COM new_order_id → 'status_change' DISPATCHED + reatribuição.
+ *  - DriverCanceled COM new_order_id → 'status_change' DISPATCHED + reatribuição
+ *    (usa old_order_id pra localizar, new_order_id pra atualizar a coluna).
  *  - Demais eventos → 'status_change' com o statusCanonico do status-map.
  *
- * @param {Object} payload - req.body do webhook
+ * @param {Object} payload - req.body do webhook { event, event_id, message, timestamp }
  * @returns {import('../../contracts/CanonicalTypes').CanonicalEvent | null}
  */
 function parsePayload99(payload) {
   if (!payload || typeof payload !== 'object') return null;
 
   const nomeEvento = extrairNomeEvento(payload);
-  const orderId = extrairOrderId(payload);
+  const msg = parsearMessage(payload);
+  const eventoLower = String(nomeEvento || '').toLowerCase();
 
+  // ─── DriverCanceled: ids vêm como old_order_id / new_order_id ───
+  if (eventoLower === 'drivercanceled') {
+    const oldId = msg.old_order_id != null ? String(msg.old_order_id) : null;
+    const newId = msg.new_order_id != null && String(msg.new_order_id).trim()
+      ? String(msg.new_order_id) : null;
+
+    if (!oldId) return null;  // sem id antigo não dá pra localizar a entrega
+
+    if (newId && newId !== oldId) {
+      // Reatribuição — pedido continua vivo com um id novo.
+      return {
+        eventType: 'status_change',
+        externalDeliveryId: oldId,                  // id ANTIGO — localiza a entrega
+        reassignedExternalDeliveryId: newId,        // id NOVO — o Dispatcher atualiza
+        statusNative: nomeEvento,
+        statusCanonico: CanonicalStatus.DISPATCHED, // volta a "procurando entregador"
+        rawProvider: payload,
+      };
+    }
+    // Sem new_order_id → cancelamento de verdade.
+    return {
+      eventType: 'status_change',
+      externalDeliveryId: oldId,
+      statusNative: nomeEvento,
+      statusCanonico: nativeToCanonical(nomeEvento),
+      rawProvider: payload,
+    };
+  }
+
+  // ─── Demais eventos: order_id está dentro de message ───
+  const orderId = msg.order_id != null ? String(msg.order_id) : null;
   if (!orderId) {
     return null;  // sem order_id não dá pra localizar a entrega
   }
 
-  const courier = extrairCourierDeWebhook(payload);
-  const eventoLower = String(nomeEvento || '').toLowerCase();
-
-  // ─── Eventos informativos (OrderClosed, SendBack): só log, sem ação ───
+  // Eventos informativos (OrderClosed, SendBack): só log, sem ação Mapp.
   const ehInformativo = WEBHOOK_EVENTOS_INFORMATIVOS
     .some(ev => ev.toLowerCase() === eventoLower);
   if (ehInformativo) {
@@ -227,26 +207,8 @@ function parsePayload99(payload) {
     };
   }
 
-  // ─── DriverCanceled COM new_order_id: reatribuição, NÃO é cancelamento ───
-  if (eventoLower === 'drivercanceled') {
-    const newOrderId = extrairNewOrderId(payload);
-    if (newOrderId && newOrderId !== orderId) {
-      return {
-        eventType: 'status_change',
-        externalDeliveryId: orderId,                 // id ANTIGO — pra localizar a entrega
-        reassignedExternalDeliveryId: newOrderId,    // id NOVO — o WebhookDispatcher atualiza
-        statusNative: nomeEvento,
-        statusCanonico: CanonicalStatus.DISPATCHED,  // pedido continua vivo
-        courier,
-        rawProvider: payload,
-      };
-    }
-    // Sem new_order_id → cancelamento de verdade (cai no fluxo padrão abaixo)
-  }
-
-  // ─── Demais eventos → status_change padrão ───
+  // Evento sem nome identificável → 'other' só pra log.
   if (!nomeEvento) {
-    // Evento sem nome identificável — devolve 'other' só pra log
     return {
       eventType: 'other',
       externalDeliveryId: orderId,
@@ -254,20 +216,20 @@ function parsePayload99(payload) {
     };
   }
 
+  // Marco de status normal.
   return {
     eventType: 'status_change',
     externalDeliveryId: orderId,
     statusNative: nomeEvento,
     statusCanonico: nativeToCanonical(nomeEvento),
-    courier,
     rawProvider: payload,
   };
 }
 
 /**
  * Detecta o "tipo" do evento — exposto pro WebhookDispatcher logar/rotear.
- * A 99Entrega só manda marcos de status (sem courier_update separado, porque
- * não há posição no webhook).
+ * A 99Entrega só manda marcos de status (sem courier_update — não há posição
+ * nem dados do entregador no webhook).
  *
  * @param {Object} payload
  * @returns {'status_change'|'other'}
@@ -284,10 +246,8 @@ function detectarTipoEvento(payload) {
 module.exports = {
   SIGNATURE_HEADERS,
   validarAssinatura99,
+  parsearMessage,
   extrairNomeEvento,
-  extrairOrderId,
-  extrairNewOrderId,
-  extrairCourierDeWebhook,
   parsePayload99,
   detectarTipoEvento,
 };
