@@ -1,128 +1,201 @@
 /**
  * NINETYNINE ADAPTER — Parser de payload (API 99Entrega)
  *
- * ⚠️ REESCRITO 2026-05 — antes este parser falava a "99 Corp API" (corridas,
- * categoryID, employeeID, costCenterID). A 99Entrega (delivery) é outra API:
- * OAuth, endpoints /v2/order/*, envelope { errno, errmsg, data }.
- *
- * Traduz objetos canônicos do hub → dialeto da 99Entrega e parseia as
- * respostas de volta.
+ * ⚠️ REESCRITO 2026-05 (rev. 2) — alinhado à doc OFICIAL da 99Entrega
+ * (https://entrega-api.99app.com/docs/en/api_reference.html). A rev.1 usava
+ * nomes de campo convencionais que NÃO batiam com a API real; corrigido:
+ *  - `vehicle_type` é OBRIGATÓRIO no estimate e no create. Enum real:
+ *    "entrega_moto" (moto) e "entrega_car" (carro) — NÃO "motorcycle"/"car".
+ *  - Endereço é `structured_address` (objeto: street/number/neighborhood/
+ *    city/state/CEP/country), não uma string `address`. Coordenadas vão em
+ *    `location:{lat,lng}` à parte.
+ *  - No /create, `package_type`/`package_weight` vão DENTRO de `package_info`.
+ *  - `note` (observação visível ao courier) é OBRIGATÓRIO em pickup_info e
+ *    dropoff_info no /create.
+ *  - `reason_id` do cancel é STRING.
+ *  - No /detail, courier traz `vehicle_info.plate_no`/`.color` e `location`.
+ *  - O /estimate responde `data.id` (estimate id) + `data.delivery_duration`
+ *    (minutos) + `data.fee` (centavos).
  *
  * Endpoints cobertos (base de noventanove.auth.getBaseUrl()):
- *   POST /v2/order/estimate  → cotação. Devolve estimate_id + fee (centavos).
+ *   POST /v2/order/estimate  → cotação. Devolve data.id + data.fee (centavos).
  *   POST /v2/order/create    → cria o pedido. Usa estimate_id (single-use).
- *   POST /v2/order/cancel    → cancela. Exige reason_id.
+ *   POST /v2/order/cancel    → cancela. Exige reason_id (string).
  *   GET  /v2/order/detail    → estado atual + driver_info.location (tracking).
  *
- * Particularidades da 99Entrega (anotadas do README-99-AUTH / doc):
- *  - `fee` vem em CENTAVOS — `fee: 8` = R$ 0,08. Dividir por 100.
- *  - `estimate_id` liga a cotação ao pedido — cada um serve pra UM create.
- *  - `external_order_id` = codigo_os da Mapp. Idempotente: repetir o mesmo
- *    retorna o pedido já criado.
- *  - `package_type` / `package_weight` são OBRIGATÓRIOS no create. A Mapp não
- *    tem essa info → default configurável (config.package_type / .package_weight).
- *  - Telefones: BR sem +55 (DDD+número). A OS da Mapp nem sempre traz →
- *    fallback config.telefone_suporte (mesma estratégia do uber.parser).
- *  - `need_pickup_code` / `need_dropoff_code`: códigos de verificação,
- *    configuráveis no painel (config booleano).
- *
- * Sobre os NOMES de campo dentro de pickup_info/dropoff_info (lat/lng/address/
- * name/phone): seguem a convenção da Open Platform da 99Entrega. Os campos
- * citados nominalmente no README (`pickup_info`, `dropoff_info`, `phone`,
- * `package_type`, `package_weight`, `need_pickup_code`, `need_dropoff_code`,
- * `external_order_id`, `estimate_id`) estão garantidos; lat/lng/address/name
- * são os nomes convencionais — se o sandbox acusar divergência, é só ajustar
- * montarInfoEndereco() (ponto único de verdade).
- *
- * Doc: https://entrega-api.99app.com/docs/en/
+ * Doc: https://entrega-api.99app.com/docs/en/api_reference.html
  */
 
-const { formatarTelefoneBR, truncarTexto } = require('../../core/AddressParser');
+const {
+  formatarTelefoneBR,
+  truncarTexto,
+  parsearEnderecoBrasileiro,
+  DEFAULT_CITY,
+  DEFAULT_STATE,
+  DEFAULT_COUNTRY,
+} = require('../../core/AddressParser');
 
 // ════════════════════════════════════════════════════════════
-// Defaults configuráveis (decisões de negócio do README)
+// Enums e defaults da 99Entrega (doc oficial)
 // ════════════════════════════════════════════════════════════
 
-/** Tipo de pacote default quando config.package_type não está setado. */
+/**
+ * Enum de veículo da 99Entrega. A API só aceita estes dois valores.
+ * O hub usa 'motorcycle'/'car'/'auto'/'van' no CanonicalQuoteRequest —
+ * normalizamos aqui. A 99Entrega faz moto e carro; qualquer coisa que
+ * não seja explicitamente carro vira moto (o caso de uso do Tutts é moto).
+ */
+const VEHICLE_99 = Object.freeze({
+  MOTO: 'entrega_moto',
+  CAR:  'entrega_car',
+});
+
+/** package_type aceitos pela 99Entrega (enum fechado da doc). */
+const PACKAGE_TYPES_99 = Object.freeze([
+  'groceries', 'food', 'documents', 'apparel', 'medication', 'electronics', 'others',
+]);
+
+/** package_weight aceitos pela 99Entrega (enum fechado da doc). */
+const PACKAGE_WEIGHTS_99 = Object.freeze(['1kg', '5kg', '10kg', '20kg', '30kg']);
+
+/** Tipo de pacote default quando config.package_type não está setado/é inválido. */
 const PACKAGE_TYPE_DEFAULT = 'documents';
 
-/** Peso de pacote default quando config.package_weight não está setado. */
+/** Peso de pacote default quando config.package_weight não está setado/é inválido. */
 const PACKAGE_WEIGHT_DEFAULT = '1kg';
 
 /**
- * reason_id default pra cancelamento. A 99Entrega aceita o enum 410013..410021.
- * 410013 é o motivo mais genérico ("cancelado pelo solicitante"). O operador
- * pode sobrescrever via config.cancel_reason_id sem precisar de deploy.
- *
- * ⚠️ Confirme o id exato do motivo desejado na doc da 99Entrega — os ids do
- * enum mudam de significado; este é só um default seguro.
+ * reason_id default pra cancelamento (STRING — a doc envia como string).
+ * Enum da doc: 410013..410021. 410018 = "Delivery no longer needed" é o
+ * motivo genérico mais adequado pra cancelamento iniciado pelo operador.
+ * O operador pode sobrescrever via config.cancel_reason_id.
  */
-const CANCEL_REASON_ID_DEFAULT = 410013;
+const CANCEL_REASON_ID_DEFAULT = '410018';
 
 // ════════════════════════════════════════════════════════════
 // Helpers
 // ════════════════════════════════════════════════════════════
 
 /**
- * Resolve um telefone BR (DDD+número, sem +55) com fallback pro telefone de
- * suporte da config — mesma estratégia do uber.parser.
+ * Normaliza o vehicleType canônico do hub pro enum da 99Entrega.
+ * @param {string} [vehicleType] - 'motorcycle' | 'car' | 'van' | 'auto'
+ * @returns {string} 'entrega_moto' | 'entrega_car'
+ */
+function resolverVeiculo(vehicleType) {
+  return vehicleType === 'car' ? VEHICLE_99.CAR : VEHICLE_99.MOTO;
+}
+
+/**
+ * Resolve um telefone BR (DDD+número, só dígitos, sem +55) com fallback pro
+ * telefone de suporte da config. A 99Entrega exige formato só-dígitos.
  *
  * @param {string} telBruto - telefone vindo da OS (formato livre)
  * @param {string} telSuporte - config.telefone_suporte (fallback)
  * @returns {string|null}
  */
 function resolverTelefone(telBruto, telSuporte) {
-  return formatarTelefoneBR(telBruto) || formatarTelefoneBR(telSuporte) || null;
+  const tel = formatarTelefoneBR(telBruto) || formatarTelefoneBR(telSuporte) || null;
+  if (!tel) return null;
+  // formatarTelefoneBR pode devolver com máscara — a 99 quer só dígitos.
+  return String(tel).replace(/\D/g, '') || null;
+}
+
+/**
+ * Monta o objeto `structured_address` da 99Entrega a partir de um
+ * CanonicalAddress do hub (que só tem `address` como string livre).
+ *
+ * O hub não fornece endereço estruturado — usamos parsearEnderecoBrasileiro
+ * (best-effort) pra quebrar a string. A 99Entrega exige street/neighborhood/
+ * city/state/CEP/country; `number`/`complement` são opcionais. Como a 99 usa
+ * `location` (lat/lng) pra estimar quando fornecida — e o hub SEMPRE manda
+ * lat/lng — a precisão do parse de string não é crítica pra cotação.
+ *
+ * @param {import('../../contracts/CanonicalTypes').CanonicalAddress} addr
+ * @returns {Object} structured_address
+ */
+function montarEnderecoEstruturado(addr) {
+  const parsed = parsearEnderecoBrasileiro(addr && addr.address);
+
+  // street_address é um array de linhas — junta na primeira linha não-vazia.
+  const street = (parsed.street_address && parsed.street_address[0])
+    || (addr && addr.address)
+    || 'Endereço não informado';
+
+  // Tenta extrair um número solto do começo/fim da rua (best-effort, opcional).
+  let number = '';
+  const mNum = String(street).match(/(?:^|,\s*|\s)(\d{1,6})(?:\s|,|$)/);
+  if (mNum) number = mNum[1];
+
+  const structured = {
+    street: truncarTexto(street, 200),
+    neighborhood: truncarTexto(parsed.neighborhood || parsed.city || DEFAULT_CITY, 120),
+    city: truncarTexto(parsed.city || DEFAULT_CITY, 120),
+    state: parsed.state || DEFAULT_STATE,
+    CEP: parsed.zip_code || '',
+    country: parsed.country || DEFAULT_COUNTRY,
+  };
+  if (number) structured.number = number;
+  if (addr && addr.complement) {
+    structured.complement = truncarTexto(addr.complement, 100);
+  }
+  return structured;
 }
 
 /**
  * Monta um objeto pickup_info / dropoff_info pra 99Entrega.
  *
- * PONTO ÚNICO DE VERDADE dos nomes de campo de endereço — se o sandbox da 99
- * acusar divergência de schema, ajuste só aqui.
+ * No /estimate só precisa de location + structured_address (geográfico).
+ * No /create precisa também de name, phone e note (todos obrigatórios).
  *
  * @param {import('../../contracts/CanonicalTypes').CanonicalAddress} addr
  * @param {Object} opts
  * @param {string}  opts.nomeDefault - nome usado se addr.name vier vazio
  * @param {string}  opts.telSuporte  - telefone de fallback (config.telefone_suporte)
- * @param {boolean} [opts.incluirContato=false] - se true, inclui name/phone/need_code (create)
- * @param {boolean} [opts.needCode=false] - valor do need_pickup_code/need_dropoff_code
+ * @param {boolean} [opts.incluirContato=false] - se true, inclui name/phone/note (create)
+ * @param {string}  [opts.note=''] - conteúdo do campo note (create)
  * @returns {Object} pickup_info / dropoff_info
  */
 function montarInfoEndereco(addr, opts) {
-  const { nomeDefault, telSuporte, incluirContato = false, needCode = false } = opts || {};
+  const { nomeDefault, telSuporte, incluirContato = false, note = '' } = opts || {};
 
   const info = {
-    lat: addr.latitude != null ? parseFloat(addr.latitude) : null,
-    lng: addr.longitude != null ? parseFloat(addr.longitude) : null,
-    address: truncarTexto(addr.address, 200) || '',
+    structured_address: montarEnderecoEstruturado(addr),
   };
 
-  if (addr.complement) {
-    info.address_detail = truncarTexto(addr.complement, 100);
+  // location (lat/lng) — opcional na doc, mas o hub sempre tem; mandar melhora
+  // a precisão da estimativa.
+  if (addr && addr.latitude != null && addr.longitude != null) {
+    info.location = {
+      lat: parseFloat(addr.latitude),
+      lng: parseFloat(addr.longitude),
+    };
   }
 
-  // Contato (name/phone/need_code) — só no create; o estimate é só geográfico.
+  // Contato (name/phone/note) — só no create; o estimate é só geográfico.
   if (incluirContato) {
-    info.name = truncarTexto(addr.name || nomeDefault, 100);
-    const tel = resolverTelefone(addr.phone, telSuporte);
+    info.name = truncarTexto((addr && addr.name) || nomeDefault, 100);
+    const tel = resolverTelefone(addr && addr.phone, telSuporte);
     if (tel) info.phone = tel;
-    info.need_code = !!needCode;
+    // note é obrigatório no create — nunca pode ir vazio.
+    info.note = truncarTexto(note || nomeDefault || '-', 127);
   }
 
   return info;
 }
 
 /**
- * Resolve package_type / package_weight a partir da config (com defaults).
+ * Resolve package_type / package_weight a partir da config, validando contra
+ * os enums da 99Entrega. Valor inválido cai no default (a 99 rejeita fora do enum).
  *
  * @param {Object} config - logistics_providers.config
  * @returns {{ package_type: string, package_weight: string }}
  */
 function resolverPacote(config) {
+  const tipo = config && config.package_type;
+  const peso = config && config.package_weight;
   return {
-    package_type: (config && config.package_type) || PACKAGE_TYPE_DEFAULT,
-    package_weight: (config && config.package_weight) || PACKAGE_WEIGHT_DEFAULT,
+    package_type: PACKAGE_TYPES_99.includes(tipo) ? tipo : PACKAGE_TYPE_DEFAULT,
+    package_weight: PACKAGE_WEIGHTS_99.includes(peso) ? peso : PACKAGE_WEIGHT_DEFAULT,
   };
 }
 
@@ -132,7 +205,7 @@ function resolverPacote(config) {
 
 /**
  * Monta o body pra POST /v2/order/estimate.
- * O estimate é geográfico — só precisa de coleta, entrega e dados do pacote.
+ * O estimate é geográfico: vehicle_type + coleta + entrega.
  *
  * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
  * @param {Object} config - logistics_providers.config
@@ -140,9 +213,9 @@ function resolverPacote(config) {
  */
 function montarBodyEstimate(req, config) {
   const telSuporte = (config && config.telefone_suporte) || '';
-  const pacote = resolverPacote(config);
 
   return {
+    vehicle_type: resolverVeiculo(req.vehicleType),
     pickup_info: montarInfoEndereco(req.pickup, {
       nomeDefault: 'Loja',
       telSuporte,
@@ -153,15 +226,13 @@ function montarBodyEstimate(req, config) {
       telSuporte,
       incluirContato: false,
     }),
-    package_type: pacote.package_type,
-    package_weight: pacote.package_weight,
   };
 }
 
 /**
  * Monta o body pra POST /v2/order/create.
  *
- * @param {string} estimateId - estimate_id devolvido pelo /estimate (single-use)
+ * @param {string} estimateId - estimate id devolvido pelo /estimate (single-use)
  * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
  * @param {Object} config - logistics_providers.config
  * @returns {Object} body pronto pra 99Entrega
@@ -173,22 +244,23 @@ function montarBodyCreate(estimateId, req, config) {
 
   const telSuporte = (config && config.telefone_suporte) || '';
   const pacote = resolverPacote(config);
+  const osRef = String(req.externalRef);
 
-  // Toggles de código de verificação (decisão de negócio — config booleana)
-  const needPickup  = config && config.need_pickup_code === true;
-  const needDropoff = config && config.need_dropoff_code === true;
+  // note é obrigatório nos dois lados. Anexa a referência da OS — a doc
+  // recomenda incluir o external_order_id no note pro courier.
+  const noteBase = truncarTexto(req.itemDescription || `OS ${osRef}`, 100);
 
   const pickupInfo = montarInfoEndereco(req.pickup, {
     nomeDefault: 'Loja',
     telSuporte,
     incluirContato: true,
-    needCode: needPickup,
+    note: `Coleta ${noteBase}`,
   });
   const dropoffInfo = montarInfoEndereco(req.dropoff, {
     nomeDefault: 'Cliente',
     telSuporte,
     incluirContato: true,
-    needCode: needDropoff,
+    note: `Entrega ${noteBase}`,
   });
 
   // Telefones são obrigatórios no create da 99Entrega.
@@ -199,30 +271,47 @@ function montarBodyCreate(estimateId, req, config) {
     );
   }
 
-  return {
+  const body = {
+    vehicle_type: resolverVeiculo(req.vehicleType),
+    external_order_id: osRef,       // codigo_os da Mapp — idempotente
     estimate_id: String(estimateId),
-    external_order_id: String(req.externalRef),  // codigo_os da Mapp — idempotente
     pickup_info: pickupInfo,
     dropoff_info: dropoffInfo,
-    package_type: pacote.package_type,
-    package_weight: pacote.package_weight,
-    remark: truncarTexto(req.itemDescription || `OS ${req.externalRef}`, 200),
+    package_info: {
+      package_type: pacote.package_type,
+      package_weight: pacote.package_weight,
+    },
   };
+
+  // Toggles de código de verificação (config booleana do painel).
+  // A doc: default true se não enviado — então enviamos sempre o valor explícito.
+  body.need_pickup_code  = (config && config.need_pickup_code === true);
+  body.need_dropoff_code = (config && config.need_dropoff_code === true);
+
+  return body;
 }
 
 /**
  * Monta o body pra POST /v2/order/cancel.
+ * A doc recomenda usar external_order_id (o codigo_os da Mapp).
  *
- * @param {string} orderId - order_id da 99 (external_delivery_id do hub)
+ * @param {string} externalOrderId - codigo_os da Mapp (recomendado pela doc)
  * @param {Object} config - logistics_providers.config (cancel_reason_id opcional)
+ * @param {string} [orderId] - order_id da 99 (fallback se não houver externalOrderId)
  * @returns {Object} body pronto pra 99Entrega
  */
-function montarBodyCancel(orderId, config) {
-  const reasonId = parseInt((config && config.cancel_reason_id), 10) || CANCEL_REASON_ID_DEFAULT;
-  return {
-    order_id: String(orderId),
-    reason_id: reasonId,
-  };
+function montarBodyCancel(externalOrderId, config, orderId) {
+  // reason_id é STRING na 99Entrega.
+  let reasonId = config && config.cancel_reason_id;
+  reasonId = reasonId != null && String(reasonId).trim()
+    ? String(reasonId).trim()
+    : CANCEL_REASON_ID_DEFAULT;
+
+  const body = { reason_id: reasonId };
+  // A doc: se ambos vierem, só external_order_id é usado. Mandamos o que tiver.
+  if (externalOrderId) body.external_order_id = String(externalOrderId);
+  else if (orderId)    body.order_id = String(orderId);
+  return body;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -231,38 +320,42 @@ function montarBodyCancel(orderId, config) {
 
 /**
  * Extrai o conteúdo útil de uma resposta /v2/order/estimate.
- * A 99Entrega devolve { errno, errmsg, data: { estimate_id, fee, ... } }.
+ * Envelope: { errno, errmsg, data: { id, fee, currency, delivery_distance,
+ * delivery_duration, created_time, expires_time } }.
  * O caller (adapter) já validou errno === 0 antes de chamar isto.
  *
  * @param {Object} data - o `data` do envelope (já desencapsulado)
- * @returns {{ estimateId: string, feeReais: number, etaMinutos: (number|null), raw: Object }}
+ * @returns {{ estimateId: string, feeReais: (number|null), etaMinutos: (number|null),
+ *             distanciaMetros: (number|null), expiresAt: (Date|null), raw: Object }}
  */
 function parseEstimate(data) {
   const d = data || {};
-  const estimateId = d.estimate_id || d.estimateId || null;
+  // A doc nomeia o campo como `id` (não `estimate_id`).
+  const estimateId = d.id || d.estimate_id || null;
   if (!estimateId) {
-    throw new Error('99Entrega: /estimate respondeu sem estimate_id');
+    throw new Error('99Entrega: /estimate respondeu sem id de cotação');
   }
 
   // fee vem em CENTAVOS — fee: 850 = R$ 8,50
   const feeCentavos = d.fee != null ? Number(d.fee) : null;
   const feeReais = feeCentavos != null ? feeCentavos / 100 : null;
 
-  // ETA — a 99 pode devolver em segundos ou minutos, em campos variados.
-  // Defensivo: tenta os caminhos conhecidos, normaliza pra minutos.
-  let etaMinutos = null;
-  if (d.eta_minutes != null) etaMinutos = Number(d.eta_minutes);
-  else if (d.eta != null) etaMinutos = Number(d.eta);
-  else if (d.duration != null) etaMinutos = Math.round(Number(d.duration) / 60); // segundos→min
-  else if (d.estimate_time != null) etaMinutos = Number(d.estimate_time);
+  // delivery_duration já vem em MINUTOS na doc.
+  const etaMinutos = d.delivery_duration != null ? Number(d.delivery_duration) : null;
+  const distanciaMetros = d.delivery_distance != null ? Number(d.delivery_distance) : null;
 
-  return { estimateId: String(estimateId), feeReais, etaMinutos, raw: d };
+  // expires_time é timestamp UNIX em segundos.
+  const expiresAt = d.expires_time != null
+    ? new Date(Number(d.expires_time) * 1000)
+    : null;
+
+  return { estimateId: String(estimateId), feeReais, etaMinutos, distanciaMetros, expiresAt, raw: d };
 }
 
 /**
  * Extrai dados do entregador do `driver_info` de GET /v2/order/detail.
- * Retorna courier canônico. A 99Entrega traz a posição SÓ no order/detail
- * (o webhook NÃO traz lat/lng).
+ * Estrutura real da doc: driver_info { name, phone, avatar,
+ * vehicle_info { plate_no, color }, location { lat, lng } }.
  *
  * @param {Object} driverInfo - data.driver_info da resposta de /detail
  * @returns {Object|null} courier canônico
@@ -271,27 +364,38 @@ function extrairCourierDeDetail(driverInfo) {
   const d = driverInfo;
   if (!d || typeof d !== 'object') return null;
 
-  const loc = d.location || d.position || null;
+  const loc = d.location || null;
+  const veic = d.vehicle_info || {};
+
+  // location { lat:0, lng:0 } é o "sem posição" da 99 — trata como ausente.
+  const lat = loc && loc.lat != null ? Number(loc.lat) : null;
+  const lng = loc && loc.lng != null ? Number(loc.lng) : null;
+  const temPosicao = lat != null && lng != null && !(lat === 0 && lng === 0);
 
   return {
-    name:    d.name || d.driver_name || d.full_name || null,
-    phone:   d.phone || d.phone_number || d.mobile || null,
-    plate:   d.plate || d.license_plate || d.car_plate || null,
-    vehicle: d.vehicle || d.car_model || d.model || null,
-    photo:   d.photo || d.avatar || d.img || null,
-    rating:  d.rating != null ? d.rating : null,
-    lat:     loc ? (loc.lat != null ? loc.lat : loc.latitude) : null,
-    lng:     loc ? (loc.lng != null ? loc.lng : loc.longitude) : null,
+    name:    d.name || null,
+    phone:   d.phone || null,
+    plate:   veic.plate_no || null,
+    vehicle: veic.color || null,   // a 99 só dá cor do veículo, não marca/modelo
+    photo:   d.avatar || null,
+    rating:  null,                 // a 99Entrega não expõe rating do courier
+    lat:     temPosicao ? lat : null,
+    lng:     temPosicao ? lng : null,
   };
 }
 
 module.exports = {
-  // constantes / defaults
+  // enums / constantes
+  VEHICLE_99,
+  PACKAGE_TYPES_99,
+  PACKAGE_WEIGHTS_99,
   PACKAGE_TYPE_DEFAULT,
   PACKAGE_WEIGHT_DEFAULT,
   CANCEL_REASON_ID_DEFAULT,
   // helpers
+  resolverVeiculo,
   resolverTelefone,
+  montarEnderecoEstruturado,
   montarInfoEndereco,
   resolverPacote,
   // builders

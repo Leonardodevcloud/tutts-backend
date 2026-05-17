@@ -210,7 +210,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const body = montarBodyEstimate(req, this.config);
     const data = await this._chamar99('POST', '/v2/order/estimate', body, 'createQuote');
 
-    const { estimateId, feeReais, etaMinutos, expiresAt, raw } = parseEstimate(data);
+    const { estimateId, feeReais, etaMinutos, raw } = parseEstimate(data);
 
     console.log(`✅ [NinetyNineAdapter] cotação: estimate_id=${estimateId} | R$${feeReais != null ? feeReais.toFixed(2) : '?'} | ETA ${etaMinutos != null ? etaMinutos + 'min' : 'n/d'}`);
 
@@ -220,11 +220,9 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       valor: feeReais != null ? feeReais : 0,    // fee/100 (centavos → reais)
       etaMinutos: etaMinutos != null ? etaMinutos : null,
       vehicleType: 'motorcycle',
-      // A 99 devolve expires_time no estimate — usa quando vier; senão, 5min
-      // nominal (o Orchestrator consome a quote logo em seguida no mesmo fluxo).
-      expiresAt: expiresAt instanceof Date && !isNaN(expiresAt)
-        ? expiresAt
-        : new Date(Date.now() + 5 * 60_000),
+      // A 99 não documenta validade explícita do estimate_id; 5min nominal
+      // (o Orchestrator consome a quote no mesmo fluxo, logo em seguida).
+      expiresAt: new Date(Date.now() + 5 * 60_000),
       rawProvider: raw,
     };
   }
@@ -289,10 +287,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   async cancelDelivery(externalDeliveryId) {
     validarConfig(this.config);
 
-    // externalDeliveryId aqui é o order_id da 99 (o que o hub guarda em
-    // external_delivery_id). montarBodyCancel aceita (externalOrderId, config,
-    // orderId) — passamos como orderId (3º arg) já que é o id interno da 99.
-    const body = montarBodyCancel(null, this.config, externalDeliveryId);
+    const body = montarBodyCancel(externalDeliveryId, this.config);
 
     try {
       await this._chamar99('POST', '/v2/order/cancel', body, 'cancelDelivery');
