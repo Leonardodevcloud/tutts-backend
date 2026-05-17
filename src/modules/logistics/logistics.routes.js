@@ -421,7 +421,30 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         [id]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
-      res.json({ success: true, entrega: mapearCanonicoParaLegado(rows[0]) });
+      const entrega = mapearCanonicoParaLegado(rows[0]);
+
+      // 🆕 Fase 6 — o modal de detalhes do frontend espera tracking + webhooks.
+      // tracking: pontos de logistics_tracking; webhooks: eventos de logistics_events.
+      let tracking = [];
+      let webhooks = [];
+      try {
+        const t = await pool.query(
+          `SELECT latitude, longitude, status_native, created_at
+           FROM logistics_tracking WHERE codigo_os = $1 ORDER BY created_at ASC`,
+          [entrega.codigo_os]
+        );
+        tracking = t.rows;
+        const w = await pool.query(
+          `SELECT event_type, event_source, status_native, payload, created_at
+           FROM logistics_events WHERE codigo_os = $1 ORDER BY created_at DESC LIMIT 50`,
+          [entrega.codigo_os]
+        );
+        webhooks = w.rows;
+      } catch (e) {
+        console.error('[logistics/routes] /deliveries/:id tracking/events:', e.message);
+      }
+
+      res.json({ success: true, entrega, tracking, webhooks });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
