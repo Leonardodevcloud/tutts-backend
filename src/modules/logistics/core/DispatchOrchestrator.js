@@ -9,7 +9,7 @@
  *  - Aplica validação de margem (R$ + %)
  *  - Decide provider via providers_preferidos (Fase 1B.1: usa só [0], primeiro da lista)
  *  - Reserva OS na Mapp (mappAlterarStatus 0 → 1)
- *  - Cria registro em uber_entregas (Opção A: escrita no legado, mantém UI/painel)
+ *  - Cria registro em logistics_deliveries (tabela primária do hub)
  *  - Chama UberAdapter.createQuote + createDelivery
  *  - Atualiza registro com quote_id, valor, delivery_id, tracking_url
  *  - Em caso de erro: marca status='erro' + libera OS na Mapp
@@ -20,7 +20,7 @@
  *  - Validar HMAC de webhook (responsabilidade do WebhookDispatcher — Fase 1B.2)
  *
  * 🆕 2026-05 Fase 5 — DUAL-WRITE:
- *  - dispatch() continua escrevendo em uber_entregas EXATAMENTE como antes
+ *  - dispatch()/cancel() escrevem direto em logistics_deliveries (Fase 6)
  *    (fonte de verdade pra UI/painel). NADA do comportamento legado muda.
  *  - ADICIONALMENTE espelha o registro em logistics_deliveries (tabela
  *    canônica). É best-effort: se o espelho falhar, loga e segue — o
@@ -42,7 +42,7 @@ const { getQuoteCache } = require('./QuoteCache');
 const { getDispatchRuleMatcher } = require('./DispatchRuleMatcher');
 const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.parser');
 
-// Status terminais em uber_entregas (não devem ser re-despachados)
+// Status terminais (status_native) — não devem ser re-despachados
 const STATUS_TERMINAL = ['cancelado', 'canceled', 'delivered', 'fallback_fila'];
 
 class DispatchOrchestrator {
@@ -229,7 +229,7 @@ class DispatchOrchestrator {
    * @param {number} [opts.regraId]
    * @param {Object} [opts.quoteReuso] - { quote: CanonicalQuote, request: CanonicalQuoteRequest }
    * @param {string} [opts.eventSource='worker']
-   * @returns {Promise<Object|null>} registro de uber_entregas criado, ou null se OS já estava ativa
+   * @returns {Promise<Object|null>} registro de logistics_deliveries criado, ou null se OS já estava ativa
    */
   async dispatch(servico, opts = {}) {
     const providerCode = opts.providerCode || 'uber';
@@ -246,12 +246,14 @@ class DispatchOrchestrator {
 
     // 1. Verificar idempotência — não despachar OS que já tem entrega ativa
     const { rows: existente } = await this.pool.query(
-      `SELECT id, status_uber FROM uber_entregas
-       WHERE codigo_os = $1 AND status_uber NOT IN ('cancelado','canceled','delivered','fallback_fila')`,
+      `SELECT id, status_native FROM logistics_deliveries
+       WHERE codigo_os = $1
+         AND status_canonico NOT IN ('CANCELED','DELIVERED')
+         AND COALESCE(status_native,'') NOT IN ('cancelado','canceled','delivered','fallback_fila')`,
       [codigoOS]
     );
     if (existente.length > 0) {
-      console.log(`⚠️ [Orchestrator] OS ${codigoOS} já tem entrega ativa (id=${existente[0].id}, status=${existente[0].status_uber})`);
+      console.log(`⚠️ [Orchestrator] OS ${codigoOS} já tem entrega ativa (id=${existente[0].id}, status=${existente[0].status_native})`);
       return null;
     }
 
@@ -271,20 +273,21 @@ class DispatchOrchestrator {
     }
     console.log(`✅ [Orchestrator] OS ${codigoOS} reservada na Mapp (status 0 → 1)`);
 
-    // 3. Inserir registro inicial em uber_entregas (status: aguardando_cotacao)
+    // 3. Inserir registro inicial em logistics_deliveries (status: aguardando_cotacao / PENDING)
     const coleta = enderecos[0];
     const entrega = enderecos[enderecos.length - 1];
     const { rows: [registro] } = await this.pool.query(`
-      INSERT INTO uber_entregas (
-        codigo_os, status_uber, valor_servico, valor_profissional,
+      INSERT INTO logistics_deliveries (
+        codigo_os, provider_code, status_canonico, status_native,
+        valor_servico, valor_profissional,
         endereco_coleta, endereco_entrega,
         latitude_coleta, longitude_coleta,
         latitude_entrega, longitude_entrega,
         obs, pontos, regra_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING *
     `, [
-      codigoOS, 'aguardando_cotacao',
+      codigoOS, providerCode, 'PENDING', 'aguardando_cotacao',
       servico.valorServico, servico.valorProfissional,
       coleta.rua, entrega.rua,
       coleta.latitude || null, coleta.longitude || null,
@@ -311,20 +314,23 @@ class DispatchOrchestrator {
       }
 
       await this.pool.query(`
-        UPDATE uber_entregas
-        SET uber_quote_id = $1, valor_uber = $2, eta_minutos = $3, status_uber = $4, updated_at = NOW()
-        WHERE id = $5
-      `, [quote.quoteId, quote.valor, quote.etaMinutos, 'cotacao_recebida', registro.id]);
+        UPDATE logistics_deliveries
+        SET external_quote_id = $1, valor_provider = $2, eta_minutos = $3,
+            status_canonico = 'PENDING', status_native = 'cotacao_recebida', updated_at = NOW()
+        WHERE id = $4
+      `, [quote.quoteId, quote.valor, quote.etaMinutos, registro.id]);
 
       // 5. Criar delivery no provider
       const delivery = await adapter.createDelivery(quote, request);
 
       // 6. Atualiza com delivery_id + tracking_url
       await this.pool.query(`
-        UPDATE uber_entregas
-        SET uber_delivery_id = $1, status_uber = $2, tracking_url = $3, updated_at = NOW()
+        UPDATE logistics_deliveries
+        SET external_delivery_id = $1, status_canonico = 'DISPATCHED', status_native = 'enviado_uber',
+            tracking_url = $2, vehicle_type = $3, updated_at = NOW()
         WHERE id = $4
-      `, [delivery.externalDeliveryId, 'enviado_uber', delivery.trackingUrl || null, registro.id]);
+      `, [delivery.externalDeliveryId, delivery.trackingUrl || null,
+          opts.vehicleType || quote.vehicleType || null, registro.id]);
 
       // 7. Limpa cache de cotações dessa OS
       this.cache.clearOS(codigoOS, providerCode);
@@ -349,37 +355,36 @@ class DispatchOrchestrator {
 
       console.log(`✅ [Orchestrator] OS ${codigoOS} despachada → ${providerCode} delivery_id=${delivery.externalDeliveryId}`);
 
-      // 9. 🆕 Fase 5 DUAL-WRITE — espelha em logistics_deliveries (best-effort).
-      // Relê o registro pra pegar o estado final (delivery_id, tracking_url, status).
-      let registroFinal = registro;
-      try {
-        const { rows } = await this.pool.query('SELECT * FROM uber_entregas WHERE id = $1', [registro.id]);
-        if (rows[0]) registroFinal = rows[0];
-      } catch (e) { /* usa o registro em memória se a releitura falhar */ }
-
-      await this._espelharEmLogisticsDeliveries({
-        registro: registroFinal,
-        providerCode,
-        quote,
-        delivery,
-        vehicleType: opts.vehicleType,
-      });
-
+      // 9. 🆕 Fase 6 — logistics_deliveries é a tabela PRIMÁRIA. Não há mais
+      // espelho/dual-write: o registro já foi escrito direto na canônica.
+      // Retorna o registro canônico + aliases legados (uber_*) por compat.
       return {
         ...registro,
+        provider_code:    providerCode,
+        external_delivery_id: delivery.externalDeliveryId,
+        external_quote_id:    quote.quoteId,
+        status_canonico:  'DISPATCHED',
+        status_native:    'enviado_uber',
+        tracking_url:     delivery.trackingUrl,
+        valor_provider:   quote.valor,
+        eta_minutos:      quote.etaMinutos,
+        // aliases legados — callers antigos que liam uber_*/status_uber
         uber_delivery_id: delivery.externalDeliveryId,
-        tracking_url: delivery.trackingUrl,
-        cotacao: quote,
+        uber_quote_id:    quote.quoteId,
+        valor_uber:       quote.valor,
+        status_uber:      'enviado_uber',
+        cotacao:          quote,
       };
 
     } catch (erro) {
       console.error(`❌ [Orchestrator] Erro ao despachar OS ${codigoOS}:`, erro.message);
 
       await this.pool.query(`
-        UPDATE uber_entregas
-        SET status_uber = $1, erro_ultimo = $2, tentativas = tentativas + 1, updated_at = NOW()
-        WHERE id = $3
-      `, ['erro', erro.message, registro.id]);
+        UPDATE logistics_deliveries
+        SET status_canonico = 'FAILED', status_native = 'erro',
+            erro_ultimo = $1, tentativas = tentativas + 1, updated_at = NOW()
+        WHERE id = $2
+      `, [erro.message, registro.id]);
 
       // Reabre na Mapp pra fila interna
       await this.mapp.alterarStatus(codigoOS, 0).catch(e =>
@@ -397,131 +402,8 @@ class DispatchOrchestrator {
     }
   }
 
-  // ════════════════════════════════════════════════════════════
-  // 🆕 2026-05 Fase 5 — DUAL-WRITE: espelho em logistics_deliveries
-  // ════════════════════════════════════════════════════════════
-
-  /**
-   * Espelha um registro de uber_entregas na tabela canônica
-   * logistics_deliveries. Best-effort: NUNCA lança — em caso de erro,
-   * loga e retorna. O despacho legado não pode ser afetado por isto.
-   *
-   * Usa o mesmo mapeamento do logistics.backfill.js. Idempotente:
-   * ON CONFLICT (provider_code, codigo_os, external_delivery_id) atualiza.
-   *
-   * @param {Object} ctx
-   * @param {Object} ctx.registro     - linha de uber_entregas (após o despacho)
-   * @param {string} ctx.providerCode
-   * @param {Object} ctx.quote        - CanonicalQuote usada
-   * @param {Object} ctx.delivery     - retorno do adapter.createDelivery
-   * @param {string} [ctx.vehicleType]
-   */
-  async _espelharEmLogisticsDeliveries(ctx) {
-    try {
-      const { registro, providerCode, quote, delivery, vehicleType } = ctx;
-
-      // Status nativo → canônico. O adapter já devolve delivery.statusCanonico.
-      const statusCanonico = delivery?.statusCanonico || 'DISPATCHED';
-      const statusNative = delivery?.statusNative || registro.status_uber || null;
-      const externalDeliveryId = delivery?.externalDeliveryId || registro.uber_delivery_id || null;
-
-      // Valores comuns ao INSERT e ao UPDATE.
-      const vals = {
-        codigo_os:          registro.codigo_os,
-        provider_code:      providerCode,
-        external_delivery_id: externalDeliveryId,
-        external_quote_id:  quote?.quoteId || registro.uber_quote_id || null,
-        status_canonico:    statusCanonico,
-        status_native:      statusNative,
-        valor_servico:      registro.valor_servico,
-        valor_provider:     quote?.valor != null ? quote.valor : registro.valor_uber,
-        valor_profissional: registro.valor_profissional,
-        eta_minutos:        quote?.etaMinutos != null ? quote.etaMinutos : registro.eta_minutos,
-        vehicle_type:       vehicleType || quote?.vehicleType || null,
-        endereco_coleta:    registro.endereco_coleta,
-        endereco_entrega:   registro.endereco_entrega,
-        latitude_coleta:    registro.latitude_coleta,
-        longitude_coleta:   registro.longitude_coleta,
-        latitude_entrega:   registro.latitude_entrega,
-        longitude_entrega:  registro.longitude_entrega,
-        pontos:             registro.pontos != null ? JSON.stringify(registro.pontos) : '[]',
-        obs:                registro.obs,
-        tracking_url:       delivery?.trackingUrl || registro.tracking_url || null,
-        raw_provider_payload: delivery?.rawPayload != null ? JSON.stringify(delivery.rawPayload) : null,
-        regra_id:           registro.regra_id,
-        tentativas:         registro.tentativas || 0,
-        erro_ultimo:        registro.erro_ultimo || null,
-        created_at:         registro.created_at || new Date(),
-      };
-
-      // Idempotência sem depender de UNIQUE constraint (mesma técnica do
-      // logistics.backfill.js): procura um registro existente pra esta
-      // (provider_code, codigo_os, external_delivery_id) e decide UPDATE x INSERT.
-      const { rows: existentes } = await this.pool.query(`
-        SELECT id FROM logistics_deliveries
-        WHERE provider_code = $1 AND codigo_os = $2
-          AND COALESCE(external_delivery_id, '') = COALESCE($3, '')
-        LIMIT 1
-      `, [providerCode, vals.codigo_os, externalDeliveryId]);
-
-      if (existentes.length > 0) {
-        await this.pool.query(`
-          UPDATE logistics_deliveries SET
-            external_quote_id    = $2,
-            status_canonico      = $3,
-            status_native        = $4,
-            valor_provider       = $5,
-            eta_minutos          = $6,
-            vehicle_type         = $7,
-            tracking_url         = $8,
-            raw_provider_payload = $9,
-            tentativas           = $10,
-            erro_ultimo          = $11,
-            updated_at           = NOW()
-          WHERE id = $1
-        `, [
-          existentes[0].id,
-          vals.external_quote_id, vals.status_canonico, vals.status_native,
-          vals.valor_provider, vals.eta_minutos, vals.vehicle_type,
-          vals.tracking_url, vals.raw_provider_payload,
-          vals.tentativas, vals.erro_ultimo,
-        ]);
-        console.log(`🪞 [Orchestrator] dual-write OK (update): OS ${vals.codigo_os} em logistics_deliveries`);
-      } else {
-        await this.pool.query(`
-          INSERT INTO logistics_deliveries (
-            codigo_os, provider_code, external_delivery_id, external_quote_id,
-            status_canonico, status_native,
-            valor_servico, valor_provider, valor_profissional, eta_minutos,
-            vehicle_type,
-            endereco_coleta, endereco_entrega,
-            latitude_coleta, longitude_coleta, latitude_entrega, longitude_entrega,
-            pontos, obs, tracking_url, raw_provider_payload,
-            regra_id, tentativas, erro_ultimo,
-            created_at, updated_at
-          ) VALUES (
-            $1,$2,$3,$4, $5,$6, $7,$8,$9,$10, $11,
-            $12,$13, $14,$15,$16,$17, $18,$19,$20,$21,
-            $22,$23,$24, $25, NOW()
-          )
-        `, [
-          vals.codigo_os, vals.provider_code, vals.external_delivery_id, vals.external_quote_id,
-          vals.status_canonico, vals.status_native,
-          vals.valor_servico, vals.valor_provider, vals.valor_profissional, vals.eta_minutos,
-          vals.vehicle_type,
-          vals.endereco_coleta, vals.endereco_entrega,
-          vals.latitude_coleta, vals.longitude_coleta, vals.latitude_entrega, vals.longitude_entrega,
-          vals.pontos, vals.obs, vals.tracking_url, vals.raw_provider_payload,
-          vals.regra_id, vals.tentativas, vals.erro_ultimo,
-          vals.created_at,
-        ]);
-        console.log(`🪞 [Orchestrator] dual-write OK (insert): OS ${vals.codigo_os} em logistics_deliveries`);
-      }
-    } catch (err) {
-      // Best-effort: o espelho NUNCA derruba o despacho legado.
-      console.error(`⚠️ [Orchestrator] dual-write falhou (OS ${ctx?.registro?.codigo_os}): ${err.message} — despacho legado segue normal`);
-    }
-  }
+  // 🆕 Fase 6 — o dual-write/espelho foi removido: logistics_deliveries
+  // virou a tabela PRIMÁRIA do hub (escrita direta em dispatch/cancel).
 
   // ════════════════════════════════════════════════════════════
   // CANCEL — cancela entrega ativa
@@ -530,7 +412,7 @@ class DispatchOrchestrator {
   /**
    * Cancela uma entrega ativa.
    *
-   * @param {number} entregaId - id em uber_entregas
+   * @param {number} entregaId - id em logistics_deliveries
    * @param {Object} opts
    * @param {string} [opts.motivo='Cancelado pelo operador']
    * @param {string} [opts.canceladoPor='operador']
@@ -541,22 +423,24 @@ class DispatchOrchestrator {
     const canceladoPor = opts.canceladoPor || 'operador';
     const reabrirMapp = opts.reabrirMapp !== false;
 
-    const { rows } = await this.pool.query('SELECT * FROM uber_entregas WHERE id = $1', [entregaId]);
+    const { rows } = await this.pool.query('SELECT * FROM logistics_deliveries WHERE id = $1', [entregaId]);
     if (rows.length === 0) {
       throw new Error(`Entrega id=${entregaId} não encontrada`);
     }
     const entrega = rows[0];
 
-    if (STATUS_TERMINAL.includes(entrega.status_uber)) {
-      throw new Error(`Entrega já está em estado terminal: ${entrega.status_uber}`);
+    if (['CANCELED','DELIVERED'].includes(entrega.status_canonico)
+        || STATUS_TERMINAL.includes(entrega.status_native)) {
+      throw new Error(`Entrega já está em estado terminal: ${entrega.status_native || entrega.status_canonico}`);
     }
 
     // Cancela no provider (se já foi enviada)
-    if (entrega.uber_delivery_id) {
-      const providerCode = 'uber'; // Fase 1: hardcoded; Fase 2+ ler de entrega.provider_code
+    const externalId = entrega.external_delivery_id;
+    if (externalId) {
+      const providerCode = entrega.provider_code || 'uber';
       const adapter = this._getAdapterOrThrow(providerCode);
       try {
-        await adapter.cancelDelivery(entrega.uber_delivery_id);
+        await adapter.cancelDelivery(externalId);
       } catch (err) {
         console.warn(`⚠️ [Orchestrator] Cancelamento no provider falhou (seguindo):`, err.message);
       }
@@ -564,11 +448,9 @@ class DispatchOrchestrator {
 
     // Atualiza registro
     await this.pool.query(`
-      UPDATE uber_entregas
-      SET status_uber = 'cancelado',
-          cancelado_por = $1,
-          cancelado_motivo = $2,
-          updated_at = NOW()
+      UPDATE logistics_deliveries
+      SET status_canonico = 'CANCELED', status_native = 'cancelado',
+          cancelado_por = $1, cancelado_motivo = $2, updated_at = NOW()
       WHERE id = $3
     `, [canceladoPor, motivo, entregaId]);
 
@@ -580,30 +462,14 @@ class DispatchOrchestrator {
     }
 
     this.events.log({
-      providerCode: 'uber',
+      providerCode: entrega.provider_code || 'uber',
       eventType: EventType.CANCELED,
       eventSource: opts.eventSource || EventSource.ADMIN,
       codigoOS: entrega.codigo_os,
       deliveryId: entregaId,
-      externalDeliveryId: entrega.uber_delivery_id,
+      externalDeliveryId: externalId,
       payload: { motivo, cancelado_por: canceladoPor, reabriu_mapp: reabrirMapp },
     });
-
-    // 🆕 Fase 5 DUAL-WRITE — reflete o cancelamento no espelho canônico.
-    // Best-effort: não derruba o cancelamento legado se falhar.
-    try {
-      await this.pool.query(`
-        UPDATE logistics_deliveries
-        SET status_canonico = 'CANCELED',
-            cancelado_por    = $1,
-            cancelado_motivo = $2,
-            updated_at       = NOW()
-        WHERE provider_code = 'uber' AND codigo_os = $3
-          AND COALESCE(external_delivery_id, '') = COALESCE($4, '')
-      `, [canceladoPor, motivo, entrega.codigo_os, entrega.uber_delivery_id || null]);
-    } catch (err) {
-      console.error(`⚠️ [Orchestrator] dual-write do cancel falhou (OS ${entrega.codigo_os}): ${err.message}`);
-    }
 
     return { ok: true, entregaId };
   }
@@ -854,7 +720,7 @@ class DispatchOrchestrator {
    * @returns {Promise<number>} quantidade promovida pra fallback
    */
   async verifyTimeouts() {
-    // Lê timeout da config (logistics_providers primeiro, fallback uber_config)
+    // Lê timeout da config do provider (logistics_providers)
     let timeoutMin = 10;
     try {
       const { rows } = await this.pool.query(`
@@ -862,18 +728,14 @@ class DispatchOrchestrator {
         FROM logistics_providers WHERE provider_code = 'uber'
       `);
       if (rows[0]?.t) timeoutMin = rows[0].t;
-    } catch (e) {
-      try {
-        const { rows } = await this.pool.query(`SELECT timeout_sem_entregador_min FROM uber_config WHERE id=1`);
-        timeoutMin = rows[0]?.timeout_sem_entregador_min || 10;
-      } catch (e2) {/* default 10 */}
-    }
+    } catch (e) { /* default 10 */ }
 
     const { rows: presas } = await this.pool.query(`
-      SELECT id, codigo_os, uber_delivery_id, EXTRACT(EPOCH FROM (NOW() - updated_at))/60 AS idade_min
-      FROM uber_entregas
-      WHERE status_uber = 'enviado_uber'
-        AND uber_delivery_id IS NOT NULL
+      SELECT id, codigo_os, provider_code, external_delivery_id,
+             EXTRACT(EPOCH FROM (NOW() - updated_at))/60 AS idade_min
+      FROM logistics_deliveries
+      WHERE status_native = 'enviado_uber'
+        AND external_delivery_id IS NOT NULL
         AND updated_at < NOW() - ($1 || ' minutes')::interval
     `, [timeoutMin]);
 
@@ -883,17 +745,16 @@ class DispatchOrchestrator {
     for (const e of presas) {
       try {
         // Cancela no provider (best effort)
-        const adapter = this.registry.get('uber');
-        if (adapter && e.uber_delivery_id) {
-          await adapter.cancelDelivery(e.uber_delivery_id).catch(() => {});
+        const adapter = this.registry.get(e.provider_code || 'uber');
+        if (adapter && e.external_delivery_id) {
+          await adapter.cancelDelivery(e.external_delivery_id).catch(() => {});
         }
 
         // Marca como fallback_fila
         await this.pool.query(`
-          UPDATE uber_entregas
-          SET status_uber = 'fallback_fila',
-              cancelado_motivo = $1,
-              updated_at = NOW()
+          UPDATE logistics_deliveries
+          SET status_native = 'fallback_fila', status_canonico = 'FAILED',
+              cancelado_motivo = $1, updated_at = NOW()
           WHERE id = $2
         `, [`Timeout ${timeoutMin}min sem entregador`, e.id]);
 
