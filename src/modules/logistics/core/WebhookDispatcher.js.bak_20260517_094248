@@ -169,30 +169,6 @@ class WebhookDispatcher {
     const entrega = rows[0];
     const codigoOS = entrega.codigo_os;
 
-    // ─── Reatribuição de external_delivery_id ───
-    // Alguns providers reatribuem o pedido a outro entregador e geram um id
-    // novo (ex: 99Entrega DriverCanceled com new_order_id). O parser do adapter
-    // expõe isso em evento.reassignedExternalDeliveryId — atualizamos a coluna
-    // pra que os próximos webhooks (que virão com o id novo) localizem a entrega.
-    if (evento.reassignedExternalDeliveryId
-        && evento.reassignedExternalDeliveryId !== entrega.external_delivery_id) {
-      await this.pool.query(
-        'UPDATE logistics_deliveries SET external_delivery_id = $1, updated_at = NOW() WHERE id = $2',
-        [evento.reassignedExternalDeliveryId, entrega.id]
-      );
-      console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: external_delivery_id reatribuído ${entrega.external_delivery_id} → ${evento.reassignedExternalDeliveryId}`);
-      this.events.log({
-        providerCode,
-        eventType: EventType.STATUS_CHANGED,
-        eventSource: EventSource.WEBHOOK,
-        codigoOS,
-        deliveryId: entrega.id,
-        externalDeliveryId: evento.reassignedExternalDeliveryId,
-        payload: { reatribuicao: true, id_anterior: entrega.external_delivery_id },
-      }).catch(() => {});
-      entrega.external_delivery_id = evento.reassignedExternalDeliveryId;
-    }
-
     // ─── courier_update: atualiza dados do entregador + vincula na Mapp ───
     if (evento.eventType === 'courier_update') {
       await this._processarCourierUpdate(providerCode, entrega, evento);

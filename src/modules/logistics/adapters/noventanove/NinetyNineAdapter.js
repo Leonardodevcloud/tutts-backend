@@ -1,49 +1,56 @@
 /**
- * MÓDULO LOGISTICS — NinetyNineAdapter
+ * MÓDULO LOGISTICS — NinetyNineAdapter (API 99Entrega)
  *
- * Implementação concreta de LogisticsProviderAdapter para a 99 Corp API v2.
+ * ⚠️ REESCRITO 2026-05 — antes este adapter mirava a "99 Corp API" (corridas
+ * de passageiro, x-api-key, employeeID/costCenterID). A API correta pro
+ * Central Tutts é a 99Entrega (delivery): OAuth 2.0 client_credentials,
+ * endpoints /v2/order/*, envelope { errno, errmsg, data }.
  *
  * provider_code = 'noventanove' (snake_case, sem dígito inicial — exigência
- * do contrato). display_name = '99' (o que aparece pro usuário).
+ * do contrato). display_name = '99Entrega'.
  *
- * Responsabilidades (idênticas ao UberAdapter, mas falando 99):
- *  - Traduzir CanonicalQuoteRequest → payload 99 (via noventanove.parser)
- *  - Chamar a 99 Corp API (auth via x-api-key — noventanove.auth)
- *  - Traduzir resposta 99 → CanonicalQuote / CanonicalDelivery
- *  - Mapear status → CanonicalStatus (via noventanove.status-map)
+ * Responsabilidades (idênticas ao UberAdapter, mas falando 99Entrega):
+ *  - Traduzir CanonicalQuoteRequest → payload 99Entrega (via noventanove.parser)
+ *  - Chamar a 99Entrega (OAuth via noventanove.auth)
+ *  - Traduzir resposta → CanonicalQuote / CanonicalDelivery
+ *  - Mapear status/eventos → CanonicalStatus (via noventanove.status-map)
  *  - Classificar erros (via noventanove.errors)
- *  - Validar Basic Auth de webhook + parsear evento (via noventanove.webhook)
+ *  - Validar assinatura HMAC do webhook + parsear evento (via noventanove.webhook)
  *
- * PARTICULARIDADES vs UberAdapter:
- *  - createQuote: a 99 não tem quote reusável. /rides/estimate é só informativo
- *    (faixa de preço lowerFare/upperFare). O quoteId retornado é sintético
- *    (não vai pra lugar nenhum) — serve só pra UI mostrar preço/ETA.
- *  - createDelivery: NÃO usa o quoteId. Cria a corrida do zero via POST /rides.
- *    O parâmetro `quote` é aceito (contrato) mas ignorado.
- *  - acknowledgeWebhook: responde 200 com CORPO VAZIO (a 99 exige isso).
- *  - getDelivery: usa GET /rides/{id}, que tem running.status (UPPER_SNAKE).
- *
- * Pré-requisitos de conta (em logistics_providers.config):
- *   api_key        — x-api-key da conta 99
- *   employee_id    — colaborador técnico fixo (pra cotar e criar corrida)
- *   cost_center_id — centro de custo (POST /rides exige)
- *   project_id     — opcional
- *   webhook_username / webhook_password — Basic Auth do webhook
+ * PARTICULARIDADES vs UberAdapter (anotadas do README-99-AUTH):
+ *  - Toda resposta é { errno, errmsg, data } — errno !== 0 é erro mesmo com HTTP 200.
+ *  - createQuote: /v2/order/estimate devolve `estimate_id` + `fee` (CENTAVOS).
+ *    O estimate_id É reusável — ele liga a cotação ao create (single-use).
+ *  - createDelivery: /v2/order/create CONSOME o estimate_id da quote.
+ *  - cancelDelivery: /v2/order/cancel exige `reason_id` (enum 410013..410021).
+ *  - getDelivery: /v2/order/detail — é a ÚNICA fonte de posição do entregador
+ *    (o webhook da 99 não traz lat/lng).
+ *  - acknowledgeWebhook: responde 200 { errno: 0 } (convenção do envelope 99).
  */
 
 const httpRequest = require('../../../../shared/utils/httpRequest');
 const { LogisticsProviderAdapter } = require('../../contracts/LogisticsProviderAdapter');
 const { CanonicalStatus } = require('../../contracts/CanonicalStatus');
-const { getBaseUrl, montarHeaders, validarConfig } = require('./noventanove.auth');
 const {
-  montarQueryEstimate,
-  montarBodyRide,
-  extrairCategoriaEstimate,
-  resolverCategoria,
+  obterToken,
+  montarHeaders,
+  validarConfig,
+  getBaseUrl,
+} = require('./noventanove.auth');
+const {
+  montarBodyEstimate,
+  montarBodyCreate,
+  montarBodyCancel,
+  parseEstimate,
+  extrairCourierDeDetail,
 } = require('./noventanove.parser');
 const { nativeToCanonical } = require('./noventanove.status-map');
 const { classify99Error } = require('./noventanove.errors');
-const { validarBasicAuth, parsePayload99, detectarTipoEvento } = require('./noventanove.webhook');
+const {
+  validarAssinatura99,
+  parsePayload99,
+  detectarTipoEvento,
+} = require('./noventanove.webhook');
 
 class NinetyNineAdapter extends LogisticsProviderAdapter {
   // ════════════════════════════════════════════════════════════
@@ -55,7 +62,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   }
 
   get displayName() {
-    return '99';
+    return '99Entrega';
   }
 
   // ════════════════════════════════════════════════════════════
@@ -65,26 +72,37 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   capabilities() {
     return {
       ...super.capabilities(),
-      supportsQuote: true,            // /rides/estimate (faixa de preço, informativo)
-      supportsCancel: true,           // DELETE /rides/{id}
+      supportsQuote: true,             // /v2/order/estimate → estimate_id + fee
+      supportsCancel: true,            // /v2/order/cancel (com reason_id)
       supportsRedispatch: true,
-      supportsRealtimeTracking: true, // subscription ride-driver-location
-      vehicleTypes: ['motorcycle', 'car', 'van'],
+      // ⚠️ false: o webhook da 99 não traz posição do entregador. O tracking
+      // ao vivo da 99 é por POLLING de /v2/order/detail, não por webhook.
+      supportsRealtimeTracking: false,
+      vehicleTypes: ['motorcycle'],    // 99Entrega é entrega por moto
       coverageRegion: ['BR'],
-      webhookAuthScheme: 'basic-auth',
-      requiresExternalRefAsString: false,
-      // Particularidades que o Orchestrator pode querer saber:
-      quoteIsReusable: false,         // a 99 NÃO tem quote_id reusável
-      quoteIsRange: true,             // retorna lowerFare/upperFare, não valor fechado
+      webhookAuthScheme: 'hmac-sha256',
+      requiresExternalRefAsString: true,  // external_order_id vai como string
+      quoteIsReusable: true,           // estimate_id liga cotação→create
+      quoteIsRange: false,             // `fee` é valor fechado, não faixa
     };
   }
 
   // ════════════════════════════════════════════════════════════
-  // Helper interno — base URL conforme sandbox
+  // Helper interno — base URL da 99Entrega
   // ════════════════════════════════════════════════════════════
 
   get _baseUrl() {
-    return getBaseUrl(this.sandboxMode);
+    return getBaseUrl();
+  }
+
+  /**
+   * Resolve o segredo de assinatura do webhook. Prioriza a coluna top-level
+   * webhook_secret; se vazia, usa o client_secret (a 99Entrega assina os
+   * webhooks com o secret da app).
+   * @private
+   */
+  _webhookSecret() {
+    return this.webhookSecret || this.config.client_secret || null;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -92,231 +110,222 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   // ════════════════════════════════════════════════════════════
 
   /**
-   * Healthcheck: GET /companies. Se voltar 200, a x-api-key é válida.
+   * Healthcheck: tenta obter um access_token OAuth. Se conseguir, as
+   * credenciais (client_id/client_secret) estão OK.
    */
   async healthCheck() {
     const t0 = Date.now();
     try {
-      if (!this.config.api_key) {
-        return { ok: false, latencyMs: 0, msg: 'api_key não configurada', errorCode: 'no_api_key' };
-      }
-      const resp = await httpRequest(`${this._baseUrl}/companies`, {
-        method: 'GET',
-        headers: montarHeaders(this.config),
-      });
-      const latencyMs = Date.now() - t0;
-      if (resp.ok) {
-        return { ok: true, latencyMs, msg: 'x-api-key válida (GET /companies OK)' };
-      }
-      const errInfo = classify99Error(resp);
-      return { ok: false, latencyMs, msg: errInfo.message, errorCode: errInfo.category };
+      validarConfig(this.config);
+      const token = await obterToken(this.pool);
+      return {
+        ok: !!token,
+        latencyMs: Date.now() - t0,
+        msg: 'OAuth client_credentials OK (token obtido)',
+      };
     } catch (err) {
-      return { ok: false, latencyMs: Date.now() - t0, msg: err.message, errorCode: 'network' };
+      return {
+        ok: false,
+        latencyMs: Date.now() - t0,
+        msg: err.message,
+        errorCode: 'auth_failed',
+      };
     }
   }
 
   // ════════════════════════════════════════════════════════════
-  // Authenticate (pre-flight) — pra 99 é só validar que a config existe
-  // ════════════════════════════════════════════════════════════
-
-  async authenticate() {
-    // 99 não tem token a renovar — só confirma que a api_key está lá.
-    if (!this.config.api_key) {
-      throw new Error('NinetyNineAdapter: api_key não configurada');
-    }
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // createQuote — GET /rides/estimate/{employeeId}
+  // Authenticate (pre-flight do Orchestrator)
   // ════════════════════════════════════════════════════════════
 
   /**
-   * "Cota" via /rides/estimate. ATENÇÃO: a 99 não tem quote reusável.
-   * Isto é INFORMATIVO — retorna faixa de preço (lowerFare/upperFare) e ETA.
-   * O quoteId retornado é sintético (não é usado no createDelivery).
+   * Chamado pelo Orchestrator antes de createQuote/createDelivery.
+   * Garante que há token OAuth válido em cache.
+   */
+  async authenticate() {
+    validarConfig(this.config);
+    await obterToken(this.pool);  // garante cache
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // Helper interno — chamada à 99Entrega + tratamento do envelope
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Faz uma chamada à 99Entrega e desencapsula o envelope { errno, errmsg, data }.
+   * Lança erro classificado (com .category/.retriable/...) se errno !== 0 ou HTTP !2xx.
+   *
+   * @param {string} metodo - 'GET' | 'POST'
+   * @param {string} path   - ex: '/v2/order/estimate'
+   * @param {Object} [body] - body JSON (POST)
+   * @param {string} [contexto] - rótulo pra log
+   * @returns {Promise<Object>} o `data` do envelope (já desencapsulado)
+   * @private
+   */
+  async _chamar99(metodo, path, body, contexto = 'op') {
+    const url = `${this._baseUrl}${path}`;
+    const temBody = body !== undefined && body !== null;
+
+    const headers = await montarHeaders(
+      this.pool,
+      temBody ? { 'Content-Type': 'application/json' } : {}
+    );
+
+    const resp = await httpRequest(url, {
+      method: metodo,
+      headers,
+      body: temBody ? JSON.stringify(body) : undefined,
+    });
+
+    const json = resp.json() || {};
+
+    // Erro: HTTP !2xx OU envelope com errno !== 0
+    if (!resp.ok || json.errno !== 0) {
+      const errInfo = classify99Error(resp, json);
+      console.error(`❌ [NinetyNineAdapter] ${contexto} falhou (${errInfo.category}/errno=${errInfo.code}):`, errInfo.message);
+      const err = new Error(`Erro 99Entrega (${contexto}): ${errInfo.message}`);
+      err.category = errInfo.category;
+      err.code = errInfo.code;
+      err.retriable = errInfo.retriable;
+      err.httpStatus = errInfo.httpStatus;
+      throw err;
+    }
+
+    return json.data || {};
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // createQuote — POST /v2/order/estimate
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Cota uma entrega na 99Entrega. O /estimate devolve um `estimate_id`
+   * (single-use, consumido pelo createDelivery) e o `fee` em centavos.
    *
    * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
    * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalQuote>}
    */
   async createQuote(req) {
-    validarConfig(this.config, { exigirEmployee: true, exigirCostCenter: false });
+    validarConfig(this.config);
 
-    const employeeId = this.config.employee_id;
-    const query = montarQueryEstimate(req);
-    const url = `${this._baseUrl}/rides/estimate/${employeeId}?${query}`;
+    const body = montarBodyEstimate(req, this.config);
+    const data = await this._chamar99('POST', '/v2/order/estimate', body, 'createQuote');
 
-    const resp = await httpRequest(url, {
-      method: 'GET',
-      headers: montarHeaders(this.config),
-    });
+    const { estimateId, feeReais, etaMinutos, raw } = parseEstimate(data);
 
-    const data = resp.json();
-
-    if (!resp.ok) {
-      const errInfo = classify99Error(resp, data);
-      console.error(`❌ [NinetyNineAdapter] createQuote falhou (${errInfo.category}/${errInfo.code}):`, errInfo.message);
-      const err = new Error(`Erro cotação 99: ${errInfo.message}`);
-      err.category = errInfo.category;
-      err.code = errInfo.code;
-      err.retriable = errInfo.retriable;
-      err.httpStatus = errInfo.httpStatus;
-      throw err;
-    }
-
-    // data é uma LISTA de categorias — extrai a que corresponde ao vehicleType
-    const match = extrairCategoriaEstimate(data, req.vehicleType);
-    if (!match) {
-      const err = new Error('99 não retornou categoria de delivery disponível para esse trajeto');
-      err.category = 'coverage';
-      err.retriable = false;
-      throw err;
-    }
-
-    // valor: usamos lowerFare (piso da faixa — conservador)
-    const lowerFare = match.estimate?.lowerFare ?? null;
-    const upperFare = match.estimate?.upperFare ?? null;
-    const etaMinutos = match.category?.eta ?? null;
-    const categoryId = match.category?.id || resolverCategoria(req.vehicleType);
-
-    console.log(`✅ [NinetyNineAdapter] estimativa: ${categoryId} | R$${lowerFare}-${upperFare} | ETA ${etaMinutos}min`);
-
-    // quoteId SINTÉTICO — a 99 não tem quote real. Formato reconhecível.
-    const quoteIdSintetico = `99-estimate-${req.externalRef}-${Date.now()}`;
+    console.log(`✅ [NinetyNineAdapter] cotação: estimate_id=${estimateId} | R$${feeReais != null ? feeReais.toFixed(2) : '?'} | ETA ${etaMinutos != null ? etaMinutos + 'min' : 'n/d'}`);
 
     return {
-      quoteId: quoteIdSintetico,
+      quoteId: estimateId,                       // estimate_id — consumido pelo create
       providerCode: this.providerCode,
-      valor: lowerFare,                    // piso da faixa
-      valorMax: upperFare,                 // teto (extra, fora do contrato mínimo)
-      etaMinutos,
-      vehicleType: req.vehicleType || 'motorcycle',
-      expiresAt: new Date(Date.now() + 5 * 60_000),  // a 99 não dá expiração — usamos 5min nominal
-      rawProvider: { categoria: match, faixa: { lowerFare, upperFare } },
+      valor: feeReais != null ? feeReais : 0,    // fee/100 (centavos → reais)
+      etaMinutos: etaMinutos != null ? etaMinutos : null,
+      vehicleType: 'motorcycle',
+      // A 99 não documenta validade explícita do estimate_id; 5min nominal
+      // (o Orchestrator consome a quote no mesmo fluxo, logo em seguida).
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+      rawProvider: raw,
     };
   }
 
   // ════════════════════════════════════════════════════════════
-  // createDelivery — POST /rides
+  // createDelivery — POST /v2/order/create
   // ════════════════════════════════════════════════════════════
 
   /**
-   * Cria a corrida/entrega via POST /rides.
-   * IMPORTANTE: o parâmetro `quote` é ACEITO (contrato) mas IGNORADO — a 99
-   * não usa quote_id. A corrida é criada do zero a partir do `req`.
+   * Cria o pedido na 99Entrega CONSUMINDO o estimate_id da cotação.
    *
-   * @param {import('../../contracts/CanonicalTypes').CanonicalQuote} quote - ignorado
+   * @param {import('../../contracts/CanonicalTypes').CanonicalQuote} quote
    * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
    * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalDelivery>}
    */
   async createDelivery(quote, req) {
-    validarConfig(this.config, { exigirEmployee: true, exigirCostCenter: true });
+    validarConfig(this.config);
 
-    const url = `${this._baseUrl}/rides`;
-    const body = montarBodyRide(req, this.config);
-
-    const resp = await httpRequest(url, {
-      method: 'POST',
-      headers: montarHeaders(this.config, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
-    });
-
-    const data = resp.json();
-
-    if (!resp.ok) {
-      const errInfo = classify99Error(resp, data);
-      console.error(`❌ [NinetyNineAdapter] createDelivery falhou (${errInfo.category}/${errInfo.code}):`, errInfo.message);
-      const err = new Error(`Erro criar corrida 99: ${errInfo.message}`);
-      err.category = errInfo.category;
-      err.code = errInfo.code;
-      err.retriable = errInfo.retriable;
-      err.httpStatus = errInfo.httpStatus;
-      throw err;
+    if (!quote || !quote.quoteId) {
+      throw new Error('NinetyNineAdapter: createDelivery exige a quote (estimate_id) — cote antes via createQuote');
     }
 
-    // POST /rides retorna { rideID, smsStartedSent, smsDriverCanceledSent }
-    const rideId = data.rideID || data.rideId;
-    if (!rideId) {
-      const err = new Error('99 criou a corrida mas não retornou rideID');
+    const body = montarBodyCreate(quote.quoteId, req, this.config);
+    const data = await this._chamar99('POST', '/v2/order/create', body, 'createDelivery');
+
+    // /create devolve o order_id da 99. external_order_id é idempotente:
+    // repetir o mesmo retorna o pedido já criado.
+    const orderId = data.order_id || data.orderId || data.id || null;
+    if (!orderId) {
+      const err = new Error('99Entrega criou o pedido mas não retornou order_id');
       err.category = 'unknown';
       throw err;
     }
 
-    console.log(`✅ [NinetyNineAdapter] corrida criada: rideID=${rideId}`);
+    const statusNative = data.status || 'finding';  // pedido nasce buscando entregador
+
+    console.log(`✅ [NinetyNineAdapter] pedido criado: order_id=${orderId} | status=${statusNative}`);
 
     return {
-      externalDeliveryId: String(rideId),
+      externalDeliveryId: String(orderId),
       providerCode: this.providerCode,
-      // POST /rides não retorna status — corrida nasce em "finding" (buscando motorista)
-      statusCanonico: CanonicalStatus.DISPATCHED,
-      statusNative: 'finding',
-      trackingUrl: null,    // a 99 não fornece tracking URL pública
-      courier: null,        // courier vem depois, via webhook
+      statusCanonico: nativeToCanonical(statusNative),
+      statusNative,
+      trackingUrl: data.tracking_url || null,
+      courier: data.driver_info ? extrairCourierDeDetail(data.driver_info) : null,
       rawProvider: data,
     };
   }
 
   // ════════════════════════════════════════════════════════════
-  // cancelDelivery — DELETE /rides/{id}
+  // cancelDelivery — POST /v2/order/cancel
   // ════════════════════════════════════════════════════════════
 
+  /**
+   * Cancela um pedido ativo na 99Entrega. Exige reason_id (config.cancel_reason_id
+   * ou o default do parser). ⚠️ A 99 não cancela depois que o entregador já
+   * pegou o pacote — nesse caso a chamada retorna erro e devolvemos ok:false.
+   *
+   * @param {string} externalDeliveryId - order_id da 99
+   * @returns {Promise<{ok: boolean, msg?: string}>}
+   */
   async cancelDelivery(externalDeliveryId) {
-    if (!this.config.api_key) {
-      throw new Error('NinetyNineAdapter: api_key não configurada');
-    }
+    validarConfig(this.config);
 
-    const url = `${this._baseUrl}/rides/${externalDeliveryId}`;
-    const resp = await httpRequest(url, {
-      method: 'DELETE',
-      headers: montarHeaders(this.config),
-    });
+    const body = montarBodyCancel(externalDeliveryId, this.config);
 
-    if (resp.ok) {
-      console.log(`✅ [NinetyNineAdapter] corrida ${externalDeliveryId} cancelada`);
+    try {
+      await this._chamar99('POST', '/v2/order/cancel', body, 'cancelDelivery');
+      console.log(`✅ [NinetyNineAdapter] pedido ${externalDeliveryId} cancelado (reason_id=${body.reason_id})`);
       return { ok: true };
+    } catch (err) {
+      console.warn(`⚠️ [NinetyNineAdapter] cancel falhou (${err.category || 'erro'}):`, err.message);
+      return { ok: false, msg: err.message };
     }
-
-    const data = resp.json();
-    const errInfo = classify99Error(resp, data);
-    console.warn(`⚠️ [NinetyNineAdapter] cancel falhou (${errInfo.category}):`, errInfo.message);
-    return { ok: false, msg: errInfo.message };
   }
 
   // ════════════════════════════════════════════════════════════
-  // getDelivery — GET /rides/{id}
+  // getDelivery — GET /v2/order/detail
   // ════════════════════════════════════════════════════════════
 
+  /**
+   * Consulta o estado atual do pedido na 99Entrega. É a ÚNICA fonte de posição
+   * do entregador (o webhook da 99 não traz lat/lng) — usar este método pro
+   * tracking ao vivo (polling) e pro sync manual.
+   *
+   * @param {string} externalDeliveryId - order_id da 99
+   * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalDelivery>}
+   */
   async getDelivery(externalDeliveryId) {
-    if (!this.config.api_key) {
-      throw new Error('NinetyNineAdapter: api_key não configurada');
-    }
+    validarConfig(this.config);
 
-    const url = `${this._baseUrl}/rides/${externalDeliveryId}`;
-    const resp = await httpRequest(url, {
-      method: 'GET',
-      headers: montarHeaders(this.config),
-    });
+    const path = `/v2/order/detail?order_id=${encodeURIComponent(externalDeliveryId)}`;
+    const data = await this._chamar99('GET', path, undefined, 'getDelivery');
 
-    const data = resp.json();
-
-    if (!resp.ok) {
-      const errInfo = classify99Error(resp, data);
-      const err = new Error(`Erro consultar corrida 99: ${errInfo.message}`);
-      err.category = errInfo.category;
-      throw err;
-    }
-
-    // GET /rides/{id} retorna { status, running: { driver, ... } }
-    // O `status` aqui é UPPER_SNAKE (running.status) — o status-map cobre os dois.
-    const nativeStatus = data.status || data.running?.status || null;
-    const driver = data.running?.driver || null;
+    const statusNative = data.status || null;
 
     return {
       externalDeliveryId: String(externalDeliveryId),
       providerCode: this.providerCode,
-      statusCanonico: nativeStatus ? nativeToCanonical(nativeStatus) : CanonicalStatus.DISPATCHED,
-      statusNative: nativeStatus,
-      trackingUrl: null,
-      courier: driver ? this._extractCourierFromRide(driver) : null,
+      statusCanonico: statusNative ? nativeToCanonical(statusNative) : CanonicalStatus.DISPATCHED,
+      statusNative,
+      trackingUrl: data.tracking_url || null,
+      courier: data.driver_info ? extrairCourierDeDetail(data.driver_info) : null,
       rawProvider: data,
     };
   }
@@ -334,28 +343,27 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   // ════════════════════════════════════════════════════════════
 
   /**
-   * Valida o Basic Auth de um webhook da 99.
+   * Valida a assinatura HMAC-SHA256 (base64) de um webhook da 99Entrega.
    *
    * @param {import('express').Request} req
    * @returns {Promise<boolean>}
    */
   async validateWebhookSignature(req) {
-    const result = validarBasicAuth(req, {
-      webhookUsername: this.config.webhook_username,
-      webhookPassword: this.config.webhook_password,
+    const result = validarAssinatura99(req, {
+      webhookSecret: this._webhookSecret(),
       sandboxMode: this.sandboxMode,
     });
     if (!result.valid) {
       console.warn(`⚠️ [NinetyNineAdapter] webhook rejeitado: ${result.motivo}`);
     } else if (result.sandbox) {
-      console.log('🤖 [NinetyNineAdapter] webhook aceito (sandbox, sem validar Basic Auth)');
+      console.log('🤖 [NinetyNineAdapter] webhook aceito (sandbox, sem validar assinatura)');
     }
     req._webhookValidation = result;
     return result.valid;
   }
 
   /**
-   * Converte payload do webhook da 99 em CanonicalEvent.
+   * Converte o payload do webhook da 99Entrega em CanonicalEvent.
    */
   parseWebhookEvent(payload) {
     return parsePayload99(payload);
@@ -366,34 +374,11 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   }
 
   /**
-   * A 99 EXIGE corpo vazio + status 2xx em até 10s.
-   * Diferente da Uber, que espera JSON { received: true }.
+   * A 99Entrega trabalha com o envelope { errno, errmsg, data } — o ack do
+   * webhook segue a mesma convenção: 200 com { errno: 0 }.
    */
   acknowledgeWebhook(res) {
-    res.status(200).end();   // .end() sem argumento = corpo VAZIO
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // Helpers privados
-  // ════════════════════════════════════════════════════════════
-
-  /**
-   * Extrai courier canônico do objeto `running.driver` de GET /rides.
-   * (O webhook usa o extractCourier de noventanove.webhook; este é pro getDelivery.)
-   */
-  _extractCourierFromRide(driver) {
-    if (!driver || typeof driver !== 'object') return null;
-    const pos = driver.position || null;
-    return {
-      name: driver.fullName || null,
-      phone: driver.phoneNumber || null,
-      plate: driver.carPlate || null,
-      vehicle: driver.carModel || null,
-      photo: driver.img || null,
-      rating: driver.rating || null,
-      lat: pos?.latitude ?? null,
-      lng: pos?.longitude ?? null,
-    };
+    res.status(200).json({ errno: 0, errmsg: '' });
   }
 }
 

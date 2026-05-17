@@ -1,100 +1,134 @@
 /**
- * NINETYNINE ADAPTER — Status Map
+ * NINETYNINE ADAPTER — Status Map (API 99Entrega)
  *
- * A 99 tem DOIS conjuntos de status diferentes:
+ * ⚠️ REESCRITO 2026-05 — antes este map cobria a "99 Corp API" (corridas de
+ * passageiro). A 99Entrega (delivery) tem dois vocabulários DIFERENTES:
  *
- *  1. Status de WEBHOOK (subscription 'ride-status') — texto kebab-case:
- *     finding, no-drivers-available, canceled-by-passenger, canceled-by-driver,
- *     on-the-way, arrived, in-progress, finished
+ *  1. STATUS DO PEDIDO — campo `status` em GET /v2/order/detail. São 7:
+ *       finding     — buscando entregador
+ *       waiting     — entregador atribuído, a caminho da coleta
+ *       delivering  — pacote coletado, a caminho da entrega
+ *       completed   — entregue
+ *       canceled    — cancelado
+ *       closed      — pedido encerrado/liquidado (estado administrativo final)
+ *       sendback    — devolução em andamento ao remetente
  *
- *  2. Status de GET /rides (campo running.status) — UPPER_SNAKE_CASE:
- *     WAITING_DRIVERS_ANSWERS, COULDNT_FIND_AVAILABLE_DRIVERS, DRIVERS_REJECTED,
- *     CAR_ON_THE_WAY, WAITING_FOR_PASSENGER, CAR_ARRIVED, CANCELED_BY_DRIVER,
- *     CANCELED_BY_PASSENGER, RIDE_ENDED
+ *  2. EVENTOS DE WEBHOOK — marcos do ciclo. São 9 (CamelCase):
+ *       DriverAccepted     — entregador aceitou
+ *       DriverArrived      — entregador chegou na COLETA
+ *       DriverBeginCharge  — entregador pegou o pacote (coletou)
+ *       DriverCanceled     — entregador desistiu (pode trazer new_order_id → reatribuição)
+ *       BroadcastTimeout   — ninguém aceitou no tempo limite
+ *       OrderCompleted     — entregue
+ *       OrderClosed        — pedido encerrado (administrativo, pós-conclusão)
+ *       SendBack           — devolução iniciada
+ *       SendBackCompleted  — devolução concluída
  *
- * Os dois mapeiam pro mesmo CanonicalStatus, mas vêm de lugares diferentes.
+ * Os dois vocabulários mapeiam pro mesmo CanonicalStatus do hub.
+ *
+ * Doc: https://entrega-api.99app.com/docs/en/
  *
  * IMPORTANTE — diferença conceitual vs Uber:
- * A 99 é uma API de "corrida" (passageiro) adaptada pra entrega. O ciclo dela
- * não tem os status intermediários de delivery que a Uber tem (chegou no
- * destino, etc). Mapeamento conceitual:
- *   - "arrived"     = motorista chegou na COLETA (não no destino)
- *   - "in-progress" = corrida rolando = item COLETADO, a caminho do destino
- *   - "finished"    = ENTREGUE (não há evento separado de "chegou no destino")
- *
- * Doc: https://github.com/99Taxis/corp-api-v2-documentation#status-de-corridas
+ * A 99Entrega NÃO tem evento de "chegou no destino" separado — `OrderCompleted`
+ * já é a entrega. Por isso não há ARRIVED_DROPOFF no ciclo da 99. Mapeamento:
+ *   - DriverArrived      = chegou na COLETA  → ARRIVED_PICKUP
+ *   - DriverBeginCharge  = coletou           → PICKED_UP
+ *   - OrderCompleted     = ENTREGUE          → DELIVERED
  */
 
 const { CanonicalStatus } = require('../../contracts/CanonicalStatus');
 
 /**
- * Mapa dos status de WEBHOOK (ride-status) → canônico.
- * É o que o WebhookDispatcher consome.
+ * Mapa dos STATUS de pedido (GET /v2/order/detail.status) → canônico.
+ * Usado pelo getDelivery (sync manual) e pelo polling de tracking.
  */
-const WEBHOOK_STATUS_TO_CANONICAL = Object.freeze({
-  'finding':                CanonicalStatus.DISPATCHED,
-  'no-drivers-available':   CanonicalStatus.FAILED,
-  'canceled-by-passenger':  CanonicalStatus.CANCELED,
-  'canceled-by-driver':     CanonicalStatus.CANCELED,
-  'on-the-way':             CanonicalStatus.PICKUP_EN_ROUTE,
-  'arrived':                CanonicalStatus.ARRIVED_PICKUP,
-  'in-progress':            CanonicalStatus.PICKED_UP,
-  'finished':               CanonicalStatus.DELIVERED,
+const ORDER_STATUS_TO_CANONICAL = Object.freeze({
+  'finding':    CanonicalStatus.DISPATCHED,
+  'waiting':    CanonicalStatus.COURIER_ASSIGNED,
+  'delivering': CanonicalStatus.PICKED_UP,
+  'completed':  CanonicalStatus.DELIVERED,
+  'canceled':   CanonicalStatus.CANCELED,
+  'cancelled':  CanonicalStatus.CANCELED,   // variante britânica, defensivo
+  'closed':     CanonicalStatus.DELIVERED,  // encerramento normal pós-conclusão
+  'sendback':   CanonicalStatus.RETURNED,
 });
 
 /**
- * Mapa dos status de GET /rides (running.status) → canônico.
- * Usado pelo getDelivery (sync manual).
+ * Mapa dos EVENTOS de webhook (os 9 nomes CamelCase) → canônico.
+ * É o que o noventanove.webhook consome.
+ *
+ * Observação sobre DriverCanceled: o evento mapeia pra CANCELED por padrão,
+ * MAS quando o payload traz `new_order_id` a 99 está reatribuindo o pedido a
+ * outro entregador — nesse caso o noventanove.webhook sobrescreve pra
+ * DISPATCHED (o pedido continua vivo). Ver noventanove.webhook.js.
  */
-const RIDE_STATUS_TO_CANONICAL = Object.freeze({
-  'WAITING_DRIVERS_ANSWERS':        CanonicalStatus.DISPATCHED,
-  'COULDNT_FIND_AVAILABLE_DRIVERS': CanonicalStatus.FAILED,
-  'DRIVERS_REJECTED':               CanonicalStatus.FAILED,
-  'CAR_ON_THE_WAY':                 CanonicalStatus.PICKUP_EN_ROUTE,
-  'WAITING_FOR_PASSENGER':          CanonicalStatus.ARRIVED_PICKUP,
-  'CAR_ARRIVED':                    CanonicalStatus.PICKED_UP,
-  'CANCELED_BY_DRIVER':             CanonicalStatus.CANCELED,
-  'CANCELED_BY_PASSENGER':          CanonicalStatus.CANCELED,
-  'RIDE_ENDED':                     CanonicalStatus.DELIVERED,
+const WEBHOOK_EVENT_TO_CANONICAL = Object.freeze({
+  'driveraccepted':    CanonicalStatus.COURIER_ASSIGNED,
+  'driverarrived':     CanonicalStatus.ARRIVED_PICKUP,
+  'driverbegincharge': CanonicalStatus.PICKED_UP,
+  'drivercanceled':    CanonicalStatus.CANCELED,
+  'broadcasttimeout':  CanonicalStatus.FAILED,
+  'ordercompleted':    CanonicalStatus.DELIVERED,
+  'orderclosed':       CanonicalStatus.DELIVERED,
+  'sendback':          CanonicalStatus.RETURNED,
+  'sendbackcompleted': CanonicalStatus.RETURNED,
 });
 
 /**
- * Status finais (não sofrem mais alteração) — vindos do webhook.
+ * Eventos de webhook que SÃO marcos terminais do ponto de vista do hub.
  * Útil pra idempotência e pra saber quando parar de esperar updates.
  */
-const WEBHOOK_STATUS_FINAIS = Object.freeze([
-  'no-drivers-available',
-  'canceled-by-passenger',
-  'canceled-by-driver',
-  'finished',
+const WEBHOOK_EVENTOS_FINAIS = Object.freeze([
+  'DriverCanceled',     // só é final quando NÃO há new_order_id (ver webhook)
+  'BroadcastTimeout',
+  'OrderCompleted',
+  'OrderClosed',
+  'SendBackCompleted',
 ]);
 
 /**
- * Converte status nativo da 99 (de webhook OU de GET /rides) → canônico.
- * Tenta os dois mapas. Retorna DISPATCHED pra desconhecido (conservador).
+ * Eventos meramente informativos — NÃO disparam ação na Mapp.
+ *  - OrderClosed: chega depois de OrderCompleted/DriverCanceled, é administrativo.
+ *  - SendBack: a devolução só vira ação quando CONCLUI (SendBackCompleted).
+ * O noventanove.webhook classifica esses como eventType 'other'.
+ */
+const WEBHOOK_EVENTOS_INFORMATIVOS = Object.freeze([
+  'OrderClosed',
+  'SendBack',
+]);
+
+/**
+ * Converte um status nativo da 99Entrega (status de pedido OU nome de evento
+ * de webhook) → CanonicalStatus. Tenta os dois mapas.
  *
- * @param {string} nativeStatus
+ * Retorna DISPATCHED para desconhecido (conservador — não dispara finalização
+ * Mapp por algo que não entendemos).
+ *
+ * @param {string} nativo - status de pedido ('finding', ...) ou evento ('DriverAccepted', ...)
  * @returns {string} valor de CanonicalStatus
  */
-function nativeToCanonical(nativeStatus) {
-  if (!nativeStatus || typeof nativeStatus !== 'string') {
+function nativeToCanonical(nativo) {
+  if (!nativo || typeof nativo !== 'string') {
     return CanonicalStatus.DISPATCHED;
   }
-  // Webhook status (kebab-case, lowercase)
-  const porWebhook = WEBHOOK_STATUS_TO_CANONICAL[nativeStatus.toLowerCase()];
-  if (porWebhook) return porWebhook;
+  const chave = nativo.toLowerCase().trim();
 
-  // Ride status (UPPER_SNAKE)
-  const porRide = RIDE_STATUS_TO_CANONICAL[nativeStatus.toUpperCase()];
-  if (porRide) return porRide;
+  // 1. Status de pedido (lowercase: finding/waiting/delivering/...)
+  const porStatus = ORDER_STATUS_TO_CANONICAL[chave];
+  if (porStatus) return porStatus;
 
-  console.warn(`[NinetyNineAdapter] status nativo desconhecido: "${nativeStatus}" — assumindo DISPATCHED`);
+  // 2. Evento de webhook (lookup case-insensitive)
+  const porEvento = WEBHOOK_EVENT_TO_CANONICAL[chave];
+  if (porEvento) return porEvento;
+
+  console.warn(`[NinetyNineAdapter] status/evento nativo desconhecido: "${nativo}" — assumindo DISPATCHED`);
   return CanonicalStatus.DISPATCHED;
 }
 
 module.exports = {
-  WEBHOOK_STATUS_TO_CANONICAL,
-  RIDE_STATUS_TO_CANONICAL,
-  WEBHOOK_STATUS_FINAIS,
+  ORDER_STATUS_TO_CANONICAL,
+  WEBHOOK_EVENT_TO_CANONICAL,
+  WEBHOOK_EVENTOS_FINAIS,
+  WEBHOOK_EVENTOS_INFORMATIVOS,
   nativeToCanonical,
 };
