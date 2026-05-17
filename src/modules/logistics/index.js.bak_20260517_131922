@@ -10,8 +10,7 @@
  *  - initLogisticsBackfill(pool)        — backfill de entregas isolado — exposto p/ resync
  *  - initLogisticsRoutes(...)           — master router /api/logistics/* (autenticado)
  *  - createLogisticsWebhookRouter(pool) — router público /api/logistics/webhook/*
- *  - startLogisticsWorker(pool)         — inicia PollingWorker (despacho) +
- *                                         TrackingPoller (posição da 99)
+ *  - startLogisticsWorker(pool)         — inicia o PollingWorker real
  */
 
 // Migration base da Fase 0 — importada com alias pra não colidir com o
@@ -26,7 +25,6 @@ const { getEventLogger } = require('./core/EventLogger');
 const { UberAdapter } = require('./adapters/uber/UberAdapter');
 const { NinetyNineAdapter } = require('./adapters/noventanove/NinetyNineAdapter');
 const { startPollingWorker } = require('./worker/PollingWorker');
-const { startTrackingPoller } = require('./worker/TrackingPoller');
 
 /**
  * Inicializa tabelas (F0) + backfill de entregas (F2) + provider 99 (F3).
@@ -73,28 +71,8 @@ function initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAudi
   return createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAuditoria);
 }
 
-/**
- * Inicia os workers do hub logístico:
- *  - PollingWorker  → despacho (polla a Mapp, cota e despacha pra Uber/99)
- *  - TrackingPoller → posição do entregador da 99Entrega (o webhook da 99
- *    não traz lat/lng; a posição só sai do GET /v2/order/detail por polling)
- *
- * Cada worker é controlado de forma independente por logistics_worker_state
- * (worker_name 'mapp_polling' e 'noventanove_tracking') — ligar/desligar é
- * UPDATE SQL, sem deploy.
- *
- * @param {import('pg').Pool} pool
- * @returns {{ parar: Function }}
- */
 function startLogisticsWorker(pool) {
-  const polling  = startPollingWorker(pool);
-  const tracking = startTrackingPoller(pool);
-  return {
-    parar: () => {
-      try { polling.parar(); }  catch (e) { /* noop */ }
-      try { tracking.parar(); } catch (e) { /* noop */ }
-    },
-  };
+  return startPollingWorker(pool);
 }
 
 module.exports = {

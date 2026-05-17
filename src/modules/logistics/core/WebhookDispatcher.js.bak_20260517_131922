@@ -151,31 +151,6 @@ class WebhookDispatcher {
   }
 
   /**
-   * Aplica um CanonicalEvent que NÃO veio de webhook (ex: polling de tracking,
-   * sync manual). Resolve o adapter pelo registry e roda o mesmo pipeline de
-   * processamento dos webhooks — atualiza logistics_deliveries, grava tracking,
-   * dispara ação Mapp, faz broadcast WebSocket.
-   *
-   * É o entrypoint público pro TrackingPoller (providers cujo webhook não traz
-   * posição do entregador, como a 99Entrega) e pra qualquer resync futuro.
-   *
-   * @param {string} providerCode
-   * @param {import('../contracts/CanonicalTypes').CanonicalEvent} evento
-   * @returns {Promise<void>}
-   */
-  async processarEventoCanonico(providerCode, evento) {
-    if (!evento || !evento.externalDeliveryId) return;
-
-    const adapter = this.registry.get(providerCode);
-    if (!adapter) {
-      console.warn(`⚠️ [WebhookDispatcher] processarEventoCanonico: provider '${providerCode}' não está ativo`);
-      return;
-    }
-
-    return this._processarEvento(providerCode, adapter, evento);
-  }
-
-  /**
    * Processa um CanonicalEvent: localiza entrega, atualiza, dispara ação Mapp.
    * @private
    */
@@ -336,18 +311,10 @@ class WebhookDispatcher {
 
     // Vincula motorista na Mapp se é a primeira vez (entrega ainda sem courier)
     if (courier?.name && !(entrega.courier_data && entrega.courier_data.name)) {
-      // O courier_update pode chegar via POLLING (TrackingPoller da 99) quando a
-      // entrega JÁ passou de COURIER_ASSIGNED. Só avançamos o status se ele ainda
-      // está num estado pré-entregador — nunca regredimos PICKED_UP/em rota de
-      // volta pra COURIER_ASSIGNED. courier_data e a vinculação Mapp acontecem
-      // de qualquer jeito (é a 1ª vez que vemos o entregador).
-      const avancaStatus = ['PENDING', 'QUOTED', 'DISPATCHED'].includes(entrega.status_canonico);
-
       await this.pool.query(`
         UPDATE logistics_deliveries SET
           courier_data = $1,
-          status_native   = CASE WHEN $3 THEN 'entregador_atribuido' ELSE status_native   END,
-          status_canonico = CASE WHEN $3 THEN 'COURIER_ASSIGNED'     ELSE status_canonico END,
+          status_native = 'entregador_atribuido', status_canonico = 'COURIER_ASSIGNED',
           updated_at = NOW()
         WHERE id = $2
       `, [
@@ -360,7 +327,6 @@ class WebhookDispatcher {
           rating:  courier.rating,
         }),
         entrega.id,
-        avancaStatus,
       ]);
 
       await this._vincularMotorista(codigoOS, entrega, courier);
