@@ -19,7 +19,6 @@
 const { initLogisticsTables: initTabelasBase } = require('./logistics.migration');
 const { initLogisticsBackfill } = require('./logistics.backfill');
 const { initLogisticsFase3 } = require('./logistics.migration-fase3');
-const { initLogisticsConfigGlobal } = require('./logistics.migration-config-global');
 const { createLogisticsRouter } = require('./logistics.routes');
 const { createLogisticsWebhookRouter } = require('./routes/webhook.routes');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
@@ -49,12 +48,6 @@ async function initLogisticsTables(pool) {
   // Fase 3: insere o provider 'noventanove' (idempotente, não sobrescreve config)
   await initLogisticsFase3(pool).catch(err => {
     console.error('⚠️ [logistics] migration fase3 (provider 99) falhou:', err.message);
-  });
-
-  // Config global do hub (guardrail global de margem). Tabela singleton,
-  // idempotente. Bloqueante mas trivial (1 CREATE + 1 INSERT ON CONFLICT).
-  await initLogisticsConfigGlobal(pool).catch(err => {
-    console.error('⚠️ [logistics] migration config-global falhou:', err.message);
   });
 
   // Fase 2: backfill de entregas (não-bloqueante)

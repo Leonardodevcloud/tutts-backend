@@ -40,7 +40,6 @@ const { getEventLogger, EventType, EventSource } = require('./EventLogger');
 const { getMappClient } = require('./MappClient');
 const { getQuoteCache } = require('./QuoteCache');
 const { getDispatchRuleMatcher } = require('./DispatchRuleMatcher');
-const { lerConfigGlobal } = require('../routes/config-global.routes');
 const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.parser');
 
 // Status terminais (status_native) — não devem ser re-despachados
@@ -480,56 +479,10 @@ class DispatchOrchestrator {
   // ════════════════════════════════════════════════════════════
 
   /**
-   * Resolve qual guardrail de margem aplicar no despacho AUTOMÁTICO.
-   *
-   * Semântica (decidida com o Tutts):
-   *  - A regra do cliente é DEFAULT-override: se a regra define margem
-   *    própria (R$ ou %), ela MANDA — o global é ignorado pra essa OS.
-   *  - Se a regra NÃO define margem nenhuma, cai no GUARDRAIL GLOBAL
-   *    (logistics_config_global), desde que ele esteja ativo.
-   *  - Se nem a regra nem o global definem nada → sem guardrail (despacha).
-   *
-   * @param {Object} regra - logistics_dispatch_rules casada
-   * @returns {Promise<{ absMin: (number|null), pctMin: (number|null),
-   *                      origem: ('regra'|'global'|'nenhum') }>}
-   */
-  async _resolverGuardrailMargem(regra) {
-    const regraAbs = regra && regra.margem_minima_aceita != null
-      ? parseFloat(regra.margem_minima_aceita) : null;
-    const regraPct = regra && regra.margem_pct_minima != null
-      ? parseFloat(regra.margem_pct_minima) : null;
-
-    // A regra definiu margem própria → override total, global ignorado.
-    if (regraAbs != null || regraPct != null) {
-      return { absMin: regraAbs, pctMin: regraPct, origem: 'regra' };
-    }
-
-    // Regra sem margem → tenta o guardrail global.
-    try {
-      const cfg = await lerConfigGlobal(this.pool);
-      if (cfg && cfg.margem_global_ativa) {
-        const gAbs = cfg.margem_global_minima_rs != null
-          ? parseFloat(cfg.margem_global_minima_rs) : null;
-        const gPct = cfg.margem_global_minima_pct != null
-          ? parseFloat(cfg.margem_global_minima_pct) : null;
-        if (gAbs != null || gPct != null) {
-          return { absMin: gAbs, pctMin: gPct, origem: 'global' };
-        }
-      }
-    } catch (err) {
-      // Falha ao ler config global não pode travar despacho — loga e segue
-      // sem guardrail (fail-open: o despacho não fica refém da config).
-      console.error('⚠️ [Orchestrator] erro ao ler guardrail global:', err.message);
-    }
-
-    return { absMin: null, pctMin: null, origem: 'nenhum' };
-  }
-
-  /**
    * Pipeline completo orientado por codigoOS:
    *  1. Busca servico Mapp
    *  2. Casa regra via DispatchRuleMatcher
-   *  3. Valida margem (regra do cliente OU guardrail global)
+   *  3. Valida margem (R$ + %)
    *  4. Cota
    *  5. Despacha
    *
@@ -593,12 +546,9 @@ class DispatchOrchestrator {
     // melhor_preco/melhor_eta já cotaram — reusa a cotação do selector
     let quoteReuso = escolha.quoteReuso || null;
 
-    // 2. Validação de margem — guardrail da regra do cliente OU o global.
-    //    A regra é default-override: se ela define margem, manda; senão,
-    //    cai no guardrail global (se ativo). _resolverGuardrailMargem decide.
-    const guardrail = await this._resolverGuardrailMargem(regra);
-    const exigeMargemAbs = guardrail.absMin != null;
-    const exigeMargemPct = guardrail.pctMin != null;
+    // 2. Validação de margem (se a regra exige)
+    const exigeMargemAbs = regra.margem_minima_aceita != null;
+    const exigeMargemPct = regra.margem_pct_minima != null;
 
     if (exigeMargemAbs || exigeMargemPct) {
       let cotResult;
@@ -628,30 +578,30 @@ class DispatchOrchestrator {
         }
       }
 
-      const margemAbsMin = guardrail.absMin;
-      const margemPctMin = guardrail.pctMin;
+      const margemAbsMin = parseFloat(regra.margem_minima_aceita);
+      const margemPctMin = parseFloat(regra.margem_pct_minima);
 
       if (exigeMargemAbs && cotResult.margem < margemAbsMin) {
-        console.log(`💸 [Orchestrator] OS ${codigoOS} REJEITADA margem abs (R$${cotResult.margem.toFixed(2)} < ${margemAbsMin}) [guardrail: ${guardrail.origem}]`);
+        console.log(`💸 [Orchestrator] OS ${codigoOS} REJEITADA margem abs (R$${cotResult.margem.toFixed(2)} < ${margemAbsMin})`);
         this.events.log({
           providerCode,
           eventType: EventType.DISPATCH_REJECTED_BY_MARGIN,
           eventSource,
           codigoOS,
-          payload: { tipo: 'absoluta', valor: cotResult.margem, minimo: margemAbsMin, guardrail: guardrail.origem },
+          payload: { tipo: 'absoluta', valor: cotResult.margem, minimo: margemAbsMin },
         });
-        return { decision: 'rejeitado_margem_absoluta', regra, margem: cotResult.margem, guardrail: guardrail.origem };
+        return { decision: 'rejeitado_margem_absoluta', regra, margem: cotResult.margem };
       }
       if (exigeMargemPct && cotResult.margem_pct < margemPctMin) {
-        console.log(`💸 [Orchestrator] OS ${codigoOS} REJEITADA margem pct (${cotResult.margem_pct.toFixed(1)}% < ${margemPctMin}%) [guardrail: ${guardrail.origem}]`);
+        console.log(`💸 [Orchestrator] OS ${codigoOS} REJEITADA margem pct (${cotResult.margem_pct.toFixed(1)}% < ${margemPctMin}%)`);
         this.events.log({
           providerCode,
           eventType: EventType.DISPATCH_REJECTED_BY_MARGIN,
           eventSource,
           codigoOS,
-          payload: { tipo: 'percentual', valor: cotResult.margem_pct, minimo: margemPctMin, guardrail: guardrail.origem },
+          payload: { tipo: 'percentual', valor: cotResult.margem_pct, minimo: margemPctMin },
         });
-        return { decision: 'rejeitado_margem_percentual', regra, margem_pct: cotResult.margem_pct, guardrail: guardrail.origem };
+        return { decision: 'rejeitado_margem_percentual', regra, margem_pct: cotResult.margem_pct };
       }
 
       quoteReuso = { quote: cotResult.cotacao, request: cotResult.request };
@@ -697,22 +647,20 @@ class DispatchOrchestrator {
       console.log(`🔄 [Orchestrator] OS ${codigoOS}: fallback tentativa ${i + 1}/${chain.length} — ${providerCode}`);
 
       try {
-        // Valida margem — guardrail da regra OU global (mesma resolução do
-        // caminho direto, pra a estratégia fallback não ignorar o global).
+        // Valida margem se a regra exige (cota e checa)
         let quoteReuso = null;
-        const guardrail = await this._resolverGuardrailMargem(regra);
-        const exigeMargem = guardrail.absMin != null || guardrail.pctMin != null;
+        const exigeMargem = regra.margem_minima_aceita != null || regra.margem_pct_minima != null;
 
         if (exigeMargem) {
           const cotResult = await this.quote(codigoOS, {
             providerCode, vehicleType, servicoMapp: servico, eventSource,
           });
-          const margemAbsMin = guardrail.absMin != null ? guardrail.absMin : -Infinity;
-          const margemPctMin = guardrail.pctMin != null ? guardrail.pctMin : -Infinity;
+          const margemAbsMin = regra.margem_minima_aceita != null ? parseFloat(regra.margem_minima_aceita) : -Infinity;
+          const margemPctMin = regra.margem_pct_minima != null ? parseFloat(regra.margem_pct_minima) : -Infinity;
 
           if (cotResult.margem < margemAbsMin || cotResult.margem_pct < margemPctMin) {
             tentativas.push({ providerCode, resultado: 'rejeitado_margem' });
-            console.log(`💸 [Orchestrator] OS ${codigoOS}: ${providerCode} rejeitado por margem [guardrail: ${guardrail.origem}] — próximo da cadeia`);
+            console.log(`💸 [Orchestrator] OS ${codigoOS}: ${providerCode} rejeitado por margem — próximo da cadeia`);
             continue; // tenta o próximo
           }
           quoteReuso = { quote: cotResult.cotacao, request: cotResult.request };

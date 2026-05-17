@@ -42,7 +42,6 @@ const { getDispatchOrchestrator } = require('./core/DispatchOrchestrator');
 const { getMappClient } = require('./core/MappClient');
 const { EventSource } = require('./core/EventLogger');
 const { createDispatchRulesRoutes } = require('./routes/dispatch-rules.routes');
-const { createConfigGlobalRoutes } = require('./routes/config-global.routes');
 const { createDashboardRoutes } = require('./routes/dashboard.routes');
 const { initLogisticsBackfill } = require('./logistics.backfill');
 
@@ -572,11 +571,6 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // CRUD de dispatch-rules (Fase 2) — sub-router dedicado
   // ───────────────────────────────────────────────────────────
   router.use(createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
-
-  // ───────────────────────────────────────────────────────────
-  // Config global do hub (guardrail global de margem) — sub-router
-  // ───────────────────────────────────────────────────────────
-  router.use(createConfigGlobalRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
   // ───────────────────────────────────────────────────────────
   // Dashboard /metrics e /events (Fase 4) — sub-router dedicado
