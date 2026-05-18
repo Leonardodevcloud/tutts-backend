@@ -230,6 +230,17 @@ async function initSolicitacaoTables(pool) {
       ALTER TABLE solicitacoes_corrida
       ADD COLUMN IF NOT EXISTS rastreio_enviado_em TIMESTAMP
     `).catch(e => console.log('⚠️ rastreio_enviado_em:', e.message));
+    // 2026-05: agendamento do envio automático (delay de 10 min após criar a OS).
+    // O worker processa as linhas com rastreio_agendado_para <= NOW() e rastreio_enviado = false.
+    await pool.query(`
+      ALTER TABLE solicitacoes_corrida
+      ADD COLUMN IF NOT EXISTS rastreio_agendado_para TIMESTAMP
+    `).catch(e => console.log('⚠️ rastreio_agendado_para:', e.message));
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_corrida_rastreio_pendente
+      ON solicitacoes_corrida (rastreio_agendado_para)
+      WHERE rastreio_enviado = false AND rastreio_agendado_para IS NOT NULL
+    `).catch(e => console.log('⚠️ idx_corrida_rastreio_pendente:', e.message));
     console.log('✅ Colunas rastreio_enviado verificadas');
 }
 

@@ -420,51 +420,23 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       }
     }
     
-    // 🚀 RASTREIO AUTOMÁTICO (2026-05): se a OS foi criada com sucesso, envia
-    // o link de rastreamento pro WhatsApp do cliente do ponto de entrega.
-    // Best-effort — nunca derruba a criação da OS.
+    // 🚀 RASTREIO AUTOMÁTICO (2026-05): NÃO envia na hora — agenda para +10min.
+    // Um worker processa o envio depois. Delay evita avisar o cliente antes da
+    // OS estar de fato em rota, e o agendamento sobrevive a restart do servidor.
+    // O envio em si checa rastreio_enviado, então nunca duplica.
     if (resultado.Sucesso) {
       try {
-        // Busca a OS já atualizada (URL de rastreio pode ter vindo no UPDATE de status)
-        const osRow = await pool.query(
-          `SELECT tutts_url_rastreamento, tutts_os_numero FROM solicitacoes_corrida WHERE id = $1`,
+        await pool.query(
+          `UPDATE solicitacoes_corrida
+              SET rastreio_agendado_para = NOW() + INTERVAL '10 minutes'
+            WHERE id = $1
+              AND rastreio_enviado = false
+              AND rastreio_agendado_para IS NULL`,
           [solicitacaoId]
         );
-        const urlRastreio = osRow.rows[0]?.tutts_url_rastreamento
-          || resultado.detalhes?.urlRastreamento
-          || null;
-
-        // Pega o ÚLTIMO ponto (entrega final) com telefone preenchido
-        const pontoRow = await pool.query(
-          `SELECT telefone, nome_fantasia
-             FROM solicitacoes_pontos
-            WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
-            ORDER BY ordem DESC
-            LIMIT 1`,
-          [solicitacaoId]
-        );
-        const ponto = pontoRow.rows[0];
-
-        if (urlRastreio && ponto && ponto.telefone) {
-          const envio = await enviarRastreioCliente({
-            telefone: ponto.telefone,
-            nomeDestinatario: ponto.nome_fantasia || null,
-            osNumero: resultado.Sucesso,
-            urlRastreamento: urlRastreio,
-          });
-          // Registra o resultado do envio na própria OS (auditoria leve)
-          await pool.query(
-            `UPDATE solicitacoes_corrida
-                SET rastreio_enviado = $1, rastreio_enviado_em = CASE WHEN $1 THEN NOW() ELSE NULL END
-              WHERE id = $2`,
-            [!!envio.enviado, solicitacaoId]
-          ).catch(() => {});
-          console.log(`📨 [rastreio-auto] OS ${resultado.Sucesso}: ${envio.enviado ? 'enviado' : 'falhou (' + envio.motivo + ')'}`);
-        } else {
-          console.log(`📭 [rastreio-auto] OS ${resultado.Sucesso}: sem ${!urlRastreio ? 'URL de rastreio' : 'telefone do cliente'} — envio pulado`);
-        }
+        console.log(`⏳ [rastreio-auto] OS ${resultado.Sucesso}: envio agendado para +10min`);
       } catch (errRastreio) {
-        console.warn('⚠️ [rastreio-auto] erro não-crítico:', errRastreio.message);
+        console.warn('⚠️ [rastreio-auto] erro ao agendar (não-crítico):', errRastreio.message);
       }
     }
 
@@ -504,7 +476,7 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
 
     // OS precisa pertencer a este cliente
     const osRow = await pool.query(
-      `SELECT id, tutts_url_rastreamento, tutts_os_numero
+      `SELECT id, tutts_url_rastreamento, tutts_os_numero, rastreio_enviado
          FROM solicitacoes_corrida
         WHERE id = $1 AND cliente_id = $2`,
       [solicitacaoId, req.clienteSolicitacao.id]
@@ -514,6 +486,11 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
 
     if (!os.tutts_url_rastreamento) {
       return res.status(409).json({ error: 'Esta OS ainda não tem link de rastreamento disponível' });
+    }
+
+    // Anti-duplicata: se o rastreio já foi enviado, não envia de novo.
+    if (os.rastreio_enviado === true) {
+      return res.status(409).json({ error: 'O rastreio desta OS já foi enviado ao cliente' });
     }
 
     // Permite sobrescrever o telefone (caso o atendente queira corrigir no reenvio)
@@ -545,7 +522,9 @@ router.post('/solicitacao/:id/enviar-rastreio', verificarTokenSolicitacao, async
 
     if (envio.enviado) {
       await pool.query(
-        `UPDATE solicitacoes_corrida SET rastreio_enviado = true, rastreio_enviado_em = NOW() WHERE id = $1`,
+        `UPDATE solicitacoes_corrida
+            SET rastreio_enviado = true, rastreio_enviado_em = NOW(), rastreio_agendado_para = NULL
+          WHERE id = $1`,
         [solicitacaoId]
       ).catch(() => {});
       return res.json({ ok: true, numero: envio.numero });

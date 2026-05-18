@@ -169,6 +169,116 @@ const limparBloqueiosExpirados = async () => {
 setInterval(limparBloqueiosExpirados, 5 * 60 * 1000);
 
 // ════════════════════════════════════════════════════════════
+// JOB: Solicitações - Envio agendado do rastreio (a cada 1 min)
+// Processa OS com rastreio_agendado_para vencido (delay de 10 min
+// após criar a OS). Anti-duplicata: só pega rastreio_enviado=false
+// e marca enviado=true ANTES de enviar (evita reenvio concorrente).
+// ════════════════════════════════════════════════════════════
+let enviarRastreioCliente;
+try {
+  enviarRastreioCliente = require('./src/modules/solicitacao/whatsapp-rastreio.service').enviarRastreioCliente;
+} catch (err) {
+  console.warn('⚠️ [Worker] módulo rastreio não carregou:', err.message);
+  enviarRastreioCliente = async () => ({ enviado: false, motivo: 'modulo_indisponivel' });
+}
+
+const processarRastreiosAgendados = async () => {
+  try {
+    // Pega até 20 OS com agendamento vencido. O UPDATE ... RETURNING marca
+    // rastreio_enviado=true de forma atômica: se duas execuções rodarem juntas,
+    // só uma pega cada linha. Em caso de falha no envio, revertemos abaixo.
+    const pend = await pool.query(`
+      UPDATE solicitacoes_corrida
+         SET rastreio_enviado = true, rastreio_enviado_em = NOW()
+       WHERE id IN (
+         SELECT id FROM solicitacoes_corrida
+          WHERE rastreio_enviado = false
+            AND rastreio_agendado_para IS NOT NULL
+            AND rastreio_agendado_para <= NOW()
+          ORDER BY rastreio_agendado_para ASC
+          LIMIT 20
+          FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, tutts_os_numero, tutts_url_rastreamento
+    `);
+
+    if (pend.rows.length === 0) return;
+    console.log(`⏳ [rastreio-worker] ${pend.rows.length} OS agendada(s) para enviar`);
+
+    for (const os of pend.rows) {
+      try {
+        if (!os.tutts_url_rastreamento) {
+          // Sem URL ainda — desagenda e deixa para reenvio manual
+          await pool.query(
+            `UPDATE solicitacoes_corrida
+                SET rastreio_enviado = false, rastreio_enviado_em = NULL, rastreio_agendado_para = NULL
+              WHERE id = $1`,
+            [os.id]
+          );
+          console.log(`📭 [rastreio-worker] OS ${os.tutts_os_numero}: sem URL — desagendado`);
+          continue;
+        }
+        const pontoRow = await pool.query(
+          `SELECT telefone, nome_fantasia
+             FROM solicitacoes_pontos
+            WHERE solicitacao_id = $1 AND telefone IS NOT NULL AND telefone != ''
+            ORDER BY ordem DESC LIMIT 1`,
+          [os.id]
+        );
+        const ponto = pontoRow.rows[0];
+        if (!ponto || !ponto.telefone) {
+          await pool.query(
+            `UPDATE solicitacoes_corrida SET rastreio_agendado_para = NULL WHERE id = $1`,
+            [os.id]
+          );
+          console.log(`📭 [rastreio-worker] OS ${os.tutts_os_numero}: sem telefone — pulado`);
+          continue;
+        }
+
+        const envio = await enviarRastreioCliente({
+          telefone: ponto.telefone,
+          nomeDestinatario: ponto.nome_fantasia || null,
+          osNumero: os.tutts_os_numero,
+          urlRastreamento: os.tutts_url_rastreamento,
+        });
+
+        if (envio.enviado) {
+          await pool.query(
+            `UPDATE solicitacoes_corrida SET rastreio_agendado_para = NULL WHERE id = $1`,
+            [os.id]
+          );
+          console.log(`📨 [rastreio-worker] OS ${os.tutts_os_numero}: enviado`);
+        } else {
+          // Falhou — reverte para tentar de novo no próximo ciclo
+          await pool.query(
+            `UPDATE solicitacoes_corrida
+                SET rastreio_enviado = false, rastreio_enviado_em = NULL,
+                    rastreio_agendado_para = NOW() + INTERVAL '5 minutes'
+              WHERE id = $1`,
+            [os.id]
+          );
+          console.warn(`⚠️ [rastreio-worker] OS ${os.tutts_os_numero}: falhou (${envio.motivo}) — reagendado +5min`);
+        }
+      } catch (errItem) {
+        console.error(`❌ [rastreio-worker] erro na OS ${os.id}:`, errItem.message);
+        await pool.query(
+          `UPDATE solicitacoes_corrida
+              SET rastreio_enviado = false, rastreio_enviado_em = NULL,
+                  rastreio_agendado_para = NOW() + INTERVAL '5 minutes'
+            WHERE id = $1`,
+          [os.id]
+        ).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error('❌ [rastreio-worker] erro geral:', err.message);
+  }
+};
+
+setInterval(processarRastreiosAgendados, 60 * 1000);
+setTimeout(processarRastreiosAgendados, 15000);
+
+// ════════════════════════════════════════════════════════════
 // JOB 4: Auth - Limpeza de refresh tokens expirados (a cada 1h)
 // ════════════════════════════════════════════════════════════
 const limparRefreshTokensExpirados = async () => {
