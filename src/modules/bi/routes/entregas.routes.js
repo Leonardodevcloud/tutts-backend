@@ -781,6 +781,10 @@ router.get('/bi/uploads/historico-unificado', async (req, res) => {
           NULL::text                        AS status,
           NULL::date                        AS data_referencia
         FROM bi_upload_historico
+        -- Esconde duplicatas: registros gravados pelo agente RPA (antes do fix
+        -- origem_rpa) tem usuario_nome 'Sistema (cron ...)'. O upload RPA real
+        -- ja aparece via bi_imports, entao esses sao copia e ficam ocultos.
+        WHERE COALESCE(usuario_nome, '') NOT ILIKE 'Sistema (cron%'
         ORDER BY data_upload DESC
         LIMIT $1
       `, [limit]).catch(() => ({ rows: [] }));
