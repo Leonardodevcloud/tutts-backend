@@ -3,6 +3,7 @@
  * Auto-extracted from bi.routes.js monolith
  */
 const express = require('express');
+const { ehClienteCcConsolidado } = require('../../../shared/constants');
 
 function createGarantidoRoutes(pool) {
   const router = express.Router();
@@ -258,9 +259,9 @@ router.get('/bi/garantido', async (req, res) => {
         // Buscar nome do cliente (máscara tem prioridade)
         const nomeCliente = mascaras[codClienteRodou] || clientesGarantido[codClienteRodou] || `Cliente ${codClienteRodou}`;
         
-        // Cliente 949: apenas cod + nome
+        // Clientes consolidados (ver CLIENTES_CC_CONSOLIDADO): apenas cod + nome
         // Outros clientes: cod + nome + centro de custo
-        if (codClienteRodou === '949') {
+        if (ehClienteCcConsolidado(codClienteRodou)) {
           ondeRodou = `${codClienteRodou} - ${nomeCliente}`;
         } else {
           ondeRodou = centroCusto 
@@ -473,12 +474,12 @@ router.get('/bi/garantido/semanal', async (req, res) => {
       const complemento = Math.max(0, valorNegociado - valorProduzido);
       
       // Determinar a chave de agrupamento
-      // Cliente 949: agrupa apenas pelo cliente (exceção)
+      // Clientes consolidados (ver CLIENTES_CC_CONSOLIDADO): agrupa só pelo cliente
       // Todos os outros: cod_cliente - nome_cliente (ou máscara) - centro_custo
       let clienteKey;
       const nomeCliente = mascaras[codCliente] || clientesNomes[codCliente] || `Cliente ${codCliente}`;
       
-      if (codCliente === '949') {
+      if (ehClienteCcConsolidado(codCliente)) {
         clienteKey = `${codCliente} - ${nomeCliente}`;
       } else if (centroCusto) {
         clienteKey = `${codCliente} - ${nomeCliente} - ${centroCusto}`;

@@ -4,6 +4,7 @@
  *         gráficos interativos expandidos, IA mais inteligente
  */
 const express = require('express');
+const { CLIENTES_CC_CONSOLIDADO } = require('../../../shared/constants');
 
 function createChatIaRoutes(pool) {
   const router = express.Router();
@@ -639,7 +640,7 @@ REGRAS DE NEGÓCIO (memorize — são fixas):
   Os centros de custo do 767 são FILIAIS (BR Autoparts Goiânia, CampinasSP, Brasília, etc).
   Os nomes pequenos (ex: "FERREIRA e MACHADO", "STOP CENTER") são as LOJAS dos clientes finais, NÃO filiais.
   Quando falar do 767, mostre apenas os centros que são FILIAIS (os que começam com "BR" ou "Pellegrino").
-- Cliente 949: consolidar TODOS os centros de custo em uma única linha.
+- Clientes ${CLIENTES_CC_CONSOLIDADO.join(', ')}: consolidar TODOS os centros de custo em uma única linha.
 - Demais clientes: prazo padrão = verificar nos dados pré-carregados (seção PRAZOS).
 - Meta geral de SLA = 85% (salvo exceções acima).
 - "Retorno" = ocorrência com "retorno", "cliente fechado", "cliente ausente", "loja fechada".
@@ -1339,7 +1340,7 @@ ${(() => {
 })()}
 ⚠️ REGRA CENTRO DE CUSTO: Quando mostrar dados do 767, usar APENAS os centros configurados acima.
    Centros pequenos (lojas) NÃO são filiais — são os clientes finais das filiais. Ignore-os na análise gerencial.
-   Cliente 949: consolidar TODOS os centros de custo em uma única linha.` : ''}
+   Clientes ${CLIENTES_CC_CONSOLIDADO.join(', ')}: consolidar TODOS os centros de custo em uma única linha.` : ''}
 `;
 
       console.log(`📊 [Pre-load] OK em ${tempo}ms — ${rg.total_entregas} entregas, ${porCliente.rows.length} clientes, ${porDia.rows.length} dias, ${porProfissional.rows.length} profs, ${profsPorCC.rows.length} prof/CC, ${porBairro.rows.length} bairros`);

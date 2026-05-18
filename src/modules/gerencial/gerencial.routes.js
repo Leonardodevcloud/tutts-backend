@@ -4,6 +4,7 @@
  * Endpoints: /gerencial/semanas, /gerencial/dados, /gerencial/config, /gerencial/clientes-disponiveis
  */
 const express = require('express');
+const { ehClienteCcConsolidado } = require('../../shared/constants');
 
 var CAT_FILTER = "categoria IN ('Motofrete','Motofrete - C','Motofrete (Expresso)','Tutts Fast')";
 var ENTREGA_FILTER = "COALESCE(ponto, 1) >= 2";
@@ -172,8 +173,8 @@ function createGerencialRouter(pool, verificarToken) {
         var seen = {};
         var result = [];
         items.forEach(function(it) {
-          // 🔧 FIX: Apenas 949 consolida CCs (os demais mantém CC separado)
-          if (it.cod === 949) {
+          // Clientes consolidados (ver CLIENTES_CC_CONSOLIDADO) consolidam CCs
+          if (ehClienteCcConsolidado(it.cod)) {
             if (!seen[it.cod]) {
               seen[it.cod] = true;
               result.push({ cod: it.cod, cc: '', nome: codNome[it.cod] || it.nome });
@@ -377,7 +378,7 @@ function createGerencialRouter(pool, verificarToken) {
           var ondeRodou;
           if (!codSheet || !nomeBase) {
             ondeRodou = 'PORTO SECO';
-          } else if (codSheet === '949') {
+          } else if (ehClienteCcConsolidado(codSheet)) {
             ondeRodou = codSheet + ' - ' + nomeBase;
           } else if (ccRodou) {
             ondeRodou = codSheet + ' - ' + ccRodou;
@@ -618,7 +619,8 @@ function createGerencialRouter(pool, verificarToken) {
       // 1) Os que na config final têm CC vazio (marcados como "geral")
       // 2) Os que têm CC específico MAS foram consolidados pela consolidarConfig (múltiplos CCs)
       // 3) QUALQUER cliente que aparece nos grupos (para evitar poluição no Ticket/Demanda)
-      var consolidarCods = { '949': true };
+      var consolidarCods = {};
+      require('../../shared/constants').CLIENTES_CC_CONSOLIDADO.forEach(function(c) { consolidarCods[c] = true; });
       portoSecoConfig.concat(outrosConfig).forEach(function(it) {
         if (!it.cc) consolidarCods[String(it.cod)] = true;
       });
