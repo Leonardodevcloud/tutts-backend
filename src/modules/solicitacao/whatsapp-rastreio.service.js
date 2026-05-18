@@ -155,13 +155,18 @@ async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, url
     ? `Olá, *${nomeDestinatario}*! 👋`
     : 'Olá! 👋';
   const linhaPedido = osNumero
-    ? `Seu pedido *${osNumero}* já foi registrado e está a caminho.`
-    : 'Seu pedido já foi registrado e está a caminho.';
+    ? `Seu pedido *#${osNumero}* já foi confirmado e está em rota de entrega. 🚚`
+    : 'Seu pedido já foi confirmado e está em rota de entrega. 🚚';
+  // Aviso em itálico (_..._) — WhatsApp não tem translúcido; itálico dá o tom
+  // discreto de "observação" sem competir com a mensagem principal.
   const texto =
     `${saud}\n\n` +
     `${linhaPedido}\n\n` +
-    `Acompanhe a entrega *ao vivo* pelo link abaixo:\n` +
-    `${urlRastreamento}`;
+    `Acompanhe o rastreio em tempo real pelo link abaixo:\n` +
+    `${urlRastreamento}\n\n` +
+    `⚠️ *Importante:*\n` +
+    `_Este número é automático e não recebe mensagens nem ligações. ` +
+    `Caso precise de suporte, entre em contato diretamente com a loja onde realizou a compra._`;
 
   try {
     const url = `${cfg.baseUrl}/message/sendText/${cfg.instancia}`;
