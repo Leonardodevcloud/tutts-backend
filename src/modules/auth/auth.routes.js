@@ -1,7 +1,7 @@
 /**
  * MÓDULO AUTH - Routes
  * 24 endpoints: register, login, verify-token, refresh-token, logout,
- *               sessions(2), 2fa(6), users CRUD(5), password-recovery(4), setor(1)
+ *               sessions(2), 2fa(6), users CRUD(5), password-recovery(4)
  */
 
 const express = require('express');
@@ -496,7 +496,7 @@ router.post('/users/login', loginLimiter, async (req, res) => {
 
     // Buscar usuário no banco
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, password, setor_id, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs, COALESCE(cadastro_completo, false) as cadastro_completo FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      'SELECT id, cod_profissional, full_name, role, password, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs, COALESCE(cadastro_completo, false) as cadastro_completo FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
@@ -665,7 +665,7 @@ router.post('/users/refresh-token', async (req, res) => {
     
     // Buscar dados atualizados do usuário
     const result = await pool.query(
-      `SELECT id, cod_profissional, full_name, role, setor_id, 
+      `SELECT id, cod_profissional, full_name, role, 
               COALESCE(allowed_modules, '[]') as allowed_modules, 
               COALESCE(allowed_tabs, '{}') as allowed_tabs,
               COALESCE(cadastro_completo, false) as cadastro_completo
@@ -726,7 +726,6 @@ router.post('/users/refresh-token', async (req, res) => {
         cod_profissional: user.cod_profissional,
         full_name: user.full_name,
         role: user.role,
-        setor_id: user.setor_id,
         allowed_modules: user.allowed_modules,
         allowed_tabs: user.allowed_tabs,
         cadastro_completo: user.cadastro_completo === true
@@ -1004,7 +1003,7 @@ router.post('/users/2fa/authenticate', async (req, res) => {
     
     // 2FA válido - completar login
     const userResult = await pool.query(
-      `SELECT id, cod_profissional, full_name, role, setor_id, 
+      `SELECT id, cod_profissional, full_name, role, 
               COALESCE(allowed_modules, '[]') as allowed_modules, 
               COALESCE(allowed_tabs, '{}') as allowed_tabs,
               COALESCE(cadastro_completo, false) as cadastro_completo
@@ -1154,10 +1153,8 @@ router.post('/users/2fa/backup-codes/regenerate', verificarToken, async (req, re
 router.get('/users', verificarToken, verificarAdmin, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT u.id, u.cod_profissional, u.full_name, u.role, u.setor_id, u.created_at,
-        s.nome as setor_nome, s.cor as setor_cor
+      SELECT u.id, u.cod_profissional, u.full_name, u.role, u.created_at
       FROM users u
-      LEFT JOIN setores s ON u.setor_id = s.id
       ORDER BY u.created_at DESC
     `);
     res.json(result.rows);
@@ -1629,32 +1626,6 @@ router.delete('/password-recovery/:id', verificarToken, verificarAdmin, async (r
   } catch (error) {
     console.error('❌ Erro ao deletar solicitação:', error);
     res.status(500).json({ error: error.message });
-  }
-});
-
-
-  // ==================== SETOR DO USUÁRIO ====================
-
-router.patch('/users/:codProfissional/setor', async (req, res) => {
-  try {
-    const { codProfissional } = req.params;
-    const { setor_id } = req.body;
-    
-    const result = await pool.query(`
-      UPDATE users 
-      SET setor_id = $1, updated_at = NOW()
-      WHERE LOWER(cod_profissional) = LOWER($2)
-      RETURNING id, cod_profissional, full_name, setor_id
-    `, [setor_id || null, codProfissional]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
-    }
-    
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error('❌ Erro ao atualizar setor do usuário:', err);
-    res.status(500).json({ error: 'Erro ao atualizar setor' });
   }
 });
 
