@@ -5,7 +5,7 @@
  * Pipeline:
  *  pendente → processando → (sucesso | falhou)
  *
- * Cron 10h diário pega job pendente do dia (origem='cron'),
+ * Cron 12h diário pega job pendente do dia (origem='cron'),
  *  ou roda quando admin clica "Importar agora" (origem='manual').
  */
 

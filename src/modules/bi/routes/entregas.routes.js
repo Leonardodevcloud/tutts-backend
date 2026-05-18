@@ -24,7 +24,10 @@ function createEntregasRoutes(pool, atualizarResumos) {
 
 router.post('/bi/entregas/upload', async (req, res) => {
   try {
-    const { entregas, data_referencia, usuario_id, usuario_nome, nome_arquivo } = req.body;
+    const { entregas, data_referencia, usuario_id, usuario_nome, nome_arquivo, origem_rpa } = req.body;
+    // origem_rpa=true => chamada do agente Playwright; NÃO registra em bi_upload_historico
+    // (o agente já tem seu próprio registro em bi_imports). Evita duplicata manual+cron.
+    const ehRPA = origem_rpa === true;
     
     console.log(`📤 Upload BI: Recebendo ${entregas?.length || 0} entregas`);
     console.log(`👤 Usuário: ${usuario_nome || 'não informado'} (${usuario_id || 'sem id'})`);
@@ -71,23 +74,27 @@ router.post('/bi/entregas/upload', async (req, res) => {
     // ============================================
     const linhasIgnoradasTotal = entregas.length - entregasNovas.length;
     
-    const historicoResult = await pool.query(`
-      INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-      RETURNING id
-    `, [
-      usuario_id, 
-      usuario_nome, 
-      nome_arquivo, 
-      entregas.length, 
-      0, // Será atualizado depois
-      linhasIgnoradasTotal,
-      osDoExcel.length - osIgnoradas.length,
-      osIgnoradas.length
-    ]);
-    
-    const uploadId = historicoResult.rows[0].id;
-    console.log(`📝 Upload registrado com ID: ${uploadId}`);
+    let uploadId = null;
+    if (!ehRPA) {
+      const historicoResult = await pool.query(`
+        INSERT INTO bi_upload_historico (usuario_id, usuario_nome, nome_arquivo, total_linhas, linhas_inseridas, linhas_ignoradas, os_novas, os_ignoradas, data_upload)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        RETURNING id
+      `, [
+        usuario_id, 
+        usuario_nome, 
+        nome_arquivo, 
+        entregas.length, 
+        0, // Será atualizado depois
+        linhasIgnoradasTotal,
+        osDoExcel.length - osIgnoradas.length,
+        osIgnoradas.length
+      ]);
+      uploadId = historicoResult.rows[0].id;
+      console.log(`📝 Upload manual registrado com ID: ${uploadId}`);
+    } else {
+      console.log(`🤖 Upload via RPA — não registra em bi_upload_historico (já está em bi_imports)`);
+    }
     
     if (entregasNovas.length === 0) {
       // Histórico já foi criado acima, apenas retorna
@@ -480,11 +487,13 @@ router.post('/bi/entregas/upload', async (req, res) => {
     // ============================================
     // PASSO 6: Atualizar histórico com total inserido
     // ============================================
-    await pool.query(`
-      UPDATE bi_upload_historico 
-      SET linhas_inseridas = $1
-      WHERE id = $2
-    `, [inseridos, uploadId]);
+    if (!ehRPA && uploadId) {
+      await pool.query(`
+        UPDATE bi_upload_historico 
+        SET linhas_inseridas = $1
+        WHERE id = $2
+      `, [inseridos, uploadId]);
+    }
     
     console.log(`✅ Upload concluído: ${inseridos} inseridos, ${linhasIgnoradasTotal} ignorados (OS duplicada), ${erros} erros`);
     console.log(`📊 Dentro do prazo: ${dentroPrazoCount}, Fora do prazo: ${foraPrazoCount}`);

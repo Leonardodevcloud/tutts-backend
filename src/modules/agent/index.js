@@ -88,11 +88,11 @@ function startAgentWorker(pool) {
 
     // 2026-04 v3: novo agente "BI Import"
     agentPool.register(biImportAgent);
-    // Cron próprio pra criar job D-1 às 10h da manhã (diferente do cron do agent que processa).
+    // Cron próprio pra criar job D-1 ao meio-dia (diferente do cron do agent que processa).
     // Esse cron só CRIA o job — o worker do pool pega depois.
     try {
       const cron = require('node-cron');
-      const cronExpr = process.env.BI_IMPORT_CRON || '0 10 * * *';
+      const cronExpr = process.env.BI_IMPORT_CRON || '0 12 * * *';
       cron.schedule(cronExpr, async () => {
         try {
           const data = biImportAgent.calcularDataD1();

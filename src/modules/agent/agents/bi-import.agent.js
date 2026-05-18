@@ -3,7 +3,7 @@
  * Worker do pool — processa fila bi_imports.
  *
  * 2 modos combinados em 1 agente:
- *  - Cron diário 10h (TZ America/Bahia): cria job D-1 (origem='cron') e processa
+ *  - Cron diário 12h (TZ America/Bahia): cria job D-1 (origem='cron') e processa
  *  - Fila pendente: pega jobs origem='manual' criados via endpoint
  *
  * Cron usa INSERT idempotente (UNIQUE INDEX da migration impede duplicação).
@@ -19,7 +19,7 @@ const playwrightLib    = require('../playwright-bi-export');
 const { processarArquivo } = require('../processar-planilha-bi');
 
 const SLOTS = Number(process.env.POOL_BI_IMPORT_SLOTS || 1);
-const CRON_DEFAULT = '0 10 * * *';  // 10h diário
+const CRON_DEFAULT = '0 12 * * *';  // 12h diário
 
 // URL base do próprio backend (pra POST interno em /bi/entregas/upload)
 // Em produção: BACKEND_INTERNAL_URL=http://tutts-backend.railway.internal:3000
@@ -93,7 +93,7 @@ async function criarJobCronSeNaoExistir(pool, dataReferencia) {
   try {
     const { rows } = await pool.query(`
       INSERT INTO bi_imports (data_referencia, origem, status, usuario_nome)
-      VALUES ($1, 'cron', 'pendente', 'Sistema (cron 10h)')
+      VALUES ($1, 'cron', 'pendente', 'Sistema (cron 12h)')
       ON CONFLICT DO NOTHING
       RETURNING id
     `, [dataReferencia]);
@@ -115,12 +115,12 @@ module.exports = defineAgent({
   sessionStrategy: 'isolada',
   intervalo: 30_000,
   // 2026-04 fix: removido cronExpression daqui — o agente roda em modo PARALELO
-  // (pega jobs pendentes da fila bi_imports). O cron 10h continua existindo,
+  // (pega jobs pendentes da fila bi_imports). O cron 12h continua existindo,
   // mas é gerenciado externamente em index.js que CRIA o job, e este worker
   // apenas processa.
   // timezone: 'America/Bahia',
 
-  // ── Cron 10h: cria job D-1 e deixa o tickGlobal/buscarPendentes processar
+  // ── Cron 12h: cria job D-1 e deixa o tickGlobal/buscarPendentes processar
   // (defineAgent suporta cron OU paralelo, não ambos. Vamos usar PARALELO
   //  com buscarPendentes E rodar uma função SEPARADA pra cron.
   //  → MAS o agent-pool registra cron OU paralelo. Solução: agente paralelo +
@@ -229,8 +229,9 @@ module.exports = defineAgent({
         entregas,
         data_referencia: dataRef,
         usuario_id: registro.usuario_id || null,
-        usuario_nome: registro.usuario_nome || (registro.origem === 'cron' ? 'Sistema (cron 10h)' : 'Importação manual'),
+        usuario_nome: registro.usuario_nome || (registro.origem === 'cron' ? 'Sistema (cron 12h)' : 'Importação manual'),
         nome_arquivo: path.basename(arquivoPath),
+        origem_rpa: true,  // sinaliza ao endpoint: NÃO registrar em bi_upload_historico (evita duplicata)
       });
 
       if (!postRes.ok) {
