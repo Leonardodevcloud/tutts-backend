@@ -2866,7 +2866,7 @@ router.get('/quiz-procedimentos/verificar/:userCod', verificarToken, async (req,
 });
 
 // Responder o quiz
-router.post('/quiz-procedimentos/responder', verificarToken, verificarAdmin, async (req, res) => {
+router.post('/quiz-procedimentos/responder', verificarToken, async (req, res) => {
   try {
     const { user_cod, user_name, respostas } = req.body;
     
