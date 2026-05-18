@@ -275,11 +275,16 @@ function createGerencialRouter(pool, verificarToken) {
       // Fat líquido por cliente+CC e também total por cliente (pra cruzar com garantido)
       var fatMap = {};
       qGarFat.rows.forEach(function(r) {
+        var fl = parseFloat(r.fat_liquido) || 0;
         var perCcKey = r.cod + '|' + (r.cc || '');
-        fatMap[perCcKey] = (fatMap[perCcKey] || 0) + (parseFloat(r.fat_liquido) || 0);
-        // Total por cliente (sem CC)
+        fatMap[perCcKey] = (fatMap[perCcKey] || 0) + fl;
+        // Total por cliente (sem CC). Se o cliente NÃO tem CC, perCcKey já é
+        // "cod|" — idêntica à totalKey. Somar nas duas dobrava o faturamento
+        // (bug do cliente 960). Só acumula a totalKey quando ela for distinta.
         var totalKey = r.cod + '|';
-        fatMap[totalKey] = (fatMap[totalKey] || 0) + (parseFloat(r.fat_liquido) || 0);
+        if (totalKey !== perCcKey) {
+          fatMap[totalKey] = (fatMap[totalKey] || 0) + fl;
+        }
       });
 
       // ── Garantido: Google Sheet + lógica idêntica ao /bi/garantido ──
