@@ -1629,8 +1629,81 @@ router.delete('/password-recovery/:id', verificarToken, verificarAdmin, async (r
   }
 });
 
+  // ── PATCH /admin/usuarios/:cod/cadastro ──────────────────────────────────
+  // Admin preenche foto + whatsapp do motoboy que tem dificuldade com a câmera.
+  // Bypassa validação do Evolution — admin é responsável.
+  // Marca cadastro_completo = true, fazendo o gate sumir no app do motoboy.
+  router.patch('/admin/usuarios/:cod/cadastro', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const cod = String(req.params.cod || '').trim();
+      if (!/^\d+$/.test(cod)) return res.status(400).json({ error: 'Código inválido' });
+
+      const { foto_selfie, whatsapp } = req.body || {};
+      if (!foto_selfie && !whatsapp) return res.status(400).json({ error: 'Envie foto ou whatsapp' });
+
+      const userRow = await pool.query(
+        'SELECT id, full_name, cod_profissional, foto_selfie, whatsapp, cadastro_completo FROM users WHERE cod_profissional = $1',
+        [cod]
+      );
+      if (userRow.rows.length === 0) return res.status(404).json({ error: 'Profissional não encontrado' });
+      const usuario = userRow.rows[0];
+
+      // Gerar thumbnail se vier foto
+      let thumb = null;
+      if (foto_selfie) {
+        try {
+          const sharp = require('sharp');
+          const base64 = String(foto_selfie).replace(/^data:image\/[a-z]+;base64,/, '');
+          const buf = Buffer.from(base64, 'base64');
+          const out = await sharp(buf).resize(96, 96, { fit: 'cover' }).jpeg({ quality: 70 }).toBuffer();
+          thumb = 'data:image/jpeg;base64,' + out.toString('base64');
+        } catch (e) { console.warn('[ADMIN-CADASTRO] thumb falhou:', e.message); }
+      }
+
+      // Normalizar whatsapp
+      let numeroNormalizado = usuario.whatsapp || null;
+      if (whatsapp) {
+        const digitos = whatsapp.replace(/\D/g, '');
+        if (digitos.length < 10) return res.status(400).json({ error: 'Número de WhatsApp inválido' });
+        numeroNormalizado = digitos.startsWith('55') ? digitos : '55' + digitos;
+      }
+
+      const temFotoFinal = !!(foto_selfie || usuario.foto_selfie);
+      const temWaFinal   = !!numeroNormalizado;
+      const completo     = temFotoFinal && temWaFinal;
+
+      // UPDATE dinâmico
+      const campos = [], vals = [];
+      let i = 1;
+      if (foto_selfie) { campos.push('foto_selfie = $' + i++); vals.push(foto_selfie); campos.push('foto_thumb = $' + i++); vals.push(thumb); }
+      if (whatsapp)    { campos.push('whatsapp = $' + i++);    vals.push(numeroNormalizado); }
+      campos.push('cadastro_completo = $' + i++); vals.push(completo);
+      if (completo && !usuario.cadastro_completo) campos.push('cadastro_completo_em = NOW()');
+      vals.push(usuario.id);
+
+      await pool.query('UPDATE users SET ' + campos.join(', ') + ' WHERE id = $' + i, vals);
+
+      await registrarAuditoria(req, 'ADMIN_CADASTRO_MOTOBOY', AUDIT_CATEGORIES.DATA, 'users', usuario.id, {
+        cod_profissional: cod, nome: usuario.full_name,
+        alterou_foto: !!foto_selfie, alterou_whatsapp: !!whatsapp, cadastro_completo: completo
+      });
+
+      console.log('[ADMIN-CADASTRO] ' + req.user.nome + ' preencheu cadastro de ' + usuario.full_name + ' (cod ' + cod + ') — completo: ' + completo);
+      res.json({
+        ok: true, cadastro_completo: completo,
+        whatsapp: numeroNormalizado, tem_foto: temFotoFinal,
+        mensagem: completo ? 'Cadastro completo — gate sumirá no app' : 'Dados salvos — falta ' + (!temFotoFinal ? 'foto' : 'whatsapp')
+      });
+    } catch (err) {
+      console.error('[ADMIN-CADASTRO]', err.message);
+      res.status(500).json({ error: 'Erro ao salvar cadastro', detalhe: err.message });
+    }
+  });
+
 
   return router;
 }
 
 module.exports = { createAuthRouter };
+
+// PATCH adicionado via heredoc — admin preenche cadastro do motoboy
