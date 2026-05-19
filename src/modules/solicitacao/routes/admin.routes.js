@@ -813,6 +813,51 @@ router.patch('/admin/solicitacao/clientes/:id/grupo', verificarToken, async (req
 });
 
 
+// ─── Categorias de frete por cliente (integração Mapp "Cliente informa") ──────
+// GET  /admin/solicitacao/clientes/:id/categorias  → lista categorias atuais
+// PUT  /admin/solicitacao/clientes/:id/categorias  → substitui a lista completa
+//
+// Body esperado no PUT: { categorias: [{ sigla: "M", nome: "Motofrete" }, ...] }
+// Enviar array vazio desabilita o dropdown no frontend.
+router.get('/admin/solicitacao/clientes/:id/categorias', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT categorias_disponiveis FROM clientes_solicitacao WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    res.json({ categorias: rows[0].categorias_disponiveis || [] });
+  } catch (err) {
+    console.error('❌ Erro ao buscar categorias:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+router.put('/admin/solicitacao/clientes/:id/categorias', verificarToken, async (req, res) => {
+  try {
+    const { categorias } = req.body; // [{ sigla, nome }]
+    if (!Array.isArray(categorias)) {
+      return res.status(400).json({ error: 'Campo "categorias" deve ser um array' });
+    }
+    // Valida cada item
+    for (const c of categorias) {
+      if (!c.sigla || !c.nome) {
+        return res.status(400).json({ error: 'Cada categoria precisa de "sigla" e "nome"' });
+      }
+    }
+    const { rows } = await pool.query(
+      'UPDATE clientes_solicitacao SET categorias_disponiveis = $1 WHERE id = $2 RETURNING id',
+      [JSON.stringify(categorias), req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    console.log(`✅ [admin] Categorias do cliente ${req.params.id} atualizadas:`, categorias);
+    res.json({ sucesso: true, categorias });
+  } catch (err) {
+    console.error('❌ Erro ao salvar categorias:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
 // ==================== ERROR HANDLER GLOBAL COM CORS ====================
 // Este handler DEVE ser o último middleware antes de app.listen
 

@@ -242,6 +242,20 @@ async function initSolicitacaoTables(pool) {
       WHERE rastreio_enviado = false AND rastreio_agendado_para IS NOT NULL
     `).catch(e => console.log('⚠️ idx_corrida_rastreio_pendente:', e.message));
     console.log('✅ Colunas rastreio_enviado verificadas');
+
+    // 2026-05: categorias de frete configuráveis por cliente (integração Mapp "Cliente informa")
+    // categorias_disponiveis: JSONB array de { sigla, nome } ex: [{"sigla":"M","nome":"Motofrete"}]
+    // Vazio = não exibe dropdown no frontend (categoria não configurada para o cliente)
+    await pool.query(`
+      ALTER TABLE clientes_solicitacao
+      ADD COLUMN IF NOT EXISTS categorias_disponiveis JSONB DEFAULT '[]'
+    `).catch(e => console.log('⚠️ categorias_disponiveis:', e.message));
+    // categoria_usada: sigla enviada na OS (ex: "M", "UC") — para auditoria
+    await pool.query(`
+      ALTER TABLE solicitacoes_corrida
+      ADD COLUMN IF NOT EXISTS categoria_usada VARCHAR(20)
+    `).catch(e => console.log('⚠️ categoria_usada:', e.message));
+    console.log('✅ Colunas categorias_disponiveis / categoria_usada verificadas');
 }
 
 module.exports = { initSolicitacaoTables };

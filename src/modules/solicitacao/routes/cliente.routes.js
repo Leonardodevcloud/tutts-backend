@@ -60,7 +60,8 @@ router.post('/solicitacao/login', async (req, res) => {
         empresa: clienteData.empresa,
         forma_pagamento_padrao: clienteData.forma_pagamento_padrao,
         endereco_partida_padrao: clienteData.endereco_partida_padrao,
-        centro_custo_padrao: clienteData.centro_custo_padrao
+        centro_custo_padrao: clienteData.centro_custo_padrao,
+        categorias_disponiveis: clienteData.categorias_disponiveis || []
       }
     });
   } catch (err) {
@@ -81,7 +82,8 @@ router.get('/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
       forma_pagamento_padrao: req.clienteSolicitacao.forma_pagamento_padrao,
       endereco_partida_padrao: req.clienteSolicitacao.endereco_partida_padrao,
       centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao,
-      grupo_enderecos_id: req.clienteSolicitacao.grupo_enderecos_id || null
+      grupo_enderecos_id: req.clienteSolicitacao.grupo_enderecos_id || null,
+      categorias_disponiveis: req.clienteSolicitacao.categorias_disponiveis || []
     }
   });
 });
@@ -154,6 +156,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       valor_rota_profissional,
       valor_rota_servico,
       sem_profissional,  // NOVO - Modo teste (não dispara para motoboys)
+      categoria,         // NOVO - Sigla da categoria (ex: 'M', 'UC') — requer "Cliente informa" no painel Mapp
       pontos // Array de pontos
     } = req.body;
     
@@ -267,6 +270,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     if (valor_rota_servico) payloadTutts.valorRotaServico = String(valor_rota_servico);
     if (ordenar) payloadTutts.ordenar = 'true';
     if (sem_profissional) payloadTutts.semProfissional = 'S';
+    if (categoria && categoria.trim()) payloadTutts.categoria = categoria.trim().toUpperCase();
     
     console.log('📤 Enviando solicitação para API Tutts:', JSON.stringify(payloadTutts, null, 2));
     console.log('🔧 Modo teste (semProfissional):', sem_profissional ? 'ATIVADO' : 'desativado');
@@ -293,8 +297,9 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         ordenar, codigo_profissional, valor_rota_profissional, valor_rota_servico,
         tutts_os_numero, tutts_distancia, tutts_duracao, tutts_valor, tutts_url_rastreamento,
         status, erro_mensagem,
-        profissional_nome, profissional_foto, profissional_telefone, profissional_placa
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        profissional_nome, profissional_foto, profissional_telefone, profissional_placa,
+        categoria_usada
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
       RETURNING id
     `, [
       req.clienteSolicitacao.id,
@@ -320,7 +325,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       profissional_nome || null,
       profissional_foto || null,
       profissional_telefone || null,
-      profissional_placa || null
+      profissional_placa || null,
+      categoria && categoria.trim() ? categoria.trim().toUpperCase() : null
     ]);
     
     const solicitacaoId = solicitacao.rows[0].id;
