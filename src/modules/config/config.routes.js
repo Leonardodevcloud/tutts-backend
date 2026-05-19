@@ -190,13 +190,8 @@ router.post('/submissions', verificarToken, async (req, res) => {
     const osNum = parseInt(sanitizedOrdemServico, 10);
     if (!isNaN(osNum) && osNum > 0) {
       try {
-        // Pega a data_hora mais recente da OS no BI (uma OS pode ter múltiplos pontos).
-        // FIX TIMEZONE: bi_entregas.data_hora armazena horário de Brasília (UTC-3) sem TZ
-        // (vem da planilha do BI no horário local). O Railway roda em UTC, então
-        // new Date(data_hora) trataria o valor como UTC — adicionando 3h extras à diferença.
-        // AT TIME ZONE 'America/Bahia' instrui o Postgres a interpretar o TIMESTAMP como
-        // horário da Bahia e devolver um TIMESTAMPTZ já convertido para UTC, que o driver
-        // pg entrega corretamente ao JS. Isso elimina o desvio de ±3h na janela.
+        // FIX TIMEZONE: AT TIME ZONE 'America/Bahia' converte o TIMESTAMP local (Brasília)
+        // para TIMESTAMPTZ UTC antes de comparar com Date.now() — elimina desvio de ±3h.
         const biCheck = await pool.query(
           `SELECT MAX(data_hora AT TIME ZONE 'America/Bahia') as data_hora_bi
            FROM bi_entregas
@@ -207,18 +202,53 @@ router.post('/submissions', verificarToken, async (req, res) => {
         const dataHoraBi = biCheck.rows[0]?.data_hora_bi;
 
         if (dataHoraBi) {
-          // Date.now() e dataHoraBi são agora ambos UTC — comparação correta
           const horasAtras = (Date.now() - new Date(dataHoraBi).getTime()) / 1000 / 3600;
           console.log(`[janela-os] OS ${osNum} | data_hora=${dataHoraBi} | horas_atras=${horasAtras.toFixed(1)}h | janela=${JANELA_SOLICITACAO_HORAS}h`);
+
           if (horasAtras > JANELA_SOLICITACAO_HORAS) {
-            return res.status(400).json({
-              error: 'janela_expirada',
-              os: sanitizedOrdemServico,
-              os_data_hora: dataHoraBi,
-              horas_atras: Math.round(horasAtras * 10) / 10,
-              janela_horas: JANELA_SOLICITACAO_HORAS,
-              mensagem: `Esta OS foi gerada há ${Math.round(horasAtras)}h. A janela para solicitar ajuste é de ${JANELA_SOLICITACAO_HORAS} horas.`
-            });
+            // ── Verificar se admin liberou override para esta OS + profissional ──
+            const override = await pool.query(
+              `SELECT tipo_liberacao FROM submissions_janela_expirada
+               WHERE os = $1::text AND cod_prof = $2 AND liberado_por_admin = true`,
+              [sanitizedOrdemServico, userCod]
+            ).catch(() => ({ rows: [] }));
+
+            if (override.rows.length > 0) {
+              // Admin liberou — consome o override (false) e deixa passar
+              console.log(`[janela-os] OS ${osNum} liberada por admin (${override.rows[0].tipo_liberacao}) para ${userCod} — prosseguindo`);
+              await pool.query(
+                `UPDATE submissions_janela_expirada
+                 SET liberado_por_admin = false
+                 WHERE os = $1::text AND cod_prof = $2`,
+                [sanitizedOrdemServico, userCod]
+              ).catch(() => {});
+              // Não bloqueia — cai fora do if e segue o fluxo normal
+            } else {
+              // Sem override — registra tentativa e bloqueia
+              await pool.query(
+                `INSERT INTO submissions_janela_expirada
+                   (os, cod_prof, nome_prof, motivo, subcategoria, horas_atras, data_hora_os, tentativa_em)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                 ON CONFLICT (os, cod_prof) DO UPDATE
+                   SET tentativa_em = NOW(),
+                       horas_atras  = EXCLUDED.horas_atras,
+                       motivo       = EXCLUDED.motivo,
+                       subcategoria = EXCLUDED.subcategoria`,
+                [sanitizedOrdemServico, userCod, userName,
+                 sanitizedMotivo, subcategoria || null,
+                 Math.round(horasAtras * 10) / 10, dataHoraBi]
+              ).catch(e => console.error('[janela-os] erro ao salvar log expirada (não-crítico):', e.message));
+
+              console.log(`[janela-os] OS ${osNum} bloqueada — registrada em submissions_janela_expirada`);
+              return res.status(400).json({
+                error: 'janela_expirada',
+                os: sanitizedOrdemServico,
+                os_data_hora: dataHoraBi,
+                horas_atras: Math.round(horasAtras * 10) / 10,
+                janela_horas: JANELA_SOLICITACAO_HORAS,
+                mensagem: `Esta OS foi gerada há ${Math.round(horasAtras)}h. A janela para solicitar ajuste é de ${JANELA_SOLICITACAO_HORAS} horas.`
+              });
+            }
           }
         } else {
           console.log(`[janela-os] OS ${osNum} não encontrada no BI — liberando (BI pode não estar atualizado ainda)`);

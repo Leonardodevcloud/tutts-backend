@@ -323,6 +323,36 @@ async function initConfigTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_foto_hashes_hash ON foto_hashes(hash)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_foto_hashes_created ON foto_hashes(created_at)`).catch(() => {});
   console.log('✅ Tabela foto_hashes verificada');
+  // ==================== JANELA EXPIRADA (log + override admin) ====================
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS submissions_janela_expirada (
+      id SERIAL PRIMARY KEY,
+      os VARCHAR(50) NOT NULL,
+      cod_prof VARCHAR(50),
+      nome_prof VARCHAR(255),
+      motivo TEXT,
+      subcategoria VARCHAR(100),
+      horas_atras NUMERIC(5,1),
+      data_hora_os TIMESTAMP,
+      tentativa_em TIMESTAMP DEFAULT NOW(),
+      liberado_por_admin BOOLEAN DEFAULT false,
+      tipo_liberacao VARCHAR(50),
+      liberado_em TIMESTAMP,
+      liberado_por_user_id INT,
+      liberado_por_nome VARCHAR(255),
+      obs_admin TEXT
+    )
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_janela_expirada_os_prof
+    ON submissions_janela_expirada(os, cod_prof)
+  `).catch(() => {});
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_janela_expirada_tentativa
+    ON submissions_janela_expirada(tentativa_em DESC)
+  `).catch(() => {});
+  console.log('✅ Tabela submissions_janela_expirada verificada');
+
 }
 
 module.exports = { initConfigTables };

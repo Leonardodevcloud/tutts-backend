@@ -634,6 +634,91 @@ router.get('/submissions/relatorios', verificarToken, async (req, res) => {
   }
 });
 
+
+// ==================== JANELA EXPIRADA — ADMIN ====================
+
+// Listar tentativas bloqueadas pela janela nas últimas 48h
+router.get('/submissions/expiradas', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        sje.*,
+        -- Verifica se já existe uma submission aprovada/pendente pra mesma OS+prof
+        EXISTS (
+          SELECT 1 FROM submissions s
+          WHERE s.ordem_servico = sje.os
+            AND s.user_cod = sje.cod_prof
+            AND s.status IN ('pendente','aprovado')
+        ) AS ja_tem_submission
+      FROM submissions_janela_expirada sje
+      WHERE sje.tentativa_em >= NOW() - INTERVAL '48 hours'
+      ORDER BY sje.tentativa_em DESC
+    `);
+    res.json({ expiradas: result.rows });
+  } catch (err) {
+    console.error('❌ Erro ao listar expiradas:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// Admin libera: 'nova_solicitacao' ou 'contestacao'
+router.post('/submissions/expiradas/:id/liberar', verificarToken, verificarAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tipo_liberacao, obs_admin } = req.body;
+
+    if (!['nova_solicitacao', 'contestacao'].includes(tipo_liberacao)) {
+      return res.status(400).json({ error: 'tipo_liberacao inválido. Use: nova_solicitacao | contestacao' });
+    }
+
+    const row = await pool.query(
+      'SELECT * FROM submissions_janela_expirada WHERE id = $1',
+      [id]
+    );
+    if (row.rows.length === 0) {
+      return res.status(404).json({ error: 'Registro não encontrado' });
+    }
+    const reg = row.rows[0];
+
+    await pool.query(`
+      UPDATE submissions_janela_expirada SET
+        liberado_por_admin   = true,
+        tipo_liberacao       = $1,
+        liberado_em          = NOW(),
+        liberado_por_user_id = $2,
+        liberado_por_nome    = $3,
+        obs_admin            = $4
+      WHERE id = $5
+    `, [tipo_liberacao, req.user.id, req.user.nome, obs_admin || null, id]);
+
+    // Se for contestacao, libera também o campo de contestacao na submission rejeitada
+    if (tipo_liberacao === 'contestacao') {
+      await pool.query(`
+        UPDATE submissions SET
+          contestacao_status = 'liberada_admin',
+          updated_at = NOW()
+        WHERE ordem_servico = $1
+          AND user_cod       = $2
+          AND status         = 'rejeitado'
+          AND (contestacao_status IS NULL OR contestacao_status = 'encerrada_rejeitada')
+        ORDER BY id DESC
+        LIMIT 1
+      `, [reg.os, reg.cod_prof]).catch(() => {});
+    }
+
+    await registrarAuditoria(req, 'JANELA_EXPIRADA_LIBERADA', AUDIT_CATEGORIES.DATA,
+      'submissions_janela_expirada', parseInt(id), {
+        os: reg.os, cod_prof: reg.cod_prof, tipo_liberacao
+      });
+
+    console.log(`✅ [janela-expirada] Admin ${req.user.nome} liberou OS ${reg.os} para ${reg.nome_prof} (${tipo_liberacao})`);
+    res.json({ sucesso: true, tipo_liberacao, os: reg.os, prof: reg.nome_prof });
+  } catch (err) {
+    console.error('❌ Erro ao liberar expirada:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
   return router;
 }
 
