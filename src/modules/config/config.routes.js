@@ -190,9 +190,15 @@ router.post('/submissions', verificarToken, async (req, res) => {
     const osNum = parseInt(sanitizedOrdemServico, 10);
     if (!isNaN(osNum) && osNum > 0) {
       try {
-        // Pega a data_hora mais recente da OS no BI (uma OS pode ter múltiplos pontos)
+        // Pega a data_hora mais recente da OS no BI (uma OS pode ter múltiplos pontos).
+        // FIX TIMEZONE: bi_entregas.data_hora armazena horário de Brasília (UTC-3) sem TZ
+        // (vem da planilha do BI no horário local). O Railway roda em UTC, então
+        // new Date(data_hora) trataria o valor como UTC — adicionando 3h extras à diferença.
+        // AT TIME ZONE 'America/Bahia' instrui o Postgres a interpretar o TIMESTAMP como
+        // horário da Bahia e devolver um TIMESTAMPTZ já convertido para UTC, que o driver
+        // pg entrega corretamente ao JS. Isso elimina o desvio de ±3h na janela.
         const biCheck = await pool.query(
-          `SELECT MAX(data_hora) as data_hora_bi
+          `SELECT MAX(data_hora AT TIME ZONE 'America/Bahia') as data_hora_bi
            FROM bi_entregas
            WHERE os = $1
              AND data_hora IS NOT NULL`,
@@ -201,6 +207,7 @@ router.post('/submissions', verificarToken, async (req, res) => {
         const dataHoraBi = biCheck.rows[0]?.data_hora_bi;
 
         if (dataHoraBi) {
+          // Date.now() e dataHoraBi são agora ambos UTC — comparação correta
           const horasAtras = (Date.now() - new Date(dataHoraBi).getTime()) / 1000 / 3600;
           console.log(`[janela-os] OS ${osNum} | data_hora=${dataHoraBi} | horas_atras=${horasAtras.toFixed(1)}h | janela=${JANELA_SOLICITACAO_HORAS}h`);
           if (horasAtras > JANELA_SOLICITACAO_HORAS) {
