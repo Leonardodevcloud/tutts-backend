@@ -90,7 +90,7 @@ function distanciaHamming(hash1, hash2) {
  * @returns {{ duplicada: boolean, hash: string|null, match?: Object }}
  */
 async function verificarDuplicata(pool, base64, opts = {}) {
-  const { origem, user_cod, limiar = 10, dias = 90 } = opts;
+  const { origem, user_cod, limiar = 6, dias = 90 } = opts;
 
   const hash = await gerarHash(base64);
   if (!hash) return { duplicada: false, hash: null };
@@ -100,8 +100,10 @@ async function verificarDuplicata(pool, base64, opts = {}) {
     const where = ['created_at > NOW() - INTERVAL \'' + dias + ' days\''];
     const params = [];
 
-    // Se quiser checar só do mesmo user ou de todos
-    // Por segurança, checa de TODOS (outro motoboy usando a mesma foto = fraude também)
+    // Estratégia de dois limiares:
+    // - Mesmo usuário: bloqueia se dist <= limiar (padrão 6) — reutilização de foto própria
+    // - Outro usuário: bloqueia só se dist <= 3 — cópias quase idênticas (fraude real)
+    // Isso evita falsos positivos entre fotos de pedágio/comprovantes naturalmente parecidos
 
     const { rows } = await pool.query(
       `SELECT id, hash, user_cod, user_nome, origem, referencia_id, created_at
@@ -111,9 +113,13 @@ async function verificarDuplicata(pool, base64, opts = {}) {
       params
     );
 
+    const LIMIAR_CROSS_USER = 3; // muito restritivo para fotos de usuários diferentes
+
     for (const row of rows) {
       const dist = distanciaHamming(hash, row.hash);
-      if (dist <= limiar) {
+      const mesmoUser = user_cod && row.user_cod === user_cod;
+      const limiarEfetivo = mesmoUser ? limiar : LIMIAR_CROSS_USER;
+      if (dist <= limiarEfetivo) {
         const dataOriginal = new Date(row.created_at).toLocaleDateString('pt-BR');
         log(`🚨 Foto duplicada! dist=${dist} | hash=${hash} ≈ ${row.hash} | original: user=${row.user_cod} em ${dataOriginal} (${row.origem} #${row.referencia_id})`);
         return {
@@ -159,7 +165,7 @@ async function salvarHash(pool, { hash, user_cod, user_nome, origem, referencia_
  * Processa múltiplas imagens: verifica duplicatas e salva hashes
  * @returns {{ bloqueada: boolean, motivo?: string, detalhes?: Object }}
  */
-async function processarFotos(pool, base64Array, { user_cod, user_nome, origem, referencia_id, limiar = 10 }) {
+async function processarFotos(pool, base64Array, { user_cod, user_nome, origem, referencia_id, limiar = 6 }) {
   if (!Array.isArray(base64Array) || base64Array.length === 0) {
     return { bloqueada: false };
   }
