@@ -379,12 +379,15 @@ function createLeadsCapturaRoutes(pool) {
 
     const { data_inicio, data_fim, tipo = 'manual', iniciado_por = 'admin' } = req.body || {};
 
+    // BUGFIX TIMEZONE: calcular hoje/ontem no fuso de Bahia
     const hoje = new Date();
-    const ontem = new Date(hoje);
-    ontem.setDate(ontem.getDate() - 1);
+    const hojeBahia = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bahia' }).format(hoje);
+    const ontemBahia = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bahia' }).format(
+      new Date(hoje.getTime() - 24 * 60 * 60 * 1000)
+    );
 
-    const dataInicio = data_inicio || formatDate(ontem);
-    const dataFim    = data_fim    || formatDate(hoje);
+    const dataInicio = data_inicio || ontemBahia;
+    const dataFim    = data_fim    || hojeBahia;
 
     let jobId;
     try {
@@ -953,7 +956,10 @@ function createLeadsCapturaRoutes(pool) {
 }
 
 function formatDate(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // BUGFIX TIMEZONE: Railway roda em UTC. getDate/getMonth/getFullYear retornam
+  // data UTC — que pode ser 1 dia à frente do horário de Bahia (UTC-3) após 21h.
+  // Usar Intl.DateTimeFormat garante que a data seja sempre a de Bahia.
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bahia' }).format(d);
 }
 
 module.exports = { createLeadsCapturaRoutes };
