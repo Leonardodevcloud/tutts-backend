@@ -256,6 +256,19 @@ async function initSolicitacaoTables(pool) {
       ADD COLUMN IF NOT EXISTS categoria_usada VARCHAR(20)
     `).catch(e => console.log('⚠️ categoria_usada:', e.message));
     console.log('✅ Colunas categorias_disponiveis / categoria_usada verificadas');
+
+    // 2026-05: provedores logísticos habilitados por cliente
+    // JSONB array de códigos: ["tutts","uber","99"]  (tutts sempre presente)
+    await pool.query(`
+      ALTER TABLE clientes_solicitacao
+      ADD COLUMN IF NOT EXISTS provedores_habilitados JSONB DEFAULT '["tutts"]'
+    `).catch(e => console.log('⚠️ provedores_habilitados:', e.message));
+    // provider_usado: código do provedor que atendeu a OS (para auditoria)
+    await pool.query(`
+      ALTER TABLE solicitacoes_corrida
+      ADD COLUMN IF NOT EXISTS provider_usado VARCHAR(20) DEFAULT 'tutts'
+    `).catch(e => console.log('⚠️ provider_usado:', e.message));
+    console.log('✅ Colunas provedores_habilitados / provider_usado verificadas');
 }
 
 module.exports = { initSolicitacaoTables };

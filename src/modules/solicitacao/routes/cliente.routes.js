@@ -83,7 +83,8 @@ router.get('/solicitacao/verificar', verificarTokenSolicitacao, (req, res) => {
       endereco_partida_padrao: req.clienteSolicitacao.endereco_partida_padrao,
       centro_custo_padrao: req.clienteSolicitacao.centro_custo_padrao,
       grupo_enderecos_id: req.clienteSolicitacao.grupo_enderecos_id || null,
-      categorias_disponiveis: req.clienteSolicitacao.categorias_disponiveis || []
+      categorias_disponiveis: req.clienteSolicitacao.categorias_disponiveis || [],
+      provedores_habilitados: req.clienteSolicitacao.provedores_habilitados || ['tutts']
     }
   });
 });
@@ -157,6 +158,7 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       valor_rota_servico,
       sem_profissional,  // NOVO - Modo teste (não dispara para motoboys)
       categoria,         // NOVO - Sigla da categoria (ex: 'M', 'UC') — requer "Cliente informa" no painel Mapp
+      provider,          // NOVO - Provedor logístico ('tutts'|'uber'|'99') — default 'tutts'
       pontos // Array de pontos
     } = req.body;
     
@@ -170,6 +172,13 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       return res.status(400).json({ error: 'Máximo de 80 pontos permitido' });
     }
     
+    // Validar provedor selecionado
+    const providerSolicitado = (provider || 'tutts').toLowerCase();
+    const provedoresHabilitados = req.clienteSolicitacao.provedores_habilitados || ['tutts'];
+    if (!provedoresHabilitados.includes(providerSolicitado)) {
+      return res.status(400).json({ error: 'Provedor "' + providerSolicitado + '" não habilitado para este cliente' });
+    }
+
     // NOVO - Validação: ordenar só permite até 20 pontos
     if (ordenar && pontos.length > 20) {
       return res.status(400).json({ error: 'Ordenação automática permite máximo de 20 pontos' });
@@ -298,8 +307,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
         tutts_os_numero, tutts_distancia, tutts_duracao, tutts_valor, tutts_url_rastreamento,
         status, erro_mensagem,
         profissional_nome, profissional_foto, profissional_telefone, profissional_placa,
-        categoria_usada
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        categoria_usada, provider_usado
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
       RETURNING id
     `, [
       req.clienteSolicitacao.id,
@@ -326,7 +335,8 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
       profissional_foto || null,
       profissional_telefone || null,
       profissional_placa || null,
-      categoria && categoria.trim() ? categoria.trim().toUpperCase() : null
+      categoria && categoria.trim() ? categoria.trim().toUpperCase() : null,
+      providerSolicitado
     ]);
     
     const solicitacaoId = solicitacao.rows[0].id;

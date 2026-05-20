@@ -242,6 +242,7 @@ router.get('/admin/solicitacao/clientes', verificarToken, async (req, res) => {
       SELECT c.id, c.nome, c.email, c.telefone, c.empresa, c.ativo, c.criado_em, c.ultimo_acesso,
         c.tutts_codigo_cliente, c.tutts_codigo_cliente as tutts_cod_cliente, c.observacoes,
         c.categorias_disponiveis,
+        c.provedores_habilitados,
         (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
       FROM clientes_solicitacao c
       ORDER BY c.criado_em DESC
@@ -855,6 +856,56 @@ router.put('/admin/solicitacao/clientes/:id/categorias', verificarToken, async (
     res.json({ sucesso: true, categorias });
   } catch (err) {
     console.error('❌ Erro ao salvar categorias:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+
+// GET  /admin/solicitacao/clientes/:id/provedores  → lista provedores atuais
+// PUT  /admin/solicitacao/clientes/:id/provedores  → substitui lista
+//
+// Body PUT: { provedores: ["tutts","uber","99"] }
+// "tutts" é sempre incluído mesmo que não enviado.
+router.get('/admin/solicitacao/clientes/:id/provedores', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT provedores_habilitados FROM clientes_solicitacao WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    const provedores = rows[0].provedores_habilitados || ['tutts'];
+    // Garante que tutts sempre está presente
+    if (!provedores.includes('tutts')) provedores.unshift('tutts');
+    res.json({ provedores });
+  } catch (err) {
+    console.error('❌ Erro ao buscar provedores:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+router.put('/admin/solicitacao/clientes/:id/provedores', verificarToken, async (req, res) => {
+  try {
+    let { provedores } = req.body;
+    if (!Array.isArray(provedores)) {
+      return res.status(400).json({ error: 'Campo "provedores" deve ser um array' });
+    }
+    const VALIDOS = ['tutts', 'uber', '99'];
+    for (const p of provedores) {
+      if (!VALIDOS.includes(p)) {
+        return res.status(400).json({ error: 'Provedor inválido: ' + p + '. Válidos: ' + VALIDOS.join(', ') });
+      }
+    }
+    // tutts sempre presente
+    if (!provedores.includes('tutts')) provedores = ['tutts', ...provedores];
+    const { rows } = await pool.query(
+      'UPDATE clientes_solicitacao SET provedores_habilitados = $1 WHERE id = $2 RETURNING id',
+      [JSON.stringify(provedores), req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    console.log('[admin] Provedores do cliente ' + req.params.id + ' atualizados:', provedores);
+    res.json({ sucesso: true, provedores });
+  } catch (err) {
+    console.error('❌ Erro ao salvar provedores:', err);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
