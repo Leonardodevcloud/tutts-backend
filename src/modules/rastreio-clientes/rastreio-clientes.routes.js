@@ -37,7 +37,8 @@ function createRastreioClientesRouter(pool, deps = {}) {
 
   router.post('/config', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const { cliente_cod, nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes } = req.body || {};
+      const { cliente_cod, nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes,
+              rastreio_cliente_ativo, rastreio_cliente_nome_exibicao } = req.body || {};
       if (!cliente_cod || !nome_exibicao || !evolution_group_id) {
         return res.status(400).json({ ok: false, erro: 'campos_obrigatorios' });
       }
@@ -46,9 +47,11 @@ function createRastreioClientesRouter(pool, deps = {}) {
       const termos = Array.isArray(termos_filtro) && termos_filtro.length ? termos_filtro : null;
       const { rows } = await pool.query(
         `INSERT INTO rastreio_clientes_config
-          (cliente_cod, nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-        [String(cliente_cod), nome_exibicao, ativo !== false, evolution_group_id, termos, observacoes || null]
+          (cliente_cod, nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes,
+           rastreio_cliente_ativo, rastreio_cliente_nome_exibicao)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [String(cliente_cod), nome_exibicao, ativo !== false, evolution_group_id, termos, observacoes || null,
+         rastreio_cliente_ativo === true, rastreio_cliente_nome_exibicao || null]
       );
       await audit(req, 'criar_cliente', { cliente_cod, evolution_group_id });
       res.json({ ok: true, cliente: rows[0] });
@@ -63,14 +66,18 @@ function createRastreioClientesRouter(pool, deps = {}) {
   router.put('/config/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const { nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes } = req.body || {};
+      const { nome_exibicao, ativo, evolution_group_id, termos_filtro, observacoes,
+              rastreio_cliente_ativo, rastreio_cliente_nome_exibicao } = req.body || {};
       const termos = Array.isArray(termos_filtro) && termos_filtro.length ? termos_filtro : null;
       const { rows } = await pool.query(
         `UPDATE rastreio_clientes_config
             SET nome_exibicao=$1, ativo=$2, evolution_group_id=$3,
-                termos_filtro=$4, observacoes=$5, atualizado_em=NOW()
-          WHERE id=$6 RETURNING *`,
-        [nome_exibicao, ativo !== false, evolution_group_id, termos, observacoes || null, id]
+                termos_filtro=$4, observacoes=$5,
+                rastreio_cliente_ativo=$6, rastreio_cliente_nome_exibicao=$7,
+                atualizado_em=NOW()
+          WHERE id=$8 RETURNING *`,
+        [nome_exibicao, ativo !== false, evolution_group_id, termos, observacoes || null,
+         rastreio_cliente_ativo === true, rastreio_cliente_nome_exibicao || null, id]
       );
       if (!rows[0]) return res.status(404).json({ ok: false, erro: 'nao_encontrado' });
       await audit(req, 'editar_cliente', { id, cliente_cod: rows[0].cliente_cod });

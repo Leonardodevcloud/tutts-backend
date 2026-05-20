@@ -11,6 +11,7 @@
 'use strict';
 
 const { logger } = require('../../config/logger');
+const { enviarRastreioCliente, normalizarTelefoneBR } = require('../solicitacao/whatsapp-rastreio.service');
 // Lazy require — quebra dependência circular:
 // sla-capture.service → playwright-sla-capture → (resolve tudo antes)
 // Sem lazy: no boot o módulo ainda não terminou de exportar → capturarPontosOS = undefined
@@ -168,6 +169,70 @@ function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod 
  * Processa UM registro pendente. Já vem marcado como 'processando'.
  * Atualiza pra 'enviado' ou re-enfileira com backoff.
  */
+// ═════════════════════════════════════════════════════════════════════════════
+// EXTRAÇÃO DE TELEFONE DA NOTA DO PONTO
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Tenta extrair um telefone celular do campo `nota` de um ponto de entrega.
+ * O campo nota pode conter: NF, CNPJ, códigos e telefones em formatos variados.
+ *
+ * Padrões reconhecidos (exemplos reais):
+ *   "05-000034696-5 061-98202-0023"  → 06198202-0023 → 5561982020023
+ *   "61-98202-0023"                   → 5561982020023
+ *   "(71) 9 8765-4321"               → 5571987654321
+ *   "71987654321"                     → 5571987654321
+ *   "998765432 NF123456"             → sem DDD → tenta com heurística
+ *
+ * Retorna o número normalizado (5571XXXXXXXXX) ou null se não encontrar.
+ */
+function extrairTelefoneDeNota(nota) {
+  if (!nota || typeof nota !== 'string') return null;
+
+  // Limpa NFs óbvias: padrão "DD-DDDDDDDDD-D" com 2-1-1 hífens (NF fiscal)
+  // Remove sequências que claramente são NFs antes de buscar telefones
+  const semNF = nota
+    .replace(/\b\d{2}-\d{9}-\d\b/g, ' ')   // 05-000034696-5
+    .replace(/\b\d{9,11}\/\d{4}-\d{2}\b/g, ' ') // CNPJ formato
+    .replace(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, ' ') // CPF
+    .replace(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g, ' '); // CNPJ
+
+  // Regex principal: captura sequências que parecem telefone com DDD
+  // Aceita: 061-98202-0023 | (61) 98202-0023 | 61 982020023 | 61-98202-0023
+  const regexes = [
+    // Com DDD explícito 2-3 dígitos: 061-98202-0023 ou 61-98202-0023
+    /(?<!\d)0?([1-9]{1}[1-9]{1})\s*[-.\s]?\s*9\s*(\d{4})\s*[-.\s]?\s*(\d{4})(?!\d)/g,
+    // Com parênteses: (71) 9 8765-4321
+    /\(0?([1-9]{1}[1-9]{1})\)\s*9?\s*(\d{4})\s*[-.\s]?\s*(\d{4})/g,
+    // 11 dígitos colados: 71987654321
+    /(?<!\d)((?:0?[1-9]{2})9\d{8})(?!\d)/g,
+  ];
+
+  for (const regex of regexes) {
+    regex.lastIndex = 0;
+    const matches = [...semNF.matchAll(regex)];
+    for (const m of matches) {
+      // Reconstruir número com todos os grupos capturados
+      let candidato;
+      if (m[3]) {
+        // Grupos: DDD + parte1(4) + parte2(4)
+        const ddd = m[1].padStart(2, '0').slice(-2);
+        candidato = ddd + '9' + m[2] + m[3];
+      } else if (m[1] && m[1].length >= 10) {
+        // Número colado
+        candidato = m[1].replace(/^0+/, '');
+      } else {
+        continue;
+      }
+      const normalizado = normalizarTelefoneBR(candidato);
+      if (normalizado) return normalizado;
+    }
+  }
+
+  return null;
+}
+
+
 async function processarCaptura(pool, registro) {
   const { id, os_numero, cliente_cod, link_rastreio, tentativas } = registro;
   const tentativaAtual = (tentativas || 0) + 1;
@@ -238,6 +303,39 @@ async function processarCaptura(pool, registro) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
     await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+
+    // 3b. Rastreio direto ao cliente final (se habilitado no cadastro)
+    if (resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
+      // Tenta extrair telefone de cada ponto (do ponto de entrega, não coleta)
+      const pontosEntrega = pontos.filter(p => p.numero >= 2);
+      let telefoneEncontrado = null;
+      for (const ponto of pontosEntrega) {
+        // Tenta campo `nota` que pode conter telefone junto com NF
+        const tel = extrairTelefoneDeNota(ponto.nota || ponto.endereco || '');
+        if (tel) { telefoneEncontrado = tel; break; }
+      }
+
+      if (telefoneEncontrado) {
+        try {
+          const nomeDestinatario = resultado.configMatched.rastreioClienteNomeExibicao ||
+            (pontosEntrega[0] && pontosEntrega[0].nomeCliente) || null;
+          const envio = await enviarRastreioCliente({
+            telefone: telefoneEncontrado,
+            nomeDestinatario,
+            osNumero: os_numero,
+            urlRastreamento: link_rastreio,
+          });
+          log(envio.enviado
+            ? 'WhatsApp cliente enviado: ' + telefoneEncontrado + ' OS ' + os_numero
+            : 'WhatsApp cliente nao enviado: ' + (envio.motivo || '') + ' — ' + telefoneEncontrado
+          );
+        } catch (e) {
+          logErr('Erro ao enviar rastreio ao cliente (nao-bloqueante): ' + e.message);
+        }
+      } else {
+        log('Rastreio cliente ativo mas nenhum telefone encontrado nos pontos da OS ' + os_numero);
+      }
+    }
 
     // 4. Marca como enviado
     await pool.query(

@@ -125,6 +125,8 @@ async function carregarConfig(pool) {
   const selectCols = ['id', 'cliente_cod', 'ativo'];
   if (colNames.includes('nome_exibicao')) selectCols.push('nome_exibicao');
   if (colNames.includes('evolution_group_id')) selectCols.push('evolution_group_id');
+  if (colNames.includes('rastreio_cliente_ativo')) selectCols.push('rastreio_cliente_ativo');
+  if (colNames.includes('rastreio_cliente_nome_exibicao')) selectCols.push('rastreio_cliente_nome_exibicao');
   if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
 
   const { rows } = await pool.query(
@@ -160,6 +162,8 @@ async function carregarConfig(pool) {
       nomeExibicao: row.nome_exibicao || null,
       evolutionGroupId: row.evolution_group_id || null,
       filtrosBalao: filtros,
+      rastreioClienteAtivo: row.rastreio_cliente_ativo === true,
+      rastreioClienteNomeExibicao: row.rastreio_cliente_nome_exibicao || null,
     };
 
     if (!config[cod]) config[cod] = [];

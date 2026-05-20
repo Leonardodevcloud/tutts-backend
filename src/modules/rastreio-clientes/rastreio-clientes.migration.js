@@ -63,6 +63,24 @@ async function initRastreioClientesTables(pool) {
     console.warn('[rastreio-clientes] add unique composto:', e.message);
   });
 
+  // 2026-05: rastreio direto ao cliente final (WhatsApp do número extraído da nota)
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
+      ADD COLUMN IF NOT EXISTS rastreio_cliente_ativo BOOLEAN DEFAULT FALSE
+  `).catch(e => console.warn('[rastreio-clientes] rastreio_cliente_ativo:', e.message));
+
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
+      ADD COLUMN IF NOT EXISTS rastreio_cliente_mensagem TEXT DEFAULT NULL
+  `).catch(e => console.warn('[rastreio-clientes] rastreio_cliente_mensagem:', e.message));
+
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
+      ADD COLUMN IF NOT EXISTS rastreio_cliente_nome_exibicao VARCHAR(120) DEFAULT NULL
+  `).catch(e => console.warn('[rastreio-clientes] rastreio_cliente_nome_exibicao:', e.message));
+
+  console.log('✅ Colunas rastreio_cliente_* verificadas');
+
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_rcc_ativo ON rastreio_clientes_config(ativo);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_rcc_cliente_ativo ON rastreio_clientes_config(cliente_cod, ativo);`);
 
