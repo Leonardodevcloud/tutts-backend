@@ -160,9 +160,7 @@ async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, url
   // Saudação com o nome do destinatário da entrega (nome fantasia do ponto)
   // em *negrito* do WhatsApp. É quem está com o celular e vai receber a mercadoria.
   const periodo = saudacaoPorHorario();
-  const saud = nomeDestinatario
-    ? `${periodo}, *${nomeDestinatario}*! 👋`
-    : `${periodo}! 👋`;
+  const saud = `${periodo}! 👋`;
   const linhaPedido = osNumero
     ? `Seu pedido *#${osNumero}* já foi confirmado e está em rota de entrega. 🚚`
     : 'Seu pedido já foi confirmado e está em rota de entrega. 🚚';
