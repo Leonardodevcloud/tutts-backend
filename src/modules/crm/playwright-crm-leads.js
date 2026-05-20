@@ -6,13 +6,14 @@
  * Usa o MESMO padrão de login do playwright-agent.js e playwright-performance.js.
  *
  * Seletores mapeados do HTML real:
- *   Exibir filtros : button com text "Exibir filtros" (toggleCollapse)
  *   Status         : select#filtros-status → value="todos"
  *   Toggle período : input#filtro-data-cadastro (checkbox)
- *   Container      : div#container-periodo-cadastro
- *   Data inicial   : input#filtro-data-cadastro-inicial (type="date")
- *   Data final     : input#filtro-data-cadastro-final (type="date")
- *   Aplicar        : button[onclick="buscarProfissionais()"]
+ *   Tipo de data   : select#filtro-data-periodo → value="data_cadastro"
+ *   Data inicial   : input#filtro-data-cadastro-inicial + hidden #filtros-periodo-data-inicial-hidden
+ *   Data final     : input#filtro-data-cadastro-final  + hidden #filtros-periodo-data-final-hidden
+ *   Flag período   : hidden #filtros-periodo-ativo-hidden → "1"
+ *   Filtro data    : hidden #filtros-periodo-data-filtro-hidden → "data_cadastro"
+ *   Aplicar        : buscarProfissionais() — lê os hidden inputs
  *   Tabela         : CÓD | NOME | TELEFONES | EMAIL | CATEGORIA | CADASTRO | STATUS
  *   Paginação      : links numéricos + "Próx."
  */
@@ -217,24 +218,19 @@ async function navegarParaProfissionais(page, context) {
 async function preencherFiltros(page, { dataInicio, dataFim }) {
   log('📋 Preenchendo filtros...');
 
-  // Passo 2: Clicar em "Exibir filtros"
+  // Passo 2: Abrir painel de filtros (botão toggle)
   log('📌 Passo 2: Abrindo painel de filtros');
-  const btnFiltros = page.locator('button:has-text("Exibir filtros")').first();
+  const btnFiltros = page.locator('button:has-text("Exibir filtros"), button:has-text("Filtros"), button:has(.fa-filter), button:has(.fa-chevron-down)').first();
   const filtroVisivel = await btnFiltros.isVisible().catch(() => false);
   if (filtroVisivel) {
     await btnFiltros.click();
     await page.waitForTimeout(800);
     log('✅ Filtros expandidos');
   } else {
-    // Fallback: tentar o botão pelo ícone
-    const btnAlt = page.locator('button:has(.fa-chevron-down)').first();
-    if (await btnAlt.isVisible().catch(() => false)) {
-      await btnAlt.click();
-      await page.waitForTimeout(800);
-    }
+    log('⚠️ Botão de filtros não encontrado — pode já estar expandido');
   }
 
-  // Passo 3: Filtro de status → "Todos os profissionais"
+  // Passo 3: Status → "todos" (inclui inativos)
   log('📌 Passo 3: Status → Todos os profissionais');
   await page.evaluate(() => {
     const sel = document.getElementById('filtros-status');
@@ -246,105 +242,102 @@ async function preencherFiltros(page, { dataInicio, dataFim }) {
   await page.waitForTimeout(500);
   log('  ✅ Status: todos');
 
-  // Passo 4: Ativar toggle de período (Bootstrap custom-switch — label intercepta clique)
+  // Passo 4: Ativar toggle de período de cadastro
   log('📌 Passo 4: Ativando filtro por período');
   await page.evaluate(() => {
     const checkbox = document.getElementById('filtro-data-cadastro');
     if (checkbox && !checkbox.checked) {
       checkbox.checked = true;
       checkbox.dispatchEvent(new Event('change', { bubbles: true }));
-      // Chamar a função que o onchange original invoca
-      if (typeof containerPeriodoCadastro === 'function') containerPeriodoCadastro();
+      checkbox.dispatchEvent(new Event('click',  { bubbles: true }));
+    }
+    // Garantir que o select de tipo de data está em data_cadastro
+    const selPeriodo = document.getElementById('filtro-data-periodo');
+    if (selPeriodo) {
+      selPeriodo.value = 'data_cadastro';
+      selPeriodo.dispatchEvent(new Event('change', { bubbles: true }));
     }
   });
   await page.waitForTimeout(800);
   log('  ✅ Toggle período ativado (via JS)');
 
-  // Aguardar container expandir
-  await page.waitForSelector('#container-periodo-cadastro[style*="display: block"], #container-periodo-cadastro.show', { timeout: 5000 }).catch(() => {
-    log('  ⚠️ Container não expandiu pelo CSS, tentando forçar...');
-  });
-
-  // Forçar exibição do container se collapse não abriu
-  await page.evaluate(() => {
-    const container = document.getElementById('container-periodo-cadastro');
-    if (container) {
-      container.style.display = 'block';
-      container.classList.add('show');
+  // Passo 5 e 6: Setar datas nos inputs visuais E nos hidden inputs
+  // O sistema usa hidden inputs para submeter — são eles que realmente importam
+  log('📌 Passo 5: Data inicial → ' + dataInicio);
+  await page.evaluate(function(val) {
+    // Input visual
+    var inputV = document.getElementById('filtro-data-cadastro-inicial');
+    if (inputV) {
+      inputV.value = val;
+      inputV.dispatchEvent(new Event('input',  { bubbles: true }));
+      inputV.dispatchEvent(new Event('change', { bubbles: true }));
     }
-  });
-  await page.waitForTimeout(500);
-
-  // Passo 5: Data inicial (formato YYYY-MM-DD para input type="date")
-  log(`📌 Passo 5: Data inicial → ${dataInicio}`);
-  await page.evaluate((val) => {
-    const input = document.getElementById('filtro-data-cadastro-inicial');
-    if (input) {
-      // input type="date" aceita YYYY-MM-DD via .value
-      input.value = val;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+    // Hidden input (é o que buscarProfissionais() lê)
+    var inputH = document.getElementById('filtros-periodo-data-inicial-hidden');
+    if (inputH) {
+      inputH.value = val;
+      inputH.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    // Ativar flag do período nos hidden
+    var periodoAtivo = document.getElementById('filtros-periodo-ativo-hidden');
+    if (periodoAtivo) periodoAtivo.value = '1';
+    var periodoFiltro = document.getElementById('filtros-periodo-data-filtro-hidden');
+    if (periodoFiltro) periodoFiltro.value = 'data_cadastro';
   }, dataInicio);
   await page.waitForTimeout(300);
 
-  // Passo 6: Data final
-  log(`📌 Passo 6: Data final → ${dataFim}`);
-  await page.evaluate((val) => {
-    const input = document.getElementById('filtro-data-cadastro-final');
-    if (input) {
-      input.value = val;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+  log('📌 Passo 6: Data final → ' + dataFim);
+  await page.evaluate(function(val) {
+    // Input visual
+    var inputV = document.getElementById('filtro-data-cadastro-final');
+    if (inputV) {
+      inputV.value = val;
+      inputV.dispatchEvent(new Event('input',  { bubbles: true }));
+      inputV.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    // Hidden input
+    var inputH = document.getElementById('filtros-periodo-data-final-hidden');
+    if (inputH) {
+      inputH.value = val;
+      inputH.dispatchEvent(new Event('change', { bubbles: true }));
     }
   }, dataFim);
   await page.waitForTimeout(300);
 
-  // Registros por página → máximo (300)
+  // Registros por página → 300 (já é o default mas garante)
   await page.evaluate(() => {
-    const selectors = ['#registros-pagina', 'select[name="registros"]'];
-    for (const s of selectors) {
-      const sel = document.querySelector(s);
-      if (sel) {
-        // Selecionar maior opção disponível
-        const options = Array.from(sel.options);
-        const maxOpt = options.reduce((max, opt) => {
-          const val = parseInt(opt.value);
-          return (!isNaN(val) && val > parseInt(max.value)) ? opt : max;
-        }, options[0]);
-        if (maxOpt) {
-          sel.value = maxOpt.value;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }
+    var sel = document.getElementById('filtro-itens-por-pagina');
+    if (sel) {
+      sel.value = '300';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    // Hidden
+    var selH = document.getElementById('filtros-itens-por-pagina-hidden');
+    if (selH) selH.value = '300';
   });
 
-  log(`  📅 Período: ${dataInicio} → ${dataFim}`);
+  log('  📅 Período: ' + dataInicio + ' → ' + dataFim);
 
-  // Passo 7: Clicar em "Aplicar filtros"
+  // Passo 7: Chamar buscarProfissionais() — que lê os hidden inputs
   log('📌 Passo 7: Aplicando filtros');
   await page.evaluate(() => {
-    // Tenta a função JS direta primeiro
     if (typeof buscarProfissionais === 'function') {
       buscarProfissionais();
       return;
     }
-    // Fallback: clicar no botão
-    const btn = document.querySelector('button[onclick*="buscarProfissionais"]');
+    var btn = document.querySelector('button[onclick*="buscarProfissionais"]');
     if (btn) btn.click();
   });
 
-  // Aguardar a tabela recarregar
   log('⏳ Aguardando tabela recarregar...');
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(5000); // aumentado de 3s para 5s
 
-  // Polling: aguardar que a tabela tenha dados ou "Total: N" apareça
-  let tabelaCarregou = false;
-  for (let i = 0; i < 30; i++) {
-    const status = await page.evaluate(() => {
-      const totalEl = document.body.textContent.match(/Total:\s*(\d+)/);
-      const rows = document.querySelectorAll('table tbody tr');
+  // Polling: aguardar Total: N ou linhas na tabela
+  var tabelaCarregou = false;
+  for (var i = 0; i < 40; i++) {
+    var status = await page.evaluate(() => {
+      var totalEl = document.body.textContent.match(/Total:\s*(\d+)/);
+      var rows = document.querySelectorAll('table tbody tr');
       return {
         total: totalEl ? parseInt(totalEl[1]) : -1,
         rows: rows.length,
@@ -353,11 +346,12 @@ async function preencherFiltros(page, { dataInicio, dataFim }) {
 
     if (status.total >= 0) {
       tabelaCarregou = true;
-      log(`✅ Tabela carregada — Total: ${status.total} | Linhas: ${status.rows}`);
+      log('✅ Tabela carregada — Total: ' + status.total + ' | Linhas: ' + status.rows);
       break;
     }
     if (i === 10) log('⏳ Ainda aguardando (10s)...');
     if (i === 20) log('⏳ Ainda aguardando (20s)...');
+    if (i === 30) log('⏳ Ainda aguardando (30s)...');
     await page.waitForTimeout(1000);
   }
 
