@@ -135,6 +135,14 @@ async function validarWhatsApp(raw) {
  *   - osNumero         (string|number) número da OS Tutts
  *   - urlRastreamento  (string) URL tutts.com.br/rastreamento?cod=...
  */
+function saudacaoPorHorario() {
+  // Horário de Bahia (UTC-3)
+  const hora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' })).getHours();
+  if (hora >= 5  && hora < 12) return 'Bom dia';
+  if (hora >= 12 && hora < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
+
 async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, urlRastreamento }) {
   const fmt = validarFormatoBR(telefone);
   if (!fmt.ok) {
@@ -151,9 +159,10 @@ async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, url
 
   // Saudação com o nome do destinatário da entrega (nome fantasia do ponto)
   // em *negrito* do WhatsApp. É quem está com o celular e vai receber a mercadoria.
+  const periodo = saudacaoPorHorario();
   const saud = nomeDestinatario
-    ? `Olá, *${nomeDestinatario}*! 👋`
-    : 'Olá! 👋';
+    ? `${periodo}, *${nomeDestinatario}*! 👋`
+    : `${periodo}! 👋`;
   const linhaPedido = osNumero
     ? `Seu pedido *#${osNumero}* já foi confirmado e está em rota de entrega. 🚚`
     : 'Seu pedido já foi confirmado e está em rota de entrega. 🚚';
