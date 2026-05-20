@@ -153,10 +153,22 @@ async function processarCapturaJob(pool, jobId, log = console.log) {
   const { capturarLeadsCadastrados } = require('./playwright-crm-leads');
 
   try {
-    log(`[crm-leads.service] Job #${jobId}: iniciando ${job.data_inicio} → ${job.data_fim}`);
+    // BUGFIX: pg driver converte colunas DATE para objeto Date JS.
+    // input[type="date"] do sistema externo só aceita YYYY-MM-DD.
+    // Forçar formato correto antes de passar ao Playwright.
+    const toYMD = (d) => {
+      if (!d) return null;
+      if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+      const dt = new Date(d);
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(dt);
+    };
+    const dataInicio = toYMD(job.data_inicio);
+    const dataFim    = toYMD(job.data_fim);
+
+    log(`[crm-leads.service] Job #${jobId}: iniciando ${dataInicio} → ${dataFim}`);
     const resultado = await capturarLeadsCadastrados({
-      dataInicio: job.data_inicio,
-      dataFim: job.data_fim,
+      dataInicio,
+      dataFim,
     });
 
     let novos = 0, jaExistentes = 0, ativos = 0, inativos = 0;
