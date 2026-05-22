@@ -163,6 +163,44 @@ router.get('/bi/garantido', async (req, res) => {
     } catch (e) {
       console.log('Erro ao buscar máscaras:', e.message);
     }
+
+    // 2.2 🆕 2026-05: enriquecer com cadastro da Central (tabela users).
+    // A planilha tinha o nome do entregador na coluna C, mas agora o source
+    // de verdade é `users.full_name` (chave: cod_profissional). Pra cada
+    // cod_prof único da planilha, pegamos full_name (override do nome) e
+    // foto_thumb (avatar nas tabelas; fallback pra foto_selfie se thumb null).
+    // Linhas SEM cod_prof na planilha (motoboy não definido ainda) mantêm
+    // o texto original da coluna C ("FALTANDO ENTREGADOR", "(Vazio)", etc.)
+    // pra preservar a sinalização que o Matheus usa pra organizar.
+    const cadastroPorCod = new Map(); // cod_prof (string) → { nome, foto }
+    try {
+      const codsDistintos = Array.from(new Set(
+        garantidoPlanilha
+          .map(g => (g.cod_prof || '').toString().trim())
+          .filter(c => c.length > 0)
+      ));
+      if (codsDistintos.length > 0) {
+        const usersResult = await pool.query(`
+          SELECT
+            TRIM(cod_profissional)::text AS cod,
+            full_name,
+            COALESCE(foto_thumb, foto_selfie) AS foto
+          FROM users
+          WHERE TRIM(cod_profissional) = ANY($1::text[])
+        `, [codsDistintos]);
+        usersResult.rows.forEach(u => {
+          if (u.cod) {
+            cadastroPorCod.set(u.cod, {
+              nome: u.full_name || null,
+              foto: u.foto || null,
+            });
+          }
+        });
+      }
+      console.log(`📊 Garantido: ${cadastroPorCod.size}/${codsDistintos.length} cods cruzados com tabela users`);
+    } catch (e) {
+      console.log('⚠️ Erro ao buscar cadastros em users (segue sem enriquecimento):', e.message);
+    }
     
     // 3. Para cada registro da planilha, buscar TODA produção do profissional no dia
     const resultados = [];
@@ -270,10 +308,19 @@ router.get('/bi/garantido', async (req, res) => {
         }
       }
       
+      // 🆕 2026-05: aplicar match com users. Se a planilha tem cod_prof e ele
+      // existe em users, o nome da Central PREVALECE sobre o da planilha
+      // (resolve "FALTANDO ENTREGADOR", "(Vazio)" e digitações desatualizadas).
+      // Foto vem direto de users (já é foto_thumb com fallback pra foto_selfie).
+      const cadCentral = g.cod_prof ? cadastroPorCod.get(String(g.cod_prof).trim()) : null;
+      const nomeFinal = (cadCentral && cadCentral.nome) ? cadCentral.nome : g.profissional;
+      const fotoFinal = cadCentral ? cadCentral.foto : null;
+
       resultados.push({
         data: g.data,
         cod_prof: g.cod_prof,
-        profissional: g.profissional,
+        profissional: nomeFinal,
+        foto: fotoFinal,
         cod_cliente_garantido: g.cod_cliente,
         onde_rodou: ondeRodou,
         entregas: totalEntregas,
@@ -605,7 +652,45 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
     mascarasResult.rows.forEach(m => {
       mascaras[String(m.cod_cliente)] = m.mascara;
     });
-    
+
+    // 🆕 2026-05: enriquecer com cadastro da Central (tabela users).
+    // Mesmo princípio do /bi/garantido — o nome cadastrado em users
+    // sobrescreve o da planilha (resolve "FALTANDO ENTREGADOR" etc.).
+    // Foto não é usada na aba "Por Cliente" (texto cru), mas trazemos
+    // junto pra padronizar e permitir uso futuro no frontend.
+    const cadastroPorCod = new Map();
+    try {
+      const codsScan = new Set();
+      for (const line of sheetLines) {
+        if (!line.trim()) continue;
+        const cols = parseCSVLine(line);
+        const codProf = (cols[3] || '').toString().trim();
+        if (codProf) codsScan.add(codProf);
+      }
+      const codsDistintos = Array.from(codsScan);
+      if (codsDistintos.length > 0) {
+        const usersResult = await pool.query(`
+          SELECT
+            TRIM(cod_profissional)::text AS cod,
+            full_name,
+            COALESCE(foto_thumb, foto_selfie) AS foto
+          FROM users
+          WHERE TRIM(cod_profissional) = ANY($1::text[])
+        `, [codsDistintos]);
+        usersResult.rows.forEach(u => {
+          if (u.cod) {
+            cadastroPorCod.set(u.cod, {
+              nome: u.full_name || null,
+              foto: u.foto || null,
+            });
+          }
+        });
+      }
+      console.log(`📊 Garantido/por-cliente: ${cadastroPorCod.size}/${codsDistintos.length} cods cruzados com tabela users`);
+    } catch (e) {
+      console.log('⚠️ Erro ao buscar cadastros em users (segue sem enriquecimento):', e.message);
+    }
+
     // Agrupar: cliente → profissional
     // porCliente[codCliente] = { cod, nome, profs: { profKey: {...} } }
     const porCliente = {};
@@ -681,8 +766,12 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       const profKey = codProf || `nome:${profissionalNome}`;
       const prof = porCliente[codClienteKey].profs;
       if (!prof[profKey]) {
+        // 🆕 2026-05: nome da Central > nome da planilha (resolve FALTANDO ENTREGADOR)
+        const cadCentral = codProf ? cadastroPorCod.get(String(codProf).trim()) : null;
+        const nomeFinal = (cadCentral && cadCentral.nome) ? cadCentral.nome : profissionalNome;
         prof[profKey] = {
-          profissional: profissionalNome,
+          profissional: nomeFinal,
+          foto: cadCentral ? cadCentral.foto : null,
           cod_prof: codProf,
           entregas: 0,
           valor_negociado: 0,
