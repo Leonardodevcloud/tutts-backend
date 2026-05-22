@@ -14,6 +14,19 @@
  *                              — null:          agente não usa Playwright
  *   intervalo       (number)   — ms entre ticks quando fila vazia
  *
+ *   timeoutMs       (number)   — timeout MÁXIMO de cada chamada de processar()
+ *                                ou tickGlobal(). Quando dispara:
+ *                                  1. Lança erro [agent-timeout] ${nome}: ${ms}ms
+ *                                  2. Se slotState tem browserSession, marca-o
+ *                                     como morto pra recriação no próximo job
+ *                                  3. finally do withBrowserSlot libera o slot
+ *                                Default: 240_000 (4min) modo paralelo, 120_000
+ *                                (2min) modo tickGlobal/cron.
+ *                                Range válido: 10s a 30min.
+ *                                ⚠️ ESTA É A DEFESA PRINCIPAL CONTRA DEADLOCK
+ *                                do browser-pool quando BrowserSession entra em
+ *                                estado zumbi (isConnected=true mas WS travado).
+ *
  *   buscarPendentes async (pool, limite) → registro[] | null
  *                              — SELECT da fila. DEVE usar
  *                                FOR UPDATE SKIP LOCKED pra suportar
@@ -25,7 +38,7 @@
  *
  *   processar async (pool, registro, ctx) → void
  *                              — lógica do agente. ctx contém:
- *                                { slotId, log, sessao, ehParaParar }
+ *                                { slotId, log, sessao, slotState, ehParaParar }
  *
  *   onErro?  async (pool, registro, err) → void
  *                              — chamado quando processar lança.
@@ -48,6 +61,12 @@
 const { logger } = require('../../../config/logger');
 
 const ESTRATEGIAS_VALIDAS = ['isolada', 'compartilhada', null];
+
+// Timeouts default por modo de execução (em ms)
+const DEFAULT_TIMEOUT_PARALELO   = 240_000; // 4 min
+const DEFAULT_TIMEOUT_TICKGLOBAL = 120_000; // 2 min
+const TIMEOUT_MIN = 10_000;      // 10s
+const TIMEOUT_MAX = 30 * 60_000; // 30min
 
 function defineAgent(spec) {
   // ── Validação ────────────────────────────────────────────────────────
@@ -85,6 +104,22 @@ function defineAgent(spec) {
     );
   }
 
+  // ── Resolver timeoutMs ───────────────────────────────────────────────
+  // Se não passado, usa default baseado no modo (paralelo vs tickGlobal/cron).
+  // Cron usa o mesmo default do tickGlobal (varredura única, geralmente rápida).
+  let timeoutMs;
+  if (spec.timeoutMs === undefined || spec.timeoutMs === null) {
+    timeoutMs = temGlobal ? DEFAULT_TIMEOUT_TICKGLOBAL : DEFAULT_TIMEOUT_PARALELO;
+  } else {
+    if (!Number.isInteger(spec.timeoutMs) || spec.timeoutMs < TIMEOUT_MIN || spec.timeoutMs > TIMEOUT_MAX) {
+      throw new Error(
+        `defineAgent[${spec.nome}]: timeoutMs inválido (${spec.timeoutMs}). ` +
+        `Esperado inteiro entre ${TIMEOUT_MIN} e ${TIMEOUT_MAX} ms`
+      );
+    }
+    timeoutMs = spec.timeoutMs;
+  }
+
   // Defaults
   const agente = {
     nome:             spec.nome,
@@ -92,6 +127,7 @@ function defineAgent(spec) {
     sessionStrategy:  spec.sessionStrategy === undefined ? 'isolada' : spec.sessionStrategy,
     envPrefix:        spec.envPrefix || 'SISTEMA_EXTERNO',
     intervalo:        spec.intervalo || 5_000,
+    timeoutMs,
     buscarPendentes:  spec.buscarPendentes || null,
     marcarProcessando:spec.marcarProcessando || null,
     processar:        spec.processar || null,
@@ -113,6 +149,7 @@ function defineAgent(spec) {
       ticksTotais:       0,
       ticksComSucesso:   0,
       ticksComErro:      0,
+      ticksComTimeout:   0,
       ultimoTickEm:      null,
       ultimoErroEm:      null,
       ultimoErroMsg:     null,

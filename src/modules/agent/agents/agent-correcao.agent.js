@@ -62,6 +62,12 @@ module.exports = defineAgent({
   slots: SLOTS,
   sessionStrategy: 'isolada',  // 1 conta por slot
   intervalo: 10_000,           // 10s entre ticks quando fila vazia
+  // 🛡️ 2026-05 fix-deadlock: timeout máximo por job.
+  // Correção pode envolver login + busca de OS + modal endereços + recálculo
+  // de frete (várias chamadas Playwright). 4 min é folgado mas evita slot
+  // preso pra sempre quando BrowserSession fica zumbi (caso observado em log:
+  // travou após "Usando sessão salva" em browser.newContext sem timeout).
+  timeoutMs: Number(process.env.POOL_AGENT_CORRECAO_TIMEOUT_MS || 240_000), // 4 min
 
   // 2026-05 fix-eagain: cria BrowserSession persistente por slot.
   // Browser sobe lazy no 1o job (não bloqueia o startup do worker).

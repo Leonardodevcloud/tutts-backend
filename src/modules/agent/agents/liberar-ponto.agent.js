@@ -49,6 +49,10 @@ module.exports = defineAgent({
   slots: SLOTS,
   sessionStrategy: 'isolada',  // 1 sessão por slot (mesmo padrão do agent-correcao)
   intervalo: 10_000,
+  // 🛡️ 2026-05 fix-deadlock: timeout máximo por job.
+  // Liberação é operação rápida (pesquisa OS → engrenagem → modal → checkbox → liberar).
+  // Logs mostram ~9s típico. 90s é margem ampla.
+  timeoutMs: Number(process.env.POOL_LIBERAR_PONTO_TIMEOUT_MS || 90_000), // 1.5 min
 
   // 2026-05 fix-eagain: BrowserSession persistente por slot
   onSlotStart: async (_pool, ctx) => {

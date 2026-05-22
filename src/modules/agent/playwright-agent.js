@@ -404,16 +404,25 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log('♻️  Usando sessão salva');
     }
 
-    context = await browser.newContext({
-      ...contextOptions,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
-    });
+    // 🛡️ FIX 2026-05: timeouts cirúrgicos. Quando o BrowserSession persistente
+    // fica em estado zumbi (isConnected()=true mas WS travado), newContext()
+    // e newPage() penduram pra sempre. Sem timeout aqui, o slot do browser-pool
+    // ficaria preso indefinidamente. Defesa local antes do timeout global do
+    // agent-pool (que também marca BrowserSession como morto se disparar).
+    context = await comTimeout(
+      browser.newContext({
+        ...contextOptions,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+        viewport: { width: 1280, height: 900 },
+      }),
+      15_000,
+      'browser.newContext'
+    );
 
     // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
-    await aplicarBloqueio(context, 'agent-correcao');
+    await comTimeout(aplicarBloqueio(context, 'agent-correcao'), 10_000, 'aplicarBloqueio');
 
-    page = await context.newPage();
+    page = await comTimeout(context.newPage(), 10_000, 'context.newPage');
     page.setDefaultTimeout(TIMEOUT);
 
     // ── Passo 1: Autenticação + ir para acompanhamento ───────────────────────

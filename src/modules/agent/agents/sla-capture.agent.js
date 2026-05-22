@@ -71,6 +71,10 @@ module.exports = defineAgent({
   sessionStrategy: 'isolada',
   envPrefix: 'SISTEMA_EXTERNO_SLA',
   intervalo: 5_000,
+  // 🛡️ 2026-05 fix-deadlock: timeout máximo por job.
+  // Captura inclui login (se sessão inválida) + busca OS + leitura de pontos.
+  // 2.5 min é folgado mas evita slot zumbi se BrowserSession travar.
+  timeoutMs: Number(process.env.POOL_SLA_CAPTURE_TIMEOUT_MS || 150_000), // 2.5 min
 
   habilitado: () => (process.env.SLA_CAPTURE_ATIVO || 'false').toLowerCase() === 'true',
 

@@ -11,6 +11,7 @@
  *         if (!registro) await sleep(intervalo); continue
  *         await marcarProcessando(registro)
  *         await processar(registro, ctx)         ← dentro de withBrowserSlot
+ *                                                ← com timeoutMs do agente
  *       } catch (err) {
  *         await onErro(registro, err)
  *       }
@@ -21,6 +22,28 @@
  * MODO tickGlobal: alguns agentes não têm fila por item (ex: sla-detector
  * faz uma varredura única). Esses usam tickGlobal — uma função chamada
  * a cada N ms ou via cron expression. Esses agentes têm slots=1 sempre.
+ *
+ * ── DEFESA CONTRA DEADLOCK (2026-05) ────────────────────────────────────
+ *
+ * Todas as chamadas de processar() e tickGlobal() são envolvidas com
+ * timeout (agente.timeoutMs). Quando o timeout dispara:
+ *
+ *   1. Lança erro "[agent-timeout] ${nome}: ${ms}ms"
+ *   2. Se slotState.browserSession existe, marca como morto pra recriação
+ *      no próximo job (resolve o problema de BrowserSession zumbi onde
+ *      isConnected()=true mas operações newContext/newPage penduram)
+ *   3. finally do withBrowserSlot libera o slot naturalmente — sem
+ *      force-release que daria SIGTRAP
+ *
+ * A Promise interna do processar() continua rodando em background (JS não
+ * cancela Promise), mas:
+ *   - O próximo job NUNCA reusa o browser zumbi (foi marcado morto)
+ *   - Eventualmente o GC + crash detection do BrowserSession recolhe
+ *   - O slot está liberado, então fila volta a fluir
+ *
+ * Isso resolve o caso documentado: agent-correcao trava em browser.newContext
+ * ou context.newPage (sem timeout próprio), browser-pool fica 4/4 ocupado pra
+ * sempre, sla-detector e liberar-ponto bloqueiam em "aguardando slot".
  */
 
 'use strict';
@@ -38,9 +61,58 @@ function log(agente, msg) {
 function logErr(agente, msg) {
   logger.error(`[agent-pool/${agente}] ${msg}`);
 }
+function logWarn(agente, msg) {
+  logger.warn(`[agent-pool/${agente}] ${msg}`);
+}
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+/**
+ * Envolve uma promise com timeout. Quando o timeout dispara:
+ *   - Rejeita imediatamente com Error('[agent-timeout] ...')
+ *   - A promise original continua rodando em background (JS não cancela)
+ *   - Marca slotState.browserSession como morto (se existir) pra forçar
+ *     recriação no próximo job, evitando que próximo job reuse browser zumbi.
+ *
+ * @param {Promise} promise — promise a ser limitada
+ * @param {number} ms — timeout em ms
+ * @param {string} nomeAgente — nome do agente (pra mensagem de erro)
+ * @param {object} slotState — slotState do agente (pode conter browserSession)
+ * @returns {Promise} — resultado da promise OU rejeita com timeout
+ */
+function _comTimeoutAgente(promise, ms, nomeAgente, slotState) {
+  let timer;
+  let timedOut = false;
+
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      // Marca BrowserSession como morto pra recriação no próximo job.
+      // Isso resolve o caso onde o browser persistente ficou em estado
+      // zumbi (isConnected()=true mas WS travado em newContext/newPage).
+      try {
+        if (slotState && slotState.browserSession &&
+            typeof slotState.browserSession._marcarMorto === 'function') {
+          slotState.browserSession._marcarMorto();
+          logWarn(nomeAgente, `🩺 timeout disparou — BrowserSession marcada como morta pra recriação no próximo job`);
+        }
+      } catch (e) {
+        // Não pode falhar no setTimeout — ignora silenciosamente
+      }
+      rej(new Error(`[agent-timeout] ${nomeAgente}: ${ms}ms excedido (slot pode ter ficado preso em chamada Playwright sem timeout próprio)`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    clearTimeout(timer);
+    // Se a promise original resolver/rejeitar APÓS o timeout, fica no .catch
+    // pra não dar UnhandledPromiseRejection. O resultado é descartado.
+    if (timedOut) {
+      promise.catch(() => {});
+    }
+  });
 }
 
 /**
@@ -55,7 +127,7 @@ function register(agente) {
     throw new Error(`agent-pool.register: agente "${agente.nome}" já registrado`);
   }
   _agentes.set(agente.nome, agente);
-  log(agente.nome, `📝 Registrado (slots: ${agente.slots}, sessionStrategy: ${agente.sessionStrategy})`);
+  log(agente.nome, `📝 Registrado (slots: ${agente.slots}, sessionStrategy: ${agente.sessionStrategy}, timeoutMs: ${agente.timeoutMs})`);
 }
 
 /**
@@ -114,7 +186,7 @@ function _startAgente(pool, agente) {
   }
 
   // Modo padrão: N slots paralelos consumindo fila item por item
-  log(agente.nome, `▶️ Iniciado em modo paralelo (${agente.slots} slot(s))`);
+  log(agente.nome, `▶️ Iniciado em modo paralelo (${agente.slots} slot(s), timeout: ${agente.timeoutMs}ms)`);
   for (let i = 0; i < agente.slots; i++) {
     _loopSlot(pool, agente, sessao, i).catch(err => {
       logErr(agente.nome, `slot[${i}] crashed loop: ${err.message}`);
@@ -196,7 +268,16 @@ async function _loopSlot(pool, agente, sessao, slotIdx) {
             slotState,       // estado persistente do slot (ex: browser)
             ehParaParar: () => !agente._ativo,
           };
-          await agente.processar(pool, registro, ctx);
+          // 🛡️ DEFESA CONTRA DEADLOCK: processar() envelopado com timeout.
+          // Se a chamada do Playwright travar (newContext/newPage zumbi),
+          // o timeout dispara, marca BrowserSession como morto, e o finally
+          // do withBrowserSlot libera o slot.
+          await _comTimeoutAgente(
+            agente.processar(pool, registro, ctx),
+            agente.timeoutMs,
+            agente.nome,
+            slotState
+          );
         });
 
         agente._stats.ticksComSucesso++;
@@ -204,7 +285,14 @@ async function _loopSlot(pool, agente, sessao, slotIdx) {
         agente._stats.ticksComErro++;
         agente._stats.ultimoErroEm = new Date().toISOString();
         agente._stats.ultimoErroMsg = err.message;
-        logErr(agente.nome, `slot[${slotIdx}] erro: ${err.message}`);
+
+        // Contabiliza timeouts separadamente pra métricas
+        if (err.message && err.message.startsWith('[agent-timeout]')) {
+          agente._stats.ticksComTimeout++;
+          logErr(agente.nome, `slot[${slotIdx}] ⏱️ TIMEOUT: ${err.message}`);
+        } else {
+          logErr(agente.nome, `slot[${slotIdx}] erro: ${err.message}`);
+        }
 
         try {
           if (registro) {
@@ -229,9 +317,13 @@ async function _loopSlot(pool, agente, sessao, slotIdx) {
  * Loop pra agentes com tickGlobal (sem fila item por item).
  */
 async function _iniciarTickGlobal(pool, agente, sessao) {
-  log(agente.nome, `▶️ Iniciado em modo tickGlobal (intervalo: ${agente.intervalo}ms)`);
+  log(agente.nome, `▶️ Iniciado em modo tickGlobal (intervalo: ${agente.intervalo}ms, timeout: ${agente.timeoutMs}ms)`);
 
   agente._slotsAtivos++;
+  // tickGlobal não tem slotState persistente (cada tick é independente).
+  // Mas mantemos o objeto vazio pra compat com _comTimeoutAgente.
+  const slotStateVazio = {};
+
   (async () => {
     try {
       while (agente._ativo) {
@@ -245,9 +337,15 @@ async function _iniciarTickGlobal(pool, agente, sessao) {
               slotIdx: 0,
               log:    (msg) => log(agente.nome, msg),
               sessao,
+              slotState: slotStateVazio,
               ehParaParar: () => !agente._ativo,
             };
-            await agente.tickGlobal(pool, ctx);
+            await _comTimeoutAgente(
+              agente.tickGlobal(pool, ctx),
+              agente.timeoutMs,
+              agente.nome,
+              slotStateVazio
+            );
           });
 
           agente._stats.ticksComSucesso++;
@@ -255,7 +353,13 @@ async function _iniciarTickGlobal(pool, agente, sessao) {
           agente._stats.ticksComErro++;
           agente._stats.ultimoErroEm = new Date().toISOString();
           agente._stats.ultimoErroMsg = err.message;
-          logErr(agente.nome, `tickGlobal erro: ${err.message}`);
+
+          if (err.message && err.message.startsWith('[agent-timeout]')) {
+            agente._stats.ticksComTimeout++;
+            logErr(agente.nome, `⏱️ TIMEOUT tickGlobal: ${err.message}`);
+          } else {
+            logErr(agente.nome, `tickGlobal erro: ${err.message}`);
+          }
         }
 
         if (agente.apenasUmTick) {
@@ -286,9 +390,10 @@ function _iniciarCron(pool, agente, sessao) {
     }
   }
 
-  log(agente.nome, `▶️ Cron agendado: "${agente.cronExpression}" (TZ: ${agente.timezone})`);
+  log(agente.nome, `▶️ Cron agendado: "${agente.cronExpression}" (TZ: ${agente.timezone}, timeout: ${agente.timeoutMs}ms)`);
 
   let rodandoAgora = false;
+  const slotStateVazio = {};
 
   _cronModule.schedule(agente.cronExpression, async () => {
     if (!agente._ativo) return;
@@ -309,9 +414,15 @@ function _iniciarCron(pool, agente, sessao) {
           slotIdx: 0,
           log:    (msg) => log(agente.nome, msg),
           sessao,
+          slotState: slotStateVazio,
           ehParaParar: () => !agente._ativo,
         };
-        await agente.tickGlobal(pool, ctx);
+        await _comTimeoutAgente(
+          agente.tickGlobal(pool, ctx),
+          agente.timeoutMs,
+          agente.nome,
+          slotStateVazio
+        );
       });
 
       agente._stats.ticksComSucesso++;
@@ -319,7 +430,13 @@ function _iniciarCron(pool, agente, sessao) {
       agente._stats.ticksComErro++;
       agente._stats.ultimoErroEm = new Date().toISOString();
       agente._stats.ultimoErroMsg = err.message;
-      logErr(agente.nome, `cron erro: ${err.message}`);
+
+      if (err.message && err.message.startsWith('[agent-timeout]')) {
+        agente._stats.ticksComTimeout++;
+        logErr(agente.nome, `⏱️ TIMEOUT cron: ${err.message}`);
+      } else {
+        logErr(agente.nome, `cron erro: ${err.message}`);
+      }
     } finally {
       agente._slotsAtivos--;
       rodandoAgora = false;
@@ -336,6 +453,7 @@ function snapshot() {
     slots:            a.slots,
     sessionStrategy:  a.sessionStrategy,
     intervalo:        a.intervalo,
+    timeoutMs:        a.timeoutMs,
     cronExpression:   a.cronExpression,
     ativo:            a._ativo,
     slotsAtivos:      a._slotsAtivos,

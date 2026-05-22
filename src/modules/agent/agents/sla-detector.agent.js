@@ -22,6 +22,10 @@ module.exports = defineAgent({
   envPrefix: 'SISTEMA_EXTERNO_SLA',
   cronExpression: process.env.SLA_DETECTOR_CRON || CRON_DEFAULT,
   timezone: 'America/Bahia',
+  // 🛡️ 2026-05 fix-deadlock: timeout máximo do tick cron.
+  // Detector só faz varredura de OS em execução — é rápido (page.goto + parse).
+  // 90s já cobre folgado + retries. Se passar disso, é certeza que travou.
+  timeoutMs: Number(process.env.SLA_DETECTOR_TIMEOUT_MS || 90_000), // 1.5 min
 
   habilitado: () => (process.env.SLA_DETECTOR_ATIVO || 'false').toLowerCase() === 'true',
 
