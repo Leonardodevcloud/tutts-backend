@@ -164,12 +164,21 @@ router.get('/bi/garantido', async (req, res) => {
       console.log('Erro ao buscar máscaras:', e.message);
     }
 
-    // 2.2 🆕 2026-05: enriquecer com cadastro da Central (tabela users).
-    // A planilha tinha o nome do entregador na coluna C, mas agora o source
-    // de verdade é `users.full_name` (chave: cod_profissional). Pra cada
-    // cod_prof único da planilha, pegamos full_name (override do nome) e
-    // foto_thumb (avatar nas tabelas; fallback pra foto_selfie se thumb null).
-    // Linhas SEM cod_prof na planilha (motoboy não definido ainda) mantêm
+    // 2.2 🆕 2026-05: enriquecer com cadastro do CRM WhatsApp (source primária)
+    // + tabela users (fallback). O CRM WhatsApp é alimentado por captura
+    // Playwright e tem TODOS os motoboys cadastrados na plataforma (não só
+    // os que já fizeram login na Central). É a fonte de verdade pra "nome
+    // por código".
+    //
+    // Estratégia:
+    //   1. Query agregada em crm_leads_capturados por cod → pega nome
+    //   2. Query agregada em users por cod_profissional → pega nome (fallback)
+    //      + foto (foto_thumb com fallback pra foto_selfie)
+    //   3. Merge: CRM > users > planilha
+    //   4. Foto sempre vem de users (CRM não tem foto). Sem match em users,
+    //      frontend renderiza avatar com iniciais (comportamento original).
+    //
+    // Linhas SEM cod_prof na planilha (motoboy ainda não definido) mantêm
     // o texto original da coluna C ("FALTANDO ENTREGADOR", "(Vazio)", etc.)
     // pra preservar a sinalização que o Matheus usa pra organizar.
     const cadastroPorCod = new Map(); // cod_prof (string) → { nome, foto }
@@ -180,26 +189,64 @@ router.get('/bi/garantido', async (req, res) => {
           .filter(c => c.length > 0)
       ));
       if (codsDistintos.length > 0) {
-        const usersResult = await pool.query(`
-          SELECT
-            TRIM(cod_profissional)::text AS cod,
-            full_name,
-            COALESCE(foto_thumb, foto_selfie) AS foto
-          FROM users
-          WHERE TRIM(cod_profissional) = ANY($1::text[])
-        `, [codsDistintos]);
-        usersResult.rows.forEach(u => {
-          if (u.cod) {
-            cadastroPorCod.set(u.cod, {
-              nome: u.full_name || null,
-              foto: u.foto || null,
-            });
-          }
-        });
+        // FONTE PRIMÁRIA: crm_leads_capturados (todos os motoboys cadastrados)
+        let crmMatchCount = 0;
+        try {
+          const crmResult = await pool.query(`
+            SELECT TRIM(cod)::text AS cod, nome
+            FROM crm_leads_capturados
+            WHERE TRIM(cod) = ANY($1::text[])
+              AND nome IS NOT NULL AND nome <> ''
+          `, [codsDistintos]);
+          crmResult.rows.forEach(r => {
+            if (r.cod) {
+              cadastroPorCod.set(r.cod, { nome: r.nome, foto: null });
+              crmMatchCount++;
+            }
+          });
+        } catch (e) {
+          console.log('⚠️ Erro ao buscar crm_leads_capturados (segue só com users):', e.message);
+        }
+
+        // FALLBACK + FOTO: tabela users (Central). Pega nome se CRM não teve
+        // match, e SEMPRE pega foto (CRM não armazena foto).
+        let usersMatchCount = 0, fotoCount = 0;
+        try {
+          const usersResult = await pool.query(`
+            SELECT
+              TRIM(cod_profissional)::text AS cod,
+              full_name,
+              COALESCE(foto_thumb, foto_selfie) AS foto
+            FROM users
+            WHERE TRIM(cod_profissional) = ANY($1::text[])
+          `, [codsDistintos]);
+          usersResult.rows.forEach(u => {
+            if (!u.cod) return;
+            const existente = cadastroPorCod.get(u.cod);
+            if (existente) {
+              // Já tem nome do CRM. Só anexa foto se users tiver.
+              if (u.foto) { existente.foto = u.foto; fotoCount++; }
+            } else {
+              // Sem match no CRM. users é fallback completo.
+              if (u.full_name) {
+                cadastroPorCod.set(u.cod, { nome: u.full_name, foto: u.foto || null });
+                usersMatchCount++;
+                if (u.foto) fotoCount++;
+              } else if (u.foto) {
+                // users tem cod mas sem nome (improvável) — só foto
+                cadastroPorCod.set(u.cod, { nome: null, foto: u.foto });
+                fotoCount++;
+              }
+            }
+          });
+        } catch (e) {
+          console.log('⚠️ Erro ao buscar tabela users (segue só com CRM):', e.message);
+        }
+
+        console.log(`📊 Garantido: ${codsDistintos.length} cods únicos | CRM: ${crmMatchCount} | users (fallback): ${usersMatchCount} | com foto: ${fotoCount}`);
       }
-      console.log(`📊 Garantido: ${cadastroPorCod.size}/${codsDistintos.length} cods cruzados com tabela users`);
     } catch (e) {
-      console.log('⚠️ Erro ao buscar cadastros em users (segue sem enriquecimento):', e.message);
+      console.log('⚠️ Erro geral no enriquecimento de cadastros (segue sem):', e.message);
     }
     
     // 3. Para cada registro da planilha, buscar TODA produção do profissional no dia
@@ -653,11 +700,13 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       mascaras[String(m.cod_cliente)] = m.mascara;
     });
 
-    // 🆕 2026-05: enriquecer com cadastro da Central (tabela users).
-    // Mesmo princípio do /bi/garantido — o nome cadastrado em users
-    // sobrescreve o da planilha (resolve "FALTANDO ENTREGADOR" etc.).
-    // Foto não é usada na aba "Por Cliente" (texto cru), mas trazemos
-    // junto pra padronizar e permitir uso futuro no frontend.
+    // 🆕 2026-05: enriquecer com CRM WhatsApp (source primária) + users
+    // (fallback). Mesma lógica do /bi/garantido:
+    //   - CRM (crm_leads_capturados): tem TODOS os motoboys cadastrados
+    //     (alimentado pela captura Playwright). Source de verdade pra nome.
+    //   - users: fallback pra nome + única fonte de foto (CRM não tem foto).
+    // Foto não é usada na aba "Por Cliente" (texto cru) mas trazemos junto
+    // pra padronizar.
     const cadastroPorCod = new Map();
     try {
       const codsScan = new Set();
@@ -669,26 +718,54 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       }
       const codsDistintos = Array.from(codsScan);
       if (codsDistintos.length > 0) {
-        const usersResult = await pool.query(`
-          SELECT
-            TRIM(cod_profissional)::text AS cod,
-            full_name,
-            COALESCE(foto_thumb, foto_selfie) AS foto
-          FROM users
-          WHERE TRIM(cod_profissional) = ANY($1::text[])
-        `, [codsDistintos]);
-        usersResult.rows.forEach(u => {
-          if (u.cod) {
-            cadastroPorCod.set(u.cod, {
-              nome: u.full_name || null,
-              foto: u.foto || null,
-            });
-          }
-        });
+        // FONTE PRIMÁRIA: crm_leads_capturados
+        let crmMatchCount = 0;
+        try {
+          const crmResult = await pool.query(`
+            SELECT TRIM(cod)::text AS cod, nome
+            FROM crm_leads_capturados
+            WHERE TRIM(cod) = ANY($1::text[])
+              AND nome IS NOT NULL AND nome <> ''
+          `, [codsDistintos]);
+          crmResult.rows.forEach(r => {
+            if (r.cod) {
+              cadastroPorCod.set(r.cod, { nome: r.nome, foto: null });
+              crmMatchCount++;
+            }
+          });
+        } catch (e) {
+          console.log('⚠️ /por-cliente: erro CRM:', e.message);
+        }
+
+        // FALLBACK + FOTO: users
+        let usersMatchCount = 0;
+        try {
+          const usersResult = await pool.query(`
+            SELECT
+              TRIM(cod_profissional)::text AS cod,
+              full_name,
+              COALESCE(foto_thumb, foto_selfie) AS foto
+            FROM users
+            WHERE TRIM(cod_profissional) = ANY($1::text[])
+          `, [codsDistintos]);
+          usersResult.rows.forEach(u => {
+            if (!u.cod) return;
+            const existente = cadastroPorCod.get(u.cod);
+            if (existente) {
+              if (u.foto) existente.foto = u.foto;
+            } else if (u.full_name || u.foto) {
+              cadastroPorCod.set(u.cod, { nome: u.full_name || null, foto: u.foto || null });
+              if (u.full_name) usersMatchCount++;
+            }
+          });
+        } catch (e) {
+          console.log('⚠️ /por-cliente: erro users:', e.message);
+        }
+
+        console.log(`📊 Garantido/por-cliente: ${codsDistintos.length} cods | CRM: ${crmMatchCount} | users (fallback): ${usersMatchCount}`);
       }
-      console.log(`📊 Garantido/por-cliente: ${cadastroPorCod.size}/${codsDistintos.length} cods cruzados com tabela users`);
     } catch (e) {
-      console.log('⚠️ Erro ao buscar cadastros em users (segue sem enriquecimento):', e.message);
+      console.log('⚠️ /por-cliente: erro geral no enriquecimento:', e.message);
     }
 
     // Agrupar: cliente → profissional
