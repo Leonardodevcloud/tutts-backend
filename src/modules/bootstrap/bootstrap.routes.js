@@ -7,6 +7,17 @@
  */
 
 const express = require('express');
+// 🆕 2026-05 FIX (Bug Conciliação): helpers TZ-aware do módulo financial.
+// Antes o filtro de data aqui usava `coluna >= $::date AND coluna < $::date + 1 day`
+// SEM correção de fuso, causando bug D±1 (saques de 21h-23h59 horário local vazavam
+// pro dia UTC seguinte). E o whitelist de tipoFiltro NÃO tinha 'aprovacao'/'realizacao',
+// fazendo a aba Conciliação cair em `created_at` (errado — devia ser approved_at).
+//
+// Importante: ESTE bootstrap.routes.js é registrado ANTES de financial.routes.js no
+// server.js (linha 418 vs 515), então TODA chamada a /api/withdrawals vem PARA CÁ
+// e NUNCA chega no handler corrigido de financial.routes.js. O fix tem que viver
+// aqui também.
+const { sqlDataInicio, sqlDataFim } = require('../financial/financial.shared');
 
 function createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAdminOuFinanceiro) {
   const router = express.Router();
@@ -131,12 +142,29 @@ function createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAd
         params = [userCod, Math.min(parseInt(req.query.limit) || 500, 500)];
       }
       else if (comFiltroData) {
-        const col = tipoFiltro === 'lancamento' ? 'lancamento_at' : tipoFiltro === 'debito' ? 'debito_plific_at' : 'created_at';
+        // 🆕 2026-05 FIX: whitelist completo + correção de fuso (Salvador/BA = UTC-3).
+        //
+        // 1) Whitelist: aceita 'aprovacao' E 'realizacao' como apelidos pra approved_at.
+        //    A aba Conciliação do front exibe "Realizado" lendo approved_at; o filtro
+        //    "Data Realização" tem que bater na MESMA coluna. Antes caía no fallback
+        //    created_at e trazia saques de outro dia (bug visto com OS do Washington
+        //    Santos: created_at 2026-05-03T00:14 UTC = 21:14 hora local do dia 02/05,
+        //    aparecia na busca por Data Realização = 03/05).
+        //
+        // 2) Fuso: sqlDataInicio/Fim convertem a borda do dia LOCAL (00:00 Bahia) pro
+        //    instante UTC equivalente, evitando o bug D±1 (saques noturnos vazando pro
+        //    dia UTC seguinte). É a mesma helper que financial.routes.js já usa.
+        //
+        // 3) Mantém compat: 'solicitacao' (default) → created_at, igual antes.
+        const col = tipoFiltro === 'lancamento' ? 'lancamento_at'
+                  : tipoFiltro === 'debito' ? 'debito_plific_at'
+                  : (tipoFiltro === 'aprovacao' || tipoFiltro === 'realizacao') ? 'approved_at'
+                  : 'created_at';
         if (status) {
-          query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${col} >= $2::date AND ${col} < $3::date + interval '1 day' ORDER BY created_at DESC`;
+          query = `SELECT * FROM withdrawal_requests WHERE status = $1 AND ${sqlDataInicio(col, 2)} AND ${sqlDataFim(col, 3)} ORDER BY created_at DESC`;
           params = [status, dataInicio, dataFim];
         } else {
-          query = `SELECT * FROM withdrawal_requests WHERE ${col} >= $1::date AND ${col} < $2::date + interval '1 day' ORDER BY created_at DESC`;
+          query = `SELECT * FROM withdrawal_requests WHERE ${sqlDataInicio(col, 1)} AND ${sqlDataFim(col, 2)} ORDER BY created_at DESC`;
           params = [dataInicio, dataFim];
         }
       } else if (status) {
