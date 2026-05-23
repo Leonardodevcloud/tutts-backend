@@ -7,6 +7,8 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 // 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
 const { sqlDataInicio, sqlDataFim } = require('./financial.shared');
+// 🆕 2026-05 Integração com módulo Máquinas (bloqueio de saque + consumo de liberação)
+const { verificarMaquinaPendente, consumirLiberacaoSeExistir } = require('../maquinas/maquinas.shared');
 
 function createFinancialRouter(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES, getClientIP) {
   const router = express.Router();
@@ -683,6 +685,40 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       // Se o helper de config falhar (DB fora?), por segurança DEIXA passar.
       // Falha aberta aqui é menos pior do que travar todos os saques por bug.
       console.warn('⚠️ [Saque] Falha ao ler saques_habilitados, permitindo por segurança:', errCfg.message);
+    }
+
+    // ==================== 🔒 BLOQUEIO POR MÁQUINA PENDENTE ====================
+    // 2026-05: motoboy com máquina da loja em mãos NÃO saca (regra de negócio).
+    // Admin pode liberar pontualmente via Controle de Máquinas (cria registro em
+    // maquinas_liberacoes com consumida=false). consumirLiberacaoSeExistir
+    // marca como usada de forma atômica e libera ESTE saque.
+    // Admin/financeiro NÃO bypassam o bloqueio: o objetivo é proteger o cliente.
+    try {
+      const maquinaPendente = await verificarMaquinaPendente(pool, userCod, userName);
+      if (maquinaPendente) {
+        const liberado = await consumirLiberacaoSeExistir(pool, maquinaPendente.movimentacao_id);
+        if (liberado) {
+          console.log(`✅ [MÁQUINA PENDENTE] ${userCod} tinha máquina mas saque foi LIBERADO pelo admin — prossegue`);
+          // não retorna — deixa o saque seguir o fluxo normal abaixo
+        } else {
+          client.release();
+          console.log(`🔒 [MÁQUINA PENDENTE] ${userCod} (${userName}) bloqueado — máquina ${maquinaPendente.identificador} ${maquinaPendente.marca} da loja ${maquinaPendente.cliente_nome} desde ${maquinaPendente.despachada_em}`);
+          return res.status(423).json({
+            error: 'maquina_pendente',
+            mensagem: 'Você está com uma máquina da loja em uso. Faça a devolução para acessar seus valores.',
+            maquina: {
+              identificador: maquinaPendente.identificador,
+              marca: maquinaPendente.marca,
+              loja: maquinaPendente.cliente_nome,
+              despachada_em: maquinaPendente.despachada_em,
+              telefone_loja: maquinaPendente.cliente_telefone || null,
+            },
+          });
+        }
+      }
+    } catch (errMaq) {
+      // Falha do check NÃO bloqueia o saque — apenas loga (fail-open por escolha)
+      console.warn('⚠️ [MÁQUINA PENDENTE] check falhou (fail-open):', errMaq.message);
     }
 
     // ==================== 🔒 SECURITY FIX: VALIDAÇÃO DE VALOR ====================
