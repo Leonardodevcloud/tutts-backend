@@ -40,6 +40,7 @@ const crmLeadsAgent       = require('./agents/crm-leads.agent');
 const liberarPontoAgent   = require('./agents/liberar-ponto.agent');     // 2026-04 v3
 const biImportAgent       = require('./agents/bi-import.agent');         // 2026-04 v3
 const initBiImportTables  = require('./bi-import.migration');            // 2026-04 v3
+const filaValidadorAgent  = require('./agents/fila-validador.agent');    // 2026-05: fila auto-gerenciável
 
 async function initAgentTables(pool) {
   await initAgentTablesBase(pool);
@@ -88,6 +89,8 @@ function startAgentWorker(pool) {
 
     // 2026-04 v3: novo agente "BI Import"
     agentPool.register(biImportAgent);
+    // 2026-05: agente da fila auto-gerenciável (varredura periódica)
+    agentPool.register(filaValidadorAgent);
     // Cron próprio pra criar job D-1 ao meio-dia (diferente do cron do agent que processa).
     // Esse cron só CRIA o job — o worker do pool pega depois.
     try {
@@ -107,7 +110,7 @@ function startAgentWorker(pool) {
     }
 
     agentPool.startAll(pool);
-    console.log('✅ Agent pool iniciado com 9 agentes');
+    console.log('✅ Agent pool iniciado com 10 agentes');
   } catch (e) {
     console.error('❌ Falha ao iniciar agent pool:', e.message);
   }

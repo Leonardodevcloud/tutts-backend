@@ -150,42 +150,6 @@ async function initFilasTables(pool) {
   // FK regiao_id nos bairros
   await pool.query(`ALTER TABLE filas_bairros_config ADD COLUMN IF NOT EXISTS regiao_id INTEGER REFERENCES filas_regioes(id) ON DELETE SET NULL`).catch(() => {});
   console.log('✅ Coluna regiao_id em filas_bairros_config verificada');
-
-  // 🆕 2026-05: Fila auto-gerenciável
-  // Diferencial vs fila atual: motoboys se organizam sozinhos, agente Playwright
-  // valida no sistema externo. tipo='gerenciada' (padrão, existente) ou 'auto'.
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'gerenciada'`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS validacao_agente_ativa BOOLEAN DEFAULT true`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS varredura_intervalo_seg INTEGER DEFAULT 30`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS remover_ao_pegar_corrida BOOLEAN DEFAULT true`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS mostrar_nomes_publicos BOOLEAN DEFAULT true`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS penalidade_min INTEGER DEFAULT 10`).catch(() => {});
-  console.log('✅ Colunas de fila auto-gerenciável em filas_centrais verificadas');
-
-  // Status do motoboy no agente. Valores possíveis:
-  //  'pendente'   — entrou na fila, agente ainda não checou (default ao entrar)
-  //  'validado'   — agente confirmou que está sem corrida ativa
-  //  'reprovado'  — agente detectou corrida ativa (será removido em seguida)
-  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS agente_status VARCHAR(20) DEFAULT 'pendente'`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS agente_ultima_validacao_at TIMESTAMP`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_posicoes ADD COLUMN IF NOT EXISTS corridas_ativas_count INTEGER DEFAULT 0`).catch(() => {});
-  console.log('✅ Colunas de status do agente em filas_posicoes verificadas');
-
-  // Log do agente — auditoria e exibição no monitor admin
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS filas_agente_logs (
-      id SERIAL PRIMARY KEY,
-      central_id INTEGER REFERENCES filas_centrais(id) ON DELETE CASCADE,
-      cod_profissional VARCHAR(50),
-      nome_profissional VARCHAR(255),
-      acao VARCHAR(30),
-      motivo TEXT,
-      detalhes JSONB,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_filas_agente_logs_central_data ON filas_agente_logs(central_id, created_at DESC)`).catch(() => {});
-  console.log('✅ Tabela filas_agente_logs verificada');
 }
 
 module.exports = { initFilasTables };
