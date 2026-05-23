@@ -1,10 +1,89 @@
 /**
  * Config Sub-Router: Promoções Novatos + Inscrições + Quiz
+ *
+ * 🆕 2026-05 — Mudanças nesta versão:
+ *   1. CRM como source primária de região (crm_leads_capturados.regiao) com fallback
+ *      pra planilha Google Sheets legada. Resolve bug "promoções aparecem pra todo
+ *      mundo" — motoboys ausentes da planilha caíam em `userRegiao = null` e
+ *      `if (userRegiao)` falhava silenciosamente, deixando passar TODAS promoções.
+ *   2. Migration idempotente das colunas `dica1..dica5` (TEXT) na
+ *      `quiz_procedimentos_config` — texto educativo que aparece pro motoboy errante
+ *      na tela de resultado.
+ *   3. GET /quiz-procedimentos/config retorna `dicas[]` agregadas.
+ *   4. POST /quiz-procedimentos/config aceita `dicas[]`.
+ *   5. Novo endpoint GET /quiz-procedimentos/kpis (respostas, aproveitamento, valor
+ *      distribuído, pergunta mais errada) pra dashboard admin.
  */
 const express = require('express');
 
+// 🆕 Lookup robusto de região por cod_profissional.
+// Ordem de prioridade:
+//   1. crm_leads_capturados.regiao (source de verdade — alimentada pela
+//      captura Playwright do módulo CRM, contém TODOS os motoboys cadastrados)
+//   2. Planilha Google Sheets (legada — usada quando CRM falha por algum motivo)
+// Retorna { regiao: string|null, fonte: 'crm'|'planilha'|null }
+async function buscarRegiaoUsuario(pool, userCod) {
+  // 1. CRM primeiro
+  try {
+    const result = await pool.query(
+      `SELECT regiao FROM crm_leads_capturados
+       WHERE TRIM(cod)::text = TRIM($1)::text
+         AND regiao IS NOT NULL AND regiao <> ''
+       LIMIT 1`,
+      [userCod.toString()]
+    );
+    if (result.rows.length > 0 && result.rows[0].regiao) {
+      return { regiao: result.rows[0].regiao.trim(), fonte: 'crm' };
+    }
+  } catch (e) {
+    console.log('⚠️ [novatos] CRM lookup falhou:', e.message);
+  }
+
+  // 2. Fallback planilha legada (mantém compat — alguns motoboys antigos podem
+  // não estar no CRM ainda dependendo de quando o RPA rodou)
+  try {
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
+    const sheetResponse = await fetch(sheetUrl);
+    const sheetText = await sheetResponse.text();
+    const sheetLines = sheetText.split('\n').slice(1);
+    for (const line of sheetLines) {
+      const cols = line.split(',');
+      if (cols[0]?.trim() === userCod.toString()) {
+        const cidade = cols[3]?.trim();
+        if (cidade) return { regiao: cidade, fonte: 'planilha' };
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ [novatos] Planilha fallback falhou:', e.message);
+  }
+
+  return { regiao: null, fonte: null };
+}
+
+// 🆕 Migration idempotente das colunas de dica (dica1..dica5) na quiz_procedimentos_config.
+// E coluna `respostas` JSONB na quiz_procedimentos_respostas pra armazenar o array
+// original (necessário pra calcular pergunta-mais-errada e pra tela de revisão do motoboy).
+// Rodada uma vez no boot via initNovatosTables (exportado lá embaixo).
+async function ensureDicasColumns(pool) {
+  const alters = [
+    'ALTER TABLE quiz_procedimentos_config ADD COLUMN IF NOT EXISTS dica1 TEXT',
+    'ALTER TABLE quiz_procedimentos_config ADD COLUMN IF NOT EXISTS dica2 TEXT',
+    'ALTER TABLE quiz_procedimentos_config ADD COLUMN IF NOT EXISTS dica3 TEXT',
+    'ALTER TABLE quiz_procedimentos_config ADD COLUMN IF NOT EXISTS dica4 TEXT',
+    'ALTER TABLE quiz_procedimentos_config ADD COLUMN IF NOT EXISTS dica5 TEXT',
+    'ALTER TABLE quiz_procedimentos_respostas ADD COLUMN IF NOT EXISTS respostas JSONB',
+  ];
+  for (const sql of alters) {
+    try { await pool.query(sql); } catch (e) { /* coluna ja existe */ }
+  }
+  console.log('✅ [novatos] Colunas dica1..dica5 + respostas JSONB verificadas');
+}
+
 function createNovatosRoutes(pool, verificarToken, verificarAdmin) {
   const router = express.Router();
+
+  // Run migration once on first creation
+  ensureDicasColumns(pool).catch(e => console.log('⚠️ ensureDicasColumns:', e.message));
 
 router.get('/promocoes-novatos/regioes', async (req, res) => {
   try {
@@ -31,28 +110,23 @@ router.get('/promocoes-novatos/regioes', async (req, res) => {
 
 // Verificar elegibilidade do usuário para promoções novatos
 // Regras: 
-// 1. Deve haver promoção ativa para a região do usuário (região vem da planilha)
+// 1. Deve haver promoção ativa para a região do usuário (região vem do CRM
+//    como source primária; fallback pra planilha Google Sheets legada)
 // 2. Usuário nunca realizou nenhuma corrida OU não realizou corrida nos últimos 10 dias
+//
+// 🆕 2026-05 FIX (bug "vaza pra todo mundo"):
+//   Antes: se userRegiao === null (motoboy ausente da planilha defasada),
+//   o filtro de região era pulado e TODAS promoções ativas eram devolvidas.
+//   Agora: sem região → elegivel:false. CRM é a primária (alimentada pela
+//   captura Playwright e contém TODOS os motoboys cadastrados).
 router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
   try {
     const { userCod } = req.params;
+
+    // 1. Buscar região (CRM > planilha)
+    const { regiao: userRegiao, fonte: fonteRegiao } = await buscarRegiaoUsuario(pool, userCod);
     
-    // Buscar região do usuário na planilha do Google Sheets
-    const sheetUrl = 'https://docs.google.com/spreadsheets/d/1d7jI-q7OjhH5vU69D3Vc_6Boc9xjLZPVR8efjMo1yAE/export?format=csv';
-    const sheetResponse = await fetch(sheetUrl);
-    const sheetText = await sheetResponse.text();
-    const sheetLines = sheetText.split('\n').slice(1); // pular header
-    
-    let userRegiao = null;
-    for (const line of sheetLines) {
-      const cols = line.split(',');
-      if (cols[0]?.trim() === userCod.toString()) {
-        userRegiao = cols[3]?.trim(); // coluna Cidade (índice 3 = coluna D)
-        break;
-      }
-    }
-    
-    // Verificar se há promoções ativas
+    // 2. Verificar se há promoções ativas
     const promoResult = await pool.query(
       "SELECT * FROM promocoes_novatos WHERE status = 'ativa'"
     );
@@ -62,11 +136,12 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
         elegivel: false, 
         motivo: 'Nenhuma promoção ativa no momento',
         promocoes: [],
-        userRegiao
+        userRegiao,
+        fonteRegiao
       });
     }
     
-    // Verificar histórico de entregas do usuário
+    // 3. Verificar histórico de entregas
     // cod_prof na bi_entregas é INTEGER, userCod pode ser string
     const userCodNumerico = parseInt(userCod.toString().replace(/\D/g, ''), 10);
     
@@ -101,43 +176,53 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
         promocoes: [],
         totalEntregas,
         diasSemEntrega,
-        userRegiao
+        userRegiao,
+        fonteRegiao
       });
     }
     
+    // 🆕 2026-05 FIX (estrito): sem região identificada → não elegível.
+    // Motoboy precisa estar no CRM (Playwright) ou na planilha legada pra
+    // sabermos qual promoção mostrar. Antes, sem região, vazava tudo.
+    if (!userRegiao) {
+      return res.json({
+        elegivel: false,
+        motivo: 'Não conseguimos identificar sua região para selecionar promoções. Procure o suporte para concluir seu cadastro.',
+        promocoes: [],
+        totalEntregas,
+        diasSemEntrega,
+        userRegiao: null,
+        fonteRegiao: null
+      });
+    }
+
     // Filtrar promoções por região do usuário
-    let promocoesDisponiveis = promoResult.rows;
-    
-    // Se o usuário tem região na planilha, filtrar promoções compatíveis
-    if (userRegiao) {
-      promocoesDisponiveis = promoResult.rows.filter(promo => {
-        const regiaoPromo = (promo.regiao || '').toLowerCase().trim();
-        const regiaoUser = userRegiao.toLowerCase().trim();
-        
-        // Compatível se:
-        // - Região da promoção é igual à região do usuário
-        // - Região da promoção contém a região do usuário (ou vice-versa)
-        // - Região da promoção é "Todas", "Geral" ou vazia
-        return regiaoPromo === regiaoUser ||
-               regiaoPromo.includes(regiaoUser) || 
-               regiaoUser.includes(regiaoPromo) ||
-               regiaoPromo.includes('todas') || 
-               regiaoPromo.includes('geral') ||
-               regiaoPromo === '' ||
-               !promo.regiao;
-      });
-    }
+    const promocoesDisponiveis = promoResult.rows.filter(promo => {
+      const regiaoPromo = (promo.regiao || '').toLowerCase().trim();
+      const regiaoUser = userRegiao.toLowerCase().trim();
+      
+      // Compatível se:
+      // - Região da promoção é igual à região do usuário
+      // - Região da promoção contém a região do usuário (ou vice-versa)
+      // - Região da promoção é "Todas", "Geral" ou vazia (atinge todo mundo)
+      return regiaoPromo === regiaoUser ||
+             regiaoPromo.includes(regiaoUser) || 
+             regiaoUser.includes(regiaoPromo) ||
+             regiaoPromo.includes('todas') || 
+             regiaoPromo.includes('geral') ||
+             regiaoPromo === '' ||
+             !promo.regiao;
+    });
     
     if (promocoesDisponiveis.length === 0) {
       return res.json({
         elegivel: false,
-        motivo: userRegiao 
-          ? `Não há promoções ativas para sua região (${userRegiao}).` 
-          : 'Você não está cadastrado na planilha de profissionais ou não tem região definida.',
+        motivo: `Não há promoções ativas para sua região (${userRegiao}).`,
         promocoes: [],
         totalEntregas,
         diasSemEntrega,
-        userRegiao
+        userRegiao,
+        fonteRegiao
       });
     }
     
@@ -149,7 +234,8 @@ router.get('/promocoes-novatos/elegibilidade/:userCod', async (req, res) => {
       promocoes: promocoesDisponiveis,
       totalEntregas,
       diasSemEntrega,
-      userRegiao
+      userRegiao,
+      fonteRegiao
     });
     
   } catch (error) {
@@ -768,6 +854,9 @@ router.get('/quiz-procedimentos/config', async (req, res) => {
           { texto: '', resposta: true },
           { texto: '', resposta: true }
         ],
+        // 🆕 2026-05 — dicas educativas que aparecem na revisão pós-quiz
+        // pra quem errar (e na entrada na tela "Aprender" também)
+        dicas: ['', '', '', '', ''],
         valor_gratuidade: 500.00,
         ativo: false
       });
@@ -784,6 +873,14 @@ router.get('/quiz-procedimentos/config', async (req, res) => {
         { texto: config.pergunta4, resposta: config.resposta4 },
         { texto: config.pergunta5, resposta: config.resposta5 }
       ],
+      // 🆕 2026-05 — array paralelo ao de perguntas
+      dicas: [
+        config.dica1 || '',
+        config.dica2 || '',
+        config.dica3 || '',
+        config.dica4 || '',
+        config.dica5 || ''
+      ],
       valor_gratuidade: parseFloat(config.valor_gratuidade),
       ativo: config.ativo
     });
@@ -796,8 +893,11 @@ router.get('/quiz-procedimentos/config', async (req, res) => {
 // Salvar configuração do quiz
 router.post('/quiz-procedimentos/config', async (req, res) => {
   try {
-    const { titulo, imagens, perguntas, valor_gratuidade, ativo } = req.body;
-    
+    // 🆕 2026-05 — `dicas` é opcional pra backward-compat com frontends antigos
+    const { titulo, imagens, perguntas, dicas, valor_gratuidade, ativo } = req.body;
+    const safeDicas = Array.isArray(dicas) ? dicas : ['', '', '', '', ''];
+    while (safeDicas.length < 5) safeDicas.push('');
+
     // Verificar se já existe config
     const existing = await pool.query('SELECT id FROM quiz_procedimentos_config LIMIT 1');
     
@@ -812,8 +912,10 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
           pergunta3 = $10, resposta3 = $11,
           pergunta4 = $12, resposta4 = $13,
           pergunta5 = $14, resposta5 = $15,
-          valor_gratuidade = $16, ativo = $17, updated_at = NOW()
-        WHERE id = $18`,
+          valor_gratuidade = $16, ativo = $17,
+          dica1 = $18, dica2 = $19, dica3 = $20, dica4 = $21, dica5 = $22,
+          updated_at = NOW()
+        WHERE id = $23`,
         [
           titulo,
           imagens[0], imagens[1], imagens[2], imagens[3],
@@ -823,6 +925,7 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
           perguntas[3].texto, perguntas[3].resposta,
           perguntas[4].texto, perguntas[4].resposta,
           valor_gratuidade, ativo,
+          safeDicas[0], safeDicas[1], safeDicas[2], safeDicas[3], safeDicas[4],
           existing.rows[0].id
         ]
       );
@@ -832,8 +935,9 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
         `INSERT INTO quiz_procedimentos_config 
           (titulo, imagem1, imagem2, imagem3, imagem4, 
            pergunta1, resposta1, pergunta2, resposta2, pergunta3, resposta3,
-           pergunta4, resposta4, pergunta5, resposta5, valor_gratuidade, ativo)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+           pergunta4, resposta4, pergunta5, resposta5, valor_gratuidade, ativo,
+           dica1, dica2, dica3, dica4, dica5)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
         [
           titulo,
           imagens[0], imagens[1], imagens[2], imagens[3],
@@ -842,7 +946,8 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
           perguntas[2].texto, perguntas[2].resposta,
           perguntas[3].texto, perguntas[3].resposta,
           perguntas[4].texto, perguntas[4].resposta,
-          valor_gratuidade, ativo
+          valor_gratuidade, ativo,
+          safeDicas[0], safeDicas[1], safeDicas[2], safeDicas[3], safeDicas[4]
         ]
       );
     }
@@ -851,6 +956,63 @@ router.post('/quiz-procedimentos/config', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('❌ Erro ao salvar config quiz:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🆕 2026-05 — KPIs do quiz pra dashboard admin.
+// Retorna: total de respostas, % aproveitamento (passou/total), valor distribuído,
+// número da pergunta mais errada (1-5, ou null se não houver dados).
+router.get('/quiz-procedimentos/kpis', async (req, res) => {
+  try {
+    const totalResult = await pool.query(`
+      SELECT 
+        COUNT(*)::int as total,
+        COUNT(*) FILTER (WHERE passou = true)::int as passou,
+        COALESCE(SUM(CASE WHEN passou THEN (SELECT valor_gratuidade FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1) ELSE 0 END), 0)::numeric as valor_distribuido
+      FROM quiz_procedimentos_respostas
+    `);
+    const { total, passou, valor_distribuido } = totalResult.rows[0];
+    const aproveitamento = total > 0 ? Math.round((passou / total) * 100) : 0;
+
+    // Pergunta mais errada — assume que `respostas` está armazenada como JSON
+    // (array de booleans) e a config tem as respostas corretas resposta1..5.
+    // Conta os errados por índice.
+    let perguntaMaisErrada = null;
+    try {
+      const erros = await pool.query(`
+        WITH cfg AS (SELECT resposta1, resposta2, resposta3, resposta4, resposta5 FROM quiz_procedimentos_config ORDER BY id DESC LIMIT 1),
+        r AS (
+          SELECT respostas FROM quiz_procedimentos_respostas WHERE respostas IS NOT NULL
+        )
+        SELECT
+          SUM(CASE WHEN (respostas->>0)::boolean IS DISTINCT FROM cfg.resposta1 THEN 1 ELSE 0 END)::int AS e1,
+          SUM(CASE WHEN (respostas->>1)::boolean IS DISTINCT FROM cfg.resposta2 THEN 1 ELSE 0 END)::int AS e2,
+          SUM(CASE WHEN (respostas->>2)::boolean IS DISTINCT FROM cfg.resposta3 THEN 1 ELSE 0 END)::int AS e3,
+          SUM(CASE WHEN (respostas->>3)::boolean IS DISTINCT FROM cfg.resposta4 THEN 1 ELSE 0 END)::int AS e4,
+          SUM(CASE WHEN (respostas->>4)::boolean IS DISTINCT FROM cfg.resposta5 THEN 1 ELSE 0 END)::int AS e5
+        FROM r, cfg
+      `);
+      const row = erros.rows[0] || {};
+      const counts = [row.e1 || 0, row.e2 || 0, row.e3 || 0, row.e4 || 0, row.e5 || 0];
+      const maxErros = Math.max(...counts);
+      if (maxErros > 0) {
+        perguntaMaisErrada = counts.indexOf(maxErros) + 1;
+      }
+    } catch (e) {
+      // Se respostas não for JSON ou houver erro, deixa null
+      console.log('⚠️ [novatos] pergunta+errada calc falhou (ok pra ignorar):', e.message);
+    }
+
+    res.json({
+      total,
+      passou,
+      aproveitamento,
+      valor_distribuido: parseFloat(valor_distribuido),
+      pergunta_mais_errada: perguntaMaisErrada
+    });
+  } catch (error) {
+    console.error('❌ Erro KPIs quiz:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -899,19 +1061,28 @@ router.post('/quiz-procedimentos/responder', async (req, res) => {
       config.resposta1, config.resposta2, config.resposta3, config.resposta4, config.resposta5
     ];
     
-    // Contar acertos
+    // Contar acertos + montar detalhe por pergunta (pra tela de revisão do motoboy)
     let acertos = 0;
+    const detalheRespostas = [];
     for (let i = 0; i < 5; i++) {
-      if (respostas[i] === respostasCorretas[i]) acertos++;
+      const correto = respostas[i] === respostasCorretas[i];
+      if (correto) acertos++;
+      detalheRespostas.push({
+        indice: i,
+        resposta_usuario: respostas[i],
+        resposta_correta: respostasCorretas[i],
+        correto
+      });
     }
     
     const passou = acertos === 5;
     
-    // Registrar resposta
+    // Registrar resposta — 🆕 inclui array JSONB pra cálculo de KPI "+errada"
+    // e exibição na tela de revisão.
     await pool.query(
-      `INSERT INTO quiz_procedimentos_respostas (user_cod, user_name, acertos, passou, gratuidade_criada)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [user_cod, user_name, acertos, passou, passou]
+      `INSERT INTO quiz_procedimentos_respostas (user_cod, user_name, acertos, passou, gratuidade_criada, respostas)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+      [user_cod, user_name, acertos, passou, passou, JSON.stringify(respostas)]
     );
     
     // Se passou, criar gratuidade automaticamente
@@ -928,7 +1099,13 @@ router.post('/quiz-procedimentos/responder', async (req, res) => {
       success: true, 
       acertos, 
       passou,
-      valor_gratuidade: passou ? parseFloat(config.valor_gratuidade) : 0
+      valor_gratuidade: passou ? parseFloat(config.valor_gratuidade) : 0,
+      // 🆕 detalhe pergunta-a-pergunta + dicas pra tela de revisão educativa
+      detalhe_respostas: detalheRespostas,
+      dicas: [
+        config.dica1 || '', config.dica2 || '', config.dica3 || '',
+        config.dica4 || '', config.dica5 || ''
+      ]
     });
   } catch (error) {
     console.error('❌ Erro ao responder quiz:', error);
