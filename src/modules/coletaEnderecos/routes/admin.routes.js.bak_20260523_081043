@@ -21,10 +21,53 @@ const { listarProfissionais, listarRegioes } = require('../../../shared/utils/pr
  * Retorna string ou null se falhar.
  */
 async function reverseGeocode(pool, latitude, longitude) {
-  // 🔄 2026-05-23: migrado pro helper centralizado (cache + tolerância 55m)
-  const { geocodeReverse } = require('../../../shared/geocodeHelper');
-  const r = await geocodeReverse(pool, latitude, longitude, { source: 'coleta-admin-reverse' });
-  return r ? r.endereco_formatado : null;
+  const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!GOOGLE_API_KEY) {
+    console.warn('[coleta-reverse] ⚠️ GOOGLE_GEOCODING_API_KEY não configurada');
+    return null;
+  }
+
+  const lat = parseFloat(latitude);
+  const lng = parseFloat(longitude);
+  if (isNaN(lat) || isNaN(lng)) return null;
+
+  try {
+    const cache = await pool.query(
+      `SELECT endereco_formatado FROM enderecos_geocodificados
+         WHERE latitude BETWEEN $1 - 0.0002 AND $1 + 0.0002
+           AND longitude BETWEEN $2 - 0.0002 AND $2 + 0.0002
+         LIMIT 1`,
+      [lat, lng]
+    );
+    if (cache.rows.length > 0) {
+      console.log(`[coleta-reverse] cache HIT ${lat},${lng}`);
+      return cache.rows[0].endereco_formatado;
+    }
+  } catch (e) {
+    console.warn('[coleta-reverse] cache falhou:', e.message);
+  }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    console.log(`[coleta-reverse] Google ${lat},${lng} → status=${data.status} results=${data.results?.length || 0}`);
+    if (data.status === 'OK' && data.results && data.results.length > 0) {
+      const endereco = data.results[0].formatted_address;
+      pool.query(
+        `INSERT INTO enderecos_geocodificados (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
+         VALUES ($1, $1, $2, $3, $4, 'google-reverse-coleta') ON CONFLICT DO NOTHING`,
+        [`${lat},${lng}`, endereco, lat, lng]
+      ).catch(() => {});
+      return endereco;
+    }
+    if (data.status !== 'OK') {
+      console.warn(`[coleta-reverse] Google não OK: ${data.status} ${data.error_message || ''}`);
+    }
+  } catch (e) {
+    console.warn('[coleta-reverse] Google fetch falhou:', e.message);
+  }
+  return null;
 }
 
 const { normalizarRegiao, regioesBate } = require('../../../shared/utils/normalizarRegiao');

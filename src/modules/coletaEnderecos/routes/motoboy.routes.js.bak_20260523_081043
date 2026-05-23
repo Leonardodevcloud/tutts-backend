@@ -62,13 +62,25 @@ function parsearEnderecoGoogle(s) {
 }
 
 /**
- * Forward geocoding: endereço (texto) → { lat, lng } via helper centralizado.
- * 🔄 2026-05-23: migrado pro geocodeHelper (cache enderecos_geocodificados).
+ * Forward geocoding: endereço (texto) → { lat, lng } via Google Maps.
+ * Usado pra geocodar o endereço impresso na NF e comparar com GPS do motoboy.
+ * Retorna null se a key não tá configurada ou Google não achou.
  */
-async function forwardGeocode(pool, endereco) {
-  const { geocodeForward } = require('../../../shared/geocodeHelper');
-  const r = await geocodeForward(pool, endereco, { source: 'coleta-motoboy-forward' });
-  return r ? { lat: r.latitude, lng: r.longitude } : null;
+async function forwardGeocode(endereco) {
+  const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!GOOGLE_API_KEY || !endereco) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(endereco)}&key=${GOOGLE_API_KEY}&region=br&language=pt-BR&components=country:br`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results?.[0]?.geometry?.location) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -85,13 +97,54 @@ function distanciaMetros(lat1, lng1, lat2, lng2) {
 }
 
 /**
- * Reverse geocoding via helper centralizado.
- * 🔄 2026-05-23: tolerância aumentada de 22m pra 55m (mais cache hits).
+ * Reverse geocoding via Google Maps — converte lat/lng em endereço formatado.
+ * Consulta cache `enderecos_geocodificados` primeiro, depois Google se miss.
+ * Retorna string ou null se falhar.
  */
 async function reverseGeocode(pool, latitude, longitude) {
-  const { geocodeReverse } = require('../../../shared/geocodeHelper');
-  const r = await geocodeReverse(pool, latitude, longitude, { source: 'coleta-motoboy-reverse' });
-  return r ? r.endereco_formatado : null;
+  const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!GOOGLE_API_KEY) {
+    console.warn('[coleta] GOOGLE_GEOCODING_API_KEY não configurada — sem reverse geocoding');
+    return null;
+  }
+
+  const lat = parseFloat(latitude);
+  const lng = parseFloat(longitude);
+  if (isNaN(lat) || isNaN(lng)) return null;
+
+  // 1) Cache (raio ~22m — 0.0002 grau)
+  try {
+    const cache = await pool.query(
+      `SELECT endereco_formatado FROM enderecos_geocodificados
+         WHERE latitude BETWEEN $1 - 0.0002 AND $1 + 0.0002
+           AND longitude BETWEEN $2 - 0.0002 AND $2 + 0.0002
+         LIMIT 1`,
+      [lat, lng]
+    );
+    if (cache.rows.length > 0) return cache.rows[0].endereco_formatado;
+  } catch (e) {
+    console.warn('[coleta] reverse cache falhou:', e.message);
+  }
+
+  // 2) Google
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results && data.results.length > 0) {
+      const endereco = data.results[0].formatted_address;
+      // Salva no cache (fire & forget)
+      pool.query(
+        `INSERT INTO enderecos_geocodificados (endereco_busca, endereco_busca_normalizado, endereco_formatado, latitude, longitude, fonte)
+         VALUES ($1, $1, $2, $3, $4, 'google-reverse-coleta') ON CONFLICT DO NOTHING`,
+        [`${lat},${lng}`, endereco, lat, lng]
+      ).catch(() => {});
+      return endereco;
+    }
+  } catch (e) {
+    console.warn('[coleta] reverseGeocode Google falhou:', e.message);
+  }
+  return null;
 }
 
 /**
@@ -381,7 +434,7 @@ function createColetaMotoboyRoutes(pool, verificarToken) {
       let coordsEnderecoNF = null;
       if (dadosNF.endereco_nf) {
         try {
-          coordsEnderecoNF = await forwardGeocode(pool, dadosNF.endereco_nf);
+          coordsEnderecoNF = await forwardGeocode(dadosNF.endereco_nf);
           if (coordsEnderecoNF) {
             distanciaMetrosNF = distanciaMetros(
               latitude, longitude,

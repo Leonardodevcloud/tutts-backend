@@ -18,39 +18,34 @@ const { consultarReceita } = require('../consultar-receita');
 const { validarFotoNfPreview } = require('../validar-foto-nf-preview');
 
 // ── 2026-05: Geocoding helpers para Path B (distância Receita↔GPS) e Path F (CEP) ──
-// 🔄 2026-05-23: Migrado pro helper compartilhado que usa cache enderecos_geocodificados.
-// Antes: chamava maps.googleapis.com direto, ignorando cache → desperdício de US$.
-// Agora: passa pelo geocodeHelper centralizado.
-const { geocodeForward, geocodeReverse } = require('../../../shared/geocodeHelper');
-
-async function geocodarEndereco(pool, enderecoTexto) {
-  const r = await geocodeForward(pool, enderecoTexto, { source: 'agent-correcao-forward' });
-  return r ? { lat: r.latitude, lng: r.longitude } : null;
+// Usa Google Geocoding API (mesma chave já usada em historico.routes.js / playwright-agent.js).
+// Falha silenciosa: se geocode falhar, o path correspondente fica sem score (não bloqueia).
+async function geocodarEndereco(enderecoTexto) {
+  const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY;
+  if (!key || !enderecoTexto) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(enderecoTexto)}&key=${key}&language=pt-BR&components=country:BR`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    if (data.status === 'OK' && data.results && data.results[0]) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
 }
 
-async function reverseGeocodeCep(pool, lat, lng) {
-  // Usa o helper pra reverse geocoding (cache + Google fallback).
-  // Mas precisamos do CEP especificamente — então se o resultado vier do cache
-  // sem CEP gravado, ainda assim batemos no Google pra pegar address_components.
-  // Otimização: poderia ter coluna `postal_code` no enderecos_geocodificados.
+async function reverseGeocodeCep(lat, lng) {
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY;
   if (!key || !Number.isFinite(parseFloat(lat)) || !Number.isFinite(parseFloat(lng))) return null;
-
-  // Primeiro tenta pegar do cache via helper (não custa nada)
-  const cached = await geocodeReverse(pool, lat, lng, { source: 'agent-correcao-cep', tolerancia_graus: 0.0003 });
-  // Cache só tem endereco_formatado, não tem CEP estruturado.
-  // Tenta extrair CEP do texto formatado (Google usa padrão "XXXXX-XXX, ...")
-  if (cached && cached.endereco_formatado) {
-    const m = String(cached.endereco_formatado).match(/(\d{5})-?(\d{3})/);
-    if (m) return m[1] + m[2];
-  }
-
-  // Sem CEP no cache → busca direta no Google (caso raro depois da migração)
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}&language=pt-BR`;
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await r.json();
     if (data.status !== 'OK' || !data.results) return null;
+    // Procura postal_code em qualquer um dos results
     for (const result of data.results) {
       const comp = (result.address_components || []).find(c => (c.types || []).includes('postal_code'));
       if (comp && comp.long_name) {
@@ -331,8 +326,8 @@ function createCorrecaoRoutes(pool) {
         if (receita && receita.ok && receita.endereco && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
           try {
             const [geoReceita, cep] = await Promise.all([
-              geocodarEndereco(pool, receita.endereco),
-              reverseGeocodeCep(pool, motoboy_lat, motoboy_lng),
+              geocodarEndereco(receita.endereco),
+              reverseGeocodeCep(motoboy_lat, motoboy_lng),
             ]);
             cepGps = cep;
             if (geoReceita) {

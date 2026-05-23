@@ -783,18 +783,23 @@ process.on('SIGINT', async () => {
 //     o cron do dia seguinte não vai compensar — com diário fica
 //     mais simples adicionar retry-guard depois se precisar
 // ════════════════════════════════════════════════════════════
-const { executarAutomacaoEmLote } = require('./src/modules/cs/cs.email-automacao.worker');
-cron.schedule('0 6 * * *', withCronLock(pool, 'csAutomacaoEmail', async () => {
-  console.log('📧 [CRON] Verificando automação de email do CS...');
-  try {
-    const r = await executarAutomacaoEmLote(pool);
-    if (r.skipped) {
-      console.log(`📧 [CRON] CS Automação pulada — hoje=${r.hoje}, dia configurado=${r.dia_configurado}`);
-    } else {
-      console.log(`📧 [CRON] CS Automação concluída — ${r.sucessos}/${r.total} sucessos, ${r.falhas} falhas`);
-    }
-  } catch (err) {
-    console.error('❌ [CRON] Erro CS Automação:', err.message);
-  }
-}), { timezone: 'America/Bahia' });
-console.log('✅ [Worker] Cron CS Automação Email registrado (06:00 diário, processa no dia configurado)');
+// 🔕 2026-05-23: Cron de automação de email CS DESATIVADO
+// Motivo: dispara Raio-X que faz geocoding massivo (vimos 8.569 calls num
+// único dia 05/mai = US$ 42 num só dia). Raio-X foi descontinuado por
+// custos incontroláveis. Mantemos o require + cron comentados pra histórico.
+//
+// const { executarAutomacaoEmLote } = require('./src/modules/cs/cs.email-automacao.worker');
+// cron.schedule('0 6 * * *', withCronLock(pool, 'csAutomacaoEmail', async () => {
+//   console.log('📧 [CRON] Verificando automação de email do CS...');
+//   try {
+//     const r = await executarAutomacaoEmLote(pool);
+//     if (r.skipped) {
+//       console.log(`📧 [CRON] CS Automação pulada — hoje=${r.hoje}, dia configurado=${r.dia_configurado}`);
+//     } else {
+//       console.log(`📧 [CRON] CS Automação concluída — ${r.sucessos}/${r.total} sucessos, ${r.falhas} falhas`);
+//     }
+//   } catch (err) {
+//     console.error('❌ [CRON] Erro CS Automação:', err.message);
+//   }
+// }), { timezone: 'America/Bahia' });
+console.log('🔕 [Worker] Cron CS Automação Email DESATIVADO (Raio-X descontinuado em 23/05/2026)');

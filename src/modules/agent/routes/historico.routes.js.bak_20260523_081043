@@ -491,20 +491,21 @@ function createHistoricoRoutes(pool, verificarAdmin) {
 
       for (const row of rows) {
         try {
-          // 🔄 2026-05-23: usa helper com cache (era fetch direto)
-          const { geocodeForward } = require('../../../shared/geocodeHelper');
-          const geo = await geocodeForward(pool, row.endereco_antigo, { source: 'agent-historico' });
-          if (geo) {
+          const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(row.endereco_antigo)}&key=${GOOGLE_API_KEY}&language=pt-BR&components=country:BR`;
+          const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(8000) });
+          const geoData = await geoRes.json();
+          if (geoData.status === 'OK' && geoData.results && geoData.results[0]) {
+            const loc = geoData.results[0].geometry.location;
             await pool.query(
               `UPDATE ajustes_automaticos SET endereco_antigo_lat = $1, endereco_antigo_lng = $2 WHERE id = $3`,
-              [geo.latitude, geo.longitude, row.id]
+              [loc.lat, loc.lng, row.id]
             );
             processados++;
           } else {
             erros++;
           }
-          // Delay pra não estourar rate limit do Google (cache hit não tem delay)
-          if (geo && geo.fonte === 'google') await new Promise(r => setTimeout(r, 200));
+          // Pequeno delay para não estourar rate limit da API
+          await new Promise(r => setTimeout(r, 200));
         } catch {
           erros++;
         }

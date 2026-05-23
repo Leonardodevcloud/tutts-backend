@@ -404,16 +404,25 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       log('♻️  Usando sessão salva');
     }
 
-    context = await browser.newContext({
-      ...contextOptions,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
-    });
+    // 🛡️ FIX 2026-05: timeouts cirúrgicos. Quando o BrowserSession persistente
+    // fica em estado zumbi (isConnected()=true mas WS travado), newContext()
+    // e newPage() penduram pra sempre. Sem timeout aqui, o slot do browser-pool
+    // ficaria preso indefinidamente. Defesa local antes do timeout global do
+    // agent-pool (que também marca BrowserSession como morto se disparar).
+    context = await comTimeout(
+      browser.newContext({
+        ...contextOptions,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+        viewport: { width: 1280, height: 900 },
+      }),
+      15_000,
+      'browser.newContext'
+    );
 
     // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
-    await aplicarBloqueio(context, 'agent-correcao');
+    await comTimeout(aplicarBloqueio(context, 'agent-correcao'), 10_000, 'aplicarBloqueio');
 
-    page = await context.newPage();
+    page = await comTimeout(context.newPage(), 10_000, 'context.newPage');
     page.setDefaultTimeout(TIMEOUT);
 
     // ── Passo 1: Autenticação + ir para acompanhamento ───────────────────────
@@ -1106,14 +1115,17 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
       // Resolver o endereço legível via geocodificação reversa
       if (!enderecoParaPreencher || /^-?\d+\.\d+/.test(enderecoParaPreencher)) {
-        // 🔄 2026-05-23: usa helper com cache (era fetch direto)
+        // Fazer geocodificação reversa para obter endereço legível
         try {
-          const { pool } = require('../../config/database');
-          const { geocodeReverse } = require('../../shared/geocodeHelper');
-          const geo = await geocodeReverse(pool, latitude, longitude, { source: 'playwright-agent-reverse' });
-          if (geo && geo.endereco_formatado) {
-            enderecoParaPreencher = geo.endereco_formatado;
-            log(`📍 Endereço via geocode (${geo.fonte}): ${enderecoParaPreencher}`);
+          const GOOGLE_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY;
+          if (GOOGLE_API_KEY) {
+            const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_API_KEY}&language=pt-BR`;
+            const geoRes = await fetch(geoUrl);
+            const geoData = await geoRes.json();
+            if (geoData.status === 'OK' && geoData.results?.[0]) {
+              enderecoParaPreencher = geoData.results[0].formatted_address;
+              log(`📍 Endereço via geocode: ${enderecoParaPreencher}`);
+            }
           }
         } catch (geoErr) {
           log(`⚠️ Geocode falhou: ${geoErr.message}`);
