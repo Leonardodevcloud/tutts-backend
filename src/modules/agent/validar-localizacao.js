@@ -16,6 +16,76 @@ const { logger } = require('../../config/logger');
 
 function log(msg) { logger.info(`[validar-loc] ${msg}`); }
 
+// ════════════════════════════════════════════════════════════
+// CACHE REGIONAL DE PLACES API (permanente, sem TTL)
+// ════════════════════════════════════════════════════════════
+//
+// Por que existe: motoboys entregam em regiões repetidamente. A mesma região
+// (mesmo bairro, mesma rua) gera coordenadas com diferença de até 50-100m.
+// Places API custa US$ 32/1000 chamadas. Cache regional reduz isso pra perto
+// de zero pra regiões já conhecidas.
+//
+// Estratégia de chave: arredonda lat/lng pra 3 casas decimais. Cada chave
+// representa um "tile" de ~110m × 110m. Todas as buscas dentro desse tile
+// reusam o mesmo cache. Estabelecimentos automotivos raramente fecham/abrem
+// em escala que justifique TTL — cache permanente é a escolha aqui.
+//
+// Tabela criada via SQL (não migration JS): sql/criar-places-cache.sql
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Gera chave de cache regional arredondando lat/lng pra 3 casas decimais.
+ * Resolução ~110m por tile. Ex: -12.951234 → -12.951
+ */
+function gerarChaveCacheRegional(lat, lng) {
+  const latR = Math.round(parseFloat(lat) * 1000) / 1000;
+  const lngR = Math.round(parseFloat(lng) * 1000) / 1000;
+  return `${latR.toFixed(3)},${lngR.toFixed(3)}`;
+}
+
+/**
+ * Busca no cache regional. Retorna array de places ou null se miss.
+ */
+async function consultarCacheRegional(pool, cacheKey) {
+  try {
+    const r = await pool.query(
+      `SELECT estabelecimentos FROM places_nearby_cache WHERE chave_regional = $1 LIMIT 1`,
+      [cacheKey]
+    );
+    if (r.rows.length === 0) return null;
+    // Atualiza contador (best-effort, não bloqueia)
+    pool.query(
+      `UPDATE places_nearby_cache SET acessos = acessos + 1, ultimo_acesso = NOW() WHERE chave_regional = $1`,
+      [cacheKey]
+    ).catch(() => {});
+    return r.rows[0].estabelecimentos || [];
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Grava resultado da Places API no cache regional.
+ * Permanente — sem TTL, sobrescreve se já existe (caso raro).
+ */
+async function gravarCacheRegional(pool, cacheKey, lat, lng, places) {
+  if (!places || !Array.isArray(places)) return;
+  try {
+    await pool.query(
+      `INSERT INTO places_nearby_cache (chave_regional, lat_centro, lng_centro, estabelecimentos)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT (chave_regional) DO UPDATE
+         SET estabelecimentos = EXCLUDED.estabelecimentos,
+             ultimo_acesso = NOW(),
+             acessos = places_nearby_cache.acessos + 1`,
+      [cacheKey, parseFloat(lat), parseFloat(lng), JSON.stringify(places)]
+    );
+    log(`✅ Cache regional gravado: ${cacheKey} (${places.length} estabelecimentos)`);
+  } catch (e) {
+    log(`⚠️ Falha gravar cache regional: ${e.message}`);
+  }
+}
+
 /**
  * Valida o conteúdo da foto E extrai o nome do estabelecimento em UMA chamada ao Gemini
  */
@@ -114,10 +184,33 @@ Se foto_valida=false, preencha motivo_rejeicao com feedback claro pro motoboy.`
 
 /**
  * Busca estabelecimentos próximos via Google Places API (New)
+ *
+ * 🔄 2026-05-23: Adicionado cache regional (places_nearby_cache).
+ * Como motoboys entregam em regiões repetidamente (mesma rua, mesmo bairro),
+ * uma busca por estabelecimentos próximos com ~50m de raio retorna basicamente
+ * os mesmos lugares. Em vez de pagar US$ 0,032 cada vez, batemos no cache.
+ *
+ * Estratégia: arredonda lat/lng pra 3 casas decimais (~110m de tile). Todas as
+ * buscas dentro desse tile reusam o mesmo cache. TTL 30 dias (estabelecimentos
+ * raramente mudam tão rápido).
  */
 async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
   const apiKey = process.env.GOOGLE_GEOCODING_API_KEY;
   if (!apiKey) { log('⚠️ GOOGLE_GEOCODING_API_KEY não configurada'); return []; }
+
+  // 🔄 Cache regional
+  const cacheKey = gerarChaveCacheRegional(lat, lng);
+  let pool;
+  try {
+    pool = require('../../config/database').pool;
+    const cached = await consultarCacheRegional(pool, cacheKey);
+    if (cached) {
+      log(`📍 Places cache HIT (${cacheKey}, ${cached.length} estabelecimentos)`);
+      return cached;
+    }
+  } catch (e) {
+    log(`⚠️ Cache regional indisponível: ${e.message}`);
+  }
 
   const url = 'https://places.googleapis.com/v1/places:searchNearby';
 
@@ -159,7 +252,7 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
       tipos: p.types || [],
     }));
 
-    log(`📍 Nearby: ${places.length} resultado(s)`);
+    log(`📍 Nearby: ${places.length} resultado(s) 💸 (US$ 0.032)`);
 
     // Sempre complementar com Text Search automotivo
     const textPlaces = await buscarTextSearch(lat, lng, raioMetros, apiKey);
@@ -168,6 +261,13 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
       const novos = textPlaces.filter(p => !nomesExistentes.has(normalizar(p.nome)));
       places.push(...novos);
       log(`📍 +TextSearch: ${novos.length} novo(s), total ${places.length}`);
+    }
+
+    // 🔄 Grava no cache regional (permanente, sem TTL)
+    if (pool) {
+      gravarCacheRegional(pool, cacheKey, lat, lng, places).catch(e => {
+        log(`⚠️ Falha ao gravar cache regional: ${e.message}`);
+      });
     }
 
     return places;
@@ -224,6 +324,7 @@ async function buscarTextSearch(lat, lng, raioMetros, apiKey) {
         lng: p.location?.longitude,
       }));
       todosResultados.push(...places);
+      log(`💸 TextSearch "${textQuery.substring(0, 25)}" → ${places.length} (US$ 0.032)`);
     } catch (err) { /* ignora */ }
   }
 
