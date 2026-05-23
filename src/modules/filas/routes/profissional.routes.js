@@ -15,7 +15,8 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
     try {
       const cod_profissional = req.user.codProfissional;
       const vinculo = await pool.query(`
-        SELECT v.*, c.nome as central_nome, c.endereco, c.latitude, c.longitude, c.raio_metros, c.ativa
+        SELECT v.*, c.nome as central_nome, c.endereco, c.latitude, c.longitude, c.raio_metros, c.ativa,
+               c.tipo, c.mostrar_nomes_publicos
         FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id
         WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
       `, [cod_profissional]);
