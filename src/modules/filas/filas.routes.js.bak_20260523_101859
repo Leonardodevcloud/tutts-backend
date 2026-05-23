@@ -1,0 +1,15 @@
+const express = require('express');
+const { createFilasAdminRoutes } = require('./routes/admin.routes');
+const { createFilasProfRoutes } = require('./routes/profissional.routes');
+const { createFilasAutoRoutes } = require('./routes/auto.routes');
+
+function createFilasRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
+  const router = express.Router();
+  router.use(createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+  router.use(createFilasProfRoutes(pool, verificarToken, registrarAuditoria));
+  // 🆕 2026-05: Fila auto-gerenciável (motoboys se organizam + agente Playwright valida)
+  router.use(createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+  return router;
+}
+
+module.exports = { createFilasRouter };
