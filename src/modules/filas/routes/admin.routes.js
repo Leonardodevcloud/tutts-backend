@@ -32,15 +32,16 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     try {
       const { nome, endereco, latitude, longitude, raio_metros } = req.body;
       
-      if (!nome || !endereco || !latitude || !longitude) {
-        return res.status(400).json({ error: 'Dados obrigatórios: nome, endereco, latitude, longitude' });
+      // 🆕 2026-05: endereço é opcional (central auto-gerenciável pode ser ponto de GPS sem rua nominal)
+      if (!nome || !latitude || !longitude) {
+        return res.status(400).json({ error: 'Dados obrigatórios: nome, latitude, longitude' });
       }
       
       const result = await pool.query(`
         INSERT INTO filas_centrais (nome, endereco, latitude, longitude, raio_metros)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING *
-      `, [nome, endereco, latitude, longitude, raio_metros || 900]);
+      `, [nome, endereco || null, latitude, longitude, raio_metros || 900]);
       
       await registrarAuditoria(req, 'CRIAR_CENTRAL_FILA', 'admin', 'filas_centrais', result.rows[0].id, { nome, endereco });
       
