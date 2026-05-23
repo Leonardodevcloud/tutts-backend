@@ -26,43 +26,11 @@ router.get('/disponibilidade', async (req, res) => {
     const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
     const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
     const linhas = await pool.query('SELECT * FROM disponibilidade_linhas ORDER BY id');
-
-    // 🆕 2026-05: enriquecer linhas com foto do motoboy (vinda de users)
-    // Estratégia: 1 query agregada com todos os cods únicos, depois Map em JS.
-    // CRM não tem foto, então só users. Quem não tem login na Central fica
-    // sem foto e o frontend renderiza avatar com iniciais (fallback gráfico).
-    let linhasEnriched = linhas.rows;
-    try {
-      const codsUnicos = Array.from(new Set(
-        linhas.rows
-          .map(l => (l.cod_profissional || '').toString().trim())
-          .filter(c => c.length > 0)
-      ));
-      if (codsUnicos.length > 0) {
-        const fotosResult = await pool.query(`
-          SELECT
-            TRIM(cod_profissional)::text AS cod,
-            COALESCE(foto_thumb, foto_selfie) AS foto
-          FROM users
-          WHERE TRIM(cod_profissional) = ANY($1::text[])
-            AND (foto_thumb IS NOT NULL OR foto_selfie IS NOT NULL)
-        `, [codsUnicos]);
-        const fotoPorCod = new Map();
-        fotosResult.rows.forEach(r => { if (r.cod && r.foto) fotoPorCod.set(r.cod, r.foto); });
-        linhasEnriched = linhas.rows.map(l => ({
-          ...l,
-          foto: fotoPorCod.get((l.cod_profissional || '').toString().trim()) || null
-        }));
-        console.log(`📊 Disp: ${codsUnicos.length} cods | ${fotoPorCod.size} com foto`);
-      }
-    } catch (e) {
-      console.log('⚠️ Erro ao enriquecer fotos (segue sem):', e.message);
-    }
-
+    
     res.json({
       regioes: regioes.rows,
       lojas: lojas.rows,
-      linhas: linhasEnriched
+      linhas: linhas.rows
     });
   } catch (err) {
     console.error('❌ Erro ao buscar disponibilidade:', err);
