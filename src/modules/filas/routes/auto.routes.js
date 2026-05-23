@@ -32,7 +32,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // Hibrído: motoboy entra na hora (com GPS + sem corrida ativa cacheada);
   // o agente Playwright valida em background (varredura ~30s) e remove
   // automaticamente se detectar corrida ativa.
-  router.post('/filas/auto/entrar', verificarToken, async (req, res) => {
+  router.post('/auto/entrar', verificarToken, async (req, res) => {
     try {
       const cod_profissional = req.user.codProfissional;
       const nome_profissional = req.user.nome;
@@ -163,7 +163,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   MOTOBOY — sair da fila (manual)
   // ═══════════════════════════════════════════════════════════════════════
-  router.post('/filas/auto/sair', verificarToken, async (req, res) => {
+  router.post('/auto/sair', verificarToken, async (req, res) => {
     const client = await pool.connect();
     try {
       const cod_profissional = req.user.codProfissional;
@@ -237,7 +237,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   MOTOBOY — minha posição
   // ═══════════════════════════════════════════════════════════════════════
-  router.get('/filas/auto/minha-posicao', verificarToken, async (req, res) => {
+  router.get('/auto/minha-posicao', verificarToken, async (req, res) => {
     try {
       const cod_profissional = req.user.codProfissional;
       const r = await pool.query(
@@ -281,7 +281,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   // Respeita config mostrar_nomes_publicos: se false, retorna apenas posições.
   // Foto vem via /perfil/fotos no frontend (padrão Saques/Filas).
-  router.get('/filas/auto/fila-publica/:central_id', verificarToken, async (req, res) => {
+  router.get('/auto/fila-publica/:central_id', verificarToken, async (req, res) => {
     try {
       const centralId = parseInt(req.params.central_id, 10);
       if (isNaN(centralId)) return res.status(400).json({ error: 'central_id inválido' });
@@ -320,7 +320,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   ADMIN — config da central
   // ═══════════════════════════════════════════════════════════════════════
-  router.patch('/filas/auto/admin/centrais/:id/config', verificarToken, verificarAdmin, async (req, res) => {
+  router.patch('/auto/admin/centrais/:id/config', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const centralId = parseInt(req.params.id, 10);
       if (isNaN(centralId)) return res.status(400).json({ error: 'id inválido' });
@@ -358,7 +358,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   ADMIN — reordenar motoboy
   // ═══════════════════════════════════════════════════════════════════════
-  router.post('/filas/auto/admin/reordenar', verificarToken, verificarAdmin, async (req, res) => {
+  router.post('/auto/admin/reordenar', verificarToken, verificarAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
       const { central_id, cod_profissional, nova_posicao } = req.body;
@@ -392,7 +392,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   ADMIN — remover motoboy (emergência)
   // ═══════════════════════════════════════════════════════════════════════
-  router.post('/filas/auto/admin/remover-emergencia', verificarToken, verificarAdmin, async (req, res) => {
+  router.post('/auto/admin/remover-emergencia', verificarToken, verificarAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
       const { central_id, cod_profissional, motivo } = req.body;
@@ -442,7 +442,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   ADMIN — log do agente (últimos N eventos)
   // ═══════════════════════════════════════════════════════════════════════
-  router.get('/filas/auto/admin/logs/:central_id', verificarToken, verificarAdmin, async (req, res) => {
+  router.get('/auto/admin/logs/:central_id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const centralId = parseInt(req.params.central_id, 10);
       const limite = Math.min(parseInt(req.query.limit, 10) || 50, 200);
@@ -466,7 +466,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   //   ADMIN — dashboard completo da central
   // ═══════════════════════════════════════════════════════════════════════
-  router.get('/filas/auto/admin/fila-completa/:central_id', verificarToken, async (req, res) => {
+  router.get('/auto/admin/fila-completa/:central_id', verificarToken, async (req, res) => {
     try {
       const centralId = parseInt(req.params.central_id, 10);
       if (isNaN(centralId)) return res.status(400).json({ error: 'central_id inválido' });
@@ -526,7 +526,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   // ═══════════════════════════════════════════════════════════════════════
   // Útil pra troubleshooting e pra ver efeito imediato sem esperar o cron.
   // O agente principal continua rodando no intervalo normal.
-  router.post('/filas/auto/admin/varredura-agora', verificarToken, verificarAdmin, async (req, res) => {
+  router.post('/auto/admin/varredura-agora', verificarToken, verificarAdmin, async (req, res) => {
     try {
       // Lazy-require pra evitar circular se o agente decidir importar daqui
       const filaValidador = require('../fila-validador.service');
