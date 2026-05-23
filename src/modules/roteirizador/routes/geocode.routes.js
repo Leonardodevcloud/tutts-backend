@@ -12,8 +12,12 @@ function detectarEnderecoPosicional(endereco) {
     // Padrão 1: sigla maiúscula de 2-5 letras seguida (com ou sem espaço) de número.
     // Cobre SQN 302, CLN 310, QI 23, SHIS 12, AOS 5, EQN 404, QNL 20, QMSW 1, AE 4, etc.
     if (/\b[A-Z]{2,5}\s*\d/.test(norm)) return true;
-    // Padrão 2: palavras-chave explícitas de endereço posicional seguidas de identificador
-    if (/\b(QUADRA|QD\.?|LOTE|LT\.?|SETOR|BLOCO|CONJUNTO|CONJ\.?)\s+[A-Z0-9]/.test(norm)) return true;
+    // Padrão 2: palavras-chave explícitas de endereço posicional seguidas de identificador.
+    // Inclui formas abreviadas comuns em Goiânia (ST. = Setor, JD. = Jardim, PQ. = Parque, RES. = Residencial).
+    if (/\b(QUADRA|QD\.?|LOTE|LT\.?|SETOR|ST\.?|BLOCO|BL\.?|CONJUNTO|CONJ\.?|JARDIM|JD\.?|PARQUE|PQ\.?|RESIDENCIAL|RES\.?|VILA|VL\.?)\s+[A-Z0-9]/.test(norm)) return true;
+    // Padrão 3: avenidas/ruas com nomenclatura alfanumérica de Goiânia (Av. T-32, Rua T-3, Av. C-205, Alameda 1).
+    // Casa "AV X-NN", "RUA X-NN", "ALAMEDA NN" e similares.
+    if (/\b(AV|AVENIDA|R|RUA|ALAMEDA|AL|TRAVESSA|TV)\.?\s+[A-Z]?-?\d+/.test(norm)) return true;
     return false;
 }
 
