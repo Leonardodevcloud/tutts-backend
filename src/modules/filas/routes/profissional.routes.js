@@ -14,9 +14,13 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
   router.get('/minha-central', verificarToken, async (req, res) => {
     try {
       const cod_profissional = req.user.codProfissional;
+      // 🔄 2026-05-24: SELECT explícito (sem v.*) pra evitar v.id sobrescrever c.id.
+      // ANTES: minhaCentral.id era o id do VÍNCULO (v.id), não da central — quebrava
+      // chamadas tipo /fila-publica/{id} que precisam do id real da central.
       const vinculo = await pool.query(`
-        SELECT v.*, c.nome as central_nome, c.endereco, c.latitude, c.longitude, c.raio_metros, c.ativa,
-               c.tipo, c.mostrar_nomes_publicos
+        SELECT c.id, c.nome as central_nome, c.endereco, c.latitude, c.longitude,
+               c.raio_metros, c.ativa, c.tipo, c.mostrar_nomes_publicos,
+               v.cod_profissional, v.nome_profissional, v.ativo
         FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id
         WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
       `, [cod_profissional]);
