@@ -489,12 +489,27 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       );
       if (centralR.rows.length === 0) return res.status(404).json({ error: 'Central não encontrada ou não é auto' });
 
+      // 🆕 2026-05-24: enriquece cada motoboy com info de alocação na disponibilidade.
+      // LEFT JOIN LATERAL pega a primeira linha do motoboy em disponibilidade_linhas
+      // (se existir). Se não tiver linha, alocado=NULL → frontend mostra badge
+      // vermelho "Sem disponibilidade" pra forçar admin a alocar.
       const filaR = await pool.query(
-        `SELECT cod_profissional, nome_profissional, posicao, status, entrada_fila_at,
-                agente_status, agente_ultima_validacao_at, corridas_ativas_count
-           FROM filas_posicoes
-          WHERE central_id = $1 AND status = 'aguardando'
-          ORDER BY posicao ASC`,
+        `SELECT p.cod_profissional, p.nome_profissional, p.posicao, p.status, p.entrada_fila_at,
+                p.agente_status, p.agente_ultima_validacao_at, p.corridas_ativas_count,
+                (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
+                d.loja_nome              AS disponibilidade_loja,
+                d.status_atual           AS disponibilidade_status
+           FROM filas_posicoes p
+           LEFT JOIN LATERAL (
+             SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
+               FROM disponibilidade_linhas dl
+               JOIN disponibilidade_lojas l ON l.id = dl.loja_id
+              WHERE dl.cod_profissional = p.cod_profissional
+              ORDER BY dl.id ASC
+              LIMIT 1
+           ) d ON TRUE
+          WHERE p.central_id = $1 AND p.status = 'aguardando'
+          ORDER BY p.posicao ASC`,
         [centralId]
       );
 
@@ -502,17 +517,31 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       // pra admin visualizar quem foi despachado, no layout 2 colunas idêntico
       // ao da fila clássica.
       const emRotaR = await pool.query(
-        `SELECT cod_profissional, nome_profissional, status, saida_rota_at,
-                agente_status, corridas_ativas_count,
-                ROUND(EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60)::int AS minutos_em_rota
-           FROM filas_posicoes
-          WHERE central_id = $1 AND status = 'em_rota'
-          ORDER BY saida_rota_at ASC`,
+        `SELECT p.cod_profissional, p.nome_profissional, p.status, p.saida_rota_at,
+                p.agente_status, p.corridas_ativas_count,
+                ROUND(EXTRACT(EPOCH FROM (NOW() - p.saida_rota_at))/60)::int AS minutos_em_rota,
+                (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
+                d.loja_nome              AS disponibilidade_loja,
+                d.status_atual           AS disponibilidade_status
+           FROM filas_posicoes p
+           LEFT JOIN LATERAL (
+             SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
+               FROM disponibilidade_linhas dl
+               JOIN disponibilidade_lojas l ON l.id = dl.loja_id
+              WHERE dl.cod_profissional = p.cod_profissional
+              ORDER BY dl.id ASC
+              LIMIT 1
+           ) d ON TRUE
+          WHERE p.central_id = $1 AND p.status = 'em_rota'
+          ORDER BY p.saida_rota_at ASC`,
         [centralId]
       );
 
       // Alertas: em rota há mais de 90 min
       const alertasArr = emRotaR.rows.filter(r => (r.minutos_em_rota || 0) > 90);
+
+      // 🆕 2026-05-24: KPI de motoboys aguardando SEM alocação na disponibilidade
+      const semAlocacao = filaR.rows.filter(p => !p.disponibilidade_alocado).length;
 
       // Bloqueados recentes (últimos eventos de bloqueou_entrada nas últimas 24h)
       const bloqR = await pool.query(
@@ -544,6 +573,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         alertas: alertasArr,           // 🆕 2026-05-24
         bloqueados: bloqR.rows,
         kpis: kpisR.rows[0],
+        total_sem_disponibilidade: semAlocacao,  // 🆕 2026-05-24
       });
     } catch (err) {
       console.error('❌ [fila-auto/admin/fila-completa]', err);

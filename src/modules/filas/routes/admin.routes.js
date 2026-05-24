@@ -195,24 +195,53 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     try {
       const { id } = req.params;
       
+      // 🆕 2026-05-24: enriquece cada motoboy com info de alocação na disponibilidade.
+      // LEFT JOIN LATERAL pega a primeira linha do motoboy em disponibilidade_linhas
+      // (se existir) e o nome da loja. Se não tiver linha, alocado=NULL → frontend
+      // mostra badge vermelho "Sem disponibilidade" pra forçar admin a alocar.
       const aguardando = await pool.query(`
-        SELECT *, 
-               EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando,
-               EXTRACT(EPOCH FROM (NOW() - primeira_nota_at))/60 as minutos_desde_primeira_nota
-        FROM filas_posicoes 
-        WHERE central_id = $1 AND status = 'aguardando'
-        ORDER BY posicao ASC
+        SELECT p.*, 
+               EXTRACT(EPOCH FROM (NOW() - p.entrada_fila_at))/60 as minutos_esperando,
+               EXTRACT(EPOCH FROM (NOW() - p.primeira_nota_at))/60 as minutos_desde_primeira_nota,
+               (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
+               d.loja_nome              AS disponibilidade_loja,
+               d.status_atual           AS disponibilidade_status
+        FROM filas_posicoes p
+        LEFT JOIN LATERAL (
+          SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
+            FROM disponibilidade_linhas dl
+            JOIN disponibilidade_lojas l ON l.id = dl.loja_id
+           WHERE dl.cod_profissional = p.cod_profissional
+           ORDER BY dl.id ASC
+           LIMIT 1
+        ) d ON TRUE
+        WHERE p.central_id = $1 AND p.status = 'aguardando'
+        ORDER BY p.posicao ASC
       `, [id]);
       
       const emRota = await pool.query(`
-        SELECT *,
-               EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60 as minutos_em_rota
-        FROM filas_posicoes 
-        WHERE central_id = $1 AND status = 'em_rota'
-        ORDER BY saida_rota_at ASC
+        SELECT p.*,
+               EXTRACT(EPOCH FROM (NOW() - p.saida_rota_at))/60 as minutos_em_rota,
+               (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
+               d.loja_nome              AS disponibilidade_loja,
+               d.status_atual           AS disponibilidade_status
+        FROM filas_posicoes p
+        LEFT JOIN LATERAL (
+          SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
+            FROM disponibilidade_linhas dl
+            JOIN disponibilidade_lojas l ON l.id = dl.loja_id
+           WHERE dl.cod_profissional = p.cod_profissional
+           ORDER BY dl.id ASC
+           LIMIT 1
+        ) d ON TRUE
+        WHERE p.central_id = $1 AND p.status = 'em_rota'
+        ORDER BY p.saida_rota_at ASC
       `, [id]);
       
       const alertas = emRota.rows.filter(p => p.minutos_em_rota > 90);
+      
+      // 🆕 2026-05-24: KPI de motoboys aguardando SEM alocação na disponibilidade
+      const semAlocacao = aguardando.rows.filter(p => !p.disponibilidade_alocado).length;
       
       res.json({ 
         success: true, 
@@ -220,7 +249,8 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         em_rota: emRota.rows,
         alertas: alertas,
         total_aguardando: aguardando.rows.length,
-        total_em_rota: emRota.rows.length
+        total_em_rota: emRota.rows.length,
+        total_sem_disponibilidade: semAlocacao    // 🆕 2026-05-24
       });
     } catch (error) {
       console.error('❌ Erro ao obter fila:', error);
