@@ -191,15 +191,24 @@ async function buscarProfissional(pool, cod) {
   const codStr = String(cod).trim();
   if (!codStr) return null;
 
+  // 🔧 v3 (2026-05-24): todas as fontes agora fazem lookup case-insensitive +
+  // resilientes a whitespace (LOWER(TRIM(...))). Alinhado com o resto do sistema
+  // (auth usa LOWER em todas as queries de cod_profissional).
+  // Evita falsos negativos quando o cod está cadastrado mas com case/whitespace
+  // diferente do digitado.
+  const codNorm = codStr.toLowerCase();
+  const tentativas = [];
+
   // 1º — CRM (fonte primária)
   try {
     const { rows } = await pool.query(
       `SELECT cod, nome, cidade, regiao, celular
          FROM crm_leads_capturados
-        WHERE cod = $1
+        WHERE LOWER(TRIM(cod)) = $1
         LIMIT 1`,
-      [codStr]
+      [codNorm]
     );
+    tentativas.push(`crm:${rows.length}`);
     if (rows.length > 0 && (rows[0].nome || rows[0].cidade || rows[0].regiao)) {
       const r = rows[0];
       return {
@@ -213,13 +222,15 @@ async function buscarProfissional(pool, cod) {
       };
     }
   } catch (err) {
+    tentativas.push(`crm:erro`);
     console.warn('[profissionaisLookup] Erro CRM:', err.message);
   }
 
   // 2º — Planilha (fallback legado)
   try {
     const rows = await _getPlanilhaRows();
-    const hit = rows.find(r => r.cod === codStr);
+    const hit = rows.find(r => String(r.cod || '').trim().toLowerCase() === codNorm);
+    tentativas.push(`planilha:${hit ? 1 : 0}`);
     if (hit && (hit.nome || hit.cidade)) {
       return {
         cod:      hit.cod,
@@ -231,21 +242,23 @@ async function buscarProfissional(pool, cod) {
       };
     }
   } catch (err) {
+    tentativas.push(`planilha:erro`);
     console.warn('[profissionaisLookup] Erro planilha:', err.message);
   }
 
   // 3º — disponibilidade_linhas (só nome)
   try {
     const { rows } = await pool.query(
-      `SELECT DISTINCT nome_profissional
+      `SELECT DISTINCT nome_profissional, cod_profissional
          FROM disponibilidade_linhas
-        WHERE cod_profissional = $1 AND nome_profissional IS NOT NULL
+        WHERE LOWER(TRIM(cod_profissional)) = $1 AND nome_profissional IS NOT NULL
         LIMIT 1`,
-      [codStr]
+      [codNorm]
     );
+    tentativas.push(`disp:${rows.length}`);
     if (rows.length > 0 && rows[0].nome_profissional) {
       return {
-        cod:      codStr,
+        cod:      rows[0].cod_profissional || codStr,
         nome:     rows[0].nome_profissional,
         cidade:   null,
         regiao:   null,
@@ -254,21 +267,23 @@ async function buscarProfissional(pool, cod) {
       };
     }
   } catch (err) {
+    tentativas.push(`disp:erro`);
     console.warn('[profissionaisLookup] Erro disponibilidade:', err.message);
   }
 
   // 4º — users (só nome)
   try {
     const { rows } = await pool.query(
-      `SELECT full_name
+      `SELECT full_name, cod_profissional
          FROM users
-        WHERE cod_profissional = $1
+        WHERE LOWER(TRIM(cod_profissional)) = $1
         LIMIT 1`,
-      [codStr]
+      [codNorm]
     );
+    tentativas.push(`users:${rows.length}`);
     if (rows.length > 0 && rows[0].full_name) {
       return {
-        cod:      codStr,
+        cod:      rows[0].cod_profissional || codStr,
         nome:     rows[0].full_name,
         cidade:   null,
         regiao:   null,
@@ -277,8 +292,16 @@ async function buscarProfissional(pool, cod) {
       };
     }
   } catch (err) {
+    tentativas.push(`users:erro`);
     console.warn('[profissionaisLookup] Erro users:', err.message);
   }
+
+  // 🔧 v3: log diagnóstico quando NÃO acha — ajuda a entender por qual fonte
+  // o cod passou. Cada tentativa mostra quantos hits teve (0 = não achou).
+  console.warn(
+    `[profissionaisLookup] cod="${codStr}" (norm="${codNorm}") NÃO encontrado em nenhuma fonte. ` +
+    `Tentativas: ${tentativas.join(' | ')}`
+  );
 
   return null;
 }

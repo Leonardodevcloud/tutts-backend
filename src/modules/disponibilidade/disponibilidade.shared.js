@@ -39,7 +39,11 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
   try {
     const origem = contexto.origem || 'fila';
     const alteradoPor = contexto.alterado_por || `Auto (${origem})`;
+    const codNorm = String(cod_profissional).trim().toLowerCase();
 
+    // 🔧 v3 (2026-05-24): LOWER(TRIM(...)) em ambos os lados — alinhado com o
+    // resto do sistema (auth usa case-insensitive); evita falsos negativos por
+    // diferença de case/whitespace entre fontes.
     // Atualiza somente linhas que NÃO estão já em EM LOJA (evita writes redundantes)
     const result = await pool.query(
       `UPDATE disponibilidade_linhas
@@ -47,10 +51,10 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
               status_alterado_por = $1,
               status_alterado_em = NOW(),
               updated_at = NOW()
-        WHERE cod_profissional = $2
+        WHERE LOWER(TRIM(cod_profissional)) = $2
           AND COALESCE(status, '') <> 'EM LOJA'
         RETURNING id, loja_id`,
-      [alteradoPor, String(cod_profissional)]
+      [alteradoPor, codNorm]
     );
 
     const atualizadas = result.rows.length;
@@ -59,6 +63,31 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
         `🏪 [disponibilidade.em-loja] cod=${cod_profissional} ` +
         `marcado EM LOJA em ${atualizadas} linha(s) | origem=${origem} | por=${alteradoPor}`
       );
+    } else {
+      // 🔧 v3: log diagnóstico quando NÃO marca nada — pode ser que:
+      // 1) já estava EM LOJA (idempotência funcionando)
+      // 2) não tem linha em disponibilidade_linhas (vai aparecer o badge "Sem Disponibilidade")
+      // O contador abaixo distingue os dois casos.
+      const checkR = await pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status = 'EM LOJA')::int AS ja_em_loja
+           FROM disponibilidade_linhas
+          WHERE LOWER(TRIM(cod_profissional)) = $1`,
+        [codNorm]
+      );
+      const total = checkR.rows[0]?.total || 0;
+      const jaEmLoja = checkR.rows[0]?.ja_em_loja || 0;
+      if (total === 0) {
+        console.log(
+          `🏪 [disponibilidade.em-loja] cod=${cod_profissional} NÃO tem linha em ` +
+          `disponibilidade_linhas | origem=${origem} (admin precisa alocar)`
+        );
+      } else {
+        console.log(
+          `🏪 [disponibilidade.em-loja] cod=${cod_profissional} já estava EM LOJA ` +
+          `em ${jaEmLoja}/${total} linha(s) | origem=${origem} (idempotente)`
+        );
+      }
     }
 
     return { atualizadas, lojas: result.rows };

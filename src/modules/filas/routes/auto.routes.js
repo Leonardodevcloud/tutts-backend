@@ -493,6 +493,9 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       // LEFT JOIN LATERAL pega a primeira linha do motoboy em disponibilidade_linhas
       // (se existir). Se não tiver linha, alocado=NULL → frontend mostra badge
       // vermelho "Sem disponibilidade" pra forçar admin a alocar.
+      // 🔧 v3 (2026-05-24): LOWER(TRIM(...)) em ambos os lados — alinhado com o
+      // resto do sistema (auth usa case-insensitive); evita falsos negativos por
+      // diferença de case/whitespace entre fontes.
       const filaR = await pool.query(
         `SELECT p.cod_profissional, p.nome_profissional, p.posicao, p.status, p.entrada_fila_at,
                 p.agente_status, p.agente_ultima_validacao_at, p.corridas_ativas_count,
@@ -504,7 +507,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
              SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
                FROM disponibilidade_linhas dl
                JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-              WHERE dl.cod_profissional = p.cod_profissional
+              WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
               ORDER BY dl.id ASC
               LIMIT 1
            ) d ON TRUE
@@ -528,7 +531,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
              SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
                FROM disponibilidade_linhas dl
                JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-              WHERE dl.cod_profissional = p.cod_profissional
+              WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
               ORDER BY dl.id ASC
               LIMIT 1
            ) d ON TRUE
