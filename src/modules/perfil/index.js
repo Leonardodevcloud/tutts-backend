@@ -173,6 +173,10 @@ function createPerfilRoutes(pool, verificarToken) {
   // Usado pelas listas de admin (Usuários, Saques) pra mostrar a foto.
   // Geração lazy: quem completou o cadastro antes do thumb existir tem
   // só foto_selfie — aqui geramos a miniatura na hora e salvamos.
+  //
+  // 🔧 v13 (2026-05-24): Query case-insensitive + trim. Antes era match exato
+  // (`cod_profissional = ANY($1)`) que falhava quando users.cod_profissional
+  // tinha whitespace/NBSP invisível. Agora normaliza ambos os lados.
   router.get('/perfil/fotos', verificarToken, async (req, res) => {
     try {
       const raw = String(req.query.codigos || '').trim();
@@ -185,37 +189,91 @@ function createPerfilRoutes(pool, verificarToken) {
         .slice(0, 200);
       if (codigos.length === 0) return res.json({ fotos: {} });
 
+      // 🔧 v13: normaliza pra LOWER+TRIM (cods são numéricos, mas seguimos seguros)
+      const codigosLower = codigos.map(c => c.toLowerCase());
+
       const r = await pool.query(
-        `SELECT cod_profissional, foto_thumb, foto_selfie
+        `SELECT TRIM(cod_profissional) AS cod_clean,
+                cod_profissional       AS cod_raw,
+                foto_thumb, foto_selfie
            FROM users
-          WHERE cod_profissional = ANY($1::text[])
+          WHERE LOWER(TRIM(cod_profissional)) = ANY($1::text[])
             AND (foto_thumb IS NOT NULL OR foto_selfie IS NOT NULL)`,
-        [codigos]
+        [codigosLower]
       );
 
       const fotos = {};
       for (const row of r.rows) {
+        const codClean = String(row.cod_clean || '').trim();
+        if (!codClean) continue;
+        // 🔧 v13: mapeia para o cod CONFORME o request recebeu (preserva formato)
+        const reqMatch = codigos.find(c => c.toLowerCase() === codClean.toLowerCase());
+        const key = reqMatch || codClean;
+
         if (row.foto_thumb) {
-          fotos[row.cod_profissional] = row.foto_thumb;
+          fotos[key] = row.foto_thumb;
         } else if (row.foto_selfie) {
           // retroativo: gera o thumb agora e persiste pra não repetir
           const thumb = await gerarThumbnail(row.foto_selfie);
           if (thumb) {
-            fotos[row.cod_profissional] = thumb;
+            fotos[key] = thumb;
             pool.query(
-              `UPDATE users SET foto_thumb = $1 WHERE cod_profissional = $2`,
-              [thumb, row.cod_profissional]
+              `UPDATE users SET foto_thumb = $1 WHERE LOWER(TRIM(cod_profissional)) = LOWER(TRIM($2))`,
+              [thumb, codClean]
             ).catch(() => {});
           } else {
             // sharp indisponível — devolve a foto cheia mesmo
-            fotos[row.cod_profissional] = row.foto_selfie;
+            fotos[key] = row.foto_selfie;
           }
         }
       }
+
+      // 🔧 v13: log no Railway pra diagnóstico
+      const naoEncontrados = codigos.filter(c => !fotos[c]);
+      if (naoEncontrados.length > 0) {
+        console.log(`📸 [/perfil/fotos] achou ${Object.keys(fotos).length}/${codigos.length} fotos. Sem foto: ${naoEncontrados.slice(0, 10).join(', ')}${naoEncontrados.length > 10 ? '...' : ''}`);
+      }
+
       res.json({ fotos });
     } catch (err) {
       console.error('❌ [PERFIL] fotos:', err.message);
       res.status(500).json({ error: 'Erro ao buscar fotos', detalhe: err.message });
+    }
+  });
+
+  // 🔧 v13 (2026-05-24): ENDPOINT DEBUG — mostra exatamente o que users tem pra um cod
+  // GET /api/perfil/_debug/foto/:cod
+  router.get('/perfil/_debug/foto/:cod', verificarToken, async (req, res) => {
+    try {
+      const cod = String(req.params.cod || '').trim();
+      const codLower = cod.toLowerCase();
+
+      const r = await pool.query(
+        `SELECT id, cod_profissional, full_name, role,
+                LENGTH(cod_profissional)::int AS cod_length,
+                ENCODE(CONVERT_TO(COALESCE(cod_profissional, ''), 'UTF8'), 'hex') AS cod_hex,
+                (foto_thumb IS NOT NULL) AS tem_thumb,
+                LENGTH(foto_thumb)::int AS thumb_length,
+                (foto_selfie IS NOT NULL) AS tem_selfie,
+                LENGTH(foto_selfie)::int AS selfie_length
+           FROM users
+          WHERE LOWER(TRIM(cod_profissional)) = $1
+             OR cod_profissional = $2
+             OR cod_profissional ILIKE $3
+          ORDER BY id ASC LIMIT 10`,
+        [codLower, cod, `%${cod}%`]
+      );
+
+      res.json({
+        cod_buscado: cod,
+        cod_lower: codLower,
+        total_users_match: r.rows.length,
+        rows: r.rows,
+        explicacao: 'Se "rows" tem item com tem_thumb=true ou tem_selfie=true, foto está cadastrada. Compare cod_hex com bytes do cod buscado pra detectar whitespace invisível. NBSP=c2a0, BOM=efbbbf, espaço=20.',
+      });
+    } catch (err) {
+      console.error('❌ [/perfil/_debug/foto] erro:', err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 

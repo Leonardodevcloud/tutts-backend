@@ -288,6 +288,9 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
     // (whitespace, NBSP=\u00A0, ZWSP=\u200B, BOM=\uFEFF). Cod permanece com case original.
     const codClean = cod_profissional ? String(cod_profissional).replace(/[\s\u00A0\u200B\uFEFF]+/g, '').trim() : null;
     const nomeClean = nome_profissional ? String(nome_profissional).trim() : null;
+
+    // 🔧 v13 (2026-05-24): log explícito pra Railway diagnosticar persistência
+    console.log(`💾 [PUT disp/linhas/${id}] cod_recv="${cod_profissional}" cod_clean="${codClean}" | nome_recv="${nome_profissional}" nome_clean="${nomeClean}" | status="${status}"`);
     
     // Validar status
     const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'A CAMINHO', 'EM LOJA', 'FALTANDO', 'SEM CONTATO'];
@@ -360,6 +363,9 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Linha não encontrada' });
     }
+    // 🔧 v13: confirma o que foi salvo (Railway logs)
+    const saved = result.rows[0];
+    console.log(`💾 [PUT disp/linhas/${id}] ✅ SALVO: cod="${saved.cod_profissional}" nome="${saved.nome_profissional}" status="${saved.status}"`);
     // Broadcast atualização granular da linha para outros clientes
     if (global.broadcastDisponibilidade) {
       global.broadcastDisponibilidade('DISP_LINHA_UPDATE', result.rows[0], getSenderWsId(req));
