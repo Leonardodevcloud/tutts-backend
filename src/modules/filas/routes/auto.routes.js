@@ -22,6 +22,8 @@
 
 const express = require('express');
 const { calcularDistanciaHaversine, compactarPosicoes, reordenarMotoboy, registrarLog } = require('../filas-auto.service');
+// 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
+const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 
 function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -141,6 +143,12 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
          VALUES ($1, $2, $3, $4, 'entrada_auto')`,
         [central.central_id_resolved, central.central_nome, cod_profissional, nome_profissional]
       );
+
+      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
+      marcarMotoboyEmLoja(pool, cod_profissional, {
+        origem: 'fila_auto',
+        alterado_por: `Auto (entrou na fila: ${nome_profissional})`,
+      }).catch(() => {});
 
       res.json({
         success: true,
@@ -623,6 +631,12 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         cod_profissional, nome_profissional: vinc.rows[0].nome_profissional,
         motivo: 'Admin inseriu manualmente',
       });
+
+      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
+      marcarMotoboyEmLoja(pool, cod_profissional, {
+        origem: 'fila_auto_admin',
+        alterado_por: `Admin: ${req.user?.nome || 'desconhecido'}`,
+      }).catch(() => {});
 
       res.json({
         success: true,

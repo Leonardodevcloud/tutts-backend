@@ -3,6 +3,8 @@
  * V2: reordenar drag-drop, penalidades, regiões, cronômetro 1ª nota, limpar bairros
  */
 const express = require('express');
+// 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
+const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 
 function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -1069,6 +1071,12 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
       `, [central_id, central_nome, cod_profissional, nome_profissional,
         `Colocado na fila pelo admin (posição ${novaPosicao})`,
         req.user.codProfissional, req.user.nome]);
+
+      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
+      marcarMotoboyEmLoja(pool, cod_profissional, {
+        origem: 'fila_classica_admin',
+        alterado_por: `Admin: ${req.user?.nome || 'desconhecido'}`,
+      }).catch(() => {});
 
       res.json({ success: true, posicao: novaPosicao, central: central_nome, nome: nome_profissional });
 

@@ -4,6 +4,8 @@
  */
 const express = require('express');
 const { calcularDistanciaHaversine } = require('../filas.service');
+// 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
+const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 
 // Tempos de penalidade por saída voluntária (em minutos)
 const PENALIDADES_MINUTOS = [30, 120, 1440]; // 30min, 2h, 24h
@@ -116,6 +118,12 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
           
           await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao, tempo_rota_minutos, observacao) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [central.central_id, central.central_nome, cod_profissional, nome_profissional, acaoHistorico, tempoRota, observacaoHistorico]);
           
+          // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
+          marcarMotoboyEmLoja(pool, cod_profissional, {
+            origem: 'fila_classica_retorno',
+            alterado_por: `Auto (retorno fila: ${nome_profissional})`,
+          }).catch(() => {});
+          
           return res.json({ success: true, mensagem: posicaoAtual.corrida_unica ? 'Você retornou com prioridade!' : 'Você retornou para a fila', posicao: novaPosicao, tempo_rota: tempoRota, prioridade: posicaoAtual.corrida_unica || false });
         } else {
           return res.status(400).json({ error: 'Você já está na fila de espera' });
@@ -127,6 +135,12 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
       
       await pool.query(`INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin) VALUES ($1, $2, $3, 'aguardando', $4, $5, $6)`, [central.central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
       await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao) VALUES ($1, $2, $3, $4, 'entrada')`, [central.central_id, central.central_nome, cod_profissional, nome_profissional]);
+      
+      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
+      marcarMotoboyEmLoja(pool, cod_profissional, {
+        origem: 'fila_classica',
+        alterado_por: `Auto (entrou na fila: ${nome_profissional})`,
+      }).catch(() => {});
       
       res.json({ success: true, posicao, central: central.central_nome, distancia: Math.round(distancia) });
       registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, { central_id: central.central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
