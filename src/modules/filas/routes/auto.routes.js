@@ -240,34 +240,20 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   router.get('/auto/minha-posicao', verificarToken, async (req, res) => {
     try {
       const cod_profissional = req.user.codProfissional;
-      // 🔄 2026-05-24: agora também retorna motoboy em status='em_rota' (despachado)
-      // pra que o frontend mostre a tela "Você está em rota!" com cooldown 30min.
       const r = await pool.query(
         `SELECT p.id, p.central_id, p.posicao, p.status, p.entrada_fila_at,
-                p.saida_rota_at,
                 p.agente_status, p.agente_ultima_validacao_at, p.corridas_ativas_count,
                 c.nome AS central_nome, c.latitude, c.longitude, c.raio_metros,
                 c.mostrar_nomes_publicos
            FROM filas_posicoes p
            JOIN filas_centrais c ON c.id = p.central_id
-          WHERE p.cod_profissional = $1
-            AND p.status IN ('aguardando', 'em_rota')
+          WHERE p.cod_profissional = $1 AND p.status = 'aguardando'
             AND c.tipo = 'auto'`,
         [cod_profissional]
       );
       if (r.rows.length === 0) return res.json({ success: true, na_fila: false });
 
       const row = r.rows[0];
-
-      // Cooldown 30min se em_rota
-      const COOLDOWN_MIN = 30;
-      let minutos_em_rota = null;
-      let cooldown_restante = 0;
-      if (row.status === 'em_rota' && row.saida_rota_at) {
-        minutos_em_rota = Math.round((Date.now() - new Date(row.saida_rota_at).getTime()) / 60000);
-        cooldown_restante = Math.max(0, COOLDOWN_MIN - minutos_em_rota);
-      }
-
       const totalR = await pool.query(
         `SELECT COUNT(*)::int AS total FROM filas_posicoes
           WHERE central_id = $1 AND status = 'aguardando'`,
@@ -277,14 +263,9 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       res.json({
         success: true, na_fila: true,
         central_id: row.central_id, central_nome: row.central_nome,
-        status: row.status,                       // 'aguardando' | 'em_rota'
-        posicao: row.posicao,                     // null se em_rota
-        total_fila: totalR.rows[0].total,
+        posicao: row.posicao, total_fila: totalR.rows[0].total,
         entrada_fila_at: row.entrada_fila_at,
-        saida_rota_at: row.saida_rota_at,         // null se aguardando
-        minutos_em_rota,                          // null se aguardando
-        cooldown_restante,                        // 0 se aguardando ou cooldown expirado
-        agente_status: row.agente_status,         // 'pendente' | 'validado' | 'reprovado'
+        agente_status: row.agente_status, // 'pendente' | 'validado' | 'reprovado'
         agente_ultima_validacao_at: row.agente_ultima_validacao_at,
         corridas_ativas_count: row.corridas_ativas_count,
         mostrar_nomes_publicos: row.mostrar_nomes_publicos,
@@ -420,17 +401,21 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       }
       await client.query('BEGIN');
 
+      // 🔄 2026-05-24: remove tanto aguardando quanto em_rota
+      // (admin pode tirar motoboy que travou ou foi despachado errado)
       const r = await client.query(
         `DELETE FROM filas_posicoes
-          WHERE central_id = $1 AND cod_profissional = $2 AND status = 'aguardando'
-          RETURNING nome_profissional`,
+          WHERE central_id = $1 AND cod_profissional = $2
+            AND status IN ('aguardando', 'em_rota')
+          RETURNING nome_profissional, status`,
         [parseInt(central_id, 10), cod_profissional]
       );
       if (r.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Motoboy não está aguardando nesta fila' });
+        return res.status(404).json({ error: 'Motoboy não está nesta fila' });
       }
       const nomeProf = r.rows[0].nome_profissional;
+      const statusAnterior = r.rows[0].status;
 
       await compactarPosicoes(client, parseInt(central_id, 10), client);
 
@@ -505,6 +490,22 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         [centralId]
       );
 
+      // 🆕 2026-05-24: também retorna motoboys em rota (status='em_rota')
+      // pra admin visualizar quem foi despachado, no layout 2 colunas idêntico
+      // ao da fila clássica.
+      const emRotaR = await pool.query(
+        `SELECT cod_profissional, nome_profissional, status, saida_rota_at,
+                agente_status, corridas_ativas_count,
+                ROUND(EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60)::int AS minutos_em_rota
+           FROM filas_posicoes
+          WHERE central_id = $1 AND status = 'em_rota'
+          ORDER BY saida_rota_at ASC`,
+        [centralId]
+      );
+
+      // Alertas: em rota há mais de 90 min
+      const alertasArr = emRotaR.rows.filter(r => (r.minutos_em_rota || 0) > 90);
+
       // Bloqueados recentes (últimos eventos de bloqueou_entrada nas últimas 24h)
       const bloqR = await pool.query(
         `SELECT DISTINCT ON (cod_profissional)
@@ -531,12 +532,111 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         success: true,
         central: centralR.rows[0],
         fila: filaR.rows,
+        em_rota: emRotaR.rows,         // 🆕 2026-05-24
+        alertas: alertasArr,           // 🆕 2026-05-24
         bloqueados: bloqR.rows,
         kpis: kpisR.rows[0],
       });
     } catch (err) {
       console.error('❌ [fila-auto/admin/fila-completa]', err);
       res.status(500).json({ error: 'Erro ao montar dashboard' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //   ADMIN — colocar motoboy na fila (manual)
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🆕 2026-05-24: admin força inserção de motoboy vinculado na fila auto,
+  // pulando GPS/raio. Útil quando o motoboy não tem como entrar sozinho.
+  router.post('/auto/admin/colocar-na-fila', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cod_profissional, central_id } = req.body;
+      if (!cod_profissional || !central_id) {
+        return res.status(400).json({ error: 'cod_profissional e central_id são obrigatórios' });
+      }
+
+      // Confere vínculo + central auto
+      const vinc = await pool.query(`
+        SELECT v.cod_profissional, v.nome_profissional, c.nome AS central_nome, c.tipo
+          FROM filas_vinculos v
+          JOIN filas_centrais c ON c.id = v.central_id
+         WHERE v.cod_profissional = $1 AND v.central_id = $2
+           AND v.ativo = true AND c.ativa = true`,
+        [cod_profissional, central_id]
+      );
+      if (vinc.rows.length === 0) {
+        return res.status(403).json({ error: 'Motoboy não está vinculado a esta central' });
+      }
+      if (vinc.rows[0].tipo !== 'auto') {
+        return res.status(400).json({ error: 'Central não é auto-gerenciável' });
+      }
+
+      // Já está na fila?
+      const ja = await pool.query(
+        'SELECT id, status, posicao FROM filas_posicoes WHERE cod_profissional = $1',
+        [cod_profissional]
+      );
+      if (ja.rows.length > 0) {
+        if (ja.rows[0].status === 'aguardando') {
+          return res.status(400).json({ error: 'Motoboy já está aguardando', posicao: ja.rows[0].posicao });
+        }
+        if (ja.rows[0].status === 'em_rota') {
+          return res.status(400).json({ error: 'Motoboy está em rota — aguarde finalizar' });
+        }
+      }
+
+      // Última posição + 1
+      const ultPos = await pool.query(
+        `SELECT COALESCE(MAX(posicao), 0) AS max_pos FROM filas_posicoes
+          WHERE central_id = $1 AND status = 'aguardando'`,
+        [central_id]
+      );
+      const novaPosicao = parseInt(ultPos.rows[0].max_pos) + 1;
+
+      if (ja.rows.length > 0) {
+        await pool.query(`
+          UPDATE filas_posicoes
+             SET central_id = $1, status = 'aguardando', posicao = $2,
+                 entrada_fila_at = NOW(), saida_rota_at = NULL, retorno_at = NULL,
+                 latitude_checkin = NULL, longitude_checkin = NULL,
+                 agente_status = 'pendente', agente_ultima_validacao_at = NULL,
+                 corridas_ativas_count = 0, motivo_posicao = 'colocado_admin',
+                 notas_liberadas = 0, primeira_nota_at = NULL, bairros = '[]'::jsonb,
+                 updated_at = NOW()
+           WHERE id = $3
+        `, [central_id, novaPosicao, ja.rows[0].id]);
+      } else {
+        await pool.query(`
+          INSERT INTO filas_posicoes
+            (central_id, cod_profissional, nome_profissional, status, posicao,
+             agente_status, motivo_posicao, entrada_fila_at)
+          VALUES ($1, $2, $3, 'aguardando', $4, 'pendente', 'colocado_admin', NOW())
+        `, [central_id, cod_profissional, vinc.rows[0].nome_profissional, novaPosicao]);
+      }
+
+      await pool.query(`
+        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao)
+        VALUES ($1, $2, $3, $4, 'colocado_admin')
+      `, [central_id, vinc.rows[0].central_nome, cod_profissional, vinc.rows[0].nome_profissional]);
+
+      registrarLog(pool, central_id, 'colocado_admin', {
+        cod_profissional, nome_profissional: vinc.rows[0].nome_profissional,
+        motivo: 'Admin inseriu manualmente',
+      });
+
+      res.json({
+        success: true,
+        posicao: novaPosicao,
+        cod_profissional,
+        nome_profissional: vinc.rows[0].nome_profissional,
+      });
+
+      registrarAuditoria(req, 'FILA_AUTO_COLOCAR_ADMIN', 'admin', 'filas_posicoes', null, {
+        central_id, cod_profissional, posicao: novaPosicao,
+      }).catch(() => {});
+    } catch (err) {
+      console.error('❌ [fila-auto/admin/colocar-na-fila]', err);
+      res.status(500).json({ error: 'Erro ao colocar na fila' });
     }
   });
 
