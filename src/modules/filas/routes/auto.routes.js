@@ -93,7 +93,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
       // 4) Já está na fila?
       const jaR = await pool.query(
-        `SELECT id, status, posicao, saida_rota_at FROM filas_posicoes WHERE cod_profissional = $1`,
+        `SELECT id, status, posicao FROM filas_posicoes WHERE cod_profissional = $1`,
         [cod_profissional]
       );
       if (jaR.rows.length > 0 && jaR.rows[0].status === 'aguardando') {
@@ -102,22 +102,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           posicao: jaR.rows[0].posicao,
           mensagem: 'Você já está nesta fila',
         });
-      }
-
-      // 🔄 2026-05-24: Cooldown 30min pós-despacho (igual fila clássica usa 15min)
-      // Se o agente detectou corrida ativa, o motoboy ficou status='em_rota'.
-      // Ele só pode re-entrar depois de 30min — tempo que normalmente termina a corrida.
-      const COOLDOWN_EM_ROTA_MIN = 30;
-      if (jaR.rows.length > 0 && jaR.rows[0].status === 'em_rota' && jaR.rows[0].saida_rota_at) {
-        const minutosEmRota = Math.round((Date.now() - new Date(jaR.rows[0].saida_rota_at).getTime()) / 60000);
-        if (minutosEmRota < COOLDOWN_EM_ROTA_MIN) {
-          const minutosRestantes = COOLDOWN_EM_ROTA_MIN - minutosEmRota;
-          return res.status(403).json({
-            error: 'cooldown_despacho',
-            mensagem: `Você está em rota. Finalize sua(s) corrida(s) e retorne em ${minutosRestantes} minuto(s).`,
-            minutos_restantes: minutosRestantes,
-          });
-        }
       }
 
       // 5) Calcular nova posição (última + 1)
@@ -256,20 +240,34 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
   router.get('/auto/minha-posicao', verificarToken, async (req, res) => {
     try {
       const cod_profissional = req.user.codProfissional;
+      // 🔄 2026-05-24: agora também retorna motoboy em status='em_rota' (despachado)
+      // pra que o frontend mostre a tela "Você está em rota!" com cooldown 30min.
       const r = await pool.query(
         `SELECT p.id, p.central_id, p.posicao, p.status, p.entrada_fila_at,
+                p.saida_rota_at,
                 p.agente_status, p.agente_ultima_validacao_at, p.corridas_ativas_count,
                 c.nome AS central_nome, c.latitude, c.longitude, c.raio_metros,
                 c.mostrar_nomes_publicos
            FROM filas_posicoes p
            JOIN filas_centrais c ON c.id = p.central_id
-          WHERE p.cod_profissional = $1 AND p.status = 'aguardando'
+          WHERE p.cod_profissional = $1
+            AND p.status IN ('aguardando', 'em_rota')
             AND c.tipo = 'auto'`,
         [cod_profissional]
       );
       if (r.rows.length === 0) return res.json({ success: true, na_fila: false });
 
       const row = r.rows[0];
+
+      // Cooldown 30min se em_rota
+      const COOLDOWN_MIN = 30;
+      let minutos_em_rota = null;
+      let cooldown_restante = 0;
+      if (row.status === 'em_rota' && row.saida_rota_at) {
+        minutos_em_rota = Math.round((Date.now() - new Date(row.saida_rota_at).getTime()) / 60000);
+        cooldown_restante = Math.max(0, COOLDOWN_MIN - minutos_em_rota);
+      }
+
       const totalR = await pool.query(
         `SELECT COUNT(*)::int AS total FROM filas_posicoes
           WHERE central_id = $1 AND status = 'aguardando'`,
@@ -279,9 +277,14 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       res.json({
         success: true, na_fila: true,
         central_id: row.central_id, central_nome: row.central_nome,
-        posicao: row.posicao, total_fila: totalR.rows[0].total,
+        status: row.status,                       // 'aguardando' | 'em_rota'
+        posicao: row.posicao,                     // null se em_rota
+        total_fila: totalR.rows[0].total,
         entrada_fila_at: row.entrada_fila_at,
-        agente_status: row.agente_status, // 'pendente' | 'validado' | 'reprovado'
+        saida_rota_at: row.saida_rota_at,         // null se aguardando
+        minutos_em_rota,                          // null se aguardando
+        cooldown_restante,                        // 0 se aguardando ou cooldown expirado
+        agente_status: row.agente_status,         // 'pendente' | 'validado' | 'reprovado'
         agente_ultima_validacao_at: row.agente_ultima_validacao_at,
         corridas_ativas_count: row.corridas_ativas_count,
         mostrar_nomes_publicos: row.mostrar_nomes_publicos,
