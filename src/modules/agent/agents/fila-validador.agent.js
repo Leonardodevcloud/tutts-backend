@@ -99,15 +99,22 @@ module.exports = defineAgent({
  */
 async function coletarCorridasAtivasPorMotoboy(slaCapture, ctx) {
   // O sla-capture expõe uma função coletarOsEmExecucao() que retorna
-  // [{os_numero, cod_profissional, ...}, ...]. Se um dia mudar o nome,
-  // ajustar aqui.
+  // 🔄 2026-05-24: um OBJETO { ok, ordens, totalEsperado, ... } — NÃO array direto.
+  // Antes: `for (const os of todasOs || [])` quebrava com "is not iterable".
   if (typeof slaCapture.coletarOsEmExecucao !== 'function') {
     throw new Error('playwright-sla-capture.coletarOsEmExecucao indisponível');
   }
-  const todasOs = await slaCapture.coletarOsEmExecucao();
+  const resultado = await slaCapture.coletarOsEmExecucao();
+  if (!resultado || !resultado.ok) {
+    throw new Error(
+      `coletarOsEmExecucao falhou: motivo=${resultado?.motivo || 'desconhecido'}` +
+      `${resultado?.sessaoExpirada ? ' (sessão expirada)' : ''}`
+    );
+  }
+  const todasOs = resultado.ordens || [];
 
   const mapa = new Map();
-  for (const os of todasOs || []) {
+  for (const os of todasOs) {
     const cod = String(os.cod_profissional || '').trim();
     if (!cod) continue;
     if (!mapa.has(cod)) mapa.set(cod, []);
