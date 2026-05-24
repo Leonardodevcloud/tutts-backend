@@ -68,6 +68,19 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
         `🏪 [disponibilidade.em-loja] cod=${cod_profissional} ` +
         `marcado EM LOJA em ${atualizadas} linha(s) | origem=${origem} | por=${alteradoPor}`
       );
+      // 🔧 v17 (2026-05-25): broadcast WS por linha atualizada pra TODOS os admins
+      // verem o status mudar em TEMPO REAL na tela de disponibilidade, sem F5.
+      // Sem senderWsId (esse update veio do backend/filas, não de um admin específico),
+      // então broadcasta pra TODOS os clientes conectados.
+      if (global.broadcastDisponibilidade) {
+        for (const linha of result.rows) {
+          try {
+            global.broadcastDisponibilidade('DISP_LINHA_UPDATE', linha, null);
+          } catch (errBcast) {
+            console.warn(`⚠️ [disponibilidade.em-loja] broadcast falhou pra linha ${linha.id}:`, errBcast.message);
+          }
+        }
+      }
     } else {
       // 🔧 v3: log diagnóstico quando NÃO marca nada — pode ser que:
       // 1) já estava EM LOJA (idempotência funcionando)
