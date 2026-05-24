@@ -41,19 +41,24 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
     const alteradoPor = contexto.alterado_por || `Auto (${origem})`;
     const codNorm = String(cod_profissional).trim().toLowerCase();
 
-    // 🔧 v3 (2026-05-24): LOWER(TRIM(...)) em ambos os lados — alinhado com o
-    // resto do sistema (auth usa case-insensitive); evita falsos negativos por
-    // diferença de case/whitespace entre fontes.
+    // 🔧 v14 (2026-05-25): RETURNING agora inclui foto (LEFT JOIN com users)
+    // pra que broadcasts futuros de DISP_LINHA_UPDATE já carreguem o shape completo.
     // Atualiza somente linhas que NÃO estão já em EM LOJA (evita writes redundantes)
     const result = await pool.query(
-      `UPDATE disponibilidade_linhas
-          SET status = 'EM LOJA',
-              status_alterado_por = $1,
-              status_alterado_em = NOW(),
-              updated_at = NOW()
-        WHERE LOWER(TRIM(cod_profissional)) = $2
-          AND COALESCE(status, '') <> 'EM LOJA'
-        RETURNING id, loja_id`,
+      `WITH up AS (
+         UPDATE disponibilidade_linhas
+            SET status = 'EM LOJA',
+                status_alterado_por = $1,
+                status_alterado_em = NOW(),
+                updated_at = NOW()
+          WHERE LOWER(TRIM(cod_profissional)) = $2
+            AND COALESCE(status, '') <> 'EM LOJA'
+          RETURNING *
+       )
+       SELECT up.*, COALESCE(u.foto_thumb, u.foto_selfie) AS foto
+         FROM up
+         LEFT JOIN users u
+           ON LOWER(TRIM(u.cod_profissional)) = LOWER(TRIM(up.cod_profissional))`,
       [alteradoPor, codNorm]
     );
 

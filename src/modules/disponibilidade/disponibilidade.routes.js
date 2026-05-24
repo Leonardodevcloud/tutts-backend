@@ -21,11 +21,23 @@ function createDisponibilidadeRouter(pool, verificarToken) {
   });
 
 // GET /api/disponibilidade - Lista todas as regiões, lojas e linhas
+// 🔧 v14 (2026-05-25): LEFT JOIN com users pra trazer foto direto na linha
+// (COALESCE foto_thumb → foto_selfie, mesmo padrão do BI Garantido).
+// Antes o frontend fazia chamada separada a /perfil/fotos, com race condition
+// quando admin trocava cod_profissional. Agora qualquer linha vinda do backend
+// já vem com `foto` preenchida (ou null) — load inicial, PUT, POST, broadcast WS.
 router.get('/disponibilidade', async (req, res) => {
   try {
     const regioes = await pool.query('SELECT * FROM disponibilidade_regioes ORDER BY ordem, nome');
     const lojas = await pool.query('SELECT * FROM disponibilidade_lojas ORDER BY ordem, nome');
-    const linhas = await pool.query('SELECT * FROM disponibilidade_linhas ORDER BY id');
+    const linhas = await pool.query(`
+      SELECT l.*,
+             COALESCE(u.foto_thumb, u.foto_selfie) AS foto
+        FROM disponibilidade_linhas l
+        LEFT JOIN users u
+          ON LOWER(TRIM(u.cod_profissional)) = LOWER(TRIM(l.cod_profissional))
+       ORDER BY l.id
+    `);
     
     res.json({
       regioes: regioes.rows,
@@ -245,7 +257,9 @@ router.post('/disponibilidade/linhas', async (req, res) => {
     
     for (let i = 0; i < qtd; i++) {
       const result = await client.query(
-        'INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) VALUES ($1, $2, $3) RETURNING *',
+        // 🔧 v14: retorna foto=null explícito pra normalizar shape com GET/PUT
+        `INSERT INTO disponibilidade_linhas (loja_id, status, is_excedente) 
+         VALUES ($1, $2, $3) RETURNING *, NULL::text AS foto`,
         [loja_id, 'A CONFIRMAR', excedente]
       );
       linhas.push(result.rows[0]);
@@ -335,18 +349,27 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
       }
     }
     
+    // 🔧 v14 (2026-05-25): wrap UPDATE num CTE com LEFT JOIN users pra trazer
+    // foto direto na resposta (COALESCE foto_thumb → foto_selfie). Frontend
+    // não precisa mais chamar /perfil/fotos após cada PUT.
     const result = await pool.query(
-      `UPDATE disponibilidade_linhas 
-       SET cod_profissional = $1, 
-           nome_profissional = $2, 
-           status = $3, 
-           observacao = $4,
-           observacao_criada_por = $5,
-           observacao_criada_em = $6,
-           status_alterado_por = $7,
-           status_alterado_em = $8,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $9 RETURNING *`,
+      `WITH up AS (
+         UPDATE disponibilidade_linhas 
+            SET cod_profissional = $1, 
+                nome_profissional = $2, 
+                status = $3, 
+                observacao = $4,
+                observacao_criada_por = $5,
+                observacao_criada_em = $6,
+                status_alterado_por = $7,
+                status_alterado_em = $8,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = $9 RETURNING *
+       )
+       SELECT up.*, COALESCE(u.foto_thumb, u.foto_selfie) AS foto
+         FROM up
+         LEFT JOIN users u
+           ON LOWER(TRIM(u.cod_profissional)) = LOWER(TRIM(up.cod_profissional))`,
       [
         codClean || null, 
         nomeClean || null, 
@@ -363,10 +386,10 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Linha não encontrada' });
     }
-    // 🔧 v13: confirma o que foi salvo (Railway logs)
+    // 🔧 v14: log COMPLETO da persistência (cod salvo + foto resolvida ou null)
     const saved = result.rows[0];
-    console.log(`💾 [PUT disp/linhas/${id}] ✅ SALVO: cod="${saved.cod_profissional}" nome="${saved.nome_profissional}" status="${saved.status}"`);
-    // Broadcast atualização granular da linha para outros clientes
+    console.log(`💾 [PUT disp/linhas/${id}] ✅ SALVO: cod="${saved.cod_profissional}" nome="${saved.nome_profissional}" status="${saved.status}" foto=${saved.foto ? 'sim(' + saved.foto.length + 'b)' : 'null'}`);
+    // Broadcast atualização granular da linha para outros clientes (já com foto)
     if (global.broadcastDisponibilidade) {
       global.broadcastDisponibilidade('DISP_LINHA_UPDATE', result.rows[0], getSenderWsId(req));
     }
@@ -580,8 +603,9 @@ router.post('/disponibilidade/linha-reposicao', async (req, res) => {
     }
     
     const result = await pool.query(
+      // 🔧 v14: retorna foto=null explícito pra normalizar shape com GET/PUT
       `INSERT INTO disponibilidade_linhas (loja_id, status, is_reposicao)
-       VALUES ($1, 'A CONFIRMAR', true) RETURNING *`,
+       VALUES ($1, 'A CONFIRMAR', true) RETURNING *, NULL::text AS foto`,
       [loja_id]
     );
     
