@@ -284,6 +284,11 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
     const { id } = req.params;
     const { cod_profissional, nome_profissional, status, observacao, observacao_usuario, status_usuario } = req.body;
     
+    // 🔧 v7 (2026-05-24): TRIM em cod_profissional pra evitar dados sujos chegando ao banco
+    // (whitespace, NBSP=\u00A0, ZWSP=\u200B, BOM=\uFEFF). Cod permanece com case original.
+    const codClean = cod_profissional ? String(cod_profissional).replace(/[\s\u00A0\u200B\uFEFF]+/g, '').trim() : null;
+    const nomeClean = nome_profissional ? String(nome_profissional).trim() : null;
+    
     // Validar status
     const statusValidos = ['A CONFIRMAR', 'CONFIRMADO', 'A CAMINHO', 'EM LOJA', 'FALTANDO', 'SEM CONTATO'];
     const statusFinal = statusValidos.includes(status) ? status : 'A CONFIRMAR';
@@ -340,8 +345,8 @@ router.put('/disponibilidade/linhas/:id', async (req, res) => {
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $9 RETURNING *`,
       [
-        cod_profissional || null, 
-        nome_profissional || null, 
+        codClean || null, 
+        nomeClean || null, 
         statusFinal, 
         observacao || null,
         observacaoCriadaPor,
@@ -1983,6 +1988,89 @@ router.get('/disponibilidade/alerta-whatsapp', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+  // 🔧 v7 (2026-05-24): ENDPOINT DE DEBUG — diagnóstico de cod_profissional
+  // GET /api/disponibilidade/_debug/cod/:cod
+  // Retorna onde o cod existe em cada tabela, com bytes/length pra detectar
+  // whitespace invisível (NBSP=c2a0, BOM=feff, etc), case diferente, leading zeros.
+  router.get('/disponibilidade/_debug/cod/:cod', async (req, res) => {
+    try {
+      const codRaw = req.params.cod || '';
+      const codStr = String(codRaw);
+      const codTrim = codStr.trim();
+      const codNorm = codTrim.toLowerCase();
+      const codHex = Buffer.from(codStr, 'utf8').toString('hex').match(/.{1,2}/g)?.join(' ') || '';
+
+      const dispR = await pool.query(`
+        SELECT id, loja_id, cod_profissional, nome_profissional, status,
+               LENGTH(cod_profissional)::int AS cod_length,
+               ENCODE(CONVERT_TO(cod_profissional, 'UTF8'), 'hex') AS cod_hex
+          FROM disponibilidade_linhas
+         WHERE LOWER(TRIM(cod_profissional)) = $1
+            OR cod_profissional = $2
+            OR cod_profissional ILIKE $3
+         ORDER BY id ASC LIMIT 20
+      `, [codNorm, codStr, `%${codTrim}%`]);
+
+      const filaR = await pool.query(`
+        SELECT id, central_id, cod_profissional, nome_profissional, status, posicao,
+               LENGTH(cod_profissional)::int AS cod_length,
+               ENCODE(CONVERT_TO(cod_profissional, 'UTF8'), 'hex') AS cod_hex
+          FROM filas_posicoes
+         WHERE LOWER(TRIM(cod_profissional)) = $1
+            OR cod_profissional = $2
+            OR cod_profissional ILIKE $3
+         ORDER BY id DESC LIMIT 20
+      `, [codNorm, codStr, `%${codTrim}%`]);
+
+      let usersR = { rows: [] };
+      try {
+        usersR = await pool.query(`
+          SELECT id, cod_profissional, full_name, role,
+                 (foto_thumb IS NOT NULL) AS tem_foto_thumb,
+                 (foto_selfie IS NOT NULL) AS tem_foto_selfie,
+                 LENGTH(cod_profissional)::int AS cod_length,
+                 ENCODE(CONVERT_TO(cod_profissional, 'UTF8'), 'hex') AS cod_hex
+            FROM users
+           WHERE LOWER(TRIM(cod_profissional)) = $1
+              OR cod_profissional = $2
+              OR cod_profissional ILIKE $3
+           ORDER BY id ASC LIMIT 10
+        `, [codNorm, codStr, `%${codTrim}%`]);
+      } catch (e) { usersR.error = e.message; }
+
+      let crmR = { rows: [] };
+      try {
+        crmR = await pool.query(`
+          SELECT cod, nome, cidade, regiao,
+                 LENGTH(cod)::int AS cod_length,
+                 ENCODE(CONVERT_TO(cod, 'UTF8'), 'hex') AS cod_hex
+            FROM crm_leads_capturados
+           WHERE LOWER(TRIM(cod)) = $1
+              OR cod = $2
+              OR cod ILIKE $3
+           ORDER BY cod ASC LIMIT 10
+        `, [codNorm, codStr, `%${codTrim}%`]);
+      } catch (e) { crmR.error = e.message; }
+
+      res.json({
+        recebido: {
+          cod_raw: codRaw, cod_str: codStr, cod_trim: codTrim,
+          cod_norm_lower: codNorm,
+          length_raw: codStr.length, length_trim: codTrim.length,
+          hex_bytes: codHex,
+        },
+        disponibilidade_linhas: { total: dispR.rows.length, rows: dispR.rows },
+        filas_posicoes: { total: filaR.rows.length, rows: filaR.rows },
+        users: usersR.error ? { erro: usersR.error } : { total: usersR.rows.length, rows: usersR.rows },
+        crm_leads_capturados: crmR.error ? { erro: crmR.error } : { total: crmR.rows.length, rows: crmR.rows },
+        explicacao: 'Compare cod_hex entre tabelas. NBSP=c2a0, BOM=efbbbf, espaço=20. Length diferente também denuncia.',
+      });
+    } catch (err) {
+      console.error('❌ [/disponibilidade/_debug/cod] erro:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   return router;
 }
