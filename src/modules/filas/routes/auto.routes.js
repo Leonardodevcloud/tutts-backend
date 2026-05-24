@@ -93,7 +93,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
 
       // 4) Já está na fila?
       const jaR = await pool.query(
-        `SELECT id, status, posicao FROM filas_posicoes WHERE cod_profissional = $1`,
+        `SELECT id, status, posicao, saida_rota_at FROM filas_posicoes WHERE cod_profissional = $1`,
         [cod_profissional]
       );
       if (jaR.rows.length > 0 && jaR.rows[0].status === 'aguardando') {
@@ -102,6 +102,22 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           posicao: jaR.rows[0].posicao,
           mensagem: 'Você já está nesta fila',
         });
+      }
+
+      // 🔄 2026-05-24: Cooldown 30min pós-despacho (igual fila clássica usa 15min)
+      // Se o agente detectou corrida ativa, o motoboy ficou status='em_rota'.
+      // Ele só pode re-entrar depois de 30min — tempo que normalmente termina a corrida.
+      const COOLDOWN_EM_ROTA_MIN = 30;
+      if (jaR.rows.length > 0 && jaR.rows[0].status === 'em_rota' && jaR.rows[0].saida_rota_at) {
+        const minutosEmRota = Math.round((Date.now() - new Date(jaR.rows[0].saida_rota_at).getTime()) / 60000);
+        if (minutosEmRota < COOLDOWN_EM_ROTA_MIN) {
+          const minutosRestantes = COOLDOWN_EM_ROTA_MIN - minutosEmRota;
+          return res.status(403).json({
+            error: 'cooldown_despacho',
+            mensagem: `Você está em rota. Finalize sua(s) corrida(s) e retorne em ${minutosRestantes} minuto(s).`,
+            minutos_restantes: minutosRestantes,
+          });
+        }
       }
 
       // 5) Calcular nova posição (última + 1)
@@ -540,20 +556,9 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(500).json({ error: 'coletarOsEmExecucao não exportada pelo sla-capture' });
       }
 
-      // 🔄 2026-05-23: coletarOsEmExecucao retorna { ok, ordens, totalEsperado, ... }
-      // não um array direto. Antes: `for (const os of todasOs || [])` quebrava
-      // com TypeError "is not iterable" porque tentava iterar sobre o objeto.
-      const resultadoColeta = await slaCapture.coletarOsEmExecucao();
-      if (!resultadoColeta || !resultadoColeta.ok) {
-        return res.status(500).json({
-          error: 'Falha ao coletar OS em execução',
-          motivo: resultadoColeta?.motivo || 'desconhecido',
-          sessao_expirada: !!resultadoColeta?.sessaoExpirada,
-        });
-      }
-      const todasOs = resultadoColeta.ordens || [];
+      const todasOs = await slaCapture.coletarOsEmExecucao();
       const mapa = new Map();
-      for (const os of todasOs) {
+      for (const os of todasOs || []) {
         const cod = String(os.cod_profissional || '').trim();
         if (!cod) continue;
         if (!mapa.has(cod)) mapa.set(cod, []);

@@ -111,18 +111,31 @@ async function aplicarResultadoVarredura(pool, corridasPorMotoboy) {
       const deveRemover = cfg && cfg.remover_ao_pegar_corrida !== false;
 
       if (deveRemover) {
+        // 🔄 2026-05-24: AGORA marca como 'em_rota' (igual fila clássica),
+        // NÃO mais DELETA. Motoboy fica no banco com status='em_rota' e
+        // saida_rota_at=NOW(). O cooldown de 15min pós-despacho (regra da fila
+        // clássica) impede ele de re-entrar até finalizar a corrida.
+        // Compactação de posições continua igual (libera a posição dele).
+        const corridasUnicas = corridas.map(c => c.os_numero).filter(Boolean);
         await pool.query(
-          `DELETE FROM filas_posicoes
-            WHERE cod_profissional = $1 AND status = 'aguardando' AND central_id = $2`,
-          [m.cod_profissional, m.central_id]
+          `UPDATE filas_posicoes
+              SET status = 'em_rota',
+                  saida_rota_at = NOW(),
+                  posicao = NULL,
+                  agente_status = 'reprovado',
+                  agente_ultima_validacao_at = NOW(),
+                  corridas_ativas_count = $1,
+                  updated_at = NOW()
+            WHERE cod_profissional = $2 AND status = 'aguardando' AND central_id = $3`,
+          [corridas.length, m.cod_profissional, m.central_id]
         );
         centraisQueRemoveram.add(m.central_id);
 
-        registrarLog(pool, m.central_id, 'removeu', {
+        registrarLog(pool, m.central_id, 'em_rota_auto', {
           cod_profissional: m.cod_profissional,
           nome_profissional: m.nome_profissional,
-          motivo: `Detectada(s) ${corridas.length} corrida(s) ativa(s)`,
-          detalhes: { os_numeros: corridas.map(c => c.os_numero).filter(Boolean) },
+          motivo: `Agente detectou ${corridas.length} corrida(s) ativa(s) → enviado pra rota`,
+          detalhes: { os_numeros: corridasUnicas },
         });
         removidos++;
       } else {
