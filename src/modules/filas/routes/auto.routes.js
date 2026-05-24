@@ -540,9 +540,20 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(500).json({ error: 'coletarOsEmExecucao não exportada pelo sla-capture' });
       }
 
-      const todasOs = await slaCapture.coletarOsEmExecucao();
+      // 🔄 2026-05-23: coletarOsEmExecucao retorna { ok, ordens, totalEsperado, ... }
+      // não um array direto. Antes: `for (const os of todasOs || [])` quebrava
+      // com TypeError "is not iterable" porque tentava iterar sobre o objeto.
+      const resultadoColeta = await slaCapture.coletarOsEmExecucao();
+      if (!resultadoColeta || !resultadoColeta.ok) {
+        return res.status(500).json({
+          error: 'Falha ao coletar OS em execução',
+          motivo: resultadoColeta?.motivo || 'desconhecido',
+          sessao_expirada: !!resultadoColeta?.sessaoExpirada,
+        });
+      }
+      const todasOs = resultadoColeta.ordens || [];
       const mapa = new Map();
-      for (const os of todasOs || []) {
+      for (const os of todasOs) {
         const cod = String(os.cod_profissional || '').trim();
         if (!cod) continue;
         if (!mapa.has(cod)) mapa.set(cod, []);
