@@ -29,9 +29,27 @@
 const { defineAgent } = require('../core/agent-base');
 const filaValidadorService = require('../../filas/fila-validador.service');
 
-// Default: a cada 30s. Ajustável por central via filas_centrais.varredura_intervalo_seg
-// (pegamos o MIN das ativas — quem quer mais frequente "ganha").
-const INTERVALO_DEFAULT_MS = 30_000;
+// 🔧 v2 (2026-05-25): intervalo aumentado de 30s → 5min pra reduzir pressão de memória.
+// Causa: cada tick disparava UM chromium.launch() novo, somando 100MB/varredura.
+// Com 1607 ticks em poucas horas, encheu o container e causou OOM kill.
+// 5 minutos é tempo suficiente pra detectar motoboy que pegou corrida —
+// não é tempo-real crítico, é um cleanup.
+const INTERVALO_DEFAULT_MS = 5 * 60_000; // 5 minutos
+
+// Cache do último resultado bem-sucedido (compartilhado entre ticks).
+// Se a coleta foi feita há <4min, REUSA em vez de subir browser novo.
+// Default propositalmente menor que INTERVALO_DEFAULT_MS pra garantir
+// que SEMPRE rodemos uma coleta nova no início do tick (a menos que
+// outro processo tenha acabado de coletar — improvável mas defensivo).
+const CACHE_TTL_MS = 4 * 60_000; // 4 minutos
+let _cacheUltimaColeta = null; // { timestampMs, mapaCorridas }
+
+// Circuit breaker: se N falhas seguidas, pausa por COOLDOWN_MS.
+// Evita loop infinito de OOM quando algo tá fundamentalmente quebrado.
+const CIRCUIT_BREAKER_LIMITE = 3;
+const CIRCUIT_BREAKER_COOLDOWN_MS = 10 * 60_000; // 10 minutos
+let _falhasConsecutivas = 0;
+let _circuitAbertoAte = 0; // timestamp em ms
 
 module.exports = defineAgent({
   nome: 'fila-validador',
@@ -44,6 +62,13 @@ module.exports = defineAgent({
 
   tickGlobal: async (pool, ctx) => {
     const inicio = Date.now();
+
+    // 🔧 v2: Circuit breaker — se quebrou demais, pausa
+    if (_circuitAbertoAte > inicio) {
+      const restanteMin = Math.ceil((_circuitAbertoAte - inicio) / 60_000);
+      ctx.log(`⏸️ Circuit breaker ABERTO — pulando varredura (volta em ~${restanteMin}min)`);
+      return;
+    }
 
     // 1) Tem centrais ativas auto?
     const centrais = await filaValidadorService.listarCentraisAtivasAuto(pool);
@@ -65,12 +90,32 @@ module.exports = defineAgent({
     //    circular — sla-capture pode requisitar coisas deste arquivo no futuro)
     const slaCapture = require('../playwright-sla-capture');
     let mapaCorridas;
+    let usouCache = false;
     try {
-      mapaCorridas = await coletarCorridasAtivasPorMotoboy(slaCapture, ctx);
+      // 🔧 v2: tenta usar cache antes de subir chromium novo
+      const agora = Date.now();
+      if (_cacheUltimaColeta && (agora - _cacheUltimaColeta.timestampMs) < CACHE_TTL_MS) {
+        const idadeSec = Math.round((agora - _cacheUltimaColeta.timestampMs) / 1000);
+        ctx.log(`♻️ Usando cache da coleta anterior (idade: ${idadeSec}s) — pulando chromium`);
+        mapaCorridas = _cacheUltimaColeta.mapaCorridas;
+        usouCache = true;
+      } else {
+        mapaCorridas = await coletarCorridasAtivasPorMotoboy(slaCapture, ctx);
+        _cacheUltimaColeta = { timestampMs: agora, mapaCorridas };
+      }
+      _falhasConsecutivas = 0; // sucesso reseta contador
     } catch (err) {
-      ctx.log(`❌ Falha ao coletar ACOMP: ${err.message}`);
-      // Sem dados confiáveis — marca todos como pendente e sai.
-      // É melhor não fazer nada do que remover indevidamente.
+      _falhasConsecutivas++;
+      ctx.log(`❌ Falha ao coletar ACOMP (${_falhasConsecutivas}/${CIRCUIT_BREAKER_LIMITE}): ${err.message}`);
+
+      // 🔧 v2: ativa circuit breaker se passou do limite
+      if (_falhasConsecutivas >= CIRCUIT_BREAKER_LIMITE) {
+        _circuitAbertoAte = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
+        const cooldownMin = Math.round(CIRCUIT_BREAKER_COOLDOWN_MS / 60_000);
+        ctx.log(`🔥 Circuit breaker ATIVADO após ${_falhasConsecutivas} falhas consecutivas. Pausando por ${cooldownMin}min.`);
+        _falhasConsecutivas = 0; // reseta pra próxima janela
+      }
+      // Sem dados confiáveis — sai. É melhor não fazer nada do que remover indevidamente.
       return;
     }
 
@@ -79,7 +124,7 @@ module.exports = defineAgent({
 
     const elapsedMs = Date.now() - inicio;
     ctx.log(
-      `✅ Varredura completa em ${elapsedMs}ms · ` +
+      `✅ Varredura completa em ${elapsedMs}ms${usouCache ? ' (cache)' : ''} · ` +
       `${resultado.validados} validados, ${resultado.removidos} removidos, ${resultado.erros} erros`
     );
   },
