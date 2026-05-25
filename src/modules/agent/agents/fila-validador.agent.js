@@ -113,6 +113,20 @@ module.exports = defineAgent({
         _circuitAbertoAte = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
         const cooldownMin = Math.round(CIRCUIT_BREAKER_COOLDOWN_MS / 60_000);
         ctx.log(`🔥 Circuit breaker ATIVADO após ${_falhasConsecutivas} falhas consecutivas. Pausando por ${cooldownMin}min.`);
+
+        // 🔧 v3 (2026-05-25): alerta WhatsApp pro Tutts saber em segundos
+        try {
+          const { enviarAlerta } = require('../../../shared/alert-whatsapp');
+          enviarAlerta(
+            'fila-validador-circuit',
+            `🔥 *Fila validador parou*\n\n` +
+            `O agente que remove motoboys da fila quando pegam corrida ` +
+            `falhou ${_falhasConsecutivas} vezes seguidas.\n\n` +
+            `Último erro: _${err.message}_\n\n` +
+            `Pausado por ${cooldownMin} minutos. Operação manual pode ser necessária.`
+          ).catch(() => {});
+        } catch (e) { /* alert-whatsapp pode não estar disponível */ }
+
         _falhasConsecutivas = 0; // reseta pra próxima janela
       }
       // Sem dados confiáveis — sai. É melhor não fazer nada do que remover indevidamente.

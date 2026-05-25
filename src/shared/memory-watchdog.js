@@ -31,17 +31,16 @@
 'use strict';
 
 // Limites em bytes — configuráveis via env var
-// MEMORY_WATCHDOG_WARN_MB: limite de warning (default 1024 MB)
-// MEMORY_WATCHDOG_KILL_MB: limite que dispara restart (default 1536 MB)
+// MEMORY_WATCHDOG_WARN_MB: limite de warning (default 1400 MB pra 2GB de RAM)
+// MEMORY_WATCHDOG_KILL_MB: limite que dispara restart (default 1700 MB pra 2GB)
 // MEMORY_WATCHDOG_CHECKS:  verificações seguidas necessárias (default 3)
 //
-// Razão de ser configurável: o tutts-agents (worker) é mais sensível e
-// roda Chromium 24/7 — limite menor faz sentido. Já o tutts-backend
-// atende HTTP e pode ter picos legítimos durante exports/uploads grandes,
-// então usa limites maiores e mais verificações antes de matar (pra não
-// reiniciar com users no meio de operação).
-const WARN_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_WARN_MB, 10) || 1024) * 1024 * 1024;
-const KILL_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_KILL_MB, 10) || 1536) * 1024 * 1024;
+// 🔧 v2 (2026-05-25): defaults ajustados pra 2GB de RAM no Railway.
+// Antes (pra 1GB): WARN=1024, KILL=1536 — mas só com 1GB total, o KILL nunca
+// dispararia antes do OOM kernel. Agora com 2GB: WARN=1400 (70%), KILL=1700 (85%).
+// Sobra margem confortável e o watchdog faz restart preventivo antes do OOM.
+const WARN_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_WARN_MB, 10) || 1400) * 1024 * 1024;
+const KILL_LIMIT = (parseInt(process.env.MEMORY_WATCHDOG_KILL_MB, 10) || 1700) * 1024 * 1024;
 
 // Quantas verificações seguidas precisam estourar antes de matar
 const VERIFICACOES_NECESSARIAS = parseInt(process.env.MEMORY_WATCHDOG_CHECKS, 10) || 3;
@@ -50,6 +49,19 @@ const VERIFICACOES_NECESSARIAS = parseInt(process.env.MEMORY_WATCHDOG_CHECKS, 10
 const INTERVALO_MS = 60 * 1000;
 
 const TAG = '[mem-watchdog]';
+
+// 🔧 v2 (2026-05-25): lazy require do alert-whatsapp pra não criar dependência
+// dura caso o módulo ainda não exista em alguma branch antiga
+let _alertaModulo = null;
+function _alerta(chave, mensagem) {
+  try {
+    if (!_alertaModulo) _alertaModulo = require('./alert-whatsapp');
+    return _alertaModulo.enviarAlerta(chave, mensagem);
+  } catch (e) {
+    console.warn(`${TAG} alert-whatsapp não disponível: ${e.message}`);
+    return Promise.resolve({ enviado: false });
+  }
+}
 
 let _timer = null;
 let _consecutivoAcimaLimite = 0;
@@ -93,6 +105,14 @@ function verificarMemoria(callbackBeforeExit) {
         `(Railway vai subir nova instância em segundos).`
       );
 
+      // 🔧 v2: alerta WhatsApp antes do exit (fire-and-forget, não bloqueia)
+      _alerta(
+        'mem-kill',
+        `🚨 *Memória crítica* no serviço ${process.env.RAILWAY_SERVICE_NAME || 'tutts'}.\n\n` +
+        `RSS = ${fmtMB(rss)} (limite KILL = ${fmtMB(KILL_LIMIT)})\n\n` +
+        `Reiniciando processo agora. Railway vai subir nova instância em segundos.`
+      ).catch(() => {});
+
       // Tenta callback de cleanup primeiro (ex: stopAll do agent-pool),
       // mas com timeout pra não travar.
       const cb = typeof callbackBeforeExit === 'function'
@@ -118,6 +138,14 @@ function verificarMemoria(callbackBeforeExit) {
 
   if (rss >= WARN_LIMIT) {
     warn(`RSS=${fmtMB(rss)} acima do WARN (${fmtMB(WARN_LIMIT)}). Continuando.`);
+    // 🔧 v2: alerta WhatsApp (com cooldown de 30min do helper)
+    _alerta(
+      'mem-warn',
+      `⚠️ *Memória alta* no serviço ${process.env.RAILWAY_SERVICE_NAME || 'tutts'}.\n\n` +
+      `RSS = ${fmtMB(rss)} (limite WARN = ${fmtMB(WARN_LIMIT)})\n\n` +
+      `Sistema ainda OK, mas pode degradar. Se passar de ${fmtMB(KILL_LIMIT)} por 3min, ` +
+      `o processo vai reiniciar automaticamente.`
+    ).catch(() => {});
   }
 }
 

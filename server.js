@@ -174,6 +174,41 @@ app.get('/api/version', (req, res) => {
   res.json({ version: env.SERVER_VERSION, timestamp: new Date().toISOString() });
 });
 
+// ── /api/health/agents — health check dos agentes (worker separado) ──────
+// 🔧 v2 (2026-05-25): Proxy pro /health/agents do worker-agents.
+// Útil pro dashboard interno mostrar status. Auth livre (igual /health) pra
+// permitir monitoramento externo (Better Uptime, UptimeRobot, etc).
+app.get('/api/health/agents', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const workerUrl = process.env.AGENTS_WORKER_URL;
+  if (!workerUrl) {
+    res.status(503).json({
+      ok: false,
+      status: 'no_worker_configured',
+      mensagem: 'AGENTS_WORKER_URL não definida no backend',
+    });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const r = await fetch(`${workerUrl.replace(/\/+$/, '')}/health/agents`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      status: 'worker_unreachable',
+      erro: err.message,
+    });
+  }
+});
+
 // ─── /diagnostico-tmp — diagnóstico de memória + /tmp ─────────────────────
 // Útil pra inspecionar vazamentos sem precisar de shell no Railway.
 // Mesma lógica do tutts-agents. Acesso aberto (info não-sensível, sem PII).
