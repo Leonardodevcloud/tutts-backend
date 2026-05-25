@@ -330,22 +330,74 @@ async function fazerLogin(page, overrides) {
 
   log(`🔐 Login SLA (${overrides ? 'override' : 'env padrão'}): ${email}`);
 
-  await page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-  await page.waitForTimeout(1500);
+  // 🔧 v17 (2026-05-25): fazerLogin DEFENSIVO.
+  // Causa raiz dos erros "Página de login não carregou. URL: principal.php":
+  // quando o storageState tem cookies parciais/expirados, o servidor Tutts
+  // redireciona o goto(LOGIN_URL) pra principal.php (estado "meio-logado").
+  // Aí #loginEmail não existe lá → throw e loop infinito (sessionFile nunca
+  // é renovado).
+  // Estratégia: tentar 3 vezes com escalada — env normal → URL hardcoded →
+  // limpar storage e tentar do zero.
+  const LOGIN_URL_FALLBACK = 'https://tutts.com.br/expresso/loginFuncionarioNovo';
+  const tentativas = [
+    { url: LOGIN_URL(), motivo: 'env_url' },
+    { url: LOGIN_URL_FALLBACK, motivo: 'fallback_hardcoded' },
+    { url: LOGIN_URL_FALLBACK, motivo: 'pos_limpeza_cookies', limparCookies: true },
+  ];
 
-  const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
-  if (!temEmail) {
-    throw new Error(`Página de login não carregou. URL: ${page.url()}`);
+  let ultimoErro = null;
+  for (let i = 0; i < tentativas.length; i++) {
+    const t = tentativas[i];
+    try {
+      // Na 3ª tentativa, limpa cookies/storage pra forçar página de login limpa
+      if (t.limparCookies) {
+        try {
+          await page.context().clearCookies();
+          log(`🧹 [tentativa ${i + 1}/${tentativas.length}] cookies limpos (storage estava corrompido)`);
+          // Apaga sessionFile do disco também
+          try {
+            const sf = getSessionFile();
+            if (fs.existsSync(sf)) {
+              fs.unlinkSync(sf);
+              log(`🧹 sessionFile removido: ${sf}`);
+            }
+          } catch (eUnlink) { /* best-effort */ }
+        } catch (eClear) {
+          log(`⚠️ clearCookies falhou: ${eClear.message}`);
+        }
+      }
+
+      log(`🔄 [tentativa ${i + 1}/${tentativas.length}] goto → ${t.url} (${t.motivo})`);
+      await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const urlAtual = page.url();
+      const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
+
+      if (!temEmail) {
+        ultimoErro = `Página de login não carregou. goto=${t.url} URL_final=${urlAtual}`;
+        log(`⚠️ [tentativa ${i + 1}/${tentativas.length}] sem #loginEmail | URL_final=${urlAtual}`);
+        continue; // próxima tentativa
+      }
+
+      // #loginEmail encontrado → preenche e submete
+      await page.fill('#loginEmail', email);
+      await page.fill('input[type="password"]', senha);
+      await page.locator('input[name="logar"]').first().click();
+
+      await page.waitForURL((url) => !url.toString().includes('loginFuncionarioNovo'), {
+        timeout: TIMEOUT,
+      });
+      log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}) — URL: ${page.url()}`);
+      return; // sucesso!
+    } catch (err) {
+      ultimoErro = err.message;
+      log(`⚠️ [tentativa ${i + 1}/${tentativas.length}] erro: ${err.message}`);
+    }
   }
 
-  await page.fill('#loginEmail', email);
-  await page.fill('input[type="password"]', senha);
-  await page.locator('input[name="logar"]').first().click();
-
-  await page.waitForURL((url) => !url.toString().includes('loginFuncionarioNovo'), {
-    timeout: TIMEOUT,
-  });
-  log(`✅ Login SLA OK — URL: ${page.url()}`);
+  // Esgotou as 3 tentativas
+  throw new Error(`fazerLogin esgotou tentativas. Último erro: ${ultimoErro}`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
