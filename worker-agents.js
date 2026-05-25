@@ -88,85 +88,6 @@ function iniciarHttpServer() {
       return;
     }
 
-    // ── /health/agents — health agregado pra dashboards e Railway healthcheck ──
-    // 🔧 v2 (2026-05-25): retorna 200 se tudo ok, 503 se crítico (Railway restart)
-    // Critérios de "crítico":
-    //   - RSS > KILL_LIMIT (mas watchdog vai matar em breve, então só status)
-    //   - Algum agente com >5 falhas consecutivas em buscarPendentes/tickGlobal
-    //   - Pool não inicializado
-    if (req.url === '/health/agents') {
-      try {
-        const mem = process.memoryUsage();
-        const fmtMB = b => Math.round(b / 1024 / 1024);
-        const snap = getPoolSnapshot();
-
-        // Coleta resumo por agente
-        const agentesResumo = (snap.agentes || []).map(a => {
-          const totalTicks = (a.stats?.ticksOk || 0) + (a.stats?.ticksErr || 0);
-          const taxaErro = totalTicks > 0
-            ? Math.round((a.stats?.ticksErr || 0) / totalTicks * 100)
-            : 0;
-          return {
-            nome: a.nome,
-            ativo: a.ativo,
-            slotsAtivos: a.slotsAtivos,
-            slots: a.slots,
-            ticksOk: a.stats?.ticksOk || 0,
-            ticksErr: a.stats?.ticksErr || 0,
-            taxaErroPct: taxaErro,
-            ultimaExecucao: a.stats?.ultimaExecucao || null,
-            ultimoSucesso: a.stats?.ultimoSucesso || null,
-            ultimoErro: a.stats?.ultimoErro || null,
-          };
-        });
-
-        // Detecta agentes com problema
-        const agentesProblema = agentesResumo.filter(a =>
-          a.taxaErroPct > 50 && a.ticksErr >= 5
-        );
-
-        // Status geral
-        const critico = !_poolIniciado || fmtMB(mem.rss) > 1700;
-        const degradado = agentesProblema.length > 0 || fmtMB(mem.rss) > 1400;
-
-        const statusGeral = critico ? 'critical' : (degradado ? 'degraded' : 'healthy');
-        const statusCode = critico ? 503 : 200;
-
-        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          ok: !critico,
-          status: statusGeral,
-          timestamp: new Date().toISOString(),
-          uptime_seg: Math.round(process.uptime()),
-          memoria: {
-            rss_mb: fmtMB(mem.rss),
-            heap_used_mb: fmtMB(mem.heapUsed),
-            heap_total_mb: fmtMB(mem.heapTotal),
-            limites: { warn_mb: 1400, kill_mb: 1700 },
-          },
-          pool: {
-            iniciado: _poolIniciado,
-            browser_pool: snap.browserPool,
-          },
-          agentes: {
-            total: agentesResumo.length,
-            ativos: agentesResumo.filter(a => a.ativo).length,
-            com_problema: agentesProblema.length,
-            problemas: agentesProblema.map(a => ({
-              nome: a.nome,
-              taxa_erro_pct: a.taxaErroPct,
-              ultimo_erro: a.ultimoErro,
-            })),
-            detalhes: agentesResumo,
-          },
-        }, null, 2));
-      } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, status: 'error', erro: e.message }));
-      }
-      return;
-    }
-
     // ── /pool/status — snapshot completo ────────────────────
     if (req.url === '/pool/status' || req.url === '/status') {
       try {
@@ -318,7 +239,10 @@ async function main() {
 
   // 4.1. Cleanup periódico de /tmp — evita que profiles do Chromium
   // acumulem e estourem disco. Roda 1x agora + a cada 30 min.
-  iniciarCleanupPeriodico(30 * 60 * 1000);
+  // 🔧 v2 (2026-05-25): intervalo reduzido de 30min → 5min pra prevenir
+  // acúmulo de /tmp entre ciclos. Cada ciclo é leve (~50-200ms) e barato.
+  // Combinado com IDADE_MIN_MS=3min, garante que /tmp nunca acumula >8min de profiles.
+  iniciarCleanupPeriodico(5 * 60 * 1000);
 
   // 4.2. Memory watchdog — failsafe último-recurso. Se a memória passar
   // de 1.5GB sustentadamente (3 verificações), faz restart graceful.

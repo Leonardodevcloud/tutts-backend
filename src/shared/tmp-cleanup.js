@@ -67,9 +67,10 @@ const PADROES_PROFILE = [
 const SCREENSHOT_DIR = path.join(TMP_DIR, 'screenshots');
 
 // Idade mínima pra considerar profile órfão (não apaga nada mais novo).
-// Browsers ativos terminam em segundos a alguns minutos. 30 min é bem
-// conservador.
-const IDADE_MIN_MS = 30 * 60 * 1000;
+// Browsers ativos terminam em segundos a alguns minutos. 3min é agressivo
+// mas seguro — execução normal de browser leva 10-30s, raramente passa de 2min.
+// 🔧 v2 (2026-05-25): reduzido de 30min → 3min pra evitar acúmulo entre ciclos.
+const IDADE_MIN_MS = 3 * 60 * 1000;
 
 // Sempre mantém os N mais recentes intocados, mesmo que velhos. Garantia
 // extra contra race conditions.
