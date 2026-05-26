@@ -88,6 +88,138 @@ function iniciarHttpServer() {
       return;
     }
 
+    // ── /health/agents — health agregado pra dashboards e Railway healthcheck ──
+    // 🔧 v3 (2026-05-26 FIX): retorna 200 durante startup window (60s) mesmo
+    // com pool não iniciado. Antes (v2) retornava 503 nos primeiros 10-30s e
+    // o Railway healthcheck falhava → deploy revertido.
+    //
+    // Critérios de "crítico" (HTTP 503):
+    //   - uptime > 60s E pool ainda não iniciado (algo travou)
+    //   - RSS > KILL_LIMIT
+    //   - Algum agente com >5 falhas consecutivas
+    if (req.url === '/health/agents') {
+      try {
+        const mem = process.memoryUsage();
+        const fmtMB = b => Math.round(b / 1024 / 1024);
+        const uptimeSeg = Math.round(process.uptime());
+
+        // 🔧 v3: grace period de 60s no startup
+        const startupGrace = uptimeSeg < 60;
+        const poolPronto = _poolIniciado;
+
+        // Se ainda tá no startup, devolve 200 "starting" SEM tentar fazer snapshot
+        // (que pode falhar se pool não iniciou)
+        if (startupGrace && !poolPronto) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            status: 'starting',
+            timestamp: new Date().toISOString(),
+            uptime_seg: uptimeSeg,
+            mensagem: `Aguardando inicialização do pool (${uptimeSeg}s/60s grace)`,
+            memoria: {
+              rss_mb: fmtMB(mem.rss),
+              heap_used_mb: fmtMB(mem.heapUsed),
+              heap_total_mb: fmtMB(mem.heapTotal),
+            },
+            pool: { iniciado: false },
+          }, null, 2));
+          return;
+        }
+
+        // Pool deve estar pronto a essa altura — se não está após 60s, é crítico
+        let snap;
+        try {
+          snap = getPoolSnapshot();
+        } catch (e) {
+          // Snapshot falhou — provavelmente pool nem iniciou
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            status: 'critical',
+            timestamp: new Date().toISOString(),
+            uptime_seg: uptimeSeg,
+            erro: `getPoolSnapshot falhou: ${e.message}`,
+            memoria: { rss_mb: fmtMB(mem.rss) },
+          }, null, 2));
+          return;
+        }
+
+        // Coleta resumo por agente
+        const agentesResumo = (snap.agentes || []).map(a => {
+          const totalTicks = (a.stats?.ticksOk || 0) + (a.stats?.ticksErr || 0);
+          const taxaErro = totalTicks > 0
+            ? Math.round((a.stats?.ticksErr || 0) / totalTicks * 100)
+            : 0;
+          return {
+            nome: a.nome,
+            ativo: a.ativo,
+            slotsAtivos: a.slotsAtivos,
+            slots: a.slots,
+            ticksOk: a.stats?.ticksOk || 0,
+            ticksErr: a.stats?.ticksErr || 0,
+            taxaErroPct: taxaErro,
+            ultimaExecucao: a.stats?.ultimaExecucao || null,
+            ultimoSucesso: a.stats?.ultimoSucesso || null,
+            ultimoErro: a.stats?.ultimoErro || null,
+          };
+        });
+
+        // Detecta agentes com problema (>50% erro E pelo menos 5 falhas)
+        const agentesProblema = agentesResumo.filter(a =>
+          a.taxaErroPct > 50 && a.ticksErr >= 5
+        );
+
+        // Status geral — só é crítico se uptime>60s E pool não iniciou, OU RSS estourou
+        const critico = (uptimeSeg > 60 && !poolPronto) || fmtMB(mem.rss) > 1700;
+        const degradado = agentesProblema.length > 0 || fmtMB(mem.rss) > 1400;
+
+        const statusGeral = critico ? 'critical' : (degradado ? 'degraded' : 'healthy');
+        const statusCode = critico ? 503 : 200;
+
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: !critico,
+          status: statusGeral,
+          timestamp: new Date().toISOString(),
+          uptime_seg: uptimeSeg,
+          memoria: {
+            rss_mb: fmtMB(mem.rss),
+            heap_used_mb: fmtMB(mem.heapUsed),
+            heap_total_mb: fmtMB(mem.heapTotal),
+            limites: { warn_mb: 1400, kill_mb: 1700 },
+          },
+          pool: {
+            iniciado: poolPronto,
+            browser_pool: snap.browserPool,
+          },
+          agentes: {
+            total: agentesResumo.length,
+            ativos: agentesResumo.filter(a => a.ativo).length,
+            com_problema: agentesProblema.length,
+            problemas: agentesProblema.map(a => ({
+              nome: a.nome,
+              taxa_erro_pct: a.taxaErroPct,
+              ultimo_erro: a.ultimoErro,
+            })),
+            detalhes: agentesResumo,
+          },
+        }, null, 2));
+      } catch (e) {
+        // 🔧 v3: em caso de exceção inesperada, retorna 200 com status "error"
+        // pra NÃO fazer Railway restart o serviço — erros aqui são bugs do health,
+        // não do worker em si.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false,
+          status: 'error',
+          erro: e.message,
+          uptime_seg: Math.round(process.uptime()),
+        }));
+      }
+      return;
+    }
+
     // ── /pool/status — snapshot completo ────────────────────
     if (req.url === '/pool/status' || req.url === '/status') {
       try {
