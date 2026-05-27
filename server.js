@@ -170,6 +170,70 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'API funcionando' });
 });
 
+// ── /api/system/restart-worker — admin master only ──────────────────────
+// 🆕 v4 (2026-05-26): permite painel disparar restart do tutts-agents.
+// Requer:
+//   - AGENTS_WORKER_URL (já existe no env do backend)
+//   - AGENTS_RESTART_TOKEN (compartilhado entre backend e worker)
+// Audita quem disparou.
+app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
+  // Só admin master pode reiniciar
+  if (req.usuario?.role !== 'admin_master') {
+    return res.status(403).json({ error: 'Apenas admin master pode reiniciar o worker' });
+  }
+
+  const workerUrl = process.env.AGENTS_WORKER_URL;
+  const restartToken = process.env.AGENTS_RESTART_TOKEN;
+  if (!workerUrl || !restartToken) {
+    return res.status(503).json({
+      error: 'Restart não configurado',
+      detalhe: 'AGENTS_WORKER_URL e AGENTS_RESTART_TOKEN devem estar definidos no backend',
+    });
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const r = await fetch(`${workerUrl.replace(/\/+$/, '')}/agents/restart`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Restart-Token': restartToken,
+      },
+      body: JSON.stringify({
+        solicitante: `${req.usuario?.cod_profissional || '?'} (${req.usuario?.full_name || '?'})`,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const data = await r.json();
+
+    // Auditoria
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (usuario_id, usuario_nome, acao, categoria, detalhes, criado_em)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          req.usuario?.cod_profissional || null,
+          req.usuario?.full_name || 'desconhecido',
+          'RESTART_WORKER',
+          'sistema',
+          JSON.stringify({ resposta: data, ip: req.ip }),
+        ]
+      );
+    } catch (e) {
+      console.warn('⚠️ Erro ao gravar auditoria de restart:', e.message);
+    }
+
+    res.status(r.status).json(data);
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      erro: err.message,
+    });
+  }
+});
+
 app.get('/api/version', (req, res) => {
   res.json({ version: env.SERVER_VERSION, timestamp: new Date().toISOString() });
 });

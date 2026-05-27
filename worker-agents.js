@@ -146,22 +146,30 @@ function iniciarHttpServer() {
         }
 
         // Coleta resumo por agente
+        // 🔧 v4 (2026-05-26 FIX): nomes dos campos de stats batem com o agent-pool
+        // (era ticksOk/ticksErr, mas no agent-pool é ticksComSucesso/ticksComErro)
         const agentesResumo = (snap.agentes || []).map(a => {
-          const totalTicks = (a.stats?.ticksOk || 0) + (a.stats?.ticksErr || 0);
+          const stats = a.stats || {};
+          const ticksOk = stats.ticksComSucesso || 0;
+          const ticksErr = stats.ticksComErro || 0;
+          const totalTicks = ticksOk + ticksErr;
           const taxaErro = totalTicks > 0
-            ? Math.round((a.stats?.ticksErr || 0) / totalTicks * 100)
+            ? Math.round(ticksErr / totalTicks * 100)
             : 0;
           return {
             nome: a.nome,
             ativo: a.ativo,
             slotsAtivos: a.slotsAtivos,
             slots: a.slots,
-            ticksOk: a.stats?.ticksOk || 0,
-            ticksErr: a.stats?.ticksErr || 0,
+            ticksOk,
+            ticksErr,
+            ticksTotais: stats.ticksTotais || 0,
+            ticksTimeout: stats.ticksComTimeout || 0,
             taxaErroPct: taxaErro,
-            ultimaExecucao: a.stats?.ultimaExecucao || null,
-            ultimoSucesso: a.stats?.ultimoSucesso || null,
-            ultimoErro: a.stats?.ultimoErro || null,
+            ultimaExecucao: stats.ultimoTickEm || null,
+            ultimoErroEm: stats.ultimoErroEm || null,
+            ultimoErroMsg: stats.ultimoErroMsg || null,
+            iniciadoEm: stats.iniciadoEm || null,
           };
         });
 
@@ -217,6 +225,57 @@ function iniciarHttpServer() {
           uptime_seg: Math.round(process.uptime()),
         }));
       }
+      return;
+    }
+
+    // ── POST /agents/restart — restart graceful via process.exit ──
+    // 🆕 v4 (2026-05-26): permite UI disparar restart sem precisar Railway API.
+    // O process.exit(0) faz Railway recriar o container em ~10-30s.
+    //
+    // Segurança: requer header X-Restart-Token que deve bater com env
+    // AGENTS_RESTART_TOKEN. Se a env não estiver setada, endpoint retorna 503
+    // (impede restart sem config explícita).
+    if (req.url === '/agents/restart' && req.method === 'POST') {
+      const tokenEsperado = process.env.AGENTS_RESTART_TOKEN;
+      if (!tokenEsperado) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false,
+          erro: 'AGENTS_RESTART_TOKEN não configurado no worker',
+        }));
+        return;
+      }
+      const tokenRecebido = req.headers['x-restart-token'];
+      if (tokenRecebido !== tokenEsperado) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, erro: 'Token inválido' }));
+        return;
+      }
+
+      // Coleta corpo (se enviado — opcional, pra log)
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        let solicitante = 'desconhecido';
+        try {
+          const data = body ? JSON.parse(body) : {};
+          solicitante = data.solicitante || 'desconhecido';
+        } catch (_) {}
+
+        logger.warn(`🔄 [agents/restart] Restart solicitado por: ${solicitante}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          mensagem: 'Restart em andamento — container vai subir nova instância em segundos',
+          solicitante,
+        }));
+
+        // Pequeno delay pra resposta sair antes do exit
+        setTimeout(() => {
+          logger.warn(`🔄 [agents/restart] process.exit(0) — Railway vai recriar container`);
+          process.exit(0);
+        }, 500);
+      });
       return;
     }
 
