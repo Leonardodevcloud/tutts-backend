@@ -883,6 +883,77 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // ───────────────────────────────────────────────────────────
   router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 5'));
 
+  // ───────────────────────────────────────────────────────────
+  // GET /deliveries/:id/comprovante
+  // Retorna o comprovante de entrega (foto + assinatura) coletado pelo provider.
+  // Hoje suportado apenas para Uber Direct (provider_code='uber').
+  // Se ainda não foi buscado, faz o fetch ao vivo na API do provider e salva.
+  // ───────────────────────────────────────────────────────────
+  router.get('/deliveries/:id/comprovante', verificarToken, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { rows } = await pool.query(
+        'SELECT id, codigo_os, provider_code, external_delivery_id, status_canonico, proof_of_delivery FROM logistics_deliveries WHERE id = $1',
+        [id]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Entrega não encontrada' });
+      }
+
+      const entrega = rows[0];
+
+      // Só Uber tem proof_of_delivery disponível via API
+      if (entrega.provider_code !== 'uber') {
+        return res.status(404).json({
+          error: `Comprovante de entrega não disponível para o provider '${entrega.provider_code}'.`,
+          detalhe: 'A 99Entrega não expõe foto/assinatura via API. Apenas Uber Direct suporta este recurso.',
+        });
+      }
+
+      // Se já está salvo no banco, retorna direto
+      if (entrega.proof_of_delivery) {
+        return res.json({ success: true, comprovante: entrega.proof_of_delivery, origem: 'banco' });
+      }
+
+      // Entrega ainda não finalizada — sem comprovante
+      if (!['DELIVERED'].includes(entrega.status_canonico)) {
+        return res.status(404).json({
+          error: 'Comprovante ainda não disponível — a entrega ainda não foi concluída.',
+          status: entrega.status_canonico,
+        });
+      }
+
+      // Busca ao vivo no provider e salva
+      if (!entrega.external_delivery_id) {
+        return res.status(404).json({ error: 'ID externo da entrega não encontrado.' });
+      }
+
+      const adapter = getProviderRegistry(pool).get('uber');
+      if (!adapter) {
+        return res.status(503).json({ error: 'Provider Uber não está ativo no momento.' });
+      }
+
+      const proof = await adapter.getProofOfDelivery(entrega.external_delivery_id);
+      if (!proof) {
+        return res.status(404).json({
+          error: 'Comprovante não encontrado na Uber para esta entrega.',
+          detalhe: 'Algumas entregas antigas não possuem comprovante armazenado.',
+        });
+      }
+
+      // Persiste para consultas futuras
+      await pool.query(
+        'UPDATE logistics_deliveries SET proof_of_delivery = $1, updated_at = NOW() WHERE id = $2',
+        [JSON.stringify(proof), id]
+      );
+
+      res.json({ success: true, comprovante: proof, origem: 'uber_api' });
+    } catch (err) {
+      console.error('[logistics/comprovante] erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
 
