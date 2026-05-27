@@ -172,13 +172,10 @@ app.get('/api/health', (req, res) => {
 
 // ── /api/system/restart-worker — admin master only ──────────────────────
 // 🆕 v4 (2026-05-26): permite painel disparar restart do tutts-agents.
-// Requer:
-//   - AGENTS_WORKER_URL (já existe no env do backend)
-//   - AGENTS_RESTART_TOKEN (compartilhado entre backend e worker)
-// Audita quem disparou.
+// 🔧 v5 (2026-05-27): corrigido req.usuario → req.user (padrão do middleware auth)
 app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
   // Só admin master pode reiniciar
-  if (req.usuario?.role !== 'admin_master') {
+  if (req.user?.role !== 'admin_master') {
     return res.status(403).json({ error: 'Apenas admin master pode reiniciar o worker' });
   }
 
@@ -201,7 +198,7 @@ app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
         'X-Restart-Token': restartToken,
       },
       body: JSON.stringify({
-        solicitante: `${req.usuario?.cod_profissional || '?'} (${req.usuario?.full_name || '?'})`,
+        solicitante: `${req.user?.codProfissional || '?'} (${req.user?.fullName || req.user?.full_name || '?'})`,
       }),
       signal: controller.signal,
     });
@@ -214,8 +211,8 @@ app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
         `INSERT INTO audit_logs (usuario_id, usuario_nome, acao, categoria, detalhes, criado_em)
          VALUES ($1, $2, $3, $4, $5, NOW())`,
         [
-          req.usuario?.cod_profissional || null,
-          req.usuario?.full_name || 'desconhecido',
+          req.user?.codProfissional || null,
+          req.user?.fullName || req.user?.full_name || 'desconhecido',
           'RESTART_WORKER',
           'sistema',
           JSON.stringify({ resposta: data, ip: req.ip }),
