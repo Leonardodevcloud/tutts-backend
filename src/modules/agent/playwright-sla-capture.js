@@ -796,7 +796,7 @@ async function coletarOsEmExecucao() {
 
     // Ativa aba "Em execução"
     const abaEmExecucao = page.locator('#pills-em-execucao-tab');
-    if (!(await abaEmExecucao.isVisible({ timeout: 5000 }).catch(() => false))) {
+    if (!(await abaEmExecucao.isVisible({ timeout: 30000 }).catch(() => false))) {
       etapa('aba_nao_visivel');
       return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, diag };
     }
