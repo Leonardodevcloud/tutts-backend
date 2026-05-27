@@ -375,6 +375,23 @@ async function fazerLogin(page, overrides) {
       const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
 
       if (!temEmail) {
+        // 🆕 v18 (2026-05-27): CHECAGEM DE "JÁ LOGADO VIA COOKIE"
+        // Causa raiz do loop de 30s: servidor Tutts redireciona goto(loginFuncionarioNovo)
+        // pra principal.php QUANDO o cookie de sessão ainda é válido. Antes, declarávamos
+        // falha por não achar #loginEmail, mesmo estando logado — perdia 2 tentativas
+        // e ~30s antes de limpar cookies e refazer.
+        // Agora, se a URL_final é uma rota interna pós-login, retorna sucesso direto.
+        const indicadoresLogado = [
+          '/principal',
+          '/notificacao-feriados',
+          '/acompanhamento-servicos',
+          '/expressoat/',
+        ];
+        const jaLogado = indicadoresLogado.some(s => urlAtual.includes(s));
+        if (jaLogado) {
+          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL: ${urlAtual}`);
+          return; // sucesso — sessão ainda válida, login desnecessário
+        }
         ultimoErro = `Página de login não carregou. goto=${t.url} URL_final=${urlAtual}`;
         log(`⚠️ [tentativa ${i + 1}/${tentativas.length}] sem #loginEmail | URL_final=${urlAtual}`);
         continue; // próxima tentativa
