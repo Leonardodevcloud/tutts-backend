@@ -111,42 +111,31 @@ function montarBodyDelivery(quoteId, req, config) {
     undeliverable_action: 'return',
   };
 
-  // ── Códigos de verificação — gerados aqui e retornados ao caller ──────────
-  let pickupCode  = null;
-  let dropoffCode = null;
-
-  // Verificação de COLETA — PIN de 6 dígitos que o atendente da loja informa
-  // ao motoboy antes de entregar o pacote. Habilitado via verificacao_coleta_habilitada.
+  // Verificação de coleta — quando habilitada, Uber gera um PIN.
+  // O atendente da loja informa o PIN ao entregador antes de entregar o pacote.
+  // Chave: verificacao_coleta_habilitada (ou alias legacy need_pickup_code).
   if (config && (config.verificacao_coleta_habilitada || config.need_pickup_code)) {
-    pickupCode = String(Math.floor(100000 + Math.random() * 900000));
     body.pickup_verification = {
-      barcodes: [{ type: 'pin', value: pickupCode }],
+      barcodes: [{
+        type: 'pin',
+        // PIN gerado pelo caller ou por nós (6 dígitos). A Uber aceita custom PIN.
+        value: config._pickup_pin || String(Math.floor(100000 + Math.random() * 900000)),
+      }],
     };
-    console.log(`[Uber] Verificação de COLETA habilitada para OS ${req.externalRef} — PIN: ${pickupCode}`);
+    console.log('[Uber] Verificação de COLETA habilitada para OS', req.externalRef);
   }
 
-  // Verificação de ENTREGA — dois modos configuráveis via verificacao_entrega_tipo:
-  //   'codigo'    → PIN de 6 dígitos. Destinatário recebe via WhatsApp e informa ao motoboy.
-  //   'assinatura'→ Assinatura digital coletada no app do motoboy (padrão se não configurado).
+  // Verificação de entrega — assinatura digital do recebedor.
+  // Chave: verificacao_entrega_habilitada (ou alias legacy need_dropoff_code).
   if (config && (config.verificacao_entrega_habilitada || config.need_dropoff_code)) {
-    const tipo = config.verificacao_entrega_tipo || 'assinatura';
-    if (tipo === 'codigo') {
-      dropoffCode = String(Math.floor(100000 + Math.random() * 900000));
-      body.dropoff_verification = {
-        barcodes: [{ type: 'pin', value: dropoffCode }],
-      };
-      console.log(`[Uber] Verificação de ENTREGA (PIN) habilitada para OS ${req.externalRef} — PIN: ${dropoffCode}`);
-    } else {
-      // Modo padrão: assinatura digital (não gera código, só comprovante visual)
-      body.dropoff_verification = {
-        signature_requirement: {
-          enabled: true,
-          collect_signer_name: true,
-          collect_signer_relationship: false,
-        },
-      };
-      console.log(`[Uber] Verificação de ENTREGA (assinatura) habilitada para OS ${req.externalRef}`);
-    }
+    body.dropoff_verification = {
+      signature_requirement: {
+        enabled: true,
+        collect_signer_name: true,
+        collect_signer_relationship: false,
+      },
+    };
+    console.log('[Uber] Verificação de ENTREGA habilitada para OS', req.externalRef);
   }
 
   // Coordenadas
@@ -166,9 +155,7 @@ function montarBodyDelivery(quoteId, req, config) {
     };
   }
 
-  // Retorna body + códigos gerados. UberAdapter.createDelivery salva os códigos
-  // em logistics_deliveries e dispara WhatsApp quando necessário.
-  return { body, pickupCode, dropoffCode };
+  return body;
 }
 
 /**

@@ -38,7 +38,6 @@
 
 const express = require('express');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
-const { enviarCodigoColeta, enviarCodigoEntrega } = require('./logistics.whatsapp');
 const { getDispatchOrchestrator } = require('./core/DispatchOrchestrator');
 const { getMappClient } = require('./core/MappClient');
 const { EventSource } = require('./core/EventLogger');
@@ -882,59 +881,6 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // ───────────────────────────────────────────────────────────
   // Endpoints ainda pendentes
   // ───────────────────────────────────────────────────────────
-  // POST /deliveries/:id/reenviar-codigo
-  // Reenvia o código de verificação (coleta ou entrega) via WhatsApp.
-  // Útil quando o destinatário não recebeu ou perdeu o código.
-  router.post('/deliveries/:id/reenviar-codigo', verificarToken, verificarAdmin, async (req, res) => {
-    const { tipo } = req.body; // 'coleta' ou 'entrega'
-    if (!tipo || !['coleta', 'entrega'].includes(tipo)) {
-      return res.status(400).json({ error: "Parâmetro 'tipo' deve ser 'coleta' ou 'entrega'" });
-    }
-    try {
-      const { rows } = await pool.query(
-        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
-         FROM logistics_deliveries ld
-         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
-         WHERE ld.id = $1`,
-        [parseInt(req.params.id, 10)]
-      );
-      if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
-      const e = rows[0];
-      const providerNome = e.provider_code === 'uber' ? 'Uber Direct' : '99Entrega';
-
-      if (tipo === 'coleta') {
-        if (!e.pickup_code) return res.status(404).json({ error: 'Código de coleta não gerado para esta entrega' });
-        // Telefone da coleta: primeiro ponto dos pontos JSON
-        const pts = Array.isArray(e.pontos) ? e.pontos : (e.pontos ? JSON.parse(e.pontos) : []);
-        const telColeta = pts[0]?.telefone || pts[0]?.fone || null;
-        if (!telColeta) return res.status(422).json({ error: 'Telefone do remetente não disponível nos dados da OS' });
-        const r = await enviarCodigoColeta(telColeta, { codigoOS: e.codigo_os, codigo: e.pickup_code, providerNome });
-        return res.json({ ok: r.enviado, motivo: r.motivo || null });
-      }
-
-      // tipo === 'entrega'
-      if (!e.dropoff_code) return res.status(404).json({ error: 'Código de entrega não gerado para esta entrega' });
-      const telEntrega = e.telefone_entrega;
-      if (!telEntrega) return res.status(422).json({ error: 'Telefone do destinatário não disponível' });
-      const pts2 = Array.isArray(e.pontos) ? e.pontos : (e.pontos ? JSON.parse(e.pontos) : []);
-      const ultimo = pts2[pts2.length - 1] || {};
-      const r2 = await enviarCodigoEntrega(telEntrega, {
-        codigoOS: e.codigo_os, codigo: e.dropoff_code,
-        providerNome, nomeDestinatario: ultimo.nome || '',
-      });
-      if (r2.enviado) {
-        await pool.query(
-          'UPDATE logistics_deliveries SET codigo_wpp_enviado = TRUE, updated_at = NOW() WHERE id = $1',
-          [e.id]
-        );
-      }
-      return res.json({ ok: r2.enviado, motivo: r2.motivo || null });
-    } catch (err) {
-      console.error('[logistics/reenviar-codigo]', err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   router.get('/deliveries/:id/tracking', verificarToken, notImplemented('Fase 5'));
 
   // ───────────────────────────────────────────────────────────

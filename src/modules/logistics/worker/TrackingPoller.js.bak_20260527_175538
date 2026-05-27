@@ -33,7 +33,6 @@
  */
 
 const { getProviderRegistry } = require('../core/ProviderRegistry');
-const { enviarCodigoColeta, enviarCodigoEntrega, normalizarTelefone } = require('../logistics.whatsapp');
 const { getWebhookDispatcher } = require('../core/WebhookDispatcher');
 const { getEventLogger, EventSource } = require('../core/EventLogger');
 
@@ -307,50 +306,6 @@ function startTrackingPoller(pool) {
           else if (r === 'posicao') posicoes++;
           else if (r === 'sem_novidade') semNovidade++;
           else semCourier++;
-
-          // Para 99Entrega: quando getDelivery retorna código pela 1ª vez,
-          // salva no banco e envia WhatsApp (a 99 não tem evento de webhook pra isso)
-          if (PROVIDER_CODE === 'noventanove' && r !== 'erro') {
-            try {
-              const det = await adapter.getDelivery(entrega.external_delivery_id);
-              const temNovoCodigo = (
-                (det.pickupCode  && !entrega.pickup_code)  ||
-                (det.dropoffCode && !entrega.dropoff_code)
-              );
-              if (temNovoCodigo) {
-                await pool.query(
-                  'UPDATE logistics_deliveries SET pickup_code = COALESCE($1, pickup_code), dropoff_code = COALESCE($2, dropoff_code), updated_at = NOW() WHERE id = $3',
-                  [det.pickupCode || null, det.dropoffCode || null, entrega.id]
-                );
-                // Envia WhatsApp do dropoff_code se ainda não enviado
-                if (det.dropoffCode && !entrega.dropoff_code && !entrega.codigo_wpp_enviado) {
-                  const { rows: r2 } = await pool.query(
-                    'SELECT telefone_entrega, pontos FROM logistics_deliveries WHERE id = $1',
-                    [entrega.id]
-                  );
-                  const telEntrega = r2[0]?.telefone_entrega || null;
-                  if (telEntrega) {
-                    const pts = r2[0]?.pontos || [];
-                    const ultimo = Array.isArray(pts) ? pts[pts.length - 1] : null;
-                    enviarCodigoEntrega(telEntrega, {
-                      codigoOS: entrega.codigo_os,
-                      codigo: det.dropoffCode,
-                      providerNome: '99Entrega',
-                      nomeDestinatario: ultimo?.nome || '',
-                    }).then(wppR => {
-                      if (wppR.enviado) {
-                        pool.query(
-                          'UPDATE logistics_deliveries SET codigo_wpp_enviado = TRUE WHERE id = $1',
-                          [entrega.id]
-                        ).catch(() => {});
-                      }
-                    }).catch(() => {});
-                  }
-                }
-                console.log(`🔑 [TrackingPoller] OS ${entrega.codigo_os}: código(s) 99 detectado(s) e salvos`);
-              }
-            } catch (_e) { /* best-effort */ }
-          }
         } catch (err) {
           erros++;
           console.error(`❌ [TrackingPoller] OS ${entrega.codigo_os} (delivery ${entrega.id}):`, err.message);

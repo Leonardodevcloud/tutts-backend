@@ -127,38 +127,9 @@ class WebhookDispatcher {
       payload: { event_type: evento?.eventType || 'unknown' },
     }).catch(() => {});
 
-    // Evento sem ação genérico → ack e fim
-    if (!evento || !evento.externalDeliveryId) {
-      console.log(`📨 [WebhookDispatcher] ${providerCode}: evento sem delivery_id (${evento?.eventType || 'null'})`);
-      return adapter.acknowledgeWebhook(res);
-    }
-
-    // refund_request (Uber) — recebemos mas precisamos registrar o valor de reembolso.
-    // Não tem ação operacional, mas é dinheiro: auditamos como evento financeiro.
-    if (evento.eventType === 'other') {
-      const kindStr = adapter.webhookEventKind ? adapter.webhookEventKind(req.body) : 'other';
-      if (kindStr === 'refund_request' || String(kindStr).includes('refund')) {
-        const valorReembolso = req.body?.data?.fee ?? req.body?.data?.refund_amount ?? null;
-        this.events.log({
-          providerCode,
-          eventType: 'refund_request',
-          eventSource: EventSource.WEBHOOK,
-          externalDeliveryId: evento.externalDeliveryId,
-          payload: {
-            motivo: 'refund_request recebido do provider',
-            valor_centavos: valorReembolso,
-            raw: req.body,
-          },
-        }).catch(() => {});
-        if (valorReembolso != null) {
-          const reaisStr = (Number(valorReembolso) / 100).toFixed(2);
-          console.log(`💰 [WebhookDispatcher] ${providerCode}: refund_request recebido — R$${reaisStr} (external=${evento.externalDeliveryId}). Registrado em logistics_events.`);
-        } else {
-          console.log(`💰 [WebhookDispatcher] ${providerCode}: refund_request recebido (sem valor). Registrado em logistics_events.`);
-        }
-      } else {
-        console.log(`📨 [WebhookDispatcher] ${providerCode}: evento informativo (${kindStr || 'other'})`);
-      }
+    // Evento sem ação (refund, sem delivery_id, etc) → ack e fim
+    if (!evento || evento.eventType === 'other' || !evento.externalDeliveryId) {
+      console.log(`📨 [WebhookDispatcher] ${providerCode}: evento sem ação (${evento?.eventType || 'null'})`);
       return adapter.acknowledgeWebhook(res);
     }
 
@@ -314,15 +285,8 @@ class WebhookDispatcher {
     const acao = STATUS_TO_MAPP_ACTION[statusCanonico];
     if (!acao) return; // status sem ação Mapp (ex: PICKUP_EN_ROUTE)
 
-    // Coordenadas do evento. Se o provider não envia GPS no webhook (ex: 99Entrega),
-    // usa a última posição conhecida gravada pelo TrackingPoller como fallback.
-    let lat = evento.location?.lat ?? null;
-    let lng = evento.location?.lng ?? null;
-    if ((lat == null || lng == null) && entrega.ultima_lat != null && entrega.ultima_lng != null) {
-      lat = parseFloat(entrega.ultima_lat);
-      lng = parseFloat(entrega.ultima_lng);
-      console.log(`📍 [WebhookDispatcher] OS ${codigoOS}: usando última posição conhecida (${lat}, ${lng}) pra ação Mapp`);
-    }
+    const lat = evento.location?.lat;
+    const lng = evento.location?.lng;
 
     // FIX #2: verifica se o provider suporta ARRIVED_DROPOFF. Se não suporta
     // (ex: 99Entrega), o evento de chegada no destino nunca ocorre — precisamos
@@ -345,23 +309,8 @@ class WebhookDispatcher {
           break;
 
         case 'finalizar_servico': {
-          // DELIVERED → finaliza ponto 2 + encerra serviço na Mapp + busca comprovante
+          // DELIVERED → finaliza ponto 2 + encerra serviço na Mapp
           const pontoDrop = acao.ponto || 2;
-
-          // Busca comprovante de entrega em best-effort (foto/assinatura do recebedor).
-          // Controlado por proof_of_delivery_habilitado na config do provider (padrão: true).
-          const _proofHabilitado = !adapter?.config || adapter.config.proof_of_delivery_habilitado !== false;
-          if (_proofHabilitado && adapter && typeof adapter.getProofOfDelivery === 'function' && entrega.external_delivery_id) {
-            adapter.getProofOfDelivery(entrega.external_delivery_id).then(proof => {
-              if (proof) {
-                this.pool.query(
-                  'UPDATE logistics_deliveries SET proof_of_delivery = $1, updated_at = NOW() WHERE id = $2',
-                  [JSON.stringify(proof), entrega.id]
-                ).catch(() => {});
-                console.log(`📸 [WebhookDispatcher] OS ${codigoOS}: comprovante de entrega salvo`);
-              }
-            }).catch(() => {});
-          }
 
           // FIX #2: provider sem ARRIVED_DROPOFF (ex: 99Entrega) — a informarChegada
           // do ponto de entrega nunca foi chamada. Fazemos agora antes de finalizar.
@@ -455,21 +404,13 @@ class WebhookDispatcher {
       await this._vincularMotorista(codigoOS, entrega, courier);
     }
 
-    // Salva posição no tracking + atualiza ultima_lat/lng na entrega (GPS enrichment)
+    // Salva posição no tracking
     if (evento.location?.lat && evento.location?.lng) {
       await this.pool.query(`
         INSERT INTO logistics_tracking (codigo_os, provider_code, delivery_id, external_delivery_id, latitude, longitude, status_native)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
       `, [codigoOS, providerCode, entrega.id, evento.externalDeliveryId, evento.location.lat, evento.location.lng, evento.statusNative])
         .catch(e => console.error('[WebhookDispatcher] erro ao gravar tracking:', e.message));
-
-      // Persiste a última posição conhecida do entregador na entrega.
-      // Usado como fallback de coordenadas quando ações Mapp (informarChegada,
-      // finalizarEndereco) chegam via webhook sem GPS (ex: 99Entrega).
-      await this.pool.query(
-        'UPDATE logistics_deliveries SET ultima_lat = $1, ultima_lng = $2, updated_at = NOW() WHERE id = $3',
-        [evento.location.lat, evento.location.lng, entrega.id]
-      ).catch(() => {});
 
       // Broadcast WebSocket (mantém compat com frontend atual)
       if (global.broadcastUberTracking) {

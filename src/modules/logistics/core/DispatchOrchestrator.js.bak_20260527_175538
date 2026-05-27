@@ -41,7 +41,6 @@ const { getMappClient } = require('./MappClient');
 const { getQuoteCache } = require('./QuoteCache');
 const { getDispatchRuleMatcher } = require('./DispatchRuleMatcher');
 const { lerConfigGlobal } = require('../routes/config-global.routes');
-const { enviarCodigoColeta, enviarCodigoEntrega, normalizarTelefone } = require('../logistics.whatsapp');
 const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.parser');
 
 // Status terminais (status_native) — não devem ser re-despachados
@@ -334,64 +333,7 @@ class DispatchOrchestrator {
       `, [delivery.externalDeliveryId, delivery.trackingUrl || null,
           opts.vehicleType || quote.vehicleType || null, registro.id]);
 
-      // 6b. Salva códigos de verificação (gerados pelo adapter) + dispara WhatsApp.
-      //     Executa em best-effort — falha não aborta o despacho.
-      const _pickupCode  = delivery.pickupCode  || null;
-      const _dropoffCode = delivery.dropoffCode || null;
-
-      if (_pickupCode || _dropoffCode) {
-        // Salva códigos + telefone do destinatário num único UPDATE
-        const _telEntregaParaSalvar = normalizarTelefone(
-          enderecos[enderecos.length - 1]?.telefone ||
-          enderecos[enderecos.length - 1]?.fone || null
-        );
-        this.pool.query(
-          'UPDATE logistics_deliveries SET pickup_code = $1, dropoff_code = $2, telefone_entrega = COALESCE(telefone_entrega, $3), updated_at = NOW() WHERE id = $4',
-          [_pickupCode, _dropoffCode, _telEntregaParaSalvar, registro.id]
-        ).catch(err => console.warn(`⚠️ [Orchestrator] Erro ao salvar códigos OS ${codigoOS}:`, err.message));
-
-        // Envia WhatsApp do código de COLETA pro remetente (loja)
-        // Telefone da coleta vem do primeiro ponto da OS
-        if (_pickupCode) {
-          const _telColeta = normalizarTelefone(enderecos[0]?.telefone || enderecos[0]?.fone || null);
-          if (_telColeta) {
-            enviarCodigoColeta(_telColeta, {
-              codigoOS,
-              codigo: _pickupCode,
-              providerNome: providerCode === 'uber' ? 'Uber Direct' : '99Entrega',
-            }).catch(() => {});
-          }
-        }
-
-        // Envia WhatsApp do código de ENTREGA pro destinatário
-        if (_dropoffCode) {
-          const _telRegistro = await this.pool.query(
-            'SELECT telefone_entrega FROM logistics_deliveries WHERE id = $1',
-            [registro.id]
-          ).then(r => r.rows[0]?.telefone_entrega || null).catch(() => null);
-
-          const _telFinal = _telRegistro || normalizarTelefone(enderecos[enderecos.length - 1]?.telefone || enderecos[enderecos.length - 1]?.fone);
-          if (_telFinal) {
-            enviarCodigoEntrega(_telFinal, {
-              codigoOS,
-              codigo: _dropoffCode,
-              providerNome: providerCode === 'uber' ? 'Uber Direct' : '99Entrega',
-              nomeDestinatario: enderecos[enderecos.length - 1]?.nome || '',
-            }).then(r => {
-              if (r.enviado) {
-                this.pool.query(
-                  'UPDATE logistics_deliveries SET codigo_wpp_enviado = TRUE, updated_at = NOW() WHERE id = $1',
-                  [registro.id]
-                ).catch(() => {});
-              }
-            }).catch(() => {});
-          } else {
-            console.warn(`⚠️ [Orchestrator] OS ${codigoOS}: dropoff_code gerado mas sem telefone do destinatário para enviar WhatsApp`);
-          }
-        }
-      }
-
-      // 6c. Sincroniza o valorProfissional na Mapp com o custo real do provider.
+      // 6b. Sincroniza o valorProfissional na Mapp com o custo real do provider.
       //     O valor original da OS foi calibrado para motoboy interno — corrigimos
       //     para o que o parceiro externo (99, Uber) efetivamente cobra.
       //     Best-effort: falha aqui NÃO aborta o despacho (entrega já criada).

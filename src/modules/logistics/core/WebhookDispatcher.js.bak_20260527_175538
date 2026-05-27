@@ -349,9 +349,8 @@ class WebhookDispatcher {
           const pontoDrop = acao.ponto || 2;
 
           // Busca comprovante de entrega em best-effort (foto/assinatura do recebedor).
-          // Controlado por proof_of_delivery_habilitado na config do provider (padrão: true).
-          const _proofHabilitado = !adapter?.config || adapter.config.proof_of_delivery_habilitado !== false;
-          if (_proofHabilitado && adapter && typeof adapter.getProofOfDelivery === 'function' && entrega.external_delivery_id) {
+          // Só providers que implementam getProofOfDelivery() retornam algo.
+          if (adapter && typeof adapter.getProofOfDelivery === 'function' && entrega.external_delivery_id) {
             adapter.getProofOfDelivery(entrega.external_delivery_id).then(proof => {
               if (proof) {
                 this.pool.query(

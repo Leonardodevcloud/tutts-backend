@@ -190,9 +190,7 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     const token = await obterTokenUber(this.pool);
     const url = `${UBER_API_BASE}/${customerId}/deliveries`;
-
-    // montarBodyDelivery agora retorna { body, pickupCode, dropoffCode }
-    const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config);
+    const body = montarBodyDelivery(quote.quoteId, req, this.config);
 
     const resp = await httpRequest(url, {
       method: 'POST',
@@ -218,7 +216,7 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     console.log(`✅ [UberAdapter] entrega criada: ${data.id} | status=${data.status}`);
 
-    // CanonicalDelivery — inclui códigos de verificação para o Orchestrator salvar
+    // CanonicalDelivery
     return {
       externalDeliveryId: data.id,
       providerCode: this.providerCode,
@@ -227,8 +225,6 @@ class UberAdapter extends LogisticsProviderAdapter {
       trackingUrl: data.tracking_url || null,
       courier: data.courier ? this._extractCourier(data.courier) : null,
       rawProvider: data,
-      pickupCode:  pickupCode  || null,   // PIN de coleta (gerado por nós)
-      dropoffCode: dropoffCode || null,   // PIN de entrega (gerado por nós, se tipo='codigo')
     };
   }
 
