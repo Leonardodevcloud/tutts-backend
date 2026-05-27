@@ -191,7 +191,20 @@ app.get('/api/health', (req, res) => {
 // ── /api/system/restart-worker — admin master only ──────────────────────
 // 🆕 v4 (2026-05-26): permite painel disparar restart do tutts-agents.
 // 🔧 v5 (2026-05-27): corrigido req.usuario → req.user (padrão do middleware auth)
+
+// 🔍 DEBUG-v6 (2026-05-27): catch-all pra TODA chamada nesse path
+app.all('/api/system/restart-worker', (req, res, next) => {
+  console.warn(`🟢 [DEBUG-v6] catch-all atingido — método=${req.method}, path=${req.path}`);
+  if (req.method !== 'POST') {
+    console.warn(`🟢 [DEBUG-v6] método diferente de POST — devolvendo 200 (debug)`);
+    return res.json({ debug: true, metodo_recebido: req.method });
+  }
+  console.warn(`🟢 [DEBUG-v6] método é POST — chamando next()`);
+  next();
+});
+
 app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
+  console.warn(`🟣 [DEBUG-v6] app.post atingido!!!`);
   // Só admin master pode reiniciar
   if (req.user?.role !== 'admin_master') {
     return res.status(403).json({ error: 'Apenas admin master pode reiniciar o worker' });
