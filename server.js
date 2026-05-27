@@ -243,7 +243,9 @@ app.get('/api/version', (req, res) => {
 // Útil pro dashboard interno mostrar status. Auth livre (igual /health) pra
 // permitir monitoramento externo (Better Uptime, UptimeRobot, etc).
 app.get('/api/health/agents', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // 🔧 v2 (2026-05-27 FIX): removido setHeader Access-Control-Allow-Origin '*'
+  // que conflitava com credentials:'include' do fetchAuth. O middleware CORS
+  // global do app (cors()) já manda a origin específica, que funciona com cookies.
 
   const workerUrl = process.env.AGENTS_WORKER_URL;
   if (!workerUrl) {
