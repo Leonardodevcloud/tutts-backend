@@ -104,6 +104,24 @@ if (env.IS_PRODUCTION) {
 const app = express();
 const registrarAuditoria = createAuditLogger(pool);
 
+// 🔍 DEBUG TEMPORÁRIO (2026-05-27) — capturar TODO request /api/system/*
+// Logga método, path, headers principais. Remover depois do debug.
+app.use((req, res, next) => {
+  if (req.originalUrl && req.originalUrl.includes('/system/')) {
+    console.warn(`🔍 [DEBUG-SYSTEM] ${req.method} ${req.originalUrl}`);
+    console.warn(`   headers.authorization: ${req.headers.authorization ? 'Bearer ...' : 'MISSING'}`);
+    console.warn(`   headers.origin: ${req.headers.origin || 'MISSING'}`);
+    console.warn(`   headers.x-csrf-token: ${req.headers['x-csrf-token'] ? 'present' : 'MISSING'}`);
+    // Hook na resposta pra ver o status final
+    const origEnd = res.end;
+    res.end = function(...args) {
+      console.warn(`🔍 [DEBUG-SYSTEM] response status: ${res.statusCode}`);
+      return origEnd.apply(this, args);
+    };
+  }
+  next();
+});
+
 // ─── Security & parsing ──────────────────────────────────
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
