@@ -94,23 +94,13 @@ function createConfigGlobalRoutes(pool, verificarToken, verificarAdmin, registra
       const margemRs  = parseMargem(body.margem_global_minima_rs, true);
       const margemPct = parseMargem(body.margem_global_minima_pct, true);
 
-      // Tabela de precificação por distância
-      const tabelaAtiva   = typeof body.tabela_preco_ativa === 'boolean' ? body.tabela_preco_ativa : undefined;
-      const precoFixo     = parseMargem(body.preco_valor_fixo, true);
-      const precoKmBase   = parseMargem(body.preco_km_base, true);
-      const precoKmAdic   = parseMargem(body.preco_valor_km_adicional, true);
-
       // Monta o UPDATE dinâmico — só os campos enviados.
       const sets = [];
       const vals = [];
       let i = 1;
-      if (ativa !== undefined)       { sets.push(`margem_global_ativa = $${i++}`);            vals.push(ativa); }
-      if (margemRs !== undefined)    { sets.push(`margem_global_minima_rs = $${i++}`);         vals.push(margemRs); }
-      if (margemPct !== undefined)   { sets.push(`margem_global_minima_pct = $${i++}`);        vals.push(margemPct); }
-      if (tabelaAtiva !== undefined) { sets.push(`tabela_preco_ativa = $${i++}`);              vals.push(tabelaAtiva); }
-      if (precoFixo !== undefined)   { sets.push(`preco_valor_fixo = $${i++}`);                vals.push(precoFixo); }
-      if (precoKmBase !== undefined) { sets.push(`preco_km_base = $${i++}`);                   vals.push(precoKmBase); }
-      if (precoKmAdic !== undefined) { sets.push(`preco_valor_km_adicional = $${i++}`);        vals.push(precoKmAdic); }
+      if (ativa !== undefined)     { sets.push(`margem_global_ativa = $${i++}`);     vals.push(ativa); }
+      if (margemRs !== undefined)  { sets.push(`margem_global_minima_rs = $${i++}`); vals.push(margemRs); }
+      if (margemPct !== undefined) { sets.push(`margem_global_minima_pct = $${i++}`);vals.push(margemPct); }
 
       if (sets.length === 0) {
         // Nada pra atualizar — devolve o estado atual.

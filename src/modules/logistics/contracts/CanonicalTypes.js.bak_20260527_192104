@@ -48,7 +48,6 @@
  * @property {number} etaMinutos - Tempo estimado total
  * @property {string} vehicleType - Veículo cotado
  * @property {Date} expiresAt - Quando o quoteId expira no provider
- * @property {number} [distanciaKm] - Distância em km retornada pelo provider (usada na precificação por km)
  * @property {Object} rawProvider - Snapshot bruto da resposta do provider
  */
 

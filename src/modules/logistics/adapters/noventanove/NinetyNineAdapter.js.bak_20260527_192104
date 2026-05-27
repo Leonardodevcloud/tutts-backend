@@ -220,16 +220,14 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
 
     console.log(`✅ [NinetyNineAdapter] cotação: estimate_id=${estimateId} | R$${feeReais != null ? feeReais.toFixed(2) : '?'} | ETA ${etaMinutos != null ? etaMinutos + 'min' : 'n/d'}`);
 
-    // distanciaMetros já parseado — converte pra km
-    const distanciaKm = distanciaMetros != null ? distanciaMetros / 1000 : null;
-
     return {
-      quoteId: estimateId,
+      quoteId: estimateId,                       // estimate_id — consumido pelo create
       providerCode: this.providerCode,
-      valor: feeReais != null ? feeReais : 0,
+      valor: feeReais != null ? feeReais : 0,    // fee/100 (centavos → reais)
       etaMinutos: etaMinutos != null ? etaMinutos : null,
       vehicleType: 'motorcycle',
-      distanciaKm,  // km da rota retornado pela 99Entrega
+      // A 99 devolve expires_time no estimate — usa quando vier; senão, 5min
+      // nominal (o Orchestrator consome a quote logo em seguida no mesmo fluxo).
       expiresAt: expiresAt instanceof Date && !isNaN(expiresAt)
         ? expiresAt
         : new Date(Date.now() + 5 * 60_000),

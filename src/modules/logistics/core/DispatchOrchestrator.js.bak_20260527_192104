@@ -391,46 +391,15 @@ class DispatchOrchestrator {
         }
       }
 
-      // 6c. Precificação por distância — calcula valorServico com base na tabela.
-      //     Resolve: regra do cliente → config global → sem precificação.
-      //     Distância: provider quote (mais preciso) → haversine (fallback).
-      //     Best-effort: falha não aborta o despacho.
-      try {
-        const _distKm = quote.distanciaKm != null && quote.distanciaKm > 0
-          ? quote.distanciaKm
-          : haversineKm(
-              coleta.latitude, coleta.longitude,
-              entrega.latitude, entrega.longitude
-            );
-
-        if (_distKm != null && _distKm > 0) {
-          await this.pool.query(
-            'UPDATE logistics_deliveries SET distancia_km = $1, updated_at = NOW() WHERE id = $2',
-            [Math.round(_distKm * 100) / 100, registro.id]
-          );
-
-          const _valorProvider2 = parseFloat(quote.valor) || 0;
-          const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(opts.regra || null);
-          const _novoValorServico = calcularPrecoDistancia(_distKm, _tabPreco);
-
-          if (_novoValorServico != null) {
-            console.log(`💰 [Orchestrator] OS ${codigoOS}: preço por km [${_origemPreco}] — ${_distKm.toFixed(1)}km → cliente=R$${_novoValorServico.toFixed(2)} provider=R$${_valorProvider2.toFixed(2)}`);
-            await this.pool.query(
-              'UPDATE logistics_deliveries SET valor_servico = $1, updated_at = NOW() WHERE id = $2',
-              [_novoValorServico, registro.id]
-            );
-            this.mapp.alterarValores(codigoOS, _novoValorServico, _valorProvider2 || null).catch(e =>
-              console.warn(`⚠️ [Orchestrator] alterarValores preço OS ${codigoOS}: ${e.message}`)
-            );
-          } else if (_valorProvider2 > 0) {
-            // Sem tabela de preço — só atualiza o custo do provider
-            this.mapp.alterarValores(codigoOS, null, _valorProvider2).catch(e =>
-              console.warn(`⚠️ [Orchestrator] alterarValores custo OS ${codigoOS}: ${e.message}`)
-            );
-          }
-        }
-      } catch (_errPreco) {
-        console.warn(`⚠️ [Orchestrator] precificação por km (best-effort) OS ${codigoOS}: ${_errPreco.message}`);
+      // 6c. Sincroniza o valorProfissional na Mapp com o custo real do provider.
+      //     O valor original da OS foi calibrado para motoboy interno — corrigimos
+      //     para o que o parceiro externo (99, Uber) efetivamente cobra.
+      //     Best-effort: falha aqui NÃO aborta o despacho (entrega já criada).
+      const _valorProvider = parseFloat(quote.valor) || 0;
+      if (_valorProvider > 0) {
+        this.mapp.alterarValores(codigoOS, null, _valorProvider).catch(_err => {
+          console.warn(`⚠️ [Orchestrator] alterarValores best-effort falhou OS ${codigoOS}: ${_err.message}`);
+        });
       }
 
       // 7. Limpa cache de cotações dessa OS

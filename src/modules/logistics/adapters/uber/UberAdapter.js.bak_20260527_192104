@@ -157,11 +157,7 @@ class UberAdapter extends LogisticsProviderAdapter {
     }
 
     const vehicleType = req.vehicleType && req.vehicleType !== 'auto' ? req.vehicleType : 'auto';
-
-    // Uber retorna distance em metros — convertemos pra km pra precificação
-    const distanciaKm = data.distance != null ? Number(data.distance) / 1000 : null;
-
-    console.log(`✅ [UberAdapter] cotação criada: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min | ${distanciaKm != null ? distanciaKm.toFixed(1)+'km' : 'dist?'} | ${vehicleType}`);
+    console.log(`✅ [UberAdapter] cotação criada: ${data.id} | R$${(data.fee / 100).toFixed(2)} | ETA ${data.duration}min | ${vehicleType}`);
 
     // CanonicalQuote
     return {
@@ -170,7 +166,6 @@ class UberAdapter extends LogisticsProviderAdapter {
       valor: data.fee / 100,
       etaMinutos: data.duration,
       vehicleType,
-      distanciaKm,  // km da rota retornado pela Uber
       expiresAt: data.expires ? new Date(data.expires) : new Date(Date.now() + 5 * 60_000),
       rawProvider: data,
     };
