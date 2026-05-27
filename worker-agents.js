@@ -61,7 +61,7 @@ function iniciarHttpServer() {
   const server = http.createServer((req, res) => {
     // CORS básico — permite chamar do centraltutts.online
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -70,9 +70,15 @@ function iniciarHttpServer() {
     }
 
     if (req.method !== 'GET') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, erro: 'method not allowed' }));
-      return;
+      // 🆕 v5 (2026-05-27): exceção pro POST /agents/restart (endpoint cai no handler abaixo).
+      // Sem isso, o early-return 405 mata o request antes dele chegar na rota.
+      if (req.method === 'POST' && req.url === '/agents/restart') {
+        // segue pro handler do /agents/restart (linha ~238)
+      } else {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, erro: 'method not allowed' }));
+        return;
+      }
     }
 
     // ── /healthz — health check do Railway ──────────────────
