@@ -234,6 +234,56 @@ class MappClient {
     console.log(`📡 [Mapp] finalizarServico OS=${codigoOS}:`, data.msgUsuario);
     return data;
   }
+
+  /**
+   * Atualiza os valores financeiros de um serviço na Mapp.
+   * Ao despachar via provider externo (99, Uber), o valorProfissional original
+   * da OS é o valor calibrado para motoboy interno — precisamos sobrescrever
+   * com o custo real cobrado pelo provider externo.
+   *
+   * Pelo menos um dos valores deve ser informado (valorServico ou valorProfissional).
+   * Valores null/undefined são omitidos do payload (a Mapp mantém o valor atual).
+   *
+   * Endpoint: PUT /integracao-app-externos/alterarValores
+   * Doc: { codigoOS, valorServico?, valorProfissional? }
+   *
+   * @param {number|string} codigoOS
+   * @param {number|null} valorServico      - Novo valor do serviço (opcional)
+   * @param {number|null} valorProfissional - Novo valor do profissional (opcional)
+   * @returns {Promise<Object>} resposta da Mapp
+   */
+  async alterarValores(codigoOS, valorServico, valorProfissional) {
+    const config = await this._obterConfigMapp();
+    const url = `${config.mapp_api_url}/integracao-app-externos/alterarValores`;
+
+    const payload = { codigoOS: Number(codigoOS) };
+    if (valorServico   != null) payload.valorServico      = Number(valorServico);
+    if (valorProfissional != null) payload.valorProfissional = Number(valorProfissional);
+
+    if (Object.keys(payload).length === 1) {
+      // Sem valores para alterar — no-op seguro (não chama a Mapp)
+      console.warn(`⚠️ [Mapp] alterarValores OS=${codigoOS}: nenhum valor fornecido, ignorado`);
+      return null;
+    }
+
+    const resp = await httpRequest(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${config.mapp_api_token}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = resp.json();
+    console.log(
+      `📡 [Mapp] alterarValores OS=${codigoOS}` +
+      (valorServico      != null ? ` valorServico=R$${Number(valorServico).toFixed(2)}`      : '') +
+      (valorProfissional != null ? ` valorProfissional=R$${Number(valorProfissional).toFixed(2)}` : '') +
+      `:`, data.msgUsuario
+    );
+    return data;
+  }
 }
 
 // ════════════════════════════════════════════════════════════

@@ -85,6 +85,10 @@ class LogisticsProviderAdapter {
       supportsCancel: true,
       supportsRedispatch: true,
       supportsRealtimeTracking: true,
+      // Se true, o provider emite evento de "chegou no destino" (ARRIVED_DROPOFF)
+      // antes de DELIVERED. Quando false (ex: 99Entrega), o WebhookDispatcher
+      // chama informarChegada(ponto 2) automaticamente no evento DELIVERED.
+      supportsArrivedDropoff: true,
       vehicleTypes: ['motorcycle', 'car'],
       coverageRegion: ['BR'],
       webhookAuthScheme: 'none',

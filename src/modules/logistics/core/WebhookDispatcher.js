@@ -268,6 +268,17 @@ class WebhookDispatcher {
   /**
    * Dispara a ação Mapp correspondente ao status canônico.
    * Usa STATUS_TO_MAPP_ACTION do CanonicalStatus.
+   *
+   * Fixes aplicados aqui:
+   *  FIX #2 — providers sem supportsArrivedDropoff (ex: 99Entrega):
+   *    O evento ARRIVED_DROPOFF nunca ocorre nesse ciclo. Quando DELIVERED
+   *    chega, chamamos informarChegada(ponto 2) ANTES de finalizarEndereco(ponto 2)
+   *    para manter a sequência que a Mapp exige.
+   *  FIX #3 — finalizarServico explícito como fallback:
+   *    Após finalizarEndereco(último ponto), chamamos finalizarServico() em
+   *    best-effort. Se a Mapp já auto-finalizou, a chamada é inócua; se não
+   *    finalizou (ex: OS com mais de 2 pontos não gerenciados pelo hub),
+   *    o serviço é encerrado corretamente.
    * @private
    */
   async _dispararAcaoMapp(codigoOS, entrega, evento, statusCanonico) {
@@ -276,6 +287,13 @@ class WebhookDispatcher {
 
     const lat = evento.location?.lat;
     const lng = evento.location?.lng;
+
+    // FIX #2: verifica se o provider suporta ARRIVED_DROPOFF. Se não suporta
+    // (ex: 99Entrega), o evento de chegada no destino nunca ocorre — precisamos
+    // compensar chamando informarChegada(ponto 2) antes de finalizar o serviço.
+    const providerCode = entrega.provider_code || 'uber';
+    const adapter = this.registry.get(providerCode);
+    const supportsArrivedDropoff = !adapter || adapter.capabilities().supportsArrivedDropoff !== false;
 
     try {
       switch (acao.type) {
@@ -290,14 +308,34 @@ class WebhookDispatcher {
           await this.mapp.informarChegada(codigoOS, acao.ponto || 2, lat, lng);
           break;
 
-        case 'finalizar_servico':
-          // DELIVERED → finaliza ponto 2 (auto-finaliza serviço)
-          await this.mapp.finalizarEndereco(codigoOS, acao.ponto || 2, lat, lng);
+        case 'finalizar_servico': {
+          // DELIVERED → finaliza ponto 2 + encerra serviço na Mapp
+          const pontoDrop = acao.ponto || 2;
+
+          // FIX #2: provider sem ARRIVED_DROPOFF (ex: 99Entrega) — a informarChegada
+          // do ponto de entrega nunca foi chamada. Fazemos agora antes de finalizar.
+          if (!supportsArrivedDropoff) {
+            console.log(`📡 [WebhookDispatcher] OS ${codigoOS}: provider '${providerCode}' sem ARRIVED_DROPOFF — chamando informarChegada(${pontoDrop}) antes de finalizar`);
+            await this.mapp.informarChegada(codigoOS, pontoDrop, lat, lng);
+          }
+
+          await this.mapp.finalizarEndereco(codigoOS, pontoDrop, lat, lng);
+
+          // FIX #3: finalizarServico explícito como fallback.
+          // A Mapp auto-finaliza ao fechar o último ponto, mas chamamos aqui
+          // em best-effort para garantir encerramento em casos de multi-ponto
+          // ou de auto-finalize não ter disparado.
+          this.mapp.finalizarServico(codigoOS).catch(errFS => {
+            // Ignoramos erro (a Mapp retorna erro se já estava finalizado — esperado)
+            console.log(`📡 [WebhookDispatcher] finalizarServico OS ${codigoOS} best-effort: ${errFS.message}`);
+          });
+
           await this.pool.query(
             'UPDATE logistics_deliveries SET finalizado_at = NOW(), updated_at = NOW() WHERE id = $1',
             [entrega.id]
           );
           break;
+        }
 
         case 'alterar_status':
           // CANCELED / RETURNED / FAILED / FALLBACK_QUEUE → reabre na Mapp

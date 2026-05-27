@@ -333,6 +333,17 @@ class DispatchOrchestrator {
       `, [delivery.externalDeliveryId, delivery.trackingUrl || null,
           opts.vehicleType || quote.vehicleType || null, registro.id]);
 
+      // 6b. Sincroniza o valorProfissional na Mapp com o custo real do provider.
+      //     O valor original da OS foi calibrado para motoboy interno — corrigimos
+      //     para o que o parceiro externo (99, Uber) efetivamente cobra.
+      //     Best-effort: falha aqui NÃO aborta o despacho (entrega já criada).
+      const _valorProvider = parseFloat(quote.valor) || 0;
+      if (_valorProvider > 0) {
+        this.mapp.alterarValores(codigoOS, null, _valorProvider).catch(_err => {
+          console.warn(`⚠️ [Orchestrator] alterarValores best-effort falhou OS ${codigoOS}: ${_err.message}`);
+        });
+      }
+
       // 7. Limpa cache de cotações dessa OS
       this.cache.clearOS(codigoOS, providerCode);
 

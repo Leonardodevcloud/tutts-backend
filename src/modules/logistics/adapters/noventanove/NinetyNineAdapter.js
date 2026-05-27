@@ -78,6 +78,12 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       // ⚠️ false: o webhook da 99 não traz posição do entregador. O tracking
       // ao vivo da 99 é por POLLING de /v2/order/detail, não por webhook.
       supportsRealtimeTracking: false,
+      // ⚠️ false: a 99Entrega NÃO tem evento de "chegou no destino" separado.
+      // O ciclo vai direto de DriverBeginCharge (PICKED_UP) para OrderCompleted
+      // (DELIVERED) — não há DriverArrivedDropoff. O WebhookDispatcher usa esta
+      // flag para chamar informarChegada(ponto 2) automaticamente antes de
+      // finalizar o serviço, compensando a ausência desse evento.
+      supportsArrivedDropoff: false,
       vehicleTypes: ['motorcycle'],    // 99Entrega é entrega por moto
       coverageRegion: ['BR'],
       webhookAuthScheme: 'hmac-sha256',
