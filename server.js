@@ -206,16 +206,19 @@ app.post('/api/system/restart-worker', verificarToken, async (req, res) => {
     const data = await r.json();
 
     // Auditoria
+    // 🔧 v6 (2026-05-27): colunas certas (user_cod/user_name/action/category/details/created_at)
     try {
       await pool.query(
-        `INSERT INTO audit_logs (usuario_id, usuario_nome, acao, categoria, detalhes, criado_em)
-         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        `INSERT INTO audit_logs (user_cod, user_name, user_role, action, category, details, ip_address, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
         [
           req.user?.codProfissional || null,
           req.user?.fullName || req.user?.full_name || 'desconhecido',
+          req.user?.role || null,
           'RESTART_WORKER',
           'sistema',
-          JSON.stringify({ resposta: data, ip: req.ip }),
+          JSON.stringify({ resposta: data }),
+          req.ip || null,
         ]
       );
     } catch (e) {
