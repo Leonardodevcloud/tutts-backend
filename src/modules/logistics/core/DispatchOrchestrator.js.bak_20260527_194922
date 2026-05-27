@@ -282,16 +282,14 @@ class DispatchOrchestrator {
       INSERT INTO logistics_deliveries (
         codigo_os, provider_code, status_canonico, status_native,
         valor_servico, valor_profissional,
-        valor_servico_mapp_original, valor_profissional_mapp_original,
         endereco_coleta, endereco_entrega,
         latitude_coleta, longitude_coleta,
         latitude_entrega, longitude_entrega,
         obs, pontos, regra_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING *
     `, [
       codigoOS, providerCode, 'PENDING', 'aguardando_cotacao',
-      servico.valorServico, servico.valorProfissional,
       servico.valorServico, servico.valorProfissional,
       coleta.rua, entrega.rua,
       coleta.latitude || null, coleta.longitude || null,
