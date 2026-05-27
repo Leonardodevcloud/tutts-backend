@@ -391,6 +391,35 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   acknowledgeWebhook(res) {
     res.status(200).json({ errno: 0, errmsg: '' });
   }
+
+  // ════════════════════════════════════════════════════════════
+  // updateDelivery — atualiza entrega em andamento
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Atualiza dados de um pedido em andamento na 99Entrega.
+   * Endpoint: POST /v2/order/update
+   * Só funciona enquanto o entregador ainda não coletou (status != delivering).
+   *
+   * @param {string} externalDeliveryId - order_id da 99
+   * @param {Object} updates - { dropoff_info?: { name?, phone?, structured_address?, note? } }
+   * @returns {Promise<{ok: boolean, msg?: string}>}
+   */
+  async updateDelivery(externalDeliveryId, updates) {
+    validarConfig(this.config);
+    const body = {
+      order_id: String(externalDeliveryId),
+      ...updates,
+    };
+    try {
+      await this._chamar99('POST', '/v2/order/update', body, 'updateDelivery');
+      console.log(`✅ [NinetyNineAdapter] pedido ${externalDeliveryId} atualizado`);
+      return { ok: true };
+    } catch (err) {
+      console.warn(`⚠️ [NinetyNineAdapter] updateDelivery falhou (${err.category}): ${err.message}`);
+      return { ok: false, msg: err.message };
+    }
+  }
 }
 
 module.exports = { NinetyNineAdapter };

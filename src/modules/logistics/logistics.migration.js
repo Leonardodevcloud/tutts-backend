@@ -83,6 +83,11 @@ async function initLogisticsTables(pool) {
       updated_at              TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Colunas adicionadas em fases posteriores (idempotente)
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS proof_of_delivery JSONB`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS ultima_lat DECIMAL(10,7)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS ultima_lng DECIMAL(10,7)`).catch(() => {});
+
   console.log('✅ [logistics] tabela logistics_deliveries verificada');
 
   // FK provider_code → logistics_providers.provider_code (validação na app, não no DB,

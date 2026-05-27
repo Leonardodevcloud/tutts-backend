@@ -285,8 +285,15 @@ function montarBodyCreate(estimateId, req, config) {
 
   // Toggles de código de verificação (config booleana do painel).
   // A doc: default true se não enviado — então enviamos sempre o valor explícito.
-  body.need_pickup_code  = (config && config.need_pickup_code === true);
-  body.need_dropoff_code = (config && config.need_dropoff_code === true);
+  // Verificação de coleta/entrega — configurável por provider no painel.
+  // Chaves canônicas: verificacao_coleta_habilitada / verificacao_entrega_habilitada.
+  // Suporte a alias legado: need_pickup_code / need_dropoff_code.
+  const coletaOk  = !!(config && (config.verificacao_coleta_habilitada  || config.need_pickup_code));
+  const entregaOk = !!(config && (config.verificacao_entrega_habilitada || config.need_dropoff_code));
+  body.need_pickup_code  = coletaOk;
+  body.need_dropoff_code = entregaOk;
+  if (coletaOk)  console.log('[99] Verificação de COLETA habilitada para OS', osRef);
+  if (entregaOk) console.log('[99] Verificação de ENTREGA habilitada para OS', osRef);
 
   return body;
 }

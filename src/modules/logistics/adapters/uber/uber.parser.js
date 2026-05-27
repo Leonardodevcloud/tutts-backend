@@ -111,6 +111,33 @@ function montarBodyDelivery(quoteId, req, config) {
     undeliverable_action: 'return',
   };
 
+  // Verificação de coleta — quando habilitada, Uber gera um PIN.
+  // O atendente da loja informa o PIN ao entregador antes de entregar o pacote.
+  // Chave: verificacao_coleta_habilitada (ou alias legacy need_pickup_code).
+  if (config && (config.verificacao_coleta_habilitada || config.need_pickup_code)) {
+    body.pickup_verification = {
+      barcodes: [{
+        type: 'pin',
+        // PIN gerado pelo caller ou por nós (6 dígitos). A Uber aceita custom PIN.
+        value: config._pickup_pin || String(Math.floor(100000 + Math.random() * 900000)),
+      }],
+    };
+    console.log('[Uber] Verificação de COLETA habilitada para OS', req.externalRef);
+  }
+
+  // Verificação de entrega — assinatura digital do recebedor.
+  // Chave: verificacao_entrega_habilitada (ou alias legacy need_dropoff_code).
+  if (config && (config.verificacao_entrega_habilitada || config.need_dropoff_code)) {
+    body.dropoff_verification = {
+      signature_requirement: {
+        enabled: true,
+        collect_signer_name: true,
+        collect_signer_relationship: false,
+      },
+    };
+    console.log('[Uber] Verificação de ENTREGA habilitada para OS', req.externalRef);
+  }
+
   // Coordenadas
   if (req.pickup.latitude != null && req.pickup.longitude != null) {
     body.pickup_latitude = parseFloat(req.pickup.latitude);

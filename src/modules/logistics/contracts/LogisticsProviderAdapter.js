@@ -173,6 +173,35 @@ class LogisticsProviderAdapter {
   }
 
   // ════════════════════════════════════════════════════════════
+  // updateDelivery — atualiza entrega em andamento
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Atualiza dados de uma entrega em andamento (endereço, observações, contato).
+   * Só funciona enquanto o entregador ainda não coletou o pacote.
+   * Providers que não suportam retornam { ok: false, msg: 'não suportado' }.
+   *
+   * @param {string} externalDeliveryId
+   * @param {Object} updates - campos a alterar (subconjunto de CanonicalQuoteRequest)
+   * @returns {Promise<{ok: boolean, msg?: string}>}
+   */
+  async updateDelivery(externalDeliveryId, updates) {
+    // Default: não suportado. Subclasse sobrescreve se o provider suportar.
+    return { ok: false, msg: `${this.providerCode}: updateDelivery não suportado` };
+  }
+
+  /**
+   * Busca comprovante de entrega (foto/assinatura do recebedor).
+   * Disponível apenas após DELIVERED. Providers que não suportam retornam null.
+   *
+   * @param {string} externalDeliveryId
+   * @returns {Promise<Object|null>}
+   */
+  async getProofOfDelivery(externalDeliveryId) {
+    return null;
+  }
+
+  // ════════════════════════════════════════════════════════════
   // Webhook
   // ════════════════════════════════════════════════════════════
 

@@ -492,6 +492,50 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // POST /deliveries/:id/redispatch  — cancela e recria entrega (Fase 2)
   // body: { providerCode?, vehicleType?, motivo? }
   // ───────────────────────────────────────────────────────────
+  // PATCH /deliveries/:id — atualiza entrega em andamento no provider
+  // Permite mudar endereço de entrega, telefone, observações enquanto
+  // o entregador ainda não coletou o pacote.
+  router.patch('/deliveries/:id', verificarToken, verificarAdmin, async (req, res) => {
+    const { id } = req.params;
+    const updates = req.body;
+
+    if (!updates || Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo de atualização fornecido' });
+    }
+
+    try {
+      const { rows } = await pool.query(
+        'SELECT * FROM logistics_deliveries WHERE id = $1',
+        [id]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Entrega não encontrada' });
+      }
+      const entrega = rows[0];
+
+      if (['DELIVERED', 'CANCELED', 'FAILED', 'FALLBACK_QUEUE'].includes(entrega.status_canonico)) {
+        return res.status(400).json({
+          error: `Entrega em estado terminal (${entrega.status_canonico}) — não é possível atualizar`,
+        });
+      }
+
+      const adapter = getProviderRegistry(pool).get(entrega.provider_code);
+      if (!adapter) {
+        return res.status(503).json({ error: `Provider '${entrega.provider_code}' não está ativo` });
+      }
+
+      const result = await adapter.updateDelivery(entrega.external_delivery_id, updates);
+      if (!result.ok) {
+        return res.status(422).json({ error: result.msg || 'Falha ao atualizar no provider' });
+      }
+
+      res.json({ ok: true, mensagem: 'Entrega atualizada no provider com sucesso' });
+    } catch (err) {
+      console.error('[logistics/patch] erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const entregaId = parseInt(req.params.id, 10);

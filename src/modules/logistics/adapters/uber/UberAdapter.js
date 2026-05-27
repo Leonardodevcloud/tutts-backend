@@ -388,6 +388,85 @@ class UberAdapter extends LogisticsProviderAdapter {
       lng: uberCourier.location?.lng || null,
     };
   }
+
+  // ════════════════════════════════════════════════════════════
+  // getProofOfDelivery — comprovante de entrega
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Busca comprovante de entrega da Uber Direct.
+   * Disponível após DELIVERED. Retorna objeto com fotos, assinatura e metadata.
+   * Endpoint: GET /v1/customers/{customer_id}/deliveries/{id}/proof_of_delivery
+   *
+   * @param {string} externalDeliveryId
+   * @returns {Promise<Object|null>}
+   */
+  async getProofOfDelivery(externalDeliveryId) {
+    const customerId = this.config.customer_id;
+    if (!customerId) return null;
+
+    try {
+      const token = await obterTokenUber(this.pool);
+      const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}/proof_of_delivery`;
+      const resp = await httpRequest(url, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        console.warn(`⚠️ [UberAdapter] getProofOfDelivery falhou (${resp.status})`);
+        return null;
+      }
+      const data = resp.json();
+      console.log(`📸 [UberAdapter] comprovante obtido para entrega ${externalDeliveryId}`);
+      return data;
+    } catch (err) {
+      console.warn(`⚠️ [UberAdapter] getProofOfDelivery erro: ${err.message}`);
+      return null;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // updateDelivery — atualiza entrega em andamento
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Atualiza dados de entrega em andamento na Uber Direct.
+   * Endpoint: PATCH /v1/customers/{customer_id}/deliveries/{id}
+   * Só funciona antes de pickup_complete (entregador ainda não coletou).
+   *
+   * @param {string} externalDeliveryId
+   * @param {Object} updates - { dropoff_address?, dropoff_name?, dropoff_phone_number?,
+   *                             dropoff_notes?, manifest_items?, tip_by_customer? }
+   * @returns {Promise<{ok: boolean, msg?: string, data?: Object}>}
+   */
+  async updateDelivery(externalDeliveryId, updates) {
+    const customerId = this.config.customer_id;
+    if (!customerId) return { ok: false, msg: 'customer_id não configurado' };
+
+    try {
+      const token = await obterTokenUber(this.pool);
+      const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}`;
+      const resp = await httpRequest(url, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      });
+      const data = resp.json();
+      if (!resp.ok) {
+        const errInfo = classifyUberError(resp, data);
+        console.warn(`⚠️ [UberAdapter] updateDelivery falhou (${errInfo.category}): ${errInfo.message}`);
+        return { ok: false, msg: errInfo.message };
+      }
+      console.log(`✅ [UberAdapter] entrega ${externalDeliveryId} atualizada`);
+      return { ok: true, data };
+    } catch (err) {
+      console.warn(`⚠️ [UberAdapter] updateDelivery erro: ${err.message}`);
+      return { ok: false, msg: err.message };
+    }
+  }
 }
 
 module.exports = { UberAdapter };

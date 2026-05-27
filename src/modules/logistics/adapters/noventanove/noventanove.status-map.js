@@ -71,7 +71,12 @@ const WEBHOOK_EVENT_TO_CANONICAL = Object.freeze({
   'ordercompleted':    CanonicalStatus.DELIVERED,
   'orderclosed':       CanonicalStatus.DELIVERED,
   'sendback':          CanonicalStatus.RETURNED,
-  'sendbackcompleted': CanonicalStatus.RETURNED,
+  // SendBackCompleted = devolução CONCLUÍDA — item já voltou ao remetente.
+  // Mapeamos pra DELIVERED (e não RETURNED) pra finalizar o serviço via
+  // finalizarEndereco(2) em vez de reabrir a OS na fila interna.
+  // RETURNED (sendback = devolução iniciada) continua reabrindo a fila —
+  // nesse ponto o item ainda está com o entregador voltando.
+  'sendbackcompleted': CanonicalStatus.DELIVERED,
 });
 
 /**
