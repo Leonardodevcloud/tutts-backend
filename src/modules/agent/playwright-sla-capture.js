@@ -389,6 +389,19 @@ async function fazerLogin(page, overrides) {
         ];
         const jaLogado = indicadoresLogado.some(s => urlAtual.includes(s));
         if (jaLogado) {
+          // 🆕 v19 (2026-05-27): Se caímos em principal.php ou notificacao-feriados,
+          // navega pra ACOMP_URL antes de retornar. Sem isso, chamadores do fazerLogin
+          // (fila-validador, sla-detector) ficam em principal.php e a aba "Em execução"
+          // não existe lá → erro aba_nao_visivel.
+          if (!urlAtual.includes('/acompanhamento-servicos')) {
+            try {
+              log(`🔓 [tentativa ${i + 1}/${tentativas.length}] cookie OK em ${urlAtual} — navegando pra ACOMP_URL`);
+              await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+              await page.waitForTimeout(1000);
+            } catch (eNav) {
+              log(`⚠️ falha ao navegar pra ACOMP após cookie-login: ${eNav.message}`);
+            }
+          }
           log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL: ${urlAtual}`);
           return; // sucesso — sessão ainda válida, login desnecessário
         }
