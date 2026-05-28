@@ -462,6 +462,8 @@ function registerGlobals() {
   global.broadcastToAdmins = broadcastToAdmins;
   global.sendToUser = sendToUser;
   global.broadcastDisponibilidade = broadcastDisponibilidade;
+  // Reusa canal disponibilidade para eventos de filas auto (mesmos admins conectados)
+  global.broadcastFilasAuto = (event, data) => broadcastDisponibilidade(event, data, undefined);
   global.notifyStarkPayment = notifyStarkPayment;
   global.broadcastUberTracking = broadcastUberTracking;
   global.broadcastUberStatus = broadcastUberStatus;

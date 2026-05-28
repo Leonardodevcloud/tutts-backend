@@ -233,6 +233,20 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           ? `Você saiu da fila. Pode voltar em ${penMin} minutos.`
           : 'Você saiu da fila.',
       });
+
+      // Broadcast WS para admins atualizarem aba Punidos em tempo real
+      if (penMin > 0 && global.broadcastFilasAuto) {
+        try {
+          global.broadcastFilasAuto('FILA_PENALIDADE_NOVA', {
+            central_id,
+            cod_profissional,
+            nome_profissional,
+            bloqueado_ate: new Date(Date.now() + penMin * 60000).toISOString(),
+            saidas_hoje: 1,
+            tipo: 'automatica',
+          });
+        } catch (_) {}
+      }
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       console.error('❌ [fila-auto/sair]', err);
