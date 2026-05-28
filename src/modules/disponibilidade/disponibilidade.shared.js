@@ -75,11 +75,16 @@ async function marcarMotoboyEmLoja(pool, cod_profissional, contexto = {}) {
       if (global.broadcastDisponibilidade) {
         for (const linha of result.rows) {
           try {
-            global.broadcastDisponibilidade('DISP_LINHA_UPDATE', linha, null);
+            // senderWsId = undefined (não null!) — força broadcast pra TODOS
+            // Usar undefined aqui porque null === null pularia clientes sem wsId
+            global.broadcastDisponibilidade('DISP_LINHA_UPDATE', linha, undefined);
           } catch (errBcast) {
             console.warn(`⚠️ [disponibilidade.em-loja] broadcast falhou pra linha ${linha.id}:`, errBcast.message);
           }
         }
+        console.log(`📡 [disponibilidade.em-loja] broadcast DISP_LINHA_UPDATE enviado para ${atualizadas} linha(s)`);
+      } else {
+        console.warn(`⚠️ [disponibilidade.em-loja] global.broadcastDisponibilidade NÃO disponível — WS não registrado?`);
       }
     } else {
       // 🔧 v3: log diagnóstico quando NÃO marca nada — pode ser que:

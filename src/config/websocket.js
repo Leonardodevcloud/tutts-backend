@@ -67,13 +67,15 @@ function broadcastDisponibilidade(event, data, senderWsId = null) {
   const message = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
   let count = 0;
   wsDispClients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN && ws._dispWsId !== senderWsId) {
-      ws.send(message);
-      count++;
-    }
+    if (ws.readyState !== WebSocket.OPEN) return;
+    // Só pula o remetente quando senderWsId é uma string válida
+    // (null/undefined = origem interna/backend → envia pra TODOS)
+    if (senderWsId && ws._dispWsId === senderWsId) return;
+    ws.send(message);
+    count++;
   });
   if (count > 0) {
-    console.log(`📡 [WS-Disp] Broadcast ${event} para ${count} cliente(s)`);
+    console.log(`📡 [WS-Disp] Broadcast ${event} para ${count} cliente(s)${senderWsId ? ' (excl. remetente)' : ''}`);
   }
 }
 
