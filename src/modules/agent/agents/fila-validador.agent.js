@@ -29,12 +29,21 @@
 const { defineAgent } = require('../core/agent-base');
 const filaValidadorService = require('../../filas/fila-validador.service');
 
-// 🔧 v2 (2026-05-25): intervalo aumentado de 30s → 5min pra reduzir pressão de memória.
-// Causa: cada tick disparava UM chromium.launch() novo, somando 100MB/varredura.
-// Com 1607 ticks em poucas horas, encheu o container e causou OOM kill.
-// 5 minutos é tempo suficiente pra detectar motoboy que pegou corrida —
-// não é tempo-real crítico, é um cleanup.
+// 🔧 v2 (2026-05-25): intervalo 5min pra reduzir pressão de memória.
+// 🔧 v3 (2026-05-28): janela de operação 07h–18h (America/Bahia).
+//   Fora da janela: tick retorna imediatamente sem subir browser.
+//   Login reutiliza a mesma sessão do sla-capture (SISTEMA_EXTERNO_SLA).
 const INTERVALO_DEFAULT_MS = 5 * 60_000; // 5 minutos
+
+// Janela de operação (hora local America/Bahia)
+const HORA_INICIO = 7;   // 07:00
+const HORA_FIM    = 18;  // 18:00 (exclusive)
+
+function dentroJanela() {
+  const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+  const hora  = agora.getHours();
+  return hora >= HORA_INICIO && hora < HORA_FIM;
+}
 
 // Cache do último resultado bem-sucedido (compartilhado entre ticks).
 // Se a coleta foi feita há <4min, REUSA em vez de subir browser novo.
@@ -62,6 +71,13 @@ module.exports = defineAgent({
 
   tickGlobal: async (pool, ctx) => {
     const inicio = Date.now();
+
+    // 🔧 v3: Janela de operação — dorme fora de 07h-18h (America/Bahia)
+    if (!dentroJanela()) {
+      const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+      ctx.log(`😴 Fora da janela de operação (${agora.getHours()}h) — aguardando 07h. Pulando.`);
+      return;
+    }
 
     // 🔧 v2: Circuit breaker — se quebrou demais, pausa
     if (_circuitAbertoAte > inicio) {
