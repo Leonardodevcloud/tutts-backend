@@ -302,6 +302,76 @@ const CHROMIUM_LAUNCH_OPTS = {
 // LOGIN
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * dispensarFeriados — v21 (2026-05-28)
+ *
+ * O sistema Tutts exibe uma tela obrigatória de notificação de feriados após
+ * o login. Se o Playwright não passar por ela, qualquer goto a
+ * /acompanhamento-servicos faz um redirect chain:
+ *   acompanhamento-servicos → index.php → principal.php   (nunca chega)
+ *
+ * Esta função:
+ *   1. Navega pra /notificacao-feriados (que já está na sessão ou redireciona)
+ *   2. Tenta clicar em qualquer botão/link de "fechar/continuar"
+ *   3. Aguarda pousar em /principal
+ *
+ * Depois desta chamada, goto(ACOMP_URL) funciona normalmente.
+ */
+const FERIADOS_URL = 'https://tutts.com.br/expresso/expressoat/notificacao-feriados';
+const SELETORES_FECHAR_FERIADO = [
+  'a[href*="principal"]',
+  'button:has-text("Fechar")',
+  'button:has-text("Continuar")',
+  'button:has-text("Prosseguir")',
+  'button:has-text("OK")',
+  'button:has-text("Ok")',
+  'a:has-text("Continuar")',
+  'a:has-text("Fechar")',
+  '.btn-fechar',
+  '.close',
+];
+
+async function dispensarFeriados(page, logFn) {
+  const log = logFn || (() => {});
+  const urlAtual = page.url();
+
+  // Só navega pra feriados se ainda não estamos lá
+  if (!urlAtual.includes('/notificacao-feriados')) {
+    log('🗓️ [dispensarFeriados] navegando para notificacao-feriados');
+    try {
+      await page.goto(FERIADOS_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(800);
+    } catch (e) {
+      log(`⚠️ [dispensarFeriados] goto falhou: ${e.message}`);
+      return;
+    }
+  }
+
+  // Tenta fechar/dispensar a notificação
+  for (const sel of SELETORES_FECHAR_FERIADO) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await el.click();
+        await page.waitForTimeout(600);
+        log(`🗓️ [dispensarFeriados] dispensado via selector "${sel}" — URL: ${page.url()}`);
+        return;
+      }
+    } catch (_) { /* tenta próximo */ }
+  }
+
+  // Nenhum botão encontrado — navega direto pra principal pra forçar o estado
+  log('🗓️ [dispensarFeriados] nenhum botão encontrado — navegando direto pra principal');
+  try {
+    await page.goto('https://tutts.com.br/expresso/expressoat/principal', {
+      waitUntil: 'domcontentloaded', timeout: 20000,
+    });
+    await page.waitForTimeout(800);
+  } catch (e) {
+    log(`⚠️ [dispensarFeriados] goto principal falhou: ${e.message}`);
+  }
+}
+
 async function isLoggedIn(page) {
   const url = page.url();
   if (!url.includes('/expresso') || url.includes('loginFuncionarioNovo')) return false;
@@ -395,41 +465,25 @@ async function fazerLogin(page, overrides) {
           // não existe lá → erro aba_nao_visivel.
           if (!urlAtual.includes('/acompanhamento-servicos')) {
             try {
-              log(`🔓 [tentativa ${i + 1}/${tentativas.length}] cookie OK em ${urlAtual} — navegando pra ACOMP_URL`);
+              log(`🔓 [tentativa ${i + 1}/${tentativas.length}] cookie OK em ${urlAtual} — dispensando feriados e navegando pra ACOMP_URL`);
+
+              // 🔧 v21 (2026-05-28): servidor exige passar pela tela de notificacao-feriados
+              // antes de liberar /acompanhamento-servicos. Sem isso: redirect chain
+              //   acompanhamento-servicos → index.php → principal.php (nunca chega).
+              await dispensarFeriados(page, log);
+
               await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
               await page.waitForTimeout(1000);
-              // 🔧 v20 (2026-05-28): log URL REAL pós-goto (v19 logava urlAtual antiga, mascarando redirect)
               const urlPosGoto = page.url();
               log(`🔍 [pós-ACOMP goto] URL real = ${urlPosGoto}`);
-              if (urlPosGoto.includes('/principal') || !urlPosGoto.includes('/acompanhamento-servicos')) {
-                // ACOMP_URL redirecionou pra principal.php — tenta encontrar link de acompanhamento na página
-                log(`⚠️ ACOMP_URL redirecionou pra ${urlPosGoto} em vez de /acompanhamento-servicos — tentando fallback`);
-                try {
-                  // Tenta clicar no link/menu de acompanhamento se existir na página
-                  const linkAcomp = page.locator('a[href*="acompanhamento-servicos"]').first();
-                  if (await linkAcomp.isVisible({ timeout: 3000 }).catch(() => false)) {
-                    await linkAcomp.click();
-                    await page.waitForLoadState('domcontentloaded', { timeout: 20000 });
-                    await page.waitForTimeout(1000);
-                    log(`🔍 [pós-fallback link] URL = ${page.url()}`);
-                  } else {
-                    // Screenshot diagnóstico pra entender o que a página mostra
-                    try {
-                      const ssPath = `/tmp/acomp-redirect-diag-${Date.now()}.png`;
-                      await page.screenshot({ path: ssPath, fullPage: false });
-                      log(`📸 Screenshot diagnóstico salvo: ${ssPath} — verifique env SISTEMA_EXTERNO_ACOMPANHAMENTO_URL`);
-                    } catch (_) {}
-                    log(`❌ Nenhum link de acompanhamento encontrado em ${urlPosGoto} — verifique env SISTEMA_EXTERNO_ACOMPANHAMENTO_URL no Railway`);
-                  }
-                } catch (eFallback) {
-                  log(`⚠️ fallback acomp falhou: ${eFallback.message}`);
-                }
+              if (!urlPosGoto.includes('/acompanhamento-servicos')) {
+                log(`⚠️ Ainda em ${urlPosGoto} após dispensarFeriados — pode ser que a tela de feriado precise de interação específica`);
               }
             } catch (eNav) {
               log(`⚠️ falha ao navegar pra ACOMP após cookie-login: ${eNav.message}`);
             }
           }
-          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL atual: ${page.url()}`); // 🔧 v20: usa page.url() em vez de urlAtual
+          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL atual: ${page.url()}`);
           return; // sucesso — sessão ainda válida, login desnecessário
         }
         ultimoErro = `Página de login não carregou. goto=${t.url} URL_final=${urlAtual}`;
@@ -824,16 +878,31 @@ async function coletarOsEmExecucao() {
     // Ativa aba "Em execução"
     const abaEmExecucao = page.locator('#pills-em-execucao-tab');
     if (!(await abaEmExecucao.isVisible({ timeout: 30000 }).catch(() => false))) {
-      etapa('aba_nao_visivel');
-      // 🔧 v20 (2026-05-28): diagnóstico — loga URL real e tira screenshot pra entender redirect
-      const urlDiag = page.url();
-      log(`🔍 [aba_nao_visivel] URL atual = ${urlDiag}`);
+      // 🔧 v21 (2026-05-28): antes de desistir, tenta dispensar a tela de feriados
+      // (servidor Tutts bloqueia /acompanhamento-servicos até passar por /notificacao-feriados)
+      const urlAntes = page.url();
+      log(`🗓️ [aba_nao_visivel] URL=${urlAntes} — tentando dispensarFeriados e renavegar`);
       try {
-        const ssPath = `/tmp/aba-nao-visivel-diag-${Date.now()}.png`;
-        await page.screenshot({ path: ssPath, fullPage: false });
-        log(`📸 Screenshot diagnóstico: ${ssPath}`);
-      } catch (_) {}
-      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, urlDiag, diag };
+        await dispensarFeriados(page, log);
+        await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(1200);
+        log(`🔍 [pós-feriados renavegar] URL = ${page.url()}`);
+      } catch (eFer) {
+        log(`⚠️ dispensarFeriados/renavegar falhou: ${eFer.message}`);
+      }
+
+      // Segunda checagem após feriados
+      if (!(await abaEmExecucao.isVisible({ timeout: 10000 }).catch(() => false))) {
+        etapa('aba_nao_visivel');
+        const urlDiag = page.url();
+        log(`🔍 [aba_nao_visivel] URL após retry = ${urlDiag}`);
+        try {
+          const ssPath = `/tmp/aba-nao-visivel-diag-${Date.now()}.png`;
+          await page.screenshot({ path: ssPath, fullPage: false });
+          log(`📸 Screenshot diagnóstico: ${ssPath}`);
+        } catch (_) {}
+        return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, urlDiag, diag };
+      }
     }
     await abaEmExecucao.click();
     etapa('aba_clicada');
