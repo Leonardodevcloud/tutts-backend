@@ -64,7 +64,7 @@ module.exports = defineAgent({
   nome: 'fila-validador',
   slots: 1,
   sessionStrategy: 'compartilhada',
-  envPrefix: 'SISTEMA_EXTERNO_SLA',
+  envPrefix: 'SISTEMA_EXTERNO', // mesmo login do crm-leads (baixa demanda, evita concorrência com sla-capture)
   intervalo: INTERVALO_DEFAULT_MS,
 
   habilitado: () => (process.env.FILA_VALIDADOR_ATIVO || 'false').toLowerCase() === 'true',
