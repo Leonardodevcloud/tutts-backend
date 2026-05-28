@@ -3,8 +3,6 @@
  * V2: reordenar drag-drop, penalidades, regiões, cronômetro 1ª nota, limpar bairros
  */
 const express = require('express');
-// 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
-const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 
 function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -58,34 +56,20 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
   router.put('/centrais/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const { nome, endereco, latitude, longitude, raio_metros, ativa,
-              validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
-              mostrar_nomes_publicos, penalidade_min,
-              barreira_horario_ativa, barreira_horario_corte } = req.body;
-
+      const { nome, endereco, latitude, longitude, raio_metros, ativa } = req.body;
+      
       const result = await pool.query(`
-        UPDATE filas_centrais
-        SET nome                     = COALESCE($1,  nome),
-            endereco                 = COALESCE($2,  endereco),
-            latitude                 = COALESCE($3,  latitude),
-            longitude                = COALESCE($4,  longitude),
-            raio_metros              = COALESCE($5,  raio_metros),
-            ativa                    = COALESCE($6,  ativa),
-            validacao_agente_ativa   = COALESCE($8,  validacao_agente_ativa),
-            varredura_intervalo_seg  = COALESCE($9,  varredura_intervalo_seg),
-            remover_ao_pegar_corrida = COALESCE($10, remover_ao_pegar_corrida),
-            mostrar_nomes_publicos   = COALESCE($11, mostrar_nomes_publicos),
-            penalidade_min           = COALESCE($12, penalidade_min),
-            barreira_horario_ativa   = COALESCE($13, barreira_horario_ativa),
-            barreira_horario_corte   = COALESCE($14, barreira_horario_corte),
-            updated_at               = NOW()
+        UPDATE filas_centrais 
+        SET nome = COALESCE($1, nome),
+            endereco = COALESCE($2, endereco),
+            latitude = COALESCE($3, latitude),
+            longitude = COALESCE($4, longitude),
+            raio_metros = COALESCE($5, raio_metros),
+            ativa = COALESCE($6, ativa),
+            updated_at = NOW()
         WHERE id = $7
         RETURNING *
-      `, [nome, endereco, latitude, longitude, raio_metros, ativa, id,
-          validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
-          mostrar_nomes_publicos, penalidade_min,
-          barreira_horario_ativa,
-          barreira_horario_corte || null]);
+      `, [nome, endereco, latitude, longitude, raio_metros, ativa, id]);
       
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Central não encontrada' });
@@ -209,56 +193,24 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
     try {
       const { id } = req.params;
       
-      // 🆕 2026-05-24: enriquece cada motoboy com info de alocação na disponibilidade.
-      // LEFT JOIN LATERAL pega a primeira linha do motoboy em disponibilidade_linhas
-      // (se existir) e o nome da loja. Se não tiver linha, alocado=NULL → frontend
-      // mostra badge vermelho "Sem disponibilidade" pra forçar admin a alocar.
-      // 🔧 v3 (2026-05-24): LOWER(TRIM(...)) em ambos os lados — alinhado com o
-      // resto do sistema (auth usa case-insensitive); evita falsos negativos por
-      // diferença de case/whitespace entre fontes.
       const aguardando = await pool.query(`
-        SELECT p.*, 
-               EXTRACT(EPOCH FROM (NOW() - p.entrada_fila_at))/60 as minutos_esperando,
-               EXTRACT(EPOCH FROM (NOW() - p.primeira_nota_at))/60 as minutos_desde_primeira_nota,
-               (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
-               d.loja_nome              AS disponibilidade_loja,
-               d.status_atual           AS disponibilidade_status
-        FROM filas_posicoes p
-        LEFT JOIN LATERAL (
-          SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
-            FROM disponibilidade_linhas dl
-            JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-           WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
-           ORDER BY dl.id ASC
-           LIMIT 1
-        ) d ON TRUE
-        WHERE p.central_id = $1 AND p.status = 'aguardando'
-        ORDER BY p.posicao ASC
+        SELECT *, 
+               EXTRACT(EPOCH FROM (NOW() - entrada_fila_at))/60 as minutos_esperando,
+               EXTRACT(EPOCH FROM (NOW() - primeira_nota_at))/60 as minutos_desde_primeira_nota
+        FROM filas_posicoes 
+        WHERE central_id = $1 AND status = 'aguardando'
+        ORDER BY posicao ASC
       `, [id]);
       
       const emRota = await pool.query(`
-        SELECT p.*,
-               EXTRACT(EPOCH FROM (NOW() - p.saida_rota_at))/60 as minutos_em_rota,
-               (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
-               d.loja_nome              AS disponibilidade_loja,
-               d.status_atual           AS disponibilidade_status
-        FROM filas_posicoes p
-        LEFT JOIN LATERAL (
-          SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
-            FROM disponibilidade_linhas dl
-            JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-           WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
-           ORDER BY dl.id ASC
-           LIMIT 1
-        ) d ON TRUE
-        WHERE p.central_id = $1 AND p.status = 'em_rota'
-        ORDER BY p.saida_rota_at ASC
+        SELECT *,
+               EXTRACT(EPOCH FROM (NOW() - saida_rota_at))/60 as minutos_em_rota
+        FROM filas_posicoes 
+        WHERE central_id = $1 AND status = 'em_rota'
+        ORDER BY saida_rota_at ASC
       `, [id]);
       
       const alertas = emRota.rows.filter(p => p.minutos_em_rota > 90);
-      
-      // 🆕 2026-05-24: KPI de motoboys aguardando SEM alocação na disponibilidade
-      const semAlocacao = aguardando.rows.filter(p => !p.disponibilidade_alocado).length;
       
       res.json({ 
         success: true, 
@@ -266,8 +218,7 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         em_rota: emRota.rows,
         alertas: alertas,
         total_aguardando: aguardando.rows.length,
-        total_em_rota: emRota.rows.length,
-        total_sem_disponibilidade: semAlocacao    // 🆕 2026-05-24
+        total_em_rota: emRota.rows.length
       });
     } catch (error) {
       console.error('❌ Erro ao obter fila:', error);
@@ -326,19 +277,7 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, 'roteiro_despachado', $2, $3)
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'roteiro_despachado', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, msgDespacho, JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, notas_liberadas: totalNotas })]).catch(() => {});
-
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-
+      
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
       
@@ -398,19 +337,7 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, 'corrida_unica', $2, $3)
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'corrida_unica', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, posicao_retorno: posicaoOriginal, bonus: true })]).catch(() => {});
-
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-
+      
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
       
@@ -1142,12 +1069,6 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
       `, [central_id, central_nome, cod_profissional, nome_profissional,
         `Colocado na fila pelo admin (posição ${novaPosicao})`,
         req.user.codProfissional, req.user.nome]);
-
-      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
-      marcarMotoboyEmLoja(pool, cod_profissional, {
-        origem: 'fila_classica_admin',
-        alterado_por: `Admin: ${req.user?.nome || 'desconhecido'}`,
-      }).catch(() => {});
 
       res.json({ success: true, posicao: novaPosicao, central: central_nome, nome: nome_profissional });
 

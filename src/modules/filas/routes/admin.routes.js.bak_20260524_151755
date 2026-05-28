@@ -58,34 +58,20 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
   router.put('/centrais/:id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const { nome, endereco, latitude, longitude, raio_metros, ativa,
-              validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
-              mostrar_nomes_publicos, penalidade_min,
-              barreira_horario_ativa, barreira_horario_corte } = req.body;
-
+      const { nome, endereco, latitude, longitude, raio_metros, ativa } = req.body;
+      
       const result = await pool.query(`
-        UPDATE filas_centrais
-        SET nome                     = COALESCE($1,  nome),
-            endereco                 = COALESCE($2,  endereco),
-            latitude                 = COALESCE($3,  latitude),
-            longitude                = COALESCE($4,  longitude),
-            raio_metros              = COALESCE($5,  raio_metros),
-            ativa                    = COALESCE($6,  ativa),
-            validacao_agente_ativa   = COALESCE($8,  validacao_agente_ativa),
-            varredura_intervalo_seg  = COALESCE($9,  varredura_intervalo_seg),
-            remover_ao_pegar_corrida = COALESCE($10, remover_ao_pegar_corrida),
-            mostrar_nomes_publicos   = COALESCE($11, mostrar_nomes_publicos),
-            penalidade_min           = COALESCE($12, penalidade_min),
-            barreira_horario_ativa   = COALESCE($13, barreira_horario_ativa),
-            barreira_horario_corte   = COALESCE($14, barreira_horario_corte),
-            updated_at               = NOW()
+        UPDATE filas_centrais 
+        SET nome = COALESCE($1, nome),
+            endereco = COALESCE($2, endereco),
+            latitude = COALESCE($3, latitude),
+            longitude = COALESCE($4, longitude),
+            raio_metros = COALESCE($5, raio_metros),
+            ativa = COALESCE($6, ativa),
+            updated_at = NOW()
         WHERE id = $7
         RETURNING *
-      `, [nome, endereco, latitude, longitude, raio_metros, ativa, id,
-          validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
-          mostrar_nomes_publicos, penalidade_min,
-          barreira_horario_ativa,
-          barreira_horario_corte || null]);
+      `, [nome, endereco, latitude, longitude, raio_metros, ativa, id]);
       
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Central não encontrada' });
@@ -326,19 +312,7 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, 'roteiro_despachado', $2, $3)
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'roteiro_despachado', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, msgDespacho, JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, notas_liberadas: totalNotas })]).catch(() => {});
-
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-
+      
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
       
@@ -398,19 +372,7 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, 'corrida_unica', $2, $3)
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'corrida_unica', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, posicao_retorno: posicaoOriginal, bonus: true })]).catch(() => {});
-
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-
+      
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
       

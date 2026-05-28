@@ -160,14 +160,6 @@ async function initFilasTables(pool) {
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS remover_ao_pegar_corrida BOOLEAN DEFAULT true`).catch(() => {});
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS mostrar_nomes_publicos BOOLEAN DEFAULT true`).catch(() => {});
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS penalidade_min INTEGER DEFAULT 10`).catch(() => {});
-  // Barreira de horário de ingresso
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS barreira_horario_ativa  BOOLEAN DEFAULT false`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS barreira_horario_corte  TIME`).catch(() => {});
-  // Coluna tipo na tabela penalidades (para diferenciar barreira de saída voluntária)
-  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS tipo VARCHAR(30) DEFAULT 'automatica'`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS motivo_admin TEXT`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS aplicado_por_cod VARCHAR(30)`).catch(() => {});
-  await pool.query(`ALTER TABLE filas_penalidades ADD COLUMN IF NOT EXISTS aplicado_por_nome VARCHAR(120)`).catch(() => {});
   console.log('✅ Colunas de fila auto-gerenciável em filas_centrais verificadas');
 
   // Status do motoboy no agente. Valores possíveis:

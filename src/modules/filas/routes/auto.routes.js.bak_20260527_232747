@@ -48,8 +48,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       const vincR = await pool.query(`
         SELECT v.*, c.nome AS central_nome, c.latitude AS central_lat,
                c.longitude AS central_lng, c.raio_metros, c.tipo,
-               c.id AS central_id_resolved, c.penalidade_min,
-               c.barreira_horario_ativa, c.barreira_horario_corte
+               c.id AS central_id_resolved, c.penalidade_min
           FROM filas_vinculos v
           JOIN filas_centrais c ON c.id = v.central_id
          WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true AND c.tipo = 'auto'`,
@@ -92,68 +91,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           bloqueado_ate: penR.rows[0].bloqueado_ate,
           mensagem: `Você saiu há pouco da fila. Aguarde ${minRest}min para reentrar.`,
         });
-      }
-
-      // 3b) Barreira de horário — só para o PRIMEIRO ingresso do dia, após horário corte
-      if (central.barreira_horario_ativa && central.barreira_horario_corte) {
-        // Verificar se é o primeiro ingresso do motoboy HOJE nesta central
-        const primeiroHojeR = await pool.query(
-          `SELECT id FROM filas_historico
-            WHERE cod_profissional = $1 AND central_id = $2
-              AND acao IN ('entrada', 'entrada_manual')
-              AND created_at >= CURRENT_DATE AT TIME ZONE 'America/Bahia'
-            LIMIT 1`,
-          [cod_profissional, central.central_id_resolved]
-        );
-        const primeiroIngressoHoje = primeiroHojeR.rows.length === 0;
-
-        if (primeiroIngressoHoje) {
-          // Comparar hora atual (Bahia) com horário corte configurado
-          const agoraBahia = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
-          const [hCorte, mCorte] = central.barreira_horario_corte.split(':').map(Number);
-          const minutosAgora  = agoraBahia.getHours() * 60 + agoraBahia.getMinutes();
-          const minutosCorte  = hCorte * 60 + mCorte;
-
-          if (minutosAgora >= minutosCorte) {
-            // Inserir como penalidade tipo 'barreira_horario' — aparece na aba Punidos
-            // Bloqueio: até meia-noite (expira sozinho no dia seguinte)
-            await pool.query(
-              `INSERT INTO filas_penalidades
-                 (cod_profissional, nome_profissional, central_id, bloqueado_ate, saidas_hoje, tipo, motivo_admin)
-               VALUES ($1, $2, $3,
-                 (CURRENT_DATE + 1)::timestamp AT TIME ZONE 'America/Bahia',
-                 0, 'barreira_horario',
-                 $4)
-               ON CONFLICT DO NOTHING`,
-              [
-                cod_profissional,
-                nome_profissional,
-                central.central_id_resolved,
-                `Acesso tardio: tentou entrar às ${agoraBahia.toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit'})} (corte: ${central.barreira_horario_corte.slice(0,5)})`,
-              ]
-            );
-
-            // Broadcast para admins verem na aba Punidos
-            if (global.broadcastFilasAuto) {
-              global.broadcastFilasAuto('FILA_PENALIDADE_NOVA', {
-                central_id: central.central_id_resolved,
-                cod_profissional,
-                nome_profissional,
-                bloqueado_ate: new Date(new Date().setHours(23,59,59,999)).toISOString(),
-                saidas_hoje: 0,
-                tipo: 'barreira_horario',
-                motivo_admin: `Acesso tardio (corte: ${central.barreira_horario_corte.slice(0,5)})`,
-              });
-            }
-
-            return res.status(403).json({
-              error: 'barreira_horario',
-              horario_corte: central.barreira_horario_corte.slice(0,5),
-              nome_profissional,
-              mensagem: `Acesso bloqueado após ${central.barreira_horario_corte.slice(0,5)}.`,
-            });
-          }
-        }
       }
 
       // 4) Já está na fila?
@@ -296,20 +233,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           ? `Você saiu da fila. Pode voltar em ${penMin} minutos.`
           : 'Você saiu da fila.',
       });
-
-      // Broadcast WS para admins atualizarem aba Punidos em tempo real
-      if (penMin > 0 && global.broadcastFilasAuto) {
-        try {
-          global.broadcastFilasAuto('FILA_PENALIDADE_NOVA', {
-            central_id,
-            cod_profissional,
-            nome_profissional,
-            bloqueado_ate: new Date(Date.now() + penMin * 60000).toISOString(),
-            saidas_hoje: 1,
-            tipo: 'automatica',
-          });
-        } catch (_) {}
-      }
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       console.error('❌ [fila-auto/sair]', err);

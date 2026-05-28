@@ -22,8 +22,6 @@
 
 const express = require('express');
 const { calcularDistanciaHaversine, compactarPosicoes, reordenarMotoboy, registrarLog } = require('../filas-auto.service');
-// 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
-const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 
 function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -48,8 +46,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       const vincR = await pool.query(`
         SELECT v.*, c.nome AS central_nome, c.latitude AS central_lat,
                c.longitude AS central_lng, c.raio_metros, c.tipo,
-               c.id AS central_id_resolved, c.penalidade_min,
-               c.barreira_horario_ativa, c.barreira_horario_corte
+               c.id AS central_id_resolved, c.penalidade_min
           FROM filas_vinculos v
           JOIN filas_centrais c ON c.id = v.central_id
          WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true AND c.tipo = 'auto'`,
@@ -92,68 +89,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           bloqueado_ate: penR.rows[0].bloqueado_ate,
           mensagem: `Você saiu há pouco da fila. Aguarde ${minRest}min para reentrar.`,
         });
-      }
-
-      // 3b) Barreira de horário — só para o PRIMEIRO ingresso do dia, após horário corte
-      if (central.barreira_horario_ativa && central.barreira_horario_corte) {
-        // Verificar se é o primeiro ingresso do motoboy HOJE nesta central
-        const primeiroHojeR = await pool.query(
-          `SELECT id FROM filas_historico
-            WHERE cod_profissional = $1 AND central_id = $2
-              AND acao IN ('entrada', 'entrada_manual')
-              AND created_at >= CURRENT_DATE AT TIME ZONE 'America/Bahia'
-            LIMIT 1`,
-          [cod_profissional, central.central_id_resolved]
-        );
-        const primeiroIngressoHoje = primeiroHojeR.rows.length === 0;
-
-        if (primeiroIngressoHoje) {
-          // Comparar hora atual (Bahia) com horário corte configurado
-          const agoraBahia = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
-          const [hCorte, mCorte] = central.barreira_horario_corte.split(':').map(Number);
-          const minutosAgora  = agoraBahia.getHours() * 60 + agoraBahia.getMinutes();
-          const minutosCorte  = hCorte * 60 + mCorte;
-
-          if (minutosAgora >= minutosCorte) {
-            // Inserir como penalidade tipo 'barreira_horario' — aparece na aba Punidos
-            // Bloqueio: até meia-noite (expira sozinho no dia seguinte)
-            await pool.query(
-              `INSERT INTO filas_penalidades
-                 (cod_profissional, nome_profissional, central_id, bloqueado_ate, saidas_hoje, tipo, motivo_admin)
-               VALUES ($1, $2, $3,
-                 (CURRENT_DATE + 1)::timestamp AT TIME ZONE 'America/Bahia',
-                 0, 'barreira_horario',
-                 $4)
-               ON CONFLICT DO NOTHING`,
-              [
-                cod_profissional,
-                nome_profissional,
-                central.central_id_resolved,
-                `Acesso tardio: tentou entrar às ${agoraBahia.toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit'})} (corte: ${central.barreira_horario_corte.slice(0,5)})`,
-              ]
-            );
-
-            // Broadcast para admins verem na aba Punidos
-            if (global.broadcastFilasAuto) {
-              global.broadcastFilasAuto('FILA_PENALIDADE_NOVA', {
-                central_id: central.central_id_resolved,
-                cod_profissional,
-                nome_profissional,
-                bloqueado_ate: new Date(new Date().setHours(23,59,59,999)).toISOString(),
-                saidas_hoje: 0,
-                tipo: 'barreira_horario',
-                motivo_admin: `Acesso tardio (corte: ${central.barreira_horario_corte.slice(0,5)})`,
-              });
-            }
-
-            return res.status(403).json({
-              error: 'barreira_horario',
-              horario_corte: central.barreira_horario_corte.slice(0,5),
-              nome_profissional,
-              mensagem: `Acesso bloqueado após ${central.barreira_horario_corte.slice(0,5)}.`,
-            });
-          }
-        }
       }
 
       // 4) Já está na fila?
@@ -206,12 +141,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
          VALUES ($1, $2, $3, $4, 'entrada_auto')`,
         [central.central_id_resolved, central.central_nome, cod_profissional, nome_profissional]
       );
-
-      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
-      marcarMotoboyEmLoja(pool, cod_profissional, {
-        origem: 'fila_auto',
-        alterado_por: `Auto (entrou na fila: ${nome_profissional})`,
-      }).catch(() => {});
 
       res.json({
         success: true,
@@ -296,20 +225,6 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           ? `Você saiu da fila. Pode voltar em ${penMin} minutos.`
           : 'Você saiu da fila.',
       });
-
-      // Broadcast WS para admins atualizarem aba Punidos em tempo real
-      if (penMin > 0 && global.broadcastFilasAuto) {
-        try {
-          global.broadcastFilasAuto('FILA_PENALIDADE_NOVA', {
-            central_id,
-            cod_profissional,
-            nome_profissional,
-            bloqueado_ate: new Date(Date.now() + penMin * 60000).toISOString(),
-            saidas_hoje: 1,
-            tipo: 'automatica',
-          });
-        } catch (_) {}
-      }
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       console.error('❌ [fila-auto/sair]', err);
@@ -486,21 +401,17 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       }
       await client.query('BEGIN');
 
-      // 🔄 2026-05-24: remove tanto aguardando quanto em_rota
-      // (admin pode tirar motoboy que travou ou foi despachado errado)
       const r = await client.query(
         `DELETE FROM filas_posicoes
-          WHERE central_id = $1 AND cod_profissional = $2
-            AND status IN ('aguardando', 'em_rota')
-          RETURNING nome_profissional, status`,
+          WHERE central_id = $1 AND cod_profissional = $2 AND status = 'aguardando'
+          RETURNING nome_profissional`,
         [parseInt(central_id, 10), cod_profissional]
       );
       if (r.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Motoboy não está nesta fila' });
+        return res.status(404).json({ error: 'Motoboy não está aguardando nesta fila' });
       }
       const nomeProf = r.rows[0].nome_profissional;
-      const statusAnterior = r.rows[0].status;
 
       await compactarPosicoes(client, parseInt(central_id, 10), client);
 
@@ -566,62 +477,14 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       );
       if (centralR.rows.length === 0) return res.status(404).json({ error: 'Central não encontrada ou não é auto' });
 
-      // 🆕 2026-05-24: enriquece cada motoboy com info de alocação na disponibilidade.
-      // LEFT JOIN LATERAL pega a primeira linha do motoboy em disponibilidade_linhas
-      // (se existir). Se não tiver linha, alocado=NULL → frontend mostra badge
-      // vermelho "Sem disponibilidade" pra forçar admin a alocar.
-      // 🔧 v3 (2026-05-24): LOWER(TRIM(...)) em ambos os lados — alinhado com o
-      // resto do sistema (auth usa case-insensitive); evita falsos negativos por
-      // diferença de case/whitespace entre fontes.
       const filaR = await pool.query(
-        `SELECT p.cod_profissional, p.nome_profissional, p.posicao, p.status, p.entrada_fila_at,
-                p.agente_status, p.agente_ultima_validacao_at, p.corridas_ativas_count,
-                (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
-                d.loja_nome              AS disponibilidade_loja,
-                d.status_atual           AS disponibilidade_status
-           FROM filas_posicoes p
-           LEFT JOIN LATERAL (
-             SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
-               FROM disponibilidade_linhas dl
-               JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-              WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
-              ORDER BY dl.id ASC
-              LIMIT 1
-           ) d ON TRUE
-          WHERE p.central_id = $1 AND p.status = 'aguardando'
-          ORDER BY p.posicao ASC`,
+        `SELECT cod_profissional, nome_profissional, posicao, status, entrada_fila_at,
+                agente_status, agente_ultima_validacao_at, corridas_ativas_count
+           FROM filas_posicoes
+          WHERE central_id = $1 AND status = 'aguardando'
+          ORDER BY posicao ASC`,
         [centralId]
       );
-
-      // 🆕 2026-05-24: também retorna motoboys em rota (status='em_rota')
-      // pra admin visualizar quem foi despachado, no layout 2 colunas idêntico
-      // ao da fila clássica.
-      const emRotaR = await pool.query(
-        `SELECT p.cod_profissional, p.nome_profissional, p.status, p.saida_rota_at,
-                p.agente_status, p.corridas_ativas_count,
-                ROUND(EXTRACT(EPOCH FROM (NOW() - p.saida_rota_at))/60)::int AS minutos_em_rota,
-                (d.loja_id IS NOT NULL) AS disponibilidade_alocado,
-                d.loja_nome              AS disponibilidade_loja,
-                d.status_atual           AS disponibilidade_status
-           FROM filas_posicoes p
-           LEFT JOIN LATERAL (
-             SELECT dl.loja_id, l.nome AS loja_nome, dl.status AS status_atual
-               FROM disponibilidade_linhas dl
-               JOIN disponibilidade_lojas l ON l.id = dl.loja_id
-              WHERE LOWER(TRIM(dl.cod_profissional)) = LOWER(TRIM(p.cod_profissional))
-              ORDER BY dl.id ASC
-              LIMIT 1
-           ) d ON TRUE
-          WHERE p.central_id = $1 AND p.status = 'em_rota'
-          ORDER BY p.saida_rota_at ASC`,
-        [centralId]
-      );
-
-      // Alertas: em rota há mais de 90 min
-      const alertasArr = emRotaR.rows.filter(r => (r.minutos_em_rota || 0) > 90);
-
-      // 🆕 2026-05-24: KPI de motoboys aguardando SEM alocação na disponibilidade
-      const semAlocacao = filaR.rows.filter(p => !p.disponibilidade_alocado).length;
 
       // Bloqueados recentes (últimos eventos de bloqueou_entrada nas últimas 24h)
       const bloqR = await pool.query(
@@ -649,118 +512,12 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         success: true,
         central: centralR.rows[0],
         fila: filaR.rows,
-        em_rota: emRotaR.rows,         // 🆕 2026-05-24
-        alertas: alertasArr,           // 🆕 2026-05-24
         bloqueados: bloqR.rows,
         kpis: kpisR.rows[0],
-        total_sem_disponibilidade: semAlocacao,  // 🆕 2026-05-24
       });
     } catch (err) {
       console.error('❌ [fila-auto/admin/fila-completa]', err);
       res.status(500).json({ error: 'Erro ao montar dashboard' });
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════════════════
-  //   ADMIN — colocar motoboy na fila (manual)
-  // ═══════════════════════════════════════════════════════════════════════
-  // 🆕 2026-05-24: admin força inserção de motoboy vinculado na fila auto,
-  // pulando GPS/raio. Útil quando o motoboy não tem como entrar sozinho.
-  router.post('/auto/admin/colocar-na-fila', verificarToken, verificarAdmin, async (req, res) => {
-    try {
-      const { cod_profissional, central_id } = req.body;
-      if (!cod_profissional || !central_id) {
-        return res.status(400).json({ error: 'cod_profissional e central_id são obrigatórios' });
-      }
-
-      // Confere vínculo + central auto
-      const vinc = await pool.query(`
-        SELECT v.cod_profissional, v.nome_profissional, c.nome AS central_nome, c.tipo
-          FROM filas_vinculos v
-          JOIN filas_centrais c ON c.id = v.central_id
-         WHERE v.cod_profissional = $1 AND v.central_id = $2
-           AND v.ativo = true AND c.ativa = true`,
-        [cod_profissional, central_id]
-      );
-      if (vinc.rows.length === 0) {
-        return res.status(403).json({ error: 'Motoboy não está vinculado a esta central' });
-      }
-      if (vinc.rows[0].tipo !== 'auto') {
-        return res.status(400).json({ error: 'Central não é auto-gerenciável' });
-      }
-
-      // Já está na fila?
-      const ja = await pool.query(
-        'SELECT id, status, posicao FROM filas_posicoes WHERE cod_profissional = $1',
-        [cod_profissional]
-      );
-      if (ja.rows.length > 0) {
-        if (ja.rows[0].status === 'aguardando') {
-          return res.status(400).json({ error: 'Motoboy já está aguardando', posicao: ja.rows[0].posicao });
-        }
-        if (ja.rows[0].status === 'em_rota') {
-          return res.status(400).json({ error: 'Motoboy está em rota — aguarde finalizar' });
-        }
-      }
-
-      // Última posição + 1
-      const ultPos = await pool.query(
-        `SELECT COALESCE(MAX(posicao), 0) AS max_pos FROM filas_posicoes
-          WHERE central_id = $1 AND status = 'aguardando'`,
-        [central_id]
-      );
-      const novaPosicao = parseInt(ultPos.rows[0].max_pos) + 1;
-
-      if (ja.rows.length > 0) {
-        await pool.query(`
-          UPDATE filas_posicoes
-             SET central_id = $1, status = 'aguardando', posicao = $2,
-                 entrada_fila_at = NOW(), saida_rota_at = NULL, retorno_at = NULL,
-                 latitude_checkin = NULL, longitude_checkin = NULL,
-                 agente_status = 'pendente', agente_ultima_validacao_at = NULL,
-                 corridas_ativas_count = 0, motivo_posicao = 'colocado_admin',
-                 notas_liberadas = 0, primeira_nota_at = NULL, bairros = '[]'::jsonb,
-                 updated_at = NOW()
-           WHERE id = $3
-        `, [central_id, novaPosicao, ja.rows[0].id]);
-      } else {
-        await pool.query(`
-          INSERT INTO filas_posicoes
-            (central_id, cod_profissional, nome_profissional, status, posicao,
-             agente_status, motivo_posicao, entrada_fila_at)
-          VALUES ($1, $2, $3, 'aguardando', $4, 'pendente', 'colocado_admin', NOW())
-        `, [central_id, cod_profissional, vinc.rows[0].nome_profissional, novaPosicao]);
-      }
-
-      await pool.query(`
-        INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao)
-        VALUES ($1, $2, $3, $4, 'colocado_admin')
-      `, [central_id, vinc.rows[0].central_nome, cod_profissional, vinc.rows[0].nome_profissional]);
-
-      registrarLog(pool, central_id, 'colocado_admin', {
-        cod_profissional, nome_profissional: vinc.rows[0].nome_profissional,
-        motivo: 'Admin inseriu manualmente',
-      });
-
-      // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)
-      marcarMotoboyEmLoja(pool, cod_profissional, {
-        origem: 'fila_auto_admin',
-        alterado_por: `Admin: ${req.user?.nome || 'desconhecido'}`,
-      }).catch(() => {});
-
-      res.json({
-        success: true,
-        posicao: novaPosicao,
-        cod_profissional,
-        nome_profissional: vinc.rows[0].nome_profissional,
-      });
-
-      registrarAuditoria(req, 'FILA_AUTO_COLOCAR_ADMIN', 'admin', 'filas_posicoes', null, {
-        central_id, cod_profissional, posicao: novaPosicao,
-      }).catch(() => {});
-    } catch (err) {
-      console.error('❌ [fila-auto/admin/colocar-na-fila]', err);
-      res.status(500).json({ error: 'Erro ao colocar na fila' });
     }
   });
 
@@ -783,26 +540,16 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(500).json({ error: 'coletarOsEmExecucao não exportada pelo sla-capture' });
       }
 
-      // coletarOsEmExecucao() retorna { ok, ordens, motivo, sessaoExpirada }
-      // NÃO é um array — mesmo fix já aplicado no fila-validador.agent.js
-      const capResult = await slaCapture.coletarOsEmExecucao();
-      if (!capResult || !capResult.ok) {
-        return res.status(502).json({
-          error: 'Falha ao coletar OS em execução do sistema externo',
-          motivo: capResult?.motivo || 'desconhecido',
-          sessao_expirada: capResult?.sessaoExpirada || false,
-        });
-      }
-      const todasOs = capResult.ordens || [];
+      const todasOs = await slaCapture.coletarOsEmExecucao();
       const mapa = new Map();
-      for (const os of todasOs) {
+      for (const os of todasOs || []) {
         const cod = String(os.cod_profissional || '').trim();
         if (!cod) continue;
         if (!mapa.has(cod)) mapa.set(cod, []);
         mapa.get(cod).push({ os_numero: os.os_numero || null });
       }
       const resultado = await filaValidador.aplicarResultadoVarredura(pool, mapa);
-      res.json({ success: true, resultado, motoboys_no_externo: mapa.size, ordens_coletadas: todasOs.length });
+      res.json({ success: true, resultado, motoboys_no_externo: mapa.size });
     } catch (err) {
       console.error('❌ [fila-auto/admin/varredura-agora]', err);
       res.status(500).json({ error: 'Erro ao disparar varredura', detalhe: err.message });
