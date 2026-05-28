@@ -84,13 +84,16 @@ async function enviarParaMotoboy(numero, texto) {
  * @returns {string} Texto pronto pra enviar.
  */
 function montarMensagemDespacho(nomeMotoboy) {
-  // Pega só o primeiro nome pra ficar mais pessoal e curto
   const primeiroNome = (nomeMotoboy || '').trim().split(/\s+/)[0] || 'motoboy';
 
-  return `🛵 *Tutts — Atenção ${primeiroNome}*\n\n` +
+  const hora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' })).getHours();
+  const saudacao = hora < 12 ? 'Bom dia' : hora < 18 ? 'Boa tarde' : 'Boa noite';
+
+  return `*${saudacao}, ${primeiroNome}!*\n\n` +
     `O suporte já disponibilizou o roteiro no seu aplicativo.\n\n` +
     `Por favor realize a coleta das mercadorias e avance para a entrega.\n\n` +
-    `⏱️ *Atenção ao tempo de entrega — evite atrasos.*`;
+    `⏱️ *Atenção ao tempo de entrega — evite atrasos.*\n\n` +
+    `_Esta mensagem é automática — em caso de dúvidas, entre em contato com o suporte Tutts._`;
 }
 
 module.exports = {
