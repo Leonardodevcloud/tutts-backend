@@ -884,17 +884,37 @@ async function coletarOsEmExecucao() {
 
     // Aguarda a tabela de em-execução renderizar (tr com data-order-id)
     try {
-      await page.waitForSelector('#pills-em-execucao tr[data-order-id]', { timeout: 15000 });
+      await page.waitForSelector('#pills-em-execucao tr[data-order-id]', { timeout: 25000 });
       etapa('tabela_renderizada');
     } catch (e) {
       etapa('tabela_timeout', { erro: e.message });
-      // Às vezes a tabela vem vazia (0 OS) — verifica o contador
-      const texto = await page.locator('#pills-em-execucao').innerText().catch(() => '');
-      if (/Serviço.*execução.*\(0\)/i.test(texto)) {
+
+      // 🔧 v23 (2026-05-28): detecção de 0 OS mais robusta
+      // Antes: regex rígida /Serviço.*execução.*\(0\)/i — não batia em todos os casos.
+      // Agora: tenta 3 indicadores de tabela vazia. Se container existe mas sem rows
+      // → assumir 0 OS (chegamos na página certa, só não tem OS no momento).
+      const containerExiste = await page.locator('#pills-em-execucao').isVisible({ timeout: 3000 }).catch(() => false);
+      const texto = containerExiste
+        ? await page.locator('#pills-em-execucao').innerText({ timeout: 3000 }).catch(() => '')
+        : '';
+
+      log(`🔍 [tabela_timeout] container=${containerExiste} texto="${texto.slice(0, 150).replace(/\n/g, ' ')}"`);
+
+      // Indicadores explícitos de zero
+      if (/\(0\)/.test(texto) || /nenhum|empty|vazio|sem servi/i.test(texto) || /Serviço.*execução.*\(0\)/i.test(texto)) {
         etapa('zero_os');
         return { ok: true, ordens: [], totalEsperado: 0, paginas: 0, duracaoMs: Date.now() - t0, diag };
       }
-      return { ok: false, motivo: 'tabela_nao_renderizou', sessaoExpirada: true, diag };
+
+      // Container existe mas sem rows e sem indicador explícito → provavelmente 0 OS
+      if (containerExiste) {
+        etapa('zero_os_fallback');
+        log(`⚠️ [tabela_timeout] container existe mas sem tr[data-order-id] — assumindo 0 OS`);
+        return { ok: true, ordens: [], totalEsperado: 0, paginas: 0, duracaoMs: Date.now() - t0, diag };
+      }
+
+      // Container não encontrado → página errada ou sessão quebrada
+      return { ok: false, motivo: 'tabela_nao_renderizou', sessaoExpirada: false, diag };
     }
 
     await page.waitForTimeout(500);
