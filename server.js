@@ -853,6 +853,7 @@ async function initDatabase() {
     try { await initGerencialTables(pool); } catch (e) { console.error('⚠️ Gerencial tables error:', e.message); }
     try { await initCrmTables(pool); } catch (e) { console.error('⚠️ CRM tables error:', e.message); }
     try { await initLogisticsTables(pool); } catch (e) { console.error('Logistics tables error:', e.message); }
+    try { await initFilasTables(pool); } catch (e) { console.error('⚠️ Filas tables error:', e.message); }
     try { await initFeedbackTables(pool); } catch (e) { console.error('⚠️ Feedback tables error:', e.message); }
     await createPerformanceIndices(pool);
     // 🚀 Materialized views do BI (agregados pré-calculados)

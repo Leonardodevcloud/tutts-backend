@@ -49,7 +49,8 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         SELECT v.*, c.nome AS central_nome, c.latitude AS central_lat,
                c.longitude AS central_lng, c.raio_metros, c.tipo,
                c.id AS central_id_resolved, c.penalidade_min,
-               c.barreira_horario_ativa, c.barreira_horario_corte
+               COALESCE(c.barreira_horario_ativa, false) AS barreira_horario_ativa,
+               c.barreira_horario_corte
           FROM filas_vinculos v
           JOIN filas_centrais c ON c.id = v.central_id
          WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true AND c.tipo = 'auto'`,
