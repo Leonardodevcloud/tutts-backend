@@ -706,16 +706,26 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(500).json({ error: 'coletarOsEmExecucao não exportada pelo sla-capture' });
       }
 
-      const todasOs = await slaCapture.coletarOsEmExecucao();
+      // coletarOsEmExecucao() retorna { ok, ordens, motivo, sessaoExpirada }
+      // NÃO é um array — mesmo fix já aplicado no fila-validador.agent.js
+      const capResult = await slaCapture.coletarOsEmExecucao();
+      if (!capResult || !capResult.ok) {
+        return res.status(502).json({
+          error: 'Falha ao coletar OS em execução do sistema externo',
+          motivo: capResult?.motivo || 'desconhecido',
+          sessao_expirada: capResult?.sessaoExpirada || false,
+        });
+      }
+      const todasOs = capResult.ordens || [];
       const mapa = new Map();
-      for (const os of todasOs || []) {
+      for (const os of todasOs) {
         const cod = String(os.cod_profissional || '').trim();
         if (!cod) continue;
         if (!mapa.has(cod)) mapa.set(cod, []);
         mapa.get(cod).push({ os_numero: os.os_numero || null });
       }
       const resultado = await filaValidador.aplicarResultadoVarredura(pool, mapa);
-      res.json({ success: true, resultado, motoboys_no_externo: mapa.size });
+      res.json({ success: true, resultado, motoboys_no_externo: mapa.size, ordens_coletadas: todasOs.length });
     } catch (err) {
       console.error('❌ [fila-auto/admin/varredura-agora]', err);
       res.status(500).json({ error: 'Erro ao disparar varredura', detalhe: err.message });
