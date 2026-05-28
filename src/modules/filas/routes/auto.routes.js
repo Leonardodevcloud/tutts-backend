@@ -269,10 +269,16 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       await compactarPosicoes(client, central_id, client);
 
       // Aplica penalidade se configurada
+      // 🔧 v2 (2026-05-28): ON CONFLICT — motoboy pode sair 2x no mesmo dia;
+      // sem isso o INSERT explode com 23505 (unique constraint data_ref) → 500 → circuit breaker.
       if (penMin > 0) {
         await client.query(
           `INSERT INTO filas_penalidades (cod_profissional, nome_profissional, central_id, bloqueado_ate, saidas_hoje)
-           VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::interval, 1)`,
+           VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::interval, 1)
+           ON CONFLICT (cod_profissional, central_id, data_ref)
+           DO UPDATE SET
+             saidas_hoje  = filas_penalidades.saidas_hoje + 1,
+             bloqueado_ate = EXCLUDED.bloqueado_ate`,
           [cod_profissional, nome_profissional, central_id, String(penMin)]
         );
       }

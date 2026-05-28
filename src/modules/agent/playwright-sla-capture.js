@@ -398,11 +398,38 @@ async function fazerLogin(page, overrides) {
               log(`🔓 [tentativa ${i + 1}/${tentativas.length}] cookie OK em ${urlAtual} — navegando pra ACOMP_URL`);
               await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
               await page.waitForTimeout(1000);
+              // 🔧 v20 (2026-05-28): log URL REAL pós-goto (v19 logava urlAtual antiga, mascarando redirect)
+              const urlPosGoto = page.url();
+              log(`🔍 [pós-ACOMP goto] URL real = ${urlPosGoto}`);
+              if (urlPosGoto.includes('/principal') || !urlPosGoto.includes('/acompanhamento-servicos')) {
+                // ACOMP_URL redirecionou pra principal.php — tenta encontrar link de acompanhamento na página
+                log(`⚠️ ACOMP_URL redirecionou pra ${urlPosGoto} em vez de /acompanhamento-servicos — tentando fallback`);
+                try {
+                  // Tenta clicar no link/menu de acompanhamento se existir na página
+                  const linkAcomp = page.locator('a[href*="acompanhamento-servicos"]').first();
+                  if (await linkAcomp.isVisible({ timeout: 3000 }).catch(() => false)) {
+                    await linkAcomp.click();
+                    await page.waitForLoadState('domcontentloaded', { timeout: 20000 });
+                    await page.waitForTimeout(1000);
+                    log(`🔍 [pós-fallback link] URL = ${page.url()}`);
+                  } else {
+                    // Screenshot diagnóstico pra entender o que a página mostra
+                    try {
+                      const ssPath = `/tmp/acomp-redirect-diag-${Date.now()}.png`;
+                      await page.screenshot({ path: ssPath, fullPage: false });
+                      log(`📸 Screenshot diagnóstico salvo: ${ssPath} — verifique env SISTEMA_EXTERNO_ACOMPANHAMENTO_URL`);
+                    } catch (_) {}
+                    log(`❌ Nenhum link de acompanhamento encontrado em ${urlPosGoto} — verifique env SISTEMA_EXTERNO_ACOMPANHAMENTO_URL no Railway`);
+                  }
+                } catch (eFallback) {
+                  log(`⚠️ fallback acomp falhou: ${eFallback.message}`);
+                }
+              }
             } catch (eNav) {
               log(`⚠️ falha ao navegar pra ACOMP após cookie-login: ${eNav.message}`);
             }
           }
-          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL: ${urlAtual}`);
+          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_ja_logado_via_cookie) — URL atual: ${page.url()}`); // 🔧 v20: usa page.url() em vez de urlAtual
           return; // sucesso — sessão ainda válida, login desnecessário
         }
         ultimoErro = `Página de login não carregou. goto=${t.url} URL_final=${urlAtual}`;
@@ -798,7 +825,15 @@ async function coletarOsEmExecucao() {
     const abaEmExecucao = page.locator('#pills-em-execucao-tab');
     if (!(await abaEmExecucao.isVisible({ timeout: 30000 }).catch(() => false))) {
       etapa('aba_nao_visivel');
-      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, diag };
+      // 🔧 v20 (2026-05-28): diagnóstico — loga URL real e tira screenshot pra entender redirect
+      const urlDiag = page.url();
+      log(`🔍 [aba_nao_visivel] URL atual = ${urlDiag}`);
+      try {
+        const ssPath = `/tmp/aba-nao-visivel-diag-${Date.now()}.png`;
+        await page.screenshot({ path: ssPath, fullPage: false });
+        log(`📸 Screenshot diagnóstico: ${ssPath}`);
+      } catch (_) {}
+      return { ok: false, motivo: 'aba_nao_visivel', sessaoExpirada: false, urlDiag, diag };
     }
     await abaEmExecucao.click();
     etapa('aba_clicada');
