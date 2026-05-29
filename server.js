@@ -82,6 +82,8 @@ const { initGerencialRoutes, initGerencialTables } = require('./src/modules/gere
 // Logistics Hub - Fase 0: setup, contratos, tabelas. Operacoes ainda nao ligadas.
 const { initLogisticsRoutes, initLogisticsTables, startLogisticsWorker } = require('./src/modules/logistics');
 const { initFeedbackRoutes, initFeedbackTables } = require('./src/modules/feedback');
+const { initConfirmaFacilTables, initConfirmaFacilRoutes,
+        getConfirmaFacilService, getConfirmaFacilPoller } = require('./src/modules/confirmafacil');
 
 // ─── Bootstrap ────────────────────────────────────────────
 dns.setDefaultResultOrder('ipv4first');
@@ -525,6 +527,33 @@ app.post("/api/webhook/tutts", webhookBasicValidation, async (req, res) => {
     } catch (logErr) { console.error('⚠️ [WEBHOOK] Erro log:', logErr.message); }
     
     console.log(`✅ [WEBHOOK] OS ${osNumero}: ${statusDescricao} (${novoStatus})`);
+
+    // ── ConfirmaFácil: reporta status após atualizar corrida ──
+    const cfService = getConfirmaFacilService(pool);
+    cfService.processar({
+      solicitacaoId,
+      osNumero,
+      novoStatus,
+      pontoNumero: statusEndereco?.endereco?.ponto
+        ? parseInt(statusEndereco.endereco.ponto) : null,
+      pontoStatus: (() => {
+        if (!statusEndereco?.codigo) return null;
+        const cod  = (statusEndereco.codigo || '').toUpperCase();
+        const comp = (statusEndereco.codigoCompleto || '').toUpperCase();
+        if (cod === 'FIN' || comp === 'FINALIZADO') return 'finalizado_ponto';
+        if (cod === 'COL' || comp === 'COLETADO')   return 'coletado';
+        if (cod === 'CHE' || comp === 'CHEGOU')     return 'chegou';
+        return null;
+      })(),
+      lat:  statusEndereco?.endereco?.latitude  || null,
+      lng:  statusEndereco?.endereco?.longitude || null,
+      fotos: Array.isArray(statusEndereco?.endereco?.protocolo)
+        ? statusEndereco.endereco.protocolo.map(f => f.url || f).filter(Boolean)
+        : [],
+      nomeRecebedor: statusEndereco?.endereco?.nomeRecebedor      || null,
+      docRecebedor:  statusEndereco?.endereco?.documentoRecebedor || null,
+    });
+    // ── fim hook CF ──
     res.status(200).json({ recebido: true, processado: true, os: osNumero, status: novoStatus });
   } catch (err) {
     console.error('❌ [WEBHOOK] Erro:', err.message);
@@ -709,6 +738,7 @@ app.use('/api', verificarToken, initPerformanceRoutes(pool, verificarToken));
 // Logistics Hub: rotas operacionais retornam 501 nesta fase; so /providers e /health funcionam.
 app.use('/api/logistics', initLogisticsRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 app.use('/api/feedback', initFeedbackRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+app.use('/api/confirmafacil', initConfirmaFacilRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
 // ═══════════════════════════════════════════════════════════════════
 // 🔬 DEBUG SLA — temporário pra diagnóstico do detector (2026-04-13)
@@ -855,6 +885,7 @@ async function initDatabase() {
     try { await initLogisticsTables(pool); } catch (e) { console.error('Logistics tables error:', e.message); }
     try { await initFilasTables(pool); } catch (e) { console.error('⚠️ Filas tables error:', e.message); }
     try { await initFeedbackTables(pool); } catch (e) { console.error('⚠️ Feedback tables error:', e.message); }
+    try { await initConfirmaFacilTables(pool); } catch (e) { console.error('⚠️ ConfirmaFacil tables error:', e.message); }
     await createPerformanceIndices(pool);
     // 🚀 Materialized views do BI (agregados pré-calculados)
     try { await createBiMaterializedViews(pool); } catch (e) { console.error('⚠️ Mat views error:', e.message); }
@@ -915,6 +946,7 @@ initDatabase().then(async () => {
   startAntiFraudeWorker(pool);
   startPerformanceWorker(pool);
   startLogisticsWorker(pool); // Logistics Hub - PollingWorker (controlado por logistics_worker_state)
+  // getConfirmaFacilPoller(pool).iniciar(); // ConfirmaFácil — ativar após homologação
   // Crons: se WORKER_ENABLED=true, crons rodam no worker.js separado
   if (process.env.WORKER_ENABLED === 'true') {
     console.log('⏰ Crons desativados no server (rodando no worker separado)');
