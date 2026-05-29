@@ -39,12 +39,13 @@ class ConfirmaFacilAuth {
     }
 
     // Login
-    const body = {
-      email:     config.cf_email,
-      senha:     config.cf_senha,
-      idcliente: config.cf_id_cliente || 0,
-      idproduto: 0,
-    };
+    // idcliente só é obrigatório quando o usuário acessa mais de uma empresa no CF.
+    // Se não informado (ou 0), a API retorna o token direto com o único cliente vinculado.
+    const body = { email: config.cf_email, senha: config.cf_senha };
+    if (config.cf_id_cliente && Number(config.cf_id_cliente) !== 0) {
+      body.idcliente = Number(config.cf_id_cliente);
+      body.idproduto = config.cf_id_produto || 1;
+    }
 
     const resp = await httpRequest(CF_LOGIN_URL, {
       method: 'POST',
