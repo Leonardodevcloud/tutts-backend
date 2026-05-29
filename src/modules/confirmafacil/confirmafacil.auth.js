@@ -11,7 +11,7 @@
  * a mesma instância (evita logins paralelos desnecessários).
  */
 
-const httpRequest = require('../../../shared/utils/httpRequest');
+const httpRequest = require('../../shared/utils/httpRequest');
 
 const CF_LOGIN_URL = 'https://utilities.confirmafacil.com.br/login/login';
 

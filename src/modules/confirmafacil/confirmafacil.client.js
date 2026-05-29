@@ -11,7 +11,7 @@
  * Este client faz o chunking automaticamente.
  */
 
-const httpRequest = require('../../../shared/utils/httpRequest');
+const httpRequest = require('../../shared/utils/httpRequest');
 
 const CF_EMBARQUE_URL    = 'https://utilities.confirmafacil.com.br/business/v2/embarque';
 const CF_LOCALIZACAO_URL = 'https://utilities.confirmafacil.com.br/rastreamento/localizacao';

@@ -3,7 +3,7 @@
 const express = require('express');
 const { getConfirmaFacilAuth }   = require('./confirmafacil.auth');
 const { getConfirmaFacilPoller } = require('./confirmafacil.poller');
-const AppError = require('../../../shared/errors/AppError');
+const AppError = require('../../shared/errors/AppError');
 
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -130,6 +130,23 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         ORDER BY criado_em DESC LIMIT 100
       `, [req.params.solicitacaoId]);
       res.json({ logs: rows });
+    } catch (err) { next(err); }
+  });
+
+  // ── NFs recebidas (vínculos) por cliente ─────────────────────
+  router.get('/nfs/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
+               v.cnpj_embarcador, v.criado_em,
+               sc.status
+        FROM confirmafacil_vinculos v
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+        WHERE v.cliente_id = $1
+        ORDER BY v.criado_em DESC
+        LIMIT 500
+      `, [req.params.clienteId]);
+      res.json({ vinculos: rows });
     } catch (err) { next(err); }
   });
 

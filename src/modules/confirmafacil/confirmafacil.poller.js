@@ -16,7 +16,7 @@
  */
 
 const cron            = require('node-cron');
-const httpRequest     = require('../../../shared/utils/httpRequest');
+const httpRequest     = require('../../shared/utils/httpRequest');
 const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
