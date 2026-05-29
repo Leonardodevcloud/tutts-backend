@@ -1,0 +1,56 @@
+============================================================
+PATCH server.js — 4 pontos
+============================================================
+
+── PONTO 1: import (linha ~83, junto dos outros requires) ──
+
+const { initConfirmaFacilTables, initConfirmaFacilRoutes,
+        getConfirmaFacilService, getConfirmaFacilPoller } = require('./src/modules/confirmafacil');
+
+
+── PONTO 2: init tables (no bloco de initTables) ──
+
+await initConfirmaFacilTables(pool);
+
+
+── PONTO 3: rota admin (junto dos outros app.use) ──
+
+app.use('/api/confirmafacil', initConfirmaFacilRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+
+
+── PONTO 4: iniciar poller (no final do bloco de inicialização,
+   junto de onde ficam os outros startXWorker()) ──
+
+getConfirmaFacilPoller(pool).iniciar();
+
+
+── PONTO 5: hook no webhook Tutts ──
+   Localizar: console.log(`✅ [WEBHOOK] OS ${osNumero}...`)
+   Adicionar LOGO DEPOIS:
+
+    const cfService = getConfirmaFacilService(pool);
+    cfService.processar({
+      solicitacaoId,
+      osNumero,
+      novoStatus,
+      pontoNumero: statusEndereco?.endereco?.ponto
+        ? parseInt(statusEndereco.endereco.ponto) : null,
+      pontoStatus: (() => {
+        if (!statusEndereco?.codigo) return null;
+        const cod = (statusEndereco.codigo || '').toUpperCase();
+        const comp = (statusEndereco.codigoCompleto || '').toUpperCase();
+        if (cod === 'FIN' || comp === 'FINALIZADO') return 'finalizado_ponto';
+        if (cod === 'COL' || comp === 'COLETADO')   return 'coletado';
+        if (cod === 'CHE' || comp === 'CHEGOU')     return 'chegou';
+        return null;
+      })(),
+      lat:  statusEndereco?.endereco?.latitude  || null,
+      lng:  statusEndereco?.endereco?.longitude || null,
+      fotos: Array.isArray(statusEndereco?.endereco?.protocolo)
+        ? statusEndereco.endereco.protocolo.map(f => f.url || f).filter(Boolean)
+        : [],
+      nomeRecebedor: statusEndereco?.endereco?.nomeRecebedor     || null,
+      docRecebedor:  statusEndereco?.endereco?.documentoRecebedor || null,
+    });
+
+============================================================
