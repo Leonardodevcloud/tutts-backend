@@ -133,13 +133,106 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
-  // ── NFs recebidas (vínculos) por cliente ─────────────────────
+  // ── Busca direta no CF (teste — não cria corrida) ────────────
+  router.post('/buscar-nfs', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { de, ate, page, size } = req.body;
+
+      // Busca todas as configs ativas
+      const { rows: configs } = await pool.query(`
+        SELECT cf.*, cs.nome AS cliente_nome
+        FROM confirmafacil_config cf
+        INNER JOIN clientes_solicitacao cs ON cs.id = cf.cliente_id
+        WHERE cf.ativo = TRUE
+        LIMIT 10
+      `);
+
+      if (configs.length === 0) {
+        return res.json({ ok: false, mensagem: 'Nenhum cliente CF configurado ainda' });
+      }
+
+      const resultados = [];
+
+      for (const config of configs) {
+        try {
+          const token = await auth.obterToken(config.cliente_id, config);
+
+          const agora = new Date();
+          const inicio = de || (() => {
+            const d = new Date(agora.getTime() - 7 * 24 * 60 * 60 * 1000);
+            return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} 00:00:00`;
+          })();
+          const fim = ate || (() => {
+            return `${agora.getFullYear()}/${String(agora.getMonth()+1).padStart(2,'0')}/${String(agora.getDate()).padStart(2,'0')} 23:59:59`;
+          })();
+
+          const filtro = {
+            page: page || 0,
+            size: size || 20,
+            de: inicio,
+            ate: fim,
+            cnpjTransportadora: [config.cnpj_transportadora],
+          };
+
+          const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+          const httpRequest = require('../../shared/utils/httpRequest');
+          const resp = await httpRequest(
+            `https://utilities.confirmafacil.com.br/filter/embarque?${params}`,
+            { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
+          );
+
+          const data = resp.json();
+          resultados.push({
+            cliente_id:   config.cliente_id,
+            cliente_nome: config.cliente_nome,
+            filtro_usado: filtro,
+            total:        data.totalCount || data.respostas?.length || 0,
+            total_paginas:data.totalPages || 1,
+            nfs:          data.respostas || data.content || data || [],
+            status_http:  resp.status,
+            ok:           resp.ok,
+          });
+        } catch (err) {
+          resultados.push({
+            cliente_id:   config.cliente_id,
+            cliente_nome: config.cliente_nome,
+            ok:           false,
+            erro:         err.message,
+          });
+        }
+      }
+
+      res.json({ ok: true, resultados });
+    } catch (err) { next(err); }
+  });
+
+  // ── NFs recebidas — TODAS os clientes (sem filtro) ────────────
+  router.get('/nfs', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
+          v.cnpj_embarcador, v.criado_em,
+          sc.status,
+          sc.tutts_os_numero,
+          cs.nome AS cliente_nome
+        FROM confirmafacil_vinculos v
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+        LEFT JOIN clientes_solicitacao cs ON cs.id = v.cliente_id
+        ORDER BY v.criado_em DESC
+        LIMIT 500
+      `);
+      res.json({ vinculos: rows });
+    } catch (err) { next(err); }
+  });
+
+  // ── NFs recebidas por cliente ─────────────────────────────────
   router.get('/nfs/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       const { rows } = await pool.query(`
         SELECT v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
                v.cnpj_embarcador, v.criado_em,
-               sc.status
+               sc.status, sc.tutts_os_numero
         FROM confirmafacil_vinculos v
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
         WHERE v.cliente_id = $1
