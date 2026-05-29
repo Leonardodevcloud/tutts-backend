@@ -148,7 +148,20 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       `);
 
       if (configs.length === 0) {
-        return res.json({ ok: false, mensagem: 'Nenhum cliente CF configurado ainda' });
+        // Fallback: aceita credenciais direto no body pra teste sem cliente configurado
+        const { cf_email, cf_senha, cf_id_cliente, cnpj_transportadora } = req.body;
+        if (cf_email && cf_senha) {
+          configs.push({
+            cliente_id:          0,
+            cliente_nome:        'Teste direto',
+            cf_email,
+            cf_senha,
+            cf_id_cliente:       cf_id_cliente || 320,
+            cnpj_transportadora: cnpj_transportadora || '',
+          });
+        } else {
+          return res.json({ ok: false, mensagem: 'Nenhum cliente CF configurado. Configure na aba Configuração ou informe cf_email e cf_senha no body.' });
+        }
       }
 
       const resultados = [];
