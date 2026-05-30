@@ -286,3 +286,189 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
 }
 
 module.exports = { createConfirmaFacilRouter };
+
+  // ── Criar corrida de teste a partir de uma NF do CF ───────────
+  // Recebe os dados brutos da NF (já buscada no CF) e cria corrida na Mapp.
+  // Usa endereço do embarcador como coleta e endereço do destinatário como entrega.
+  router.post('/criar-corrida', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { nf, cliente_id } = req.body;
+
+      if (!nf) throw new AppError('nf é obrigatório', 400);
+      if (!cliente_id) throw new AppError('cliente_id é obrigatório', 400);
+
+      // Verificar se já tem vínculo
+      const idEmbarque = nf.idEmbarque || nf.id;
+      if (idEmbarque) {
+        const { rows: jaExiste } = await pool.query(
+          'SELECT id FROM confirmafacil_vinculos WHERE id_embarque = $1', [idEmbarque]
+        );
+        if (jaExiste.length > 0) {
+          return res.json({ ok: false, mensagem: `NF ${nf.numero} já tem corrida vinculada (solicitacao_id: ${jaExiste[0].id})` });
+        }
+      }
+
+      // Buscar dados do cliente
+      const { rows: [cliente] } = await pool.query(
+        'SELECT * FROM clientes_solicitacao WHERE id = $1', [cliente_id]
+      );
+      if (!cliente) throw new AppError('Cliente não encontrado', 404);
+
+      // Montar pontos a partir dos dados da NF
+      // Ponto 1: coleta — endereço do embarcador
+      const embEnd = nf.embarcador?.endereco || nf.enderecoRedespacho || {};
+      // Ponto 2: entrega — endereço do destinatário
+      // Prioriza trecho[0].enderecoDestino (mais completo), depois destinatario.endereco, depois nf.endereco
+      const destEnd = nf.trecho?.[0]?.enderecoDestino
+                   || nf.destinatario?.endereco
+                   || nf.endereco
+                   || {};
+      const dest = nf.destinatario || {};
+
+      const montarObs = (p, nomeExtra) => {
+        const partes = [];
+        if (nomeExtra) partes.push(`NOME FANTASIA: ${nomeExtra}`);
+        if (nf.numero) partes.push(`NF: ${nf.numero}`);
+        if (nf.serie) partes.push(`SÉRIE: ${nf.serie}`);
+        if (dest.celular) partes.push(`TEL: ${dest.celular}`);
+        if (nf.valor) partes.push(`VALOR: R$ ${Number(nf.valor).toFixed(2)}`);
+        return partes.join(', ');
+      };
+
+      const pontos = [
+        // Coleta
+        {
+          rua:    embEnd.logradouro || '',
+          numero: embEnd.numero || '',
+          bairro: '',
+          cidade: embEnd.cidade || '',
+          uf:     embEnd.uf || '',
+          cep:    embEnd.cep || '',
+          obs:    `COLETA: ${nf.embarcador?.nome || 'Embarcador'}`,
+        },
+        // Entrega
+        {
+          rua:         destEnd.logradouro || '',
+          numero:      destEnd.numero || '',
+          bairro:      '',
+          cidade:      destEnd.cidade || '',
+          uf:          destEnd.uf || '',
+          cep:         destEnd.cep || '',
+          nome_fantasia: dest.nome || '',
+          numero_nota: nf.numero || '',
+          obs:         montarObs(destEnd, dest.nome),
+        },
+      ];
+
+      // Validação mínima
+      if (!pontos[1].cidade || !pontos[1].uf) {
+        return res.json({ ok: false, mensagem: 'Endereço de entrega incompleto na NF — faltam cidade/UF' });
+      }
+
+      const httpRequest = require('../../shared/utils/httpRequest');
+
+      const payloadTutts = {
+        token:          cliente.tutts_token_api,
+        codCliente:     cliente.tutts_codigo_cliente,
+        Usuario:        'ConfirmaFácil',
+        centroCusto:    cliente.centro_custo_padrao || cliente.nome || 'Central',
+        pontos:         pontos.map(p => {
+          const obj = { rua: p.rua, numero: p.numero, bairro: p.bairro,
+                        cidade: p.cidade, uf: p.uf, obs: p.obs };
+          if (p.cep) obj.cep = p.cep;
+          return obj;
+        }),
+        retorno:        'N',
+        formaPagamento: cliente.forma_pagamento_padrao || 'F',
+        UrlRetorno:     'https://tutts-backend-production.up.railway.app/api/webhook/tutts',
+        numeroPedido:   String(idEmbarque || nf.numero),
+      };
+
+      console.log('📤 [CF criar-corrida] payload:', JSON.stringify(payloadTutts, null, 2));
+
+      const resp = await httpRequest('https://tutts.com.br/integracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payloadTutts),
+      });
+
+      const resultado = resp.json();
+      console.log('📥 [CF criar-corrida] resultado:', resultado);
+
+      if (resultado.Erro) {
+        return res.json({ ok: false, mensagem: resultado.Erro, payload_enviado: payloadTutts });
+      }
+
+      const osNumero = resultado.Sucesso;
+
+      // Salvar solicitacao_corrida
+      const { rows: [solic] } = await pool.query(`
+        INSERT INTO solicitacoes_corrida (
+          cliente_id, numero_pedido, centro_custo, usuario_solicitante,
+          forma_pagamento, retorno, tutts_os_numero, tutts_distancia,
+          tutts_duracao, tutts_valor, tutts_url_rastreamento,
+          status, provider_usado
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        RETURNING id
+      `, [
+        cliente_id,
+        String(idEmbarque || nf.numero),
+        cliente.centro_custo_padrao || cliente.nome || 'Central',
+        'ConfirmaFácil',
+        cliente.forma_pagamento_padrao || 'F',
+        false,
+        osNumero,
+        resultado.detalhes?.distancia || null,
+        resultado.detalhes?.duracao   || null,
+        resultado.detalhes?.valor ? parseFloat(resultado.detalhes.valor) : null,
+        resultado.detalhes?.urlRastreamento || null,
+        'enviado',
+        'tutts',
+      ]);
+
+      const solicitacaoId = solic.id;
+
+      // Salvar pontos
+      const pontosDB = [
+        { ordem: 1, rua: embEnd.logradouro, numero: embEnd.numero, bairro: '',
+          cidade: embEnd.cidade, uf: embEnd.uf, cep: embEnd.cep,
+          nome_fantasia: nf.embarcador?.nome, numero_nota: null },
+        { ordem: 2, rua: destEnd.logradouro, numero: destEnd.numero, bairro: '',
+          cidade: destEnd.cidade, uf: destEnd.uf, cep: destEnd.cep,
+          nome_fantasia: dest.nome, numero_nota: nf.numero },
+      ];
+
+      for (const p of pontosDB) {
+        await pool.query(`
+          INSERT INTO solicitacoes_pontos
+            (solicitacao_id, ordem, rua, numero, bairro, cidade, uf, cep,
+             nome_fantasia, numero_nota, status, endereco_completo)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente',$11)
+        `, [
+          solicitacaoId, p.ordem, p.rua||'', p.numero||'', p.bairro||'',
+          p.cidade||'', p.uf||'', p.cep||'',
+          p.nome_fantasia||'', p.numero_nota||null,
+          [p.rua, p.numero, p.cidade, p.uf].filter(Boolean).join(', '),
+        ]);
+      }
+
+      // Salvar vínculo
+      if (idEmbarque) {
+        await pool.query(`
+          INSERT INTO confirmafacil_vinculos
+            (id_embarque, solicitacao_id, cliente_id, numero_nf, serie_nf, cnpj_embarcador)
+          VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT (id_embarque) DO NOTHING
+        `, [idEmbarque, solicitacaoId, cliente_id, nf.numero, nf.serie, nf.embarcador?.cnpj||'']);
+      }
+
+      res.json({
+        ok:            true,
+        os_numero:     osNumero,
+        solicitacao_id: solicitacaoId,
+        mensagem:      `Corrida criada! OS: ${osNumero}`,
+        detalhes:      resultado.detalhes || null,
+      });
+
+    } catch (err) { next(err); }
+  });
