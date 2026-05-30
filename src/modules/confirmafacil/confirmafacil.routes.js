@@ -468,6 +468,54 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
+  // ── Testar envio de ocorrência para o CF ──────────────────────
+  // Simula o que o webhook faz: envia uma ocorrência para uma OS já criada.
+  // Use para verificar se o CF está recebendo corretamente.
+  router.post('/testar-ocorrencia', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { solicitacao_id, status, codigo_ocorrencia } = req.body;
+      if (!solicitacao_id) throw new AppError('solicitacao_id é obrigatório', 400);
+
+      const { getConfirmaFacilService } = require('./confirmafacil.service');
+      const cfService = getConfirmaFacilService(pool);
+
+      // Buscar OS
+      const { rows: [solic] } = await pool.query(
+        'SELECT * FROM solicitacoes_corrida WHERE id = $1', [solicitacao_id]
+      );
+      if (!solic) throw new AppError('Solicitação não encontrada', 404);
+
+      // Se informou código direto, injeta no mapa temporariamente
+      const statusUsar = status || 'finalizado_ponto';
+
+      // Processar
+      await cfService.processar({
+        solicitacaoId: solicitacao_id,
+        osNumero:      solic.tutts_os_numero,
+        novoStatus:    statusUsar,
+        pontoStatus:   statusUsar,
+      });
+
+      // Buscar último log
+      const { rows: logs } = await pool.query(`
+        SELECT id, numero_nf, cod_ocorrencia, sucesso, erro_msg, resposta, criado_em
+        FROM confirmafacil_log
+        WHERE solicitacao_id = $1
+        ORDER BY criado_em DESC
+        LIMIT 5
+      `, [solicitacao_id]);
+
+      res.json({
+        ok:      true,
+        mensagem: 'Ocorrência processada — veja o log abaixo',
+        os_numero: solic.tutts_os_numero,
+        status_usado: statusUsar,
+        logs,
+      });
+    } catch (err) { next(err); }
+  });
+
+
   return router;
 }
 

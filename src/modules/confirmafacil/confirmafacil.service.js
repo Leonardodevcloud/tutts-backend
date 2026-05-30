@@ -199,10 +199,12 @@ class ConfirmaFacilService {
         cf.cf_senha,
         cf.cf_id_cliente,
         cf.cnpj_transportadora,
-        cf.cnpj_embarcador,
-        cf.mapa_ocorrencias
+        cf.mapa_ocorrencias,
+        -- Pega cnpj_embarcador do vínculo (mais preciso por NF)
+        COALESCE(v.cnpj_embarcador, cf.cnpj_embarcador, '') AS cnpj_embarcador
       FROM confirmafacil_config cf
       INNER JOIN solicitacoes_corrida sc ON sc.cliente_id = cf.cliente_id
+      LEFT JOIN confirmafacil_vinculos v ON v.solicitacao_id = sc.id
       WHERE sc.id = $1
         AND cf.ativo = TRUE
       LIMIT 1
