@@ -39,6 +39,7 @@ async function initConfirmaFacilTables(pool) {
       coleta_lng           DECIMAL(10,7),
       coleta_nome_fantasia VARCHAR(255),
       coleta_telefone      VARCHAR(50),
+      centro_custo_mapp    VARCHAR(100),
       ativo                BOOLEAN DEFAULT TRUE,
       criado_em            TIMESTAMP DEFAULT NOW(),
       UNIQUE (config_id, cnpj_embarcador)
@@ -80,6 +81,10 @@ async function initConfirmaFacilTables(pool) {
       criado_em       TIMESTAMP DEFAULT NOW()
     )
   `);
+
+  // Adiciona centro_custo_mapp se ainda não existir (idempotente para produção)
+  await pool.query(`ALTER TABLE confirmafacil_embarcadores
+    ADD COLUMN IF NOT EXISTS centro_custo_mapp VARCHAR(100)`).catch(() => {});
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_solicitacao   ON confirmafacil_log      (solicitacao_id)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_embarque      ON confirmafacil_log      (id_embarque)`).catch(() => {});

@@ -71,7 +71,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const { cliente_id, cnpj_embarcador, nome_embarcador,
               coleta_rua, coleta_numero, coleta_bairro,
               coleta_cidade, coleta_uf, coleta_cep,
-              coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone } = req.body;
+              coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone,
+              centro_custo_mapp } = req.body;
 
       if (!cliente_id || !cnpj_embarcador || !coleta_cidade || !coleta_uf)
         throw new AppError('cliente_id, cnpj_embarcador, coleta_cidade e coleta_uf são obrigatórios', 400);
@@ -86,8 +87,9 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           (config_id, cnpj_embarcador, nome_embarcador,
            coleta_rua, coleta_numero, coleta_bairro,
            coleta_cidade, coleta_uf, coleta_cep,
-           coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone,
+           centro_custo_mapp)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (config_id, cnpj_embarcador) DO UPDATE SET
           nome_embarcador     = EXCLUDED.nome_embarcador,
           coleta_rua          = EXCLUDED.coleta_rua,
@@ -99,13 +101,15 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           coleta_lat          = EXCLUDED.coleta_lat,
           coleta_lng          = EXCLUDED.coleta_lng,
           coleta_nome_fantasia= EXCLUDED.coleta_nome_fantasia,
-          coleta_telefone     = EXCLUDED.coleta_telefone
+          coleta_telefone     = EXCLUDED.coleta_telefone,
+          centro_custo_mapp   = EXCLUDED.centro_custo_mapp
         RETURNING *
       `, [cfg[0].id, cnpj_embarcador, nome_embarcador,
           coleta_rua, coleta_numero, coleta_bairro,
           coleta_cidade, coleta_uf, coleta_cep,
           coleta_lat || null, coleta_lng || null,
-          coleta_nome_fantasia, coleta_telefone]);
+          coleta_nome_fantasia, coleta_telefone,
+          centro_custo_mapp || null]);
 
       res.json({ ok: true, embarcador: rows[0] });
     } catch (err) { next(err); }
@@ -362,11 +366,29 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
 
       const httpRequest = require('../../shared/utils/httpRequest');
 
+      // Buscar centro_custo_mapp do embarcador desta NF
+      const cnpjEmbNF = nf.embarcador?.cnpj || '';
+      const { rows: [embConfig] } = await pool.query(`
+        SELECT e.centro_custo_mapp FROM confirmafacil_embarcadores e
+        INNER JOIN confirmafacil_config c ON c.id = e.config_id
+        WHERE c.cliente_id = $1
+          AND (REPLACE(REPLACE(REPLACE(e.cnpj_embarcador,'.',''),'/',''),'-','') =
+               REPLACE(REPLACE(REPLACE($2,'.',''),'/',''),'-','')
+               OR e.cnpj_embarcador = $2)
+          AND e.ativo = TRUE
+        LIMIT 1
+      `, [cliente_id, cnpjEmbNF]).catch(() => ({ rows: [] }));
+
+      const centroCusto = embConfig?.centro_custo_mapp
+        || cliente.centro_custo_padrao
+        || cliente.nome
+        || 'Central';
+
       const payloadTutts = {
         token:          cliente.tutts_token_api,
         codCliente:     cliente.tutts_codigo_cliente,
         Usuario:        'ConfirmaFácil',
-        centroCusto:    cliente.centro_custo_padrao || cliente.nome || 'Central',
+        centroCusto,
         pontos:         pontos.map(p => {
           const obj = { rua: p.rua, numero: p.numero, bairro: p.bairro,
                         cidade: p.cidade, uf: p.uf, obs: p.obs };
