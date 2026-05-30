@@ -282,12 +282,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
-  return router;
-}
-
-module.exports = { createConfirmaFacilRouter };
-
-  // ── Criar corrida de teste a partir de uma NF do CF ───────────
+// ── Criar corrida de teste a partir de uma NF do CF ───────────
   // Recebe os dados brutos da NF (já buscada no CF) e cria corrida na Mapp.
   // Usa endereço do embarcador como coleta e endereço do destinatário como entrega.
   router.post('/criar-corrida', verificarToken, verificarAdmin, async (req, res, next) => {
@@ -472,3 +467,8 @@ module.exports = { createConfirmaFacilRouter };
 
     } catch (err) { next(err); }
   });
+
+  return router;
+}
+
+module.exports = { createConfirmaFacilRouter };
