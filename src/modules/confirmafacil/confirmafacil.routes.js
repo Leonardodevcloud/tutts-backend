@@ -473,22 +473,69 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // Use para verificar se o CF está recebendo corretamente.
   router.post('/testar-ocorrencia', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { solicitacao_id, status, codigo_ocorrencia } = req.body;
+      const { solicitacao_id, status } = req.body;
       if (!solicitacao_id) throw new AppError('solicitacao_id é obrigatório', 400);
 
-      const { getConfirmaFacilService } = require('./confirmafacil.service');
-      const cfService = getConfirmaFacilService(pool);
-
-      // Buscar OS
+      // 1. Buscar OS
       const { rows: [solic] } = await pool.query(
         'SELECT * FROM solicitacoes_corrida WHERE id = $1', [solicitacao_id]
       );
       if (!solic) throw new AppError('Solicitação não encontrada', 404);
 
-      // Se informou código direto, injeta no mapa temporariamente
-      const statusUsar = status || 'finalizado_ponto';
+      // 2. Verificar se tem config CF para este cliente
+      const { rows: [config] } = await pool.query(`
+        SELECT cf.id, cf.cf_email, cf.cnpj_transportadora, cf.ativo,
+               COALESCE(v.cnpj_embarcador,'') AS cnpj_embarcador
+        FROM confirmafacil_config cf
+        LEFT JOIN confirmafacil_vinculos v ON v.solicitacao_id = $1
+        WHERE cf.cliente_id = $2 AND cf.ativo = TRUE
+        LIMIT 1
+      `, [solicitacao_id, solic.cliente_id]);
 
-      // Processar
+      if (!config) {
+        return res.json({
+          ok: false,
+          mensagem: 'Cliente ID '+solic.cliente_id+' não tem configuração CF ativa. Vá em Configuração → selecione o cliente → preencha email/senha/CNPJ e salve.',
+          logs: [],
+        });
+      }
+
+      // 3. Verificar se tem NF vinculada (número de nota no ponto)
+      const { rows: pontos } = await pool.query(`
+        SELECT numero_nota FROM solicitacoes_pontos
+        WHERE solicitacao_id = $1 AND ordem > 1 AND numero_nota IS NOT NULL
+      `, [solicitacao_id]);
+
+      if (pontos.length === 0) {
+        return res.json({
+          ok: false,
+          mensagem: 'Nenhum ponto com número de NF encontrado para esta corrida. Verifique se os pontos foram salvos corretamente.',
+          logs: [],
+        });
+      }
+
+      // 4. Verificar mapa de ocorrências
+      const { rows: [cfConfig] } = await pool.query(
+        'SELECT mapa_ocorrencias FROM confirmafacil_config WHERE cliente_id = $1', [solic.cliente_id]
+      );
+      const mapa = cfConfig?.mapa_ocorrencias || {};
+      const statusUsar = status || 'finalizado_ponto';
+      const codMapeado = mapa[statusUsar];
+
+      if (!codMapeado) {
+        return res.json({
+          ok: false,
+          mensagem: 'Status "'+statusUsar+'" não tem código CF mapeado. Vá em Configuração e adicione o mapa de ocorrências. Ex: {"finalizado_ponto":"1","coletado":"58"}',
+          config_atual: { email: config.cf_email, mapa_ocorrencias: mapa },
+          nfs_encontradas: pontos.map(p => p.numero_nota),
+          logs: [],
+        });
+      }
+
+      // 5. Tudo OK — processar
+      const { getConfirmaFacilService } = require('./confirmafacil.service');
+      const cfService = getConfirmaFacilService(pool);
+
       await cfService.processar({
         solicitacaoId: solicitacao_id,
         osNumero:      solic.tutts_os_numero,
@@ -496,20 +543,24 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         pontoStatus:   statusUsar,
       });
 
-      // Buscar último log
+      // 6. Buscar log criado
       const { rows: logs } = await pool.query(`
-        SELECT id, numero_nf, cod_ocorrencia, sucesso, erro_msg, resposta, criado_em
+        SELECT id, numero_nf, cod_ocorrencia, sucesso, erro_msg,
+               resposta, criado_em
         FROM confirmafacil_log
         WHERE solicitacao_id = $1
         ORDER BY criado_em DESC
         LIMIT 5
       `, [solicitacao_id]);
 
+      const sucesso = logs.some(l => l.sucesso);
       res.json({
-        ok:      true,
-        mensagem: 'Ocorrência processada — veja o log abaixo',
-        os_numero: solic.tutts_os_numero,
+        ok:          sucesso,
+        mensagem:    sucesso ? '✅ CF recebeu a ocorrência!' : '❌ CF rejeitou — veja detalhes nos logs',
+        os_numero:   solic.tutts_os_numero,
         status_usado: statusUsar,
+        cod_ocorrencia: codMapeado,
+        nfs:         pontos.map(p => p.numero_nota),
         logs,
       });
     } catch (err) { next(err); }
