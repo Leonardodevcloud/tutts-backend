@@ -401,12 +401,13 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         SELECT e.centro_custo_mapp FROM confirmafacil_embarcadores e
         INNER JOIN confirmafacil_config c ON c.id = e.config_id
         WHERE c.cliente_id = $1
-          AND (REPLACE(REPLACE(REPLACE(e.cnpj_embarcador,'.',''),'/',''),'-','') =
-               REPLACE(REPLACE(REPLACE($2,'.',''),'/',''),'-','')
-               OR e.cnpj_embarcador = $2)
+          AND REGEXP_REPLACE(e.cnpj_embarcador, '[^0-9]', '', 'g') =
+              REGEXP_REPLACE($2::text, '[^0-9]', '', 'g')
           AND e.ativo = TRUE
         LIMIT 1
       `, [cliente_id, cnpjEmbNF]).catch(() => ({ rows: [] }));
+
+      console.log('[CF criar-corrida] cnpjEmbNF:', cnpjEmbNF, '| embConfig:', embConfig);
 
       const centroCusto = embConfig?.centro_custo_mapp
         || cliente.centro_custo_padrao
