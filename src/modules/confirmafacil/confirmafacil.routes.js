@@ -364,14 +364,16 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       };
 
       const pontos = [
-        // Coleta
+        // Coleta — usa dados do banco (embConfig) se disponível, senão dados da NF
         {
-          rua:    embEnd.logradouro || '',
-          numero: embEnd.numero || '',
+          rua:    embConfig?.coleta_rua    || embEnd.logradouro || '',
+          numero: embConfig?.coleta_numero || embEnd.numero     || '',
           bairro: '',
-          cidade: embEnd.cidade || '',
-          uf:     embEnd.uf || '',
-          cep:    embEnd.cep || '',
+          cidade: embConfig?.coleta_cidade || embEnd.cidade     || '',
+          uf:     embConfig?.coleta_uf     || embEnd.uf         || '',
+          cep:    embConfig?.coleta_cep    || embEnd.cep        || '',
+          la:     embConfig?.coleta_lat    || null,
+          lo:     embConfig?.coleta_lng    || null,
           obs:    `COLETA: ${nf.embarcador?.nome || 'Embarcador'}`,
         },
         // Entrega
@@ -398,7 +400,9 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       // Buscar centro_custo_mapp do embarcador desta NF
       const cnpjEmbNF = nf.embarcador?.cnpj || '';
       const { rows: [embConfig] } = await pool.query(`
-        SELECT e.centro_custo_mapp FROM confirmafacil_embarcadores e
+        SELECT e.centro_custo_mapp, e.coleta_lat, e.coleta_lng,
+               e.coleta_rua, e.coleta_numero, e.coleta_cidade, e.coleta_uf, e.coleta_cep
+        FROM confirmafacil_embarcadores e
         INNER JOIN confirmafacil_config c ON c.id = e.config_id
         WHERE c.cliente_id = $1
           AND REGEXP_REPLACE(e.cnpj_embarcador, '[^0-9]', '', 'g') =
@@ -423,6 +427,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           const obj = { rua: p.rua, numero: p.numero, bairro: p.bairro,
                         cidade: p.cidade, uf: p.uf, obs: p.obs };
           if (p.cep) obj.cep = p.cep;
+          if (p.la)  obj.la  = String(p.la);
+          if (p.lo)  obj.lo  = String(p.lo);
           return obj;
         }),
         retorno:        'N',
