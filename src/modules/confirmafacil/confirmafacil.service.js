@@ -92,6 +92,8 @@ class ConfirmaFacilService {
   async _processar(evento) {
     const { solicitacaoId, osNumero, novoStatus, pontoNumero, pontoStatus, lat, lng, fotos, nomeRecebedor, docRecebedor } = evento;
 
+    console.log(`🔍 [CF Service] _processar OS=${osNumero} solicitacaoId=${solicitacaoId} pontoNumero=${pontoNumero} pontoStatus=${pontoStatus} novoStatus=${novoStatus} fotos=${fotos?.length||0}`);
+
     // 1. Config do cliente
     const config = await this._buscarConfig(solicitacaoId);
     if (!config) return; // CF não habilitado para este cliente
@@ -103,13 +105,41 @@ class ConfirmaFacilService {
 
     if (!codOcorrencia) {
       console.log(`[CF Service] status '${statusParaMapear}' não mapeado — ignorando corrida ${osNumero}`);
+      // Mesmo sem código mapeado, salva log com fotos recebidas para consulta posterior
+      if (fotos?.length > 0 || nomeRecebedor) {
+        try {
+          const config2 = await this._buscarConfig(solicitacaoId);
+          if (config2) {
+            await this.pool.query(`
+              INSERT INTO confirmafacil_log
+                (solicitacao_id, cliente_id, os_numero, status_tutts,
+                 tipo, payload, sucesso, erro_msg)
+              VALUES ($1,$2,$3,$4,'webhook',$5,FALSE,'status nao mapeado')
+            `, [solicitacaoId, config2.cliente_id, osNumero, statusParaMapear,
+                JSON.stringify({ fotos, nomeRecebedor, docRecebedor })]);
+          }
+        } catch(_) {}
+      }
       return;
     }
 
     // 3. Buscar NFs dos pontos
-    const pontos = await this._buscarPontos(solicitacaoId, pontoNumero);
+    // Se pontoNumero = 1 (coleta), não tem NF — busca todos os pontos com NF
+    const pontoParaBuscar = pontoNumero === 1 ? null : pontoNumero;
+    const pontos = await this._buscarPontos(solicitacaoId, pontoParaBuscar);
     if (pontos.length === 0) {
-      console.warn(`⚠️ [CF Service] corrida ${osNumero} sem pontos com NF — nada a enviar`);
+      console.warn(`⚠️ [CF Service] corrida ${osNumero} sem pontos com NF — nada a enviar (pontoNumero=${pontoNumero})`);
+      // Salvar fotos mesmo sem NF mapeada
+      if (fotos?.length > 0 || nomeRecebedor) {
+        try {
+          if (config) await this.pool.query(`
+            INSERT INTO confirmafacil_log (solicitacao_id, cliente_id, os_numero, status_tutts,
+              tipo, payload, sucesso, erro_msg)
+            VALUES ($1,$2,$3,$4,'webhook',$5,FALSE,'sem ponto com NF')
+          `, [solicitacaoId, config.cliente_id, osNumero, novoStatus,
+              JSON.stringify({ fotos, nomeRecebedor, docRecebedor })]);
+        } catch(_) {}
+      }
       return;
     }
 
