@@ -69,13 +69,43 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   router.post('/embarcadores', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       const { cliente_id, cnpj_embarcador, nome_embarcador,
-              coleta_rua, coleta_numero, coleta_bairro,
-              coleta_cidade, coleta_uf, coleta_cep,
-              coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone,
-              centro_custo_mapp } = req.body;
+              endereco_texto, coleta_lat, coleta_lng, centro_custo_mapp } = req.body;
 
-      if (!cliente_id || !cnpj_embarcador || !coleta_cidade || !coleta_uf)
-        throw new AppError('cliente_id, cnpj_embarcador, coleta_cidade e coleta_uf são obrigatórios', 400);
+      if (!cliente_id || !cnpj_embarcador || !endereco_texto)
+        throw new AppError('cliente_id, cnpj_embarcador e endereco_texto são obrigatórios', 400);
+
+      // Geocoding se não vieram coordenadas
+      let lat = coleta_lat || null;
+      let lng = coleta_lng || null;
+
+      if ((!lat || !lng) && endereco_texto) {
+        try {
+          const httpRequest = require('../../shared/utils/httpRequest');
+          const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+          if (apiKey) {
+            const geoResp = await httpRequest(
+              'https://maps.googleapis.com/maps/api/geocode/json?address='+
+              encodeURIComponent(endereco_texto)+'&key='+apiKey
+            );
+            const geoData = geoResp.json();
+            if (geoData.results?.[0]?.geometry?.location) {
+              lat = String(geoData.results[0].geometry.location.lat);
+              lng = String(geoData.results[0].geometry.location.lng);
+            }
+          }
+        } catch(geoErr) {
+          console.warn('[CF Embarcador] geocoding falhou:', geoErr.message);
+        }
+      }
+
+      // Parsear endereço_texto nos campos separados (melhor esforço)
+      const partes = endereco_texto.split(',').map(p => p.trim());
+      const coleta_rua    = partes[0] || '';
+      const coleta_numero = partes[1] || '';
+      const coleta_bairro = partes[2] || '';
+      const coleta_cidade = partes[3] || '';
+      const coleta_uf     = partes[4] || '';
+      const coleta_cep    = partes[5] || '';
 
       // Buscar config_id
       const { rows: cfg } = await pool.query(
@@ -87,9 +117,9 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           (config_id, cnpj_embarcador, nome_embarcador,
            coleta_rua, coleta_numero, coleta_bairro,
            coleta_cidade, coleta_uf, coleta_cep,
-           coleta_lat, coleta_lng, coleta_nome_fantasia, coleta_telefone,
+           coleta_lat, coleta_lng, coleta_nome_fantasia,
            centro_custo_mapp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (config_id, cnpj_embarcador) DO UPDATE SET
           nome_embarcador     = EXCLUDED.nome_embarcador,
           coleta_rua          = EXCLUDED.coleta_rua,
@@ -101,14 +131,13 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           coleta_lat          = EXCLUDED.coleta_lat,
           coleta_lng          = EXCLUDED.coleta_lng,
           coleta_nome_fantasia= EXCLUDED.coleta_nome_fantasia,
-          coleta_telefone     = EXCLUDED.coleta_telefone,
           centro_custo_mapp   = EXCLUDED.centro_custo_mapp
         RETURNING *
       `, [cfg[0].id, cnpj_embarcador, nome_embarcador,
           coleta_rua, coleta_numero, coleta_bairro,
           coleta_cidade, coleta_uf, coleta_cep,
-          coleta_lat || null, coleta_lng || null,
-          coleta_nome_fantasia, coleta_telefone,
+          lat || null, lng || null,
+          nome_embarcador || null,
           centro_custo_mapp || null]);
 
       res.json({ ok: true, embarcador: rows[0] });
