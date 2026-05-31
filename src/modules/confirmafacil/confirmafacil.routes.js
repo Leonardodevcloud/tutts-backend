@@ -589,6 +589,39 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   });
 
 
+  // ── Centros de custo disponíveis para um cliente ─────────────
+  // Busca os centros de custo da Mapp a partir do cod_cliente interno
+  router.get('/centros-custo/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { clienteId } = req.params;
+
+      // Buscar cod_cliente Tutts (campo tutts_codigo_cliente em clientes_solicitacao)
+      const { rows: [cliente] } = await pool.query(
+        'SELECT tutts_codigo_cliente FROM clientes_solicitacao WHERE id = $1',
+        [clienteId]
+      );
+
+      if (!cliente?.tutts_codigo_cliente) {
+        return res.json({ centros: [], mensagem: 'cod_cliente não encontrado para este cliente' });
+      }
+
+      const codCliente = cliente.tutts_codigo_cliente;
+
+      // Buscar centros de custo do BI
+      const { rows } = await pool.query(`
+        SELECT DISTINCT centro_custo
+        FROM bi_entregas
+        WHERE cod_cliente = $1
+          AND centro_custo IS NOT NULL
+          AND centro_custo != ''
+        ORDER BY centro_custo
+      `, [codCliente]);
+
+      res.json({ centros: rows.map(r => r.centro_custo), cod_cliente: codCliente });
+    } catch (err) { next(err); }
+  });
+
+
   return router;
 }
 
