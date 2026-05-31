@@ -607,17 +607,17 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
 
       const codCliente = cliente.tutts_codigo_cliente;
 
-      // Buscar centros de custo do BI
+      // Buscar centros de custo do BI — cast para texto pra evitar mismatch de tipo
       const { rows } = await pool.query(`
         SELECT DISTINCT centro_custo
         FROM bi_entregas
-        WHERE cod_cliente = $1
+        WHERE cod_cliente::text = $1::text
           AND centro_custo IS NOT NULL
           AND centro_custo != ''
         ORDER BY centro_custo
       `, [codCliente]);
 
-      res.json({ centros: rows.map(r => r.centro_custo), cod_cliente: codCliente });
+      res.json({ centros: rows.map(r => r.centro_custo), cod_cliente: codCliente, total: rows.length });
     } catch (err) { next(err); }
   });
 
