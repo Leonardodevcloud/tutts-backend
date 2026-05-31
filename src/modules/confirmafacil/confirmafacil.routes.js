@@ -363,6 +363,22 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         return partes.join(', ');
       };
 
+      // Buscar centro_custo_mapp do embarcador desta NF
+      const cnpjEmbNF = nf.embarcador?.cnpj || '';
+      const { rows: [embConfig] } = await pool.query(`
+        SELECT e.centro_custo_mapp, e.coleta_lat, e.coleta_lng,
+               e.coleta_rua, e.coleta_numero, e.coleta_cidade, e.coleta_uf, e.coleta_cep
+        FROM confirmafacil_embarcadores e
+        INNER JOIN confirmafacil_config c ON c.id = e.config_id
+        WHERE c.cliente_id = $1
+          AND REGEXP_REPLACE(e.cnpj_embarcador, '[^0-9]', '', 'g') =
+              REGEXP_REPLACE($2::text, '[^0-9]', '', 'g')
+          AND e.ativo = TRUE
+        LIMIT 1
+      `, [cliente_id, cnpjEmbNF]).catch(() => ({ rows: [] }));
+
+      console.log('[CF criar-corrida] cnpjEmbNF:', cnpjEmbNF, '| embConfig:', embConfig);
+
       const pontos = [
         // Coleta — usa dados do banco (embConfig) se disponível, senão dados da NF
         {
@@ -396,22 +412,6 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       }
 
       const httpRequest = require('../../shared/utils/httpRequest');
-
-      // Buscar centro_custo_mapp do embarcador desta NF
-      const cnpjEmbNF = nf.embarcador?.cnpj || '';
-      const { rows: [embConfig] } = await pool.query(`
-        SELECT e.centro_custo_mapp, e.coleta_lat, e.coleta_lng,
-               e.coleta_rua, e.coleta_numero, e.coleta_cidade, e.coleta_uf, e.coleta_cep
-        FROM confirmafacil_embarcadores e
-        INNER JOIN confirmafacil_config c ON c.id = e.config_id
-        WHERE c.cliente_id = $1
-          AND REGEXP_REPLACE(e.cnpj_embarcador, '[^0-9]', '', 'g') =
-              REGEXP_REPLACE($2::text, '[^0-9]', '', 'g')
-          AND e.ativo = TRUE
-        LIMIT 1
-      `, [cliente_id, cnpjEmbNF]).catch(() => ({ rows: [] }));
-
-      console.log('[CF criar-corrida] cnpjEmbNF:', cnpjEmbNF, '| embConfig:', embConfig);
 
       const centroCusto = embConfig?.centro_custo_mapp
         || cliente.centro_custo_padrao
