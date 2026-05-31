@@ -146,6 +146,9 @@ class ConfirmaFacilService {
       codOcorrencia,
       payload: itens,
       resultados,
+      fotos,
+      nomeRecebedor,
+      docRecebedor,
     });
   }
 
@@ -318,7 +321,7 @@ class ConfirmaFacilService {
   /**
    * Persiste resultado em confirmafacil_log (não bloqueante).
    */
-  async _logar({ solicitacaoId, clienteId, osNumero, pontos, statusTutts, codOcorrencia, payload, resultados }) {
+  async _logar({ solicitacaoId, clienteId, osNumero, pontos, statusTutts, codOcorrencia, payload, resultados, fotos, nomeRecebedor, docRecebedor }) {
     const sucesso = resultados.every(r => r.ok);
     const erros   = resultados.filter(r => !r.ok).map(r => r.erro || `HTTP ${r.status}`).join('; ');
 
@@ -336,7 +339,7 @@ class ConfirmaFacilService {
           ponto.numero_nota,
           statusTutts,
           codOcorrencia,
-          JSON.stringify(payload),
+          JSON.stringify({ itens: payload, fotos, nomeRecebedor, docRecebedor }),
           JSON.stringify(resultados.map(r => r.body)),
           sucesso,
           erros || null,

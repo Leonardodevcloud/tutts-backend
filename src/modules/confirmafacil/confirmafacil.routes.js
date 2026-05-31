@@ -661,6 +661,145 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   });
 
 
+  // ── Listagem combinada de NFs (vinculos + filtros) ───────────
+  router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { cliente_id, embarcador_cnpj, status_cf, tem_corrida,
+              de, ate, busca, page = 0, size = 50 } = req.query;
+
+      const offset = Number(page) * Number(size);
+      const params = [];
+      const wheres = [];
+
+      if (cliente_id) {
+        params.push(cliente_id);
+        wheres.push(`v.cliente_id = $${params.length}`);
+      }
+      if (embarcador_cnpj) {
+        params.push(embarcador_cnpj);
+        wheres.push(`REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($${params.length},'[^0-9]','','g')`);
+      }
+      if (tem_corrida === 'sim')  wheres.push('v.solicitacao_id IS NOT NULL');
+      if (tem_corrida === 'nao')  wheres.push('v.solicitacao_id IS NULL');
+      if (de)  { params.push(de);  wheres.push(`v.criado_em >= $${params.length}`); }
+      if (ate) { params.push(ate); wheres.push(`v.criado_em <= $${params.length}`); }
+      if (busca) {
+        params.push('%' + busca + '%');
+        wheres.push(`(v.numero_nf ILIKE $${params.length} OR sc.tutts_os_numero ILIKE $${params.length} OR e.nome_embarcador ILIKE $${params.length})`);
+      }
+
+      const where = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
+
+      const { rows } = await pool.query(`
+        SELECT
+          v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
+          v.cnpj_embarcador, v.criado_em, v.cliente_id,
+          sc.status            AS status_tutts,
+          sc.tutts_os_numero,
+          sc.tutts_valor,
+          sc.atualizado_em     AS ultima_atualizacao,
+          cs.nome              AS cliente_nome,
+          e.nome_embarcador,
+          e.coleta_cidade,
+          e.coleta_uf,
+          e.centro_custo_mapp,
+          -- Última ocorrência enviada ao CF
+          (SELECT cod_ocorrencia FROM confirmafacil_log
+           WHERE solicitacao_id = v.solicitacao_id AND sucesso = TRUE
+           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cod_cf,
+          (SELECT sucesso FROM confirmafacil_log
+           WHERE solicitacao_id = v.solicitacao_id
+           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cf_sucesso
+        FROM confirmafacil_vinculos v
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+        LEFT JOIN clientes_solicitacao cs ON cs.id = v.cliente_id
+        LEFT JOIN confirmafacil_config cfg ON cfg.cliente_id = v.cliente_id
+        LEFT JOIN confirmafacil_embarcadores e ON e.config_id = cfg.id
+          AND REGEXP_REPLACE(e.cnpj_embarcador,'[^0-9]','','g') =
+              REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g')
+        ${where}
+        ORDER BY v.criado_em DESC
+        LIMIT ${Number(size)} OFFSET ${offset}
+      `);
+
+      const { rows: [{ total }] } = await pool.query(`
+        SELECT COUNT(*) AS total FROM confirmafacil_vinculos v
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+        LEFT JOIN confirmafacil_embarcadores e ON TRUE
+        ${where}
+      `);
+
+      res.json({ nfs: rows, total: Number(total), page: Number(page), size: Number(size) });
+    } catch (err) { next(err); }
+  });
+
+  // ── Detalhes de uma OS com trilha + fotos ────────────────────
+  router.get('/os-detalhes/:solicitacaoId', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { solicitacaoId } = req.params;
+
+      // OS principal
+      const { rows: [sc] } = await pool.query(`
+        SELECT sc.*, cs.nome AS cliente_nome
+        FROM solicitacoes_corrida sc
+        LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+        WHERE sc.id = $1
+      `, [solicitacaoId]);
+
+      if (!sc) return res.status(404).json({ error: 'OS não encontrada' });
+
+      // Pontos
+      const { rows: pontos } = await pool.query(`
+        SELECT * FROM solicitacoes_pontos WHERE solicitacao_id = $1 ORDER BY ordem
+      `, [solicitacaoId]);
+
+      // Vínculo CF
+      const { rows: [vinculo] } = await pool.query(`
+        SELECT * FROM confirmafacil_vinculos WHERE solicitacao_id = $1
+      `, [solicitacaoId]);
+
+      // Trilha de eventos (log CF)
+      const { rows: logs } = await pool.query(`
+        SELECT id, numero_nf, status_tutts, cod_ocorrencia, sucesso, erro_msg,
+               payload, resposta, criado_em
+        FROM confirmafacil_log
+        WHERE solicitacao_id = $1
+        ORDER BY criado_em DESC
+      `, [solicitacaoId]);
+
+      // Extrair fotos e recebedor do payload do último log com sucesso
+      let fotos = [];
+      let nomeRecebedor = null;
+      let docRecebedor = null;
+
+      for (const log of logs) {
+        if (log.sucesso && log.payload) {
+          try {
+            const p = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
+            if (p.fotos?.length > 0) { fotos = p.fotos; }
+            if (p.nomeRecebedor) nomeRecebedor = p.nomeRecebedor;
+            if (p.docRecebedor)  docRecebedor  = p.docRecebedor;
+            if (fotos.length > 0) break;
+          } catch(_) {}
+        }
+      }
+
+      // Trilha formatada
+      const trilha = logs.map(l => ({
+        id:            l.id,
+        numero_nf:     l.numero_nf,
+        status_tutts:  l.status_tutts,
+        cod_ocorrencia:l.cod_ocorrencia,
+        sucesso:       l.sucesso,
+        erro_msg:      l.erro_msg,
+        criado_em:     l.criado_em,
+      }));
+
+      res.json({ sc, pontos, vinculo, trilha, fotos, nomeRecebedor, docRecebedor });
+    } catch (err) { next(err); }
+  });
+
+
   return router;
 }
 
