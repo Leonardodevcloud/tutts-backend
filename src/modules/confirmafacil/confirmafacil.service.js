@@ -278,6 +278,9 @@ class ConfirmaFacilService {
       transportadora: {
         cnpj: config.cnpj_transportadora,
       },
+      trecho: {
+        ordem: '1',
+      },
       ocorrencia: {
         tipoEntrega:       codOcorrencia,
         dtOcorrencia:      formatarData(agora),
