@@ -677,84 +677,157 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
-  // ── Listagem combinada de NFs (vinculos + filtros) ────────────
+  // ── Listagem combinada: CF API + vinculos ────────────────────
+  // Busca NFs direto na API CF e cruza com vinculos do banco
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { cliente_id, embarcador_cnpj, tem_corrida,
-              de, ate, busca, page = '0', size = '50' } = req.query;
+      const { embarcador_cnpj, tem_corrida, de, ate, busca, page = '0', size = '50' } = req.query;
 
-      const pg     = Math.max(0, Number(page));
-      const sz     = Math.min(100, Math.max(1, Number(size)));
-      const offset = pg * sz;
-      const params = [];
-      const wheres = [];
+      const pg = Math.max(0, Number(page));
+      const sz = Math.min(100, Math.max(1, Number(size)));
 
-      if (cliente_id) {
-        params.push(Number(cliente_id));
-        wheres.push('v.cliente_id = $' + params.length);
+      // 1. Buscar todas as configs ativas
+      const { rows: configs } = await pool.query(`
+        SELECT cf.*, cs.nome AS cliente_nome
+        FROM confirmafacil_config cf
+        INNER JOIN clientes_solicitacao cs ON cs.id = cf.cliente_id
+        WHERE cf.ativo = TRUE
+      `);
+
+      if (configs.length === 0) {
+        return res.json({ nfs: [], total: 0, page: pg, size: sz, mensagem: 'Nenhum cliente CF configurado' });
       }
+
+      const httpRequest = require('../../shared/utils/httpRequest');
+      const agora = new Date();
+
+      // Definir período
+      const inicio = de ? new Date(de) : new Date(agora.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const fim    = ate ? new Date(ate) : agora;
+
+      const fmtCF = d => {
+        const p = n => String(n).padStart(2,'0');
+        return d.getFullYear()+'/'+p(d.getMonth()+1)+'/'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())
+      };
+
+      // 2. Buscar NFs em todas as configs
+      let todasNfs = [];
+      for (const config of configs) {
+        try {
+          const cfAuth = getConfirmaFacilAuth();
+          const token = await cfAuth.obterToken(config.cliente_id, config);
+          let pg2 = 0;
+          while (true) {
+            const filtro = { page: pg2, size: 100, de: fmtCF(inicio), ate: fmtCF(fim),
+                             cnpjTransportadora: [config.cnpj_transportadora] };
+            const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+            const resp = await httpRequest(
+              'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
+              { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
+            );
+            const data = resp.json();
+            const nfs = data.respostas || data.content || [];
+            nfs.forEach(nf => { nf._cliente_id = config.cliente_id; nf._cliente_nome = config.cliente_nome; });
+            todasNfs = todasNfs.concat(nfs);
+            if (nfs.length < 100) break;
+            pg2++;
+          }
+        } catch(e) {
+          console.warn('[CF nfs-lista] erro config', config.cliente_id, e.message);
+        }
+      }
+
+      // 3. Buscar todos os vinculos existentes
+      const idsEmbarque = todasNfs.map(n => n.idEmbarque || n.id).filter(Boolean);
+      let vinculos = [];
+      if (idsEmbarque.length > 0) {
+        const { rows: v } = await pool.query(`
+          SELECT v.*, sc.tutts_os_numero, sc.status AS status_corrida,
+                 cl.sucesso AS ultimo_cf_sucesso,
+                 cl.cod_ocorrencia AS ultimo_cod_cf
+          FROM confirmafacil_vinculos v
+          LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+          LEFT JOIN LATERAL (
+            SELECT cod_ocorrencia, sucesso FROM confirmafacil_log
+            WHERE solicitacao_id = v.solicitacao_id
+            ORDER BY criado_em DESC LIMIT 1
+          ) cl ON TRUE
+          WHERE v.id_embarque = ANY($1)
+        `, [idsEmbarque]);
+        vinculos = v;
+      }
+      const vinculoMap = {};
+      vinculos.forEach(v => { vinculoMap[String(v.id_embarque)] = v; });
+
+      // 4. Buscar embarcadores para nomes
+      const { rows: embs } = await pool.query(`
+        SELECT e.*, c.cliente_id FROM confirmafacil_embarcadores e
+        INNER JOIN confirmafacil_config c ON c.id = e.config_id WHERE e.ativo = TRUE
+      `);
+      const embMap = {};
+      embs.forEach(e => {
+        const cnpjLimpo = (e.cnpj_embarcador||'').replace(/[^0-9]/g,'');
+        embMap[cnpjLimpo] = e;
+      });
+
+      // 5. Montar resultado combinado
+      let resultado = todasNfs.map(nf => {
+        const id = String(nf.idEmbarque || nf.id || '');
+        const vinc = vinculoMap[id] || null;
+        const cnpjEmb = (nf.embarcador?.cnpj||'').replace(/[^0-9]/g,'');
+        const emb = embMap[cnpjEmb] || null;
+        return {
+          id_embarque:       nf.idEmbarque || nf.id,
+          numero_nf:         nf.numero,
+          serie_nf:          nf.serie,
+          cnpj_embarcador:   nf.embarcador?.cnpj || '',
+          nome_embarcador:   nf.embarcador?.nome || emb?.nome_embarcador || '',
+          cliente_id:        nf._cliente_id,
+          cliente_nome:      nf._cliente_nome,
+          destinatario_nome: nf.destinatario?.nome || '',
+          destinatario_cidade: nf.destinatario?.endereco?.cidade || nf.endereco?.cidade || '',
+          destinatario_uf:   nf.destinatario?.endereco?.uf || nf.endereco?.uf || '',
+          status_cf:         nf.statusEmbarque?.nome || 'DESCONHECIDO',
+          status_nota:       nf.statusNota || '',
+          dias_atraso:       nf.diasAtraso || 0,
+          data_previsao:     nf.dataPrevisao || null,
+          valor:             nf.valor || null,
+          centro_custo_mapp: emb?.centro_custo_mapp || null,
+          // Dados do vínculo (se já criou corrida)
+          solicitacao_id:    vinc?.solicitacao_id || null,
+          tutts_os_numero:   vinc?.tutts_os_numero || null,
+          status_corrida:    vinc?.status_corrida || null,
+          ultimo_cf_sucesso: vinc?.ultimo_cf_sucesso || false,
+          ultimo_cod_cf:     vinc?.ultimo_cod_cf || null,
+          vinculado_em:      vinc?.criado_em || null,
+          link_rastreamento: nf.linkExterno || null,
+        };
+      });
+
+      // 6. Aplicar filtros locais
       if (embarcador_cnpj) {
-        params.push(embarcador_cnpj);
-        wheres.push("REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($" + params.length + ",'[^0-9]','','g')");
+        const cnpjBusca = embarcador_cnpj.replace(/[^0-9]/g,'');
+        resultado = resultado.filter(n => (n.cnpj_embarcador||'').replace(/[^0-9]/g,'') === cnpjBusca);
       }
-      if (tem_corrida === 'sim') wheres.push('v.solicitacao_id IS NOT NULL');
-      if (tem_corrida === 'nao') wheres.push('v.solicitacao_id IS NULL');
-      if (de)  { params.push(de);  wheres.push('v.criado_em >= $' + params.length); }
-      if (ate) { params.push(ate); wheres.push('v.criado_em <= $' + params.length); }
+      if (tem_corrida === 'sim') resultado = resultado.filter(n => n.solicitacao_id);
+      if (tem_corrida === 'nao') resultado = resultado.filter(n => !n.solicitacao_id);
       if (busca) {
-        params.push('%' + busca + '%');
-        const pi = params.length;
-        wheres.push('(v.numero_nf ILIKE $' + pi + ' OR sc.tutts_os_numero ILIKE $' + pi + ')');
+        const b = busca.toLowerCase();
+        resultado = resultado.filter(n =>
+          (n.numero_nf||'').toLowerCase().includes(b) ||
+          (n.destinatario_nome||'').toLowerCase().includes(b) ||
+          (n.tutts_os_numero||'').toLowerCase().includes(b) ||
+          (n.nome_embarcador||'').toLowerCase().includes(b)
+        );
       }
 
-      const whereClause = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
+      const total = resultado.length;
+      const paginado = resultado.slice(pg * sz, (pg + 1) * sz);
 
-      // Params para paginação (adicionados ao final)
-      const paramsData  = [...params, sz, offset];
-      const paramsCount = [...params];
-
-      const sql = `
-        SELECT
-          v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
-          v.cnpj_embarcador, v.criado_em, v.cliente_id,
-          sc.status AS status_tutts, sc.tutts_os_numero,
-          cs.nome AS cliente_nome,
-          e.nome_embarcador, e.coleta_cidade, e.coleta_uf, e.centro_custo_mapp,
-          (SELECT cod_ocorrencia FROM confirmafacil_log cl2
-           WHERE cl2.solicitacao_id = v.solicitacao_id AND cl2.sucesso = TRUE
-           ORDER BY cl2.criado_em DESC LIMIT 1) AS ultimo_cod_cf,
-          (SELECT sucesso FROM confirmafacil_log cl3
-           WHERE cl3.solicitacao_id = v.solicitacao_id
-           ORDER BY cl3.criado_em DESC LIMIT 1) AS ultimo_cf_sucesso
-        FROM confirmafacil_vinculos v
-        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-        LEFT JOIN clientes_solicitacao cs ON cs.id = v.cliente_id
-        LEFT JOIN confirmafacil_config cfg ON cfg.cliente_id = v.cliente_id
-        LEFT JOIN confirmafacil_embarcadores e
-          ON e.config_id = cfg.id
-          AND REGEXP_REPLACE(e.cnpj_embarcador,'[^0-9]','','g') =
-              REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g')
-          AND e.ativo = TRUE
-        ${whereClause}
-        ORDER BY v.criado_em DESC
-        LIMIT $${paramsData.length - 1} OFFSET $${paramsData.length}
-      `;
-
-      const sqlCount = `
-        SELECT COUNT(*) AS total
-        FROM confirmafacil_vinculos v
-        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-        ${whereClause}
-      `;
-
-      const [{ rows }, { rows: [{ total }] }] = await Promise.all([
-        pool.query(sql, paramsData),
-        pool.query(sqlCount, paramsCount),
-      ]);
-
-      res.json({ nfs: rows, total: Number(total), page: pg, size: sz });
+      res.json({ nfs: paginado, total, page: pg, size: sz });
     } catch (err) { next(err); }
   });
+
 
   // ── Detalhes de uma OS com trilha + fotos ────────────────────
   router.get('/os-detalhes/:solicitacaoId', verificarToken, verificarAdmin, async (req, res, next) => {
