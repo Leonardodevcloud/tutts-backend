@@ -132,7 +132,9 @@ class ConfirmaFacilService {
 
     // 6. Enviar
     console.log(`📤 [CF Service] enviando ${itens.length} item(s) para OS ${osNumero} | ocorrência ${codOcorrencia}`);
+    console.log(`📦 [CF Service] payload:`, JSON.stringify(itens, null, 2).substring(0, 1000));
     const resultados = await this.client.enviarEmbarque(token, itens);
+    console.log(`📥 [CF Service] resposta:`, JSON.stringify(resultados));
 
     // 7. Logar
     await this._logar({
@@ -242,8 +244,13 @@ class ConfirmaFacilService {
         sp.cep,
         sp.latitude,
         sp.longitude,
-        sp.status
+        sp.status,
+        -- Pega serie e cnpj_embarcador do vínculo CF
+        v.serie_nf,
+        v.cnpj_embarcador AS cnpj_embarcador_nf
       FROM solicitacoes_pontos sp
+      LEFT JOIN confirmafacil_vinculos v ON v.solicitacao_id = sp.solicitacao_id
+        AND v.numero_nf = sp.numero_nota
       WHERE ${filtro}
       ORDER BY sp.ordem
     `, params);
@@ -255,13 +262,18 @@ class ConfirmaFacilService {
    * Monta um CamposEmbarqueDTO para envio ao CF.
    */
   _montarItem({ ponto, config, codOcorrencia, agora, lat, lng, fotos, nomeRecebedor, docRecebedor }) {
+    // cnpj_embarcador: prioriza o que veio do vínculo CF (mais preciso)
+    const cnpjEmb = ponto.cnpj_embarcador_nf || config.cnpj_embarcador || '';
+    // Remover formatação para enviar só dígitos (padrão CF)
+    const cnpjEmbLimpo = cnpjEmb.replace(/[^0-9]/g, '');
+
     const item = {
       embarque: {
         numero: ponto.numero_nota,
-        serie:  ponto.serie_nota || '1',
+        serie:  ponto.serie_nf || ponto.serie_nota || '1',
       },
       embarcador: {
-        cnpj: config.cnpj_embarcador || '',
+        cnpj: cnpjEmbLimpo || cnpjEmb,
       },
       transportadora: {
         cnpj: config.cnpj_transportadora,
