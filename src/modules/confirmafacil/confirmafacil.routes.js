@@ -466,7 +466,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       `, [
         cliente_id,
         String(idEmbarque || nf.numero),
-        cliente.centro_custo_padrao || cliente.nome || 'Central',
+        centroCusto,
         'ConfirmaFácil',
         cliente.forma_pagamento_padrao || 'F',
         false,
@@ -523,7 +523,10 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         detalhes:      resultado.detalhes || null,
       });
 
-    } catch (err) { next(err); }
+    } catch (err) {
+      console.error('❌ [CF criar-corrida] erro:', err.message, err.stack?.split('\n')[1]);
+      next(err);
+    }
   });
 
   // ── Testar envio de ocorrência para o CF ──────────────────────
