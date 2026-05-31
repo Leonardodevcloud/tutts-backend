@@ -43,7 +43,7 @@ class ConfirmaFacilClient {
           body: JSON.stringify(lote),
         });
 
-        const status = resp.status();
+        const status = resp.status;
         let body = null;
         try { body = resp.json(); } catch (_) { body = resp.text(); }
 
@@ -86,7 +86,7 @@ class ConfirmaFacilClient {
         body: JSON.stringify(payload),
       });
 
-      const status = resp.status();
+      const status = resp.status;
       let body = null;
       try { body = resp.json(); } catch (_) { body = resp.text(); }
 
