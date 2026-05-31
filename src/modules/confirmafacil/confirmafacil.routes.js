@@ -662,74 +662,97 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
 
 
   // ── Listagem combinada de NFs (vinculos + filtros) ───────────
+  // ── Listagem de embarcadores de todos os clientes (para filtro) ─
+  router.get('/embarcadores-todos', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT e.id, e.cnpj_embarcador, e.nome_embarcador, e.coleta_cidade, e.coleta_uf,
+               e.centro_custo_mapp, c.cliente_id
+        FROM confirmafacil_embarcadores e
+        INNER JOIN confirmafacil_config c ON c.id = e.config_id
+        WHERE e.ativo = TRUE
+        ORDER BY e.nome_embarcador
+      `);
+      res.json({ embarcadores: rows });
+    } catch (err) { next(err); }
+  });
+
+  // ── Listagem combinada de NFs (vinculos + filtros) ────────────
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { cliente_id, embarcador_cnpj, status_cf, tem_corrida,
-              de, ate, busca, page = 0, size = 50 } = req.query;
+      const { cliente_id, embarcador_cnpj, tem_corrida,
+              de, ate, busca, page = '0', size = '50' } = req.query;
 
-      const offset = Number(page) * Number(size);
+      const pg     = Math.max(0, Number(page));
+      const sz     = Math.min(100, Math.max(1, Number(size)));
+      const offset = pg * sz;
       const params = [];
       const wheres = [];
 
       if (cliente_id) {
-        params.push(cliente_id);
-        wheres.push(`v.cliente_id = $${params.length}`);
+        params.push(Number(cliente_id));
+        wheres.push('v.cliente_id = $' + params.length);
       }
       if (embarcador_cnpj) {
         params.push(embarcador_cnpj);
-        wheres.push(`REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($${params.length},'[^0-9]','','g')`);
+        wheres.push("REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($" + params.length + ",'[^0-9]','','g')");
       }
-      if (tem_corrida === 'sim')  wheres.push('v.solicitacao_id IS NOT NULL');
-      if (tem_corrida === 'nao')  wheres.push('v.solicitacao_id IS NULL');
-      if (de)  { params.push(de);  wheres.push(`v.criado_em >= $${params.length}`); }
-      if (ate) { params.push(ate); wheres.push(`v.criado_em <= $${params.length}`); }
+      if (tem_corrida === 'sim') wheres.push('v.solicitacao_id IS NOT NULL');
+      if (tem_corrida === 'nao') wheres.push('v.solicitacao_id IS NULL');
+      if (de)  { params.push(de);  wheres.push('v.criado_em >= $' + params.length); }
+      if (ate) { params.push(ate); wheres.push('v.criado_em <= $' + params.length); }
       if (busca) {
         params.push('%' + busca + '%');
-        wheres.push(`(v.numero_nf ILIKE $${params.length} OR sc.tutts_os_numero ILIKE $${params.length} OR e.nome_embarcador ILIKE $${params.length})`);
+        const pi = params.length;
+        wheres.push('(v.numero_nf ILIKE $' + pi + ' OR sc.tutts_os_numero ILIKE $' + pi + ')');
       }
 
-      const where = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
+      const whereClause = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
 
-      const { rows } = await pool.query(`
+      // Params para paginação (adicionados ao final)
+      const paramsData  = [...params, sz, offset];
+      const paramsCount = [...params];
+
+      const sql = `
         SELECT
           v.id, v.id_embarque, v.solicitacao_id, v.numero_nf, v.serie_nf,
           v.cnpj_embarcador, v.criado_em, v.cliente_id,
-          sc.status            AS status_tutts,
-          sc.tutts_os_numero,
-          sc.tutts_valor,
-          sc.atualizado_em     AS ultima_atualizacao,
-          cs.nome              AS cliente_nome,
-          e.nome_embarcador,
-          e.coleta_cidade,
-          e.coleta_uf,
-          e.centro_custo_mapp,
-          -- Última ocorrência enviada ao CF
-          (SELECT cod_ocorrencia FROM confirmafacil_log
-           WHERE solicitacao_id = v.solicitacao_id AND sucesso = TRUE
-           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cod_cf,
-          (SELECT sucesso FROM confirmafacil_log
-           WHERE solicitacao_id = v.solicitacao_id
-           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cf_sucesso
+          sc.status AS status_tutts, sc.tutts_os_numero,
+          cs.nome AS cliente_nome,
+          e.nome_embarcador, e.coleta_cidade, e.coleta_uf, e.centro_custo_mapp,
+          (SELECT cod_ocorrencia FROM confirmafacil_log cl2
+           WHERE cl2.solicitacao_id = v.solicitacao_id AND cl2.sucesso = TRUE
+           ORDER BY cl2.criado_em DESC LIMIT 1) AS ultimo_cod_cf,
+          (SELECT sucesso FROM confirmafacil_log cl3
+           WHERE cl3.solicitacao_id = v.solicitacao_id
+           ORDER BY cl3.criado_em DESC LIMIT 1) AS ultimo_cf_sucesso
         FROM confirmafacil_vinculos v
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
         LEFT JOIN clientes_solicitacao cs ON cs.id = v.cliente_id
         LEFT JOIN confirmafacil_config cfg ON cfg.cliente_id = v.cliente_id
-        LEFT JOIN confirmafacil_embarcadores e ON e.config_id = cfg.id
+        LEFT JOIN confirmafacil_embarcadores e
+          ON e.config_id = cfg.id
           AND REGEXP_REPLACE(e.cnpj_embarcador,'[^0-9]','','g') =
               REGEXP_REPLACE(v.cnpj_embarcador,'[^0-9]','','g')
-        ${where}
+          AND e.ativo = TRUE
+        ${whereClause}
         ORDER BY v.criado_em DESC
-        LIMIT ${Number(size)} OFFSET ${offset}
-      `);
+        LIMIT $${paramsData.length - 1} OFFSET $${paramsData.length}
+      `;
 
-      const { rows: [{ total }] } = await pool.query(`
-        SELECT COUNT(*) AS total FROM confirmafacil_vinculos v
+      const sqlCount = `
+        SELECT COUNT(*) AS total
+        FROM confirmafacil_vinculos v
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-        LEFT JOIN confirmafacil_embarcadores e ON TRUE
-        ${where}
-      `);
+        ${whereClause}
+      `;
 
-      res.json({ nfs: rows, total: Number(total), page: Number(page), size: Number(size) });
+      const [{ rows }, { rows: [{ total }] }] = await Promise.all([
+        pool.query(sql, paramsData),
+        pool.query(sqlCount, paramsCount),
+      ]);
+
+      res.json({ nfs: rows, total: Number(total), page: pg, size: sz });
     } catch (err) { next(err); }
   });
 
