@@ -319,6 +319,13 @@ const CHROMIUM_LAUNCH_OPTS = {
  */
 const FERIADOS_URL = 'https://tutts.com.br/expresso/expressoat/notificacao-feriados';
 const SELETORES_FECHAR_FERIADO = [
+  // ✅ 2026-05-31: botão real confirmado no HTML da tela:
+  //   <form action="principal" method="GET">
+  //     <button type="submit" class="btn btn-outline-secondary">IGNORAR</button>
+  'form[action="principal"] button[type="submit"]',
+  'button:has-text("IGNORAR")',
+  'button:has-text("Ignorar")',
+  // demais variações (defensivo, caso a tela mude)
   'a[href*="principal"]',
   'button:has-text("Fechar")',
   'button:has-text("Continuar")',
@@ -347,15 +354,20 @@ async function dispensarFeriados(page, logFn) {
     }
   }
 
-  // Tenta fechar/dispensar a notificação
+  // Tenta fechar/dispensar a notificação. O botão IGNORAR é submit de um form
+  // GET para "principal" — após o clique a URL deve sair de notificacao-feriados.
   for (const sel of SELETORES_FECHAR_FERIADO) {
     try {
       const el = page.locator(sel).first();
       if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await el.click();
+        await Promise.all([
+          page.waitForURL((u) => !u.toString().includes('notificacao-feriados'), { timeout: 15000 }).catch(() => {}),
+          el.click(),
+        ]);
         await page.waitForTimeout(600);
         log(`🗓️ [dispensarFeriados] dispensado via selector "${sel}" — URL: ${page.url()}`);
-        return;
+        // Se de fato saiu da tela de feriados, terminamos.
+        if (!page.url().includes('notificacao-feriados')) return;
       }
     } catch (_) { /* tenta próximo */ }
   }
@@ -1146,6 +1158,10 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
     // Confirma sessão — se não, relogin
     if (!(await isLoggedIn(page))) {
       await fazerLogin(page, _credentialsOverride);
+      // 🔧 2026-05-31 FIX: passar pela tela de feriados ANTES do acompanhamento.
+      // Sem isso o servidor faz redirect chain acompanhamento → index → principal.php,
+      // e #search-autocomplete-input nunca aparece (Timeout 25000ms).
+      await dispensarFeriados(page, log);
       await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(1500);
     }
@@ -1213,6 +1229,8 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
           if (fs.existsSync(getSessionFile())) fs.unlinkSync(getSessionFile());
         } catch (_) {}
         await fazerLogin(page, _credentialsOverride);
+        // 🔧 2026-05-31 FIX: dispensar feriados antes de reabrir o acompanhamento
+        await dispensarFeriados(page, log);
         await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: 45000 });
         await page.waitForTimeout(2000);
         try {
