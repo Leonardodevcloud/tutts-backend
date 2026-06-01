@@ -684,7 +684,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const { embarcador_cnpj, tem_corrida, de, ate, busca, page = '0', size = '50' } = req.query;
 
       const pg = Math.max(0, Number(page));
-      const sz = Math.min(100, Math.max(1, Number(size)));
+      const sz = Math.min(500, Math.max(1, Number(size)));
 
       // 1. Buscar todas as configs ativas
       const { rows: configs } = await pool.query(`
@@ -863,21 +863,37 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         ORDER BY criado_em DESC
       `, [solicitacaoId]);
 
-      // Extrair fotos e recebedor do payload do último log com sucesso
+      // Extrair fotos e recebedor — verifica todos os logs (sucesso ou não)
       let fotos = [];
       let nomeRecebedor = null;
       let docRecebedor = null;
 
       for (const log of logs) {
-        if (log.sucesso && log.payload) {
-          try {
-            const p = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
-            if (p.fotos?.length > 0) { fotos = p.fotos; }
-            if (p.nomeRecebedor) nomeRecebedor = p.nomeRecebedor;
-            if (p.docRecebedor)  docRecebedor  = p.docRecebedor;
-            if (fotos.length > 0) break;
-          } catch(_) {}
-        }
+        if (!log.payload) continue;
+        try {
+          const p = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
+          // Fotos podem estar em p.fotos ou em p.itens[].ocorrencia.fotos
+          if (!fotos.length && p.fotos?.length > 0) fotos = p.fotos;
+          if (!nomeRecebedor && p.nomeRecebedor) nomeRecebedor = p.nomeRecebedor;
+          if (!docRecebedor && p.docRecebedor)   docRecebedor  = p.docRecebedor;
+          // Fallback: fotos dentro dos itens CF
+          if (!fotos.length && Array.isArray(p.itens)) {
+            for (const item of p.itens) {
+              const f = item?.ocorrencia?.fotos;
+              if (Array.isArray(f) && f.length > 0) { fotos = f; break; }
+            }
+          }
+        } catch(_) {}
+      }
+
+      // Se não achou no log, tenta buscar nos detalhes da solicitação
+      if (fotos.length === 0) {
+        const { rows: pontosComFoto } = await pool.query(`
+          SELECT foto_url FROM solicitacoes_pontos_fotos
+          WHERE solicitacao_id = $1
+          LIMIT 20
+        `, [solicitacaoId]).catch(() => ({ rows: [] }));
+        fotos = pontosComFoto.map(p => p.foto_url).filter(Boolean);
       }
 
       // Trilha formatada
