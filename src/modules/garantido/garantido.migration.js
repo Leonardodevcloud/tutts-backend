@@ -11,6 +11,8 @@ async function initGarantidoTables(pool) {
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS garantido_valor_padrao NUMERIC(10,2) DEFAULT 0`).catch(() => {});
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS garantido_hora_inicio  TIME DEFAULT '08:00'`).catch(() => {});
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS garantido_hora_fim     TIME DEFAULT '17:00'`).catch(() => {});
+  // 🆕 2026-05-31: margem de tolerância — só começa a descontar APÓS este horário (opcional)
+  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS garantido_hora_tolerancia TIME`).catch(() => {});
   console.log('✅ Colunas de garantido em filas_centrais verificadas');
 
   // Valores especiais por motoboy (sobrepõem o valor padrão da central)

@@ -25,7 +25,7 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
       const cfg = await pool.query(
         `SELECT id, nome, COALESCE(garantido_ativo, false) AS garantido_ativo,
                 COALESCE(garantido_valor_padrao, 0) AS garantido_valor_padrao,
-                garantido_hora_inicio, garantido_hora_fim
+                garantido_hora_inicio, garantido_hora_fim, garantido_hora_tolerancia
            FROM filas_centrais WHERE id = $1`,
         [central_id]
       );
@@ -48,6 +48,7 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
           garantido_valor_padrao: Number(c.garantido_valor_padrao),
           garantido_hora_inicio: hhmm(c.garantido_hora_inicio) || '08:00',
           garantido_hora_fim: hhmm(c.garantido_hora_fim) || '17:00',
+          garantido_hora_tolerancia: hhmm(c.garantido_hora_tolerancia) || '',
         },
         especiais: esp.rows.map(r => ({ ...r, valor: Number(r.valor) })),
       });
@@ -60,15 +61,16 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.put('/garantido/config/:central_id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { central_id } = req.params;
-      const { garantido_ativo, garantido_valor_padrao, garantido_hora_inicio, garantido_hora_fim } = req.body;
+      const { garantido_ativo, garantido_valor_padrao, garantido_hora_inicio, garantido_hora_fim, garantido_hora_tolerancia } = req.body;
 
       const result = await pool.query(
         `UPDATE filas_centrais SET
-            garantido_ativo        = COALESCE($1, garantido_ativo),
-            garantido_valor_padrao = COALESCE($2, garantido_valor_padrao),
-            garantido_hora_inicio  = COALESCE($3, garantido_hora_inicio),
-            garantido_hora_fim     = COALESCE($4, garantido_hora_fim),
-            updated_at             = NOW()
+            garantido_ativo           = COALESCE($1, garantido_ativo),
+            garantido_valor_padrao    = COALESCE($2, garantido_valor_padrao),
+            garantido_hora_inicio     = COALESCE($3, garantido_hora_inicio),
+            garantido_hora_fim        = COALESCE($4, garantido_hora_fim),
+            garantido_hora_tolerancia = $6,
+            updated_at                = NOW()
           WHERE id = $5
         RETURNING id`,
         [
@@ -77,6 +79,7 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
           garantido_hora_inicio || null,
           garantido_hora_fim || null,
           central_id,
+          garantido_hora_tolerancia || null,
         ]
       );
       if (result.rows.length === 0) return res.status(404).json({ error: 'Central não encontrada' });

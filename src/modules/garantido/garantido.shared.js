@@ -29,7 +29,8 @@ async function registrarGarantidoIngresso(pool, { central_id, cod_profissional, 
 
     // 1) Config da central
     const cfgR = await pool.query(
-      `SELECT garantido_ativo, garantido_valor_padrao, garantido_hora_inicio, garantido_hora_fim
+      `SELECT garantido_ativo, garantido_valor_padrao, garantido_hora_inicio, garantido_hora_fim,
+              garantido_hora_tolerancia
          FROM filas_centrais WHERE id = $1`,
       [central_id]
     );
@@ -55,6 +56,7 @@ async function registrarGarantidoIngresso(pool, { central_id, cod_profissional, 
         fracao: Number(r.fracao),
         hora_inicio: hhmm(cfg.garantido_hora_inicio),
         hora_fim: hhmm(cfg.garantido_hora_fim),
+        hora_desconto: hhmm(cfg.garantido_hora_tolerancia) || hhmm(cfg.garantido_hora_inicio),
       };
     }
 
@@ -70,6 +72,7 @@ async function registrarGarantidoIngresso(pool, { central_id, cod_profissional, 
       valorBase,
       horaInicio: cfg.garantido_hora_inicio,
       horaFim: cfg.garantido_hora_fim,
+      horaTolerancia: cfg.garantido_hora_tolerancia,
       agora: agoraBahia(),
     });
 
@@ -92,6 +95,7 @@ async function registrarGarantidoIngresso(pool, { central_id, cod_profissional, 
       fracao: calc.fracao,
       hora_inicio: hhmm(cfg.garantido_hora_inicio),
       hora_fim: hhmm(cfg.garantido_hora_fim),
+      hora_desconto: hhmm(cfg.garantido_hora_tolerancia) || hhmm(cfg.garantido_hora_inicio),
     };
   } catch (err) {
     console.error('❌ [garantido/registrar]', err.message);
