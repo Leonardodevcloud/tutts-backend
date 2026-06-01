@@ -22,13 +22,27 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
       const vinculo = await pool.query(`
         SELECT c.id, c.nome as central_nome, c.endereco, c.latitude, c.longitude,
                c.raio_metros, c.ativa, c.tipo, c.mostrar_nomes_publicos,
+               COALESCE(c.abertura_horario_ativa, false) AS abertura_horario_ativa,
+               c.abertura_horario,
                v.cod_profissional, v.nome_profissional, v.ativo
         FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id
         WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
       `, [cod_profissional]);
       if (vinculo.rows.length === 0) return res.json({ success: true, vinculado: false });
       const posicao = await pool.query('SELECT * FROM filas_posicoes WHERE cod_profissional = $1', [cod_profissional]);
-      res.json({ success: true, vinculado: true, central: vinculo.rows[0], na_fila: posicao.rows.length > 0, posicao_atual: posicao.rows[0] || null });
+
+      // 🆕 2026-05-31: calcula liberação da fila pela trava de horário (timezone America/Bahia)
+      const central = vinculo.rows[0];
+      central.fila_liberada = true; // default: liberada
+      if (central.abertura_horario_ativa && central.abertura_horario) {
+        const aberturaFmt = String(central.abertura_horario).slice(0, 5); // 'HH:MM'
+        central.abertura_horario = aberturaFmt;
+        const agoraBahia = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+        const [hA, mA] = aberturaFmt.split(':').map(Number);
+        central.fila_liberada = (agoraBahia.getHours() * 60 + agoraBahia.getMinutes()) >= (hA * 60 + mA);
+      }
+
+      res.json({ success: true, vinculado: true, central, na_fila: posicao.rows.length > 0, posicao_atual: posicao.rows[0] || null });
     } catch (error) {
       console.error('❌ Erro ao verificar central:', error);
       res.status(500).json({ error: 'Erro ao verificar central' });
@@ -44,13 +58,31 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
       if (!latitude || !longitude) return res.status(400).json({ error: 'Localização GPS é obrigatória' });
       
       const vinculo = await pool.query(`
-        SELECT v.*, c.nome as central_nome, c.latitude as central_lat, c.longitude as central_lng, c.raio_metros
+        SELECT v.*, c.nome as central_nome, c.latitude as central_lat, c.longitude as central_lng, c.raio_metros,
+               COALESCE(c.abertura_horario_ativa, false) AS abertura_horario_ativa, c.abertura_horario
         FROM filas_vinculos v JOIN filas_centrais c ON c.id = v.central_id
         WHERE v.cod_profissional = $1 AND v.ativo = true AND c.ativa = true
       `, [cod_profissional]);
       if (vinculo.rows.length === 0) return res.status(403).json({ error: 'Você não está vinculado a nenhuma central' });
       
       const central = vinculo.rows[0];
+
+      // 🆕 2026-05-31: TRAVA DE HORÁRIO DE ABERTURA — bloqueia ingresso antes do horário.
+      // Autoritativa no backend (timezone America/Bahia), independente do relógio do celular.
+      if (central.abertura_horario_ativa && central.abertura_horario) {
+        const aberturaFmt = String(central.abertura_horario).slice(0, 5); // 'HH:MM'
+        const agoraBahia = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+        const [hA, mA] = aberturaFmt.split(':').map(Number);
+        const liberada = (agoraBahia.getHours() * 60 + agoraBahia.getMinutes()) >= (hA * 60 + mA);
+        if (!liberada) {
+          return res.status(403).json({
+            error: 'fila_nao_aberta',
+            abertura_horario: aberturaFmt,
+            mensagem: `A fila só será liberada a partir das ${aberturaFmt}.`,
+          });
+        }
+      }
+
       const distancia = calcularDistanciaHaversine(parseFloat(latitude), parseFloat(longitude), parseFloat(central.central_lat), parseFloat(central.central_lng));
       if (distancia > central.raio_metros) {
         return res.status(403).json({ error: 'Você está muito longe da central', distancia_atual: Math.round(distancia), raio_permitido: central.raio_metros, mensagem: `Você está a ${Math.round(distancia)}m da central. Aproxime-se para entrar na fila (máx ${central.raio_metros}m).` });

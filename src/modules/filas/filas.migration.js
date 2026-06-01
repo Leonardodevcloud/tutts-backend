@@ -194,6 +194,14 @@ async function initFilasTables(pool) {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_filas_agente_logs_central_data ON filas_agente_logs(central_id, created_at DESC)`).catch(() => {});
   console.log('✅ Tabela filas_agente_logs verificada');
+
+  // 🆕 2026-05-31: TRAVA DE HORÁRIO DE ABERTURA (fila tradicional/gerenciada)
+  // Diferente da barreira_horario (que bloqueia acesso TARDIO, após um corte, na fila auto):
+  // esta trava bloqueia o ingresso ANTES do horário e só LIBERA a partir dele.
+  // Configurável por central (toggle). Ex.: só libera a fila a partir das 07:30.
+  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS abertura_horario_ativa BOOLEAN DEFAULT false`).catch(() => {});
+  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS abertura_horario       TIME`).catch(() => {});
+  console.log('✅ Colunas de trava de horário de abertura verificadas');
 }
 
 module.exports = { initFilasTables };

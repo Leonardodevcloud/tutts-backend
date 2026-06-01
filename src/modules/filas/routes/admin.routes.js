@@ -61,7 +61,8 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
       const { nome, endereco, latitude, longitude, raio_metros, ativa,
               validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
               mostrar_nomes_publicos, penalidade_min,
-              barreira_horario_ativa, barreira_horario_corte } = req.body;
+              barreira_horario_ativa, barreira_horario_corte,
+              abertura_horario_ativa, abertura_horario } = req.body;
 
       const result = await pool.query(`
         UPDATE filas_centrais
@@ -78,6 +79,8 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
             penalidade_min           = COALESCE($12, penalidade_min),
             barreira_horario_ativa   = COALESCE($13, barreira_horario_ativa),
             barreira_horario_corte   = COALESCE($14, barreira_horario_corte),
+            abertura_horario_ativa   = COALESCE($15, abertura_horario_ativa),
+            abertura_horario         = COALESCE($16, abertura_horario),
             updated_at               = NOW()
         WHERE id = $7
         RETURNING *
@@ -85,7 +88,9 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
           validacao_agente_ativa, varredura_intervalo_seg, remover_ao_pegar_corrida,
           mostrar_nomes_publicos, penalidade_min,
           barreira_horario_ativa,
-          barreira_horario_corte || null]);
+          barreira_horario_corte || null,
+          (typeof abertura_horario_ativa === 'boolean' ? abertura_horario_ativa : null),
+          abertura_horario || null]);
       
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Central não encontrada' });
