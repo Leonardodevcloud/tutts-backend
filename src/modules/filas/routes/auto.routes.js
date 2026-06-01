@@ -98,10 +98,15 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
       // 3b) Barreira de horário — só para o PRIMEIRO ingresso do dia, após horário corte
       if (central.barreira_horario_ativa && central.barreira_horario_corte) {
         // Verificar se é o primeiro ingresso do motoboy HOJE nesta central
+        // 🔧 2026-05-31 BUGFIX: a fila auto registra ingresso como 'entrada_auto'
+        // (auto.routes.js: INSERT ... 'entrada_auto'). A lista ANTERIOR só tinha
+        // 'entrada'/'entrada_manual', então NUNCA encontrava o 1º ingresso do dia
+        // na fila auto → primeiroIngressoHoje era sempre true → todo RETORNO da
+        // rota após o corte era barrado indevidamente. Incluído 'entrada_auto'.
         const primeiroHojeR = await pool.query(
           `SELECT id FROM filas_historico
             WHERE cod_profissional = $1 AND central_id = $2
-              AND acao IN ('entrada', 'entrada_manual')
+              AND acao IN ('entrada', 'entrada_manual', 'entrada_auto')
               AND created_at >= CURRENT_DATE AT TIME ZONE 'America/Bahia'
             LIMIT 1`,
           [cod_profissional, central.central_id_resolved]
