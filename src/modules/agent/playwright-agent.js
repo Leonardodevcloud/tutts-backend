@@ -434,17 +434,22 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         log('🗑️  Sessão inválida removida');
       }
       await fazerLogin(page, _credentialsOverride);
-      await dispensarFeriados(page, log);
-      await comRetryTimeout(
-        () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
-        'page.goto ACOMP_URL (após login)'
-      );
-      await page.waitForTimeout(2000);
       await context.storageState({ path: getSessionFile() });
       log('💾 Sessão salva');
     } else {
       log('✅ Já logado');
     }
+
+    // 🔧 2026-06-01 FIX: dispensar feriados SEMPRE (mesmo com "Já logado").
+    // A sessão pode estar válida porém presa na tela de feriados (principal.php),
+    // onde #search-autocomplete-input não existe → Timeout 25000ms. Dispensar e
+    // reabrir o acompanhamento cobre tanto login novo quanto sessão persistente.
+    await dispensarFeriados(page, log);
+    await comRetryTimeout(
+      () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+      'page.goto ACOMP_URL (pós-feriados)'
+    );
+    await page.waitForTimeout(2000);
 
 
     // ── Passo 1b: Garantir que está na aba "Em execução" ────────────────────

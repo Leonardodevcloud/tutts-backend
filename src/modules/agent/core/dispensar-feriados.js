@@ -46,9 +46,18 @@ async function dispensarFeriados(page, logFn) {
   const log = logFn || (() => {});
   const urlAtual = page.url();
 
-  // Só navega pra feriados se ainda não estamos lá
-  if (!urlAtual.includes('/notificacao-feriados')) {
-    log('🗓️ [dispensarFeriados] navegando para notificacao-feriados');
+  // Caso 1: já estamos na tela de feriados → dispensar direto.
+  // Caso 2: estamos presos em principal.php (sintoma do redirect de feriados) → navegar pra feriados e dispensar.
+  // Caso contrário (já no acompanhamento, etc.) → não faz nada (não penaliza o ciclo normal).
+  const naTelaFeriados = urlAtual.includes('/notificacao-feriados');
+  const presoEmPrincipal = urlAtual.includes('/principal');
+
+  if (!naTelaFeriados) {
+    if (!presoEmPrincipal) {
+      // fora de feriados e fora de principal → nada a fazer
+      return;
+    }
+    log('🗓️ [dispensarFeriados] preso em principal — navegando para notificacao-feriados');
     try {
       await page.goto(FERIADOS_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page.waitForTimeout(800);
@@ -58,7 +67,7 @@ async function dispensarFeriados(page, logFn) {
     }
   }
 
-  // Se nem caiu na tela de feriados, não há o que dispensar (ex.: feriado já passou)
+  // Se não caiu na tela de feriados, não há o que dispensar (ex.: feriado já passou)
   if (!page.url().includes('/notificacao-feriados')) {
     log('🗓️ [dispensarFeriados] sem tela de feriados — nada a dispensar');
     return;

@@ -415,13 +415,18 @@ async function executarLiberacaoOS({ os_numero, onProgresso }) {
     }
     if (!logado) {
       await fazerLogin(page, _credentialsOverride);
-      await dispensarFeriados(page, log);
       await context.storageState({ path: sessionPath });
       log(`💾 Sessão salva`);
-      // Após login, ir pra acompanhamento
-      await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-      await page.waitForTimeout(1500);
     }
+
+    // 🔧 2026-06-01 FIX: dispensar feriados SEMPRE (não só após login novo).
+    // Com browser persistente, a sessão salva pode estar "logada" porém presa na
+    // tela de feriados — isLoggedIn dá true, o if acima é pulado e a OS nunca
+    // carrega (#search-autocomplete-input some → Timeout 25000ms). Chamar aqui,
+    // incondicionalmente, garante que saímos de principal.php antes de localizar.
+    await dispensarFeriados(page, log);
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    await page.waitForTimeout(1500);
 
     // Passo 2: localizar OS
     reportar('localizando', 35);
