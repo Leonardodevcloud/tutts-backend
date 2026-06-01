@@ -68,23 +68,26 @@ function resolverCodigo(status, mapaCustom) {
  * @returns {string}
  */
 function formatarData(data) {
+  // Usa fuso BRT (UTC-3) porque o Railway roda em UTC
   const d = data || new Date();
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const aaaa = d.getFullYear();
+  const brt = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+  const dd   = String(brt.getUTCDate()).padStart(2, '0');
+  const mm   = String(brt.getUTCMonth() + 1).padStart(2, '0');
+  const aaaa = brt.getUTCFullYear();
   return `${dd}-${mm}-${aaaa}`;
 }
 
 /**
- * Formata hora JS para HH:MM:SS exigido pelo CF.
+ * Formata hora JS para HH:MM:SS exigido pelo CF (BRT).
  * @param {Date} [data]
  * @returns {string}
  */
 function formatarHora(data) {
   const d = data || new Date();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
+  const brt = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+  const hh = String(brt.getUTCHours()).padStart(2, '0');
+  const mi = String(brt.getUTCMinutes()).padStart(2, '0');
+  const ss = String(brt.getUTCSeconds()).padStart(2, '0');
   return `${hh}:${mi}:${ss}`;
 }
 
