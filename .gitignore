@@ -25,3 +25,7 @@ Thumbs.db
 # Backups locais Fase 0
 _backup-logistics-*/
 *.bak-*
+
+# backups locais
+*.bak
+*.bak_*
