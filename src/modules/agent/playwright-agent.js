@@ -23,6 +23,8 @@ const path = require('path');
 const { logger } = require('../../config/logger');
 // 2026-04 egress-fix: bloqueia trackers externos quando BLOCK_TRACKERS=1
 const { aplicarBloqueio } = require('../../shared/network-blocker');
+// 🆕 2026-05-31: helper compartilhado (codigo, NAO login) p/ dispensar tela de feriados
+const { dispensarFeriados } = require('./core/dispensar-feriados');
 
 // getSessionFile() pode ser sobrescrito via setOverrides (usado pelo agent-pool
 // quando há múltiplas contas com 1 sessão por slot).
@@ -432,6 +434,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         log('🗑️  Sessão inválida removida');
       }
       await fazerLogin(page, _credentialsOverride);
+      await dispensarFeriados(page, log);
       await comRetryTimeout(
         () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
         'page.goto ACOMP_URL (após login)'
@@ -519,6 +522,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
           log('🗑️  Sessão removida');
         }
         await fazerLogin(page, _credentialsOverride);
+        await dispensarFeriados(page, log);
         await comRetryTimeout(
           () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
           'page.goto ACOMP_URL (re-login fallback)'

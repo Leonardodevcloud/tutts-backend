@@ -28,6 +28,8 @@ const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
 const { logger } = require('../../config/logger');
+// 🆕 2026-05-31: helper compartilhado (codigo, NAO login) p/ dispensar tela de feriados
+const { dispensarFeriados } = require('./core/dispensar-feriados');
 
 // ── Reuso de helpers do playwright-agent.js ──────────────────────────────
 // Mantemos sessão SEPARADA pra liberar-ponto (conta diferente do agent-correcao)
@@ -413,6 +415,7 @@ async function executarLiberacaoOS({ os_numero, onProgresso }) {
     }
     if (!logado) {
       await fazerLogin(page, _credentialsOverride);
+      await dispensarFeriados(page, log);
       await context.storageState({ path: sessionPath });
       log(`💾 Sessão salva`);
       // Após login, ir pra acompanhamento
