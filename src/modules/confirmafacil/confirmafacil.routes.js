@@ -717,21 +717,27 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           const cfAuth = getConfirmaFacilAuth();
           const token = await cfAuth.obterToken(config.cliente_id, config);
           let pg2 = 0;
-          while (true) {
+          let totalPages = 1;
+          while (pg2 < totalPages) {
             const filtro = { page: pg2, size: 100, de: fmtCF(inicio), ate: fmtCF(fim),
                              cnpjTransportadora: [config.cnpj_transportadora] };
-            const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+            const params2 = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
             const resp = await httpRequest(
-              'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
+              'https://utilities.confirmafacil.com.br/filter/embarque?' + params2,
               { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
             );
             const data = resp.json();
             const nfs = data.respostas || data.content || [];
             nfs.forEach(nf => { nf._cliente_id = config.cliente_id; nf._cliente_nome = config.cliente_nome; });
             todasNfs = todasNfs.concat(nfs);
-            if (nfs.length < 100) break;
+            // Usar totalPages da resposta se disponível
+            if (data.totalPages > 1) totalPages = data.totalPages;
+            else if (data.totalCount > 0) totalPages = Math.ceil(data.totalCount / 100);
+            // Fallback: parar se retornou menos que o tamanho da página
+            if (nfs.length < 100 && data.totalPages === undefined && data.totalCount === undefined) break;
             pg2++;
           }
+          console.log(`[CF nfs-lista] config ${config.cliente_id}: ${todasNfs.length} NFs carregadas (${totalPages} páginas)`);
         } catch(e) {
           console.warn('[CF nfs-lista] erro config', config.cliente_id, e.message);
         }
