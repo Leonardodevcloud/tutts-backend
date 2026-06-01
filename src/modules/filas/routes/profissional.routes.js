@@ -6,6 +6,8 @@ const express = require('express');
 const { calcularDistanciaHaversine } = require('../filas.service');
 // 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
 const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
+// 🆕 2026-05-31: integração filas → garantido (registra 1º ingresso do dia)
+const { registrarGarantidoIngresso } = require('../../garantido/garantido.shared');
 
 // Tempos de penalidade por saída voluntária (em minutos)
 const PENALIDADES_MINUTOS = [30, 120, 1440]; // 30min, 2h, 24h
@@ -174,7 +176,12 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
         alterado_por: `Auto (entrou na fila: ${nome_profissional})`,
       }).catch(() => {});
       
-      res.json({ success: true, posicao, central: central.central_nome, distancia: Math.round(distancia) });
+      // 🆕 2026-05-31: registra/recupera o garantido do dia (1º ingresso trava o valor)
+      const garantido = await registrarGarantidoIngresso(pool, {
+        central_id: central.central_id, cod_profissional, nome_profissional,
+      });
+
+      res.json({ success: true, posicao, central: central.central_nome, distancia: Math.round(distancia), garantido });
       registrarAuditoria(req, 'ENTRAR_NA_FILA', 'user', 'filas_posicoes', null, { central_id: central.central_id, posicao, distancia: Math.round(distancia) }).catch(() => {});
     } catch (error) {
       console.error('❌ Erro ao entrar na fila:', error);

@@ -24,6 +24,8 @@ const express = require('express');
 const { calcularDistanciaHaversine, compactarPosicoes, reordenarMotoboy, registrarLog } = require('../filas-auto.service');
 // 🆕 2026-05-24: integração filas → disponibilidade (marcar EM LOJA automático)
 const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
+// 🆕 2026-05-31: integração filas → garantido (registra 1º ingresso do dia)
+const { registrarGarantidoIngresso } = require('../../garantido/garantido.shared');
 
 function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -219,6 +221,11 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         alterado_por: `Auto (entrou na fila: ${nome_profissional})`,
       }).catch(() => {});
 
+      // 🆕 2026-05-31: registra/recupera o garantido do dia (1º ingresso trava o valor)
+      const garantido = await registrarGarantidoIngresso(pool, {
+        central_id: central.central_id_resolved, cod_profissional, nome_profissional,
+      });
+
       res.json({
         success: true,
         posicao: novaPosicao,
@@ -226,6 +233,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         distancia: Math.round(dist),
         mensagem: 'Você entrou! O agente vai confirmar que está sem corrida ativa em alguns segundos.',
         agente_status: 'pendente',
+        garantido,
       });
 
       registrarAuditoria(req, 'FILA_AUTO_ENTRAR', 'user', 'filas_posicoes', null, {
