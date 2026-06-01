@@ -12,6 +12,7 @@
 'use strict';
 
 const express = require('express');
+const { dataRefBahia } = require('../../shared/utils/tzBahia');
 
 function hhmm(t) { return String(t || '').slice(0, 5); }
 
@@ -129,7 +130,7 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.get('/garantido/registros/:central_id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const { central_id } = req.params;
-      const data = req.query.data || new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' })).toISOString().slice(0, 10);
+      const data = req.query.data || dataRefBahia();
       const r = await pool.query(
         `SELECT cod_profissional, nome_profissional, hora_ingresso, valor_base,
                 fracao, minutos_atraso, valor_garantido
@@ -167,7 +168,7 @@ function createGarantidoRouter(pool, verificarToken, verificarAdmin, registrarAu
         return res.json({ success: true, ativo: false });
       }
       const v = vinc.rows[0];
-      const data = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' })).toISOString().slice(0, 10);
+      const data = dataRefBahia();
       const reg = await pool.query(
         `SELECT hora_ingresso, valor_base, fracao, minutos_atraso, valor_garantido
            FROM garantido_registros

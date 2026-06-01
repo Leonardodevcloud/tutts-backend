@@ -26,6 +26,8 @@ const { calcularDistanciaHaversine, compactarPosicoes, reordenarMotoboy, registr
 const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 // 🆕 2026-05-31: integração filas → garantido (registra 1º ingresso do dia)
 const { registrarGarantidoIngresso } = require('../../garantido/garantido.shared');
+// 🆕 2026-05-31: helpers de timezone Bahia (fronteira de dia independente da sessão)
+const { mesmoDiaBahiaSQL, inicioProximoDiaBahiaSQL } = require('../../../shared/utils/tzBahia');
 
 function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -109,7 +111,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           `SELECT id FROM filas_historico
             WHERE cod_profissional = $1 AND central_id = $2
               AND acao IN ('entrada', 'entrada_manual', 'entrada_auto')
-              AND created_at >= CURRENT_DATE AT TIME ZONE 'America/Bahia'
+              AND ${mesmoDiaBahiaSQL('created_at')}
             LIMIT 1`,
           [cod_profissional, central.central_id_resolved]
         );
@@ -129,7 +131,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
               `INSERT INTO filas_penalidades
                  (cod_profissional, nome_profissional, central_id, bloqueado_ate, saidas_hoje, tipo, motivo_admin)
                VALUES ($1, $2, $3,
-                 (CURRENT_DATE + 1)::timestamp AT TIME ZONE 'America/Bahia',
+                 ${inicioProximoDiaBahiaSQL()},
                  0, 'barreira_horario',
                  $4)
                ON CONFLICT DO NOTHING`,

@@ -9,16 +9,8 @@
  */
 
 const { calcularGarantido } = require('./garantido.service');
+const { agoraBahia, dataRefBahia } = require('../../shared/utils/tzBahia');
 
-function agoraBahia() {
-  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
-}
-function dataRefBahia() {
-  const d = agoraBahia();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
 function hhmm(t) {
   return String(t || '').slice(0, 5);
 }
