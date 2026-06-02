@@ -171,8 +171,10 @@ async function localizarOS(page, os_numero) {
   }
 
   // Verificar se a OS já está visível na tela atual (aba aberta)
-  // Usamos um seletor que pega QUALQUER row contendo o número da OS
-  const rowOS = page.locator(`tr:has-text("${os_numero}"), .row:has-text("${os_numero}")`).first();
+  // ⚠️ 2026-06-01: o acompanhamento da MAPP NÃO usa <table>/<tr> — é layout de
+  // divs (div.row.styleBorde / col-*). Por isso casamos tr OU div.row OU qualquer
+  // elemento que contenha o número da OS.
+  const rowOS = localizarRowOS(page, os_numero);
   const jaVisivel = await rowOS.isVisible().catch(() => false);
   if (jaVisivel) {
     log('✅ OS encontrada diretamente na lista');
@@ -213,7 +215,28 @@ async function localizarOS(page, os_numero) {
   await page.waitForTimeout(2000);
 
   // Confirma se OS apareceu
-  return await rowOS.isVisible().catch(() => false);
+  return await localizarRowOS(page, os_numero).isVisible().catch(() => false);
+}
+
+/**
+ * Localiza o container da OS de forma robusta ao layout.
+ * A MAPP usa layout de DIVS (div.row.styleBorde / col-*), não <table>/<tr>.
+ * Estratégia: o número da OS aparece dentro de um input editável (código) na
+ * linha; subimos até o container de linha (div.row mais próximo) — com fallback
+ * pra <tr> caso a estrutura mude.
+ */
+function localizarRowOS(page, os_numero) {
+  const os = String(os_numero);
+  // Casa, em ordem de preferência:
+  //  - <tr> contendo o número (layout de tabela, se existir)
+  //  - div.row / div com classe styleBorde contendo o número
+  //  - qualquer linha de lista (li / div[class*=row]) contendo o número
+  return page.locator(
+    `tr:has-text("${os}"), ` +
+    `div.row:has-text("${os}"), ` +
+    `div[class*="styleBorde"]:has-text("${os}"), ` +
+    `div[class*="row"]:has-text("${os}")`
+  ).first();
 }
 
 /**
@@ -223,20 +246,24 @@ async function localizarOS(page, os_numero) {
 async function abrirModalLiberarApp(page, os_numero) {
   log(`⚙️  Abrindo menu engrenagem da OS ${os_numero}`);
 
-  // Localiza a row da OS — geralmente <tr> que contém o número
-  const rowSelector = `tr:has-text("${os_numero}")`;
-  const row = page.locator(rowSelector).first();
+  // Localiza a row da OS — layout de DIVS (não <tr>), via helper robusto
+  const row = localizarRowOS(page, os_numero);
   await row.waitFor({ state: 'visible', timeout: TIMEOUT });
 
   // Clica na engrenagem dentro dessa row
-  // Padrão: button com classe contendo "btn-grupo-acoes" ou ícone de gear
-  // Fallback: dropdown-toggle com data-toggle="dropdown"
+  // A coluna AÇÕES tem vários ícones; a engrenagem (config/ações) abre o dropdown
+  // com "Liberar App". Cobrimos várias variações do layout real da MAPP.
   const engrenagemSelectores = [
     'button[data-toggle="dropdown"]',
+    'a[data-toggle="dropdown"]',
     '.dropdown-toggle',
     'button:has(i.fa-cog)',
-    'button:has(.fa-gear)',
+    'button:has(i.fa-gear)',
+    'a:has(i.fa-cog)',
+    'i.fa-cog',
+    'i.fa-gear',
     '.btn-grupo-acoes',
+    '[class*="dropdown"]',
   ];
 
   let clicou = false;
