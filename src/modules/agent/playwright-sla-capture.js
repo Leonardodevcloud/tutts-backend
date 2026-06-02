@@ -317,72 +317,9 @@ const CHROMIUM_LAUNCH_OPTS = {
  *
  * Depois desta chamada, goto(ACOMP_URL) funciona normalmente.
  */
-const FERIADOS_URL = 'https://tutts.com.br/expresso/expressoat/notificacao-feriados';
-const SELETORES_FECHAR_FERIADO = [
-  // ✅ 2026-05-31: botão real confirmado no HTML da tela:
-  //   <form action="principal" method="GET">
-  //     <button type="submit" class="btn btn-outline-secondary">IGNORAR</button>
-  'form[action="principal"] button[type="submit"]',
-  'button:has-text("IGNORAR")',
-  'button:has-text("Ignorar")',
-  // demais variações (defensivo, caso a tela mude)
-  'a[href*="principal"]',
-  'button:has-text("Fechar")',
-  'button:has-text("Continuar")',
-  'button:has-text("Prosseguir")',
-  'button:has-text("OK")',
-  'button:has-text("Ok")',
-  'a:has-text("Continuar")',
-  'a:has-text("Fechar")',
-  '.btn-fechar',
-  '.close',
-];
-
-async function dispensarFeriados(page, logFn) {
-  const log = logFn || (() => {});
-  const urlAtual = page.url();
-
-  // Só navega pra feriados se ainda não estamos lá
-  if (!urlAtual.includes('/notificacao-feriados')) {
-    log('🗓️ [dispensarFeriados] navegando para notificacao-feriados');
-    try {
-      await page.goto(FERIADOS_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(800);
-    } catch (e) {
-      log(`⚠️ [dispensarFeriados] goto falhou: ${e.message}`);
-      return;
-    }
-  }
-
-  // Tenta fechar/dispensar a notificação. O botão IGNORAR é submit de um form
-  // GET para "principal" — após o clique a URL deve sair de notificacao-feriados.
-  for (const sel of SELETORES_FECHAR_FERIADO) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await Promise.all([
-          page.waitForURL((u) => !u.toString().includes('notificacao-feriados'), { timeout: 15000 }).catch(() => {}),
-          el.click(),
-        ]);
-        await page.waitForTimeout(600);
-        log(`🗓️ [dispensarFeriados] dispensado via selector "${sel}" — URL: ${page.url()}`);
-        // Se de fato saiu da tela de feriados, terminamos.
-        if (!page.url().includes('notificacao-feriados')) return;
-      }
-    } catch (_) { /* tenta próximo */ }
-  }
-
-  // Nenhum botão encontrado — navega direto pra principal pra forçar o estado
-  log('🗓️ [dispensarFeriados] nenhum botão encontrado — navegando direto pra principal');
-  try {
-    await page.goto('https://tutts.com.br/expresso/expressoat/principal', {
-      waitUntil: 'domcontentloaded', timeout: 20000,
-    });
-    await page.waitForTimeout(800);
-  } catch (e) {
-    log(`⚠️ [dispensarFeriados] goto principal falhou: ${e.message}`);
-  }
-}
+// 🔧 2026-06-02: usa o helper COMPARTILHADO (fonte unica). A copia local foi
+// removida para nao divergir do core/dispensar-feriados.js usado pelos demais agentes.
+const { dispensarFeriados } = require('./core/dispensar-feriados');
 
 async function isLoggedIn(page) {
   const url = page.url();

@@ -44,30 +44,24 @@ const SELETORES_FECHAR_FERIADO = [
  */
 async function dispensarFeriados(page, logFn) {
   const log = logFn || (() => {});
-  const urlAtual = page.url();
 
-  // Caso 1: já estamos na tela de feriados → dispensar direto.
-  // Caso 2: estamos presos em principal.php (sintoma do redirect de feriados) → navegar pra feriados e dispensar.
-  // Caso contrário (já no acompanhamento, etc.) → não faz nada (não penaliza o ciclo normal).
-  const naTelaFeriados = urlAtual.includes('/notificacao-feriados');
-  const presoEmPrincipal = urlAtual.includes('/principal');
-
-  if (!naTelaFeriados) {
-    if (!presoEmPrincipal) {
-      // fora de feriados e fora de principal → nada a fazer
-      return;
-    }
-    log('🗓️ [dispensarFeriados] preso em principal — navegando para notificacao-feriados');
+  // 🔧 2026-06-02: SEMPRE navega para a tela de feriados para checar.
+  // A otimização anterior (só agir se URL atual fosse feriados/principal) abria
+  // um buraco: após isLoggedIn/redirect a página podia parar numa URL que não
+  // casava nenhum dos dois, o helper retornava sem fazer nada e o agente caía em
+  // feriados de novo (#search-autocomplete-input → Timeout 25000ms). Robustez > 1 goto.
+  if (!page.url().includes('/notificacao-feriados')) {
     try {
       await page.goto(FERIADOS_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(600);
     } catch (e) {
       log(`⚠️ [dispensarFeriados] goto falhou: ${e.message}`);
       return;
     }
   }
 
-  // Se não caiu na tela de feriados, não há o que dispensar (ex.: feriado já passou)
+  // Se o servidor NÃO nos manteve em feriados, não há tela a dispensar
+  // (ex.: feriado já passou). Seguimos sem fazer nada.
   if (!page.url().includes('/notificacao-feriados')) {
     log('🗓️ [dispensarFeriados] sem tela de feriados — nada a dispensar');
     return;
