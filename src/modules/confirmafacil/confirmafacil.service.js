@@ -201,6 +201,29 @@ class ConfirmaFacilService {
       nomeRecebedor,
       docRecebedor,
     });
+
+    // Atualizar status no cache se envio foi bem-sucedido
+    const sucesso = resultados.some(r => r.ok);
+    if (sucesso) {
+      const novoStatusCache = {
+        '1': 'ENTREGUE', '52': 'DEVOLVIDO',
+        '19': 'REENTREGA', '26': 'REENTREGA',
+      }[codOcorrencia];
+      if (novoStatusCache) {
+        const idEmbarques = pontos.map(p => p.id_embarque || null).filter(Boolean);
+        // Buscar id_embarque do vínculo
+        const { rows: vinc } = await this.pool.query(
+          'SELECT id_embarque FROM confirmafacil_vinculos WHERE solicitacao_id = $1',
+          [solicitacaoId]
+        ).catch(() => ({ rows: [] }));
+        if (vinc.length > 0) {
+          await this.pool.query(
+            'UPDATE confirmafacil_nfs_cache SET status_cf = $1 WHERE id_embarque = $2',
+            [novoStatusCache, vinc[0].id_embarque]
+          ).catch(() => {});
+        }
+      }
+    }
   }
 
   async _enviarGps(dados) {

@@ -938,9 +938,14 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         SELECT * FROM solicitacoes_pontos WHERE solicitacao_id = $1 ORDER BY ordem
       `, [solicitacaoId]);
 
-      // Vínculo CF
+      // Vínculo CF + dados do cache
       const { rows: [vinculo] } = await pool.query(`
-        SELECT * FROM confirmafacil_vinculos WHERE solicitacao_id = $1
+        SELECT v.*, c.data_emissao, c.data_previsao, c.status_cf,
+               c.destinatario_nome, c.destinatario_cidade, c.destinatario_uf
+        FROM confirmafacil_vinculos v
+        LEFT JOIN confirmafacil_nfs_cache c
+          ON c.id_embarque = v.id_embarque AND c.cliente_id = v.cliente_id
+        WHERE v.solicitacao_id = $1
       `, [solicitacaoId]);
 
       // Trilha de eventos (log CF)
