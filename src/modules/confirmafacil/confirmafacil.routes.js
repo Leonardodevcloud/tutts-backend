@@ -513,6 +513,35 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           VALUES ($1,$2,$3,$4,$5,$6)
           ON CONFLICT (id_embarque) DO NOTHING
         `, [idEmbarque, solicitacaoId, cliente_id, nf.numero, nf.serie, nf.embarcador?.cnpj||'']);
+
+        // Garantir entrada no cache com dados básicos da NF
+        const end = nf.destinatario?.endereco || nf.endereco || {};
+        await pool.query(`
+          INSERT INTO confirmafacil_nfs_cache (
+            cliente_id, id_embarque, numero_nf, serie_nf, chave_nfe,
+            cnpj_embarcador, nome_embarcador,
+            destinatario_nome, destinatario_cidade, destinatario_uf, destinatario_end,
+            status_cf, status_nota, dias_atraso,
+            data_previsao, data_emissao, valor,
+            payload_completo, sincronizado_em
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
+          ON CONFLICT (cliente_id, id_embarque) DO UPDATE SET
+            status_cf       = EXCLUDED.status_cf,
+            data_emissao    = COALESCE(confirmafacil_nfs_cache.data_emissao, EXCLUDED.data_emissao),
+            data_previsao   = COALESCE(confirmafacil_nfs_cache.data_previsao, EXCLUDED.data_previsao),
+            sincronizado_em = NOW()
+        `, [
+          cliente_id, idEmbarque, nf.numero, nf.serie, nf.chave||null,
+          nf.embarcador?.cnpj||'', nf.embarcador?.nome||'',
+          nf.destinatario?.nome||'',
+          end.cidade||'', end.uf||'',
+          [end.logradouro, end.numero, end.cidade, end.uf].filter(Boolean).join(', '),
+          nf.statusEmbarque?.nome||'A_EMBARCAR',
+          nf.statusNota||'', nf.diasAtraso||0,
+          nf.dataPrevisao ? new Date(nf.dataPrevisao) : null,
+          nf.dataEmissao  ? new Date(nf.dataEmissao)  : null,
+          nf.valor||null, nf,
+        ]).catch(e => console.warn('[CF] erro ao salvar cache no criar-corrida:', e.message));
       }
 
       res.json({
