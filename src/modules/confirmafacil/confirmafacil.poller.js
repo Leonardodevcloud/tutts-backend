@@ -103,6 +103,8 @@ class ConfirmaFacilPoller {
 
   async _processarCliente(config) {
     console.log(`[CF Poller] processando cliente ${config.cliente_id} codCliente=${config.tutts_codigo_cliente}`);
+    if (!this._retryTableReady) { await this._ensureTabelaRetry(); this._retryTableReady = true; }
+    this._puladosBackoff = 0;
     const token = await this.auth.obterToken(config.cliente_id, config);
 
     // Janela de busca: do último polling até agora
@@ -172,6 +174,9 @@ class ConfirmaFacilPoller {
 
     if (totalProcessadas > 0) {
       console.log(`✅ [CF Poller] cliente ${config.cliente_id}: ${totalProcessadas} NF(s) processadas`);
+    }
+    if (this._puladosBackoff > 0) {
+      console.log(`⏳ [CF Poller] cliente ${config.cliente_id}: ${this._puladosBackoff} NF(s) em backoff (serao re-tentadas mais tarde)`);
     }
   }
 
@@ -260,6 +265,14 @@ class ConfirmaFacilPoller {
     );
     if (jaExiste.length > 0) return; // já criou corrida pra essa NF
 
+    // Backoff: se esta NF falhou recentemente, nao re-tenta agora — volta no proximo
+    // ciclo apos a janela de espera (evita martelar a API Tutts a cada 60s).
+    const { rows: _bk } = await this.pool.query(
+      'SELECT 1 FROM confirmafacil_poller_retry WHERE config_id = $1 AND id_embarque = $2 AND proximo_retry > NOW()',
+      [config.id, idEmbarque]
+    );
+    if (_bk.length > 0) { this._puladosBackoff = (this._puladosBackoff || 0) + 1; return; }
+
     // Buscar endereço de coleta pelo cnpj do embarcador
     const coleta = await this._buscarColeta(config.id, cnpjEmbarcador);
     if (!coleta) {
@@ -327,11 +340,6 @@ class ConfirmaFacilPoller {
       numeroPedido:   String(numeroNF),
     };
 
-    // Modalidade de frete (categoria) configurada na filial — se houver
-    if (coleta.categoria_mapp && String(coleta.categoria_mapp).trim()) {
-      payloadTutts.categoria = String(coleta.categoria_mapp).trim().toUpperCase();
-    }
-
     console.log(`📤 [CF Poller] criando corrida para NF ${numeroNF} (idEmbarque ${idEmbarque})`);
 
     // Chamar API Tutts
@@ -346,11 +354,13 @@ class ConfirmaFacilPoller {
     if (resultado.Erro) {
       console.error(`❌ [CF Poller] API Tutts recusou NF ${numeroNF}: ${resultado.Erro}`);
       await this._logarErro(config.cliente_id, idEmbarque, numeroNF, serieNF, cnpjEmbarcador, resultado.Erro);
+      await this._registrarFalhaRetry(config.id, idEmbarque, resultado.Erro);
       return;
     }
 
     const osNumero = resultado.Sucesso;
     console.log(`✅ [CF Poller] OS criada: ${osNumero} | NF ${numeroNF}`);
+    await this._removerRetry(config.id, idEmbarque); // sucesso — limpa qualquer backoff
 
     // Salvar solicitacao_corrida
     const { rows: [solic] } = await this.pool.query(`
@@ -358,8 +368,8 @@ class ConfirmaFacilPoller {
         cliente_id, numero_pedido, centro_custo, usuario_solicitante,
         forma_pagamento, retorno, tutts_os_numero, tutts_distancia,
         tutts_duracao, tutts_valor, tutts_url_rastreamento,
-        status, provider_usado, categoria_usada
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        status, provider_usado
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING id
     `, [
       config.cliente_id,
@@ -375,7 +385,6 @@ class ConfirmaFacilPoller {
       resultado.detalhes?.urlRastreamento || null,
       'enviado',
       'tutts',
-      (coleta.categoria_mapp && String(coleta.categoria_mapp).trim()) ? String(coleta.categoria_mapp).trim().toUpperCase() : null,
     ]);
 
     const solicitacaoId = solic.id;
@@ -534,6 +543,48 @@ class ConfirmaFacilPoller {
       return fallback[0] || null;
     }
     return rows[0];
+  }
+
+  // ══════════════════════════════════════════════════
+  // BACKOFF DE RE-TENTATIVA (NFs recusadas pela API Tutts)
+  // ══════════════════════════════════════════════════
+  // A NF recusada NAO some: fica registrada com um proximo_retry crescente
+  // (15min, 30, 45 ... ate 6h). Nos ciclos seguintes ela e pulada ate a
+  // janela vencer, quando volta a ser tentada. Ao cadastrar a modalidade/
+  // filial e a corrida ser criada, o backoff e limpo automaticamente.
+  async _ensureTabelaRetry() {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS confirmafacil_poller_retry (
+        config_id     INT    NOT NULL,
+        id_embarque   BIGINT NOT NULL,
+        tentativas    INT    NOT NULL DEFAULT 1,
+        ultimo_erro   TEXT,
+        proximo_retry TIMESTAMP NOT NULL DEFAULT NOW(),
+        atualizado_em TIMESTAMP NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (config_id, id_embarque)
+      )
+    `).catch((e) => console.warn('[CF Poller] _ensureTabelaRetry:', e.message));
+  }
+
+  async _registrarFalhaRetry(configId, idEmbarque, erro) {
+    await this.pool.query(`
+      INSERT INTO confirmafacil_poller_retry
+        (config_id, id_embarque, tentativas, ultimo_erro, proximo_retry, atualizado_em)
+      VALUES ($1, $2, 1, $3, NOW() + INTERVAL '15 minutes', NOW())
+      ON CONFLICT (config_id, id_embarque) DO UPDATE SET
+        tentativas    = confirmafacil_poller_retry.tentativas + 1,
+        ultimo_erro   = EXCLUDED.ultimo_erro,
+        atualizado_em = NOW(),
+        proximo_retry = NOW() + (LEAST((confirmafacil_poller_retry.tentativas + 1) * 15, 360) || ' minutes')::interval
+    `, [configId, idEmbarque, String(erro || '').slice(0, 500)])
+      .catch((e) => console.warn('[CF Poller] _registrarFalhaRetry:', e.message));
+  }
+
+  async _removerRetry(configId, idEmbarque) {
+    await this.pool.query(
+      'DELETE FROM confirmafacil_poller_retry WHERE config_id = $1 AND id_embarque = $2',
+      [configId, idEmbarque]
+    ).catch(() => {});
   }
 
   async _logarErro(clienteId, idEmbarque, numeroNF, serieNF, cnpjEmbarcador, erro) {
