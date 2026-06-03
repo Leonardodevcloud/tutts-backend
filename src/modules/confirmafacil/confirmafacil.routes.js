@@ -870,7 +870,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
               const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
               const resp = await httpRequest(
                 'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
-                { method: 'GET', headers: { Authorization: token2, accept: 'application/json' } }
+                { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
               );
               const data = resp.json();
               const nfs  = data.respostas || data.content || [];
