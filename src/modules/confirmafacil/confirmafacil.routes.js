@@ -869,6 +869,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
               );
               const data = resp.json();
               const nfs  = data.respostas || data.content || [];
+              console.log(`[CF Sync] pg ${pg2}: ${nfs.length} NFs | totalCount=${data.totalCount} totalPages=${data.totalPages} total=${data.total} keys=${Object.keys(data).join(',')}`);
 
               for (const nf of nfs) {
                 const end = nf.destinatario?.endereco || nf.endereco || {};
