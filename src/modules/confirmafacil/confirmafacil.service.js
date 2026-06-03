@@ -101,6 +101,23 @@ class ConfirmaFacilService {
     // 2. Determinar status a reportar
     // Prioridade: status do ponto (mais específico) > status da corrida
     const statusParaMapear = pontoStatus || novoStatus;
+
+    // Se o status é 'finalizado' (OS encerrada), verificar se houve insucesso anterior
+    // Se sim, não enviar Cod.1 (entregue) — a OS foi encerrada sem entrega real
+    if (novoStatus === 'finalizado' && !pontoStatus) {
+      const { rows: logInsucesso } = await this.pool.query(`
+        SELECT id FROM confirmafacil_log
+        WHERE solicitacao_id = $1
+          AND status_tutts IN ('ausente','fechado','recusou','nao_entregue')
+          AND sucesso = TRUE
+        LIMIT 1
+      `, [solicitacaoId]);
+      if (logInsucesso.length > 0) {
+        console.log(`[CF Service] OS ${osNumero} finalizada mas teve insucesso anterior — ignorando Cod.1`);
+        return;
+      }
+    }
+
     const codOcorrencia = resolverCodigo(statusParaMapear, config.mapa_ocorrencias);
 
     if (!codOcorrencia) {
