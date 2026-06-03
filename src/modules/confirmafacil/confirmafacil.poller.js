@@ -15,7 +15,6 @@
  *      e. Cria vínculo idEmbarque ↔ solicitacao_id
  */
 
-const cron            = require('node-cron');
 const httpRequest     = require('../../shared/utils/httpRequest');
 const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 
@@ -36,22 +35,27 @@ class ConfirmaFacilPoller {
   // ══════════════════════════════════════════════════
 
   iniciar() {
-    // A cada 1 minuto
-    cron.schedule('* * * * *', async () => {
+    console.log('✅ [CF Poller] iniciado — polling a cada 1 minuto (setInterval)');
+    // Rodar imediatamente na inicialização
+    setTimeout(async () => {
+      if (this._rodando) return;
+      this._rodando = true;
+      try { await this._ciclo(); }
+      catch (err) { console.error('❌ [CF Poller] erro ciclo inicial:', err.message); }
+      finally { this._rodando = false; }
+    }, 5000); // 5s após start
+
+    // Depois a cada 60s
+    setInterval(async () => {
       if (this._rodando) {
-        console.log('[CF Poller] ainda processando ciclo anterior — pulando');
+        console.log('[CF Poller] ciclo anterior ainda rodando — pulando');
         return;
       }
       this._rodando = true;
-      try {
-        await this._ciclo();
-      } catch (err) {
-        console.error('❌ [CF Poller] erro no ciclo:', err.message);
-      } finally {
-        this._rodando = false;
-      }
-    });
-    console.log('✅ [CF Poller] iniciado — polling a cada 1 minuto');
+      try { await this._ciclo(); }
+      catch (err) { console.error('❌ [CF Poller] erro no ciclo:', err.message); }
+      finally { this._rodando = false; }
+    }, 60 * 1000);
   }
 
   // ══════════════════════════════════════════════════
@@ -59,6 +63,7 @@ class ConfirmaFacilPoller {
   // ══════════════════════════════════════════════════
 
   async _ciclo() {
+    console.log('[CF Poller] iniciando ciclo...');
     const { rows: configs } = await this.pool.query(`
       SELECT
         cf.id,
@@ -80,6 +85,7 @@ class ConfirmaFacilPoller {
       WHERE cf.ativo = TRUE AND cf.polling_ativo = TRUE
     `);
 
+    console.log(`[CF Poller] configs ativas: ${configs.length}`);
     if (configs.length === 0) return;
 
     for (const config of configs) {
@@ -96,6 +102,7 @@ class ConfirmaFacilPoller {
   // ══════════════════════════════════════════════════
 
   async _processarCliente(config) {
+    console.log(`[CF Poller] processando cliente ${config.cliente_id} codCliente=${config.tutts_codigo_cliente}`);
     const token = await this.auth.obterToken(config.cliente_id, config);
 
     // Janela de busca: do último polling até agora
@@ -124,6 +131,7 @@ class ConfirmaFacilPoller {
       };
 
       const resp = await this._buscarEmbarques(token, filtro);
+      console.log(`[CF Poller] pg ${page}: ${resp?.respostas?.length || 0} NFs encontradas`);
       if (!resp || !Array.isArray(resp.respostas) || resp.respostas.length === 0) break;
 
       for (const item of resp.respostas) {
