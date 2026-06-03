@@ -109,8 +109,7 @@ class ConfirmaFacilPoller {
     // Se primeiro polling, busca últimas 24h
     const agora = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    // Janela AMPLA, identica a rota /sincronizar (que funciona). A seguranca vem do
-    // guard de status (so cria corrida para A_EMBARCAR) + do vinculo (idempotente).
+    // Janela ampla, identica a /sincronizar. Seguranca: guard A_EMBARCAR + vinculo.
     const deStr  = '2024/01/01 00:00:00';
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
@@ -128,29 +127,20 @@ class ConfirmaFacilPoller {
       };
 
       const resp = await this._buscarEmbarques(token, filtro);
-
-      // Distingue FALHA de chamada (resp null) de pagina realmente vazia.
-      // Sem isso, um erro de rede na pg 1 fazia o loop parar achando que acabou
-      // (travava em 50/100 NFs).
       if (!resp) {
-        console.warn(`⚠️ [CF Poller] pg ${page}: falha na chamada ao CF — paginacao interrompida (NAO foi fim de dados)`);
+        console.warn(`⚠️ [CF Poller] pg ${page}: paginacao interrompida por falha na chamada ao CF (NAO foi fim de dados)`);
         break;
       }
 
-      // A API do CF as vezes devolve em "respostas", as vezes em "content"
       const lista = resp.respostas || resp.content || [];
       console.log(`[CF Poller] pg ${page}: ${lista.length} NFs | totalCount=${resp.totalCount} totalPages=${resp.totalPages}`);
       if (!Array.isArray(lista) || lista.length === 0) break;
 
       for (const item of lista) {
         try {
-          // Cache de TODA NF (a tela mostra tudo sozinha, sem sync manual)
-          await this._salvarCache(item, config.cliente_id);
-
-          // GUARD: so cria corrida para NF pendente (nao coletada).
+          await this._salvarCache(item, config.cliente_id); // cache de TODA NF
           const statusNF = String(item.statusEmbarque?.nome || '').toUpperCase();
-          if (statusNF !== 'A_EMBARCAR') continue;
-
+          if (statusNF !== 'A_EMBARCAR') continue;           // corrida so p/ pendente
           await this._processarNF(item, config);
           totalProcessadas++;
         } catch (err) {
@@ -158,8 +148,6 @@ class ConfirmaFacilPoller {
         }
       }
 
-      // Paginar ate vir pagina vazia. Cap de seguranca contra loop infinito
-      // caso a API ignore o parametro "page".
       page++;
       if (page > 300) {
         console.warn('[CF Poller] limite de 300 paginas atingido — parando por seguranca');
@@ -211,7 +199,6 @@ class ConfirmaFacilPoller {
     }
 
     // Montar destinatário a partir do objeto retornado pelo CF
-    // Prioriza trecho[0].enderecoDestino (mais completo), igual a rota manual
     const dest     = item.destinatario || {};
     const endDest  = item.trecho?.[0]?.enderecoDestino || dest.endereco || item.endereco || {};
 
@@ -239,6 +226,7 @@ class ConfirmaFacilPoller {
         cep:           endDest.cep || '',
         la:            endDest.latitude  ? String(endDest.latitude)  : undefined,
         lo:            endDest.longitude ? String(endDest.longitude) : undefined,
+        numeroNota:    String(numeroNF),
         obs:           [
           `NOME FANTASIA: ${dest.nome || ''}`,
           `NF: ${numeroNF}`,
@@ -265,7 +253,7 @@ class ConfirmaFacilPoller {
       retorno:        'N',
       formaPagamento: config.forma_pagamento_padrao || 'F',
       UrlRetorno:     TUTTS_WEBHOOK,
-      numeroPedido:   String(idEmbarque),
+      numeroPedido:   String(numeroNF),
     };
 
     console.log(`📤 [CF Poller] criando corrida para NF ${numeroNF} (idEmbarque ${idEmbarque})`);
@@ -299,7 +287,7 @@ class ConfirmaFacilPoller {
       RETURNING id
     `, [
       config.cliente_id,
-      String(idEmbarque),
+      String(numeroNF),
       coleta.centro_custo_mapp || config.centro_custo_padrao || config.cliente_nome || 'Central',
       'ConfirmaFácil Auto',
       config.forma_pagamento_padrao || 'F',
@@ -417,13 +405,18 @@ class ConfirmaFacilPoller {
 
   async _buscarEmbarques(token, filtro) {
     try {
-      // filtroDTO vai como query string serializado como JSON
       const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
       const resp = await httpRequest(`${CF_FILTER_URL}?${params}`, {
         method:  'GET',
         headers: { Authorization: token, accept: 'application/json' },
       });
-      return resp.json();
+      const data = resp.json();
+      if (!resp.ok || (data && data.error)) {
+        const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data);
+        console.error(`❌ [CF Poller] CF /filter/embarque status=${resp.status} — corpo(400): ${String(corpo).slice(0, 400)}`);
+        return null;
+      }
+      return data;
     } catch (err) {
       console.error('❌ [CF Poller] erro ao buscar embarques:', err.message);
       return null;
