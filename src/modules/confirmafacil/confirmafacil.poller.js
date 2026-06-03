@@ -154,6 +154,16 @@ class ConfirmaFacilPoller {
       }
     }
 
+    // Fallback/reconciliacao pelo cache: cria corridas para A_EMBARCAR sem
+    // vinculo ja conhecidas localmente. Roda sempre — se a busca ao vivo criou
+    // os vinculos, este passo nao encontra nada; se o CF falhou, ele despacha.
+    try {
+      const criadasCache = await this._processarPendentesDoCache(config);
+      if (criadasCache > 0) totalProcessadas += criadasCache;
+    } catch (e) {
+      console.error('[CF Poller] erro no fallback de cache:', e.message);
+    }
+
     // Atualizar timestamp do último polling
     await this.pool.query(
       'UPDATE confirmafacil_config SET ultimo_polling = $1 WHERE id = $2',
@@ -163,6 +173,68 @@ class ConfirmaFacilPoller {
     if (totalProcessadas > 0) {
       console.log(`✅ [CF Poller] cliente ${config.cliente_id}: ${totalProcessadas} NF(s) processadas`);
     }
+  }
+
+  // ══════════════════════════════════════════════════
+  // FALLBACK: PROCESSAR PENDENTES DO CACHE LOCAL
+  // ══════════════════════════════════════════════════
+  // Cria corridas para NFs A_EMBARCAR sem vinculo que ja estao no cache
+  // local (confirmafacil_nfs_cache). Funciona mesmo quando a busca ao vivo
+  // no CF falha (ex.: erro Hibernate do GKO), porque a criacao da corrida e
+  // na API da Mapp/Tutts (outro servidor). _processarNF re-checa o vinculo,
+  // entao nao ha risco de duplicar.
+  async _processarPendentesDoCache(config) {
+    const { rows } = await this.pool.query(`
+      SELECT c.id_embarque, c.numero_nf, c.serie_nf, c.cnpj_embarcador,
+             c.nome_embarcador, c.destinatario_nome, c.destinatario_cnpj,
+             c.destinatario_cidade, c.destinatario_uf, c.destinatario_end,
+             c.status_cf, c.payload_completo
+      FROM confirmafacil_nfs_cache c
+      LEFT JOIN confirmafacil_vinculos v
+        ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+      WHERE c.cliente_id = $1
+        AND UPPER(c.status_cf) = 'A_EMBARCAR'
+        AND v.id_embarque IS NULL
+    `, [config.cliente_id]);
+
+    if (rows.length === 0) return 0;
+    console.log(`[CF Poller] (cache) ${rows.length} NF(s) A_EMBARCAR sem corrida — criando a partir do cache local`);
+
+    let criadas = 0;
+    for (const row of rows) {
+      try {
+        // Usa o payload completo do CF (salvo no sync) quando disponivel.
+        let item = (row.payload_completo && typeof row.payload_completo === 'object')
+          ? row.payload_completo
+          : null;
+
+        if (!item) {
+          // Reconstroi um item minimo a partir das colunas achatadas do cache
+          item = {
+            idEmbarque:   row.id_embarque,
+            numero:       row.numero_nf,
+            serie:        row.serie_nf,
+            embarcador:   { cnpj: row.cnpj_embarcador || '', nome: row.nome_embarcador || '' },
+            destinatario: {
+              nome: row.destinatario_nome || '',
+              cnpj: row.destinatario_cnpj || '',
+              endereco: { cidade: row.destinatario_cidade || '', uf: row.destinatario_uf || '' },
+            },
+          };
+        } else {
+          // Garante chaves essenciais mesmo se o payload vier incompleto
+          item.idEmbarque = item.idEmbarque || item.id || row.id_embarque;
+          item.numero     = item.numero || row.numero_nf;
+          item.serie      = item.serie  || row.serie_nf;
+        }
+
+        await this._processarNF(item, config);
+        criadas++;
+      } catch (err) {
+        console.error(`⚠️ [CF Poller] (cache) erro NF idEmbarque ${row.id_embarque}: ${err.message}`);
+      }
+    }
+    return criadas;
   }
 
   // ══════════════════════════════════════════════════
