@@ -542,7 +542,8 @@ app.post("/api/webhook/tutts", webhookBasicValidation, async (req, res) => {
         const cod  = (statusEndereco.codigo || '').toUpperCase();
         const comp = (statusEndereco.codigoCompleto || '').toUpperCase();
         const mot  = (statusEndereco.endereco?.motivo?.tipo || '').toLowerCase();
-        if (cod === 'FIN' || comp === 'FINALIZADO')   return 'finalizado_ponto';
+        const desc = (statusEndereco.endereco?.motivo?.descricao || '').toLowerCase();
+
         if (cod === 'COL' || comp === 'COLETADO')     return 'coletado';
         if (cod === 'CHE' || comp === 'CHEGOU')       return 'chegou';
         if (cod === 'AUS' || comp === 'AUSENTE')      return 'ausente';
@@ -550,7 +551,17 @@ app.post("/api/webhook/tutts", webhookBasicValidation, async (req, res) => {
         if (cod === 'REC' || comp === 'RECUSOU')      return 'recusou';
         if (cod === 'RET' || comp === 'RETORNO')      return 'retorno';
         if (cod === 'NAO' || comp === 'NAO_ENTREGUE') return 'nao_entregue';
-        if (mot === 'insucesso')                       return 'nao_entregue';
+
+        // FIN com insucesso = tentativa sem entrega
+        if (cod === 'FIN' || comp === 'FINALIZADO') {
+          if (mot === 'insucesso') return 'nao_entregue';
+          if (desc.includes('ausente'))  return 'ausente';
+          if (desc.includes('fechado'))  return 'fechado';
+          if (desc.includes('recusou') || desc.includes('recusa')) return 'recusou';
+          return 'finalizado_ponto'; // sucesso real
+        }
+
+        if (mot === 'insucesso') return 'nao_entregue';
         return null;
       })(),
       lat:  statusEndereco?.endereco?.latitude  || null,
