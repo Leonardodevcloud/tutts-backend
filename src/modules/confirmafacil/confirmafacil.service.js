@@ -102,6 +102,20 @@ class ConfirmaFacilService {
     // Prioridade: status do ponto (mais específico) > status da corrida
     const statusParaMapear = pontoStatus || novoStatus;
 
+    // Se já enviou Cod.1 com sucesso, não enviar duplicata
+    const codParaEnviar = resolverCodigo(statusParaMapear, config.mapa_ocorrencias);
+    if (codParaEnviar === '1') {
+      const { rows: jaEntregue } = await this.pool.query(`
+        SELECT id FROM confirmafacil_log
+        WHERE solicitacao_id = $1 AND cod_ocorrencia = '1' AND sucesso = TRUE
+        LIMIT 1
+      `, [solicitacaoId]);
+      if (jaEntregue.length > 0) {
+        console.log(`[CF Service] OS ${osNumero} já tem Cod.1 enviado — ignorando duplicata`);
+        return;
+      }
+    }
+
     // Se o status é 'finalizado' (OS encerrada), verificar se houve insucesso anterior
     // Se sim, não enviar Cod.1 (entregue) — a OS foi encerrada sem entrega real
     if (novoStatus === 'finalizado' && !pontoStatus) {
