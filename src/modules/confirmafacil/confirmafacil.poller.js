@@ -71,7 +71,7 @@ class ConfirmaFacilPoller {
         cf.mapa_ocorrencias,
         cf.ultimo_polling,
         cs.tutts_token_api,
-        cs.tutts_id_cliente AS tutts_codigo_cliente,
+        cs.tutts_codigo_cliente,
         cs.nome AS cliente_nome,
         cs.forma_pagamento_padrao,
         cs.centro_custo_padrao
