@@ -21,7 +21,7 @@ const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
 const TUTTS_API_URL  = 'https://tutts.com.br/integracao';
 const TUTTS_WEBHOOK  = 'https://tutts-backend-production.up.railway.app/api/webhook/tutts';
-const PAGE_SIZE      = 50;
+const PAGE_SIZE      = 100;
 
 class ConfirmaFacilPoller {
   constructor(pool) {
@@ -109,14 +109,11 @@ class ConfirmaFacilPoller {
     // Se primeiro polling, busca últimas 24h
     const agora = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    // Janela FIXA de lookback (mesma logica da rota manual /buscar-nfs que funciona).
-    // NAO depende de ultimo_polling para a data inicial: a janela curta (ultimo_polling
-    // ate agora) fazia o poller so enxergar NFs do ultimo ~1 minuto, ignorando NFs ja
-    // pendentes no CF. O vinculo em confirmafacil_vinculos garante idempotencia (nao
-    // recria corrida pra NF que ja tem corrida), entao re-escanear a janela e seguro.
-    const LOOKBACK_DIAS = 3;
-    const dInicio  = new Date(agora.getTime() - LOOKBACK_DIAS * 24 * 60 * 60 * 1000);
-    const deStr  = `${dInicio.getFullYear()}/${p(dInicio.getMonth()+1)}/${p(dInicio.getDate())} 00:00:00`;
+    // Janela AMPLA, identica a rota /sincronizar que funciona e popula o cache.
+    // NFs pendentes (A_EMBARCAR) costumam ser mais antigas que poucos dias, entao
+    // a janela precisa ser larga. A seguranca vem do guard de status (so cria
+    // corrida para A_EMBARCAR) + do vinculo (nao recria corrida ja existente).
+    const deStr  = '2024/01/01 00:00:00';
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
     // Buscar NFs paginando
@@ -133,12 +130,18 @@ class ConfirmaFacilPoller {
       };
 
       const resp = await this._buscarEmbarques(token, filtro);
-      console.log(`[CF Poller] pg ${page}: ${resp?.respostas?.length || 0} NFs encontradas`);
-      if (!resp || !Array.isArray(resp.respostas) || resp.respostas.length === 0) break;
+      // A API do CF as vezes devolve em "respostas", as vezes em "content"
+      const lista = resp ? (resp.respostas || resp.content || []) : [];
+      console.log(`[CF Poller] pg ${page}: ${lista.length} NFs encontradas`);
+      if (!Array.isArray(lista) || lista.length === 0) break;
 
-      for (const item of resp.respostas) {
+      for (const item of lista) {
         try {
-          // Sempre atualiza o cache, independente de já ter vínculo
+          // GUARD: so cria corrida para NF pendente (nao coletada).
+          // Sem isso, alargar a janela criaria corridas para NFs ja entregues.
+          const statusNF = String(item.statusEmbarque?.nome || '').toUpperCase();
+          if (statusNF !== 'A_EMBARCAR') continue;
+
           await this._salvarCache(item, config.cliente_id);
           await this._processarNF(item, config);
           totalProcessadas++;
@@ -147,8 +150,7 @@ class ConfirmaFacilPoller {
         }
       }
 
-      // Próxima página ou fim
-      if (resp.respostas.length < PAGE_SIZE) break;
+      // Paginar ate vir pagina vazia (nunca para so por ter menos de PAGE_SIZE)
       page++;
     }
 
