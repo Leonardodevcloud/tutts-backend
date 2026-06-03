@@ -107,15 +107,17 @@ class ConfirmaFacilPoller {
 
     // Janela de busca: do último polling até agora
     // Se primeiro polling, busca últimas 24h
-    const agora  = new Date();
-    const inicio = config.ultimo_polling
-      ? new Date(config.ultimo_polling)
-      : new Date(agora.getTime() - 24 * 60 * 60 * 1000);
-
-    const formatarDataCF = (d) => {
-      const p = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-    };
+    const agora = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    // Janela FIXA de lookback (mesma logica da rota manual /buscar-nfs que funciona).
+    // NAO depende de ultimo_polling para a data inicial: a janela curta (ultimo_polling
+    // ate agora) fazia o poller so enxergar NFs do ultimo ~1 minuto, ignorando NFs ja
+    // pendentes no CF. O vinculo em confirmafacil_vinculos garante idempotencia (nao
+    // recria corrida pra NF que ja tem corrida), entao re-escanear a janela e seguro.
+    const LOOKBACK_DIAS = 3;
+    const dInicio  = new Date(agora.getTime() - LOOKBACK_DIAS * 24 * 60 * 60 * 1000);
+    const deStr  = `${dInicio.getFullYear()}/${p(dInicio.getMonth()+1)}/${p(dInicio.getDate())} 00:00:00`;
+    const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
     // Buscar NFs paginando
     let page = 0;
@@ -125,8 +127,8 @@ class ConfirmaFacilPoller {
       const filtro = {
         page,
         size: PAGE_SIZE,
-        de:   formatarDataCF(inicio),
-        ate:  formatarDataCF(agora),
+        de:   deStr,
+        ate:  ateStr,
         cnpjTransportadora: [config.cnpj_transportadora],
       };
 
