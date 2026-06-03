@@ -728,16 +728,17 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         SELECT c.*,
           v.solicitacao_id, v.criado_em AS vinculado_em,
           sc.tutts_os_numero, sc.status AS status_corrida,
-          cl.sucesso AS ultimo_cf_sucesso, cl.cod_ocorrencia AS ultimo_cod_cf,
-          cs.nome AS cliente_nome
+          cs.nome AS cliente_nome,
+          (SELECT cod_ocorrencia FROM confirmafacil_log
+           WHERE solicitacao_id = v.solicitacao_id
+           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cod_cf,
+          (SELECT sucesso FROM confirmafacil_log
+           WHERE solicitacao_id = v.solicitacao_id
+           ORDER BY criado_em DESC LIMIT 1) AS ultimo_cf_sucesso
         FROM confirmafacil_nfs_cache c
-        LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+        LEFT JOIN confirmafacil_vinculos v
+          ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-        LEFT JOIN LATERAL (
-          SELECT cod_ocorrencia, sucesso FROM confirmafacil_log
-          WHERE v.solicitacao_id IS NOT NULL AND solicitacao_id = v.solicitacao_id
-          ORDER BY criado_em DESC LIMIT 1
-        ) cl ON TRUE
         LEFT JOIN clientes_solicitacao cs ON cs.id = c.cliente_id
         WHERE 1=1 ${where}
         ORDER BY c.data_previsao DESC NULLS LAST, c.id_embarque DESC
