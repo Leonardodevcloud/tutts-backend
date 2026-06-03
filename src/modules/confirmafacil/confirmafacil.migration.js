@@ -38,6 +38,7 @@ async function initConfirmaFacilTables(pool) {
       coleta_nome_fantasia VARCHAR(255),
       coleta_telefone      VARCHAR(50),
       centro_custo_mapp    VARCHAR(100),
+      categoria_mapp       VARCHAR(20),
       ativo                BOOLEAN DEFAULT TRUE,
       criado_em            TIMESTAMP DEFAULT NOW(),
       UNIQUE (config_id, cnpj_embarcador)
@@ -46,6 +47,9 @@ async function initConfirmaFacilTables(pool) {
 
   await pool.query(`ALTER TABLE confirmafacil_embarcadores
     ADD COLUMN IF NOT EXISTS centro_custo_mapp VARCHAR(100)`).catch(() => {});
+
+  await pool.query(`ALTER TABLE confirmafacil_embarcadores
+    ADD COLUMN IF NOT EXISTS categoria_mapp VARCHAR(20)`).catch(() => {});
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS confirmafacil_log (

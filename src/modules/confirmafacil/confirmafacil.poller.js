@@ -327,6 +327,11 @@ class ConfirmaFacilPoller {
       numeroPedido:   String(numeroNF),
     };
 
+    // Modalidade de frete (categoria) configurada na filial — se houver
+    if (coleta.categoria_mapp && String(coleta.categoria_mapp).trim()) {
+      payloadTutts.categoria = String(coleta.categoria_mapp).trim().toUpperCase();
+    }
+
     console.log(`📤 [CF Poller] criando corrida para NF ${numeroNF} (idEmbarque ${idEmbarque})`);
 
     // Chamar API Tutts
@@ -353,8 +358,8 @@ class ConfirmaFacilPoller {
         cliente_id, numero_pedido, centro_custo, usuario_solicitante,
         forma_pagamento, retorno, tutts_os_numero, tutts_distancia,
         tutts_duracao, tutts_valor, tutts_url_rastreamento,
-        status, provider_usado
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        status, provider_usado, categoria_usada
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING id
     `, [
       config.cliente_id,
@@ -370,6 +375,7 @@ class ConfirmaFacilPoller {
       resultado.detalhes?.urlRastreamento || null,
       'enviado',
       'tutts',
+      (coleta.categoria_mapp && String(coleta.categoria_mapp).trim()) ? String(coleta.categoria_mapp).trim().toUpperCase() : null,
     ]);
 
     const solicitacaoId = solic.id;
