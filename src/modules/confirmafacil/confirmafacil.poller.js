@@ -21,7 +21,7 @@ const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
 const TUTTS_API_URL  = 'https://tutts.com.br/integracao';
 const TUTTS_WEBHOOK  = 'https://tutts-backend-production.up.railway.app/api/webhook/tutts';
-const PAGE_SIZE      = 100;
+const PAGE_SIZE      = 50;
 
 class ConfirmaFacilPoller {
   constructor(pool) {
@@ -109,7 +109,6 @@ class ConfirmaFacilPoller {
     // Se primeiro polling, busca últimas 24h
     const agora = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    // Janela ampla, identica a /sincronizar. Seguranca: guard A_EMBARCAR + vinculo.
     const deStr  = '2024/01/01 00:00:00';
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
@@ -128,7 +127,7 @@ class ConfirmaFacilPoller {
 
       const resp = await this._buscarEmbarques(token, filtro);
       if (!resp) {
-        console.warn(`⚠️ [CF Poller] pg ${page}: paginacao interrompida por falha na chamada ao CF (NAO foi fim de dados)`);
+        console.warn(`⚠️ [CF Poller] pg ${page}: paginacao interrompida (falha no CF apos retries — provavel instabilidade GKO)`);
         break;
       }
 
@@ -404,23 +403,37 @@ class ConfirmaFacilPoller {
   }
 
   async _buscarEmbarques(token, filtro) {
-    try {
-      const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
-      const resp = await httpRequest(`${CF_FILTER_URL}?${params}`, {
-        method:  'GET',
-        headers: { Authorization: token, accept: 'application/json' },
-      });
-      const data = resp.json();
-      if (!resp.ok || (data && data.error)) {
+    // O CF (GKO) as vezes devolve HTTP 400 com erro interno de Hibernate
+    // ("LogicalConnectionManagedImpl is closed"), que costuma ser transitorio.
+    // Tentamos a mesma pagina ate 3x com backoff antes de desistir.
+    const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+    const url    = `${CF_FILTER_URL}?${params}`;
+    const MAX_TENTATIVAS = 3;
+
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+      try {
+        const resp = await httpRequest(url, {
+          method:  'GET',
+          headers: { Authorization: token, accept: 'application/json' },
+        });
+        const data = resp.json();
+
+        if (resp.ok && !(data && data.error)) return data; // sucesso
+
         const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data);
-        console.error(`❌ [CF Poller] CF /filter/embarque status=${resp.status} — corpo(400): ${String(corpo).slice(0, 400)}`);
-        return null;
+        console.error(`❌ [CF Poller] CF /filter/embarque status=${resp.status} (tentativa ${tentativa}/${MAX_TENTATIVAS}) — corpo(300): ${String(corpo).slice(0, 300)}`);
+      } catch (err) {
+        console.error(`❌ [CF Poller] erro de rede ao buscar (tentativa ${tentativa}/${MAX_TENTATIVAS}): ${err.message}`);
       }
-      return data;
-    } catch (err) {
-      console.error('❌ [CF Poller] erro ao buscar embarques:', err.message);
-      return null;
+
+      // backoff progressivo: 2s, 4s (nao espera depois da ultima tentativa)
+      if (tentativa < MAX_TENTATIVAS) {
+        await new Promise((r) => setTimeout(r, tentativa * 2000));
+      }
     }
+
+    console.error('❌ [CF Poller] CF falhou apos todas as tentativas — provavel instabilidade no ConfirmaFacil (GKO). Tentaremos no proximo ciclo.');
+    return null;
   }
 
   async _buscarColeta(configId, cnpjEmbarcador) {
