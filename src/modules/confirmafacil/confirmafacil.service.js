@@ -124,8 +124,13 @@ class ConfirmaFacilService {
     }
 
     // 3. Buscar NFs dos pontos
-    // Se pontoNumero = 1 (coleta), não tem NF — busca todos os pontos com NF
-    const pontoParaBuscar = pontoNumero === 1 ? null : pontoNumero;
+    // Ponto 1 = coleta: se finalizado_ponto, ignora (motoboy coletou, não entregou)
+    if (pontoNumero === 1 && pontoStatus === 'finalizado_ponto') {
+      console.log(`[CF Service] OS ${osNumero} ponto 1 finalizado (coleta) — aguardando entrega, sem notificação CF`);
+      return;
+    }
+    // Se pontoNumero = 1 com outro status (ausente, fechado etc) ou sem número, busca todos
+    const pontoParaBuscar = (!pontoNumero || pontoNumero === 1) ? null : pontoNumero;
     const pontos = await this._buscarPontos(solicitacaoId, pontoParaBuscar);
     if (pontos.length === 0) {
       console.warn(`⚠️ [CF Service] corrida ${osNumero} sem pontos com NF — nada a enviar (pontoNumero=${pontoNumero})`);
