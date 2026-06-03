@@ -681,7 +681,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // Busca NFs direto na API CF e cruza com vinculos do banco
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { embarcador_cnpj, tem_corrida, de, ate, busca, page = '0', size = '50' } = req.query;
+      const { embarcador_cnpj, tem_corrida, status_cf, de, ate, busca, page = '0', size = '50' } = req.query;
 
       const pg = Math.max(0, Number(page));
       const sz = Math.min(500, Math.max(1, Number(size)));
@@ -817,6 +817,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       }
       if (tem_corrida === 'sim') resultado = resultado.filter(n => n.solicitacao_id);
       if (tem_corrida === 'nao') resultado = resultado.filter(n => !n.solicitacao_id);
+      if (status_cf) resultado = resultado.filter(n => n.status_cf === status_cf);
       if (busca) {
         const b = busca.toLowerCase();
         resultado = resultado.filter(n =>
