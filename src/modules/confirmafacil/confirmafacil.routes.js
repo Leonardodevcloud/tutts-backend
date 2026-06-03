@@ -69,8 +69,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   router.post('/embarcadores', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       const { cliente_id, cnpj_embarcador, nome_embarcador,
-              endereco_texto, coleta_lat, coleta_lng, centro_custo_mapp,
-              categoria_mapp } = req.body;
+              endereco_texto, coleta_lat, coleta_lng, centro_custo_mapp } = req.body;
 
       if (!cliente_id || !cnpj_embarcador || !endereco_texto)
         throw new AppError('cliente_id, cnpj_embarcador e endereco_texto são obrigatórios', 400);
@@ -124,8 +123,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
            coleta_rua, coleta_numero, coleta_bairro,
            coleta_cidade, coleta_uf, coleta_cep,
            coleta_lat, coleta_lng, coleta_nome_fantasia,
-           centro_custo_mapp, categoria_mapp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           centro_custo_mapp)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (config_id, cnpj_embarcador) DO UPDATE SET
           nome_embarcador     = EXCLUDED.nome_embarcador,
           coleta_rua          = EXCLUDED.coleta_rua,
@@ -137,16 +136,14 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           coleta_lat          = EXCLUDED.coleta_lat,
           coleta_lng          = EXCLUDED.coleta_lng,
           coleta_nome_fantasia= EXCLUDED.coleta_nome_fantasia,
-          centro_custo_mapp   = EXCLUDED.centro_custo_mapp,
-          categoria_mapp      = EXCLUDED.categoria_mapp
+          centro_custo_mapp   = EXCLUDED.centro_custo_mapp
         RETURNING *
       `, [cfg[0].id, cnpj_embarcador, nome_embarcador,
           coleta_rua, coleta_numero, coleta_bairro,
           coleta_cidade, coleta_uf, coleta_cep,
           lat || null, lng || null,
           nome_embarcador || null,
-          centro_custo_mapp || null,
-          categoria_mapp || null]);
+          centro_custo_mapp || null]);
 
       res.json({ ok: true, embarcador: rows[0] });
     } catch (err) { next(err); }
@@ -727,18 +724,6 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
-  // ── Categorias (modalidades de frete) configuradas para o cliente ──
-  // Espelha clientes_solicitacao.categorias_disponiveis ([{sigla,nome}]).
-  router.get('/categorias/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {
-    try {
-      const { rows } = await pool.query(
-        'SELECT categorias_disponiveis FROM clientes_solicitacao WHERE id = $1',
-        [req.params.clienteId]
-      );
-      res.json({ categorias: rows[0]?.categorias_disponiveis || [] });
-    } catch (err) { next(err); }
-  });
-
 
   // ── Listagem combinada de NFs (vinculos + filtros) ───────────
   // ── Listagem de embarcadores de todos os clientes (para filtro) ─
@@ -1101,6 +1086,29 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       console.error('[CF Poller] erro ciclo manual:', err.message);
       res.json({ ok: false, erro: err.message });
     }
+  });
+
+  // ── Reprocessar notas barradas: limpa o backoff e dispara o ciclo na hora ──
+  // As NFs que falharam (ex.: "Categoria nao informada") ficam em backoff. Este
+  // endpoint zera o backoff e roda um ciclo imediatamente, entao tudo que estava
+  // barrado e re-tentado agora (uteis depois de cadastrar a modalidade da filial).
+  router.post('/reprocessar-barradas', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      let limpo = 0;
+      try {
+        const del = await pool.query('DELETE FROM confirmafacil_poller_retry');
+        limpo = del.rowCount || 0;
+      } catch (e) { /* tabela pode nao existir ainda — ignora */ }
+
+      const { getConfirmaFacilPoller } = require('./index');
+      const poller = getConfirmaFacilPoller(pool);
+      console.log(`[CF Poller] reprocessamento manual: ${limpo} backoff(s) limpo(s) — disparando ciclo`);
+      // fire-and-forget: o ciclo pagina varias paginas; nao travamos a resposta
+      poller._ciclo().catch((e) => console.error('[CF Poller] erro no reprocesso:', e.message));
+
+      res.json({ ok: true, backoff_limpo: limpo,
+        mensagem: 'Backoff limpo e ciclo disparado — as notas barradas serao reprocessadas agora.' });
+    } catch (err) { next(err); }
   });
 
 
