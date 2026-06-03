@@ -735,7 +735,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
         LEFT JOIN LATERAL (
           SELECT cod_ocorrencia, sucesso FROM confirmafacil_log
-          WHERE solicitacao_id = v.solicitacao_id ORDER BY criado_em DESC LIMIT 1
+          WHERE v.solicitacao_id IS NOT NULL AND solicitacao_id = v.solicitacao_id
+          ORDER BY criado_em DESC LIMIT 1
         ) cl ON TRUE
         LEFT JOIN clientes_solicitacao cs ON cs.id = c.cliente_id
         WHERE 1=1 ${where}
