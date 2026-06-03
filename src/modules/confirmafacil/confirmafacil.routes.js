@@ -1074,6 +1074,21 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   });
 
 
+  // ── Forçar ciclo do poller manualmente (debug) ───────────────
+  router.post('/poller/ciclo', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { getConfirmaFacilPoller } = require('./index');
+      const poller = getConfirmaFacilPoller(pool);
+      console.log('[CF Poller] ciclo manual disparado via API');
+      await poller._ciclo();
+      res.json({ ok: true, mensagem: 'Ciclo executado — veja logs Railway' });
+    } catch (err) {
+      console.error('[CF Poller] erro ciclo manual:', err.message);
+      res.json({ ok: false, erro: err.message });
+    }
+  });
+
+
   return router;
 }
 
