@@ -76,7 +76,7 @@ class ConfirmaFacilPoller {
         cf.mapa_ocorrencias,
         cf.ultimo_polling,
         cs.tutts_token_api,
-        cs.tutts_cod_cliente AS tutts_codigo_cliente,
+        cs.tutts_codigo_cliente,
         cs.nome AS cliente_nome,
         cs.forma_pagamento_padrao,
         cs.centro_custo_padrao
@@ -194,8 +194,9 @@ class ConfirmaFacilPoller {
     }
 
     // Montar destinatário a partir do objeto retornado pelo CF
+    // Prioriza trecho[0].enderecoDestino (mais completo), igual a rota manual
     const dest     = item.destinatario || {};
-    const endDest  = dest.endereco || item.endereco || {};
+    const endDest  = item.trecho?.[0]?.enderecoDestino || dest.endereco || item.endereco || {};
 
     // Montar pontos: ponto 1 = coleta, ponto 2 = entrega destinatário
     const pontos = [
@@ -413,15 +414,14 @@ class ConfirmaFacilPoller {
   }
 
   async _buscarColeta(configId, cnpjEmbarcador) {
-    const cnpjLimpo = (cnpjEmbarcador || '').replace(/\D/g, '');
     const { rows } = await this.pool.query(`
       SELECT * FROM confirmafacil_embarcadores
       WHERE config_id = $1
-        AND (REPLACE(cnpj_embarcador, '.', '') REPLACE(REPLACE(cnpj_embarcador, '/', ''), '-', '') = $2
-             OR cnpj_embarcador = $3)
+        AND REGEXP_REPLACE(cnpj_embarcador, '[^0-9]', '', 'g') =
+            REGEXP_REPLACE($2::text, '[^0-9]', '', 'g')
         AND ativo = TRUE
       LIMIT 1
-    `, [configId, cnpjLimpo, cnpjEmbarcador]);
+    `, [configId, cnpjEmbarcador]);
 
     // fallback: busca sem filtrar CNPJ (embarcador padrão)
     if (rows.length === 0) {
@@ -437,7 +437,7 @@ class ConfirmaFacilPoller {
 
   async _logarErro(clienteId, idEmbarque, numeroNF, serieNF, cnpjEmbarcador, erro) {
     await this.pool.query(`
-      INSERT INTO confirmafacial_log
+      INSERT INTO confirmafacil_log
         (cliente_id, id_embarque, numero_nf, serie_nf, cnpj_embarcador,
          tipo, sucesso, erro_msg)
       VALUES ($1,$2,$3,$4,$5,'poller',FALSE,$6)
