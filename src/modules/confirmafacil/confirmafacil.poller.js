@@ -109,10 +109,8 @@ class ConfirmaFacilPoller {
     // Se primeiro polling, busca últimas 24h
     const agora = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    // Janela AMPLA, identica a rota /sincronizar que funciona e popula o cache.
-    // NFs pendentes (A_EMBARCAR) costumam ser mais antigas que poucos dias, entao
-    // a janela precisa ser larga. A seguranca vem do guard de status (so cria
-    // corrida para A_EMBARCAR) + do vinculo (nao recria corrida ja existente).
+    // Janela AMPLA, identica a rota /sincronizar (que funciona). A seguranca vem do
+    // guard de status (so cria corrida para A_EMBARCAR) + do vinculo (idempotente).
     const deStr  = '2024/01/01 00:00:00';
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
@@ -130,19 +128,29 @@ class ConfirmaFacilPoller {
       };
 
       const resp = await this._buscarEmbarques(token, filtro);
+
+      // Distingue FALHA de chamada (resp null) de pagina realmente vazia.
+      // Sem isso, um erro de rede na pg 1 fazia o loop parar achando que acabou
+      // (travava em 50/100 NFs).
+      if (!resp) {
+        console.warn(`⚠️ [CF Poller] pg ${page}: falha na chamada ao CF — paginacao interrompida (NAO foi fim de dados)`);
+        break;
+      }
+
       // A API do CF as vezes devolve em "respostas", as vezes em "content"
-      const lista = resp ? (resp.respostas || resp.content || []) : [];
-      console.log(`[CF Poller] pg ${page}: ${lista.length} NFs encontradas`);
+      const lista = resp.respostas || resp.content || [];
+      console.log(`[CF Poller] pg ${page}: ${lista.length} NFs | totalCount=${resp.totalCount} totalPages=${resp.totalPages}`);
       if (!Array.isArray(lista) || lista.length === 0) break;
 
       for (const item of lista) {
         try {
+          // Cache de TODA NF (a tela mostra tudo sozinha, sem sync manual)
+          await this._salvarCache(item, config.cliente_id);
+
           // GUARD: so cria corrida para NF pendente (nao coletada).
-          // Sem isso, alargar a janela criaria corridas para NFs ja entregues.
           const statusNF = String(item.statusEmbarque?.nome || '').toUpperCase();
           if (statusNF !== 'A_EMBARCAR') continue;
 
-          await this._salvarCache(item, config.cliente_id);
           await this._processarNF(item, config);
           totalProcessadas++;
         } catch (err) {
@@ -150,8 +158,13 @@ class ConfirmaFacilPoller {
         }
       }
 
-      // Paginar ate vir pagina vazia (nunca para so por ter menos de PAGE_SIZE)
+      // Paginar ate vir pagina vazia. Cap de seguranca contra loop infinito
+      // caso a API ignore o parametro "page".
       page++;
+      if (page > 300) {
+        console.warn('[CF Poller] limite de 300 paginas atingido — parando por seguranca');
+        break;
+      }
     }
 
     // Atualizar timestamp do último polling
