@@ -823,13 +823,14 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           try {
             const cfAuth = getConfirmaFacilAuth();
             const token  = await cfAuth.obterToken(config.cliente_id, config);
-            let pg2 = 0, totalPages = 1, total = 0;
+            let pg2 = 0, total = 0;
+            const ateStr = (() => { const n = new Date(); const p = x => String(x).padStart(2,'0');
+              return `${n.getFullYear()}/${p(n.getMonth()+1)}/${p(n.getDate())} 23:59:59`; })();
 
-            while (pg2 < totalPages) {
+            while (true) {
               const filtro = { page: pg2, size: 100,
                 de:  '2024/01/01 00:00:00',
-                ate: (() => { const n = new Date(); const p = x => String(x).padStart(2,'0');
-                  return `${n.getFullYear()}/${p(n.getMonth()+1)}/${p(n.getDate())} 23:59:59`; })(),
+                ate: ateStr,
                 cnpjTransportadora: [config.cnpj_transportadora] };
 
               const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
@@ -839,11 +840,6 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
               );
               const data = resp.json();
               const nfs  = data.respostas || data.content || [];
-
-              // Descobrir total de páginas com qualquer campo disponível
-              if (data.totalPages && data.totalPages > totalPages) totalPages = data.totalPages;
-              else if (data.totalCount > 0) totalPages = Math.ceil(data.totalCount / 100);
-              else if (data.total > 0) totalPages = Math.ceil(data.total / 100);
 
               for (const nf of nfs) {
                 const end = nf.destinatario?.endereco || nf.endereco || {};
