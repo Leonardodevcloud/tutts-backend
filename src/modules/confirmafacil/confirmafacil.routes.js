@@ -985,16 +985,19 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         fotos = pontosComFoto.map(p => p.foto_url).filter(Boolean);
       }
 
-      // Trilha formatada
-      const trilha = logs.map(l => ({
-        id:            l.id,
-        numero_nf:     l.numero_nf,
-        status_tutts:  l.status_tutts,
-        cod_ocorrencia:l.cod_ocorrencia,
-        sucesso:       l.sucesso,
-        erro_msg:      l.erro_msg,
-        criado_em:     l.criado_em,
-      }));
+      // Trilha formatada — filtra eventos internos sem relevância pro usuário
+      const trilha = logs
+        .filter(l => !(l.erro_msg === 'sem ponto com NF' && !l.sucesso))
+        .filter(l => !(l.erro_msg === 'status nao mapeado' && !l.sucesso))
+        .map(l => ({
+          id:            l.id,
+          numero_nf:     l.numero_nf,
+          status_tutts:  l.status_tutts,
+          cod_ocorrencia:l.cod_ocorrencia,
+          sucesso:       l.sucesso,
+          erro_msg:      l.erro_msg,
+          criado_em:     l.criado_em,
+        }));
 
       res.json({ sc, pontos, vinculo, trilha, fotos, nomeRecebedor, docRecebedor });
     } catch (err) { next(err); }

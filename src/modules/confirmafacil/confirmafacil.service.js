@@ -150,8 +150,7 @@ class ConfirmaFacilService {
     const pontoParaBuscar = (!pontoNumero || pontoNumero === 1) ? null : pontoNumero;
     const pontos = await this._buscarPontos(solicitacaoId, pontoParaBuscar);
     if (pontos.length === 0) {
-      console.warn(`⚠️ [CF Service] corrida ${osNumero} sem pontos com NF — nada a enviar (pontoNumero=${pontoNumero})`);
-      // Salvar fotos mesmo sem NF mapeada
+      // Salvar só se tiver fotos ou recebedor — senão descarta silenciosamente
       if (fotos?.length > 0 || nomeRecebedor) {
         try {
           if (config) await this.pool.query(`
