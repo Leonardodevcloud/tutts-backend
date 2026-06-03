@@ -838,8 +838,10 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
               const data = resp.json();
               const nfs  = data.respostas || data.content || [];
 
-              if (data.totalPages > 1) totalPages = data.totalPages;
+              // Descobrir total de páginas com qualquer campo disponível
+              if (data.totalPages && data.totalPages > totalPages) totalPages = data.totalPages;
               else if (data.totalCount > 0) totalPages = Math.ceil(data.totalCount / 100);
+              else if (data.total > 0) totalPages = Math.ceil(data.total / 100);
 
               for (const nf of nfs) {
                 const end = nf.destinatario?.endereco || nf.endereco || {};
@@ -888,7 +890,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
                 total++;
               }
 
-              if (nfs.length < 100 && data.totalPages === undefined) break;
+              // Para só se vier página vazia — nunca para por ter menos de 100
+              if (nfs.length === 0) break;
               pg2++;
             }
             console.log(`✅ [CF Sync] cliente ${config.cliente_id}: ${total} NFs sincronizadas`);
