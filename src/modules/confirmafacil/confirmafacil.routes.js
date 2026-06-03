@@ -831,7 +831,18 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const total = resultado.length;
       const paginado = resultado.slice(pg * sz, (pg + 1) * sz);
 
-      res.json({ nfs: paginado, total, page: pg, size: sz });
+      // Contadores por status (calculado sobre todos os resultados filtrados)
+      const contadores = {};
+      resultado.forEach(n => {
+        const s = n.status_cf || 'DESCONHECIDO';
+        contadores[s] = (contadores[s] || 0) + 1;
+      });
+      const totalComOS  = resultado.filter(n => n.solicitacao_id).length;
+      const totalSemOS  = resultado.filter(n => !n.solicitacao_id).length;
+      const totalCFOk   = resultado.filter(n => n.ultimo_cf_sucesso).length;
+
+      res.json({ nfs: paginado, total, page: pg, size: sz,
+                 contadores, totalComOS, totalSemOS, totalCFOk });
     } catch (err) { next(err); }
   });
 
