@@ -104,8 +104,13 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const coleta_numero = partes[1] || '';
       const coleta_bairro = partes[2] || '';
       const coleta_cidade = partes[3] || '';
-      const coleta_uf     = partes[4] || '';
-      const coleta_cep    = partes[5] || '';
+      // UF: pegar só 2 letras maiúsculas — ex: "AL - 57061-51" → "AL"
+      const ufRaw = partes[4] || '';
+      const ufMatch = ufRaw.match(/[A-Z]{2}/);
+      const coleta_uf  = ufMatch ? ufMatch[0] : ufRaw.substring(0, 2);
+      // CEP: buscar padrão XXXXX-XX em qualquer parte do endereço
+      const cepMatch = endereco_texto.match(/\d{5}-?\d{2,3}/);
+      const coleta_cep = cepMatch ? cepMatch[0] : (partes[5] || '');
 
       // Buscar config_id
       const { rows: cfg } = await pool.query(
@@ -865,7 +870,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
               const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
               const resp = await httpRequest(
                 'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
-                { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
+                { method: 'GET', headers: { Authorization: token2, accept: 'application/json' } }
               );
               const data = resp.json();
               const nfs  = data.respostas || data.content || [];
