@@ -128,6 +128,8 @@ class ConfirmaFacilPoller {
 
       for (const item of resp.respostas) {
         try {
+          // Sempre atualiza o cache, independente de já ter vínculo
+          await this._salvarCache(item, config.cliente_id);
           await this._processarNF(item, config);
           totalProcessadas++;
         } catch (err) {
@@ -335,6 +337,57 @@ class ConfirmaFacilPoller {
   // ══════════════════════════════════════════════════
   // HELPERS
   // ══════════════════════════════════════════════════
+
+  async _salvarCache(nf, clienteId) {
+    try {
+      const end = nf.destinatario?.endereco || nf.endereco || {};
+      await this.pool.query(`
+        INSERT INTO confirmafacil_nfs_cache (
+          cliente_id, id_embarque, numero_nf, serie_nf, chave_nfe,
+          cnpj_embarcador, nome_embarcador,
+          destinatario_nome, destinatario_cnpj,
+          destinatario_cidade, destinatario_uf, destinatario_end,
+          status_cf, status_nota, dias_atraso,
+          data_previsao, data_emissao, valor,
+          tipo_envio, tipo_frete, link_rastreamento,
+          payload_completo, sincronizado_em
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW())
+        ON CONFLICT (cliente_id, id_embarque) DO UPDATE SET
+          status_cf           = EXCLUDED.status_cf,
+          status_nota         = EXCLUDED.status_nota,
+          dias_atraso         = EXCLUDED.dias_atraso,
+          data_previsao       = EXCLUDED.data_previsao,
+          destinatario_nome   = EXCLUDED.destinatario_nome,
+          destinatario_cidade = EXCLUDED.destinatario_cidade,
+          destinatario_uf     = EXCLUDED.destinatario_uf,
+          link_rastreamento   = EXCLUDED.link_rastreamento,
+          payload_completo    = EXCLUDED.payload_completo,
+          sincronizado_em     = NOW()
+      `, [
+        clienteId,
+        nf.idEmbarque || nf.id,
+        nf.numero, nf.serie, nf.chave || null,
+        nf.embarcador?.cnpj || '',
+        nf.embarcador?.nome || '',
+        nf.destinatario?.nome || '',
+        nf.destinatario?.cnpj || '',
+        end.cidade || '', end.uf || '',
+        [end.logradouro, end.numero, end.cidade, end.uf].filter(Boolean).join(', '),
+        nf.statusEmbarque?.nome || 'DESCONHECIDO',
+        nf.statusNota || '',
+        nf.diasAtraso || 0,
+        nf.dataPrevisao ? new Date(nf.dataPrevisao) : null,
+        nf.dataEmissao  ? new Date(nf.dataEmissao)  : null,
+        nf.valor || null,
+        nf.tipoEnvio || null,
+        nf.tipoDeFrete || null,
+        nf.linkExterno || null,
+        nf,
+      ]);
+    } catch (err) {
+      console.warn('[CF Poller] erro ao salvar cache NF:', err.message);
+    }
+  }
 
   async _buscarEmbarques(token, filtro) {
     try {
