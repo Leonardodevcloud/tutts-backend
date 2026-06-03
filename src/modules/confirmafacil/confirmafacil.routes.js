@@ -325,7 +325,37 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // Usa endereço do embarcador como coleta e endereço do destinatário como entrega.
   router.post('/criar-corrida', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { nf, cliente_id } = req.body;
+      const { nf: nfRaw, cliente_id } = req.body;
+
+      // Normalizar — suporta NF do CF API e NF do cache local
+      const nf = nfRaw.idEmbarque ? nfRaw : {
+        idEmbarque:   nfRaw.id_embarque,
+        numero:       nfRaw.numero_nf,
+        serie:        nfRaw.serie_nf,
+        chave:        nfRaw.chave_nfe,
+        valor:        nfRaw.valor,
+        diasAtraso:   nfRaw.dias_atraso || 0,
+        dataPrevisao: nfRaw.data_previsao,
+        statusEmbarque: { nome: nfRaw.status_cf || 'A_EMBARCAR' },
+        embarcador: {
+          cnpj: nfRaw.cnpj_embarcador || '',
+          nome: nfRaw.nome_embarcador || '',
+          endereco: {},
+        },
+        destinatario: {
+          nome: nfRaw.destinatario_nome || '',
+          cnpj: nfRaw.destinatario_cnpj || '',
+          endereco: {
+            logradouro: nfRaw.destinatario_end || '',
+            cidade:     nfRaw.destinatario_cidade || '',
+            uf:         nfRaw.destinatario_uf || '',
+          },
+        },
+        linkExterno: nfRaw.link_rastreamento,
+        // Se tiver payload_completo do CF, mescla
+        ...(nfRaw.payload_completo && typeof nfRaw.payload_completo === 'object'
+          ? nfRaw.payload_completo : {}),
+      };
 
       if (!nf) throw new AppError('nf é obrigatório', 400);
       if (!cliente_id) throw new AppError('cliente_id é obrigatório', 400);
