@@ -677,174 +677,244 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
-  // ── Listagem combinada: CF API + vinculos ────────────────────
-  // Busca NFs direto na API CF e cruza com vinculos do banco
+  // ── Listagem de NFs — lê do cache local (rápido) ────────────
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { embarcador_cnpj, tem_corrida, status_cf, de, ate, busca, page = '0', size = '50' } = req.query;
+      const { embarcador_cnpj, tem_corrida, status_cf,
+              de, ate, busca, page = '0', size = '100' } = req.query;
 
       const pg = Math.max(0, Number(page));
       const sz = Math.min(500, Math.max(1, Number(size)));
+      const offset = pg * sz;
 
-      // 1. Buscar todas as configs ativas
+      const params = [];
+      const wheres = [];
+
+      if (embarcador_cnpj) {
+        params.push(embarcador_cnpj);
+        wheres.push(`REGEXP_REPLACE(c.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($${params.length},'[^0-9]','','g')`);
+      }
+      if (status_cf) {
+        params.push(status_cf);
+        wheres.push(`c.status_cf = $${params.length}`);
+      }
+      if (de)  { params.push(de);  wheres.push(`c.data_previsao >= $${params.length}`); }
+      if (ate) { params.push(ate); wheres.push(`c.data_previsao <= $${params.length}`); }
+      if (tem_corrida === 'sim') wheres.push('v.solicitacao_id IS NOT NULL');
+      if (tem_corrida === 'nao') wheres.push('v.solicitacao_id IS NULL');
+      if (busca) {
+        params.push('%' + busca + '%');
+        const pi = params.length;
+        wheres.push(`(c.numero_nf ILIKE $${pi} OR c.destinatario_nome ILIKE $${pi} OR v.tutts_os_numero ILIKE $${pi})`);
+      }
+
+      const where = wheres.length ? 'AND ' + wheres.join(' AND ') : '';
+
+      // Buscar embarcadores para nomes
+      const { rows: embs } = await pool.query(`
+        SELECT e.cnpj_embarcador, e.nome_embarcador, e.centro_custo_mapp, e.config_id,
+               cf.cliente_id
+        FROM confirmafacil_embarcadores e
+        INNER JOIN confirmafacil_config cf ON cf.id = e.config_id
+        WHERE e.ativo = TRUE
+      `);
+      const embMap = {};
+      embs.forEach(e => {
+        const k = (e.cnpj_embarcador||'').replace(/[^0-9]/g,'');
+        embMap[k] = e;
+      });
+
+      const sqlData = `
+        SELECT c.*,
+          v.solicitacao_id, v.criado_em AS vinculado_em,
+          sc.tutts_os_numero, sc.status AS status_corrida,
+          cl.sucesso AS ultimo_cf_sucesso, cl.cod_ocorrencia AS ultimo_cod_cf,
+          cs.nome AS cliente_nome
+        FROM confirmafacil_nfs_cache c
+        LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+        LEFT JOIN LATERAL (
+          SELECT cod_ocorrencia, sucesso FROM confirmafacil_log
+          WHERE solicitacao_id = v.solicitacao_id ORDER BY criado_em DESC LIMIT 1
+        ) cl ON TRUE
+        LEFT JOIN clientes_solicitacao cs ON cs.id = c.cliente_id
+        WHERE 1=1 ${where}
+        ORDER BY c.data_previsao DESC NULLS LAST, c.id_embarque DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      `;
+
+      const sqlCount = `
+        SELECT COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE c.status_cf = 'A_EMBARCAR')  AS a_embarcar,
+          COUNT(*) FILTER (WHERE c.status_cf = 'EM_TRANSITO') AS em_transito,
+          COUNT(*) FILTER (WHERE c.status_cf = 'ENTREGUE')    AS entregue,
+          COUNT(*) FILTER (WHERE c.status_cf = 'REENTREGA')   AS reentrega,
+          COUNT(*) FILTER (WHERE c.status_cf = 'DEVOLVIDO')   AS devolvido,
+          COUNT(*) FILTER (WHERE c.status_cf = 'CANCELADO')   AS cancelado
+        FROM confirmafacil_nfs_cache c
+        LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+        WHERE 1=1 ${where}
+      `;
+
+      const [{ rows }, { rows: [counts] }] = await Promise.all([
+        pool.query(sqlData,  [...params, sz, offset]),
+        pool.query(sqlCount, params),
+      ]);
+
+      // Enriquecer com dados do embarcador
+      const nfs = rows.map(r => {
+        const k = (r.cnpj_embarcador||'').replace(/[^0-9]/g,'');
+        const emb = embMap[k];
+        return {
+          ...r,
+          nome_embarcador:  r.nome_embarcador || emb?.nome_embarcador || '',
+          centro_custo_mapp: emb?.centro_custo_mapp || null,
+        };
+      });
+
+      const total      = Number(counts.total);
+      const totalSemOS = rows.filter(r => !r.solicitacao_id).length;
+      const totalComOS = rows.filter(r =>  r.solicitacao_id).length;
+      const totalCFOk  = rows.filter(r =>  r.ultimo_cf_sucesso).length;
+
+      // Verificar última sincronização
+      const { rows: [syncInfo] } = await pool.query(
+        'SELECT MAX(sincronizado_em) AS ultima_sync, COUNT(*) AS total_cache FROM confirmafacil_nfs_cache'
+      );
+
+      res.json({
+        nfs, total, page: pg, size: sz,
+        contadores: {
+          A_EMBARCAR:  Number(counts.a_embarcar),
+          EM_TRANSITO: Number(counts.em_transito),
+          ENTREGUE:    Number(counts.entregue),
+          REENTREGA:   Number(counts.reentrega),
+          DEVOLVIDO:   Number(counts.devolvido),
+          CANCELADO:   Number(counts.cancelado),
+        },
+        totalComOS, totalSemOS, totalCFOk,
+        ultima_sync: syncInfo?.ultima_sync || null,
+        total_cache: Number(syncInfo?.total_cache || 0),
+      });
+    } catch (err) { next(err); }
+  });
+  // ── Sincronizar NFs do CF para o cache local ─────────────────
+  router.post('/sincronizar', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { cliente_id } = req.body;
+
       const { rows: configs } = await pool.query(`
         SELECT cf.*, cs.nome AS cliente_nome
         FROM confirmafacil_config cf
         INNER JOIN clientes_solicitacao cs ON cs.id = cf.cliente_id
-        WHERE cf.ativo = TRUE
-      `);
+        WHERE cf.ativo = TRUE ${cliente_id ? 'AND cf.cliente_id = $1' : ''}
+      `, cliente_id ? [cliente_id] : []);
 
-      if (configs.length === 0) {
-        return res.json({ nfs: [], total: 0, page: pg, size: sz, mensagem: 'Nenhum cliente CF configurado' });
-      }
+      if (configs.length === 0)
+        return res.json({ ok: false, mensagem: 'Nenhum cliente CF configurado' });
 
-      const httpRequest = require('../../shared/utils/httpRequest');
-      const agora = new Date();
+      // Roda sync em background
+      (async () => {
+        const httpRequest = require('../../shared/utils/httpRequest');
 
-      // Definir período
-      const inicio = de ? new Date(de) : new Date(agora.getTime() - 7 * 24 * 60 * 60 * 1000);
-      const fim    = ate ? new Date(ate) : agora;
+        for (const config of configs) {
+          try {
+            const cfAuth = getConfirmaFacilAuth();
+            const token  = await cfAuth.obterToken(config.cliente_id, config);
+            let pg2 = 0, totalPages = 1, total = 0;
 
-      const fmtCF = d => {
-        const p = n => String(n).padStart(2,'0');
-        return d.getFullYear()+'/'+p(d.getMonth()+1)+'/'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())
-      };
+            while (pg2 < totalPages) {
+              const filtro = { page: pg2, size: 100,
+                de:  '2024/01/01 00:00:00',
+                ate: (() => { const n = new Date(); const p = x => String(x).padStart(2,'0');
+                  return `${n.getFullYear()}/${p(n.getMonth()+1)}/${p(n.getDate())} 23:59:59`; })(),
+                cnpjTransportadora: [config.cnpj_transportadora] };
 
-      // 2. Buscar NFs em todas as configs
-      let todasNfs = [];
-      for (const config of configs) {
-        try {
-          const cfAuth = getConfirmaFacilAuth();
-          const token = await cfAuth.obterToken(config.cliente_id, config);
-          let pg2 = 0;
-          let totalPages = 1;
-          while (pg2 < totalPages) {
-            const filtro = { page: pg2, size: 100, de: fmtCF(inicio), ate: fmtCF(fim),
-                             cnpjTransportadora: [config.cnpj_transportadora] };
-            const params2 = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
-            const resp = await httpRequest(
-              'https://utilities.confirmafacil.com.br/filter/embarque?' + params2,
-              { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
-            );
-            const data = resp.json();
-            const nfs = data.respostas || data.content || [];
-            nfs.forEach(nf => { nf._cliente_id = config.cliente_id; nf._cliente_nome = config.cliente_nome; });
-            todasNfs = todasNfs.concat(nfs);
-            // Usar totalPages da resposta se disponível
-            if (data.totalPages > 1) totalPages = data.totalPages;
-            else if (data.totalCount > 0) totalPages = Math.ceil(data.totalCount / 100);
-            // Fallback: parar se retornou menos que o tamanho da página
-            if (nfs.length < 100 && data.totalPages === undefined && data.totalCount === undefined) break;
-            pg2++;
+              const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+              const resp = await httpRequest(
+                'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
+                { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
+              );
+              const data = resp.json();
+              const nfs  = data.respostas || data.content || [];
+
+              if (data.totalPages > 1) totalPages = data.totalPages;
+              else if (data.totalCount > 0) totalPages = Math.ceil(data.totalCount / 100);
+
+              for (const nf of nfs) {
+                const end = nf.destinatario?.endereco || nf.endereco || {};
+                await pool.query(`
+                  INSERT INTO confirmafacil_nfs_cache (
+                    cliente_id, id_embarque, numero_nf, serie_nf, chave_nfe,
+                    cnpj_embarcador, nome_embarcador,
+                    destinatario_nome, destinatario_cnpj,
+                    destinatario_cidade, destinatario_uf, destinatario_end,
+                    status_cf, status_nota, dias_atraso, data_previsao, data_emissao,
+                    valor, tipo_envio, tipo_frete, link_rastreamento, payload_completo,
+                    sincronizado_em
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW())
+                  ON CONFLICT (cliente_id, id_embarque) DO UPDATE SET
+                    status_cf          = EXCLUDED.status_cf,
+                    status_nota        = EXCLUDED.status_nota,
+                    dias_atraso        = EXCLUDED.dias_atraso,
+                    data_previsao      = EXCLUDED.data_previsao,
+                    destinatario_nome  = EXCLUDED.destinatario_nome,
+                    destinatario_cidade= EXCLUDED.destinatario_cidade,
+                    destinatario_uf    = EXCLUDED.destinatario_uf,
+                    link_rastreamento  = EXCLUDED.link_rastreamento,
+                    payload_completo   = EXCLUDED.payload_completo,
+                    sincronizado_em    = NOW()
+                `, [
+                  config.cliente_id,
+                  nf.idEmbarque || nf.id,
+                  nf.numero, nf.serie, nf.chave,
+                  nf.embarcador?.cnpj || '',
+                  nf.embarcador?.nome || '',
+                  nf.destinatario?.nome || '',
+                  nf.destinatario?.cnpj || '',
+                  end.cidade || '', end.uf || '',
+                  [end.logradouro, end.numero, end.cidade, end.uf].filter(Boolean).join(', '),
+                  nf.statusEmbarque?.nome || 'DESCONHECIDO',
+                  nf.statusNota || '',
+                  nf.diasAtraso || 0,
+                  nf.dataPrevisao ? new Date(nf.dataPrevisao) : null,
+                  nf.dataEmissao  ? new Date(nf.dataEmissao)  : null,
+                  nf.valor || null,
+                  nf.tipoEnvio || null,
+                  nf.tipoDeFrete || null,
+                  nf.linkExterno || null,
+                  nf,
+                ]);
+                total++;
+              }
+
+              if (nfs.length < 100 && data.totalPages === undefined) break;
+              pg2++;
+            }
+            console.log(`✅ [CF Sync] cliente ${config.cliente_id}: ${total} NFs sincronizadas`);
+          } catch(e) {
+            console.error(`❌ [CF Sync] cliente ${config.cliente_id}:`, e.message);
           }
-          console.log(`[CF nfs-lista] config ${config.cliente_id}: ${todasNfs.length} NFs carregadas (${totalPages} páginas)`);
-        } catch(e) {
-          console.warn('[CF nfs-lista] erro config', config.cliente_id, e.message);
         }
-      }
+      })();
 
-      // 3. Buscar todos os vinculos existentes
-      const idsEmbarque = todasNfs.map(n => n.idEmbarque || n.id).filter(Boolean);
-      let vinculos = [];
-      if (idsEmbarque.length > 0) {
-        const { rows: v } = await pool.query(`
-          SELECT v.*, sc.tutts_os_numero, sc.status AS status_corrida,
-                 cl.sucesso AS ultimo_cf_sucesso,
-                 cl.cod_ocorrencia AS ultimo_cod_cf
-          FROM confirmafacil_vinculos v
-          LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-          LEFT JOIN LATERAL (
-            SELECT cod_ocorrencia, sucesso FROM confirmafacil_log
-            WHERE solicitacao_id = v.solicitacao_id
-            ORDER BY criado_em DESC LIMIT 1
-          ) cl ON TRUE
-          WHERE v.id_embarque = ANY($1)
-        `, [idsEmbarque]);
-        vinculos = v;
-      }
-      const vinculoMap = {};
-      vinculos.forEach(v => { vinculoMap[String(v.id_embarque)] = v; });
-
-      // 4. Buscar embarcadores para nomes
-      const { rows: embs } = await pool.query(`
-        SELECT e.*, c.cliente_id FROM confirmafacil_embarcadores e
-        INNER JOIN confirmafacil_config c ON c.id = e.config_id WHERE e.ativo = TRUE
-      `);
-      const embMap = {};
-      embs.forEach(e => {
-        const cnpjLimpo = (e.cnpj_embarcador||'').replace(/[^0-9]/g,'');
-        embMap[cnpjLimpo] = e;
-      });
-
-      // 5. Montar resultado combinado
-      let resultado = todasNfs.map(nf => {
-        const id = String(nf.idEmbarque || nf.id || '');
-        const vinc = vinculoMap[id] || null;
-        const cnpjEmb = (nf.embarcador?.cnpj||'').replace(/[^0-9]/g,'');
-        const emb = embMap[cnpjEmb] || null;
-        return {
-          id_embarque:       nf.idEmbarque || nf.id,
-          numero_nf:         nf.numero,
-          serie_nf:          nf.serie,
-          cnpj_embarcador:   nf.embarcador?.cnpj || '',
-          nome_embarcador:   nf.embarcador?.nome || emb?.nome_embarcador || '',
-          cliente_id:        nf._cliente_id,
-          cliente_nome:      nf._cliente_nome,
-          destinatario_nome: nf.destinatario?.nome || '',
-          destinatario_cidade: nf.destinatario?.endereco?.cidade || nf.endereco?.cidade || '',
-          destinatario_uf:   nf.destinatario?.endereco?.uf || nf.endereco?.uf || '',
-          status_cf:         nf.statusEmbarque?.nome || 'DESCONHECIDO',
-          status_nota:       nf.statusNota || '',
-          dias_atraso:       nf.diasAtraso || 0,
-          data_previsao:     nf.dataPrevisao || null,
-          valor:             nf.valor || null,
-          centro_custo_mapp: emb?.centro_custo_mapp || null,
-          // Dados do vínculo (se já criou corrida)
-          solicitacao_id:    vinc?.solicitacao_id || null,
-          tutts_os_numero:   vinc?.tutts_os_numero || null,
-          status_corrida:    vinc?.status_corrida || null,
-          ultimo_cf_sucesso: vinc?.ultimo_cf_sucesso || false,
-          ultimo_cod_cf:     vinc?.ultimo_cod_cf || null,
-          vinculado_em:      vinc?.criado_em || null,
-          link_rastreamento: nf.linkExterno || null,
-        };
-      });
-
-      // 6. Aplicar filtros locais
-      if (embarcador_cnpj) {
-        const cnpjBusca = embarcador_cnpj.replace(/[^0-9]/g,'');
-        resultado = resultado.filter(n => (n.cnpj_embarcador||'').replace(/[^0-9]/g,'') === cnpjBusca);
-      }
-      if (tem_corrida === 'sim') resultado = resultado.filter(n => n.solicitacao_id);
-      if (tem_corrida === 'nao') resultado = resultado.filter(n => !n.solicitacao_id);
-      if (status_cf) resultado = resultado.filter(n => n.status_cf === status_cf);
-      if (busca) {
-        const b = busca.toLowerCase();
-        resultado = resultado.filter(n =>
-          (n.numero_nf||'').toLowerCase().includes(b) ||
-          (n.destinatario_nome||'').toLowerCase().includes(b) ||
-          (n.tutts_os_numero||'').toLowerCase().includes(b) ||
-          (n.nome_embarcador||'').toLowerCase().includes(b)
-        );
-      }
-
-      const total = resultado.length;
-      const paginado = resultado.slice(pg * sz, (pg + 1) * sz);
-
-      // Contadores por status (calculado sobre todos os resultados filtrados)
-      const contadores = {};
-      resultado.forEach(n => {
-        const s = n.status_cf || 'DESCONHECIDO';
-        contadores[s] = (contadores[s] || 0) + 1;
-      });
-      const totalComOS  = resultado.filter(n => n.solicitacao_id).length;
-      const totalSemOS  = resultado.filter(n => !n.solicitacao_id).length;
-      const totalCFOk   = resultado.filter(n => n.ultimo_cf_sucesso).length;
-
-      res.json({ nfs: paginado, total, page: pg, size: sz,
-                 contadores, totalComOS, totalSemOS, totalCFOk });
+      res.json({ ok: true, mensagem: 'Sincronização iniciada em background' });
     } catch (err) { next(err); }
   });
+
+  // ── Status da última sincronização ───────────────────────────
+  router.get('/sincronizar/status', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT cliente_id, COUNT(*) AS total, MAX(sincronizado_em) AS ultima_sync
+        FROM confirmafacil_nfs_cache
+        GROUP BY cliente_id
+      `);
+      res.json({ status: rows });
+    } catch (err) { next(err); }
+  });
+
+
 
 
   // ── Detalhes de uma OS com trilha + fotos ────────────────────

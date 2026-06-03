@@ -2,7 +2,6 @@
 
 async function initConfirmaFacilTables(pool) {
 
-  // Config principal por cliente
   await pool.query(`
     CREATE TABLE IF NOT EXISTS confirmafacil_config (
       id                   SERIAL PRIMARY KEY,
@@ -22,7 +21,6 @@ async function initConfirmaFacilTables(pool) {
     )
   `);
 
-  // Embarcadores: cada embarcador tem seu endereço de coleta
   await pool.query(`
     CREATE TABLE IF NOT EXISTS confirmafacil_embarcadores (
       id                   SERIAL PRIMARY KEY,
@@ -32,8 +30,8 @@ async function initConfirmaFacilTables(pool) {
       coleta_rua           VARCHAR(500),
       coleta_numero        VARCHAR(50),
       coleta_bairro        VARCHAR(255),
-      coleta_cidade        VARCHAR(255) NOT NULL,
-      coleta_uf            VARCHAR(2) NOT NULL,
+      coleta_cidade        VARCHAR(255),
+      coleta_uf            VARCHAR(2),
       coleta_cep           VARCHAR(10),
       coleta_lat           DECIMAL(10,7),
       coleta_lng           DECIMAL(10,7),
@@ -46,7 +44,9 @@ async function initConfirmaFacilTables(pool) {
     )
   `);
 
-  // Log de cada NF processada pelo poller
+  await pool.query(`ALTER TABLE confirmafacil_embarcadores
+    ADD COLUMN IF NOT EXISTS centro_custo_mapp VARCHAR(100)`).catch(() => {});
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS confirmafacil_log (
       id              SERIAL PRIMARY KEY,
@@ -68,7 +68,6 @@ async function initConfirmaFacilTables(pool) {
     )
   `);
 
-  // Vínculo idEmbarque CF ↔ solicitacao_id Tutts
   await pool.query(`
     CREATE TABLE IF NOT EXISTS confirmafacil_vinculos (
       id              SERIAL PRIMARY KEY,
@@ -82,16 +81,43 @@ async function initConfirmaFacilTables(pool) {
     )
   `);
 
-  // Adiciona centro_custo_mapp se ainda não existir (idempotente para produção)
-  await pool.query(`ALTER TABLE confirmafacil_embarcadores
-    ADD COLUMN IF NOT EXISTS centro_custo_mapp VARCHAR(100)`).catch(() => {});
+  // Cache de NFs do CF — evita chamar a API CF a cada busca
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS confirmafacil_nfs_cache (
+      id                   SERIAL PRIMARY KEY,
+      cliente_id           INT NOT NULL,
+      id_embarque          BIGINT NOT NULL,
+      numero_nf            VARCHAR(100),
+      serie_nf             VARCHAR(20),
+      chave_nfe            VARCHAR(100),
+      cnpj_embarcador      VARCHAR(20),
+      nome_embarcador      VARCHAR(255),
+      destinatario_nome    VARCHAR(255),
+      destinatario_cnpj    VARCHAR(20),
+      destinatario_cidade  VARCHAR(100),
+      destinatario_uf      VARCHAR(2),
+      destinatario_end     VARCHAR(500),
+      status_cf            VARCHAR(50),
+      status_nota          VARCHAR(50),
+      dias_atraso          INT DEFAULT 0,
+      data_previsao        TIMESTAMP,
+      data_emissao         TIMESTAMP,
+      valor                DECIMAL(12,2),
+      tipo_envio           VARCHAR(50),
+      tipo_frete           VARCHAR(50),
+      link_rastreamento    TEXT,
+      payload_completo     JSONB,
+      sincronizado_em      TIMESTAMP DEFAULT NOW(),
+      UNIQUE (cliente_id, id_embarque)
+    )
+  `);
 
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_solicitacao   ON confirmafacil_log      (solicitacao_id)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_embarque      ON confirmafacil_log      (id_embarque)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_config_cliente    ON confirmafacil_config   (cliente_id)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_emb_config        ON confirmafacil_embarcadores (config_id)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_vinculos_embarque ON confirmafacil_vinculos  (id_embarque)`).catch(() => {});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_vinculos_solic    ON confirmafacil_vinculos  (solicitacao_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_cache_cliente    ON confirmafacil_nfs_cache (cliente_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_cache_status     ON confirmafacil_nfs_cache (status_cf)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_cache_embarque   ON confirmafacil_nfs_cache (id_embarque)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_cache_previsao   ON confirmafacil_nfs_cache (data_previsao)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_solicitacao  ON confirmafacil_log      (solicitacao_id)`).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_vinculos_embarque ON confirmafacil_vinculos (id_embarque)`).catch(() => {});
 
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
