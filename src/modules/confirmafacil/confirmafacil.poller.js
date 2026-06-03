@@ -71,7 +71,7 @@ class ConfirmaFacilPoller {
         cf.mapa_ocorrencias,
         cf.ultimo_polling,
         cs.tutts_token_api,
-        cs.tutts_codigo_cliente,
+        cs.tutts_cod_cliente AS tutts_codigo_cliente,
         cs.nome AS cliente_nome,
         cs.forma_pagamento_padrao,
         cs.centro_custo_padrao
@@ -234,7 +234,7 @@ class ConfirmaFacilPoller {
       token:          config.tutts_token_api,
       codCliente:     config.tutts_codigo_cliente,
       Usuario:        'ConfirmaFácil Auto',
-      centroCusto:    config.centro_custo_padrao || config.cliente_nome || 'Central',
+      centroCusto:    coleta.centro_custo_mapp || config.centro_custo_padrao || config.cliente_nome || 'Central',
       pontos:         pontosLimpos,
       retorno:        'N',
       formaPagamento: config.forma_pagamento_padrao || 'F',
@@ -274,7 +274,7 @@ class ConfirmaFacilPoller {
     `, [
       config.cliente_id,
       String(idEmbarque),
-      config.centro_custo_padrao || config.cliente_nome || 'Central',
+      coleta.centro_custo_mapp || config.centro_custo_padrao || config.cliente_nome || 'Central',
       'ConfirmaFácil Auto',
       config.forma_pagamento_padrao || 'F',
       false,
