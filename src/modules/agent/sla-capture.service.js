@@ -152,9 +152,15 @@ function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod 
   pontos.forEach((pe) => {
     if (pontos.length > 1) blocos.push(`*Ponto ${pe.numero}*`);
     if (pe.endereco) blocos.push(`📍 *Endereço:* ${pe.endereco}`);
-    if (pe.nomeCliente) blocos.push(`🏪 *Cliente:* ${pe.nomeCliente}`);
-    if (cliente_cod === '767' && pe.nota) {
-      blocos.push(`🧾 *NF:* ${pe.nota}`);
+    // 1165: o nome do cliente vem corrompido pelo parser de endereço
+    // (vira lixo tipo "1 - 9834"); mostra a NF no lugar.
+    if (cliente_cod === '1165') {
+      if (pe.nota) blocos.push(`🧾 *NF:* ${pe.nota}`);
+    } else {
+      if (pe.nomeCliente) blocos.push(`🏪 *Cliente:* ${pe.nomeCliente}`);
+      if (cliente_cod === '767' && pe.nota) {
+        blocos.push(`🧾 *NF:* ${pe.nota}`);
+      }
     }
   });
 
