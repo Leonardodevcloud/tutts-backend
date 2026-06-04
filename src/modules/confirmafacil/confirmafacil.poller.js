@@ -127,7 +127,7 @@ class ConfirmaFacilPoller {
         cnpjTransportadora: [config.cnpj_transportadora],
       };
 
-      const resp = await this._buscarEmbarques(token, filtro);
+      const resp = await this._buscarEmbarques(filtro, config);
       if (!resp) {
         console.warn(`⚠️ [CF Poller] pg ${page}: paginacao interrompida (falha no CF apos retries — provavel instabilidade GKO)`);
         break;
@@ -502,13 +502,15 @@ class ConfirmaFacilPoller {
     }
   }
 
-  async _buscarEmbarques(token, filtro) {
-    // O CF (GKO) as vezes devolve HTTP 400 com erro interno de Hibernate
-    // ("LogicalConnectionManagedImpl is closed"), que costuma ser transitorio.
-    // Tentamos a mesma pagina ate 3x com backoff antes de desistir.
+  async _buscarEmbarques(filtro, config) {
+    // O CF as vezes devolve 400 (Hibernate) ou 401 (token invalidado antes do
+    // fim do dia, ex.: restart do servidor deles). Tentamos a mesma pagina ate
+    // 3x; em 401 forcamos um novo login antes de re-tentar.
     const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
     const url    = `${CF_FILTER_URL}?${params}`;
     const MAX_TENTATIVAS = 3;
+
+    let token = await this.auth.obterToken(config.cliente_id, config);
 
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
       try {
@@ -522,6 +524,12 @@ class ConfirmaFacilPoller {
 
         const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data);
         console.error(`❌ [CF Poller] CF /filter/embarque status=${resp.status} (tentativa ${tentativa}/${MAX_TENTATIVAS}) — corpo(300): ${String(corpo).slice(0, 300)}`);
+
+        // 401 = token morto no CF. Forca novo login para a proxima tentativa.
+        if (resp.status === 401) {
+          console.warn('🔑 [CF Poller] token rejeitado (401) — refazendo login no CF');
+          token = await this.auth.obterToken(config.cliente_id, config, true);
+        }
       } catch (err) {
         console.error(`❌ [CF Poller] erro de rede ao buscar (tentativa ${tentativa}/${MAX_TENTATIVAS}): ${err.message}`);
       }

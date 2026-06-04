@@ -29,12 +29,14 @@ class ConfirmaFacilAuth {
    * @param {{ cf_email, cf_senha, cf_id_cliente }} config
    * @returns {Promise<string>} token JWT
    */
-  async obterToken(clienteId, config) {
+  async obterToken(clienteId, config, forcar = false) {
     const agora = new Date();
     const cached = this._cache.get(clienteId);
 
-    // Token ainda válido (antes de 23:59:59 de hoje)
-    if (cached && agora < cached.validoAte) {
+    // Token ainda válido (antes de 23:59:59 de hoje) — exceto quando forçado.
+    // O CF às vezes invalida o token antes do fim do dia (ex.: restart do
+    // servidor deles); nesse caso o chamador passa forcar=true após um 401.
+    if (!forcar && cached && agora < cached.validoAte) {
       return cached.token;
     }
 
