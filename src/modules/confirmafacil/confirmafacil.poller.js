@@ -150,6 +150,13 @@ class ConfirmaFacilPoller {
       }
 
       page++;
+      // O CF informa totalPages mas NAO devolve pagina vazia no fim — ele recicla
+      // os dados. Entao paramos no fim real informado por ele, senao o poller fica
+      // relendo duplicata por centenas de paginas (ciclo lento + atropelado).
+      if (resp.totalPages && page >= Number(resp.totalPages)) {
+        console.log(`[CF Poller] fim das paginas reais (totalPages=${resp.totalPages})`);
+        break;
+      }
       if (page > 300) {
         console.warn('[CF Poller] limite de 300 paginas atingido — parando por seguranca');
         break;
