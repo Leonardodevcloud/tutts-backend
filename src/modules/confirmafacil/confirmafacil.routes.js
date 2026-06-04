@@ -806,7 +806,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         LEFT JOIN clientes_solicitacao cs ON cs.id = c.cliente_id
         WHERE 1=1 ${where}
         ORDER BY c.data_previsao DESC NULLS LAST, c.id_embarque DESC
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        LIMIT $${paramsData.length + 1} OFFSET $${paramsData.length + 2}
       `;
 
       const sqlCount = `
@@ -824,8 +824,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       `;
 
       const [{ rows }, { rows: [counts] }] = await Promise.all([
-        pool.query(sqlData,  [...params, sz, offset]),
-        pool.query(sqlCount, params),
+        pool.query(sqlData,  [...paramsData, sz, offset]),
+        pool.query(sqlCount, paramsCount),
       ]);
 
       // Enriquecer com dados do embarcador
@@ -840,8 +840,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       });
 
       const total      = Number(counts.total);
-      const totalSemOS = rows.filter(r => !r.solicitacao_id).length;
-      const totalComOS = rows.filter(r =>  r.solicitacao_id).length;
+      const totalSemOS = Number(counts.sem_os || 0);
+      const totalComOS = total - totalSemOS;
       const totalCFOk  = rows.filter(r =>  r.ultimo_cf_sucesso).length;
 
       // Verificar última sincronização
