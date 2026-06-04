@@ -758,10 +758,6 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         params.push(embarcador_cnpj);
         wheres.push(`REGEXP_REPLACE(c.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($${params.length},'[^0-9]','','g')`);
       }
-      if (status_cf) {
-        params.push(status_cf);
-        wheres.push(`c.status_cf = $${params.length}`);
-      }
       if (de)  { params.push(de);  wheres.push(`c.data_previsao >= $${params.length}`); }
       if (ate) { params.push(ate); wheres.push(`c.data_previsao <= $${params.length}`); }
       if (tem_corrida === 'sim') wheres.push('v.solicitacao_id IS NOT NULL');
@@ -772,7 +768,16 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         wheres.push(`(c.numero_nf ILIKE $${pi} OR c.destinatario_nome ILIKE $${pi} OR sc.tutts_os_numero ILIKE $${pi})`);
       }
 
-      const where = wheres.length ? 'AND ' + wheres.join(' AND ') : '';
+      // Filtros base (SEM status_cf) -> usados na CONTAGEM (cards mostram a
+      // distribuicao completa, nao zeram ao selecionar um status).
+      const whereCount  = wheres.length ? 'AND ' + wheres.join(' AND ') : '';
+      const paramsCount = [...params];
+
+      // A LISTA aplica tambem o filtro de status (selecao do card).
+      const paramsData = [...params];
+      let statusClause = '';
+      if (status_cf) { paramsData.push(status_cf); statusClause = ` AND c.status_cf = $${paramsData.length}`; }
+      const where = whereCount + statusClause;
 
       // Buscar embarcadores para nomes
       const { rows: embs } = await pool.query(`
@@ -816,11 +821,12 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           COUNT(*) FILTER (WHERE c.status_cf = 'ENTREGUE')    AS entregue,
           COUNT(*) FILTER (WHERE c.status_cf = 'REENTREGA')   AS reentrega,
           COUNT(*) FILTER (WHERE c.status_cf = 'DEVOLVIDO')   AS devolvido,
-          COUNT(*) FILTER (WHERE c.status_cf = 'CANCELADO')   AS cancelado
+          COUNT(*) FILTER (WHERE c.status_cf = 'CANCELADO')   AS cancelado,
+          COUNT(*) FILTER (WHERE v.solicitacao_id IS NULL)    AS sem_os
         FROM confirmafacil_nfs_cache c
         LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
         LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-        WHERE 1=1 ${where}
+        WHERE 1=1 ${whereCount}
       `;
 
       const [{ rows }, { rows: [counts] }] = await Promise.all([
