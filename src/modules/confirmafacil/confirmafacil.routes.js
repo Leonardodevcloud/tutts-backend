@@ -769,7 +769,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       if (busca) {
         params.push('%' + busca + '%');
         const pi = params.length;
-        wheres.push(`(c.numero_nf ILIKE $${pi} OR c.destinatario_nome ILIKE $${pi} OR v.tutts_os_numero ILIKE $${pi})`);
+        wheres.push(`(c.numero_nf ILIKE $${pi} OR c.destinatario_nome ILIKE $${pi} OR sc.tutts_os_numero ILIKE $${pi})`);
       }
 
       const where = wheres.length ? 'AND ' + wheres.join(' AND ') : '';
@@ -819,6 +819,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           COUNT(*) FILTER (WHERE c.status_cf = 'CANCELADO')   AS cancelado
         FROM confirmafacil_nfs_cache c
         LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+        LEFT JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
         WHERE 1=1 ${where}
       `;
 
