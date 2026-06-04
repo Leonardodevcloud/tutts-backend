@@ -119,15 +119,16 @@ class ConfirmaFacilPoller {
     let totalProcessadas = 0;
 
     while (true) {
+      // IMPORTANTE: page/size vao FORA do filtroDTO, como query params na URL.
+      // O CF ignora page/size quando enviados dentro do filtroDTO (por isso
+      // antes devolvia sempre a primeira pagina). Ver _buscarEmbarques.
       const filtro = {
-        page,
-        size: PAGE_SIZE,
         de:   deStr,
         ate:  ateStr,
         cnpjTransportadora: [config.cnpj_transportadora],
       };
 
-      const resp = await this._buscarEmbarques(filtro, config);
+      const resp = await this._buscarEmbarques(filtro, page, config);
       if (!resp) {
         console.warn(`⚠️ [CF Poller] pg ${page}: paginacao interrompida (falha no CF apos retries — provavel instabilidade GKO)`);
         break;
@@ -502,11 +503,18 @@ class ConfirmaFacilPoller {
     }
   }
 
-  async _buscarEmbarques(filtro, config) {
+  async _buscarEmbarques(filtro, page, config) {
     // O CF as vezes devolve 400 (Hibernate) ou 401 (token invalidado antes do
     // fim do dia, ex.: restart do servidor deles). Tentamos a mesma pagina ate
     // 3x; em 401 forcamos um novo login antes de re-tentar.
-    const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+    //
+    // page e size vao como query params SEPARADOS (?filtroDTO=...&page=N&size=M).
+    // O CF ignora esses campos quando enviados dentro do filtroDTO.
+    const params = new URLSearchParams({
+      filtroDTO: JSON.stringify(filtro),
+      page:      String(page),
+      size:      String(PAGE_SIZE),
+    });
     const url    = `${CF_FILTER_URL}?${params}`;
     const MAX_TENTATIVAS = 3;
 
