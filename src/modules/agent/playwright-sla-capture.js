@@ -1385,20 +1385,20 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
       const parser = cliente_cod === '814' ? parseEntrega814 : parseEntrega767;
       pontosParsed = pontosBrutos
         .filter((pt) => pt.numero >= 2)
-        .map((pt) => ({ numero: pt.numero, ...(parser(pt.texto) || {}) }));
+        .map((pt) => ({ numero: pt.numero, textoBruto: pt.texto, ...(parser(pt.texto) || {}) }));
     } else {
       // Fluxo LEGADO (retrocompat): 814 sem filtro, 767 com hardcoded Galba
       if (cliente_cod === '814') {
         pontosParsed = pontosBrutos
           .filter((pt) => pt.numero >= 2)
-          .map((pt) => ({ numero: pt.numero, ...(parseEntrega814(pt.texto) || {}) }));
+          .map((pt) => ({ numero: pt.numero, textoBruto: pt.texto, ...(parseEntrega814(pt.texto) || {}) }));
       } else {
         if (!ponto1 || !ponto1Bate767(ponto1.texto)) {
           return { pontos: [], skipped: true, motivo: 'ponto1_nao_bate_767', debugInfo };
         }
         pontosParsed = pontosBrutos
           .filter((pt) => pt.numero >= 2)
-          .map((pt) => ({ numero: pt.numero, ...(parseEntrega767(pt.texto) || {}) }));
+          .map((pt) => ({ numero: pt.numero, textoBruto: pt.texto, ...(parseEntrega767(pt.texto) || {}) }));
       }
     }
 

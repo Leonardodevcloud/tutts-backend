@@ -310,8 +310,15 @@ async function processarCaptura(pool, registro) {
       const pontosEntrega = pontos.filter(p => p.numero >= 2);
       let telefoneEncontrado = null;
       for (const ponto of pontosEntrega) {
-        // Tenta campo `nota` que pode conter telefone junto com NF
-        const tel = extrairTelefoneDeNota(ponto.nota || ponto.endereco || '');
+        // 2026-06 FIX: o telefone do cliente final fica no MEIO do texto do ponto
+        // (depois do endereco, antes do "No nota:"). O parseEntrega767 joga esse
+        // trecho no campo `nomeCliente` (e as vezes o picota com um CEP falso),
+        // entao olhar so `nota`/`endereco` nunca acha o numero. Varremos o texto
+        // bruto integro do ponto (preservado em `textoBruto`), que sempre contem
+        // o telefone original; campos parseados ficam como fallback retrocompat.
+        const fonteTelefone = ponto.textoBruto
+          || [ponto.nota, ponto.endereco, ponto.nomeCliente].filter(Boolean).join(' ');
+        const tel = extrairTelefoneDeNota(fonteTelefone);
         if (tel) { telefoneEncontrado = tel; break; }
       }
 
