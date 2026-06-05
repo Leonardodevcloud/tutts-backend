@@ -42,12 +42,13 @@ const MAPA_PADRAO = {
   finalizado:    '1',   // entrega realizada normalmente
   cancelado:     '52',  // NF entregue para redespacho (genérico para cancelamentos)
   em_andamento:  null,  // não reporta — só eventos terminais por padrão
+  aceito:        '0',   // processo de transporte iniciado (profissional recebeu a OS)
 
   // status de ponto (pontoStatus)
   finalizado_ponto: '1',
   nao_entregue:     '2',
   chegou:           null,  // não reporta por padrão
-  coletado:         null,  // não reporta por padrão
+  coletado:         '0',   // processo de transporte iniciado (coleta confirmada)
 };
 
 /**

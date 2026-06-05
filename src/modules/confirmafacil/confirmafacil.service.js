@@ -116,6 +116,19 @@ class ConfirmaFacilService {
       }
     }
 
+    // Cod.0 (processo de transporte iniciado): enviar apenas UMA vez por OS
+    if (codParaEnviar === '0') {
+      const { rows: jaIniciado } = await this.pool.query(`
+        SELECT id FROM confirmafacil_log
+        WHERE solicitacao_id = $1 AND cod_ocorrencia = '0' AND sucesso = TRUE
+        LIMIT 1
+      `, [solicitacaoId]);
+      if (jaIniciado.length > 0) {
+        console.log(`[CF Service] OS ${osNumero} já tem Cod.0 enviado — ignorando duplicata`);
+        return;
+      }
+    }
+
     // Se o status é 'finalizado' (OS encerrada), verificar se houve insucesso anterior
     // Se sim, não enviar Cod.1 (entregue) — a OS foi encerrada sem entrega real
     if (novoStatus === 'finalizado' && !pontoStatus) {
