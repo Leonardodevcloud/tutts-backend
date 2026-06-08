@@ -216,7 +216,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const body = montarBodyEstimate(req, this.config);
     const data = await this._chamar99('POST', '/v2/order/estimate', body, 'createQuote');
 
-    const { estimateId, feeReais, etaMinutos, expiresAt, raw } = parseEstimate(data);
+    const { estimateId, feeReais, etaMinutos, distanciaMetros, expiresAt, raw } = parseEstimate(data);
 
     console.log(`✅ [NinetyNineAdapter] cotação: estimate_id=${estimateId} | R$${feeReais != null ? feeReais.toFixed(2) : '?'} | ETA ${etaMinutos != null ? etaMinutos + 'min' : 'n/d'}`);
 
