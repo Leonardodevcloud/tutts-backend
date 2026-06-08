@@ -131,7 +131,7 @@ function startTrackingPoller(pool) {
    */
   async function buscarEntregasEmTransito() {
     const { rows } = await pool.query(`
-      SELECT id, codigo_os, external_delivery_id
+      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, telefone_entrega
       FROM logistics_deliveries
       WHERE provider_code = $1
         AND status_canonico = ANY($2)
@@ -313,6 +313,7 @@ function startTrackingPoller(pool) {
           if (PROVIDER_CODE === 'noventanove' && r !== 'erro') {
             try {
               const det = await adapter.getDelivery(entrega.external_delivery_id);
+              console.log(`🔎 [TrackingPoller] OS ${entrega.codigo_os} detail: pickup=${det.pickupCode || 'null'} dropoff=${det.dropoffCode || 'null'} courier=${det.courier ? (det.courier.name || 'sem-nome') : 'null'} tel=${entrega.telefone_entrega || 'null'} wppEnviado=${entrega.codigo_wpp_enviado || false}`);
               const temNovoCodigo = (
                 (det.pickupCode  && !entrega.pickup_code)  ||
                 (det.dropoffCode && !entrega.dropoff_code)
@@ -349,7 +350,7 @@ function startTrackingPoller(pool) {
                 }
                 console.log(`🔑 [TrackingPoller] OS ${entrega.codigo_os}: código(s) 99 detectado(s) e salvos`);
               }
-            } catch (_e) { /* best-effort */ }
+            } catch (_e) { console.warn(`⚠️ [TrackingPoller] codigo/wpp OS ${entrega.codigo_os}: ${_e.message}`); }
           }
         } catch (err) {
           erros++;
