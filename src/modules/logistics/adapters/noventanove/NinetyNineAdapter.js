@@ -375,6 +375,9 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
 
     const path = `/v2/order/detail?order_id=${encodeURIComponent(externalDeliveryId)}`;
     const data = await this._chamar99('GET', path, undefined, 'getDelivery');
+    try {
+      console.log(`🔎 [99 detail] order=${externalDeliveryId} keys=[${Object.keys(data || {}).join(',')}] pickup_info=${JSON.stringify((data && data.pickup_info) || null)} dropoff_info=${JSON.stringify((data && data.dropoff_info) || null)} pickup_code=${data && data.pickup_code} dropoff_code=${data && data.dropoff_code}`);
+    } catch (_e) { /* log best-effort */ }
 
     const statusNative = data.status || null;
 
