@@ -208,6 +208,10 @@ class DispatchOrchestrator {
           expires_at: d.cotacao.expiresAt,
           endereco_coleta: d.servicoMapp.endereco[0]?.rua,
           endereco_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.rua,
+          distancia_km: d.cotacao.distanciaKm != null ? d.cotacao.distanciaKm : null,
+          observacao: d.servicoMapp.obs || '',
+          telefone_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.telefone
+            || d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.fone || '',
         };
       } else {
         const errMsg = r.reason?.message || String(r.reason);
@@ -335,6 +339,26 @@ class DispatchOrchestrator {
         WHERE id = $4
       `, [delivery.externalDeliveryId, delivery.trackingUrl || null,
           opts.vehicleType || quote.vehicleType || null, registro.id]);
+
+      // 6a-bis. Salva telefone do destinatario SEMPRE (nao so quando ha codigo).
+      //     Prioriza o telefone editado no modal de despacho (opts.telefoneEntrega);
+      //     senao usa o do ultimo ponto da OS. Necessario pro 99Entrega: o codigo
+      //     (e o WhatsApp) so chegam depois via TrackingPoller, que le telefone_entrega
+      //     do registro — se ficar NULL, o WhatsApp nunca e enviado.
+      {
+        const _telManual = opts.telefoneEntrega ? normalizarTelefone(opts.telefoneEntrega) : null;
+        const _telOS = normalizarTelefone(
+          enderecos[enderecos.length - 1]?.telefone ||
+          enderecos[enderecos.length - 1]?.fone || null
+        );
+        const _telDestino = _telManual || _telOS;
+        if (_telDestino) {
+          await this.pool.query(
+            'UPDATE logistics_deliveries SET telefone_entrega = $1, updated_at = NOW() WHERE id = $2',
+            [_telDestino, registro.id]
+          ).catch(err => console.warn(`⚠️ [Orchestrator] erro salvando telefone_entrega OS ${codigoOS}:`, err.message));
+        }
+      }
 
       // 6b. Salva códigos de verificação (gerados pelo adapter) + dispara WhatsApp.
       //     Executa em best-effort — falha não aborta o despacho.
