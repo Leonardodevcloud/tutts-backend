@@ -196,6 +196,7 @@ function servicoMappToCanonicalQuoteRequest(servico) {
   return {
     pickup: {
       address: coleta.rua,
+      instructions: coleta.obs || coleta.observacao || null,
       name: coleta.nome || 'Loja',
       phone: coleta.telefone || coleta.fone || null,
       complement: coleta.complemento || null,
@@ -205,6 +206,7 @@ function servicoMappToCanonicalQuoteRequest(servico) {
     },
     dropoff: {
       address: entrega.rua,
+      instructions: entrega.obs || entrega.observacao || null,
       name: entrega.nome || 'Cliente',
       phone: entrega.telefone || entrega.fone || null,
       complement: entrega.complemento || null,
@@ -214,7 +216,7 @@ function servicoMappToCanonicalQuoteRequest(servico) {
     },
     vehicleType: null, // Decidido pelo caller (Orchestrator decide via regra)
     externalRef: servico.codigoOS,
-    itemDescription: servico.obs || `OS ${servico.codigoOS}`,
+    itemDescription: entrega.obs || entrega.observacao || coleta.obs || coleta.observacao || servico.obs || `OS ${servico.codigoOS}`,
   };
 }
 

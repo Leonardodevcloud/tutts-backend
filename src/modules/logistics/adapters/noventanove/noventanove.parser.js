@@ -249,18 +249,22 @@ function montarBodyCreate(estimateId, req, config) {
   // note é obrigatório nos dois lados. Anexa a referência da OS — a doc
   // recomenda incluir o external_order_id no note pro courier.
   const noteBase = truncarTexto(req.itemDescription || `OS ${osRef}`, 100);
+  // Nota por ponto: prioriza a observacao daquele ponto (obs do cliente vem por ponto),
+  // caindo no itemDescription geral se o ponto nao tiver instrucoes.
+  const notePickup  = truncarTexto((req.pickup  && req.pickup.instructions)  || req.itemDescription || `OS ${osRef}`, 100);
+  const noteDropoff = truncarTexto((req.dropoff && req.dropoff.instructions) || req.itemDescription || `OS ${osRef}`, 100);
 
   const pickupInfo = montarInfoEndereco(req.pickup, {
     nomeDefault: 'Loja',
     telSuporte,
     incluirContato: true,
-    note: `Coleta ${noteBase}`,
+    note: `Coleta ${notePickup}`,
   });
   const dropoffInfo = montarInfoEndereco(req.dropoff, {
     nomeDefault: 'Cliente',
     telSuporte,
     incluirContato: true,
-    note: `Entrega ${noteBase}`,
+    note: `Entrega ${noteDropoff}`,
   });
 
   // Telefones são obrigatórios no create da 99Entrega.

@@ -209,7 +209,7 @@ class DispatchOrchestrator {
           endereco_coleta: d.servicoMapp.endereco[0]?.rua,
           endereco_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.rua,
           distancia_km: d.cotacao.distanciaKm != null ? d.cotacao.distanciaKm : null,
-          observacao: d.servicoMapp.obs || '',
+          observacao: (d.servicoMapp.endereco && d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1] && (d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1].obs || d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1].observacao)) || d.servicoMapp.obs || '',
           telefone_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.telefone
             || d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.fone || '',
         };
