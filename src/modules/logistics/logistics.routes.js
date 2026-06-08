@@ -733,6 +733,16 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // GET /tracking/ativas — entregas em andamento + última posição (porta /uber/tracking/ativas)
+  // GET /maps-key — chave do Google Maps JS pro mapa de tracking do Hub (app principal).
+  // Protegido por verificarToken. Devolve GOOGLE_GEOCODING_API_KEY (chave de browser,
+  // restrita por HTTP Referrer no Google Cloud Console). O index.html do app principal
+  // nao injeta o Maps; o frontend carrega dinamicamente usando esta chave.
+  router.get('/maps-key', verificarToken, (req, res) => {
+    const chave = process.env.GOOGLE_GEOCODING_API_KEY;
+    if (!chave) return res.status(500).json({ error: 'Chave do Google Maps nao configurada no servidor' });
+    res.json({ key: chave });
+  });
+
   router.get('/tracking/ativas', verificarToken, async (req, res) => {
     try {
       const { rows } = await pool.query(`
