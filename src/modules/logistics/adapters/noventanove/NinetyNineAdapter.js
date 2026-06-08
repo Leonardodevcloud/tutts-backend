@@ -111,6 +111,50 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     return this.webhookSecret || this.config.client_secret || null;
   }
 
+  /**
+   * Resolve o CEP de um ponto por geocode reverso (Google) a partir de lat/lng.
+   * A 99Entrega exige CEP no structured_address; OS de algumas regioes chegam
+   * da Mapp sem CEP. Como o hub sempre manda lat/lng, resolvemos aqui.
+   * Best-effort: se falhar, devolve null e o fluxo segue como antes.
+   * @private
+   */
+  async _resolverCEPPorCoordenada(lat, lng) {
+    const key = process.env.GOOGLE_GEOCODING_API_KEY;
+    if (!key || lat == null || lng == null) return null;
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}&language=pt-BR`;
+      const resp = await httpRequest(url);
+      if (!resp.ok) return null;
+      const data = resp.json();
+      for (const r of (data.results || [])) {
+        const comp = (r.address_components || []).find(c => (c.types || []).includes('postal_code'));
+        if (comp && comp.long_name) return comp.long_name;
+      }
+      return null;
+    } catch (_e) { return null; }
+  }
+
+  /**
+   * Garante CEP em pickup e dropoff de um CanonicalQuoteRequest.
+   * Usa o CEP que ja veio (req.pickup.cep); se ausente, resolve por geocode.
+   * Muta o req in-place. Best-effort.
+   * @private
+   */
+  async _garantirCEP(req) {
+    for (const ponto of ['pickup', 'dropoff']) {
+      const p = req && req[ponto];
+      if (!p) continue;
+      const temCep = p.cep && String(p.cep).replace(/\D/g, '').length >= 8;
+      if (!temCep && p.latitude != null && p.longitude != null) {
+        const cep = await this._resolverCEPPorCoordenada(p.latitude, p.longitude);
+        if (cep) {
+          p.cep = cep;
+          console.log(`📍 [NinetyNineAdapter] CEP do ${ponto} resolvido por geocode: ${cep}`);
+        }
+      }
+    }
+  }
+
   // ════════════════════════════════════════════════════════════
   // Health check
   // ════════════════════════════════════════════════════════════
@@ -212,6 +256,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
    */
   async createQuote(req) {
     validarConfig(this.config);
+    await this._garantirCEP(req);
 
     const body = montarBodyEstimate(req, this.config);
     const data = await this._chamar99('POST', '/v2/order/estimate', body, 'createQuote');
@@ -255,6 +300,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       throw new Error('NinetyNineAdapter: createDelivery exige a quote (estimate_id) — cote antes via createQuote');
     }
 
+    await this._garantirCEP(req);
     const body = montarBodyCreate(quote.quoteId, req, this.config);
     const data = await this._chamar99('POST', '/v2/order/create', body, 'createDelivery');
 

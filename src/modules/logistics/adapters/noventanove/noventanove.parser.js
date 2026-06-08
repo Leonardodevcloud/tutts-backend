@@ -131,7 +131,7 @@ function montarEnderecoEstruturado(addr) {
     neighborhood: truncarTexto(parsed.neighborhood || parsed.city || DEFAULT_CITY, 120),
     city: truncarTexto(parsed.city || DEFAULT_CITY, 120),
     state: parsed.state || DEFAULT_STATE,
-    CEP: parsed.zip_code || '',
+    CEP: (addr && addr.cep) ? String(addr.cep) : (parsed.zip_code || ''),
     country: parsed.country || DEFAULT_COUNTRY,
   };
   if (number) structured.number = number;
