@@ -561,15 +561,28 @@ class DispatchOrchestrator {
       throw new Error(`Entrega já está em estado terminal: ${entrega.status_native || entrega.status_canonico}`);
     }
 
-    // Cancela no provider (se já foi enviada)
+    // Cancela no provider (se já foi enviada). Captura o resultado: a 99 pode
+    // RECUSAR o cancelamento (ex.: corrida ja aceita/em rota) e ainda assim
+    // cancelamos localmente — mas precisamos SINALIZAR isso pro operador, senao
+    // o pedido fica vivo na 99 sem ninguem saber.
     const externalId = entrega.external_delivery_id;
+    let providerCancelado = true;   // true tambem quando nao havia nada a cancelar
+    let providerCancelMsg = null;
     if (externalId) {
       const providerCode = entrega.provider_code || 'uber';
       const adapter = this._getAdapterOrThrow(providerCode);
       try {
-        await adapter.cancelDelivery(externalId);
+        const rc = await adapter.cancelDelivery(externalId);
+        if (rc && rc.ok === false) {
+          providerCancelado = false;
+          providerCancelMsg = rc.msg || 'provider recusou o cancelamento';
+        }
       } catch (err) {
-        console.warn(`⚠️ [Orchestrator] Cancelamento no provider falhou (seguindo):`, err.message);
+        providerCancelado = false;
+        providerCancelMsg = err.message;
+      }
+      if (!providerCancelado) {
+        console.warn(`⚠️ [Orchestrator] Cancelamento no provider ${providerCode} NAO confirmado (OS ${entrega.codigo_os}): ${providerCancelMsg}`);
       }
     }
 
@@ -598,7 +611,7 @@ class DispatchOrchestrator {
       payload: { motivo, cancelado_por: canceladoPor, reabriu_mapp: reabrirMapp },
     });
 
-    return { ok: true, entregaId };
+    return { ok: true, entregaId, providerCancelado, providerCancelMsg };
   }
 
   // ════════════════════════════════════════════════════════════
