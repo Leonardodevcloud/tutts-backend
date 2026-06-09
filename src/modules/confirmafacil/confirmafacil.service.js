@@ -272,8 +272,8 @@ class ConfirmaFacilService {
         .filter(p => p.numero_nota)
         .map(p => ({
           numero:         p.numero_nota,
-          serie:          p.serie_nota || '1',
-          cnpjEmbarcador: config.cnpj_embarcador || '',
+          serie:          p.serie_nota || p.serie_nf || '1',
+          cnpjEmbarcador: (p.cnpj_embarcador_nf || config.cnpj_embarcador || '').replace(/[^0-9]/g, ''),
         })),
     };
 
