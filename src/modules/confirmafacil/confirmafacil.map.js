@@ -39,7 +39,7 @@
 // Altere aqui ou sobrescreva via banco (confirmafacil_config.mapa_ocorrencias).
 const MAPA_PADRAO = {
   // status da corrida (novoStatus)
-  finalizado:    '1',   // entrega realizada normalmente
+  finalizado:    null,  // OS finalizada NAO reporta Cod.1 (o 'finalizado_ponto' ja reporta a entrega COM foto; evita duplicata no CF: INDX_UNIQUE_OC)
   cancelado:     '52',  // NF entregue para redespacho (genérico para cancelamentos)
   em_andamento:  null,  // não reporta — só eventos terminais por padrão
   aceito:        '0',   // processo de transporte iniciado (profissional recebeu a OS)
