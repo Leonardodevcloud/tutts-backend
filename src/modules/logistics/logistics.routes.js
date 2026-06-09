@@ -282,7 +282,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // ───────────────────────────────────────────────────────────
   router.post('/deliveries', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const { codigoOS, providerCode = 'uber', vehicleType = null, quoteId = null, regraId = null, telefoneEntrega = null } = req.body || {};
+      const { codigoOS, providerCode = 'uber', vehicleType = null, quoteId = null, regraId = null, telefoneEntrega = null, nomeRemetente = null, nomeCliente = null } = req.body || {};
       if (!codigoOS) {
         return res.status(400).json({ error: 'codigoOS obrigatório' });
       }
@@ -311,6 +311,8 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         regraId,
         quoteReuso,
         telefoneEntrega,
+        nomeRemetente,
+        nomeCliente,
         eventSource: EventSource.API,
       });
 

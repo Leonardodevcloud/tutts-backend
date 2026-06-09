@@ -208,6 +208,8 @@ class DispatchOrchestrator {
           expires_at: d.cotacao.expiresAt,
           endereco_coleta: d.servicoMapp.endereco[0]?.rua,
           endereco_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.rua,
+          nome_coleta: d.servicoMapp.endereco[0]?.nome || '',
+          nome_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.nome || '',
           distancia_km: d.cotacao.distanciaKm != null ? d.cotacao.distanciaKm : null,
           observacao: (d.servicoMapp.endereco && d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1] && (d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1].obs || d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1].observacao)) || d.servicoMapp.obs || '',
           telefone_entrega: d.servicoMapp.endereco[d.servicoMapp.endereco.length - 1]?.telefone
@@ -319,6 +321,15 @@ class DispatchOrchestrator {
         });
         quote = cotResult.cotacao;
         request = cotResult.request;
+      }
+
+      // Override de nome do remetente/cliente final (digitados no modal de
+      // despacho). Vira pickup_info.name / dropoff_info.name na 99/Uber.
+      if (request && request.pickup && opts.nomeRemetente && String(opts.nomeRemetente).trim()) {
+        request.pickup.name = String(opts.nomeRemetente).trim().slice(0, 100);
+      }
+      if (request && request.dropoff && opts.nomeCliente && String(opts.nomeCliente).trim()) {
+        request.dropoff.name = String(opts.nomeCliente).trim().slice(0, 100);
       }
 
       await this.pool.query(`
