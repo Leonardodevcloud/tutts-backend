@@ -266,15 +266,18 @@ function criarBrowserSession(opts) {
     _lancandoPromise = (async () => {
       _totalLaunches++;
       log(`🚀 Lançando Chromium (launch #${_totalLaunches})`);
+      // So matamos o browser se REALMENTE desistimos do launch por timeout.
+      // (comparar _browser !== b tinha race: o .then disparava ANTES de
+      //  _browser receber b, matando o browser que acabou de subir com sucesso.)
+      let _desistiu = false;
       try {
         const _launchPromise = chromium.launch(launchOpts);
         // Promise.race NAO cancela: se o timeout estourar, este launch pode
-        // resolver DEPOIS e deixar um Chromium orfao (enche o limite de PIDs
-        // do container -> todo launch novo morre com "Target page closed").
-        // Garante que um browser que chegue tarde demais seja morto.
+        // resolver DEPOIS e deixar um Chromium orfao (enche o limite de PIDs).
+        // So nesse caso (apos desistir) matamos o browser que chega tarde.
         _launchPromise.then(
           (b) => {
-            if (_browser !== b) {
+            if (_desistiu) {
               try {
                 const p = b.process && b.process();
                 if (p && typeof p.kill === 'function') p.kill('SIGKILL');
@@ -299,6 +302,7 @@ function criarBrowserSession(opts) {
 
         log(`✅ Chromium ativo (launch #${_totalLaunches})`);
       } catch (err) {
+        _desistiu = true;   // launch abandonado -> mata o browser se chegar tarde
         logErr(`❌ Falha no launch #${_totalLaunches}: ${err.message}`);
         _browser = null;
         _vivo = false;
