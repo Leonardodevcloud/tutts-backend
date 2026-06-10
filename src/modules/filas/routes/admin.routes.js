@@ -332,18 +332,6 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'roteiro_despachado', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, msgDespacho, JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, notas_liberadas: totalNotas })]).catch(() => {});
 
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera }).catch(() => {});
       
@@ -403,18 +391,6 @@ function createFilasAdminRoutes(pool, verificarToken, verificarAdmin, registrarA
         VALUES ($1, 'corrida_unica', $2, $3)
         ON CONFLICT (cod_profissional) DO UPDATE SET tipo = 'corrida_unica', mensagem = $2, dados = $3, lida = false, created_at = NOW()
       `, [cod_profissional, '👑 Seu roteiro já foi definido, e você saiu com apenas uma corrida! Não há possibilidade de novas coletas. Retire a mercadoria na expedição e boas entregas! O seu bônus já está adicionado!', JSON.stringify({ tempo_espera: tempoEspera, central: central.rows[0]?.nome, posicao_retorno: posicaoOriginal, bonus: true })]).catch(() => {});
-
-      // 🆕 2026-05-25: Envia mensagem WhatsApp pro número pessoal do motoboy.
-      // Fire-and-forget — falha silenciosamente se motoboy não tiver número.
-      pool.query('SELECT full_name, whatsapp FROM users WHERE cod_profissional = $1', [cod_profissional])
-        .then(r => {
-          const u = r.rows[0];
-          if (u && u.whatsapp) {
-            const { enviarParaMotoboy, montarMensagemDespacho } = require('../../../shared/whatsapp-motoboy');
-            enviarParaMotoboy(u.whatsapp, montarMensagemDespacho(u.full_name || prof.nome_profissional)).catch(() => {});
-          }
-        })
-        .catch(() => {});
 
       registrarAuditoria(req, 'ENVIAR_PARA_ROTA_UNICA', 'admin', 'filas_posicoes', null, 
         { cod_profissional, central_id, tempo_espera: tempoEspera, posicao_original: posicaoOriginal }).catch(() => {});
