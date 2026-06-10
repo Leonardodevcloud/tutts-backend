@@ -283,9 +283,19 @@ async function abrirModalLiberarApp(page, os_numero) {
 
   await page.waitForTimeout(500);
 
-  // Clica no item "Liberar App" do dropdown
-  const liberarApp = page.locator('a:has-text("Liberar App"), button:has-text("Liberar App")').first();
-  await liberarApp.waitFor({ state: 'visible', timeout: 5000 });
+  // Clica no item "Liberar App" do dropdown. Cobre mais variacoes de markup
+  // (a/button/li/.dropdown-item) e da mais tempo (o menu da MAPP as vezes
+  // demora a renderizar). Se nao achar, tira screenshot pra diagnostico.
+  const liberarApp = page.locator(
+    'a:has-text("Liberar App"), button:has-text("Liberar App"), ' +
+    'li:has-text("Liberar App"), .dropdown-item:has-text("Liberar App")'
+  ).first();
+  try {
+    await liberarApp.waitFor({ state: 'visible', timeout: TIMEOUT });
+  } catch (e) {
+    const ss = await screenshot(page, os_numero, 'liberar_app_nao_achado');
+    throw new Error(`Item "Liberar App" nao apareceu no dropdown (a engrenagem abriu o menu certo?). Screenshot: ${ss}`);
+  }
   await liberarApp.click();
   log(`✅ "Liberar App" clicado`);
 
