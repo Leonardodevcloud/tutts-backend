@@ -20,6 +20,9 @@ const { withCronLock, liberarLocksOrfaos } = require('./src/shared/utils/cronMut
 
 // ─── Score ────────────────────────────────────────────────
 const { aplicarGratuidadeProfissional } = require('./src/modules/score/score.service');
+// 🆕 2026-06: sorteio mensal v2 (blindado: roda aqui E no server.js, com
+// withCronLock 'scoreV2Sorteio' + UNIQUE no banco garantem execucao unica).
+const scoreV2Service = require('./src/modules/score/score-v2.service');
 
 // 🆕 Fase 6 — Uber worker legado removido. O PollingWorker do Hub assumiu.
 
@@ -102,6 +105,26 @@ cron.schedule('5 0 1 * *', async () => {
     console.error('❌ [CRON] Erro gratuidades Score:', error.message);
   }
 });
+
+// ════════════════════════════════════════════════════════════
+// JOB 1b: SORTEIO MENSAL v2 — dia 1 as 00:05 (Bahia)
+// ════════════════════════════════════════════════════════════
+// Blindagem: o mesmo cron existe no server.js. withCronLock('scoreV2Sorteio')
+// + UNIQUE(mes,regiao,nivel) garantem que roda UMA vez, nao importa qual
+// processo (server/worker) esteja ativo. Sorteia o MES ANTERIOR e ja congela
+// o ranking + notifica os ganhadores (tudo dentro de rodarSorteiosMensais).
+cron.schedule('5 0 1 * *', withCronLock(pool, 'scoreV2Sorteio', async () => {
+  try {
+    const agora = new Date();
+    const mesAnt = new Date(agora.getFullYear(), agora.getMonth() - 1, 1);
+    const mesRef = `${mesAnt.getFullYear()}-${String(mesAnt.getMonth() + 1).padStart(2, '0')}`;
+    console.log(`🎲 [Worker Score v2] Disparando sorteio mensal para ${mesRef}...`);
+    const resultados = await scoreV2Service.rodarSorteiosMensais(pool, mesRef);
+    console.log(`🎲 [Worker Score v2] Sorteios concluídos: ${resultados.length} vencedores`);
+  } catch (err) {
+    console.error('❌ [Worker Score v2] Erro no sorteio:', err.message);
+  }
+}), { timezone: 'America/Bahia' });
 
 // ════════════════════════════════════════════════════════════
 // JOB 2: TODO - Recorrências (a cada 1 hora)
