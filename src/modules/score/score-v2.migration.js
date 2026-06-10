@@ -154,6 +154,53 @@ async function initScoreV2Tables(pool) {
   console.log('  ✅ score_sorteios');
 
   // ============================================================
+  // 3b. PARTICIPANTES DE CADA SORTEIO (quem concorreu)
+  // ============================================================
+  // 🆕 2026-06: guarda a lista de concorrentes de cada sorteio (antes so
+  // ficava o total_participantes como numero). Permite ver os nomes depois.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS score_sorteio_participantes (
+      id SERIAL PRIMARY KEY,
+      sorteio_id INT REFERENCES score_sorteios(id) ON DELETE CASCADE,
+      mes_referencia VARCHAR(7) NOT NULL,
+      regiao VARCHAR(100) NOT NULL,
+      nivel INT NOT NULL,
+      cod_prof VARCHAR(50) NOT NULL,
+      nome_prof VARCHAR(255),
+      foi_vencedor BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(sorteio_id, cod_prof)
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_sort_part_sorteio ON score_sorteio_participantes(sorteio_id)').catch(() => {});
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_sort_part_mes ON score_sorteio_participantes(mes_referencia DESC, regiao)').catch(() => {});
+  console.log('  ✅ score_sorteio_participantes');
+
+  // ============================================================
+  // 3c. RANKING MENSAL CONGELADO (colocacao do mes)
+  // ============================================================
+  // 🆕 2026-06: snapshot da colocacao de cada motoboy por regiao no fechamento
+  // do mes (rodado junto com o sorteio, dia 1). Como score_nivel_motoboy muda
+  // toda semana, sem este congelamento nao da pra ver a colocacao passada.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS score_ranking_mensal (
+      id SERIAL PRIMARY KEY,
+      mes_referencia VARCHAR(7) NOT NULL,
+      regiao VARCHAR(100) NOT NULL,
+      cod_prof VARCHAR(50) NOT NULL,
+      nome_prof VARCHAR(255),
+      nivel INT DEFAULT 1,
+      entregas INT DEFAULT 0,
+      pct_prazo DECIMAL(5,2) DEFAULT 0,
+      posicao INT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(mes_referencia, regiao, cod_prof)
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_rank_mes ON score_ranking_mensal(mes_referencia DESC, regiao, posicao)').catch(() => {});
+  console.log('  ✅ score_ranking_mensal');
+
+  // ============================================================
   // 4. SAQUES-BÔNUS LANÇADOS (rastreabilidade)
   // ============================================================
   // Quando o sistema lança gratuidade pelo bônus de nível, registra aqui.

@@ -33,6 +33,7 @@ const {
   avaliarTodasRegioes,
   lerNivelMotoboy,
   rodarSorteiosMensais,
+  congelarRankingMensal,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
 const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
@@ -423,6 +424,61 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       res.json({ sucesso: true, mes: mes_referencia, sorteios: resultados });
     } catch (err) {
       console.error('❌ [Score v2] /sortear-agora:', err);
+      res.status(500).json({ error: 'Erro', details: err.message });
+    }
+  });
+
+  // 🆕 2026-06: participantes (concorrentes) de um sorteio
+  router.get('/score-v2/admin/sorteios/:id/participantes', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const sorteioId = parseInt(req.params.id);
+      if (!sorteioId) return res.status(400).json({ error: 'id invalido' });
+      const r = await pool.query(`
+        SELECT cod_prof, nome_prof, foi_vencedor
+        FROM score_sorteio_participantes
+        WHERE sorteio_id = $1
+        ORDER BY foi_vencedor DESC, nome_prof
+      `, [sorteioId]);
+      res.json({ sorteio_id: sorteioId, total: r.rows.length, participantes: r.rows });
+    } catch (err) {
+      console.error('❌ [Score v2] /participantes:', err);
+      res.status(500).json({ error: 'Erro', details: err.message });
+    }
+  });
+
+  // 🆕 2026-06: ranking mensal congelado (colocacao do mes)
+  router.get('/score-v2/admin/ranking/:mes', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const mes = req.params.mes;
+      if (!/^\d{4}-\d{2}$/.test(mes)) return res.status(400).json({ error: 'mes no formato YYYY-MM' });
+      const regiao = req.query.regiao;
+      const params = [mes];
+      let where = 'mes_referencia = $1';
+      if (regiao) { params.push(regiao); where += ` AND regiao = $${params.length}`; }
+      const r = await pool.query(`
+        SELECT regiao, posicao, cod_prof, nome_prof, nivel, entregas, pct_prazo
+        FROM score_ranking_mensal
+        WHERE ${where}
+        ORDER BY regiao, posicao
+      `, params);
+      res.json({ mes, total: r.rows.length, ranking: r.rows });
+    } catch (err) {
+      console.error('❌ [Score v2] /ranking:', err);
+      res.status(500).json({ error: 'Erro', details: err.message });
+    }
+  });
+
+  // 🆕 2026-06: congelar ranking manualmente (debug / capturar agora)
+  router.post('/score-v2/admin/congelar-ranking', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { mes_referencia } = req.body || {};
+      if (!mes_referencia || !/^\d{4}-\d{2}$/.test(mes_referencia)) {
+        return res.status(400).json({ error: 'mes_referencia obrigatório no formato YYYY-MM' });
+      }
+      const r = await congelarRankingMensal(pool, mes_referencia);
+      res.json({ sucesso: true, ...r });
+    } catch (err) {
+      console.error('❌ [Score v2] /congelar-ranking:', err);
       res.status(500).json({ error: 'Erro', details: err.message });
     }
   });

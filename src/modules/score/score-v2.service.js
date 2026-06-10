@@ -27,6 +27,8 @@
 //   CRM → Planilha Google Sheets → disponibilidade_linhas → users
 // (mesmo que outros módulos como avisos.routes.js já usam)
 const { buscarProfissional, listarProfissionais } = require('../../shared/utils/profissionaisLookup');
+// 🆕 2026-06: notificacao 1-pra-1 do ganhador do sorteio (Evolution).
+const { enviarParaMotoboy } = require('../../shared/whatsapp-motoboy');
 
 // ============================================================
 // CONSTANTES
@@ -645,6 +647,14 @@ async function avaliarMotoboy(pool, codProf) {
 async function rodarSorteiosMensais(pool, mesRef) {
   console.log(`🎲 [Score v2] Rodando sorteios para ${mesRef}...`);
 
+  // 🆕 2026-06: congela a colocacao do mes ANTES de sortear (mesmo regioes
+  // sem candidato ficam registradas, pra dar pra ver a colocacao depois).
+  try {
+    await congelarRankingMensal(pool, mesRef);
+  } catch (err) {
+    console.error(`  ❌ [ranking] falha ao congelar ${mesRef}:`, err.message);
+  }
+
   const regioes = await pool.query(
     `SELECT regiao, niveis_ativos, sorteio_valor_n2, sorteio_valor_n3 
      FROM score_config_regiao WHERE ativo = true`
@@ -698,16 +708,61 @@ async function rodarSorteiosMensais(pool, mesRef) {
         ]);
 
         // Registra sorteio (UNIQUE constraint protege contra dupla execução)
-        await pool.query(`
+        const insSorteio = await pool.query(`
           INSERT INTO score_sorteios (
             mes_referencia, regiao, nivel, total_participantes,
             vencedor_cod_prof, vencedor_nome, valor, gratuidade_id
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           ON CONFLICT (mes_referencia, regiao, nivel) DO NOTHING
+          RETURNING id
         `, [
           mesRef, r.regiao, nivel, candidatos.rows.length,
           vencedor.cod_prof, vencedor.nome_prof, valor, grat.rows[0].id
         ]);
+
+        // Se nao retornou id, ja existia (mes ja sorteado) — nao duplica nada.
+        if (insSorteio.rows.length === 0) {
+          console.log(`  ⏭️ ${r.regiao} N${nivel}: ja sorteado para ${mesRef} (ignorado)`);
+          continue;
+        }
+        const sorteioId = insSorteio.rows[0].id;
+
+        // 🆕 Salva a lista de participantes (concorrentes) deste sorteio.
+        for (const cand of candidatos.rows) {
+          await pool.query(`
+            INSERT INTO score_sorteio_participantes (
+              sorteio_id, mes_referencia, regiao, nivel, cod_prof, nome_prof, foi_vencedor
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (sorteio_id, cod_prof) DO NOTHING
+          `, [
+            sorteioId, mesRef, r.regiao, nivel,
+            cand.cod_prof, cand.nome_prof, cand.cod_prof === vencedor.cod_prof
+          ]).catch((e) => console.error(`  ⚠️ [participante] ${cand.cod_prof}:`, e.message));
+        }
+
+        // 🆕 Notifica o ganhador via WhatsApp (Evolution). Fire-and-forget.
+        try {
+          const u = await pool.query(
+            'SELECT whatsapp FROM users WHERE cod_profissional = $1',
+            [vencedor.cod_prof]
+          );
+          const numero = u.rows[0]?.whatsapp;
+          if (numero) {
+            const valorFmt = Number(valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            const msg =
+              `🎉 Parabéns, ${vencedor.nome_prof}!\n\n` +
+              `Você foi o GANHADOR do sorteio do Score (${r.regiao}) referente a ${mesRef}! 🏆\n\n` +
+              `Prêmio: ${valorFmt} em gratuidade (1 saque grátis).\n` +
+              `O crédito já está disponível na sua conta. 🚀`;
+            enviarParaMotoboy(numero, msg)
+              .then((rEnv) => console.log(`  🔔 [sorteio] notificacao ${vencedor.cod_prof}: ${rEnv?.enviado ? 'enviada' : (rEnv?.motivo || 'ignorada')}`))
+              .catch(() => {});
+          } else {
+            console.log(`  🔕 [sorteio] ${vencedor.cod_prof} sem whatsapp cadastrado`);
+          }
+        } catch (eNotif) {
+          console.error(`  ⚠️ [sorteio] erro ao notificar ${vencedor.cod_prof}:`, eNotif.message);
+        }
 
         console.log(`  🏆 ${r.regiao} N${nivel}: ${vencedor.nome_prof} (R$ ${valor})`);
         resultados.push({
@@ -965,6 +1020,43 @@ async function avaliarTodasRegioes(pool) {
   return resumo;
 }
 
+/**
+ * 🆕 2026-06: Congela a colocação do mês (snapshot por região).
+ * Roda junto com o sorteio (dia 1). Como score_nivel_motoboy muda toda
+ * semana, sem este congelamento não dá pra ver a colocação passada.
+ * Idempotente: UNIQUE(mes, regiao, cod_prof) + ON CONFLICT DO NOTHING.
+ */
+async function congelarRankingMensal(pool, mesRef) {
+  console.log(`🧊 [Score v2] Congelando ranking mensal de ${mesRef}...`);
+  const regioes = await pool.query(
+    `SELECT regiao FROM score_config_regiao WHERE ativo = true`
+  );
+  let totalLinhas = 0;
+  for (const r of regioes.rows) {
+    try {
+      const inserted = await pool.query(`
+        INSERT INTO score_ranking_mensal
+          (mes_referencia, regiao, cod_prof, nome_prof, nivel, entregas, pct_prazo, posicao)
+        SELECT
+          $1, regiao, cod_prof, nome_prof, nivel_atual,
+          COALESCE(entregas_periodo, 0), COALESCE(pct_prazo, 0),
+          ROW_NUMBER() OVER (
+            ORDER BY nivel_atual DESC, COALESCE(entregas_periodo,0) DESC, COALESCE(pct_prazo,0) DESC
+          )
+        FROM score_nivel_motoboy
+        WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$2::text')}
+        ON CONFLICT (mes_referencia, regiao, cod_prof) DO NOTHING
+        RETURNING id
+      `, [mesRef, r.regiao]);
+      totalLinhas += inserted.rows.length;
+    } catch (err) {
+      console.error(`  ❌ [ranking] ${r.regiao}:`, err.message);
+    }
+  }
+  console.log(`🧊 [Score v2] Ranking ${mesRef} congelado: ${totalLinhas} linha(s)`);
+  return { mes: mesRef, linhas: totalLinhas };
+}
+
 module.exports = {
   // Constantes
   NIVEL_2,
@@ -985,4 +1077,5 @@ module.exports = {
   lerNivelMotoboy,
   // Sorteio
   rodarSorteiosMensais,
+  congelarRankingMensal,
 };
