@@ -84,6 +84,67 @@ function comTimeout(promise, ms, nome) {
   return Promise.race([promise, t]).finally(() => clearTimeout(timer));
 }
 
+// ── Reaper de Chromium orfao ────────────────────────────────────────────
+// tutts-agents e dedicado aos agentes RPA: nenhum Chromium legitimo vive
+// muito (jobs duram segundos ate ~90s). Qualquer headless_shell/chrome com
+// mais de REAPER_MAX_IDADE_MS e leak (launch que falhou deixou processo orfao)
+// e estava enchendo o limite de PIDs do container. O reaper mata na marra.
+// Le direto do /proc (sem depender de 'ps', que pode nao existir no container).
+const REAPER_INTERVALO_MS = 60 * 1000;       // varre a cada 1 min
+const REAPER_MAX_IDADE_MS = 5 * 60 * 1000;   // mata Chromium com mais de 5 min
+let _reaperLigado = false;
+
+function _uptimeSeg() {
+  try {
+    const fs = require('fs');
+    return parseFloat(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]) || 0;
+  } catch (_) { return 0; }
+}
+
+function _idadeProcMs(pid, uptimeSeg) {
+  try {
+    const fs = require('fs');
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // formato: pid (comm) state ppid ... starttime(campo 22).
+    // Pega tudo depois do ultimo ')': [state, ppid, ..., starttime, ...].
+    const apos = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    const starttimeTicks = parseFloat(apos[19]); // campo 22 = indice 19 pos-comm
+    const clkTck = 100; // USER_HZ padrao no Linux
+    const startSeg = starttimeTicks / clkTck;
+    return Math.max(0, (uptimeSeg - startSeg) * 1000);
+  } catch (_) { return -1; }
+}
+
+function _varrerChromiumOrfao() {
+  let fs;
+  try { fs = require('fs'); } catch (_) { return; }
+  let pids;
+  try { pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch (_) { return; }
+  const uptime = _uptimeSeg();
+  let mortos = 0;
+  for (const pid of pids) {
+    let cmd = '';
+    try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch (_) { continue; }
+    if (!/headless_shell|chromium|chrome-linux/i.test(cmd)) continue;
+    const idade = _idadeProcMs(pid, uptime);
+    if (idade > REAPER_MAX_IDADE_MS) {
+      try { process.kill(Number(pid), 'SIGKILL'); mortos++; } catch (_) {}
+    }
+  }
+  if (mortos > 0) {
+    try { logger.warn(`[chromium-reaper] 🧹 ${mortos} Chromium orfao(s) mortos (idade > ${Math.round(REAPER_MAX_IDADE_MS / 60000)}min)`); } catch (_) {}
+  }
+}
+
+function _iniciarReaper() {
+  if (_reaperLigado) return;
+  _reaperLigado = true;
+  const timer = setInterval(_varrerChromiumOrfao, REAPER_INTERVALO_MS);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  try { logger.info(`[chromium-reaper] ▶️ ligado (varre a cada ${Math.round(REAPER_INTERVALO_MS / 1000)}s, mata Chromium > ${Math.round(REAPER_MAX_IDADE_MS / 60000)}min)`); } catch (_) {}
+}
+_iniciarReaper();
+
 /**
  * Cria uma sessão de browser persistente.
  *
@@ -206,11 +267,24 @@ function criarBrowserSession(opts) {
       _totalLaunches++;
       log(`🚀 Lançando Chromium (launch #${_totalLaunches})`);
       try {
-        _browser = await comTimeout(
-          chromium.launch(launchOpts),
-          TIMEOUT_LAUNCH_MS,
-          'chromium.launch'
+        const _launchPromise = chromium.launch(launchOpts);
+        // Promise.race NAO cancela: se o timeout estourar, este launch pode
+        // resolver DEPOIS e deixar um Chromium orfao (enche o limite de PIDs
+        // do container -> todo launch novo morre com "Target page closed").
+        // Garante que um browser que chegue tarde demais seja morto.
+        _launchPromise.then(
+          (b) => {
+            if (_browser !== b) {
+              try {
+                const p = b.process && b.process();
+                if (p && typeof p.kill === 'function') p.kill('SIGKILL');
+              } catch (_) {}
+              try { b.close().catch(() => {}); } catch (_) {}
+            }
+          },
+          () => {}
         );
+        _browser = await comTimeout(_launchPromise, TIMEOUT_LAUNCH_MS, 'chromium.launch');
         _vivo = true;
 
         // Detecta crash/close inesperado do processo Chromium
