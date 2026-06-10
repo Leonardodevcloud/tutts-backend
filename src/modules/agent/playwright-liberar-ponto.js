@@ -327,17 +327,41 @@ async function executarLiberacaoPonto1(page, os_numero) {
     throw new Error(`Nenhum checkbox de liberação no modal. Screenshot: ${ss}`);
   }
 
-  const checkboxPonto1 = checkboxes.first();
-  // Confirma que é mesmo do Ponto 1 — vê o texto vizinho
-  const containerCheckbox = checkboxPonto1.locator('xpath=ancestor::div[contains(@class,"checkbox")][1]');
+  // 🎯 SEGURANCA/IDEMPOTENCIA: o objetivo do agente e SO o Ponto 1.
+  // Em vez de pegar cegamente o first() (que vira o Ponto 2 se o Ponto 1 ja
+  // sumiu da lista por estar liberado!), procuramos o checkbox cujo texto
+  // vizinho menciona "ponto 1". Se nao existir, NAO tocamos em nenhum outro
+  // ponto e avisamos que o Ponto 1 ja esta liberado.
+  let checkboxPonto1 = null;
   let textoVizinho = '';
-  try {
-    textoVizinho = (await containerCheckbox.innerText().catch(() => '')).trim();
-  } catch { /* ignora */ }
-  if (textoVizinho && !textoVizinho.toLowerCase().includes('ponto 1')) {
-    log(`⚠️ Texto vizinho do primeiro checkbox: "${textoVizinho}" — esperado "Liberar ponto 1"`);
-    // Não bloqueia — first() ainda é a aposta segura, mas registra alerta
+  for (let i = 0; i < total; i++) {
+    const cb = checkboxes.nth(i);
+    const cont = cb.locator('xpath=ancestor::div[contains(@class,"checkbox")][1]');
+    const txt = (await cont.innerText().catch(() => '')).trim();
+    if (txt.toLowerCase().includes('ponto 1')) {
+      checkboxPonto1 = cb;
+      textoVizinho = txt;
+      break;
+    }
   }
+
+  const MSG_JA_LIBERADO = 'O Ponto 1 ja esta liberado. Se voce precisa liberar o Ponto 2, entre em contato com o suporte!';
+
+  if (!checkboxPonto1) {
+    // Nenhum checkbox de "Ponto 1" no modal — quase sempre porque o Ponto 1
+    // JA esta liberado (sumiu da lista). Nao liberamos Ponto 2/3 por engano.
+    log(`ℹ️ Nenhum checkbox de "Ponto 1" no modal — Ponto 1 ja liberado. Nada a fazer.`);
+    return { sucesso: true, ja_liberado: true, mensagem_retorno: MSG_JA_LIBERADO };
+  }
+
+  // Se o checkbox do Ponto 1 esta desabilitado, ja foi liberado — idempotente.
+  const desabilitado = await checkboxPonto1.isDisabled().catch(() => false);
+  if (desabilitado) {
+    log(`ℹ️ Checkbox do Ponto 1 desabilitado — ja liberado. Nada a fazer.`);
+    return { sucesso: true, ja_liberado: true, mensagem_retorno: MSG_JA_LIBERADO };
+  }
+
+  log(`☑️  Checkbox do Ponto 1 localizado (texto: "${textoVizinho}")`);
 
   // Marca o checkbox (se já estiver marcado, não faz nada)
   const jaMarcado = await checkboxPonto1.isChecked().catch(() => false);
