@@ -377,15 +377,20 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const path = `/v2/order/detail?order_id=${encodeURIComponent(externalDeliveryId)}`;
     const data = await this._chamar99('GET', path, undefined, 'getDelivery');
     try {
-      console.log(`🔎 [99 detail] order=${externalDeliveryId} keys=[${Object.keys(data || {}).join(',')}] pickup_info=${JSON.stringify((data && data.pickup_info) || null)} dropoff_info=${JSON.stringify((data && data.dropoff_info) || null)} pickup_code=${data && data.pickup_code} dropoff_code=${data && data.dropoff_code}`);
+      console.log(`🔎 [99 detail] order=${externalDeliveryId} status=${data && data.status} verify_info=${JSON.stringify((data && data.verify_info) || null)}`);
     } catch (_e) { /* log best-effort */ }
 
     const statusNative = data.status || null;
 
-    // Códigos de verificação — a 99 os retorna no detail quando habilitados.
-    // Campos no response: pickup_code, dropoff_code (ou dentro de pickup_info/dropoff_info).
-    const pickupCode  = data.pickup_code  || data.pickup_info?.code   || null;
-    const dropoffCode = data.dropoff_code || data.dropoff_info?.code  || null;
+    // Códigos de verificação — a 99 os retorna em data.verify_info (doc oficial:
+    // verify_info.pickup_verify_code / dropoff_verify_code, 4 dígitos; string
+    // vazia quando o código não é exigido). Mantém fallbacks antigos por garantia.
+    const _vi = (data && data.verify_info) || {};
+    const _pick = _vi.pickup_verify_code  || data.pickup_code  || data.pickup_info?.code  || null;
+    const _drop = _vi.dropoff_verify_code || data.dropoff_code || data.dropoff_info?.code || null;
+    // 99 devolve "" (string vazia) quando não exige código — normaliza pra null.
+    const pickupCode  = (_pick && String(_pick).trim()) ? String(_pick).trim() : null;
+    const dropoffCode = (_drop && String(_drop).trim()) ? String(_drop).trim() : null;
 
     return {
       externalDeliveryId: String(externalDeliveryId),
