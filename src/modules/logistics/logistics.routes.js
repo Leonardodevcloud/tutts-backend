@@ -1000,16 +1000,18 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         return res.status(404).json({ error: 'ID externo da entrega não encontrado.' });
       }
 
-      const adapter = getProviderRegistry(pool).get('uber');
-      if (!adapter) {
-        return res.status(503).json({ error: 'Provider Uber não está ativo no momento.' });
+      // 🆕 usa o provider REAL da entrega (uber OU noventanove), nao fixo no uber.
+      const _provCode = entrega.provider_code || 'uber';
+      const adapter = getProviderRegistry(pool).get(_provCode);
+      if (!adapter || typeof adapter.getProofOfDelivery !== 'function') {
+        return res.status(503).json({ error: `Provider ${_provCode} indisponivel para comprovante.` });
       }
 
       const proof = await adapter.getProofOfDelivery(entrega.external_delivery_id);
       if (!proof) {
         return res.status(404).json({
-          error: 'Comprovante não encontrado na Uber para esta entrega.',
-          detalhe: 'Algumas entregas antigas não possuem comprovante armazenado.',
+          error: 'Comprovante ainda nao disponivel para esta entrega.',
+          detalhe: 'A foto pode nao ter sido enviada pelo entregador ainda, ou a verificacao por foto nao esta habilitada.',
         });
       }
 
@@ -1019,7 +1021,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         [JSON.stringify(proof), id]
       );
 
-      res.json({ success: true, comprovante: proof, origem: 'uber_api' });
+      res.json({ success: true, comprovante: proof, origem: `${_provCode}_api` });
     } catch (err) {
       console.error('[logistics/comprovante] erro:', err.message);
       res.status(500).json({ error: err.message });

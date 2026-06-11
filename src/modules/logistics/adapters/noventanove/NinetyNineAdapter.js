@@ -366,6 +366,63 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   }
 
   // ════════════════════════════════════════════════════════════
+  // getProofOfDelivery — comprovante (fotos) da 99
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * 🆕 2026-06: Busca o comprovante de entrega da 99 (fotos do entregador).
+   * Ao contrário da Uber (endpoint dedicado), a 99 devolve as fotos no MESMO
+   * /v2/order/detail, dentro de verify_info:
+   *   - dropoff_verify_imgs   → fotos da ENTREGA (recebedor)
+   *   - pickup_verify_imgs    → fotos da COLETA
+   *   - return_handover_imgs  → fotos da DEVOLUÇÃO (quando não entregou)
+   * São arrays de URLs. Retorna null se não houver foto nenhuma.
+   *
+   * Mesmo shape do proof da Uber (fotos[] + metadata) pra reaproveitar o
+   * visualizador do front e o endpoint /deliveries/:id/comprovante.
+   *
+   * @param {string} externalDeliveryId - order_id da 99
+   * @returns {Promise<Object|null>}
+   */
+  async getProofOfDelivery(externalDeliveryId) {
+    validarConfig(this.config);
+    try {
+      const path = `/v2/order/detail?order_id=${encodeURIComponent(externalDeliveryId)}`;
+      const data = await this._chamar99('GET', path, undefined, 'getProofOfDelivery');
+      const vi = (data && data.verify_info) || {};
+
+      const _arr = (x) => Array.isArray(x) ? x.filter(Boolean) : [];
+      const fotosEntrega   = _arr(vi.dropoff_verify_imgs);
+      const fotosColeta    = _arr(vi.pickup_verify_imgs);
+      const fotosDevolucao = _arr(vi.return_handover_imgs);
+
+      const todas = [].concat(fotosEntrega, fotosColeta, fotosDevolucao);
+      if (todas.length === 0) {
+        // sem foto ainda (ou verificação por foto não habilitada)
+        return null;
+      }
+
+      console.log(`📸 [NinetyNineAdapter] comprovante: entrega=${fotosEntrega.length} coleta=${fotosColeta.length} devolucao=${fotosDevolucao.length} (order ${externalDeliveryId})`);
+
+      return {
+        provider: 'noventanove',
+        // 'fotos' = campo canônico que o front/endpoint ja consomem (entrega primeiro)
+        fotos: fotosEntrega.length ? fotosEntrega : todas,
+        // detalhamento por tipo (pra quem quiser separar)
+        fotos_entrega:   fotosEntrega,
+        fotos_coleta:    fotosColeta,
+        fotos_devolucao: fotosDevolucao,
+        assinatura: null,              // a 99 não fornece assinatura digital
+        return_res: data.return_res != null ? data.return_res : null,
+        capturado_em: new Date().toISOString(),
+      };
+    } catch (err) {
+      console.warn(`⚠️ [NinetyNineAdapter] getProofOfDelivery erro: ${err.message}`);
+      return null;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
   // getDelivery — GET /v2/order/detail
   // ════════════════════════════════════════════════════════════
 
