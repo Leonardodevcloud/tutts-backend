@@ -974,23 +974,20 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
 
       const entrega = rows[0];
 
-      // Só Uber tem proof_of_delivery disponível via API
-      if (entrega.provider_code !== 'uber') {
-        return res.status(404).json({
-          error: `Comprovante de entrega não disponível para o provider '${entrega.provider_code}'.`,
-          detalhe: 'A 99Entrega não expõe foto/assinatura via API. Apenas Uber Direct suporta este recurso.',
-        });
-      }
+      // 🆕 2026-06: Uber E 99Entrega tem comprovante. A 99 devolve as fotos no
+      // verify_info do /order/detail (capturadas por NinetyNineAdapter.getProofOfDelivery).
+      // O bloqueio "so uber" foi removido.
 
       // Se já está salvo no banco, retorna direto
       if (entrega.proof_of_delivery) {
         return res.json({ success: true, comprovante: entrega.proof_of_delivery, origem: 'banco' });
       }
 
-      // Entrega ainda não finalizada — sem comprovante
-      if (!['DELIVERED'].includes(entrega.status_canonico)) {
+      // Comprovante disponivel a partir da COLETA (a 99 ja sobe foto de coleta).
+      const _STATUS_COM_FOTO = ['PICKED_UP', 'DROPOFF_EN_ROUTE', 'ARRIVED_DROPOFF', 'DELIVERED'];
+      if (!_STATUS_COM_FOTO.includes(entrega.status_canonico)) {
         return res.status(404).json({
-          error: 'Comprovante ainda não disponível — a entrega ainda não foi concluída.',
+          error: 'Comprovante ainda não disponível — aguardando coleta/entrega.',
           status: entrega.status_canonico,
         });
       }
