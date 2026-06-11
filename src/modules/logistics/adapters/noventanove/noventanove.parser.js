@@ -72,6 +72,11 @@ const PACKAGE_WEIGHT_DEFAULT = '1kg';
  */
 const CANCEL_REASON_ID_DEFAULT = '410018';
 
+// 🆕 Aviso padrao mostrado ao entregador da 99 na note da COLETA (visivel ao
+// courier, doc: pickup_info.note). Pode ser sobrescrito via config.aviso_entregador.
+// Limite da note: 127 chars — manter a mensagem curta.
+const AVISO_ENTREGADOR_DEFAULT = 'Transporte de pecas automotivas. Antes de aceitar, veja se possui as ferramentas para coletar.';
+
 // ════════════════════════════════════════════════════════════
 // Helpers
 // ════════════════════════════════════════════════════════════
@@ -254,11 +259,18 @@ function montarBodyCreate(estimateId, req, config) {
   const notePickup  = truncarTexto((req.pickup  && req.pickup.instructions)  || req.itemDescription || `OS ${osRef}`, 100);
   const noteDropoff = truncarTexto((req.dropoff && req.dropoff.instructions) || req.itemDescription || `OS ${osRef}`, 100);
 
+  // 🆕 Aviso padrao ao entregador (configuravel). Vai no INICIO da note da coleta
+  // pra ser a 1a coisa que o courier le antes de aceitar. A note tem limite de
+  // 127 chars; o truncarTexto em montarInfoEndereco garante o corte seguro.
+  const avisoEntregador = (config && typeof config.aviso_entregador === 'string' && config.aviso_entregador.trim())
+    ? config.aviso_entregador.trim()
+    : AVISO_ENTREGADOR_DEFAULT;
+
   const pickupInfo = montarInfoEndereco(req.pickup, {
     nomeDefault: 'Loja',
     telSuporte,
     incluirContato: true,
-    note: `Coleta ${notePickup}`,
+    note: avisoEntregador,
   });
   const dropoffInfo = montarInfoEndereco(req.dropoff, {
     nomeDefault: 'Cliente',
