@@ -341,17 +341,23 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
    * @param {string} externalDeliveryId - order_id da 99
    * @returns {Promise<{ok: boolean, msg?: string}>}
    */
-  async cancelDelivery(externalDeliveryId) {
+  async cancelDelivery(externalDeliveryId, externalOrderRef) {
     validarConfig(this.config);
 
-    // externalDeliveryId aqui é o order_id da 99 (o que o hub guarda em
-    // external_delivery_id). montarBodyCancel aceita (externalOrderId, config,
-    // orderId) — passamos como orderId (3º arg) já que é o id interno da 99.
-    const body = montarBodyCancel(null, this.config, externalDeliveryId);
+    // 🆕 Prioriza external_order_id (= codigo_os, ESTAVEL) quando disponivel.
+    // A doc da 99: order_id MUDA na reatribuicao a outro entregador; o
+    // external_order_id nunca muda. Cancelar por ele evita "order not found"
+    // quando o entregador original largou e a 99 reatribuiu. Fallback: order_id.
+    const extRef = (externalOrderRef != null && String(externalOrderRef).trim())
+      ? String(externalOrderRef).trim()
+      : null;
+    const body = extRef
+      ? montarBodyCancel(extRef, this.config, null)          // usa external_order_id
+      : montarBodyCancel(null, this.config, externalDeliveryId); // fallback order_id
 
     try {
       await this._chamar99('POST', '/v2/order/cancel', body, 'cancelDelivery');
-      console.log(`✅ [NinetyNineAdapter] pedido ${externalDeliveryId} cancelado (reason_id=${body.reason_id})`);
+      console.log(`✅ [NinetyNineAdapter] pedido cancelado (ref=${extRef || externalDeliveryId}, reason_id=${body.reason_id})`);
       return { ok: true };
     } catch (err) {
       console.warn(`⚠️ [NinetyNineAdapter] cancel falhou (${err.category || 'erro'}):`, err.message);

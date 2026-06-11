@@ -590,7 +590,11 @@ class DispatchOrchestrator {
       const providerCode = entrega.provider_code || 'uber';
       const adapter = this._getAdapterOrThrow(providerCode);
       try {
-        const rc = await adapter.cancelDelivery(externalId);
+        // 🆕 passa o codigo_os (external_order_id ESTAVEL da 99) como 2o arg.
+        // A doc da 99: order_id MUDA se a corrida e reatribuida a outro
+        // entregador; external_order_id (= codigo_os) nunca muda. Cancelar pelo
+        // external_order_id evita falha quando houve reatribuicao.
+        const rc = await adapter.cancelDelivery(externalId, entrega.codigo_os);
         if (rc && rc.ok === false) {
           providerCancelado = false;
           providerCancelMsg = rc.msg || 'provider recusou o cancelamento';
