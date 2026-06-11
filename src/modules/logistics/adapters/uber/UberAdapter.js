@@ -171,6 +171,7 @@ class UberAdapter extends LogisticsProviderAdapter {
       etaMinutos: data.duration,
       vehicleType,
       distanciaKm,  // km da rota retornado pela Uber
+      distanciaMetros: data.distance != null ? Number(data.distance) : null,  // 🆕 metros crus
       expiresAt: data.expires ? new Date(data.expires) : new Date(Date.now() + 5 * 60_000),
       rawProvider: data,
     };

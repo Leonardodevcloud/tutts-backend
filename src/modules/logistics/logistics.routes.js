@@ -97,6 +97,9 @@ function mapearCanonicoParaLegado(ld) {
     longitude_entrega:  ld.longitude_entrega,
     pontos:             ld.pontos,
     obs:                ld.obs,
+    distancia_km:       ld.distancia_km,
+    distancia_origem:   ld.distancia_origem,   // 🆕 'provider' | 'haversine'
+    distancia_metros:   ld.distancia_metros,   // 🆕 metros crus do provider
     regra_id:           ld.regra_id,
     cliente_nome_regra: ld.cliente_nome_regra || null, // vem do JOIN
     tentativas:         ld.tentativas,

@@ -89,6 +89,11 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS ultima_lng DECIMAL(10,7)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS pickup_code VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS distancia_km DECIMAL(8,2)`).catch(() => {});
+  // 🆕 2026-06: rastreabilidade da distancia.
+  //   distancia_origem: 'provider' (veio da 99/Uber) | 'haversine' (linha reta, fallback)
+  //   distancia_metros: metros crus retornados pelo provider (delivery_distance da 99); null no fallback
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS distancia_origem VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS distancia_metros INTEGER`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_servico_mapp_original DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_profissional_mapp_original DECIMAL(10,2)`).catch(() => {});
   // Override de tabela de preço por regra de cliente

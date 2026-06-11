@@ -433,18 +433,25 @@ class DispatchOrchestrator {
       //     Distância: provider quote (mais preciso) → haversine (fallback).
       //     Best-effort: falha não aborta o despacho.
       try {
-        const _distKm = quote.distanciaKm != null && quote.distanciaKm > 0
+        const _veioDoProvider = quote.distanciaKm != null && quote.distanciaKm > 0;
+        const _distKm = _veioDoProvider
           ? quote.distanciaKm
           : haversineKm(
               coleta.latitude, coleta.longitude,
               entrega.latitude, entrega.longitude
             );
+        // 🆕 rastro: de onde veio a distancia + metros crus do provider
+        const _distOrigem = _veioDoProvider ? 'provider' : 'haversine';
+        const _distMetros = _veioDoProvider && quote.distanciaMetros != null
+          ? Math.round(Number(quote.distanciaMetros))
+          : null;
 
         if (_distKm != null && _distKm > 0) {
           await this.pool.query(
-            'UPDATE logistics_deliveries SET distancia_km = $1, updated_at = NOW() WHERE id = $2',
-            [Math.round(_distKm * 100) / 100, registro.id]
+            'UPDATE logistics_deliveries SET distancia_km = $1, distancia_origem = $2, distancia_metros = $3, updated_at = NOW() WHERE id = $4',
+            [Math.round(_distKm * 100) / 100, _distOrigem, _distMetros, registro.id]
           );
+          console.log(`📏 [Orchestrator] OS ${codigoOS}: distancia ${_distKm.toFixed(2)}km (origem=${_distOrigem}${_distMetros != null ? ', ' + _distMetros + 'm' : ''})`);
 
           const _valorProvider2 = parseFloat(quote.valor) || 0;
           const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(opts.regra || null);

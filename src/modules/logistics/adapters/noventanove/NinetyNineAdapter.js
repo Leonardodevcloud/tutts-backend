@@ -275,6 +275,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       etaMinutos: etaMinutos != null ? etaMinutos : null,
       vehicleType: 'motorcycle',
       distanciaKm,  // km da rota retornado pela 99Entrega
+      distanciaMetros,  // 🆕 metros crus da 99 (delivery_distance) p/ rastreabilidade
       expiresAt: expiresAt instanceof Date && !isNaN(expiresAt)
         ? expiresAt
         : new Date(Date.now() + 5 * 60_000),
