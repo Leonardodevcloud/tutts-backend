@@ -107,6 +107,8 @@ function mapearCanonicoParaLegado(ld) {
     finalizado_at:      ld.finalizado_at,
     cancelado_por:      ld.cancelado_por,
     cancelado_motivo:   ld.cancelado_motivo,
+    pickup_code:        ld.pickup_code   || null,  // 🆕 codigo de coleta (99/Uber)
+    dropoff_code:       ld.dropoff_code  || null,  // 🆕 codigo de entrega (99/Uber)
     // courier_data JSONB → campos entregador_* legados
     entregador_nome:      courier.name || null,
     entregador_telefone:  courier.phone || null,
