@@ -90,8 +90,8 @@ function comTimeout(promise, ms, nome) {
 // mais de REAPER_MAX_IDADE_MS e leak (launch que falhou deixou processo orfao)
 // e estava enchendo o limite de PIDs do container. O reaper mata na marra.
 // Le direto do /proc (sem depender de 'ps', que pode nao existir no container).
-const REAPER_INTERVALO_MS = 60 * 1000;       // varre a cada 1 min
-const REAPER_MAX_IDADE_MS = 5 * 60 * 1000;   // mata Chromium com mais de 5 min
+const REAPER_INTERVALO_MS = 30 * 1000;       // varre a cada 30s (mais agressivo sob rajada)
+const REAPER_MAX_IDADE_MS = 3 * 60 * 1000;   // mata Chromium com mais de 3 min (jobs duram ate ~90s)
 let _reaperLigado = false;
 
 function _uptimeSeg() {
@@ -271,23 +271,42 @@ function criarBrowserSession(opts) {
       //  _browser receber b, matando o browser que acabou de subir com sucesso.)
       let _desistiu = false;
       try {
-        const _launchPromise = chromium.launch(launchOpts);
-        // Promise.race NAO cancela: se o timeout estourar, este launch pode
-        // resolver DEPOIS e deixar um Chromium orfao (enche o limite de PIDs).
-        // So nesse caso (apos desistir) matamos o browser que chega tarde.
-        _launchPromise.then(
-          (b) => {
-            if (_desistiu) {
-              try {
-                const p = b.process && b.process();
-                if (p && typeof p.kill === 'function') p.kill('SIGKILL');
-              } catch (_) {}
-              try { b.close().catch(() => {}); } catch (_) {}
-            }
-          },
-          () => {}
-        );
-        _browser = await comTimeout(_launchPromise, TIMEOUT_LAUNCH_MS, 'chromium.launch');
+        // 🆕 2026-06: retry sob erro TRANSITORIO (spawn EAGAIN / Target closed)
+        // que aparece sob pressao de PIDs numa rajada. Cada tentativa tem seu
+        // proprio orphan-kill (_attemptDesistiu); o _desistiu global (catch)
+        // cobre o caso de abandono definitivo.
+        let _tentativa = 0;
+        while (true) {
+          _tentativa++;
+          let _attemptDesistiu = false;
+          const _launchPromise = chromium.launch(launchOpts);
+          // Promise.race NAO cancela: se o timeout estourar, este launch pode
+          // resolver DEPOIS e deixar um Chromium orfao. Mata o que chega tarde.
+          _launchPromise.then(
+            (b) => {
+              if (_attemptDesistiu || _desistiu) {
+                try {
+                  const p = b.process && b.process();
+                  if (p && typeof p.kill === 'function') p.kill('SIGKILL');
+                } catch (_) {}
+                try { b.close().catch(() => {}); } catch (_) {}
+              }
+            },
+            () => {}
+          );
+          try {
+            _browser = await comTimeout(_launchPromise, TIMEOUT_LAUNCH_MS, 'chromium.launch');
+            break;  // sucesso
+          } catch (errTent) {
+            _attemptDesistiu = true;  // mata o launch orfao DESTA tentativa
+            const _msg = (errTent && errTent.message) || '';
+            const _transit = /EAGAIN|spawn|Target page|has been closed|Failed to launch|timeout/i.test(_msg);
+            if (!_transit || _tentativa >= 4) throw errTent;
+            const _espera = 400 * _tentativa;
+            logErr(`⚠️ launch #${_totalLaunches} tentativa ${_tentativa}/4: ${_msg.split('\n')[0]} — retry em ${_espera}ms`);
+            await new Promise((r) => setTimeout(r, _espera));
+          }
+        }
         _vivo = true;
 
         // Detecta crash/close inesperado do processo Chromium

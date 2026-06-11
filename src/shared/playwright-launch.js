@@ -54,6 +54,11 @@ const ARGS_PADRAO = [
 ];
 
 const TIMEOUT_CLOSE_MS = 5_000;  // close gracioso. Se passar, manda SIGKILL.
+// 🆕 2026-06: retry de launch. Sob rajada (site externo lento -> jobs empilham),
+// o Chromium falha com "spawn EAGAIN" / "Target ... closed" de forma TRANSITORIA.
+// Em vez de desistir na 1a, tenta algumas vezes com espera crescente.
+const MAX_TENTATIVAS_LAUNCH = 4;
+const BACKOFF_BASE_MS = 400;  // espera = 400, 800, 1200ms entre tentativas
 
 function log(msg) {
   // Não usa o logger formal pra evitar dependências circulares —
@@ -81,13 +86,36 @@ function comTimeout(promise, ms, nome) {
  *                         args, executablePath, etc).
  * @returns {Promise<{browser: import('playwright').Browser, fechar: () => Promise<void>}>}
  */
+/**
+ * 🆕 2026-06: chromium.launch com retry+backoff para erros TRANSITORIOS
+ * (spawn EAGAIN, Target closed, Failed to launch) que aparecem sob pressao
+ * de PIDs. Da tempo do reaper/GC liberarem recursos entre as tentativas.
+ */
+async function _lancarComRetry(launchOpts) {
+  let ultimoErro;
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_LAUNCH; tentativa++) {
+    try {
+      return await chromium.launch(launchOpts);
+    } catch (err) {
+      ultimoErro = err;
+      const msg = (err && err.message) || '';
+      const transitorio = /EAGAIN|spawn|Target page|has been closed|Failed to launch|Timeout/i.test(msg);
+      if (!transitorio || tentativa === MAX_TENTATIVAS_LAUNCH) break;
+      const espera = BACKOFF_BASE_MS * tentativa;
+      log('⚠️ launch falhou (tentativa ' + tentativa + '/' + MAX_TENTATIVAS_LAUNCH + '): ' + msg.split('\n')[0] + ' — retry em ' + espera + 'ms');
+      await new Promise(function(r) { setTimeout(r, espera); });
+    }
+  }
+  throw ultimoErro;
+}
+
 async function lancarChromiumSeguro(opts) {
   opts = opts || {};
   // Se o caller passou args, usa o dele. Senão, usa o padrão.
   const launchOpts = Object.assign({ headless: true }, opts);
   if (!launchOpts.args) launchOpts.args = ARGS_PADRAO;
 
-  const browser = await chromium.launch(launchOpts);
+  const browser = await _lancarComRetry(launchOpts);
 
   let jaFechado = false;
 
