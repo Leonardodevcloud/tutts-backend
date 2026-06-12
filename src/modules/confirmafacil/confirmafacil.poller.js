@@ -524,7 +524,7 @@ class ConfirmaFacilPoller {
       size:      String(PAGE_SIZE),
     });
     const url    = `${CF_FILTER_URL}?${params}`;
-    const MAX_TENTATIVAS = 3;
+    const MAX_TENTATIVAS = 5;
 
     let token = await this.auth.obterToken(config.cliente_id, config);
 
@@ -550,9 +550,10 @@ class ConfirmaFacilPoller {
         console.error(`❌ [CF Poller] erro de rede ao buscar (tentativa ${tentativa}/${MAX_TENTATIVAS}): ${err.message}`);
       }
 
-      // backoff progressivo: 2s, 4s (nao espera depois da ultima tentativa)
+      // backoff progressivo: 3s, 6s, 9s, 12s (teto 12s) — da tempo do
+      // Hibernate do CF (GKO) reabrir a conexao antes da proxima tentativa.
       if (tentativa < MAX_TENTATIVAS) {
-        await new Promise((r) => setTimeout(r, tentativa * 2000));
+        await new Promise((r) => setTimeout(r, Math.min(tentativa * 3000, 12000)));
       }
     }
 
