@@ -167,7 +167,7 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
       const ultimaPosicao = await pool.query('SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central.central_id, 'aguardando']);
       const posicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
       
-      await pool.query(`INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin) VALUES ($1, $2, $3, 'aguardando', $4, $5, $6)`, [central.central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
+      await pool.query(`INSERT INTO filas_posicoes (central_id, cod_profissional, nome_profissional, status, posicao, latitude_checkin, longitude_checkin) VALUES ($1, $2, $3, 'aguardando', $4, $5, $6) ON CONFLICT (central_id, cod_profissional) WHERE status IN ('aguardando', 'em_rota') DO NOTHING`, [central.central_id, cod_profissional, nome_profissional, posicao, latitude, longitude]);
       await pool.query(`INSERT INTO filas_historico (central_id, central_nome, cod_profissional, nome_profissional, acao) VALUES ($1, $2, $3, $4, 'entrada')`, [central.central_id, central.central_nome, cod_profissional, nome_profissional]);
       
       // 🆕 2026-05-24: marca o motoboy como EM LOJA na disponibilidade (fire-and-forget)

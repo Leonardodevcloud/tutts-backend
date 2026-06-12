@@ -206,7 +206,8 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
           `INSERT INTO filas_posicoes
              (central_id, cod_profissional, nome_profissional, status, posicao,
               latitude_checkin, longitude_checkin, agente_status, entrada_fila_at)
-           VALUES ($1, $2, $3, 'aguardando', $4, $5, $6, 'pendente', NOW())`,
+           VALUES ($1, $2, $3, 'aguardando', $4, $5, $6, 'pendente', NOW())
+           ON CONFLICT (central_id, cod_profissional) WHERE status IN ('aguardando', 'em_rota') DO NOTHING`,
           [central.central_id_resolved, cod_profissional, nome_profissional, novaPosicao, latitude, longitude]
         );
       }
@@ -751,6 +752,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
             (central_id, cod_profissional, nome_profissional, status, posicao,
              agente_status, motivo_posicao, entrada_fila_at)
           VALUES ($1, $2, $3, 'aguardando', $4, 'pendente', 'colocado_admin', NOW())
+          ON CONFLICT (central_id, cod_profissional) WHERE status IN ('aguardando', 'em_rota') DO NOTHING
         `, [central_id, cod_profissional, vinc.rows[0].nome_profissional, novaPosicao]);
       }
 
