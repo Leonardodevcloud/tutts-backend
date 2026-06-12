@@ -189,6 +189,20 @@ class ConfirmaFacilPoller {
       }
     }
 
+    // Captacao por ID-TAILING via /filter/embarque/{idEmbarque} (UNITARIO, que
+    // responde 200) — varre os idEmbarque sequenciais a partir de um cursor
+    // persistido e capta NOTA NOVA A_EMBARCAR (o que o /ocorrencia nao pega,
+    // pois nota nova ainda nao tem ocorrencia). So trata os CNPJs configurados
+    // (default: o da Tutts). Liga/desliga via CF_IDTAILING (default ligado).
+    if (String(process.env.CF_IDTAILING || 'true') !== 'false') {
+      try {
+        const criadasTail = await this._processarViaIdTailing(config);
+        if (criadasTail > 0) totalProcessadas += criadasTail;
+      } catch (e) {
+        console.error('[CF Poller] erro no idtailing:', e.message);
+      }
+    }
+
     // Fallback/reconciliacao pelo cache: cria corridas para A_EMBARCAR sem
     // vinculo ja conhecidas localmente. Roda sempre — se a busca ao vivo criou
     // os vinculos, este passo nao encontra nada; se o CF falhou, ele despacha.
@@ -686,6 +700,192 @@ class ConfirmaFacilPoller {
     }
     console.error('❌ [CF Poller] /filter/ocorrencia falhou apos todas as tentativas. Tentaremos no proximo ciclo.');
     return null;
+  }
+
+  // ══════════════════════════════════════════════════
+  // CAPTACAO POR ID-TAILING (/filter/embarque/{idEmbarque})
+  // ══════════════════════════════════════════════════
+  // O /filter/embarque (LISTA) esta quebrado no GKO ("is closed"), mas o
+  // /filter/embarque/{idEmbarque} (UNITARIO) responde 200. Os idEmbarque sao
+  // sequenciais. Mantemos um cursor persistido (confirmafacil_config.
+  // idtailing_cursor) e, a cada ciclo, varremos cursor+1, cursor+2, ... ate
+  // bater a fronteira (IDs inexistentes) ou um teto por ciclo. Captura NOTA
+  // NOVA A_EMBARCAR (que o /ocorrencia nao ve). So trata os CNPJs configurados.
+  async _processarViaIdTailing(config) {
+    const cnpjsEnv = String(process.env.CF_IDTAILING_CNPJS || '')
+      .split(',').map((s) => s.replace(/\D/g, '')).filter(Boolean);
+    const tratados = new Set(cnpjsEnv.length
+      ? cnpjsEnv
+      : [String(config.cnpj_transportadora || '').replace(/\D/g, '')].filter(Boolean));
+    if (tratados.size === 0) {
+      console.warn('[CF Poller] idtailing: nenhum CNPJ para tratar — pulando');
+      return 0;
+    }
+
+    let cursor = await this._getCursor(config);
+    if (cursor == null) {
+      const start = parseInt(process.env.CF_IDTAILING_START, 10);
+      if (start > 0) {
+        cursor = start;
+      } else {
+        const backfill = parseInt(process.env.CF_IDTAILING_BACKFILL, 10) > 0
+          ? parseInt(process.env.CF_IDTAILING_BACKFILL, 10) : 200;
+        let base = await this._maxIdConhecido(config);
+        if (!base) base = await this._maxIdViaOcorrencia(config);
+        if (!base) {
+          console.warn('[CF Poller] idtailing: sem base para semear cursor — pulando este ciclo');
+          return 0;
+        }
+        cursor = Math.max(0, base - backfill);
+      }
+      await this._setCursor(config, cursor);
+      console.log(`[CF Poller] idtailing: cursor semeado em ${cursor}`);
+    }
+
+    const GAP  = parseInt(process.env.CF_IDTAILING_GAP, 10) > 0
+      ? parseInt(process.env.CF_IDTAILING_GAP, 10) : 20;
+    const MAXP = parseInt(process.env.CF_IDTAILING_MAX_PER_CYCLE, 10) > 0
+      ? parseInt(process.env.CF_IDTAILING_MAX_PER_CYCLE, 10) : 150;
+
+    let id = cursor, miss = 0, probes = 0, lastGood = cursor, criadas = 0, existentes = 0;
+
+    while (probes < MAXP && miss < GAP) {
+      id++; probes++;
+      const r = await this._buscarEmbarqueUnitario(id, config);
+
+      if (r.error) {
+        // Erro transitorio (is closed / 5xx / 401 / rede). NAO trata como
+        // fronteira: para o scan agora e retoma do mesmo ponto no proximo ciclo.
+        console.warn(`[CF Poller] idtailing: erro transitorio no id ${id} — pausando scan ate o proximo ciclo`);
+        break;
+      }
+      if (!r.exists) { miss++; continue; }
+
+      miss = 0; lastGood = id; existentes++;
+      const emb  = r.data;
+      const cnpj = String(emb.transportadora && emb.transportadora.cnpj || '').replace(/\D/g, '');
+      if (!tratados.has(cnpj)) continue; // do hub, mas nao e CNPJ tratado
+
+      try {
+        await this._salvarCache(emb, config.cliente_id);
+        const st = String(emb.statusEmbarque && emb.statusEmbarque.nome || '').toUpperCase();
+        if (st === 'A_EMBARCAR') {
+          const { rows } = await this.pool.query(
+            'SELECT id FROM confirmafacil_vinculos WHERE id_embarque = $1', [id]
+          );
+          if (rows.length === 0) {
+            await this._processarNF(emb, config);
+            criadas++;
+          }
+        }
+      } catch (err) {
+        console.error(`⚠️ [CF Poller] idtailing erro NF id ${id}:`, err.message);
+      }
+    }
+
+    if (lastGood > cursor) await this._setCursor(config, lastGood);
+
+    if (existentes > 0 || criadas > 0) {
+      console.log(`[CF Poller] idtailing cliente ${config.cliente_id}: cursor ${cursor}->${lastGood} | ${probes} probes, ${existentes} existentes, ${criadas} despachada(s)`);
+    }
+    return criadas;
+  }
+
+  // Busca UNITARIA de uma NF pelo idEmbarque. Classifica o retorno em
+  // {exists:true,data} | {exists:false} | {error:true}. Erros transitorios
+  // (is closed/Deadlock/5xx/401/rede) viram {error:true} apos pequenas
+  // re-tentativas, para nunca confundir instabilidade com "nota inexistente".
+  async _buscarEmbarqueUnitario(id, config) {
+    const url = `${CF_FILTER_URL}/${id}`;
+    const MAX = 2;
+    let token = await this.auth.obterToken(config.cliente_id, config);
+
+    for (let t = 1; t <= MAX; t++) {
+      try {
+        const resp = await httpRequest(url, {
+          method:  'GET',
+          headers: { Authorization: token, accept: 'application/json' },
+        });
+        let data = null;
+        try { data = resp.json(); } catch (_) { data = null; }
+
+        if (resp.ok && data && (data.idEmbarque || data.id)) return { exists: true, data };
+        if (resp.ok) return { exists: false }; // 200 sem corpo valido => nao existe
+
+        const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data || '');
+        const txt = String(corpo);
+        const transitorio = resp.status >= 500 || resp.status === 401
+          || /is closed|closed|Deadlock|LockAcquisition/i.test(txt);
+
+        if (resp.status === 404) return { exists: false };
+        if (resp.status === 401) {
+          token = await this.auth.obterToken(config.cliente_id, config, true);
+        }
+        if (!transitorio && resp.status === 400) return { exists: false }; // id invalido => nao existe
+        // transitorio => cai no retry
+      } catch (err) {
+        // erro de rede => retry
+      }
+      if (t < MAX) await new Promise((r) => setTimeout(r, 800));
+    }
+    return { error: true };
+  }
+
+  // MAX(id_embarque) ja conhecido localmente (cache + vinculos) — usado para
+  // semear o cursor sem varrer o historico inteiro.
+  async _maxIdConhecido(config) {
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT GREATEST(
+          COALESCE((SELECT MAX(id_embarque) FROM confirmafacil_nfs_cache WHERE cliente_id = $1), 0),
+          COALESCE((SELECT MAX(id_embarque) FROM confirmafacil_vinculos), 0)
+        ) AS m
+      `, [config.cliente_id]);
+      return Number(rows[0] && rows[0].m) || 0;
+    } catch (e) {
+      console.warn('[CF Poller] _maxIdConhecido:', e.message);
+      return 0;
+    }
+  }
+
+  // MAX(idEmbarque) a partir da 1a pagina do /ocorrencia (fallback de seed).
+  async _maxIdViaOcorrencia(config) {
+    try {
+      const resp = await this._buscarOcorrencias(0, config);
+      const lista = (resp && (resp.respostas || resp.content)) || [];
+      let m = 0;
+      for (const o of lista) {
+        const id = o && o.embarque && o.embarque.idEmbarque;
+        if (id && id > m) m = id;
+      }
+      return m;
+    } catch (e) {
+      console.warn('[CF Poller] _maxIdViaOcorrencia:', e.message);
+      return 0;
+    }
+  }
+
+  async _ensureIdtailingColumn() {
+    if (this._idtailingColReady) return;
+    await this.pool.query(
+      'ALTER TABLE confirmafacil_config ADD COLUMN IF NOT EXISTS idtailing_cursor BIGINT'
+    ).catch((e) => console.warn('[CF Poller] _ensureIdtailingColumn:', e.message));
+    this._idtailingColReady = true;
+  }
+
+  async _getCursor(config) {
+    await this._ensureIdtailingColumn();
+    const { rows } = await this.pool.query(
+      'SELECT idtailing_cursor FROM confirmafacil_config WHERE id = $1', [config.id]
+    );
+    const v = rows[0] && rows[0].idtailing_cursor;
+    return (v == null) ? null : Number(v);
+  }
+
+  async _setCursor(config, id) {
+    await this.pool.query(
+      'UPDATE confirmafacil_config SET idtailing_cursor = $1 WHERE id = $2', [id, config.id]
+    );
   }
 
   async _buscarColeta(configId, cnpjEmbarcador) {
