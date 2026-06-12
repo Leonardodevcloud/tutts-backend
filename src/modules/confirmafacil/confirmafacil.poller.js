@@ -19,6 +19,7 @@ const httpRequest     = require('../../shared/utils/httpRequest');
 const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
+const CF_OCORRENCIA_URL = 'https://utilities.confirmafacil.com.br/filter/ocorrencia';
 const TUTTS_API_URL  = 'https://tutts.com.br/integracao';
 const TUTTS_WEBHOOK  = 'https://tutts-backend-production.up.railway.app/api/webhook/tutts';
 const PAGE_SIZE      = 50;
@@ -169,6 +170,22 @@ class ConfirmaFacilPoller {
       if (page > 300) {
         console.warn('[CF Poller] limite de 300 paginas atingido — parando por seguranca');
         break;
+      }
+    }
+
+    // Fallback via /filter/ocorrencia (endpoint que FUNCIONA e e SCOPED a nossa
+    // conta). O /filter/embarque (lista) entra em erro Hibernate ("is closed")
+    // no lado do GKO; o /ocorrencia continua 200 e so retorna ocorrencias do
+    // usuario autenticado (a propria Tutts), trazendo o objeto "embarque"
+    // completo aninhado. Usamos para reconciliar status no cache e despachar
+    // A_EMBARCAR ja conhecida. NUNCA le dado de terceiro. Liga/desliga via
+    // CF_FALLBACK_OCORRENCIA (default ligado).
+    if (String(process.env.CF_FALLBACK_OCORRENCIA || 'true') !== 'false') {
+      try {
+        const criadasOcc = await this._processarViaOcorrencias(config);
+        if (criadasOcc > 0) totalProcessadas += criadasOcc;
+      } catch (e) {
+        console.error('[CF Poller] erro no fallback de ocorrencias:', e.message);
       }
     }
 
@@ -558,6 +575,116 @@ class ConfirmaFacilPoller {
     }
 
     console.error('❌ [CF Poller] CF falhou apos todas as tentativas — provavel instabilidade no ConfirmaFacil (GKO). Tentaremos no proximo ciclo.');
+    return null;
+  }
+
+  // ══════════════════════════════════════════════════
+  // FALLBACK VIA /filter/ocorrencia (SCOPED A TUTTS)
+  // ══════════════════════════════════════════════════
+  // O /filter/embarque (lista) entra em erro Hibernate ("is closed") no GKO.
+  // Os endpoints irmaos /filter/ocorrencia e /filter/pedido seguem 200. O
+  // /ocorrencia retorna SOMENTE ocorrencias do usuario autenticado (Tutts) e
+  // traz, aninhado em cada ocorrencia, o objeto "embarque" COMPLETO — mesma
+  // forma que o /filter/embarque devolvia. Com isso:
+  //   1) reconciliamos o status real das NOSSAS notas no cache local;
+  //   2) despachamos qualquer A_EMBARCAR ja conhecida que ainda nao virou corrida.
+  // NAO captura nota 100% nova (sem nenhuma ocorrencia ainda) — para isso
+  // depende-se do /embarque (lista) voltar ou de captacao manual pela Comolatti.
+  async _processarViaOcorrencias(config) {
+    const MAX_PAGES = parseInt(process.env.CF_OCORRENCIA_MAX_PAGES, 10) > 0
+      ? parseInt(process.env.CF_OCORRENCIA_MAX_PAGES, 10)
+      : 5;
+
+    const vistos = new Set();   // dedup por idEmbarque dentro do ciclo
+    let criadas  = 0;
+    let page     = 0;
+
+    while (page < MAX_PAGES) {
+      const resp = await this._buscarOcorrencias(page, config);
+      if (!resp) break; // falha apos retries — tenta no proximo ciclo
+
+      const lista = resp.respostas || resp.content || [];
+      if (!Array.isArray(lista) || lista.length === 0) break;
+
+      for (const occ of lista) {
+        const emb = occ && occ.embarque;
+        if (!emb || typeof emb !== 'object') continue;
+
+        const idEmb = emb.idEmbarque || emb.id;
+        if (!idEmb || vistos.has(idEmb)) continue;
+        vistos.add(idEmb);
+
+        // Guard de seguranca: /ocorrencia ja e scoped, mas confirmamos que a
+        // transportadora da nota e a NOSSA antes de tocar em qualquer coisa.
+        const cnpjTransp = String(emb.transportadora && emb.transportadora.cnpj || '').replace(/\D/g, '');
+        const cnpjNosso  = String(config.cnpj_transportadora || '').replace(/\D/g, '');
+        if (cnpjNosso && cnpjTransp && cnpjTransp !== cnpjNosso) continue;
+
+        try {
+          await this._salvarCache(emb, config.cliente_id); // reconcilia status
+          const statusNF = String(emb.statusEmbarque && emb.statusEmbarque.nome || '').toUpperCase();
+          if (statusNF === 'A_EMBARCAR') {
+            const antes = await this.pool.query(
+              'SELECT id FROM confirmafacil_vinculos WHERE id_embarque = $1', [idEmb]
+            );
+            if (antes.rows.length === 0) {
+              await this._processarNF(emb, config);
+              criadas++;
+            }
+          }
+        } catch (err) {
+          console.error(`⚠️ [CF Poller] (ocorrencia) erro NF idEmbarque ${idEmb}:`, err.message);
+        }
+      }
+
+      // /ocorrencia vem ordenado por mais recente primeiro; pagina menor que o
+      // tamanho => fim dos registros.
+      if (lista.length < PAGE_SIZE) break;
+      page++;
+    }
+
+    if (criadas > 0) {
+      console.log(`✅ [CF Poller] (fallback ocorrencia) cliente ${config.cliente_id}: ${criadas} NF(s) despachada(s)`);
+    }
+    return criadas;
+  }
+
+  async _buscarOcorrencias(page, config) {
+    // Mesma resiliencia do _buscarEmbarques: ate 3 tentativas, re-login em 401.
+    // page/size como query params separados. Token RAW (sem Bearer).
+    const params = new URLSearchParams({
+      page: String(page),
+      size: String(PAGE_SIZE),
+    });
+    const url = `${CF_OCORRENCIA_URL}?${params}`;
+    const MAX_TENTATIVAS = 3;
+
+    let token = await this.auth.obterToken(config.cliente_id, config);
+
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+      try {
+        const resp = await httpRequest(url, {
+          method:  'GET',
+          headers: { Authorization: token, accept: 'application/json' },
+        });
+        const data = resp.json();
+        if (resp.ok && !(data && data.error)) return data;
+
+        const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data);
+        console.error(`❌ [CF Poller] CF /filter/ocorrencia status=${resp.status} (tentativa ${tentativa}/${MAX_TENTATIVAS}) — corpo(200): ${String(corpo).slice(0, 200)}`);
+
+        if (resp.status === 401) {
+          console.warn('🔑 [CF Poller] token rejeitado (401) em /ocorrencia — refazendo login');
+          token = await this.auth.obterToken(config.cliente_id, config, true);
+        }
+      } catch (err) {
+        console.error(`❌ [CF Poller] erro de rede em /ocorrencia (tentativa ${tentativa}/${MAX_TENTATIVAS}): ${err.message}`);
+      }
+      if (tentativa < MAX_TENTATIVAS) {
+        await new Promise((r) => setTimeout(r, tentativa * 2000));
+      }
+    }
+    console.error('❌ [CF Poller] /filter/ocorrencia falhou apos todas as tentativas. Tentaremos no proximo ciclo.');
     return null;
   }
 
