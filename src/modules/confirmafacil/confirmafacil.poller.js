@@ -107,11 +107,19 @@ class ConfirmaFacilPoller {
     this._puladosBackoff = 0;
     const token = await this.auth.obterToken(config.cliente_id, config);
 
-    // Janela de busca: do último polling até agora
-    // Se primeiro polling, busca últimas 24h
+    // Janela de busca por DATA. Antes era fixa em 2024/01/01, o que fazia a
+    // busca crescer sem limite (ex.: 4148 NFs / 83 paginas a cada minuto) e o
+    // ciclo travar/ficar lento, deixando de alcancar as NFs novas (A_EMBARCAR
+    // costumam estar nas ultimas paginas). Agora a janela e curta e configuravel.
+    // O fallback de cache (_processarPendentesDoCache) continua cobrindo
+    // qualquer A_EMBARCAR ja conhecida que ficar fora da janela.
     const agora = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    const deStr  = '2024/01/01 00:00:00';
+    const DIAS_JANELA = parseInt(process.env.CF_POLLER_DIAS_JANELA, 10) > 0
+      ? parseInt(process.env.CF_POLLER_DIAS_JANELA, 10)
+      : 3;
+    const inicio = new Date(agora.getTime() - DIAS_JANELA * 24 * 60 * 60 * 1000);
+    const deStr  = `${inicio.getFullYear()}/${p(inicio.getMonth()+1)}/${p(inicio.getDate())} 00:00:00`;
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
 
     // Buscar NFs paginando
