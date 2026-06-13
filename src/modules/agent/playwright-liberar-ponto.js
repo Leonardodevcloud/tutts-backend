@@ -244,71 +244,92 @@ function localizarRowOS(page, os_numero) {
  * O dropdown da engrenagem tem item "Liberar App" (visto no print).
  */
 async function abrirModalLiberarApp(page, os_numero) {
-  log(`⚙️  Abrindo menu engrenagem da OS ${os_numero}`);
+  log(`\u2699\ufe0f  Abrindo menu engrenagem da OS ${os_numero}`);
 
-  // Localiza a row da OS — layout de DIVS (não <tr>), via helper robusto
+  // Localiza a row da OS \u2014 layout de DIVS (nao <tr>), via helper robusto
   const row = localizarRowOS(page, os_numero);
   await row.waitFor({ state: 'visible', timeout: TIMEOUT });
 
-  // Clica na engrenagem dentro dessa row
-  // A coluna AÇÕES tem vários ícones; a engrenagem (config/ações) abre o dropdown
-  // com "Liberar App". Cobrimos várias variações do layout real da MAPP.
-  const engrenagemSelectores = [
+  // \ud83d\udd27 2026-06 dropdown-fix: em vez de chutar UM gear com .last() e procurar
+  // "Liberar App" no documento inteiro, iteramos TODOS os toggles candidatos
+  // da row. Pra cada um: clica, espera o menu, e so aceita se "Liberar App"
+  // estiver VISIVEL num menu aberto. Se nao, fecha (Escape) e tenta o proximo.
+  const candidatos = [
     'button[data-toggle="dropdown"]',
     'a[data-toggle="dropdown"]',
+    'button[data-bs-toggle="dropdown"]',
+    'a[data-bs-toggle="dropdown"]',
     '.dropdown-toggle',
     'button:has(i.fa-cog)',
     'button:has(i.fa-gear)',
     'a:has(i.fa-cog)',
-    'i.fa-cog',
-    'i.fa-gear',
     '.btn-grupo-acoes',
-    '[class*="dropdown"]',
   ];
 
-  let clicou = false;
-  for (const sel of engrenagemSelectores) {
-    const btn = row.locator(sel).last();  // last() porque pode ter outros dropdowns na row
-    if (await btn.isVisible().catch(() => false)) {
-      await btn.click();
-      clicou = true;
-      log(`✅ Engrenagem clicada (${sel})`);
-      break;
+  const itemSel =
+    '.dropdown-menu.show a:has-text("Liberar App"), ' +
+    '.dropdown-menu.show button:has-text("Liberar App"), ' +
+    '.dropdown-menu.show li:has-text("Liberar App"), ' +
+    '.dropdown-menu:visible a:has-text("Liberar App"), ' +
+    '.dropdown-menu:visible li:has-text("Liberar App"), ' +
+    'ul[role="menu"]:visible a:has-text("Liberar App")';
+  const itemLiberar = () => page.locator(itemSel).first();
+
+  let abriu = false;
+  const togglesTentados = [];
+  for (const sel of candidatos) {
+    const toggles = row.locator(sel);
+    const n = await toggles.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const btn = toggles.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      try { await btn.click({ timeout: 4000 }); } catch (_) { continue; }
+      togglesTentados.push(sel);
+      // Espera curta: o item so aparece se este foi o menu certo
+      const ok = await itemLiberar().waitFor({ state: 'visible', timeout: 2500 })
+        .then(() => true).catch(() => false);
+      if (ok) {
+        await itemLiberar().click();
+        log(`\u2705 "Liberar App" clicado (toggle: ${sel})`);
+        abriu = true;
+        break;
+      }
+      // Menu errado \u2014 fecha e tenta o proximo toggle
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(200);
     }
-  }
-  if (!clicou) {
-    const ss = await screenshot(page, os_numero, 'engrenagem_nao_achada');
-    throw new Error(`Engrenagem não encontrada na row da OS. Screenshot: ${ss}`);
+    if (abriu) break;
   }
 
-  await page.waitForTimeout(500);
-
-  // Clica no item "Liberar App" do dropdown. Cobre mais variacoes de markup
-  // (a/button/li/.dropdown-item) e da mais tempo (o menu da MAPP as vezes
-  // demora a renderizar). Se nao achar, tira screenshot pra diagnostico.
-  const liberarApp = page.locator(
-    'a:has-text("Liberar App"), button:has-text("Liberar App"), ' +
-    'li:has-text("Liberar App"), .dropdown-item:has-text("Liberar App")'
-  ).first();
-  try {
-    await liberarApp.waitFor({ state: 'visible', timeout: TIMEOUT });
-  } catch (e) {
+  if (!abriu) {
+    // \ud83d\udd0e Auto-diagnostico: captura o texto de QUALQUER menu aberto, mesmo com
+    // SCREENSHOTS_ENABLED=0 (o screenshot vinha null e te deixava cego). Assim o
+    // proprio erro ja diz O QUE a engrenagem mostrou \u2014 sem depender de print.
+    let menusTxt = '';
+    try {
+      const menus = page.locator('.dropdown-menu.show, .dropdown-menu:visible, ul[role="menu"]:visible');
+      const qm = await menus.count().catch(() => 0);
+      for (let i = 0; i < qm && i < 3; i++) {
+        const t = (await menus.nth(i).innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+        if (t) menusTxt += `[menu ${i}] ${t.slice(0, 200)} | `;
+      }
+    } catch (_) {}
     const ss = await screenshot(page, os_numero, 'liberar_app_nao_achado');
-    throw new Error(`Item "Liberar App" nao apareceu no dropdown (a engrenagem abriu o menu certo?). Screenshot: ${ss}`);
+    throw new Error(
+      `Item "Liberar App" nao apareceu. Toggles tentados: ${togglesTentados.join(', ') || 'nenhum visivel'}. ` +
+      `Menu(s) aberto(s): ${menusTxt || 'nenhum'}. Screenshot: ${ss}`
+    );
   }
-  await liberarApp.click();
-  log(`✅ "Liberar App" clicado`);
 
   // Aguarda modal aparecer
   await page.locator('#modalPadrao').waitFor({ state: 'visible', timeout: 10000 });
-  // Aguarda conteúdo do modal carregar (lista de pontos)
+  // Aguarda conteudo do modal carregar (lista de pontos)
   await page.locator('#modalPadrao input[type="checkbox"][name="liberar"]').first().waitFor({
     state: 'visible',
     timeout: 10000,
   });
-  log(`✅ Modal "Liberar App" aberto`);
+  log(`\u2705 Modal "Liberar App" aberto`);
 }
-
 /**
  * Marca o checkbox do Ponto 1 e clica "Liberar".
  * Aguarda texto "Enviado" aparecer no #divRetornoModal.

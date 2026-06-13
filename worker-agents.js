@@ -51,6 +51,12 @@ const { iniciarCleanupPeriodico, rodarCicloLimpeza } = require('./src/shared/tmp
 // sustentadamente, força restart graceful (Railway sobe nova instância).
 const { iniciarMemoryWatchdog } = require('./src/shared/memory-watchdog');
 
+// 🛡️ 2026-06: PID watchdog — failsafe contra esgotamento de PIDs (spawn EAGAIN).
+// Estava escrito em src/shared/pid-watchdog.js mas NUNCA era iniciado. Ligado no main().
+const { iniciarPidWatchdog } = require('./src/shared/pid-watchdog');
+// Reaper stats (zumbis + chromium vivos) e handler de tempestade de launch.
+const { getReaperStats, setLaunchStormHandler } = require('./src/modules/agent/core/browser-session');
+
 const HTTP_PORT = Number(process.env.PORT || 8080);
 
 // Estado pra health check
@@ -349,6 +355,7 @@ function iniciarHttpServer() {
             maisAntigosPrimeiro: profiles.slice().sort((a,b) => b.idadeMin - a.idadeMin).slice(0, 10),
             maisRecentesPrimeiro: profiles.slice(0, 10),
           },
+          reaper: (() => { try { return getReaperStats(); } catch (_) { return null; } })(),
           uptime: Math.round(process.uptime()) + 's',
         }, null, 2));
       } catch (e) {
@@ -410,6 +417,20 @@ function iniciarHttpServer() {
 async function main() {
   logger.info('🚀 worker-agents iniciando...');
 
+  // 🔎 2026-06: self-check de PID 1. dumb-init/tini como PID 1 e quem reapa os
+  // zumbis do Chromium. Se o start command do Railway bypassar o ENTRYPOINT, PID 1
+  // vira "node" e os zumbis acumulam ate dar spawn EAGAIN.
+  try {
+    const _comm = require('fs').readFileSync('/proc/1/comm', 'utf8').trim();
+    if (/dumb-init|tini/i.test(_comm)) {
+      logger.info(`✅ PID 1 = "${_comm}" — init reaper ativo (zumbis do Chromium serao reapados)`);
+    } else {
+      logger.error(`🚨 PID 1 = "${_comm}" (esperado dumb-init/tini). SEM init reaper os zumbis do Chromium acumulam ate dar spawn EAGAIN. Ajuste o start command no Railway pra passar pelo ENTRYPOINT dumb-init.`);
+    }
+  } catch (e) {
+    logger.warn(`⚠️ Nao consegui ler /proc/1/comm: ${e.message}`);
+  }
+
   // 1. Sobe HTTP server JÁ (pra Railway poder fazer health check enquanto inicializa)
   iniciarHttpServer();
 
@@ -456,6 +477,37 @@ async function main() {
     }
   });
 
+  // 🛡️ 2026-06: PID watchdog — raiz documentada do spawn EAGAIN e o esgotamento
+  // de PIDs do cgroup. PIDs sustentadamente altos → restart graceful em segundos em
+  // vez de outage ate restart manual. Com 32GB de RAM o pids.max pode aparecer como
+  // "max"; por isso recomenda-se PID_WATCHDOG_HARDCAP=2500 nas envs do Railway.
+  iniciarPidWatchdog(async () => {
+    try {
+      const agentPool = require('./src/modules/agent')._agentPool;
+      if (agentPool && agentPool.stopAll) {
+        await agentPool.stopAll();
+        logger.info('✅ Pool parado (pid-watchdog)');
+      }
+    } catch (e) {
+      logger.warn(`⚠️ stopAll falhou no pid-watchdog: ${e.message}`);
+    }
+  });
+
+  // 🌩️ 2026-06: circuit-breaker de tempestade de launch. Se N launches do Chromium
+  // falharem seguidos (sintoma de PID esgotado), reage em segundos sem esperar os 3
+  // ciclos do pid-watchdog: para o pool e reinicia.
+  let _reinicioStormEmAndamento = false;
+  setLaunchStormHandler(async (qtd) => {
+    if (_reinicioStormEmAndamento) return;
+    _reinicioStormEmAndamento = true;
+    logger.error(`🌩️ Tempestade de launch (${qtd} falhas seguidas) — reiniciando worker gracefully`);
+    try {
+      const agentPool = require('./src/modules/agent')._agentPool;
+      if (agentPool && agentPool.stopAll) await agentPool.stopAll();
+    } catch (_) {}
+    setTimeout(() => process.exit(1), 1500);
+  });
+
   // 5. Health snapshot a cada 60s no log
   setInterval(() => {
     const snap = getPoolSnapshot();
@@ -463,7 +515,12 @@ async function main() {
       `${a.nome}: ${a.slotsAtivos}/${a.slots} ativo, ` +
       `ticks=${a.stats.ticksTotais} (ok=${a.stats.ticksComSucesso}, err=${a.stats.ticksComErro})`
     );
-    logger.info(`📊 Pool snapshot:\n  ${linhas.join('\n  ')}\n  Browser pool: ${snap.browserPool.slots.filter(s => !s.livre).length}/${snap.browserPool.poolSize} ocupados`);
+    let _rp = '';
+    try {
+      const r = getReaperStats();
+      if (r) _rp = `\n  Reaper: ${r.chromiumVivos} chromium vivo(s), ${r.zumbisAgora} zumbi(s), ${r.orfaosMortos} orfao(s) mortos (total)`;
+    } catch (_) {}
+    logger.info(`📊 Pool snapshot:\n  ${linhas.join('\n  ')}\n  Browser pool: ${snap.browserPool.slots.filter(s => !s.livre).length}/${snap.browserPool.poolSize} ocupados${_rp}`);
   }, 60_000);
 
   logger.info('✅ worker-agents pronto');

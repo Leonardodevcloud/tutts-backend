@@ -92,7 +92,27 @@ function comTimeout(promise, ms, nome) {
 // Le direto do /proc (sem depender de 'ps', que pode nao existir no container).
 const REAPER_INTERVALO_MS = 30 * 1000;       // varre a cada 30s (mais agressivo sob rajada)
 const REAPER_MAX_IDADE_MS = 3 * 60 * 1000;   // mata Chromium com mais de 3 min (jobs duram ate ~90s)
+const ZUMBI_ALERTA = Number(process.env.CHROMIUM_ZUMBI_ALERTA || 50); // loga ERROR se zumbis >= isso
 let _reaperLigado = false;
+// 2026-06: estatisticas do reaper. zumbis altos = init reaper (dumb-init) ausente.
+let _reaperStats = { ultimaVarredura: null, orfaosMortos: 0, zumbisAgora: 0, chromiumVivos: 0 };
+// 2026-06: circuit-breaker de tempestade de launch (N falhas seguidas -> handler).
+let _falhasLaunchSeguidas = 0;
+let _onLaunchStorm = null;
+const LAUNCH_STORM_LIMIAR = Number(process.env.LAUNCH_STORM_LIMIAR || 6);
+function setLaunchStormHandler(fn) { _onLaunchStorm = (typeof fn === 'function') ? fn : null; }
+function getReaperStats() { return Object.assign({}, _reaperStats); }
+
+// Le o state do processo (R/S/Z/...) do /proc/<pid>/stat. Zumbi = 'Z'.
+// Zumbi tem cmdline VAZIA, entao o regex de chromium nao o pega; aqui detectamos
+// pelo state pra ao menos CONTAR (nao da pra SIGKILL zumbi, so o PID 1 reapa).
+function _estadoProc(pid, fs) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const apos = stat.slice(stat.lastIndexOf(')') + 2).trim();
+    return apos.charAt(0);
+  } catch (_) { return ''; }
+}
 
 function _uptimeSeg() {
   try {
@@ -122,17 +142,31 @@ function _varrerChromiumOrfao() {
   try { pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch (_) { return; }
   const uptime = _uptimeSeg();
   let mortos = 0;
+  let zumbis = 0;
+  let chromiumVivos = 0;
   for (const pid of pids) {
+    // Zumbi (state Z) tem cmdline vazia -> detecta pelo state. So contamos.
+    if (_estadoProc(pid, fs) === 'Z') { zumbis++; continue; }
     let cmd = '';
     try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch (_) { continue; }
     if (!/headless_shell|chromium|chrome-linux/i.test(cmd)) continue;
+    chromiumVivos++;
     const idade = _idadeProcMs(pid, uptime);
     if (idade > REAPER_MAX_IDADE_MS) {
       try { process.kill(Number(pid), 'SIGKILL'); mortos++; } catch (_) {}
     }
   }
+  _reaperStats = {
+    ultimaVarredura: new Date().toISOString(),
+    orfaosMortos: (_reaperStats.orfaosMortos || 0) + mortos,
+    zumbisAgora: zumbis,
+    chromiumVivos,
+  };
   if (mortos > 0) {
     try { logger.warn(`[chromium-reaper] 🧹 ${mortos} Chromium orfao(s) mortos (idade > ${Math.round(REAPER_MAX_IDADE_MS / 60000)}min)`); } catch (_) {}
+  }
+  if (zumbis >= ZUMBI_ALERTA) {
+    try { logger.error(`[chromium-reaper] 🧟 ${zumbis} zumbis detectados — init reaper (dumb-init) pode nao estar como PID 1. Leva a spawn EAGAIN.`); } catch (_) {}
   }
 }
 
@@ -308,6 +342,7 @@ function criarBrowserSession(opts) {
           }
         }
         _vivo = true;
+        _falhasLaunchSeguidas = 0;  // 2026-06: launch OK reseta o circuit-breaker
 
         // Detecta crash/close inesperado do processo Chromium
         _browser.on('disconnected', () => {
@@ -325,6 +360,12 @@ function criarBrowserSession(opts) {
         logErr(`❌ Falha no launch #${_totalLaunches}: ${err.message}`);
         _browser = null;
         _vivo = false;
+        // 2026-06: circuit-breaker — N launches falhos seguidos disparam handler global
+        _falhasLaunchSeguidas++;
+        if (_falhasLaunchSeguidas >= LAUNCH_STORM_LIMIAR && _onLaunchStorm) {
+          logErr(`🌩️ ${_falhasLaunchSeguidas} launches falharam seguidos — disparando handler de tempestade (provavel PID esgotado)`);
+          try { _onLaunchStorm(_falhasLaunchSeguidas); } catch (_) {}
+        }
         throw err;
       } finally {
         _lancando = false;
@@ -429,4 +470,4 @@ function criarBrowserSession(opts) {
   return { comContext, obterBrowser, _marcarMorto, fechar, status };
 }
 
-module.exports = { criarBrowserSession };
+module.exports = { criarBrowserSession, getReaperStats, setLaunchStormHandler };
