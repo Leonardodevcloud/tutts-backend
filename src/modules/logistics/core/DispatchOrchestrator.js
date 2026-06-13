@@ -47,6 +47,53 @@ const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.pa
 // Status terminais (status_native) — não devem ser re-despachados
 const STATUS_TERMINAL = ['cancelado', 'canceled', 'delivered', 'fallback_fila'];
 
+// ═════════════════════════════════════════════════════════════
+// 2026-06: helpers de precificacao por distancia. Estavam REFERENCIADOS no
+// bloco 6c (linhas ~439/457/458) mas NUNCA foram implementados/importados — o
+// try/catch best-effort engolia o ReferenceError em TODA corrida, entao o
+// preco por km nunca era aplicado. node --check nao pega (e runtime).
+// ═════════════════════════════════════════════════════════════
+
+/**
+ * Distancia em km entre dois pontos (Haversine). Fallback quando o provider
+ * nao devolve distancia na cotacao. Retorna null se algum ponto for invalido.
+ */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  // Number(null)===0 e Number('')===0 (finitos!) — rejeita explicitamente antes,
+  // senao coordenada ausente viraria 0 e calcularia uma distancia lixo.
+  if ([lat1, lon1, lat2, lon2].some((v) => v == null || v === '')) return null;
+  const a1 = Number(lat1), o1 = Number(lon1), a2 = Number(lat2), o2 = Number(lon2);
+  if (![a1, o1, a2, o2].every((n) => Number.isFinite(n))) return null;
+  const R = 6371; // raio da Terra em km
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(a2 - a1);
+  const dLon = rad(o2 - o1);
+  const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(rad(a1)) * Math.cos(rad(a2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+/**
+ * Preco por distancia: o valor fixo cobre ate `kmBase` km; o que exceder e
+ * cobrado a `valorKmAdicional` por km. Retorna null se a tabela nao tiver
+ * valor fixo (ai o caller mantem o valor original / so atualiza o custo).
+ * @param {number} distKm
+ * @param {{valorFixo:number, kmBase:number, valorKmAdicional:number}|null} tabela
+ * @returns {number|null} valor em R$ (2 casas) ou null
+ */
+function calcularPrecoDistancia(distKm, tabela) {
+  if (!tabela || tabela.valorFixo == null || !Number.isFinite(Number(tabela.valorFixo))) {
+    return null;
+  }
+  const d = Number(distKm);
+  if (!Number.isFinite(d) || d < 0) return null;
+  const base = Number.isFinite(Number(tabela.kmBase)) ? Number(tabela.kmBase) : 0;
+  const adic = Number.isFinite(Number(tabela.valorKmAdicional)) ? Number(tabela.valorKmAdicional) : 0;
+  const excedenteKm = Math.max(0, d - base);
+  const total = Number(tabela.valorFixo) + (excedenteKm * adic);
+  return Math.round(total * 100) / 100;
+}
+
 class DispatchOrchestrator {
   /**
    * @param {import('pg').Pool} pool
@@ -684,6 +731,48 @@ class DispatchOrchestrator {
     }
 
     return { absMin: null, pctMin: null, origem: 'nenhum' };
+  }
+
+  /**
+   * 2026-06: resolve a tabela de preco por distancia. Mesma logica do
+   * _resolverGuardrailMargem: regra do cliente (override) -> config global
+   * (se tabela_preco_ativa) -> nenhuma. Campos: preco_valor_fixo /
+   * preco_km_base / preco_valor_km_adicional (iguais nas duas tabelas).
+   * @param {object|null} regra - logistics_dispatch_rules
+   * @returns {Promise<{tabela: {valorFixo:number,kmBase:number,valorKmAdicional:number}|null, origem: string}>}
+   */
+  async _resolverTabelaPreco(regra) {
+    // 1) Regra do cliente definiu tabela propria -> override total.
+    if (regra && regra.preco_valor_fixo != null) {
+      return {
+        tabela: {
+          valorFixo: parseFloat(regra.preco_valor_fixo),
+          kmBase: regra.preco_km_base != null ? parseFloat(regra.preco_km_base) : 0,
+          valorKmAdicional: regra.preco_valor_km_adicional != null ? parseFloat(regra.preco_valor_km_adicional) : 0,
+        },
+        origem: 'regra',
+      };
+    }
+
+    // 2) Sem tabela na regra -> tenta a config global (se ativa).
+    try {
+      const cfg = await lerConfigGlobal(this.pool);
+      if (cfg && cfg.tabela_preco_ativa && cfg.preco_valor_fixo != null) {
+        return {
+          tabela: {
+            valorFixo: parseFloat(cfg.preco_valor_fixo),
+            kmBase: cfg.preco_km_base != null ? parseFloat(cfg.preco_km_base) : 0,
+            valorKmAdicional: cfg.preco_valor_km_adicional != null ? parseFloat(cfg.preco_valor_km_adicional) : 0,
+          },
+          origem: 'global',
+        };
+      }
+    } catch (err) {
+      // fail-open: nao trava o despacho por causa da config de preco
+      console.error('⚠️ [Orchestrator] erro ao ler tabela de preco global:', err.message);
+    }
+
+    return { tabela: null, origem: 'nenhum' };
   }
 
   /**
