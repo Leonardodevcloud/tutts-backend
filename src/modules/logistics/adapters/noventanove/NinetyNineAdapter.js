@@ -341,7 +341,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
    * @param {string} externalDeliveryId - order_id da 99
    * @returns {Promise<{ok: boolean, msg?: string}>}
    */
-  async cancelDelivery(externalDeliveryId, externalOrderRef) {
+  async cancelDelivery(externalDeliveryId, externalOrderRef, opts = {}) {
     validarConfig(this.config);
 
     // external_order_id (= codigo_os) e ESTAVEL; order_id muda em reatribuicao.
@@ -350,45 +350,32 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const orderId = (externalDeliveryId != null && String(externalDeliveryId).trim())
       ? String(externalDeliveryId).trim() : null;
 
-    // 🔧 2026-06: cancel multi-tentativa. A 99 devolve errno=-1 "Erro no
-    // sistema" quando o reason_id contradiz o estado — ex.: 410013 ("nenhum
-    // entregador aceitou") enviado com um entregador JA atribuido (status
-    // waiting). 410018 ("Delivery no longer needed") e o motivo de cancelamento
-    // por decisao do operador, valido em qualquer estado pre-coleta. Tentamos:
-    //   1) external_order_id + reason configurado (funciona no estado finding)
-    //   2) external_order_id + 410018 (cobre waiting/delivering pre-coleta)
-    //   3) order_id + 410018 (fallback se a 99 nao achar pelo external_order_id)
-    // Entre tentativas damos uma pausa curta (a 99 as vezes pede "tente depois").
-    const REASON_UNIVERSAL = '410018';
-    const cfg410018 = Object.assign({}, this.config, { cancel_reason_id: REASON_UNIVERSAL });
+    // 2026-06 (v2): UMA tentativa por chamada. A 99 rate-limita cancels do mesmo
+    // pedido (errno=1001 "cancel too frequently"), entao NAO disparamos varias
+    // seguidas aqui — o re-tentar espacado e responsabilidade do caller.
+    // reason_id 410018 = "Delivery no longer needed": cancelamento por decisao do
+    // operador, valido em qualquer estado PRE-COLETA. (410013 "nenhum entregador
+    // aceitou" so vale no finding e causa errno=-1 no waiting.)
+    const reason = (opts && opts.reasonId) ? String(opts.reasonId) : '410018';
+    const cfg = Object.assign({}, this.config, { cancel_reason_id: reason });
+    const usarOrderId = !!(opts && opts.viaOrderId) || !extRef;
+    const body = usarOrderId
+      ? montarBodyCancel(null, cfg, orderId || extRef)
+      : montarBodyCancel(extRef, cfg, null);
 
-    const tentativas = [];
-    if (extRef) {
-      tentativas.push({ body: montarBodyCancel(extRef, this.config, null), via: 'external+reason_cfg' });
-      tentativas.push({ body: montarBodyCancel(extRef, cfg410018, null),   via: 'external+410018' });
+    try {
+      await this._chamar99('POST', '/v2/order/cancel', body, 'cancelDelivery');
+      console.log(`✅ [NinetyNineAdapter] pedido cancelado (reason_id=${body.reason_id}, via=${usarOrderId ? 'order_id' : 'external_order_id'})`);
+      return { ok: true };
+    } catch (err) {
+      // errno=-1 ("tente mais tarde"/sistema) e errno=1001 ("too frequently")
+      // sao TRANSITORIOS — o caller deve reagendar com espacamento.
+      const m = String(err.message || '');
+      const retriable = /errno=-1\b|errno=1001\b|too\s*frequently|tente\s*novamente|try\s*again|erro no sistema/i.test(m)
+        || err.retriable === true;
+      console.warn(`⚠️ [NinetyNineAdapter] cancel falhou (${err.category || 'erro'}${retriable ? ', transitorio' : ''}): ${err.message}`);
+      return { ok: false, msg: err.message, retriable };
     }
-    if (orderId) {
-      tentativas.push({ body: montarBodyCancel(null, cfg410018, orderId),  via: 'order_id+410018' });
-    }
-    if (tentativas.length === 0) {
-      return { ok: false, msg: 'sem external_order_id nem order_id para cancelar' };
-    }
-
-    let ultimaMsg = null;
-    for (let i = 0; i < tentativas.length; i++) {
-      const t = tentativas[i];
-      try {
-        await this._chamar99('POST', '/v2/order/cancel', t.body, `cancelDelivery[${t.via}]`);
-        console.log(`✅ [NinetyNineAdapter] pedido cancelado (via=${t.via}, reason_id=${t.body.reason_id})`);
-        return { ok: true, via: t.via };
-      } catch (err) {
-        ultimaMsg = err.message;
-        console.warn(`⚠️ [NinetyNineAdapter] cancel tentativa ${i + 1}/${tentativas.length} (${t.via}) falhou: ${err.message}`);
-        if (i < tentativas.length - 1) await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
-    console.warn(`⚠️ [NinetyNineAdapter] cancel falhou apos ${tentativas.length} tentativa(s): ${ultimaMsg}`);
-    return { ok: false, msg: ultimaMsg };
   }
 
   // ════════════════════════════════════════════════════════════

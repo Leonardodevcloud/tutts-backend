@@ -645,6 +645,12 @@ class DispatchOrchestrator {
         if (rc && rc.ok === false) {
           providerCancelado = false;
           providerCancelMsg = rc.msg || 'provider recusou o cancelamento';
+          // 2026-06: erro transitorio da 99 (errno=-1 "tente mais tarde" ou
+          // errno=1001 "too frequently") -> reagenda o cancel em background,
+          // espacado (acima do rate limit). Nao bloqueia a resposta ao operador.
+          if (rc.retriable) {
+            this._agendarRetryCancel99(adapter, entregaId, externalId, entrega.codigo_os);
+          }
         }
       } catch (err) {
         providerCancelado = false;
@@ -681,6 +687,53 @@ class DispatchOrchestrator {
     });
 
     return { ok: true, entregaId, providerCancelado, providerCancelMsg };
+  }
+
+  /**
+   * 2026-06: re-tentativa ESPACADA do cancelamento na 99 quando a 1a falhou com
+   * erro transitorio (errno=-1 "tente mais tarde" / errno=1001 "cancel too
+   * frequently"). Espacamento bem acima da janela do rate limit da 99.
+   * Fire-and-forget (nao bloqueia a resposta). Dedupe por entregaId.
+   */
+  _agendarRetryCancel99(adapter, entregaId, externalId, codigoOS, tentativa = 1) {
+    const ATRASOS_MS = [20000, 60000, 150000]; // 20s, 60s, 150s
+    if (!this._retryCancel99) this._retryCancel99 = new Set();
+    if (tentativa === 1) {
+      if (this._retryCancel99.has(entregaId)) return; // ja tem cadeia rodando
+      this._retryCancel99.add(entregaId);
+    }
+    if (tentativa > ATRASOS_MS.length) {
+      this._retryCancel99.delete(entregaId);
+      console.warn(`⚠️ [Orchestrator] retry de cancelamento 99 esgotado (OS ${codigoOS}) — pedido pode seguir vivo na 99; verifique manualmente`);
+      return;
+    }
+    setTimeout(async () => {
+      try {
+        // Se a entrega ja nao consta cancelada localmente, aborta (alguem mexeu).
+        const { rows } = await this.pool.query(
+          'SELECT status_canonico FROM logistics_deliveries WHERE id = $1', [entregaId]
+        );
+        if (!rows.length || rows[0].status_canonico !== 'CANCELED') {
+          this._retryCancel99.delete(entregaId);
+          return;
+        }
+        const rc = await adapter.cancelDelivery(externalId, codigoOS);
+        if (rc && rc.ok) {
+          this._retryCancel99.delete(entregaId);
+          console.log(`✅ [Orchestrator] cancelamento 99 confirmado no retry ${tentativa} (OS ${codigoOS})`);
+          return;
+        }
+        if (rc && rc.retriable) {
+          this._agendarRetryCancel99(adapter, entregaId, externalId, codigoOS, tentativa + 1);
+        } else {
+          this._retryCancel99.delete(entregaId);
+          console.warn(`⚠️ [Orchestrator] retry ${tentativa} cancel 99 (OS ${codigoOS}) falhou (nao-retriable): ${rc && rc.msg}`);
+        }
+      } catch (e) {
+        console.warn(`⚠️ [Orchestrator] erro no retry ${tentativa} cancel 99 (OS ${codigoOS}): ${e.message}`);
+        this._agendarRetryCancel99(adapter, entregaId, externalId, codigoOS, tentativa + 1);
+      }
+    }, ATRASOS_MS[tentativa - 1]);
   }
 
   // ════════════════════════════════════════════════════════════
