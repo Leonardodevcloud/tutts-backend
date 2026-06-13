@@ -23,10 +23,18 @@
 
 FROM mcr.microsoft.com/playwright:v1.49.1-jammy
 
-# Imagem oficial vem com Node 20 e dumb-init pré-instalados.
+# Imagem oficial vem com Node 20. (dumb-init NAO vem — instalado abaixo via apt.)
 USER root
 
 WORKDIR /app
+
+# 🔧 2026-06: instala dumb-init (init reaper). A imagem Playwright jammy NAO o traz;
+# o deploy do worker falhou com "dumb-init could not be found". Com ele instalado,
+# tanto o ENTRYPOINT quanto o start command do worker (dumb-init -- node worker-agents.js)
+# funcionam, e os zumbis do Chromium passam a ser reapados (cura o spawn EAGAIN).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends dumb-init \
+ && rm -rf /var/lib/apt/lists/*
 
 # Copiar package.json e instalar deps.
 # A imagem JÁ tem o Chromium 1.49.1 instalado em /ms-playwright/.
