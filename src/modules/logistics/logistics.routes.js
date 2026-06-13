@@ -89,6 +89,7 @@ function mapearCanonicoParaLegado(ld) {
     uber_quote_id:      ld.external_quote_id,     // legado: uber_quote_id
     uber_delivery_id:   ld.external_delivery_id,  // legado: uber_delivery_id
     tracking_url:       ld.tracking_url,
+    rastreio_token:     ld.rastreio_token || null,
     endereco_coleta:    ld.endereco_coleta,
     endereco_entrega:   ld.endereco_entrega,
     latitude_coleta:    ld.latitude_coleta,
