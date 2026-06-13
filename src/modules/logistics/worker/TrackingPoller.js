@@ -33,6 +33,7 @@
  */
 
 const { getProviderRegistry } = require('../core/ProviderRegistry');
+const { resolverDestinoViaPonte } = require('../core/PonteRastreioCliente');
 const { enviarCodigoColeta, enviarCodigoEntrega, enviarRastreioCliente, normalizarTelefone } = require('../logistics.whatsapp');
 const crypto = require('crypto');
 const RASTREIO_BASE_URL = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
@@ -373,7 +374,18 @@ function startTrackingPoller(pool) {
                 const linkTutts = `${RASTREIO_BASE_URL}/r/${token}`;
                 const pts = Array.isArray(r3[0]?.pontos) ? r3[0].pontos
                           : (r3[0]?.pontos ? JSON.parse(r3[0].pontos) : []);
-                const telDestino = r3[0]?.telefone_entrega || null;
+                let telDestino = r3[0]?.telefone_entrega || null;
+                if (!telDestino) {
+                  try {
+                    telDestino = (await resolverDestinoViaPonte(pool, entrega.codigo_os)).telefone || null;
+                    if (telDestino) {
+                      await pool.query(
+                        'UPDATE logistics_deliveries SET telefone_entrega = $1 WHERE id = $2 AND telefone_entrega IS NULL',
+                        [telDestino, entrega.id]
+                      ).catch(() => {});
+                    }
+                  } catch (_) {}
+                }
                 const telLoja    = (pts[0]?.telefone || pts[0]?.fone) || null;
                 const nomeDestino = pts.length ? (pts[pts.length - 1]?.nome || '') : '';
                 const destinos = [];

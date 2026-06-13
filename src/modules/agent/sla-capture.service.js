@@ -419,6 +419,7 @@ async function processarCaptura(pool, registro) {
 module.exports = {
   enfileirarCaptura,
   processarCaptura,
+  extrairTelefoneDeNota,
   // expostos pra testes
   _internal: { montarMensagemRastreio, enviarRastreioWhatsApp, getGrupoIdPorCliente },
 };

@@ -43,6 +43,7 @@ const { getDispatchRuleMatcher } = require('./DispatchRuleMatcher');
 const { lerConfigGlobal } = require('../routes/config-global.routes');
 const { enviarCodigoColeta, enviarCodigoEntrega, normalizarTelefone } = require('../logistics.whatsapp');
 const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.parser');
+const { resolverDestinoViaPonte } = require('./PonteRastreioCliente');
 
 // Status terminais (status_native) — não devem ser re-despachados
 const STATUS_TERMINAL = ['cancelado', 'canceled', 'delivered', 'fallback_fila'];
@@ -379,6 +380,19 @@ class DispatchOrchestrator {
         request.dropoff.name = String(opts.nomeCliente).trim().slice(0, 100);
       }
 
+      // Ponte rastreio-cliente: nome + telefone do CORPO da OS.
+      // Quando os dados do cliente final nao vem em campo estruturado (ficam
+      // soltos no corpo), usa o que o RPA do rastreio-cliente extraiu.
+      // Prioridade: manual (modal) -> estruturado (entrega.nome) -> ponte.
+      // O nome e resolvido AQUI porque vai pro dropoff.name da 99.
+      const _ponte = await resolverDestinoViaPonte(this.pool, codigoOS);
+      if (request && request.dropoff
+          && !(opts.nomeCliente && String(opts.nomeCliente).trim())
+          && !String((entrega && entrega.nome) || '').trim()
+          && _ponte.nome) {
+        request.dropoff.name = String(_ponte.nome).trim().slice(0, 100);
+      }
+
       await this.pool.query(`
         UPDATE logistics_deliveries
         SET external_quote_id = $1, valor_provider = $2, eta_minutos = $3,
@@ -409,7 +423,7 @@ class DispatchOrchestrator {
           enderecos[enderecos.length - 1]?.telefone ||
           enderecos[enderecos.length - 1]?.fone || null
         );
-        const _telDestino = _telManual || _telOS;
+        const _telDestino = _telManual || _telOS || _ponte.telefone;
         if (_telDestino) {
           await this.pool.query(
             'UPDATE logistics_deliveries SET telefone_entrega = $1, updated_at = NOW() WHERE id = $2',
