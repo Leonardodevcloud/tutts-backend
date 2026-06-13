@@ -323,7 +323,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       providerCode: this.providerCode,
       statusCanonico: nativeToCanonical(statusNative),
       statusNative,
-      trackingUrl: data.tracking_url || null,
+      trackingUrl: data.tracking_link || null,
       courier: data.driver_info ? extrairCourierDeDetail(data.driver_info) : null,
       rawProvider: data,
     };
@@ -473,7 +473,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       providerCode: this.providerCode,
       statusCanonico: statusNative ? nativeToCanonical(statusNative) : CanonicalStatus.DISPATCHED,
       statusNative,
-      trackingUrl: data.tracking_url || null,
+      trackingUrl: data.tracking_link || null,
       courier: data.driver_info ? extrairCourierDeDetail(data.driver_info) : null,
       rawProvider: data,
       pickupCode:  pickupCode  ? String(pickupCode)  : null,

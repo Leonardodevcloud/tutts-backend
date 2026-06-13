@@ -103,6 +103,7 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS dropoff_code VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS telefone_entrega VARCHAR(30)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS codigo_wpp_enviado BOOLEAN DEFAULT FALSE`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rastreio_wpp_enviado BOOLEAN DEFAULT FALSE`).catch(() => {});
 
   console.log('✅ [logistics] tabela logistics_deliveries verificada');
 

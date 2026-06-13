@@ -33,7 +33,7 @@
  */
 
 const { getProviderRegistry } = require('../core/ProviderRegistry');
-const { enviarCodigoColeta, enviarCodigoEntrega, normalizarTelefone } = require('../logistics.whatsapp');
+const { enviarCodigoColeta, enviarCodigoEntrega, enviarRastreioCliente, normalizarTelefone } = require('../logistics.whatsapp');
 const { getWebhookDispatcher } = require('../core/WebhookDispatcher');
 const { getEventLogger, EventSource } = require('../core/EventLogger');
 
@@ -131,7 +131,7 @@ function startTrackingPoller(pool) {
    */
   async function buscarEntregasEmTransito() {
     const { rows } = await pool.query(`
-      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, telefone_entrega
+      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, rastreio_wpp_enviado, telefone_entrega
       FROM logistics_deliveries
       WHERE provider_code = $1
         AND status_canonico = ANY($2)
@@ -349,6 +349,44 @@ function startTrackingPoller(pool) {
                   }
                 }
                 console.log(`🔑 [TrackingPoller] OS ${entrega.codigo_os}: código(s) 99 detectado(s) e salvos`);
+              }
+
+              // 🆕 Rastreio em tempo real: assim que a 99 expoe o tracking_link
+              // (so aparece em waiting+), manda UMA vez pro destinatario E pra loja.
+              if (det.trackingUrl && !entrega.rastreio_wpp_enviado) {
+                const { rows: r3 } = await pool.query(
+                  'SELECT telefone_entrega, pontos FROM logistics_deliveries WHERE id = $1',
+                  [entrega.id]
+                );
+                const pts = Array.isArray(r3[0]?.pontos) ? r3[0].pontos
+                          : (r3[0]?.pontos ? JSON.parse(r3[0].pontos) : []);
+                const telDestino = r3[0]?.telefone_entrega || null;
+                const telLoja    = (pts[0]?.telefone || pts[0]?.fone) || null;
+                const nomeDestino = pts.length ? (pts[pts.length - 1]?.nome || '') : '';
+                const destinos = [];
+                if (telDestino) destinos.push({ tel: telDestino, papel: 'destinatario', nome: nomeDestino });
+                if (telLoja && normalizarTelefone(telLoja) !== normalizarTelefone(telDestino)) {
+                  destinos.push({ tel: telLoja, papel: 'loja', nome: '' });
+                }
+                if (destinos.length) {
+                  Promise.all(destinos.map((dst) =>
+                    enviarRastreioCliente(dst.tel, {
+                      codigoOS: entrega.codigo_os,
+                      link: det.trackingUrl,
+                      providerNome: '99Entrega',
+                      nomeDestinatario: dst.nome,
+                      papel: dst.papel,
+                    }).catch(() => ({ enviado: false }))
+                  )).then((resultados) => {
+                    if (resultados.some((x) => x && x.enviado)) {
+                      pool.query(
+                        'UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1',
+                        [entrega.id]
+                      ).catch(() => {});
+                      console.log(`📍 [TrackingPoller] OS ${entrega.codigo_os}: link de rastreio enviado (${destinos.map(d=>d.papel).join('+')})`);
+                    }
+                  }).catch(() => {});
+                }
               }
             } catch (_e) { console.warn(`⚠️ [TrackingPoller] codigo/wpp OS ${entrega.codigo_os}: ${_e.message}`); }
           }
