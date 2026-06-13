@@ -287,14 +287,35 @@ function createCorrecaoRoutes(pool) {
         }
       }
 
-      // ── 2. Validar fachada (obrigatória) — foto + Google Places ──
+      // 💰 GATE DE CUSTO (2026-06): confirma CEP da Receita == CEP reverso do GPS.
+      // O CEP da Receita ja veio do brasilapi (gratis) no passo 1; o reverse e cacheado
+      // e e REUSADO no passo 3a (Path F) — nao adiciona chamada. Se baterem, pulamos o
+      // Google Places (caro: ate ~US$0.16/correcao) na validacao da fachada.
+      let cepGps = null;
+      try {
+        if (Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
+          cepGps = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
+        }
+      } catch (gateErr) {
+        console.error('[agent] ⚠️ reverseGeocodeCep (gate) falhou (nao-bloqueante):', gateErr.message);
+      }
+      const _receitaCep = (validacaoNF && validacaoNF.receita && validacaoNF.receita.ok)
+        ? validacaoNF.receita.cep : null;
+      const confirmadoBarato = !!(_receitaCep && cepGps &&
+        String(_receitaCep).slice(0, 8) === String(cepGps).slice(0, 8));
+      if (confirmadoBarato) {
+        console.log(`[agent] 💰 CEP Receita == CEP GPS (${cepGps}) — pulando Google Places (economia)`);
+      }
+
+      // ── 2. Validar fachada (obrigatória) — foto + Google Places (gateado) ──
       let validacaoLoc = null;
       if (foto_fachada) {
         try {
           validacaoLoc = await validarLocalizacao(
             foto_fachada,
             parseFloat(motoboy_lat),
-            parseFloat(motoboy_lng)
+            parseFloat(motoboy_lng),
+            { pularPlaces: confirmadoBarato }
           );
 
           if (validacaoLoc && validacaoLoc.foto_rejeitada) {
@@ -325,16 +346,12 @@ function createCorrecaoRoutes(pool) {
       if (validacaoNF && !validacaoNF.nf_rejeitada) {
         const receita = validacaoNF.receita;
         let distanciaReceitaGps;
-        let cepGps;
+        // cepGps ja foi computado no GATE DE CUSTO acima (reusado aqui, SEM nova chamada)
 
         // 3a. Geocoda endereço da Receita pra calcular distância até o GPS (Path B)
         if (receita && receita.ok && receita.endereco && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
           try {
-            const [geoReceita, cep] = await Promise.all([
-              geocodarEndereco(pool, receita.endereco),
-              reverseGeocodeCep(pool, motoboy_lat, motoboy_lng),
-            ]);
-            cepGps = cep;
+            const geoReceita = await geocodarEndereco(pool, receita.endereco);
             if (geoReceita) {
               const { distanciaMetros } = require('../cruzar-validacoes');
               distanciaReceitaGps = distanciaMetros(geoReceita.lat, geoReceita.lng, motoboy_lat, motoboy_lng);

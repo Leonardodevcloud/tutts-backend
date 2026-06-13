@@ -240,7 +240,8 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
     if (!resp.ok) {
       const err = await resp.text();
       log(`❌ Places API Nearby erro ${resp.status}: ${err.substring(0, 200)}`);
-      return await buscarTextSearch(lat, lng, raioMetros, apiKey);
+      // 2026-06 custo: Text Search desativado. Em erro de Nearby, retorna vazio.
+      return [];
     }
 
     const data = await resp.json();
@@ -254,14 +255,9 @@ async function buscarEstabelecimentosProximos(lat, lng, raioMetros) {
 
     log(`📍 Nearby: ${places.length} resultado(s) 💸 (US$ 0.032)`);
 
-    // Sempre complementar com Text Search automotivo
-    const textPlaces = await buscarTextSearch(lat, lng, raioMetros, apiKey);
-    if (textPlaces.length > 0) {
-      const nomesExistentes = new Set(places.map(p => normalizar(p.nome)));
-      const novos = textPlaces.filter(p => !nomesExistentes.has(normalizar(p.nome)));
-      places.push(...novos);
-      log(`📍 +TextSearch: ${novos.length} novo(s), total ${places.length}`);
-    }
+    // 2026-06 custo: Text Search REMOVIDO. Antes rodava SEMPRE 4 queries
+    // (= 4x Places por correcao, alem do Nearby). Agora so Nearby. Pra reativar,
+    // a funcao buscarTextSearch() segue definida abaixo (sem callers).
 
     // 🔄 Grava no cache regional (permanente, sem TTL)
     if (pool) {
@@ -390,7 +386,7 @@ function contemPalavrasChave(nomeFoto, nomeGoogle) {
  * VALIDAÇÃO PRINCIPAL
  * @returns {{ valido, nome_foto, match_google, confianca, lugares_proximos, detalhes }}
  */
-async function validarLocalizacao(base64Foto, lat, lng) {
+async function validarLocalizacao(base64Foto, lat, lng, opts = {}) {
   const RAIO_BUSCA_METROS = 500;
   const LIMIAR_SIMILARIDADE = 0.35;
   const LIMIAR_PALAVRAS = 0.5;
@@ -449,6 +445,23 @@ async function validarLocalizacao(base64Foto, lat, lng) {
   }
 
   // 4. Buscar estabelecimentos próximos
+  //    💰 2026-06 custo: gate. Se o caller ja confirmou por sinal barato
+  //    (ex: CEP da Receita == CEP reverso do GPS), pulamos o Google Places.
+  //    O Gemini (validacao da foto + nome) ja rodou acima — so o Places e pulado.
+  if (opts && opts.pularPlaces) {
+    log('💰 pularPlaces=true — Google Places NAO chamado (confirmado por sinal barato)');
+    return {
+      valido: true,
+      foto_valida: true,
+      nome_foto: nomeFoto,
+      match_google: null,
+      confianca: 0,
+      tipo_local: gemini.tipo_local,
+      motivo: 'Validado por CEP (Receita == GPS); Google Places dispensado',
+      lugares_proximos: 0,
+      detalhes: { gemini, places_pulado: true },
+    };
+  }
   const lugares = await buscarEstabelecimentosProximos(lat, lng, RAIO_BUSCA_METROS);
   if (lugares.length === 0) {
     log(`⚠️ Nenhum estabelecimento em ${RAIO_BUSCA_METROS}m — aprovando`);
