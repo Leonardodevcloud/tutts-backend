@@ -24,6 +24,43 @@ const TUTTS_API_URL  = 'https://tutts.com.br/integracao';
 const TUTTS_WEBHOOK  = 'https://tutts-backend-production.up.railway.app/api/webhook/tutts';
 const PAGE_SIZE      = 50;
 
+// ── 🕒 2026-06: Janela de criacao de corrida na MAPP (SO poller automatico) ──
+// Fora de [INICIO, FIM) no fuso America/Bahia, a criacao na MAPP e ADIADA pro
+// proximo INICIO (07:30). Reusa o backoff existente (proximo_retry futuro): NAO
+// cria tabela/worker novo nem mexe na chamada da MAPP. Kill-switch por env.
+// A rota manual /criar-corrida NAO passa por aqui (cria sempre na hora).
+const CF_JANELA_CRIACAO_ATIVA = process.env.CF_JANELA_CRIACAO_ATIVA !== 'false'; // default: ligado
+const CF_JANELA_TZ            = process.env.CF_JANELA_TZ || 'America/Bahia';
+function _hmParaMin(hhmm, def) {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+  return m ? (Number(m[1]) * 60 + Number(m[2])) : def;
+}
+const CF_JANELA_INICIO_MIN = _hmParaMin(process.env.CF_JANELA_INICIO, 7 * 60 + 30);  // 07:30
+const CF_JANELA_FIM_MIN    = _hmParaMin(process.env.CF_JANELA_FIM,   17 * 60 + 30);  // 17:30
+
+// Minuto-do-dia atual no fuso configurado (0..1439).
+function _minutoDoDiaTz(d = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: CF_JANELA_TZ, hour12: false, hour: '2-digit', minute: '2-digit',
+    }).formatToParts(d);
+    const h  = Number(parts.find(p => p.type === 'hour').value);
+    const mm = Number(parts.find(p => p.type === 'minute').value);
+    return h * 60 + mm;
+  } catch (_) {
+    // Fallback: Bahia = UTC-3 fixo (sem horario de verao)
+    const u = d.getUTCHours() * 60 + d.getUTCMinutes();
+    return ((u - 180) % 1440 + 1440) % 1440;
+  }
+}
+// Minutos ate a proxima abertura da janela. 0 = ja estamos dentro.
+function _minutosAteJanela(d = new Date()) {
+  const agora = _minutoDoDiaTz(d);
+  if (agora >= CF_JANELA_INICIO_MIN && agora < CF_JANELA_FIM_MIN) return 0;
+  if (agora < CF_JANELA_INICIO_MIN) return CF_JANELA_INICIO_MIN - agora;  // hoje de manha (inclui madrugada)
+  return (1440 - agora) + CF_JANELA_INICIO_MIN;                          // passou do FIM -> amanha 07:30
+}
+
 class ConfirmaFacilPoller {
   constructor(pool) {
     this.pool    = pool;
@@ -319,6 +356,19 @@ class ConfirmaFacilPoller {
       [config.id, idEmbarque]
     );
     if (_bk.length > 0) { this._puladosBackoff = (this._puladosBackoff || 0) + 1; return; }
+
+    // 🕒 2026-06: janela de criacao (SO poller automatico). Fora de 07:30-17:30
+    // (Bahia), adia a criacao na MAPP pro proximo 07:30 reusando o backoff.
+    // O vinculo NAO e criado aqui, entao quando a janela abrir a NF e criada normal.
+    if (CF_JANELA_CRIACAO_ATIVA) {
+      const _minJanela = _minutosAteJanela();
+      if (_minJanela > 0) {
+        const _horas = (_minJanela / 60).toFixed(1);
+        console.log(`🕒 [CF Poller] fora da janela (07:30-17:30) — adiando NF ${numeroNF} (idEmbarque ${idEmbarque}) por ~${_horas}h (proximo 07:30)`);
+        await this._agendarParaJanela(config.id, idEmbarque, _minJanela);
+        return;
+      }
+    }
 
     // Buscar endereço de coleta pelo cnpj do embarcador
     const coleta = await this._buscarColeta(config.id, cnpjEmbarcador);
@@ -943,6 +993,21 @@ class ConfirmaFacilPoller {
         proximo_retry = NOW() + (LEAST((confirmafacil_poller_retry.tentativas + 1) * 15, 360) || ' minutes')::interval
     `, [configId, idEmbarque, String(erro || '').slice(0, 500)])
       .catch((e) => console.warn('[CF Poller] _registrarFalhaRetry:', e.message));
+  }
+
+  async _agendarParaJanela(configId, idEmbarque, minutos) {
+    // Adia a criacao reusando o backoff: proximo_retry = NOW() + minutos.
+    // NAO mexe em 'tentativas' (nao e falha) — so reagenda. Upsert idempotente.
+    await this.pool.query(`
+      INSERT INTO confirmafacil_poller_retry
+        (config_id, id_embarque, tentativas, ultimo_erro, proximo_retry, atualizado_em)
+      VALUES ($1, $2, 0, 'adiado: fora da janela de criacao (07:30-17:30)', NOW() + ($3 || ' minutes')::interval, NOW())
+      ON CONFLICT (config_id, id_embarque) DO UPDATE SET
+        ultimo_erro   = 'adiado: fora da janela de criacao (07:30-17:30)',
+        proximo_retry = NOW() + ($3 || ' minutes')::interval,
+        atualizado_em = NOW()
+    `, [configId, idEmbarque, String(minutos)])
+      .catch((e) => console.warn('[CF Poller] _agendarParaJanela:', e.message));
   }
 
   async _removerRetry(configId, idEmbarque) {
