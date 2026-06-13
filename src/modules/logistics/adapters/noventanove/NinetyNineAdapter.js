@@ -344,25 +344,51 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
   async cancelDelivery(externalDeliveryId, externalOrderRef) {
     validarConfig(this.config);
 
-    // 🆕 Prioriza external_order_id (= codigo_os, ESTAVEL) quando disponivel.
-    // A doc da 99: order_id MUDA na reatribuicao a outro entregador; o
-    // external_order_id nunca muda. Cancelar por ele evita "order not found"
-    // quando o entregador original largou e a 99 reatribuiu. Fallback: order_id.
+    // external_order_id (= codigo_os) e ESTAVEL; order_id muda em reatribuicao.
     const extRef = (externalOrderRef != null && String(externalOrderRef).trim())
-      ? String(externalOrderRef).trim()
-      : null;
-    const body = extRef
-      ? montarBodyCancel(extRef, this.config, null)          // usa external_order_id
-      : montarBodyCancel(null, this.config, externalDeliveryId); // fallback order_id
+      ? String(externalOrderRef).trim() : null;
+    const orderId = (externalDeliveryId != null && String(externalDeliveryId).trim())
+      ? String(externalDeliveryId).trim() : null;
 
-    try {
-      await this._chamar99('POST', '/v2/order/cancel', body, 'cancelDelivery');
-      console.log(`✅ [NinetyNineAdapter] pedido cancelado (ref=${extRef || externalDeliveryId}, reason_id=${body.reason_id})`);
-      return { ok: true };
-    } catch (err) {
-      console.warn(`⚠️ [NinetyNineAdapter] cancel falhou (${err.category || 'erro'}):`, err.message);
-      return { ok: false, msg: err.message };
+    // 🔧 2026-06: cancel multi-tentativa. A 99 devolve errno=-1 "Erro no
+    // sistema" quando o reason_id contradiz o estado — ex.: 410013 ("nenhum
+    // entregador aceitou") enviado com um entregador JA atribuido (status
+    // waiting). 410018 ("Delivery no longer needed") e o motivo de cancelamento
+    // por decisao do operador, valido em qualquer estado pre-coleta. Tentamos:
+    //   1) external_order_id + reason configurado (funciona no estado finding)
+    //   2) external_order_id + 410018 (cobre waiting/delivering pre-coleta)
+    //   3) order_id + 410018 (fallback se a 99 nao achar pelo external_order_id)
+    // Entre tentativas damos uma pausa curta (a 99 as vezes pede "tente depois").
+    const REASON_UNIVERSAL = '410018';
+    const cfg410018 = Object.assign({}, this.config, { cancel_reason_id: REASON_UNIVERSAL });
+
+    const tentativas = [];
+    if (extRef) {
+      tentativas.push({ body: montarBodyCancel(extRef, this.config, null), via: 'external+reason_cfg' });
+      tentativas.push({ body: montarBodyCancel(extRef, cfg410018, null),   via: 'external+410018' });
     }
+    if (orderId) {
+      tentativas.push({ body: montarBodyCancel(null, cfg410018, orderId),  via: 'order_id+410018' });
+    }
+    if (tentativas.length === 0) {
+      return { ok: false, msg: 'sem external_order_id nem order_id para cancelar' };
+    }
+
+    let ultimaMsg = null;
+    for (let i = 0; i < tentativas.length; i++) {
+      const t = tentativas[i];
+      try {
+        await this._chamar99('POST', '/v2/order/cancel', t.body, `cancelDelivery[${t.via}]`);
+        console.log(`✅ [NinetyNineAdapter] pedido cancelado (via=${t.via}, reason_id=${t.body.reason_id})`);
+        return { ok: true, via: t.via };
+      } catch (err) {
+        ultimaMsg = err.message;
+        console.warn(`⚠️ [NinetyNineAdapter] cancel tentativa ${i + 1}/${tentativas.length} (${t.via}) falhou: ${err.message}`);
+        if (i < tentativas.length - 1) await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    console.warn(`⚠️ [NinetyNineAdapter] cancel falhou apos ${tentativas.length} tentativa(s): ${ultimaMsg}`);
+    return { ok: false, msg: ultimaMsg };
   }
 
   // ════════════════════════════════════════════════════════════
