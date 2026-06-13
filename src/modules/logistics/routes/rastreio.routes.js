@@ -51,6 +51,7 @@ function createLogisticsRastreioRouter(pool) {
           nome: courier.name,
           veiculo: courier.vehicle || null,
           placa: courier.plate || null,
+          foto: courier.photo || null,
         } : null,
         posicao: (d.ultima_lat != null && d.ultima_lng != null) ? {
           lat: parseFloat(d.ultima_lat),
