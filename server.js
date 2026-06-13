@@ -593,6 +593,10 @@ app.post("/api/solicitacao/webhook/tutts", webhookBasicValidation, (req, res) =>
 const { createLogisticsWebhookRouter } = require('./src/modules/logistics');
 app.use('/api/logistics/webhook', createLogisticsWebhookRouter(pool));
 
+// Logistics Hub - rastreio publico (sem auth; protegido por token aleatorio por entrega)
+const { createLogisticsRastreioRouter } = require('./src/modules/logistics');
+app.use('/api/logistics/rastreio', createLogisticsRastreioRouter(pool));
+
 // 🔒 SECURITY FIX (AUDIT-10): Rotas de init/overrides extraídas para módulo próprio
 const { createBootstrapRoutes } = require('./src/modules/bootstrap/bootstrap.routes');
 app.use('/api', createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAdminOuFinanceiro));

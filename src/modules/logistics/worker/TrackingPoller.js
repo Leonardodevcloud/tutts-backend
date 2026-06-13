@@ -34,6 +34,8 @@
 
 const { getProviderRegistry } = require('../core/ProviderRegistry');
 const { enviarCodigoColeta, enviarCodigoEntrega, enviarRastreioCliente, normalizarTelefone } = require('../logistics.whatsapp');
+const crypto = require('crypto');
+const RASTREIO_BASE_URL = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
 const { getWebhookDispatcher } = require('../core/WebhookDispatcher');
 const { getEventLogger, EventSource } = require('../core/EventLogger');
 
@@ -351,13 +353,24 @@ function startTrackingPoller(pool) {
                 console.log(`🔑 [TrackingPoller] OS ${entrega.codigo_os}: código(s) 99 detectado(s) e salvos`);
               }
 
-              // 🆕 Rastreio em tempo real: assim que a 99 expoe o tracking_link
-              // (so aparece em waiting+), manda UMA vez pro destinatario E pra loja.
+              // 🆕 Rastreio Tutts: quando a 99 expoe o link (waiting+, prova de que
+              // o entregador aceitou), geramos o token proprio e mandamos o link da
+              // Tutts (centraltutts.online/r/<token>) UMA vez pro destinatario E pra
+              // loja. O cliente nunca ve a 99.
               if (det.trackingUrl && !entrega.rastreio_wpp_enviado) {
                 const { rows: r3 } = await pool.query(
-                  'SELECT telefone_entrega, pontos FROM logistics_deliveries WHERE id = $1',
+                  'SELECT telefone_entrega, pontos, rastreio_token FROM logistics_deliveries WHERE id = $1',
                   [entrega.id]
                 );
+                let token = r3[0]?.rastreio_token || null;
+                if (!token) {
+                  token = crypto.randomBytes(9).toString('hex');
+                  await pool.query(
+                    'UPDATE logistics_deliveries SET rastreio_token = $1 WHERE id = $2 AND rastreio_token IS NULL',
+                    [token, entrega.id]
+                  ).catch(() => {});
+                }
+                const linkTutts = `${RASTREIO_BASE_URL}/r/${token}`;
                 const pts = Array.isArray(r3[0]?.pontos) ? r3[0].pontos
                           : (r3[0]?.pontos ? JSON.parse(r3[0].pontos) : []);
                 const telDestino = r3[0]?.telefone_entrega || null;
@@ -372,8 +385,8 @@ function startTrackingPoller(pool) {
                   Promise.all(destinos.map((dst) =>
                     enviarRastreioCliente(dst.tel, {
                       codigoOS: entrega.codigo_os,
-                      link: det.trackingUrl,
-                      providerNome: '99Entrega',
+                      link: linkTutts,
+                      providerNome: 'Tutts',
                       nomeDestinatario: dst.nome,
                       papel: dst.papel,
                     }).catch(() => ({ enviado: false }))
@@ -383,7 +396,7 @@ function startTrackingPoller(pool) {
                         'UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1',
                         [entrega.id]
                       ).catch(() => {});
-                      console.log(`📍 [TrackingPoller] OS ${entrega.codigo_os}: link de rastreio enviado (${destinos.map(d=>d.papel).join('+')})`);
+                      console.log(`📍 [TrackingPoller] OS ${entrega.codigo_os}: link de rastreio Tutts enviado (${destinos.map(d=>d.papel).join('+')})`);
                     }
                   }).catch(() => {});
                 }

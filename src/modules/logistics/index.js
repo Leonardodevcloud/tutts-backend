@@ -22,6 +22,7 @@ const { initLogisticsFase3 } = require('./logistics.migration-fase3');
 const { initLogisticsConfigGlobal } = require('./logistics.migration-config-global');
 const { createLogisticsRouter } = require('./logistics.routes');
 const { createLogisticsWebhookRouter } = require('./routes/webhook.routes');
+const { createLogisticsRastreioRouter } = require('./routes/rastreio.routes');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
 const { getEventLogger } = require('./core/EventLogger');
 const { UberAdapter } = require('./adapters/uber/UberAdapter');
@@ -109,5 +110,6 @@ module.exports = {
   initLogisticsBackfill,
   initLogisticsRoutes,
   createLogisticsWebhookRouter,
+  createLogisticsRastreioRouter,
   startLogisticsWorker,
 };
