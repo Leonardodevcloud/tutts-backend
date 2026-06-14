@@ -119,8 +119,11 @@ router.get('/bi/garantido', async (req, res) => {
         valorTotalNaoRodouPlanilha += valorNegociado;
       }
       
-      // Chave única: cod_prof + data + cod_cliente (ou profissional se cod_prof vazio)
-      const chaveUnica = `${codProfPlan || profissional}_${dataFormatada}_${codClientePlan}`;
+      // Chave única: cod_prof + data (1 linha por motoboy/dia).
+      // A atribuição de cliente vem da planilha; a produção é o dia inteiro
+      // (somada de todos os clientes). Se o mesmo motoboy/dia aparece na
+      // planilha sob mais de um cliente, fica só a 1a ocorrência — evita duplicar.
+      const chaveUnica = `${codProfPlan || profissional}_${dataFormatada}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
@@ -513,8 +516,8 @@ router.get('/bi/garantido/semanal', async (req, res) => {
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
       
-      // Verificar duplicata
-      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}_${codCliente}`;
+      // Verificar duplicata — 1 linha por motoboy/dia (atribuicao vem da planilha)
+      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
@@ -793,8 +796,8 @@ router.get('/bi/garantido/por-cliente', async (req, res) => {
       if (partes.length !== 3) continue;
       const dataFormatada = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
       
-      // Verificar duplicata
-      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}_${codCliente}`;
+      // Verificar duplicata — 1 linha por motoboy/dia (atribuicao vem da planilha)
+      const chaveUnica = `${codProf || cols[2] || 'vazio'}_${dataFormatada}`;
       if (chavesProcessadas.has(chaveUnica)) continue;
       chavesProcessadas.add(chaveUnica);
       
