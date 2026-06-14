@@ -300,6 +300,10 @@ async function processarCaptura(pool, registro) {
     // 2. Monta mensagem
     const texto = montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod });
 
+    // Cliente Hub: o envio do rastreio e feito pelo Hub (no aceite da corrida),
+    // entao aqui NAO enviamos o link legado. A captura segue alimentando a ponte.
+    const _usaHub = !!(resultado.configMatched && resultado.configMatched.usaHub);
+
     // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
     // ou fallback pra env var legada se não houver match.
     const grupoIdOverride = resultado.configMatched
@@ -308,10 +312,12 @@ async function processarCaptura(pool, registro) {
     if (resultado.configMatched && DEBUG_VERBOSE) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
-    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+    if (!_usaHub) {
+      await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+    }
 
     // 3b. Rastreio direto ao cliente final (se habilitado no cadastro)
-    if (resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
+    if (!_usaHub && resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
       // Tenta extrair telefone de cada ponto (do ponto de entrega, não coleta)
       const pontosEntrega = pontos.filter(p => p.numero >= 2);
       let telefoneEncontrado = null;
@@ -420,6 +426,8 @@ module.exports = {
   enfileirarCaptura,
   processarCaptura,
   extrairTelefoneDeNota,
+  montarMensagemRastreio,
+  enviarRastreioWhatsApp,
   // expostos pra testes
   _internal: { montarMensagemRastreio, enviarRastreioWhatsApp, getGrupoIdPorCliente },
 };

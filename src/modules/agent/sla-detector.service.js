@@ -127,6 +127,7 @@ async function carregarConfig(pool) {
   if (colNames.includes('evolution_group_id')) selectCols.push('evolution_group_id');
   if (colNames.includes('rastreio_cliente_ativo')) selectCols.push('rastreio_cliente_ativo');
   if (colNames.includes('rastreio_cliente_nome_exibicao')) selectCols.push('rastreio_cliente_nome_exibicao');
+  if (colNames.includes('usa_hub')) selectCols.push('usa_hub');
   if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
 
   const { rows } = await pool.query(
@@ -164,6 +165,7 @@ async function carregarConfig(pool) {
       filtrosBalao: filtros,
       rastreioClienteAtivo: row.rastreio_cliente_ativo === true,
       rastreioClienteNomeExibicao: row.rastreio_cliente_nome_exibicao || null,
+      usaHub: row.usa_hub === true,
     };
 
     if (!config[cod]) config[cod] = [];

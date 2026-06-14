@@ -372,6 +372,44 @@ function startTrackingPoller(pool) {
                   ).catch(() => {});
                 }
                 const linkTutts = `${RASTREIO_BASE_URL}/r/${token}`;
+
+                // Cliente Hub: o link Tutts tambem vai pro GRUPO, no mesmo template
+                // do rastreio-cliente. (O link legado desses clientes ja foi
+                // suprimido no RPA via flag usa_hub.)
+                try {
+                  const { rows: capt } = await pool.query(
+                    'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
+                    [String(entrega.codigo_os)]
+                  );
+                  const clienteCodHub = capt[0]?.cliente_cod || null;
+                  if (clienteCodHub) {
+                    const { rows: gruposHub } = await pool.query(
+                      "SELECT evolution_group_id FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true AND evolution_group_id IS NOT NULL",
+                      [String(clienteCodHub)]
+                    );
+                    if (gruposHub.length) {
+                      const sla = require('../../agent/sla-capture.service');
+                      let ptsHub = capt[0].pontos_json;
+                      if (typeof ptsHub === 'string') { try { ptsHub = JSON.parse(ptsHub); } catch (_) { ptsHub = []; } }
+                      const textoHub = sla.montarMensagemRastreio({
+                        os_numero: entrega.codigo_os,
+                        link_rastreio: linkTutts,
+                        pontos: Array.isArray(ptsHub) ? ptsHub : [],
+                        cliente_cod: String(clienteCodHub),
+                      });
+                      let enviouGrupo = false;
+                      for (const g of gruposHub) {
+                        try {
+                          await sla.enviarRastreioWhatsApp({ texto: textoHub, clienteCod: String(clienteCodHub), grupoIdOverride: g.evolution_group_id });
+                          enviouGrupo = true;
+                        } catch (_) {}
+                      }
+                      if (enviouGrupo) {
+                        await pool.query('UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1', [entrega.id]).catch(() => {});
+                      }
+                    }
+                  }
+                } catch (e) { console.warn(`grupo Hub OS ${entrega.codigo_os}:`, e.message); }
                 const pts = Array.isArray(r3[0]?.pontos) ? r3[0].pontos
                           : (r3[0]?.pontos ? JSON.parse(r3[0].pontos) : []);
                 let telDestino = r3[0]?.telefone_entrega || null;

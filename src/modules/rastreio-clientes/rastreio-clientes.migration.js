@@ -71,6 +71,11 @@ async function initRastreioClientesTables(pool) {
 
   await pool.query(`
     ALTER TABLE rastreio_clientes_config
+      ADD COLUMN IF NOT EXISTS usa_hub BOOLEAN DEFAULT FALSE
+  `).catch(e => console.warn('[rastreio-clientes] usa_hub:', e.message));
+
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
       ADD COLUMN IF NOT EXISTS rastreio_cliente_mensagem TEXT DEFAULT NULL
   `).catch(e => console.warn('[rastreio-clientes] rastreio_cliente_mensagem:', e.message));
 
