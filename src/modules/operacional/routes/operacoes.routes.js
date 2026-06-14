@@ -99,20 +99,25 @@ function createOperacoesRouter(pool) {
       const {
         regiao, nome_cliente, endereco, modelo, quantidade_motos,
         obrigatoriedade_bau, possui_garantido, valor_garantido,
-        data_inicio, observacoes, faixas_km, criado_por
+        data_inicio, observacoes, faixas_km, criado_por,
+        tipo_veiculo, modalidade, salario, horario_inicio, horario_fim, escala_obs, beneficios
       } = req.body;
       
       const operacaoResult = await client.query(`
         INSERT INTO operacoes (
           regiao, nome_cliente, endereco, modelo, quantidade_motos,
           obrigatoriedade_bau, possui_garantido, valor_garantido,
-          data_inicio, observacoes, criado_por
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          data_inicio, observacoes, criado_por,
+          tipo_veiculo, modalidade, salario, horario_inicio, horario_fim, escala_obs, beneficios
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING *
       `, [
         regiao, nome_cliente, endereco, modelo, quantidade_motos || 1,
         obrigatoriedade_bau || false, possui_garantido || false, valor_garantido || 0,
-        data_inicio, observacoes, criado_por
+        data_inicio, observacoes, criado_por,
+        tipo_veiculo || null, modalidade || null, salario || null,
+        horario_inicio || null, horario_fim || null, escala_obs || null,
+        beneficios ? JSON.stringify(beneficios) : null
       ]);
       
       const operacaoId = operacaoResult.rows[0].id;
@@ -165,7 +170,8 @@ function createOperacoesRouter(pool) {
       const {
         regiao, nome_cliente, endereco, modelo, quantidade_motos,
         obrigatoriedade_bau, possui_garantido, valor_garantido,
-        data_inicio, observacoes, status, faixas_km
+        data_inicio, observacoes, status, faixas_km,
+        tipo_veiculo, modalidade, salario, horario_inicio, horario_fim, escala_obs, beneficios
       } = req.body;
       
       await client.query(`
@@ -181,12 +187,22 @@ function createOperacoesRouter(pool) {
           data_inicio = COALESCE($9, data_inicio),
           observacoes = COALESCE($10, observacoes),
           status = COALESCE($11, status),
+          tipo_veiculo = COALESCE($13, tipo_veiculo),
+          modalidade = COALESCE($14, modalidade),
+          salario = COALESCE($15, salario),
+          horario_inicio = COALESCE($16, horario_inicio),
+          horario_fim = COALESCE($17, horario_fim),
+          escala_obs = COALESCE($18, escala_obs),
+          beneficios = COALESCE($19, beneficios),
           atualizado_em = NOW()
         WHERE id = $12
       `, [
         regiao, nome_cliente, endereco, modelo, quantidade_motos,
         obrigatoriedade_bau, possui_garantido, valor_garantido,
-        data_inicio, observacoes, status, id
+        data_inicio, observacoes, status, id,
+        tipo_veiculo || null, modalidade || null, salario || null,
+        horario_inicio || null, horario_fim || null, escala_obs || null,
+        beneficios ? JSON.stringify(beneficios) : null
       ]);
       
       if (faixas_km) {

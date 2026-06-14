@@ -56,6 +56,16 @@ async function initOperacionalTables(pool) {
   `);
   console.log('✅ Tabela operacoes verificada');
 
+  // Migrations: novos campos da rework (veículo, modalidade, CLT)
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS tipo_veiculo VARCHAR(30)`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS modalidade VARCHAR(30)`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS salario DECIMAL(10,2)`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS horario_inicio VARCHAR(10)`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS horario_fim VARCHAR(10)`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS escala_obs TEXT`).catch(() => {});
+  await pool.query(`ALTER TABLE operacoes ADD COLUMN IF NOT EXISTS beneficios JSONB`).catch(() => {});
+  console.log('✅ Colunas extras de operacoes verificadas');
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS operacoes_faixas_km (
       id SERIAL PRIMARY KEY,
