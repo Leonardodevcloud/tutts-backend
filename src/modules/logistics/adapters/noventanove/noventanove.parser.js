@@ -311,6 +311,23 @@ function montarBodyCreate(estimateId, req, config) {
   if (coletaOk)  console.log('[99] Verificação de COLETA habilitada para OS', osRef);
   if (entregaOk) console.log('[99] Verificação de ENTREGA habilitada para OS', osRef);
 
+  // return_type: o que fazer com o pacote se o entregador nao conseguir
+  // contato com o destinatario. Doc da 99: se NAO enviado, o default e
+  // "2: descartar" — pra autopecas o padrao seguro e DEVOLVER (1).
+  // Configuravel por provider (config.return_type_99: 1=devolver, 2=descartar).
+  // return_handover_method (entrega da devolucao): 1=sem verificacao (descarte),
+  // 2=foto, 3=codigo. Regra da doc: se return_type=1 -> method 2 ou 3 (default 2);
+  // se return_type=2 -> method=1.
+  const _rtCfg = config && config.return_type_99;
+  const returnType = (_rtCfg === 2 || _rtCfg === '2') ? 2 : 1;
+  body.return_type = returnType;
+  if (returnType === 1) {
+    const _hm = config && config.return_handover_99;
+    body.return_handover_method = (_hm === 3 || _hm === '3') ? 3 : 2;
+  } else {
+    body.return_handover_method = 1;
+  }
+
   return body;
 }
 

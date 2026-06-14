@@ -49,8 +49,9 @@ const ORDER_STATUS_TO_CANONICAL = Object.freeze({
   'completed':  CanonicalStatus.DELIVERED,
   'canceled':   CanonicalStatus.CANCELED,
   'cancelled':  CanonicalStatus.CANCELED,   // variante britânica, defensivo
-  'closed':     CanonicalStatus.DELIVERED,  // encerramento normal pós-conclusão
+  'closed':     CanonicalStatus.FAILED,     // doc 99: overdue/sem courier OU fechado pelo suporte — NAO e entrega
   'sendback':   CanonicalStatus.RETURNED,
+  'sendbackcompleted': CanonicalStatus.RETURNED,  // devolucao concluida (doc: sendbackCompleted)
 });
 
 /**
