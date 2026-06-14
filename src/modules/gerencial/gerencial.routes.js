@@ -452,6 +452,11 @@ function createGerencialRouter(pool, verificarToken) {
               });
             }
             fl = fatTotal;
+          } else if (ehClienteCcConsolidado(g.cod)) {
+            // Cliente consolidado (949, 1165, 1178...): faturamento é o TOTAL
+            // do cliente (todos os CCs). g.cc fica preso ao 1o CC do grupo,
+            // então buscar por cod+cc subestimaria — usar sempre o total.
+            fl = fatMap[String(g.cod) + '|'] || 0;
           } else {
             // Cliente normal: buscar por cod+cc, depois total do cod
             fl = fatMap[String(g.cod) + '|' + (g.cc || '')] || fatMap[String(g.cod) + '|'] || 0;
