@@ -96,6 +96,11 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS distancia_metros INTEGER`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_servico_mapp_original DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_profissional_mapp_original DECIMAL(10,2)`).catch(() => {});
+  // 99Entrega: reconciliacao de preco final (price_info do /detail, em reais)
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_provider_final DECIMAL(10,2)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_entrega_99     DECIMAL(10,2)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_devolucao_99   DECIMAL(10,2)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_sendback_99    DECIMAL(10,2)`).catch(() => {});
   // Override de tabela de preço por regra de cliente
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_fixo         DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_km_base            DECIMAL(5,1)`).catch(() => {});

@@ -478,6 +478,13 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       rawProvider: data,
       pickupCode:  pickupCode  ? String(pickupCode)  : null,
       dropoffCode: dropoffCode ? String(dropoffCode) : null,
+      // price_info do /detail (centavos -> reais). fee=preco, delivery_fee=entrega,
+      // return_fee=devolucao, sendback_fee=sendback. Usado na reconciliacao.
+      precoProvider: (function (pi) {
+        if (!pi || typeof pi !== 'object') return null;
+        const _c = (v) => (v != null ? Number(v) / 100 : null);
+        return { fee: _c(pi.fee), deliveryFee: _c(pi.delivery_fee), returnFee: _c(pi.return_fee), sendbackFee: _c(pi.sendback_fee) };
+      })(data.price_info),
     };
   }
 

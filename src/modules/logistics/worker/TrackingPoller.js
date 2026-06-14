@@ -223,6 +223,21 @@ function startTrackingPoller(pool) {
       avancou = true;
     }
 
+    // ─── 1b. RECONCILIACAO DE PRECO (99) ───
+    // O /detail traz price_info (preco + taxas). Em status terminal isso e o
+    // valor final. Grava uma vez (a entrega sai do polling depois disso).
+    if (det.precoProvider && det.precoProvider.fee != null
+        && ['DELIVERED', 'CANCELED', 'RETURNED', 'FAILED'].includes(det.statusCanonico)) {
+      await pool.query(
+        `UPDATE logistics_deliveries SET
+           valor_provider_final = $1, taxa_entrega_99 = $2,
+           taxa_devolucao_99 = $3, taxa_sendback_99 = $4, updated_at = NOW()
+         WHERE id = $5`,
+        [det.precoProvider.fee, det.precoProvider.deliveryFee,
+         det.precoProvider.returnFee, det.precoProvider.sendbackFee, entrega.id]
+      ).catch((e) => console.error('[TrackingPoller] erro ao persistir preco 99:', e.message));
+    }
+
     // ─── 2. POSIÇÃO / courier ───
     const evento = montarEventoCourier(det);
     if (!evento.courier && !evento.location) {
