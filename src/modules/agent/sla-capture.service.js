@@ -261,6 +261,38 @@ async function processarCaptura(pool, registro) {
       logErr(`⚠️ Falha ao carregar configEntries de ${cliente_cod}: ${e.message}. Seguindo com fluxo legado.`);
     }
 
+    // Cliente Hub: decide POR OS. Se a OS ja saiu pelo Hub, captura mas NAO
+    // envia o legado (o Hub manda o link Tutts). Se ainda nao saiu, segura ate
+    // 10 min apos a captura pra dar tempo do Hub assumir; passada a janela,
+    // segue o legado normal. Cliente sem usa_hub nao entra aqui.
+    let _hubDelivery = false;
+    {
+      const _ehHub = (await pool.query(
+        "SELECT 1 FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true LIMIT 1",
+        [String(cliente_cod)]
+      )).rows.length > 0;
+      if (_ehHub) {
+        _hubDelivery = (await pool.query(
+          'SELECT 1 FROM logistics_deliveries WHERE codigo_os = $1 LIMIT 1',
+          [String(os_numero)]
+        )).rows.length > 0;
+        if (!_hubDelivery) {
+          const JANELA_HUB_MS = 10 * 60 * 1000;
+          const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
+          const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
+          if (Date.now() - _criadoMs < JANELA_HUB_MS) {
+            await pool.query(
+              "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '60 seconds', atualizado_em = NOW() WHERE id = $1",
+              [id]
+            );
+            log(`⏳ OS ${os_numero}: cliente Hub, aguardando despacho do Hub (janela 10min)`);
+            return { sucesso: true, adiado: true };
+          }
+          // Janela passou e nao saiu pelo Hub: segue o envio legado normal.
+        }
+      }
+    }
+
     // 1. Captura pontos via Playwright
     // Nota: o browser persistente (2026-05) é injetado via setOverrides({ browser })
     // pelo sla-capture.agent.js ANTES desta chamada. O service não precisa saber.
@@ -300,10 +332,6 @@ async function processarCaptura(pool, registro) {
     // 2. Monta mensagem
     const texto = montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod });
 
-    // Cliente Hub: o envio do rastreio e feito pelo Hub (no aceite da corrida),
-    // entao aqui NAO enviamos o link legado. A captura segue alimentando a ponte.
-    const _usaHub = !!(resultado.configMatched && resultado.configMatched.usaHub);
-
     // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
     // ou fallback pra env var legada se não houver match.
     const grupoIdOverride = resultado.configMatched
@@ -312,12 +340,12 @@ async function processarCaptura(pool, registro) {
     if (resultado.configMatched && DEBUG_VERBOSE) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
-    if (!_usaHub) {
+    if (!_hubDelivery) {
       await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
     }
 
     // 3b. Rastreio direto ao cliente final (se habilitado no cadastro)
-    if (!_usaHub && resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
+    if (!_hubDelivery && resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
       // Tenta extrair telefone de cada ponto (do ponto de entrega, não coleta)
       const pontosEntrega = pontos.filter(p => p.numero >= 2);
       let telefoneEncontrado = null;
