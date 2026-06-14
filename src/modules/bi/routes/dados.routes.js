@@ -3,6 +3,7 @@
  * Auto-extracted from bi.routes.js monolith
  */
 const express = require('express');
+const { CLIENTES_CC_SEPARADO } = require('../../../shared/constants');
 
 function createDadosRoutes(pool) {
   const router = express.Router();
@@ -108,7 +109,8 @@ router.delete('/bi/mascaras/:id', async (req, res) => {
 router.get('/bi/localizacao-clientes', async (req, res) => {
   try {
     // Clientes que devem ter endereços separados por centro de custo
-    const clientesSeparadosPorCC = ['767', '1046', '713'];
+    // Fonte única: CLIENTES_CC_SEPARADO em shared/constants.js (767, 1046, 713, 814)
+    const clientesSeparadosPorCC = CLIENTES_CC_SEPARADO;
     
     // Query para clientes NORMAIS - retorna apenas o endereço com mais entregas
     const resultNormal = await pool.query(`
@@ -135,7 +137,7 @@ router.get('/bi/localizacao-clientes', async (req, res) => {
           AND cod_cliente IS NOT NULL
           AND endereco IS NOT NULL
           AND endereco != ''
-          AND cod_cliente::text NOT IN ('767', '1046', '713')
+          AND cod_cliente::text != ALL($1::text[])
       ),
       cliente_enderecos AS (
         SELECT 
@@ -185,9 +187,9 @@ router.get('/bi/localizacao-clientes', async (req, res) => {
         ) as enderecos
       FROM cliente_top_endereco ce
       LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
-    `);
+    `, [clientesSeparadosPorCC]);
     
-    // Query para clientes ESPECIAIS (767, 1046, 713) - separados por centro de custo, 1 endereço por CC
+    // Query para clientes ESPECIAIS (CLIENTES_CC_SEPARADO: 767, 1046, 713, 814) - separados por centro de custo, 1 endereço por CC
     const resultEspecial = await pool.query(`
       WITH endereco_normalizado AS (
         SELECT 
@@ -212,7 +214,7 @@ router.get('/bi/localizacao-clientes', async (req, res) => {
           AND cod_cliente IS NOT NULL
           AND endereco IS NOT NULL
           AND endereco != ''
-          AND cod_cliente::text IN ('767', '1046', '713')
+          AND cod_cliente::text = ANY($1::text[])
       ),
       cliente_enderecos AS (
         SELECT 
@@ -264,7 +266,7 @@ router.get('/bi/localizacao-clientes', async (req, res) => {
         ) as enderecos
       FROM cliente_cc_top_endereco ce
       LEFT JOIN bi_mascaras m ON m.cod_cliente = ce.cod_cliente::text
-    `);
+    `, [clientesSeparadosPorCC]);
     
     // Combina os resultados e ordena
     const todosClientes = [...resultNormal.rows, ...resultEspecial.rows]
