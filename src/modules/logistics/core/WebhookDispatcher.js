@@ -424,35 +424,44 @@ class WebhookDispatcher {
     const courier = evento.courier;
 
     // Vincula motorista na Mapp se é a primeira vez (entrega ainda sem courier)
-    if (courier?.name && !(entrega.courier_data && entrega.courier_data.name)) {
-      // O courier_update pode chegar via POLLING (TrackingPoller da 99) quando a
-      // entrega JÁ passou de COURIER_ASSIGNED. Só avançamos o status se ele ainda
-      // está num estado pré-entregador — nunca regredimos PICKED_UP/em rota de
-      // volta pra COURIER_ASSIGNED. courier_data e a vinculação Mapp acontecem
-      // de qualquer jeito (é a 1ª vez que vemos o entregador).
-      const avancaStatus = ['PENDING', 'QUOTED', 'DISPATCHED'].includes(entrega.status_canonico);
+    if (courier?.name) {
+      // Merge (antes era write-once): a placa/cor da 99 so existem em
+      // waiting/delivering e o PRIMEIRO courier_update pode chegar sem elas
+      // (a 99 zera vehicle_info em finding e apos completed/canceled). O
+      // write-once antigo perdia a placa que so aparecia depois. Aqui a gente
+      // preenche o que faltava SEM sobrescrever valor existente com null.
+      const ehPrimeiraVez = !(entrega.courier_data && entrega.courier_data.name);
+      const avancaStatus = ehPrimeiraVez && ['PENDING', 'QUOTED', 'DISPATCHED'].includes(entrega.status_canonico);
 
-      await this.pool.query(`
-        UPDATE logistics_deliveries SET
-          courier_data = $1,
-          status_native   = CASE WHEN $3 THEN 'entregador_atribuido' ELSE status_native   END,
-          status_canonico = CASE WHEN $3 THEN 'COURIER_ASSIGNED'     ELSE status_canonico END,
-          updated_at = NOW()
-        WHERE id = $2
-      `, [
-        JSON.stringify({
-          name:    courier.name,
-          phone:   courier.phone,
-          plate:   courier.plate,
-          vehicle: courier.vehicle,
-          photo:   courier.photo,
-          rating:  courier.rating,
-        }),
-        entrega.id,
-        avancaStatus,
-      ]);
+      const _atual = entrega.courier_data || {};
+      const _merged = {
+        name:    courier.name    || _atual.name    || null,
+        phone:   courier.phone   || _atual.phone   || null,
+        plate:   courier.plate   || _atual.plate   || null,
+        vehicle: courier.vehicle || _atual.vehicle || null,
+        photo:   courier.photo   || _atual.photo   || null,
+        rating:  courier.rating != null ? courier.rating : (_atual.rating != null ? _atual.rating : null),
+      };
+      const _mudou = ehPrimeiraVez
+        || (_merged.plate   || null) !== (_atual.plate   || null)
+        || (_merged.vehicle || null) !== (_atual.vehicle || null)
+        || (_merged.photo   || null) !== (_atual.photo   || null)
+        || (_merged.phone   || null) !== (_atual.phone   || null);
 
-      await this._vincularMotorista(codigoOS, entrega, courier);
+      if (_mudou) {
+        await this.pool.query(`
+          UPDATE logistics_deliveries SET
+            courier_data = $1,
+            status_native   = CASE WHEN $3 THEN 'entregador_atribuido' ELSE status_native   END,
+            status_canonico = CASE WHEN $3 THEN 'COURIER_ASSIGNED'     ELSE status_canonico END,
+            updated_at = NOW()
+          WHERE id = $2
+        `, [JSON.stringify(_merged), entrega.id, avancaStatus]);
+      }
+
+      if (ehPrimeiraVez) {
+        await this._vincularMotorista(codigoOS, entrega, courier);
+      }
     }
 
     // Salva posição no tracking + atualiza ultima_lat/lng na entrega (GPS enrichment)
