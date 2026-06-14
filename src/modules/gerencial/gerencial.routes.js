@@ -629,6 +629,9 @@ function createGerencialRouter(pool, verificarToken) {
       portoSecoConfig.concat(outrosConfig).forEach(function(it) {
         if (!it.cc) consolidarCods[String(it.cod)] = true;
       });
+      // Clientes SEPARADOS por CC (ver CLIENTES_CC_SEPARADO) NUNCA consolidam,
+      // mesmo que estejam num grupo com CC vazio. Ex: 814 deve quebrar por filial como o 767.
+      (require('../../shared/constants').CLIENTES_CC_SEPARADO || []).forEach(function(c) { delete consolidarCods[String(c)]; });
 
       // Normalizar CCs sujos no ticket/demanda (mesmo critério: < 1% → mescla no dominante)
       var ticket4semNorm = normalizarCC(qTicket4sem.rows);
@@ -783,6 +786,15 @@ function createGerencialRouter(pool, verificarToken) {
       } catch(evErr) {
         console.warn('⚠️ Evolução semanal error:', evErr.message);
       }
+
+      // ── Padronizar nomes de cliente em CAIXA ALTA (todas as tabelas) ──
+      function upNomes(arr) { if (Array.isArray(arr)) arr.forEach(function(x) { if (x && x.nome) x.nome = String(x.nome).toUpperCase(); }); }
+      upNomes(sla767); upNomes(slaPortoSeco); upNomes(slaOutros);
+      upNomes(ticketCl); upNomes(demandaCl); upNomes(garantido);
+      Object.keys(evolucaoSemanal).forEach(function(cod) {
+        var ev = evolucaoSemanal[cod];
+        if (ev && Array.isArray(ev.lojas)) ev.lojas.forEach(function(l) { if (l && l.nome) l.nome = String(l.nome).toUpperCase(); });
+      });
 
       res.json({
         success: true,
