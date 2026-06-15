@@ -99,6 +99,7 @@ function createConfigGlobalRoutes(pool, verificarToken, verificarAdmin, registra
       const precoFixo     = parseMargem(body.preco_valor_fixo, true);
       const precoKmBase   = parseMargem(body.preco_km_base, true);
       const precoKmAdic   = parseMargem(body.preco_valor_km_adicional, true);
+      const alterarValorMapp = typeof body.alterar_valor_mapp_ativo === 'boolean' ? body.alterar_valor_mapp_ativo : undefined;
 
       // Monta o UPDATE dinâmico — só os campos enviados.
       const sets = [];
@@ -111,6 +112,7 @@ function createConfigGlobalRoutes(pool, verificarToken, verificarAdmin, registra
       if (precoFixo !== undefined)   { sets.push(`preco_valor_fixo = $${i++}`);                vals.push(precoFixo); }
       if (precoKmBase !== undefined) { sets.push(`preco_km_base = $${i++}`);                   vals.push(precoKmBase); }
       if (precoKmAdic !== undefined) { sets.push(`preco_valor_km_adicional = $${i++}`);        vals.push(precoKmAdic); }
+      if (alterarValorMapp !== undefined) { sets.push(`alterar_valor_mapp_ativo = $${i++}`);     vals.push(alterarValorMapp); }
 
       if (sets.length === 0) {
         // Nada pra atualizar — devolve o estado atual.

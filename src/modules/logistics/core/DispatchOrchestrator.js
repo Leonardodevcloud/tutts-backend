@@ -518,20 +518,34 @@ class DispatchOrchestrator {
           const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(opts.regra || null);
           const _novoValorServico = calcularPrecoDistancia(_distKm, _tabPreco);
 
+          // Toggle global: a funcao que muda o valor do cliente na Mapp
+          // (alterarValores) pode ser desligada nas configuracoes. Default = ativo.
+          let _alterarMapp = true;
+          try {
+            const _cg = await lerConfigGlobal(this.pool);
+            if (_cg && _cg.alterar_valor_mapp_ativo === false) _alterarMapp = false;
+          } catch (_e) { /* fail-open: mantem o comportamento atual */ }
+
           if (_novoValorServico != null) {
             console.log(`💰 [Orchestrator] OS ${codigoOS}: preço por km [${_origemPreco}] — ${_distKm.toFixed(1)}km → cliente=R$${_novoValorServico.toFixed(2)} provider=R$${_valorProvider2.toFixed(2)}`);
             await this.pool.query(
               'UPDATE logistics_deliveries SET valor_servico = $1, updated_at = NOW() WHERE id = $2',
               [_novoValorServico, registro.id]
             );
-            this.mapp.alterarValores(codigoOS, _novoValorServico, _valorProvider2 || null).catch(e =>
-              console.warn(`⚠️ [Orchestrator] alterarValores preço OS ${codigoOS}: ${e.message}`)
-            );
+            if (_alterarMapp) {
+              this.mapp.alterarValores(codigoOS, _novoValorServico, _valorProvider2 || null).catch(e =>
+                console.warn(`⚠️ [Orchestrator] alterarValores preço OS ${codigoOS}: ${e.message}`)
+              );
+            } else {
+              console.log(`⏸️ [Orchestrator] OS ${codigoOS}: muda valor na Mapp DESATIVADO (toggle) — Mapp inalterado`);
+            }
           } else if (_valorProvider2 > 0) {
             // Sem tabela de preço — só atualiza o custo do provider
-            this.mapp.alterarValores(codigoOS, null, _valorProvider2).catch(e =>
-              console.warn(`⚠️ [Orchestrator] alterarValores custo OS ${codigoOS}: ${e.message}`)
-            );
+            if (_alterarMapp) {
+              this.mapp.alterarValores(codigoOS, null, _valorProvider2).catch(e =>
+                console.warn(`⚠️ [Orchestrator] alterarValores custo OS ${codigoOS}: ${e.message}`)
+              );
+            }
           }
         }
       } catch (_errPreco) {

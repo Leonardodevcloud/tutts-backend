@@ -39,6 +39,8 @@ async function initLogisticsConfigGlobal(pool) {
   await pool.query(`ALTER TABLE logistics_config_global ADD COLUMN IF NOT EXISTS preco_valor_fixo         DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_config_global ADD COLUMN IF NOT EXISTS preco_km_base            DECIMAL(5,1)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_config_global ADD COLUMN IF NOT EXISTS preco_valor_km_adicional DECIMAL(10,2)`).catch(() => {});
+  // Toggle: a funcao que muda o valor do cliente na Mapp (alterarValores). Default TRUE = comportamento atual.
+  await pool.query(`ALTER TABLE logistics_config_global ADD COLUMN IF NOT EXISTS alterar_valor_mapp_ativo BOOLEAN DEFAULT true`).catch(() => {});
 
   console.log('✅ [logistics] tabela logistics_config_global verificada');
 
