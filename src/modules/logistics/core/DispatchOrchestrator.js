@@ -518,13 +518,10 @@ class DispatchOrchestrator {
           const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(opts.regra || null);
           const _novoValorServico = calcularPrecoDistancia(_distKm, _tabPreco);
 
-          // Toggle global: a funcao que muda o valor do cliente na Mapp
-          // (alterarValores) pode ser desligada nas configuracoes. Default = ativo.
-          let _alterarMapp = true;
-          try {
-            const _cg = await lerConfigGlobal(this.pool);
-            if (_cg && _cg.alterar_valor_mapp_ativo === false) _alterarMapp = false;
-          } catch (_e) { /* fail-open: mantem o comportamento atual */ }
+          // Toggle POR REGRA: cada cliente liga/desliga "alterar valor na Mapp"
+          // na sua regra de despacho. Default = ativo (regra sem a flag = mantem).
+          // Como "sem regra = sem despacho automatico", a regra sempre existe aqui.
+          const _alterarMapp = !(opts.regra && opts.regra.alterar_valor_mapp_ativo === false);
 
           if (_novoValorServico != null) {
             console.log(`💰 [Orchestrator] OS ${codigoOS}: preço por km [${_origemPreco}] — ${_distKm.toFixed(1)}km → cliente=R$${_novoValorServico.toFixed(2)} provider=R$${_valorProvider2.toFixed(2)}`);

@@ -119,6 +119,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         regioes_permitidas, ativo,
         margem_minima_aceita, margem_pct_minima,
         preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
+        alterar_valor_mapp_ativo,
         // compat: aceita usar_uber do formato legado
         usar_uber,
       } = req.body || {};
@@ -151,6 +152,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       const precoFixo   = _numPreco(preco_valor_fixo);
       const precoKmBase = _numPreco(preco_km_base);
       const precoKmAdic = _numPreco(preco_valor_km_adicional);
+      // Toggle por regra (default true se nao enviado).
+      const _alterarValorMapp = (alterar_valor_mapp_ativo === false) ? false : true;
 
       const { rows: [regra] } = await pool.query(`
         INSERT INTO logistics_dispatch_rules (
@@ -159,9 +162,10 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           horario_inicio, horario_fim, valor_minimo, valor_maximo,
           regioes_permitidas, ativo,
           margem_minima_aceita, margem_pct_minima,
-          preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+          preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
+          alterar_valor_mapp_ativo
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         RETURNING *
       `, [
         cliente_nome.trim(),
@@ -181,6 +185,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         precoFixo,
         precoKmBase,
         precoKmAdic,
+        _alterarValorMapp,
       ]);
 
       if (registrarAuditoria) {
@@ -208,6 +213,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
         margem_minima_aceita, margem_pct_minima,
+        alterar_valor_mapp_ativo,
         usar_uber,
       } = req.body || {};
 
@@ -255,8 +261,9 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           ativo                  = COALESCE($12, ativo),
           margem_minima_aceita   = CASE WHEN $14::boolean THEN $13 ELSE margem_minima_aceita END,
           margem_pct_minima      = CASE WHEN $16::boolean THEN $15 ELSE margem_pct_minima END,
+          alterar_valor_mapp_ativo = COALESCE($17, alterar_valor_mapp_ativo),
           updated_at             = NOW()
-        WHERE id = $17
+        WHERE id = $18
         RETURNING *
       `, [
         cliente_nome ? cliente_nome.trim() : null,
@@ -271,6 +278,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         margemAbsParsed !== undefined,
         margemPctParsed === undefined ? null : margemPctParsed,
         margemPctParsed !== undefined,
+        typeof alterar_valor_mapp_ativo === 'boolean' ? alterar_valor_mapp_ativo : null,
         id,
       ]);
 
