@@ -266,17 +266,26 @@ async function processarCaptura(pool, registro) {
     // 10 min apos a captura pra dar tempo do Hub assumir; passada a janela,
     // segue o legado normal. Cliente sem usa_hub nao entra aqui.
     let _hubDelivery = false;
+    let _tuttsToken = null;
     {
       const _ehHub = (await pool.query(
         "SELECT 1 FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true LIMIT 1",
         [String(cliente_cod)]
       )).rows.length > 0;
       if (_ehHub) {
-        _hubDelivery = (await pool.query(
-          'SELECT 1 FROM logistics_deliveries WHERE codigo_os = $1 LIMIT 1',
+        // Hub: so consideramos "entregue pelo Hub" quando ja existe o token de
+        // rastreio Tutts (entregador aceitou na 99 -> tracking_link -> token).
+        // Ai mandamos o link Tutts pro MESMO grupo do rastreio-clientes.
+        const _tok = (await pool.query(
+          'SELECT rastreio_token FROM logistics_deliveries WHERE codigo_os = $1 AND rastreio_token IS NOT NULL ORDER BY id DESC LIMIT 1',
           [String(os_numero)]
-        )).rows.length > 0;
-        if (!_hubDelivery) {
+        )).rows[0];
+        if (_tok && _tok.rastreio_token) {
+          _hubDelivery = true;
+          _tuttsToken = _tok.rastreio_token;
+        } else {
+          // Sem token ainda: segura ate 10 min apos a captura pra dar tempo do
+          // entregador aceitar e o token nascer. Passada a janela, cai no legado.
           const JANELA_HUB_MS = 10 * 60 * 1000;
           const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
           const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
@@ -285,10 +294,10 @@ async function processarCaptura(pool, registro) {
               "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '60 seconds', atualizado_em = NOW() WHERE id = $1",
               [id]
             );
-            log(`⏳ OS ${os_numero}: cliente Hub, aguardando despacho do Hub (janela 10min)`);
+            log(`⏳ OS ${os_numero}: cliente Hub, aguardando link Tutts (janela 10min)`);
             return { sucesso: true, adiado: true };
           }
-          // Janela passou e nao saiu pelo Hub: segue o envio legado normal.
+          // Janela passou sem token Tutts: cai no legado (link Mapp pro grupo).
         }
       }
     }
@@ -329,8 +338,14 @@ async function processarCaptura(pool, registro) {
       throw new Error('Sem pontos de entrega (Ponto >= 2) encontrados.');
     }
 
-    // 2. Monta mensagem
-    const texto = montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod });
+    // 2. Monta mensagem. OS do Hub (com token) usa o link de rastreio Tutts
+    // (centraltutts.online/r/<token>) no lugar do link Mapp — mesmo grupo.
+    let _linkGrupo = link_rastreio;
+    if (_hubDelivery && _tuttsToken) {
+      const _base = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
+      _linkGrupo = `${_base}/r/${_tuttsToken}`;
+    }
+    const texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod });
 
     // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
     // ou fallback pra env var legada se não houver match.
@@ -340,9 +355,9 @@ async function processarCaptura(pool, registro) {
     if (resultado.configMatched && DEBUG_VERBOSE) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
-    if (!_hubDelivery) {
-      await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
-    }
+    // Sempre manda pro grupo: Hub com link Tutts, legado com link Mapp.
+    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+    if (_hubDelivery) log(`📍 OS ${os_numero}: link de rastreio Tutts enviado ao grupo`);
 
     // 3b. Rastreio direto ao cliente final (se habilitado no cadastro)
     if (!_hubDelivery && resultado.configMatched && resultado.configMatched.rastreioClienteAtivo) {
