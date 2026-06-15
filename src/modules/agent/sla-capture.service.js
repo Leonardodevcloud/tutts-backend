@@ -291,7 +291,7 @@ async function processarCaptura(pool, registro) {
           const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
           if (Date.now() - _criadoMs < JANELA_HUB_MS) {
             await pool.query(
-              "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '60 seconds', atualizado_em = NOW() WHERE id = $1",
+              "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '15 seconds', atualizado_em = NOW() WHERE id = $1",
               [id]
             );
             log(`⏳ OS ${os_numero}: cliente Hub, aguardando link Tutts (janela 10min)`);
