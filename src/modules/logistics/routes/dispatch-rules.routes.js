@@ -118,6 +118,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         horario_inicio, horario_fim, valor_minimo, valor_maximo,
         regioes_permitidas, ativo,
         margem_minima_aceita, margem_pct_minima,
+        preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
         // compat: aceita usar_uber do formato legado
         usar_uber,
       } = req.body || {};
@@ -144,6 +145,12 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       const regioesArray = normalizarRegioes(regioes_permitidas, false);
       const margemAbs = parseMargem(margem_minima_aceita);
       const margemPct = parseMargem(margem_pct_minima);
+      // preco por distancia (override do cliente). Estas variaveis eram usadas
+      // no INSERT mas nunca eram declaradas aqui -> ReferenceError -> 500.
+      const _numPreco = (v) => (v == null || v === '' || isNaN(Number(v))) ? null : Number(v);
+      const precoFixo   = _numPreco(preco_valor_fixo);
+      const precoKmBase = _numPreco(preco_km_base);
+      const precoKmAdic = _numPreco(preco_valor_km_adicional);
 
       const { rows: [regra] } = await pool.query(`
         INSERT INTO logistics_dispatch_rules (
