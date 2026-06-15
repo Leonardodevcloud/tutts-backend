@@ -11,7 +11,7 @@
 #   - Chromium da versao casada com playwright 1.49.1
 #   - ENTRYPOINT/CMD identicos (worker-agents continua usando o mesmo start command)
 
-FROM node:20-jammy
+FROM node:20-bookworm
 
 USER root
 WORKDIR /app
