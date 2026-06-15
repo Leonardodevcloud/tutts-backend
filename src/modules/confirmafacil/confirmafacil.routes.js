@@ -4,6 +4,7 @@ const express = require('express');
 const { getConfirmaFacilAuth }   = require('./confirmafacil.auth');
 const { getConfirmaFacilPoller } = require('./confirmafacil.poller');
 const AppError = require('../../shared/errors/AppError');
+const { resolverCodigo } = require('./confirmafacil.map');
 
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -401,7 +402,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       // Buscar centro_custo_mapp do embarcador desta NF
       const cnpjEmbNF = nf.embarcador?.cnpj || '';
       const { rows: [embConfig] } = await pool.query(`
-        SELECT e.centro_custo_mapp, e.coleta_lat, e.coleta_lng,
+        SELECT e.centro_custo_mapp, e.categoria_mapp, e.coleta_lat, e.coleta_lng,
                e.coleta_rua, e.coleta_numero, e.coleta_cidade, e.coleta_uf, e.coleta_cep
         FROM confirmafacil_embarcadores e
         INNER JOIN confirmafacil_config c ON c.id = e.config_id
@@ -471,6 +472,12 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         UrlRetorno:     'https://tutts-backend-production.up.railway.app/api/webhook/tutts',
         numeroPedido:   String(idEmbarque || nf.numero),
       };
+
+      // Categoria (modalidade de frete) do embarcador — mesma regra do poller.
+      // Sem isso a Tutts rejeita com "Categoria nao informada".
+      if (embConfig && embConfig.categoria_mapp && String(embConfig.categoria_mapp).trim()) {
+        payloadTutts.categoria = String(embConfig.categoria_mapp).trim().toUpperCase();
+      }
 
       console.log('📤 [CF criar-corrida] payload:', JSON.stringify(payloadTutts, null, 2));
 
@@ -645,7 +652,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       );
       const mapa = cfConfig?.mapa_ocorrencias || {};
       const statusUsar = status || 'finalizado_ponto';
-      const codMapeado = mapa[statusUsar];
+      const codMapeado = resolverCodigo(statusUsar, mapa);
 
       if (!codMapeado) {
         return res.json({

@@ -36,7 +36,7 @@ function _hmParaMin(hhmm, def) {
   return m ? (Number(m[1]) * 60 + Number(m[2])) : def;
 }
 const CF_JANELA_INICIO_MIN = _hmParaMin(process.env.CF_JANELA_INICIO, 7 * 60 + 30);  // 07:30
-const CF_JANELA_FIM_MIN    = _hmParaMin(process.env.CF_JANELA_FIM,   17 * 60 + 30);  // 17:30
+const CF_JANELA_FIM_MIN    = _hmParaMin(process.env.CF_JANELA_FIM,   18 * 60 + 20);  // 18:20
 
 // Minuto-do-dia atual no fuso configurado (0..1439).
 function _minutoDoDiaTz(d = new Date()) {
@@ -357,14 +357,14 @@ class ConfirmaFacilPoller {
     );
     if (_bk.length > 0) { this._puladosBackoff = (this._puladosBackoff || 0) + 1; return; }
 
-    // 🕒 2026-06: janela de criacao (SO poller automatico). Fora de 07:30-17:30
+    // 🕒 2026-06: janela de criacao (SO poller automatico). Fora de 07:30-18:20
     // (Bahia), adia a criacao na MAPP pro proximo 07:30 reusando o backoff.
     // O vinculo NAO e criado aqui, entao quando a janela abrir a NF e criada normal.
     if (CF_JANELA_CRIACAO_ATIVA) {
       const _minJanela = _minutosAteJanela();
       if (_minJanela > 0) {
         const _horas = (_minJanela / 60).toFixed(1);
-        console.log(`🕒 [CF Poller] fora da janela (07:30-17:30) — adiando NF ${numeroNF} (idEmbarque ${idEmbarque}) por ~${_horas}h (proximo 07:30)`);
+        console.log(`🕒 [CF Poller] fora da janela (07:30-18:20) — adiando NF ${numeroNF} (idEmbarque ${idEmbarque}) por ~${_horas}h (proximo 07:30)`);
         await this._agendarParaJanela(config.id, idEmbarque, _minJanela);
         return;
       }
@@ -1001,9 +1001,9 @@ class ConfirmaFacilPoller {
     await this.pool.query(`
       INSERT INTO confirmafacil_poller_retry
         (config_id, id_embarque, tentativas, ultimo_erro, proximo_retry, atualizado_em)
-      VALUES ($1, $2, 0, 'adiado: fora da janela de criacao (07:30-17:30)', NOW() + ($3 || ' minutes')::interval, NOW())
+      VALUES ($1, $2, 0, 'adiado: fora da janela de criacao (07:30-18:20)', NOW() + ($3 || ' minutes')::interval, NOW())
       ON CONFLICT (config_id, id_embarque) DO UPDATE SET
-        ultimo_erro   = 'adiado: fora da janela de criacao (07:30-17:30)',
+        ultimo_erro   = 'adiado: fora da janela de criacao (07:30-18:20)',
         proximo_retry = NOW() + ($3 || ' minutes')::interval,
         atualizado_em = NOW()
     `, [configId, idEmbarque, String(minutos)])
