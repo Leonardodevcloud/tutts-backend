@@ -273,32 +273,34 @@ async function processarCaptura(pool, registro) {
         [String(cliente_cod)]
       )).rows.length > 0;
       if (_ehHub) {
-        // Hub: so consideramos "entregue pelo Hub" quando ja existe o token de
-        // rastreio Tutts (entregador aceitou na 99 -> tracking_link -> token).
-        // Ai mandamos o link Tutts pro MESMO grupo do rastreio-clientes.
-        const _tok = (await pool.query(
-          'SELECT rastreio_token FROM logistics_deliveries WHERE codigo_os = $1 AND rastreio_token IS NOT NULL ORDER BY id DESC LIMIT 1',
+        // Cliente hibrido: so seguramos quando a OS REALMENTE saiu pelo Hub
+        // (existe em logistics_deliveries). Se ja tem token -> link Tutts pro
+        // grupo; se ainda nao tem -> segura ate 10 min (entregador aceitar na
+        // 99). OS do cliente Hub que NAO passou pelo Hub vai pro legado NA HORA.
+        const _ld = (await pool.query(
+          'SELECT rastreio_token FROM logistics_deliveries WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1',
           [String(os_numero)]
         )).rows[0];
-        if (_tok && _tok.rastreio_token) {
-          _hubDelivery = true;
-          _tuttsToken = _tok.rastreio_token;
-        } else {
-          // Sem token ainda: segura ate 10 min apos a captura pra dar tempo do
-          // entregador aceitar e o token nascer. Passada a janela, cai no legado.
-          const JANELA_HUB_MS = 10 * 60 * 1000;
-          const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
-          const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
-          if (Date.now() - _criadoMs < JANELA_HUB_MS) {
-            await pool.query(
-              "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '15 seconds', atualizado_em = NOW() WHERE id = $1",
-              [id]
-            );
-            log(`⏳ OS ${os_numero}: cliente Hub, aguardando link Tutts (janela 10min)`);
-            return { sucesso: true, adiado: true };
+        if (_ld) {
+          if (_ld.rastreio_token) {
+            _hubDelivery = true;
+            _tuttsToken = _ld.rastreio_token;
+          } else {
+            const JANELA_HUB_MS = 10 * 60 * 1000;
+            const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
+            const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
+            if (Date.now() - _criadoMs < JANELA_HUB_MS) {
+              await pool.query(
+                "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '15 seconds', atualizado_em = NOW() WHERE id = $1",
+                [id]
+              );
+              log(`⏳ OS ${os_numero}: OS do Hub, aguardando link Tutts (janela 10min)`);
+              return { sucesso: true, adiado: true };
+            }
+            // Janela passou sem token: cai no legado (link Mapp pro grupo).
           }
-          // Janela passou sem token Tutts: cai no legado (link Mapp pro grupo).
         }
+        // _ld ausente => OS nao saiu pelo Hub (cliente hibrido) => legado imediato.
       }
     }
 
