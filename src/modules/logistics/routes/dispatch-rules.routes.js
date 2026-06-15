@@ -241,9 +241,9 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       // Margens: undefined = não atualiza, '' / null = limpa, número = atualiza
       const margemAbsParsed = margem_minima_aceita === undefined ? undefined : parseMargem(margem_minima_aceita);
       const margemPctParsed = margem_pct_minima === undefined ? undefined : parseMargem(margem_pct_minima);
-      const precoFixoParsed  = preco_valor_fixo         === undefined ? undefined : parseMargem(preco_valor_fixo);
-      const precoKmBaseParsed= preco_km_base            === undefined ? undefined : parseMargem(preco_km_base);
-      const precoKmAdicParsed= preco_valor_km_adicional === undefined ? undefined : parseMargem(preco_valor_km_adicional);
+      // (removido) precoFixoParsed/KmBaseParsed/KmAdicParsed: era dead code (nunca usado
+      // no UPDATE) que referenciava preco_* nao destructurado -> ReferenceError -> 500 no PUT.
+      // O preco por regra e gravado no POST (criar). Persistir edicao de preco via PUT sera tratado a parte.
 
       const { rows: [regra] } = await pool.query(`
         UPDATE logistics_dispatch_rules SET
