@@ -1,53 +1,46 @@
-# 2026-04 v3: A causa real do "spawn EAGAIN" foi descoberta.
+# 2026-06 v4: Dockerfile SEM dependencia do mcr.microsoft.com.
 #
-# NÃO era memória (32GB já alocados no Railway, sobrando muito).
-# NÃO era versão do Playwright/Chromium (já travada em 1.49.1).
+# Por que mudou: o build do Railway falhou ao puxar a imagem oficial
+# mcr.microsoft.com/playwright:v1.49.1-jammy com erro de auth no registry
+# da Microsoft (mcrprod.azurecr.io/oauth2/token). Pra nao ficar refem do MCR,
+# trocamos a base pro node:20-jammy (Docker Hub) e instalamos o Chromium 1.49.1
+# via Playwright no MESMO path que a imagem oficial usava (/ms-playwright).
 #
-# A causa real: Node.js rodando como PID 1 no container.
-# Chromium spawna ~50 subprocessos cada. Quando algo dá erro e os processos
-# do Chromium morrem, seus FILHOS ficam órfãos. PID 1 é o "reaper" de zombies
-# no Linux — mas Node.js NÃO sabe fazer isso. Os zombies se acumulam até
-# atingir o limite de PIDs do cgroup do container (~4096 default Docker)
-# e o fork() retorna EAGAIN = "Resource temporarily unavailable".
-#
-# Documentação oficial do Playwright (https://playwright.dev/docs/docker):
-#   "Chromium spawns subprocesses. Without an init system, they become zombies.
-#    Using --init Docker flag is recommended to avoid special treatment for
-#    processes with PID=1."
-#
-# A solução é usar `dumb-init` (já incluído na imagem oficial Playwright) como
-# PID 1. Ele:
-#   1. Faz reap automático dos zombies (fix do EAGAIN)
-#   2. Faz forward dos sinais (SIGTERM) pro Node corretamente
-#   3. É leve (~30KB)
+# Mantido o que importa do v3:
+#   - dumb-init como PID 1 (reaper de zombies do Chromium -> cura o spawn EAGAIN)
+#   - Chromium da versao casada com playwright 1.49.1
+#   - ENTRYPOINT/CMD identicos (worker-agents continua usando o mesmo start command)
 
-FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+FROM node:20-jammy
 
-# Imagem oficial vem com Node 20. (dumb-init NAO vem — instalado abaixo via apt.)
 USER root
-
 WORKDIR /app
 
-# 🔧 2026-06: instala dumb-init (init reaper). A imagem Playwright jammy NAO o traz;
-# o deploy do worker falhou com "dumb-init could not be found". Com ele instalado,
-# tanto o ENTRYPOINT quanto o start command do worker (dumb-init -- node worker-agents.js)
-# funcionam, e os zumbis do Chromium passam a ser reapados (cura o spawn EAGAIN).
+# Chromium fica no MESMO path da imagem oficial Playwright, pra nao quebrar nada
+# que dependa de /ms-playwright.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Garante que o install explicito do Chromium (abaixo) nao seja pulado por env.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
+
+# dumb-init (init reaper). As libs de SO do Chromium sao instaladas pelo
+# `playwright install --with-deps` mais abaixo.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends dumb-init \
  && rm -rf /var/lib/apt/lists/*
 
-# Copiar package.json e instalar deps.
-# A imagem JÁ tem o Chromium 1.49.1 instalado em /ms-playwright/.
-# Definimos SKIP_PLAYWRIGHT_INSTALL=1 nas envs do Railway pra pular o postinstall.
+# Deps do Node.
 COPY package*.json ./
 RUN npm install --omit=dev=false && npm cache clean --force
 
-# Copiar o restante do código
+# Baixa o Chromium da versao casada com o playwright 1.49.1 + libs de SO.
+# Isso baixa do CDN do Playwright (nao do MCR), eliminando o ponto de falha.
+RUN npx playwright install --with-deps chromium
+
+# Codigo
 COPY . .
 
 EXPOSE 3000
 
-# 🔥 FIX DO EAGAIN: dumb-init vira PID 1, faz reaping de zombies do Chromium.
-# Sem isso, os subprocessos do Chromium acumulam e estouram o PID limit do cgroup.
+# FIX DO EAGAIN: dumb-init vira PID 1, faz reaping de zombies do Chromium.
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "server.js"]
