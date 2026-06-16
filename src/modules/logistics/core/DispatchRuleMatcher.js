@@ -85,7 +85,7 @@ class DispatchRuleMatcher {
 
     // Validar horário
     if (regraCasada.horario_inicio && regraCasada.horario_fim) {
-      const agora = new Date().toTimeString().slice(0, 5);
+      const agora = new Date().toLocaleTimeString('en-GB', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false });
       const inicio = String(regraCasada.horario_inicio).slice(0, 5);
       const fim = String(regraCasada.horario_fim).slice(0, 5);
       if (agora < inicio || agora > fim) {

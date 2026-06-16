@@ -114,7 +114,11 @@ function startPollingWorker(pool) {
    */
   function dentroDaJanela(servico, janelaMinutos) {
     if (!servico?.dataHora) return false;
-    const dataOS = new Date(String(servico.dataHora).replace(' ', 'T'));
+    // Mapp envia dataHora no fuso de Brasilia (UTC-3) SEM marcador de timezone.
+    // O servidor roda em UTC; sem marcar -03:00 a OS parece ~3h mais velha e cai fora da janela.
+    let _iso = String(servico.dataHora).trim().replace(' ', 'T');
+    if (!/([Zz]|[+-]\d{2}:?\d{2})$/.test(_iso)) _iso += '-03:00';
+    const dataOS = new Date(_iso);
     if (isNaN(dataOS.getTime())) return false;
     const idadeMin = (Date.now() - dataOS.getTime()) / 60000;
     return idadeMin >= 0 && idadeMin <= janelaMinutos;
