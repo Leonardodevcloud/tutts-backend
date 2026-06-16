@@ -245,6 +245,11 @@ async function processarCaptura(pool, registro) {
 
   log(`🔍 Processando OS ${os_numero} (cliente ${cliente_cod}, tentativa ${tentativaAtual}/${MAX_TENTATIVAS})`);
 
+  // Guarda anti-duplicata: vira true assim que a mensagem do grupo sai. Se um
+  // passo POSTERIOR falhar, o catch NAO reenfileira (reenviar duplicaria o
+  // rastreio no grupo — causa real da duplicacao relatada).
+  let grupoEnviado = false;
+
   try {
     // 🆕 2026-05 v3: carrega configEntries do cliente ANTES de capturar pontos.
     // Vem como array (1+ cadastros) — passado pro playwright pra ele decidir
@@ -359,6 +364,14 @@ async function processarCaptura(pool, registro) {
     }
     // Sempre manda pro grupo: Hub com link Tutts, legado com link Mapp.
     await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+    grupoEnviado = true;
+    // A mensagem do grupo (acao critica) JA saiu. Persistimos 'enviado' agora,
+    // antes de qualquer passo que possa falhar, para que um re-claim/retry
+    // nunca reenvie pro grupo. Os passos seguintes sao best-effort.
+    await pool.query(
+      "UPDATE sla_capturas SET status = 'enviado', enviado_em = COALESCE(enviado_em, NOW()), atualizado_em = NOW() WHERE id = $1",
+      [id]
+    ).catch(() => {});
     if (_hubDelivery) log(`📍 OS ${os_numero}: link de rastreio Tutts enviado ao grupo`);
 
     // 3b. Rastreio direto ao cliente final (se habilitado no cadastro)
@@ -418,6 +431,19 @@ async function processarCaptura(pool, registro) {
     return { sucesso: true };
   } catch (err) {
     const mensagemErro = err.message || String(err);
+
+    // Se a mensagem do grupo JA saiu, o erro foi num passo pos-envio (update de
+    // status, rastreio ao cliente final, etc). NAO reenfileira — reenviar
+    // duplicaria o rastreio no grupo. Encerra como enviado.
+    if (grupoEnviado) {
+      logErr(`⚠️ OS ${os_numero}: erro pos-envio (grupo ja recebeu, nao reenvia): ${mensagemErro}`);
+      await pool.query(
+        "UPDATE sla_capturas SET status = 'enviado', enviado_em = COALESCE(enviado_em, NOW()), erro = $1, atualizado_em = NOW() WHERE id = $2",
+        [`pos-envio: ${mensagemErro}`, id]
+      ).catch(() => {});
+      return { sucesso: true, posEnvioComErro: true };
+    }
+
     logErr(`❌ OS ${os_numero} falhou (tentativa ${tentativaAtual}): ${mensagemErro}`);
 
     if (tentativaAtual >= MAX_TENTATIVAS) {
