@@ -329,7 +329,11 @@ class WebhookDispatcher {
    * @private
    */
   async _dispararAcaoMapp(codigoOS, entrega, evento, statusCanonico) {
-    const acao = STATUS_TO_MAPP_ACTION[statusCanonico];
+    // mappActionStatus (quando presente no evento) permite gravar um
+    // status_canonico mas disparar a ACAO Mapp de outro status. Ex.: devolucao
+    // concluida grava RETURNED mas FINALIZA a OS (acao de DELIVERED) em vez de
+    // reabrir. Sem o flag, usa o proprio statusCanonico (comportamento normal).
+    const acao = STATUS_TO_MAPP_ACTION[(evento && evento.mappActionStatus) || statusCanonico];
     if (!acao) return; // status sem ação Mapp (ex: PICKUP_EN_ROUTE)
 
     // Coordenadas do evento. Se o provider não envia GPS no webhook (ex: 99Entrega),

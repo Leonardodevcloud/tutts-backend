@@ -216,7 +216,23 @@ function parsePayload99(payload) {
     };
   }
 
-  // Marco de status normal.
+  // SendBackCompleted = devolucao CONCLUIDA. Grava RETURNED (info clara do
+  // inicio ao fim: foi DEVOLVIDO, nao entregue), mas FINALIZA a OS na Mapp
+  // (encerra + busca comprovante de devolucao) em vez de reabrir. O campo
+  // mappActionStatus diz ao WebhookDispatcher qual acao Mapp usar sem mudar
+  // o status_canonico gravado.
+  if (eventoLower === 'sendbackcompleted') {
+    return {
+      eventType: 'status_change',
+      externalDeliveryId: orderId,
+      statusNative: nomeEvento,
+      statusCanonico: CanonicalStatus.RETURNED,
+      mappActionStatus: CanonicalStatus.DELIVERED,
+      rawProvider: payload,
+    };
+  }
+
+  // Marco de status normal (demais eventos).
   return {
     eventType: 'status_change',
     externalDeliveryId: orderId,
