@@ -653,23 +653,61 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
 
       // status terminal no canônico: DELIVERED / CANCELED. Mantém as chaves
       // de resposta legadas (valor_*_uber) pro frontend não precisar mudar.
+      const fimTs = fim + ' 23:59:59';
       const { rows: [metricas] } = await pool.query(`
         SELECT
           COUNT(*) AS total,
           COUNT(*) FILTER (WHERE status_canonico = 'DELIVERED') AS entregues,
           COUNT(*) FILTER (WHERE status_canonico = 'CANCELED' OR cancelado_por IS NOT NULL) AS cancelados,
           COUNT(*) FILTER (WHERE status_native = 'fallback_fila') AS fallback,
-          COUNT(*) FILTER (WHERE status_canonico NOT IN ('DELIVERED','CANCELED')
+          COUNT(*) FILTER (WHERE status_canonico = 'RETURNED') AS devolvidos,
+          COUNT(*) FILTER (WHERE status_canonico NOT IN ('DELIVERED','CANCELED','RETURNED')
                              AND status_native IS DISTINCT FROM 'fallback_fila'
                              AND cancelado_por IS NULL) AS em_andamento,
+          COUNT(*) FILTER (WHERE status_canonico IN ('PENDING','QUOTED','DISPATCHED')) AS and_procurando,
+          COUNT(*) FILTER (WHERE status_canonico IN ('COURIER_ASSIGNED','PICKUP_EN_ROUTE','ARRIVED_PICKUP')) AS and_coletar,
+          COUNT(*) FILTER (WHERE status_canonico IN ('PICKED_UP','DROPOFF_EN_ROUTE','ARRIVED_DROPOFF')) AS and_rota,
           COALESCE(AVG(valor_provider), 0) AS valor_medio_uber,
           COALESCE(AVG(eta_minutos), 0) AS eta_medio,
-          COALESCE(SUM(valor_provider), 0) AS custo_total_uber
+          COALESCE(SUM(valor_provider), 0) AS custo_total_uber,
+          COALESCE(SUM(valor_servico), 0) AS receita_total,
+          COALESCE(SUM(valor_servico - valor_provider), 0) AS margem_total,
+          ROUND(AVG(EXTRACT(EPOCH FROM (atribuido_at - created_at)) / 60.0) FILTER (WHERE atribuido_at IS NOT NULL))::int AS t_localizacao_min,
+          ROUND(AVG(EXTRACT(EPOCH FROM (coletado_at - atribuido_at)) / 60.0) FILTER (WHERE coletado_at IS NOT NULL AND atribuido_at IS NOT NULL))::int AS t_coleta_min,
+          ROUND(AVG(EXTRACT(EPOCH FROM (entregue_at - coletado_at)) / 60.0) FILTER (WHERE entregue_at IS NOT NULL AND coletado_at IS NOT NULL))::int AS t_rota_min,
+          ROUND(AVG(EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0) FILTER (WHERE entregue_at IS NOT NULL))::int AS t_total_min
         FROM logistics_deliveries
         WHERE created_at >= $1 AND created_at <= $2
-      `, [inicio, fim + ' 23:59:59']);
+      `, [inicio, fimTs]);
 
-      res.json({ success: true, metricas, periodo: { inicio, fim } });
+      // SLA — entregues no prazo vs fora (prazo por distância da tabela bi_prazo_padrao)
+      const sla = { no_prazo: 0, fora: 0, total_avaliado: 0, pct_no_prazo: null, atraso_medio_min: 0 };
+      try {
+        const { rows: fx } = await pool.query('SELECT km_min, km_max, prazo_minutos FROM bi_prazo_padrao ORDER BY km_min');
+        const prazoKm = (km) => {
+          if (km == null || isNaN(km)) return null;
+          for (const f of fx) { const lo = Number(f.km_min) || 0, hi = (f.km_max == null) ? Infinity : Number(f.km_max); if (km >= lo && km < hi) return Number(f.prazo_minutos) || null; }
+          const u = fx[fx.length - 1]; if (u && Number(u.prazo_minutos)) return Number(u.prazo_minutos);
+          return 60 + Math.max(0, Math.ceil((km - 10) / 5)) * 15;
+        };
+        const { rows: ent } = await pool.query(`
+          SELECT distancia_km AS km, EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0 AS tot
+          FROM logistics_deliveries
+          WHERE created_at >= $1 AND created_at <= $2 AND entregue_at IS NOT NULL
+        `, [inicio, fimTs]);
+        let somaAtraso = 0;
+        for (const e of ent) {
+          const prazo = prazoKm(e.km != null ? parseFloat(e.km) : null);
+          if (prazo == null || e.tot == null) continue;
+          sla.total_avaliado++;
+          if (parseFloat(e.tot) <= prazo) sla.no_prazo++;
+          else { sla.fora++; somaAtraso += (parseFloat(e.tot) - prazo); }
+        }
+        sla.pct_no_prazo = sla.total_avaliado > 0 ? (sla.no_prazo / sla.total_avaliado) * 100 : null;
+        sla.atraso_medio_min = sla.fora > 0 ? Math.round(somaAtraso / sla.fora) : 0;
+      } catch (e) { /* sem tabela de prazo → sla zerado */ }
+
+      res.json({ success: true, metricas, sla, periodo: { inicio, fim } });
     } catch (err) {
       console.error('[logistics/routes] GET /dashboard/metricas erro:', err.message);
       res.status(500).json({ error: 'Erro ao calcular métricas' });
@@ -696,7 +734,8 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           COALESCE(SUM(ld.valor_servico), 0)::numeric AS receita_total,
           COALESCE(SUM(ld.valor_provider), 0)::numeric AS custo_uber_total,
           COALESCE(SUM(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_total,
-          COALESCE(AVG(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_media
+          COALESCE(AVG(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_media,
+          ROUND(AVG(EXTRACT(EPOCH FROM (ld.coletado_at - ld.atribuido_at)) / 60.0) FILTER (WHERE ld.coletado_at IS NOT NULL AND ld.atribuido_at IS NOT NULL))::int AS medio_coleta_min
         FROM logistics_deliveries ld
         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
         WHERE ld.created_at BETWEEN $1 AND $2 AND ld.valor_provider IS NOT NULL
@@ -721,17 +760,45 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         WHERE created_at BETWEEN $1 AND $2 AND valor_provider IS NOT NULL
       `, [dataInicio, dataFim]);
 
+      // % no prazo por cliente (prazo por distância da tabela bi_prazo_padrao)
+      const slaPorRegra = {};
+      try {
+        const { rows: fx } = await pool.query('SELECT km_min, km_max, prazo_minutos FROM bi_prazo_padrao ORDER BY km_min');
+        const prazoKm = (km) => {
+          if (km == null || isNaN(km)) return null;
+          for (const f of fx) { const lo = Number(f.km_min) || 0, hi = (f.km_max == null) ? Infinity : Number(f.km_max); if (km >= lo && km < hi) return Number(f.prazo_minutos) || null; }
+          const u = fx[fx.length - 1]; if (u && Number(u.prazo_minutos)) return Number(u.prazo_minutos);
+          return 60 + Math.max(0, Math.ceil((km - 10) / 5)) * 15;
+        };
+        const { rows: ent } = await pool.query(`
+          SELECT regra_id, distancia_km AS km, EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0 AS tot
+          FROM logistics_deliveries
+          WHERE created_at BETWEEN $1 AND $2 AND entregue_at IS NOT NULL
+        `, [dataInicio, dataFim]);
+        for (const e of ent) {
+          const prazo = prazoKm(e.km != null ? parseFloat(e.km) : null);
+          if (prazo == null || e.tot == null) continue;
+          const k = e.regra_id == null ? 'null' : String(e.regra_id);
+          if (!slaPorRegra[k]) slaPorRegra[k] = { ok: 0, tot: 0 };
+          slaPorRegra[k].tot++;
+          if (parseFloat(e.tot) <= prazo) slaPorRegra[k].ok++;
+        }
+      } catch (e) { /* sem tabela de prazo */ }
+
       res.json({
         success: true,
         periodo: { tipo: periodo, inicio: dataInicio, fim: dataFim },
         totais,
-        por_cliente: porCliente.map(r => ({
-          ...r,
-          margem_pct: r.receita_total > 0
-            ? (parseFloat(r.margem_total) / parseFloat(r.receita_total)) * 100 : 0,
-          taxa_cancelamento: r.qtd > 0
-            ? (parseFloat(r.cancelados) / parseFloat(r.qtd)) * 100 : 0,
-        })),
+        por_cliente: porCliente.map(r => {
+          const k = r.regra_id == null ? 'null' : String(r.regra_id);
+          const s = slaPorRegra[k];
+          return {
+            ...r,
+            margem_pct: r.receita_total > 0 ? (parseFloat(r.margem_total) / parseFloat(r.receita_total)) * 100 : 0,
+            taxa_cancelamento: r.qtd > 0 ? (parseFloat(r.cancelados) / parseFloat(r.qtd)) * 100 : 0,
+            pct_no_prazo: (s && s.tot > 0) ? (s.ok / s.tot) * 100 : null,
+          };
+        }),
         por_dia: porDia,
       });
     } catch (err) {
