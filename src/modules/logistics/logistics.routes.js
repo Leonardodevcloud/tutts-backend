@@ -675,7 +675,8 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           ROUND(AVG(EXTRACT(EPOCH FROM (atribuido_at - created_at)) / 60.0) FILTER (WHERE atribuido_at IS NOT NULL))::int AS t_localizacao_min,
           ROUND(AVG(EXTRACT(EPOCH FROM (coletado_at - atribuido_at)) / 60.0) FILTER (WHERE coletado_at IS NOT NULL AND atribuido_at IS NOT NULL))::int AS t_coleta_min,
           ROUND(AVG(EXTRACT(EPOCH FROM (entregue_at - coletado_at)) / 60.0) FILTER (WHERE entregue_at IS NOT NULL AND coletado_at IS NOT NULL))::int AS t_rota_min,
-          ROUND(AVG(EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0) FILTER (WHERE entregue_at IS NOT NULL))::int AS t_total_min
+          ROUND(AVG(EXTRACT(EPOCH FROM (COALESCE(entregue_at, finalizado_at) - created_at)) / 60.0) FILTER (WHERE COALESCE(entregue_at, finalizado_at) IS NOT NULL))::int AS t_total_min,
+          COUNT(*) FILTER (WHERE atribuido_at IS NOT NULL)::int AS n_trilha
         FROM logistics_deliveries
         WHERE created_at >= $1 AND created_at <= $2
       `, [inicio, fimTs]);
@@ -691,9 +692,9 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           return 60 + Math.max(0, Math.ceil((km - 10) / 5)) * 15;
         };
         const { rows: ent } = await pool.query(`
-          SELECT distancia_km AS km, EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0 AS tot
+          SELECT distancia_km AS km, EXTRACT(EPOCH FROM (COALESCE(entregue_at, finalizado_at) - created_at)) / 60.0 AS tot
           FROM logistics_deliveries
-          WHERE created_at >= $1 AND created_at <= $2 AND entregue_at IS NOT NULL
+          WHERE created_at >= $1 AND created_at <= $2 AND COALESCE(entregue_at, finalizado_at) IS NOT NULL
         `, [inicio, fimTs]);
         let somaAtraso = 0;
         for (const e of ent) {
@@ -771,9 +772,9 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           return 60 + Math.max(0, Math.ceil((km - 10) / 5)) * 15;
         };
         const { rows: ent } = await pool.query(`
-          SELECT regra_id, distancia_km AS km, EXTRACT(EPOCH FROM (entregue_at - created_at)) / 60.0 AS tot
+          SELECT regra_id, distancia_km AS km, EXTRACT(EPOCH FROM (COALESCE(entregue_at, finalizado_at) - created_at)) / 60.0 AS tot
           FROM logistics_deliveries
-          WHERE created_at BETWEEN $1 AND $2 AND entregue_at IS NOT NULL
+          WHERE created_at BETWEEN $1 AND $2 AND COALESCE(entregue_at, finalizado_at) IS NOT NULL
         `, [dataInicio, dataFim]);
         for (const e of ent) {
           const prazo = prazoKm(e.km != null ? parseFloat(e.km) : null);
