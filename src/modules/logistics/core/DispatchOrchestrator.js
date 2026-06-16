@@ -1160,6 +1160,130 @@ class DispatchOrchestrator {
     return promovidas;
   }
 
+  /**
+   * COLETA LENTA -> cancela e redespacha (mantendo o MESMO link de rastreio).
+   * Se um entregador ACEITOU (atribuido_at) mas NAO coletou (coletado_at nulo)
+   * ha mais de timeout_coleta_min (default 17), cancela no provider e
+   * redespacha a MESMA OS, transferindo o rastreio_token pra nova entrega.
+   * O cliente continua no mesmo /r/<token>, agora com o motoboy novo.
+   *
+   * Sem limite de redespachos: o relogio reseta a cada novo aceite, entao so
+   * dispara de novo se o proximo entregador tambem demorar. Vale p/ todos os
+   * providers. Se o provider RECUSAR o cancelamento (corrida viva), NAO
+   * redespacha (evita 2 entregadores) e so alerta. Se o redespacho falhar
+   * (OS sumiu da Mapp / sem entregador), reabre na Mapp + alerta admin.
+   *
+   * @returns {Promise<number>} quantidade redespachada
+   */
+  async verifyColetaTimeoutsERedespacha() {
+    let timeoutMin = 17;
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT (config->>'timeout_coleta_min')::int AS t
+        FROM logistics_providers WHERE provider_code = 'uber'
+      `);
+      if (rows[0]?.t) timeoutMin = rows[0].t;
+    } catch (e) { /* default 17 */ }
+
+    const { rows: lentas } = await this.pool.query(`
+      SELECT id, codigo_os, provider_code, external_delivery_id, rastreio_token, regra_id,
+             EXTRACT(EPOCH FROM (NOW() - atribuido_at))/60 AS espera_min
+      FROM logistics_deliveries
+      WHERE status_canonico IN ('COURIER_ASSIGNED', 'ARRIVED_PICKUP')
+        AND atribuido_at IS NOT NULL
+        AND coletado_at IS NULL
+        AND external_delivery_id IS NOT NULL
+        AND atribuido_at < NOW() - ($1 || ' minutes')::interval
+    `, [timeoutMin]);
+
+    if (lentas.length === 0) return 0;
+
+    let redespachadas = 0;
+    for (const e of lentas) {
+      const espera = parseFloat(e.espera_min || 0).toFixed(1);
+      try {
+        // Re-checa: pode ter coletado nesse meio tempo (corrida com o webhook).
+        const { rows: atual } = await this.pool.query(
+          'SELECT coletado_at, status_canonico FROM logistics_deliveries WHERE id = $1',
+          [e.id]
+        );
+        if (!atual.length || atual[0].coletado_at
+            || ['PICKED_UP', 'DROPOFF_EN_ROUTE', 'DELIVERED', 'CANCELED', 'RETURNED'].includes(atual[0].status_canonico)) {
+          continue; // ja coletou ou mudou de estado — nao mexe
+        }
+
+        // 1. Cancela no provider, SEM reabrir Mapp (vamos redespachar ja).
+        const rc = await this.cancel(e.id, {
+          motivo: `Coleta nao realizada em ${timeoutMin}min - redespacho automatico`,
+          canceladoPor: 'sistema_timeout_coleta',
+          reabrirMapp: false,
+          eventSource: EventSource.WORKER,
+        });
+
+        // 1b. Provider RECUSOU cancelar -> corrida ainda viva. NAO redespacha
+        //     (evita dois entregadores). So alerta.
+        if (rc && rc.providerCancelado === false) {
+          console.warn(`[Orchestrator] OS ${e.codigo_os}: coleta lenta (${espera}min) mas provider recusou cancelar - sem redespacho, alertando admin`);
+          this._alertarColetaTimeout('coleta_timeout_cancel_recusado', e, espera, timeoutMin, rc.providerCancelMsg || null);
+          continue;
+        }
+
+        // 2. Re-busca a OS na Mapp.
+        const servico = await this._buscarServicoMapp(e.codigo_os);
+        if (!servico) {
+          await this.mapp.alterarStatus(e.codigo_os, 0).catch(() => {});
+          console.warn(`[Orchestrator] OS ${e.codigo_os}: nao encontrada na Mapp pra redespacho - reaberta + alerta`);
+          this._alertarColetaTimeout('coleta_timeout_os_sumiu', e, espera, timeoutMin, null);
+          continue;
+        }
+
+        // 3. Redespacha a MESMA OS, mesmo provider.
+        const novo = await this.dispatch(servico, {
+          providerCode: e.provider_code,
+          regraId: e.regra_id || null,
+          eventSource: EventSource.WORKER,
+        });
+
+        if (!novo || !novo.id) {
+          await this.mapp.alterarStatus(e.codigo_os, 0).catch(() => {});
+          console.warn(`[Orchestrator] OS ${e.codigo_os}: redespacho falhou - reaberta + alerta`);
+          this._alertarColetaTimeout('coleta_timeout_redispatch_falhou', e, espera, timeoutMin, null);
+          continue;
+        }
+
+        // 4. Transfere o rastreio_token -> MESMO link aponta pra nova entrega.
+        if (e.rastreio_token) {
+          await this.pool.query('UPDATE logistics_deliveries SET rastreio_token = NULL WHERE id = $1', [e.id]).catch(() => {});
+          await this.pool.query('UPDATE logistics_deliveries SET rastreio_token = $1 WHERE id = $2', [e.rastreio_token, novo.id]).catch(() => {});
+        }
+
+        redespachadas++;
+        console.log(`[Orchestrator] OS ${e.codigo_os}: coleta >${timeoutMin}min (${espera}min) -> cancelada e redespachada (entrega ${e.id} -> ${novo.id}, mesmo link)`);
+      } catch (err) {
+        console.error(`[Orchestrator] Erro no redespacho por coleta lenta (entrega ${e.id}, OS ${e.codigo_os}):`, err.message);
+      }
+    }
+    return redespachadas;
+  }
+
+  /**
+   * Alerta admins (WebSocket) sobre um evento de timeout de coleta. Best-effort.
+   */
+  _alertarColetaTimeout(tipo, entrega, esperaMin, timeoutMin, detalhe) {
+    try {
+      if (typeof global.broadcastToAdmins === 'function') {
+        global.broadcastToAdmins(tipo, {
+          codigo_os: entrega.codigo_os,
+          entrega_id: entrega.id,
+          provider: entrega.provider_code,
+          espera_min: esperaMin,
+          timeout_min: timeoutMin,
+          detalhe: detalhe || null,
+        });
+      }
+    } catch (_) { /* alerta best-effort */ }
+  }
+
   // ════════════════════════════════════════════════════════════
   // Helpers privados
   // ════════════════════════════════════════════════════════════

@@ -230,6 +230,16 @@ function startPollingWorker(pool) {
         console.log(`⏰ [PollingWorker] ${promovidas} entrega(s) → fallback por timeout`);
       }
 
+      // 2b. Coleta lenta: cancela e redespacha mantendo o mesmo link de rastreio.
+      try {
+        const redesp = await orchestrator.verifyColetaTimeoutsERedespacha();
+        if (redesp > 0) {
+          console.log(`🔁 [PollingWorker] ${redesp} entrega(s) redespachada(s) por coleta lenta`);
+        }
+      } catch (eCol) {
+        console.error('[PollingWorker] erro em verifyColetaTimeoutsERedespacha:', eCol.message);
+      }
+
     } catch (error) {
       console.error('❌ [PollingWorker] erro no ciclo:', error.message);
       events.logError('uber', error, { eventSource: EventSource.WORKER }).catch(() => {});
