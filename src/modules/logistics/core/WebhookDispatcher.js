@@ -278,6 +278,19 @@ class WebhookDispatcher {
       );
     }
 
+    // 🆕 Timestamps de estágio (idempotente: a primeira ocorrência vence via COALESCE)
+    if (novoStatusCanonico === CanonicalStatus.PICKED_UP) {
+      await this.pool.query(
+        'UPDATE logistics_deliveries SET coletado_at = COALESCE(coletado_at, NOW()) WHERE id = $1',
+        [entrega.id]
+      ).catch(() => {});
+    } else if (novoStatusCanonico === CanonicalStatus.DELIVERED) {
+      await this.pool.query(
+        'UPDATE logistics_deliveries SET entregue_at = COALESCE(entregue_at, NOW()) WHERE id = $1',
+        [entrega.id]
+      ).catch(() => {});
+    }
+
     // Audita mudança de status
     this.events.log({
       providerCode,

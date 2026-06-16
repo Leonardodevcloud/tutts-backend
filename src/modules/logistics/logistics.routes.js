@@ -446,7 +446,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         );
         tracking = t.rows;
         const w = await pool.query(
-          `SELECT event_type, event_source, status_native, payload, created_at
+          `SELECT event_type, event_source, status_canonico, status_native, payload, created_at
            FROM logistics_events WHERE codigo_os = $1 ORDER BY created_at DESC LIMIT 50`,
           [entrega.codigo_os]
         );
