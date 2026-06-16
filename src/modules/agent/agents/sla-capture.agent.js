@@ -98,13 +98,25 @@ module.exports = defineAgent({
   },
 
   buscarPendentes: async (pool, _limite) => {
+    // CLAIM ATOMICO (2026-06): um unico UPDATE seleciona a proxima pendente
+    // com FOR UPDATE SKIP LOCKED e ja marca 'processando' na MESMA transacao.
+    // Sem isso, o FOR UPDATE de um pool.query solto libera o lock na hora
+    // (cada pool.query e auto-commit), entao 2+ slots pegavam a MESMA linha
+    // e cada um enviava o rastreio -> WhatsApp DUPLICADO no grupo do cliente.
+    // Com o claim atomico, so um slot vence a linha; os outros pulam (SKIP
+    // LOCKED) para a proxima OS. O marcarProcessando seguinte vira no-op.
     const { rows } = await pool.query(`
-      SELECT * FROM sla_capturas
-      WHERE status = 'pendente'
-        AND proximo_retry_em <= NOW()
-      ORDER BY criado_em ASC
-      LIMIT 1
-      FOR UPDATE SKIP LOCKED
+      UPDATE sla_capturas
+      SET status = 'processando', atualizado_em = NOW()
+      WHERE id = (
+        SELECT id FROM sla_capturas
+        WHERE status = 'pendente'
+          AND proximo_retry_em <= NOW()
+        ORDER BY criado_em ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *
     `);
     return rows[0] || null;
   },
