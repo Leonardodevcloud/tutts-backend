@@ -99,6 +99,7 @@ async function initLogisticsTables(pool) {
   // 🆕 Timestamps por estágio — alimentam a trilha de tempo e o indicador "atrasado".
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS coletado_at TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS entregue_at TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS atribuido_at TIMESTAMPTZ`).catch(() => {});
   // 99Entrega: reconciliacao de preco final (price_info do /detail, em reais)
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_provider_final DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_entrega_99     DECIMAL(10,2)`).catch(() => {});

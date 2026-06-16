@@ -279,7 +279,12 @@ class WebhookDispatcher {
     }
 
     // 🆕 Timestamps de estágio (idempotente: a primeira ocorrência vence via COALESCE)
-    if (novoStatusCanonico === CanonicalStatus.PICKED_UP) {
+    if (novoStatusCanonico === CanonicalStatus.COURIER_ASSIGNED) {
+      await this.pool.query(
+        'UPDATE logistics_deliveries SET atribuido_at = COALESCE(atribuido_at, NOW()) WHERE id = $1',
+        [entrega.id]
+      ).catch(() => {});
+    } else if (novoStatusCanonico === CanonicalStatus.PICKED_UP) {
       await this.pool.query(
         'UPDATE logistics_deliveries SET coletado_at = COALESCE(coletado_at, NOW()) WHERE id = $1',
         [entrega.id]
