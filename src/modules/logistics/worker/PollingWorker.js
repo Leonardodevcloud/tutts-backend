@@ -230,6 +230,13 @@ function startPollingWorker(pool) {
         console.log(`⏰ [PollingWorker] ${promovidas} entrega(s) → fallback por timeout`);
       }
 
+      // 2c. Alertas de monitoramento (corrida sem entregador 10/15 min)
+      try {
+        await orchestrator.verificarAlertasMonitoramento();
+      } catch (eMon) {
+        console.error('[PollingWorker] erro em verificarAlertasMonitoramento:', eMon.message);
+      }
+
       // 2b. Coleta lenta: cancela e redespacha mantendo o mesmo link de rastreio.
       try {
         const redesp = await orchestrator.verifyColetaTimeoutsERedespacha();

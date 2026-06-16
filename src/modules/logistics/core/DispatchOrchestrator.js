@@ -1300,6 +1300,108 @@ class DispatchOrchestrator {
     const servicos = await this.mapp.listarServicos(0, 0);
     return servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
   }
+
+  /**
+   * ALERTAS DE MONITORAMENTO -> grupo (EVOLUTION_GROUP_ID).
+   * Avisa quando uma corrida esta SEM entregador (DISPATCHED, sem courier) ha:
+   *   - > 10 min -> aviso (1x)
+   *   - > 15 min -> escalada urgente (1x)
+   * Dedup por nivel via colunas alerta_10_em / alerta_15_em (nao reenvia).
+   * @returns {Promise<number>} alertas enviados
+   */
+  async verificarAlertasMonitoramento() {
+    const { rows } = await this.pool.query(`
+      SELECT d.id, d.codigo_os, d.provider_code, d.endereco_coleta,
+             d.alerta_10_em, d.alerta_15_em,
+             FLOOR(EXTRACT(EPOCH FROM (NOW() - d.created_at)) / 60) AS idade_min,
+             r.cliente_nome
+      FROM logistics_deliveries d
+      LEFT JOIN logistics_dispatch_rules r ON r.id = d.regra_id
+      WHERE d.status_canonico = 'DISPATCHED'
+        AND d.atribuido_at IS NULL
+        AND d.coletado_at IS NULL
+        AND (
+          (d.created_at < NOW() - INTERVAL '10 minutes' AND d.alerta_10_em IS NULL)
+          OR
+          (d.created_at < NOW() - INTERVAL '15 minutes' AND d.alerta_15_em IS NULL)
+        )
+    `);
+
+    if (rows.length === 0) return 0;
+
+    let enviados = 0;
+    for (const d of rows) {
+      const minutos = parseInt(d.idade_min, 10) || 0;
+      try {
+        if (minutos >= 15 && !d.alerta_15_em) {
+          await this._enviarMonitoramento(this._msgMonitoramento(15, d, minutos));
+          await this.pool.query(
+            'UPDATE logistics_deliveries SET alerta_15_em = NOW(), alerta_10_em = COALESCE(alerta_10_em, NOW()) WHERE id = $1',
+            [d.id]
+          );
+          enviados++;
+        } else if (minutos >= 10 && !d.alerta_10_em) {
+          await this._enviarMonitoramento(this._msgMonitoramento(10, d, minutos));
+          await this.pool.query(
+            'UPDATE logistics_deliveries SET alerta_10_em = NOW() WHERE id = $1',
+            [d.id]
+          );
+          enviados++;
+        }
+      } catch (err) {
+        console.error(`[Orchestrator] Falha ao alertar monitoramento OS ${d.codigo_os}:`, err.message);
+      }
+    }
+    return enviados;
+  }
+
+  _msgMonitoramento(nivel, d, minutos) {
+    const cliente = d.cliente_nome || '—';
+    const coleta = d.endereco_coleta || '—';
+    const provMap = { noventanove: '99', uber: 'Uber' };
+    const prov = provMap[d.provider_code] || d.provider_code || '—';
+    if (nivel === 15) {
+      return [
+        '🚨 *MONITORAMENTO — 15 MIN SEM ENTREGADOR*', '',
+        `🧾 *OS:* ${d.codigo_os}`,
+        `⏱️ *Há:* ${minutos} min sem ninguém aceitar`,
+        `🏪 *Cliente:* ${cliente}`,
+        `📍 *Coleta:* ${coleta}`,
+        `🛵 *Provedor:* ${prov}`, '',
+        '❗ Corrida segue sem entregador — pode precisar de ação manual.',
+      ].join('\n');
+    }
+    return [
+      '⚠️ *MONITORAMENTO — PROCURANDO ENTREGADOR*', '',
+      `🧾 *OS:* ${d.codigo_os}`,
+      `⏱️ *Há:* ${minutos} min procurando`,
+      `🏪 *Cliente:* ${cliente}`,
+      `📍 *Coleta:* ${coleta}`,
+      `🛵 *Provedor:* ${prov}`, '',
+      '🔎 Nenhum entregador aceitou ainda.',
+    ].join('\n');
+  }
+
+  async _enviarMonitoramento(texto) {
+    const baseUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+    const apiKey = process.env.EVOLUTION_API_KEY;
+    const instancia = process.env.EVOLUTION_INSTANCE;
+    const grupoId = process.env.EVOLUTION_GROUP_ID;
+    if (!baseUrl || !apiKey || !instancia || !grupoId) {
+      console.warn('[Orchestrator] Monitoramento: Evolution/EVOLUTION_GROUP_ID nao configurado - alerta nao enviado');
+      return false;
+    }
+    const response = await fetch(`${baseUrl}/message/sendText/${instancia}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: apiKey },
+      body: JSON.stringify({ number: grupoId, text: texto }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`Evolution API erro ${response.status}: ${JSON.stringify(data)}`);
+    }
+    return true;
+  }
 }
 
 // ════════════════════════════════════════════════════════════
