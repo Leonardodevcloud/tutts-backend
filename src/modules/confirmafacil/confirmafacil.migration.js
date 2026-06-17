@@ -123,6 +123,11 @@ async function initConfirmaFacilTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_solicitacao  ON confirmafacil_log      (solicitacao_id)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_vinculos_embarque ON confirmafacil_vinculos (id_embarque)`).catch(() => {});
 
+  // SLA: garante a coluna created_at (marco zero do SLA) em solicitacoes_corrida.
+  // Linhas antigas ficam NULL (sem SLA); novas corridas recebem NOW() pelo default.
+  await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS created_at TIMESTAMP`).catch(() => {});
+  await pool.query(`ALTER TABLE solicitacoes_corrida ALTER COLUMN created_at SET DEFAULT NOW()`).catch(() => {});
+
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
 
