@@ -231,7 +231,15 @@ class WebhookDispatcher {
     if (evento.reassignedExternalDeliveryId
         && evento.reassignedExternalDeliveryId !== entrega.external_delivery_id) {
       await this.pool.query(
-        'UPDATE logistics_deliveries SET external_delivery_id = $1, updated_at = NOW() WHERE id = $2',
+        `UPDATE logistics_deliveries
+            SET external_delivery_id = $1,
+                courier_data    = NULL,
+                id_motoboy_mapp = NULL,
+                atribuido_at    = NULL,
+                ultima_lat      = NULL,
+                ultima_lng      = NULL,
+                updated_at      = NOW()
+          WHERE id = $2`,
         [evento.reassignedExternalDeliveryId, entrega.id]
       );
       console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: external_delivery_id reatribuído ${entrega.external_delivery_id} → ${evento.reassignedExternalDeliveryId}`);
@@ -245,6 +253,9 @@ class WebhookDispatcher {
         payload: { reatribuicao: true, id_anterior: entrega.external_delivery_id },
       }).catch(() => {});
       entrega.external_delivery_id = evento.reassignedExternalDeliveryId;
+      // Motoboy trocou: zera o courier em memoria pra o proximo courier_update
+      // ser tratado como PRIMEIRA VEZ (ehPrimeiraVez) e avancar o status certo.
+      entrega.courier_data = null;
     }
 
     // ─── courier_update: atualiza dados do entregador + vincula na Mapp ───
