@@ -134,7 +134,7 @@ function startTrackingPoller(pool) {
    */
   async function buscarEntregasEmTransito() {
     const { rows } = await pool.query(`
-      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, rastreio_wpp_enviado, telefone_entrega
+      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, rastreio_wpp_enviado, telefone_entrega, rastreio_grupo_em
       FROM logistics_deliveries
       WHERE provider_code = $1
         AND status_canonico = ANY($2)
@@ -391,7 +391,7 @@ function startTrackingPoller(pool) {
                 // Cliente Hub: o link Tutts tambem vai pro GRUPO, no mesmo template
                 // do rastreio-cliente. (O link legado desses clientes ja foi
                 // suprimido no RPA via flag usa_hub.)
-                try {
+                if (!entrega.rastreio_grupo_em) try {
                   const { rows: capt } = await pool.query(
                     'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
                     [String(entrega.codigo_os)]

@@ -493,12 +493,81 @@ async function processarCaptura(pool, registro) {
   }
 }
 
+/**
+ * Envia o rastreio Tutts (link /r/<token>) AO GRUPO imediatamente — chamado no
+ * ACEITE do entregador (webhook courier_update), sem esperar o TrackingPoller
+ * (30s). Resolve o grupo Hub via sla_capturas + rastreio_clientes_config (mesmo
+ * caminho do poller). Idempotente via rastreio_grupo_em. Se faltar config/dados
+ * (ex.: sla_capturas ainda nao pronta), retorna false e o poller cobre depois.
+ * @returns {Promise<boolean>} true se enviou ao grupo
+ */
+async function enviarRastreioGrupoImediato(pool, deliveryId) {
+  const { rows } = await pool.query(
+    'SELECT id, codigo_os, rastreio_token, rastreio_grupo_em, pontos FROM logistics_deliveries WHERE id = $1',
+    [deliveryId]
+  );
+  const ent = rows[0];
+  if (!ent || ent.rastreio_grupo_em) return false;
+
+  const { rows: capt } = await pool.query(
+    'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
+    [String(ent.codigo_os)]
+  );
+  const clienteCod = capt[0]?.cliente_cod || null;
+  if (!clienteCod) return false;
+
+  const { rows: grupos } = await pool.query(
+    "SELECT evolution_group_id FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true AND evolution_group_id IS NOT NULL",
+    [String(clienteCod)]
+  );
+  if (!grupos.length) return false;
+
+  let token = ent.rastreio_token;
+  if (!token) {
+    token = require('crypto').randomBytes(9).toString('hex');
+    await pool.query(
+      'UPDATE logistics_deliveries SET rastreio_token = $1 WHERE id = $2 AND rastreio_token IS NULL',
+      [token, ent.id]
+    ).catch(() => {});
+  }
+  const base = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
+  const linkTutts = `${base}/r/${token}`;
+
+  let pts = capt[0] && capt[0].pontos_json;
+  if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = []; } }
+  if (!Array.isArray(pts) || !pts.length) {
+    let ep = ent.pontos;
+    if (typeof ep === 'string') { try { ep = JSON.parse(ep); } catch (_) { ep = []; } }
+    pts = Array.isArray(ep) ? ep : [];
+  }
+
+  const texto = montarMensagemRastreio({
+    os_numero: ent.codigo_os,
+    link_rastreio: linkTutts,
+    pontos: Array.isArray(pts) ? pts : [],
+    cliente_cod: String(clienteCod),
+  });
+
+  let enviou = false;
+  for (const g of grupos) {
+    try {
+      await enviarRastreioWhatsApp({ texto, clienteCod: String(clienteCod), grupoIdOverride: g.evolution_group_id });
+      enviou = true;
+    } catch (_) {}
+  }
+  if (enviou) {
+    await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1', [ent.id]).catch(() => {});
+  }
+  return enviou;
+}
+
 module.exports = {
   enfileirarCaptura,
   processarCaptura,
   extrairTelefoneDeNota,
   montarMensagemRastreio,
   enviarRastreioWhatsApp,
+  enviarRastreioGrupoImediato,
   // expostos pra testes
   _internal: { montarMensagemRastreio, enviarRastreioWhatsApp, getGrupoIdPorCliente },
 };

@@ -117,6 +117,7 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS alerta_10_em TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS alerta_15_em TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rastreio_wpp_enviado BOOLEAN DEFAULT FALSE`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rastreio_grupo_em TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rastreio_token VARCHAR(40)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_logdelivery_rastreio_token ON logistics_deliveries (rastreio_token)`).catch(() => {});
 

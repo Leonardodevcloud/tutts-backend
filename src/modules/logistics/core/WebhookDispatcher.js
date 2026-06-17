@@ -483,6 +483,15 @@ class WebhookDispatcher {
 
       if (ehPrimeiraVez) {
         await this._vincularMotorista(codigoOS, entrega, courier);
+        // Rastreio IMEDIATO ao grupo no aceite (nao espera o poller de 30s).
+        try {
+          const _sla = require('../../agent/sla-capture.service');
+          if (typeof _sla.enviarRastreioGrupoImediato === 'function') {
+            await _sla.enviarRastreioGrupoImediato(this.pool, entrega.id);
+          }
+        } catch (eRast) {
+          console.warn(`[WebhookDispatcher] rastreio imediato OS ${codigoOS}:`, eRast.message);
+        }
       }
     }
 
