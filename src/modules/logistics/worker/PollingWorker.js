@@ -237,15 +237,7 @@ function startPollingWorker(pool) {
         console.error('[PollingWorker] erro em verificarAlertasMonitoramento:', eMon.message);
       }
 
-      // 2b. Coleta lenta: cancela e redespacha mantendo o mesmo link de rastreio.
-      try {
-        const redesp = await orchestrator.verifyColetaTimeoutsERedespacha();
-        if (redesp > 0) {
-          console.log(`🔁 [PollingWorker] ${redesp} entrega(s) redespachada(s) por coleta lenta`);
-        }
-      } catch (eCol) {
-        console.error('[PollingWorker] erro em verifyColetaTimeoutsERedespacha:', eCol.message);
-      }
+      // (cancelamento automatico por coleta lenta removido a pedido)
 
     } catch (error) {
       console.error('❌ [PollingWorker] erro no ciclo:', error.message);
