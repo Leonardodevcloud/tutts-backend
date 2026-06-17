@@ -751,7 +751,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // ── Listagem de NFs — lê do cache local (rápido) ────────────
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { embarcador_cnpj, tem_corrida, status_cf,
+      const { embarcador_cnpj, tem_corrida, status_cf, sla,
               de, ate, busca, page = '0', size = '100' } = req.query;
 
       const pg = Math.max(0, Number(page));
@@ -784,7 +784,26 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const paramsData = [...params];
       let statusClause = '';
       if (status_cf) { paramsData.push(status_cf); statusClause = ` AND c.status_cf = $${paramsData.length}`; }
-      const where = whereCount + statusClause;
+
+      // Filtro de SLA (server-side). Regra: 2h desde a criacao da corrida;
+      // se criada apos 16:30 (BRT) conta a partir das 08:00 do dia seguinte.
+      // created_at e armazenado em UTC (naive) -> interpretamos como UTC e convertemos para BRT.
+      let slaClause = '';
+      if (sla) {
+        const criadoBrt   = `((sc.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo')`;
+        const inicioBrt   = `(CASE WHEN ${criadoBrt}::time > TIME '16:30' THEN ((date(${criadoBrt}) + 1) + TIME '08:00') ELSE ${criadoBrt} END)`;
+        const inicioUtc   = `(${inicioBrt} AT TIME ZONE 'America/Sao_Paulo')`;
+        const deadlineUtc = `((${inicioBrt} + INTERVAL '2 hours') AT TIME ZONE 'America/Sao_Paulo')`;
+        let cond = null;
+        if (sla === 'agendado')       cond = `NOW() < ${inicioUtc}`;
+        else if (sla === 'estourado') cond = `NOW() >= ${deadlineUtc}`;
+        else if (sla === 'iminente')  cond = `NOW() >= ${inicioUtc} AND NOW() < ${deadlineUtc} AND (${deadlineUtc} - NOW()) <= INTERVAL '15 minutes'`;
+        else if (sla === 'atencao')   cond = `NOW() >= ${inicioUtc} AND (${deadlineUtc} - NOW()) > INTERVAL '15 minutes' AND (${deadlineUtc} - NOW()) <= INTERVAL '30 minutes'`;
+        else if (sla === 'no_prazo')  cond = `NOW() >= ${inicioUtc} AND (${deadlineUtc} - NOW()) > INTERVAL '30 minutes'`;
+        if (cond) slaClause = ` AND sc.created_at IS NOT NULL AND c.status_cf NOT IN ('ENTREGUE','CANCELADO','DEVOLVIDO') AND (${cond})`;
+      }
+
+      const where = whereCount + statusClause + slaClause;
 
       // Buscar embarcadores para nomes
       const { rows: embs } = await pool.query(`
@@ -804,6 +823,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         SELECT c.*,
           v.solicitacao_id, v.criado_em AS vinculado_em,
           sc.tutts_os_numero, sc.status AS status_corrida,
+          sc.created_at AS corrida_criada_em,
           cs.nome AS cliente_nome,
           (SELECT cod_ocorrencia FROM confirmafacil_log
            WHERE solicitacao_id = v.solicitacao_id
