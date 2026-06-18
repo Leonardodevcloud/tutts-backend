@@ -354,7 +354,15 @@ async function processarCaptura(pool, registro) {
       const _base = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
       _linkGrupo = `${_base}/r/${_tuttsToken}`;
     }
-    const texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod });
+    // Hub: MESMO corpo do modulo rastreio-cliente (so muda o link, do Hub).
+    // Legado (nao-Hub): mantem o formato antigo do grupo.
+    let texto;
+    if (_hubDelivery && _tuttsToken) {
+      const { montarTextoRastreioCliente } = require('../solicitacao/whatsapp-rastreio.service');
+      texto = montarTextoRastreioCliente({ osNumero: os_numero, urlRastreamento: _linkGrupo });
+    } else {
+      texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod });
+    }
 
     // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
     // ou fallback pra env var legada se não houver match.
@@ -564,12 +572,9 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
     pts = Array.isArray(ep) ? ep : [];
   }
 
-  const texto = montarMensagemRastreio({
-    os_numero: ent.codigo_os,
-    link_rastreio: linkTutts,
-    pontos: Array.isArray(pts) ? pts : [],
-    cliente_cod: String(clienteCod),
-  });
+  // Hub: mesmo corpo do modulo rastreio-cliente, com o link do Hub.
+  const { montarTextoRastreioCliente } = require('../solicitacao/whatsapp-rastreio.service');
+  const texto = montarTextoRastreioCliente({ osNumero: ent.codigo_os, urlRastreamento: linkTutts });
 
   // CLAIM atomico: so um emissor (webhook/poller/agente) ganha o grupo.
   const _claim = await pool.query(

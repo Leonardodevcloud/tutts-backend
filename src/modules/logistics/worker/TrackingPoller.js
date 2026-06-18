@@ -406,12 +406,9 @@ function startTrackingPoller(pool) {
                       const sla = require('../../agent/sla-capture.service');
                       let ptsHub = capt[0].pontos_json;
                       if (typeof ptsHub === 'string') { try { ptsHub = JSON.parse(ptsHub); } catch (_) { ptsHub = []; } }
-                      const textoHub = sla.montarMensagemRastreio({
-                        os_numero: entrega.codigo_os,
-                        link_rastreio: linkTutts,
-                        pontos: Array.isArray(ptsHub) ? ptsHub : [],
-                        cliente_cod: String(clienteCodHub),
-                      });
+                      // Hub: mesmo corpo do modulo rastreio-cliente, com o link do Hub.
+                      const { montarTextoRastreioCliente } = require('../../solicitacao/whatsapp-rastreio.service');
+                      const textoHub = montarTextoRastreioCliente({ osNumero: entrega.codigo_os, urlRastreamento: linkTutts });
                       // CLAIM atomico (consistente com webhook/agente): so manda se ganhar.
                       const _claimP = await pool.query(
                         'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',

@@ -143,6 +143,27 @@ function saudacaoPorHorario() {
   return 'Boa noite';
 }
 
+/**
+ * Monta o corpo do rastreio ao cliente (MESMO texto do modulo rastreio-cliente).
+ * Exportado pra que o GRUPO do Hub use exatamente este formato (so muda o link).
+ */
+function montarTextoRastreioCliente({ osNumero, urlRastreamento }) {
+  const periodo = saudacaoPorHorario();
+  const saud = `${periodo}! 👋`;
+  const linhaPedido = osNumero
+    ? `Seu pedido *#${osNumero}* já foi confirmado e está em rota de entrega. 🚚`
+    : 'Seu pedido já foi confirmado e está em rota de entrega. 🚚';
+  return (
+    `${saud}\n\n` +
+    `${linhaPedido}\n\n` +
+    `Acompanhe o rastreio em tempo real pelo link abaixo:\n` +
+    `${urlRastreamento}\n\n` +
+    `⚠️ *Importante:*\n` +
+    `_Este número é automático e não recebe mensagens nem ligações. ` +
+    `Caso precise de suporte, entre em contato diretamente com a loja onde realizou a compra._`
+  );
+}
+
 async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, urlRastreamento }) {
   const fmt = validarFormatoBR(telefone);
   if (!fmt.ok) {
@@ -157,23 +178,7 @@ async function enviarRastreioCliente({ telefone, nomeDestinatario, osNumero, url
     return { enviado: false, motivo: 'evolution_nao_configurada' };
   }
 
-  // Saudação com o nome do destinatário da entrega (nome fantasia do ponto)
-  // em *negrito* do WhatsApp. É quem está com o celular e vai receber a mercadoria.
-  const periodo = saudacaoPorHorario();
-  const saud = `${periodo}! 👋`;
-  const linhaPedido = osNumero
-    ? `Seu pedido *#${osNumero}* já foi confirmado e está em rota de entrega. 🚚`
-    : 'Seu pedido já foi confirmado e está em rota de entrega. 🚚';
-  // Aviso em itálico (_..._) — WhatsApp não tem translúcido; itálico dá o tom
-  // discreto de "observação" sem competir com a mensagem principal.
-  const texto =
-    `${saud}\n\n` +
-    `${linhaPedido}\n\n` +
-    `Acompanhe o rastreio em tempo real pelo link abaixo:\n` +
-    `${urlRastreamento}\n\n` +
-    `⚠️ *Importante:*\n` +
-    `_Este número é automático e não recebe mensagens nem ligações. ` +
-    `Caso precise de suporte, entre em contato diretamente com a loja onde realizou a compra._`;
+  const texto = montarTextoRastreioCliente({ osNumero, urlRastreamento });
 
   try {
     const url = `${cfg.baseUrl}/message/sendText/${cfg.instancia}`;
@@ -200,4 +205,5 @@ module.exports = {
   validarFormatoBR,
   validarWhatsApp,
   enviarRastreioCliente,
+  montarTextoRastreioCliente,
 };
