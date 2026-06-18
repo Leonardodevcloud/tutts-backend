@@ -365,26 +365,26 @@ async function processarCaptura(pool, registro) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
     // Sempre manda pro grupo: Hub com link Tutts, legado com link Mapp.
-    // Hub: coordena com o envio imediato (webhook) via rastreio_grupo_em pra
-    // NAO duplicar. Se o webhook ja mandou pro grupo, pula aqui; se mandar
-    // aqui primeiro, marca a flag (e o webhook/poller pulam). Legado: manda sempre.
-    let _grupoJaFoi = false;
+    // Hub: CLAIM atomico via rastreio_grupo_em (UPDATE ... WHERE IS NULL RETURNING).
+    // So um emissor (webhook/poller/agente) ganha; os outros pulam. Legado: sempre.
+    let _mandarGrupo = true;
     if (_hubDelivery && _hubDeliveryId) {
-      const _chk = (await pool.query(
-        'SELECT rastreio_grupo_em FROM logistics_deliveries WHERE id = $1',
+      const _claim = await pool.query(
+        'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
         [_hubDeliveryId]
-      ).catch(() => ({ rows: [] }))).rows[0];
-      if (_chk && _chk.rastreio_grupo_em) _grupoJaFoi = true;
+      ).catch(() => ({ rows: [] }));
+      _mandarGrupo = _claim.rows.length > 0;
+      if (!_mandarGrupo) log(`↩️ OS ${os_numero}: grupo ja recebeu o rastreio (outro emissor) - pulando duplicata`);
     }
-    if (_grupoJaFoi) {
-      log(`↩️ OS ${os_numero}: grupo ja recebeu o rastreio (envio imediato) - pulando duplicata`);
-    } else {
-      await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
-      if (_hubDelivery && _hubDeliveryId) {
-        await pool.query(
-          'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL',
-          [_hubDeliveryId]
-        ).catch(() => {});
+    if (_mandarGrupo) {
+      try {
+        await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+      } catch (eGrp) {
+        // envio falhou: libera o claim Hub pra um retry/fallback tentar de novo
+        if (_hubDelivery && _hubDeliveryId) {
+          await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NULL WHERE id = $1', [_hubDeliveryId]).catch(() => {});
+        }
+        throw eGrp;
       }
     }
     grupoEnviado = true;
@@ -571,6 +571,12 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
     cliente_cod: String(clienteCod),
   });
 
+  // CLAIM atomico: so um emissor (webhook/poller/agente) ganha o grupo.
+  const _claim = await pool.query(
+    'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
+    [ent.id]
+  ).catch(() => ({ rows: [] }));
+  if (!_claim.rows.length) return false; // outro emissor ja mandou pro grupo
   let enviou = false;
   for (const g of grupos) {
     try {
@@ -578,8 +584,9 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
       enviou = true;
     } catch (_) {}
   }
-  if (enviou) {
-    await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1', [ent.id]).catch(() => {});
+  if (!enviou) {
+    // envio falhou: libera o claim pra um retry/fallback tentar de novo
+    await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NULL WHERE id = $1', [ent.id]).catch(() => {});
   }
   return enviou;
 }

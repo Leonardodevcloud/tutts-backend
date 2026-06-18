@@ -412,15 +412,25 @@ function startTrackingPoller(pool) {
                         pontos: Array.isArray(ptsHub) ? ptsHub : [],
                         cliente_cod: String(clienteCodHub),
                       });
-                      let enviouGrupo = false;
-                      for (const g of gruposHub) {
-                        try {
-                          await sla.enviarRastreioWhatsApp({ texto: textoHub, clienteCod: String(clienteCodHub), grupoIdOverride: g.evolution_group_id });
-                          enviouGrupo = true;
-                        } catch (_) {}
-                      }
-                      if (enviouGrupo) {
-                        await pool.query('UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1', [entrega.id]).catch(() => {});
+                      // CLAIM atomico (consistente com webhook/agente): so manda se ganhar.
+                      const _claimP = await pool.query(
+                        'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
+                        [entrega.id]
+                      ).catch(() => ({ rows: [] }));
+                      if (_claimP.rows.length) {
+                        let enviouGrupo = false;
+                        for (const g of gruposHub) {
+                          try {
+                            await sla.enviarRastreioWhatsApp({ texto: textoHub, clienteCod: String(clienteCodHub), grupoIdOverride: g.evolution_group_id });
+                            enviouGrupo = true;
+                          } catch (_) {}
+                        }
+                        if (enviouGrupo) {
+                          await pool.query('UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1', [entrega.id]).catch(() => {});
+                        } else {
+                          // envio falhou: libera o claim pra um retry/fallback tentar
+                          await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NULL WHERE id = $1', [entrega.id]).catch(() => {});
+                        }
                       }
                     }
                   }
