@@ -139,6 +139,17 @@ async function initConfirmaFacilTables(pool) {
     )
   `).catch(() => {});
 
+  // Reconciliação: estado do reenvio automático de entregas não confirmadas no CF
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS confirmafacil_reconc (
+      solicitacao_id  INT PRIMARY KEY,
+      tentativas      INT DEFAULT 0,
+      ultima_em       TIMESTAMP DEFAULT NOW(),
+      alertado        BOOLEAN DEFAULT FALSE,
+      resolvido       BOOLEAN DEFAULT FALSE
+    )
+  `).catch(() => {});
+
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
 

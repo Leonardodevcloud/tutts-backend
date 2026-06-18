@@ -6,6 +6,7 @@ const { getConfirmaFacilPoller } = require('./confirmafacil.poller');
 const AppError = require('../../shared/errors/AppError');
 const { resolverCodigo } = require('./confirmafacil.map');
 const slaMod = require('./confirmafacil.sla');
+const reconcMod = require('./confirmafacil.reconciliacao');
 
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
@@ -22,6 +23,13 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   router.get('/sla-painel', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       res.json(await slaMod.calcularPainel(pool));
+    } catch (err) { next(err); }
+  });
+
+  // ── CF: reconciliação manual (reenvia entregas não confirmadas no CF) ──
+  router.post('/reconciliar', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      res.json(await reconcMod.reconciliarEntregas(pool));
     } catch (err) { next(err); }
   });
 

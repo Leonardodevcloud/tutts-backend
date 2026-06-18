@@ -18,6 +18,7 @@
 const httpRequest     = require('../../shared/utils/httpRequest');
 const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
 const slaMod = require('./confirmafacil.sla');
+const reconcMod = require('./confirmafacil.reconciliacao');
 
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
 const CF_OCORRENCIA_URL = 'https://utilities.confirmafacil.com.br/filter/ocorrencia';
@@ -101,6 +102,12 @@ class ConfirmaFacilPoller {
       try { await slaMod.verificarRiscosEAlertar(this.pool); }
       catch (err) { console.error('❌ [CF SLA] erro na verificação de risco:', err.message); }
     }, 60 * 1000);
+
+    // 🔁 Reconciliação: reenvia entregas que não chegaram ao CF (a cada 3 min)
+    setInterval(async () => {
+      try { await reconcMod.reconciliarEntregas(this.pool); }
+      catch (err) { console.error('❌ [CF Reconc] erro na reconciliação:', err.message); }
+    }, 3 * 60 * 1000);
   }
 
   // ══════════════════════════════════════════════════
