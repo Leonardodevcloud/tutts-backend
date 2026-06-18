@@ -225,4 +225,16 @@ async function verificarRiscosEAlertar(pool) {
   return { verificadas: rows.length, enviados };
 }
 
-module.exports = { metaPorCnpj, calcularPainel, verificarRiscosEAlertar };
+// Envia uma mensagem de TESTE no mesmo grupo (valida o disparo)
+async function enviarTeste(texto) {
+  const msg = (texto && String(texto).trim()) || [
+    '🧪 *TESTE — Alerta de SLA (ConfirmaFácil)*',
+    'Mensagem de teste do painel de SLA.',
+    'Se você está vendo isso, o disparo no grupo está OK. ✅',
+    '📊 Exemplo: Performance hoje (Goiânia): 98.0% / meta 98% · margem 0',
+  ].join('\n');
+  const res = await _enviarWhats(msg);
+  return { ...res, mensagem: msg };
+}
+
+module.exports = { metaPorCnpj, calcularPainel, verificarRiscosEAlertar, enviarTeste };

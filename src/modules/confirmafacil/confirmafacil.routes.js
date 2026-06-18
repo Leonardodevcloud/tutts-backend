@@ -11,6 +11,13 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   const router = express.Router();
   const auth   = getConfirmaFacilAuth();
 
+  // ── SLA: dispara uma mensagem de TESTE no grupo (diagnóstico) ──
+  router.post('/sla-teste', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      res.json(await slaMod.enviarTeste(req.body && req.body.texto));
+    } catch (err) { next(err); }
+  });
+
   // ── SLA: painel por filial + lista de risco (para a aba "Risco de SLA") ──
   router.get('/sla-painel', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
