@@ -1530,22 +1530,20 @@ router.post('/solicitacao/enderecos-salvos', verificarTokenSolicitacao, async (r
     // em cada ramo. Passar um parâmetro null que não aparece na query causa erro 42P18
     // ("could not determine data type of parameter") no PostgreSQL — foi o bug que travava
     // clientes sem grupo (grupoId null) em produção.
-    let scopeClausula, scopeParams;
-    if (grupoId) {
-      scopeClausula = '(grupo_enderecos_id = $1 OR cliente_id = $2)';
-      scopeParams = [grupoId, req.clienteSolicitacao.id];
-    } else {
-      scopeClausula = '(cliente_id = $1 AND grupo_enderecos_id IS NULL)';
-      scopeParams = [req.clienteSolicitacao.id];
-    }
-    const base = scopeParams.length; // 2 se tem grupo, 1 se não
+    // 2026-06 FIX (enderecos infinitos): dedup SO nos enderecos PROPRIOS do
+    // cliente (cliente_id + sem grupo) E exigindo o MESMO apelido. Antes o
+    // escopo incluia o grupo inteiro e ignorava o apelido, entao salvar um
+    // endereco novo podia SOBRESCREVER outro (proprio ou compartilhado) que
+    // coincidisse de endereco -> "sumia outro". Agora so atualiza se for
+    // exatamente o mesmo (seu, mesmo apelido); qualquer outro caso INSERE novo.
     const existe = await pool.query(
-      `SELECT id FROM solicitacao_favoritos 
-       WHERE ${scopeClausula} AND (
-         (endereco_completo = $${base + 1} AND $${base + 1} IS NOT NULL) OR 
-         (rua = $${base + 2} AND numero = $${base + 3} AND cidade = $${base + 4})
+      `SELECT id FROM solicitacao_favoritos
+       WHERE cliente_id = $1 AND grupo_enderecos_id IS NULL
+         AND apelido IS NOT DISTINCT FROM $2 AND (
+         (endereco_completo = $3 AND $3 IS NOT NULL) OR
+         (rua = $4 AND numero = $5 AND cidade = $6)
        )`,
-      [...scopeParams, endereco_completo, rua, numero, cidade]
+      [req.clienteSolicitacao.id, apelido, endereco_completo, rua, numero, cidade]
     );
     
     if (existe.rows.length > 0) {
