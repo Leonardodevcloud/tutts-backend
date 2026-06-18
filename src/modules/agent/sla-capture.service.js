@@ -272,6 +272,7 @@ async function processarCaptura(pool, registro) {
     // segue o legado normal. Cliente sem usa_hub nao entra aqui.
     let _hubDelivery = false;
     let _tuttsToken = null;
+    let _hubDeliveryId = null;
     {
       const _ehHub = (await pool.query(
         "SELECT 1 FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true LIMIT 1",
@@ -283,13 +284,14 @@ async function processarCaptura(pool, registro) {
         // grupo; se ainda nao tem -> segura ate 10 min (entregador aceitar na
         // 99). OS do cliente Hub que NAO passou pelo Hub vai pro legado NA HORA.
         const _ld = (await pool.query(
-          'SELECT rastreio_token FROM logistics_deliveries WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1',
+          'SELECT id, rastreio_token FROM logistics_deliveries WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1',
           [String(os_numero)]
         )).rows[0];
         if (_ld) {
           if (_ld.rastreio_token) {
             _hubDelivery = true;
             _tuttsToken = _ld.rastreio_token;
+            _hubDeliveryId = _ld.id;
           } else {
             const JANELA_HUB_MS = 10 * 60 * 1000;
             const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
@@ -363,7 +365,28 @@ async function processarCaptura(pool, registro) {
       log(`📤 Enviando OS ${os_numero} pro cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" (grupo ${grupoIdOverride})`);
     }
     // Sempre manda pro grupo: Hub com link Tutts, legado com link Mapp.
-    await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+    // Hub: coordena com o envio imediato (webhook) via rastreio_grupo_em pra
+    // NAO duplicar. Se o webhook ja mandou pro grupo, pula aqui; se mandar
+    // aqui primeiro, marca a flag (e o webhook/poller pulam). Legado: manda sempre.
+    let _grupoJaFoi = false;
+    if (_hubDelivery && _hubDeliveryId) {
+      const _chk = (await pool.query(
+        'SELECT rastreio_grupo_em FROM logistics_deliveries WHERE id = $1',
+        [_hubDeliveryId]
+      ).catch(() => ({ rows: [] }))).rows[0];
+      if (_chk && _chk.rastreio_grupo_em) _grupoJaFoi = true;
+    }
+    if (_grupoJaFoi) {
+      log(`↩️ OS ${os_numero}: grupo ja recebeu o rastreio (envio imediato) - pulando duplicata`);
+    } else {
+      await enviarRastreioWhatsApp({ texto, clienteCod: cliente_cod, grupoIdOverride });
+      if (_hubDelivery && _hubDeliveryId) {
+        await pool.query(
+          'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL',
+          [_hubDeliveryId]
+        ).catch(() => {});
+      }
+    }
     grupoEnviado = true;
     // A mensagem do grupo (acao critica) JA saiu. Persistimos 'enviado' agora,
     // antes de qualquer passo que possa falhar, para que um re-claim/retry
