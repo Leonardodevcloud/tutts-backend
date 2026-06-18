@@ -142,6 +142,27 @@ async function enviarRastreioWhatsApp({ texto, clienteCod, grupoIdOverride }) {
 // MONTAGEM DA MENSAGEM (mesmo formato da extensão v7.15)
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Fallback de pontos: quando o sla_capturas ainda nao capturou (rastreio sai
+ * antes do agente), monta os pontos a partir do `pontos` da propria entrega
+ * (logistics_deliveries.pontos = enderecos do dispatch, com .rua e .nome).
+ * Mapeia pro formato do montarMensagemRastreio e pula a coleta (indice 0).
+ */
+function montarPontosFallback(enderecos) {
+  if (typeof enderecos === 'string') {
+    try { enderecos = JSON.parse(enderecos); } catch (_) { return []; }
+  }
+  if (!Array.isArray(enderecos) || enderecos.length < 2) return [];
+  return enderecos.slice(1)
+    .map((p) => ({
+      endereco: (p && (p.endereco || p.rua)) || '',
+      nomeCliente: (p && (p.nomeCliente || p.nome)) || '',
+      nota: (p && p.nota) || null,
+    }))
+    .filter((p) => p.endereco || p.nomeCliente)
+    .map((p, i) => ({ numero: i + 2, ...p }));
+}
+
 function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod }) {
   const blocos = [`📦 *NOVO RASTREIO*`, `🧾 *OS:* ${os_numero}`];
 
@@ -559,9 +580,9 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
   let pts = capt[0] && capt[0].pontos_json;
   if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = []; } }
   if (!Array.isArray(pts) || !pts.length) {
-    let ep = ent.pontos;
-    if (typeof ep === 'string') { try { ep = JSON.parse(ep); } catch (_) { ep = []; } }
-    pts = Array.isArray(ep) ? ep : [];
+    // sla_capturas vazio (rastreio antes da captura) -> usa o endereco da
+    // propria entrega, mapeado pro formato certo.
+    pts = montarPontosFallback(ent.pontos);
   }
 
   const texto = montarMensagemRastreio({
@@ -596,6 +617,7 @@ module.exports = {
   processarCaptura,
   extrairTelefoneDeNota,
   montarMensagemRastreio,
+  montarPontosFallback,
   enviarRastreioWhatsApp,
   enviarRastreioGrupoImediato,
   // expostos pra testes

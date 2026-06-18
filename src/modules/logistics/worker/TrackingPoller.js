@@ -406,6 +406,10 @@ function startTrackingPoller(pool) {
                       const sla = require('../../agent/sla-capture.service');
                       let ptsHub = capt[0].pontos_json;
                       if (typeof ptsHub === 'string') { try { ptsHub = JSON.parse(ptsHub); } catch (_) { ptsHub = []; } }
+                      if (!Array.isArray(ptsHub) || !ptsHub.length) {
+                        // sla_capturas ainda vazio -> usa o endereco da entrega.
+                        ptsHub = sla.montarPontosFallback(r3[0] && r3[0].pontos);
+                      }
                       const textoHub = sla.montarMensagemRastreio({
                         os_numero: entrega.codigo_os,
                         link_rastreio: linkTutts,
