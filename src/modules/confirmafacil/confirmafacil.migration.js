@@ -128,6 +128,17 @@ async function initConfirmaFacilTables(pool) {
   await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS created_at TIMESTAMP`).catch(() => {});
   await pool.query(`ALTER TABLE solicitacoes_corrida ALTER COLUMN created_at SET DEFAULT NOW()`).catch(() => {});
 
+  // SLA: controle de dedupe dos alertas (risco / estouro) por corrida+estágio
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS confirmafacil_sla_alertas (
+      id              SERIAL PRIMARY KEY,
+      solicitacao_id  INT NOT NULL,
+      estagio         VARCHAR(20) NOT NULL,
+      criado_em       TIMESTAMP DEFAULT NOW(),
+      UNIQUE (solicitacao_id, estagio)
+    )
+  `).catch(() => {});
+
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
 

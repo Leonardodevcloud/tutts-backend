@@ -5,10 +5,18 @@ const { getConfirmaFacilAuth }   = require('./confirmafacil.auth');
 const { getConfirmaFacilPoller } = require('./confirmafacil.poller');
 const AppError = require('../../shared/errors/AppError');
 const { resolverCodigo } = require('./confirmafacil.map');
+const slaMod = require('./confirmafacil.sla');
 
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
   const auth   = getConfirmaFacilAuth();
+
+  // ── SLA: painel por filial + lista de risco (para a aba "Risco de SLA") ──
+  router.get('/sla-painel', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      res.json(await slaMod.calcularPainel(pool));
+    } catch (err) { next(err); }
+  });
 
   // ── Config principal ──────────────────────────────
   router.get('/config/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {

@@ -17,6 +17,7 @@
 
 const httpRequest     = require('../../shared/utils/httpRequest');
 const { getConfirmaFacilAuth } = require('./confirmafacil.auth');
+const slaMod = require('./confirmafacil.sla');
 
 const CF_FILTER_URL  = 'https://utilities.confirmafacil.com.br/filter/embarque';
 const CF_OCORRENCIA_URL = 'https://utilities.confirmafacil.com.br/filter/ocorrencia';
@@ -93,6 +94,12 @@ class ConfirmaFacilPoller {
       try { await this._ciclo(); }
       catch (err) { console.error('❌ [CF Poller] erro no ciclo:', err.message); }
       finally { this._rodando = false; }
+    }, 60 * 1000);
+
+    // 🛡️ Verificação de risco de SLA + alerta WhatsApp (a cada 60s)
+    setInterval(async () => {
+      try { await slaMod.verificarRiscosEAlertar(this.pool); }
+      catch (err) { console.error('❌ [CF SLA] erro na verificação de risco:', err.message); }
     }, 60 * 1000);
   }
 
