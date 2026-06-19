@@ -314,18 +314,20 @@ async function processarCaptura(pool, registro) {
             _tuttsToken = _ld.rastreio_token;
             _hubDeliveryId = _ld.id;
           } else {
-            const JANELA_HUB_MS = 10 * 60 * 1000;
-            const _cap = (await pool.query('SELECT criado_em FROM sla_capturas WHERE id = $1', [id])).rows[0];
-            const _criadoMs = _cap && _cap.criado_em ? new Date(_cap.criado_em).getTime() : Date.now();
-            if (Date.now() - _criadoMs < JANELA_HUB_MS) {
-              await pool.query(
-                "UPDATE sla_capturas SET status = 'pendente', proximo_retry_em = NOW() + INTERVAL '15 seconds', atualizado_em = NOW() WHERE id = $1",
-                [id]
-              );
-              log(`⏳ OS ${os_numero}: OS do Hub, aguardando link Tutts (janela 10min)`);
-              return { sucesso: true, adiado: true };
-            }
-            // Janela passou sem token: cai no legado (link Mapp pro grupo).
+            // 2026-06: NAO espera mais o webhook/aceite criar o token (isso
+            // atrasava ate 10 min e fazia o webhook/poller mandarem o fallback
+            // ANTES da captura rica). O agente cria o token ele mesmo e segue
+            // como entrega Hub -> captura e manda a mensagem RICA + link do Hub
+            // na hora. Idempotente: se outro emissor ja criou, reusa o atual.
+            const _novoTk = require('crypto').randomBytes(9).toString('hex');
+            await pool.query(
+              'UPDATE logistics_deliveries SET rastreio_token = $1 WHERE id = $2 AND rastreio_token IS NULL',
+              [_novoTk, _ld.id]
+            ).catch(() => {});
+            const _tkRow = (await pool.query('SELECT rastreio_token FROM logistics_deliveries WHERE id = $1', [_ld.id])).rows[0];
+            _hubDelivery = true;
+            _tuttsToken = (_tkRow && _tkRow.rastreio_token) || _novoTk;
+            _hubDeliveryId = _ld.id;
           }
         }
         // _ld ausente => OS nao saiu pelo Hub (cliente hibrido) => legado imediato.
@@ -580,9 +582,11 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
   let pts = capt[0] && capt[0].pontos_json;
   if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = []; } }
   if (!Array.isArray(pts) || !pts.length) {
-    // sla_capturas vazio (rastreio antes da captura) -> usa o endereco da
-    // propria entrega, mapeado pro formato certo.
-    pts = montarPontosFallback(ent.pontos);
+    // 2026-06: captura rica ainda nao pronta -> o AGENTE e o dono e manda a
+    // captura RICA + link Hub. Aqui NAO mandamos o fallback (evita preempcao
+    // com endereco do despacho). O poller cobre como rede de seguranca se o
+    // agente falhar de vez.
+    return false;
   }
 
   const texto = montarMensagemRastreio({

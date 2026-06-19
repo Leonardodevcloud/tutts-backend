@@ -393,7 +393,7 @@ function startTrackingPoller(pool) {
                 // suprimido no RPA via flag usa_hub.)
                 if (!entrega.rastreio_grupo_em) try {
                   const { rows: capt } = await pool.query(
-                    'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
+                    'SELECT cliente_cod, pontos_json, status FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
                     [String(entrega.codigo_os)]
                   );
                   const clienteCodHub = capt[0]?.cliente_cod || null;
@@ -406,34 +406,42 @@ function startTrackingPoller(pool) {
                       const sla = require('../../agent/sla-capture.service');
                       let ptsHub = capt[0].pontos_json;
                       if (typeof ptsHub === 'string') { try { ptsHub = JSON.parse(ptsHub); } catch (_) { ptsHub = []; } }
+                      // 2026-06: o AGENTE e o dono do rastreio Hub (manda a captura
+                      // RICA + link Hub). Se a captura ainda nao esta pronta, so
+                      // mandamos aqui como REDE DE SEGURANCA quando o agente ja
+                      // FALHOU de vez (status 'falhou'); senao deferimos pro agente.
                       if (!Array.isArray(ptsHub) || !ptsHub.length) {
-                        // sla_capturas ainda vazio -> usa o endereco da entrega.
-                        ptsHub = sla.montarPontosFallback(r3[0] && r3[0].pontos);
-                      }
-                      const textoHub = sla.montarMensagemRastreio({
-                        os_numero: entrega.codigo_os,
-                        link_rastreio: linkTutts,
-                        pontos: Array.isArray(ptsHub) ? ptsHub : [],
-                        cliente_cod: String(clienteCodHub),
-                      });
-                      // CLAIM atomico (consistente com webhook/agente): so manda se ganhar.
-                      const _claimP = await pool.query(
-                        'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
-                        [entrega.id]
-                      ).catch(() => ({ rows: [] }));
-                      if (_claimP.rows.length) {
-                        let enviouGrupo = false;
-                        for (const g of gruposHub) {
-                          try {
-                            await sla.enviarRastreioWhatsApp({ texto: textoHub, clienteCod: String(clienteCodHub), grupoIdOverride: g.evolution_group_id });
-                            enviouGrupo = true;
-                          } catch (_) {}
-                        }
-                        if (enviouGrupo) {
-                          await pool.query('UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1', [entrega.id]).catch(() => {});
+                        if (capt[0] && capt[0].status === 'falhou') {
+                          ptsHub = sla.montarPontosFallback(r3[0] && r3[0].pontos);
                         } else {
-                          // envio falhou: libera o claim pra um retry/fallback tentar
-                          await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NULL WHERE id = $1', [entrega.id]).catch(() => {});
+                          ptsHub = [];
+                        }
+                      }
+                      if (Array.isArray(ptsHub) && ptsHub.length) {
+                        const textoHub = sla.montarMensagemRastreio({
+                          os_numero: entrega.codigo_os,
+                          link_rastreio: linkTutts,
+                          pontos: ptsHub,
+                          cliente_cod: String(clienteCodHub),
+                        });
+                        // CLAIM atomico (consistente com webhook/agente): so manda se ganhar.
+                        const _claimP = await pool.query(
+                          'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
+                          [entrega.id]
+                        ).catch(() => ({ rows: [] }));
+                        if (_claimP.rows.length) {
+                          let enviouGrupo = false;
+                          for (const g of gruposHub) {
+                            try {
+                              await sla.enviarRastreioWhatsApp({ texto: textoHub, clienteCod: String(clienteCodHub), grupoIdOverride: g.evolution_group_id });
+                              enviouGrupo = true;
+                            } catch (_) {}
+                          }
+                          if (enviouGrupo) {
+                            await pool.query('UPDATE logistics_deliveries SET rastreio_wpp_enviado = TRUE WHERE id = $1', [entrega.id]).catch(() => {});
+                          } else {
+                            await pool.query('UPDATE logistics_deliveries SET rastreio_grupo_em = NULL WHERE id = $1', [entrega.id]).catch(() => {});
+                          }
                         }
                       }
                     }
