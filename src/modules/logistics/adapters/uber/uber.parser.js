@@ -22,6 +22,11 @@
 
 const { parsearEnderecoBrasileiro, formatarTelefoneE164, truncarTexto } =
   require('../../core/AddressParser');
+const {
+  montarJanelasUber,
+  montarManifestItem,
+  montarExternalStoreId,
+} = require('./uber.manifest-windows');
 
 /**
  * Monta o JSON-string que vai em pickup_address / dropoff_address.
@@ -83,15 +88,19 @@ function montarBodyDelivery(quoteId, req, config) {
   }
 
   const manifestValueCents = parseInt(config.manifest_total_value_centavos || 10000, 10);
-  const manifestItems = [{
-    name: truncarTexto(req.itemDescription || 'Encomenda', 100),
-    quantity: 1,
-    size: 'small',
-  }];
+  // manifest_items com weight (g) e dimensions (cm) — REQUIRED na certificacao.
+  // Defaults configuraveis no provider (uber_item_weight_g / *_cm).
+  const manifestItems = [
+    montarManifestItem(truncarTexto(req.itemDescription || 'Encomenda', 100), config),
+  ];
 
   const body = {
     quote_id: quoteId,
     external_id: `OS-${req.externalRef}`,
+    // manifest_reference: codigo unico do pedido do parceiro (REQUIRED).
+    manifest_reference: String(req.externalRef),
+    // external_store_id: unico por endereco de retirada/loja (REQUIRED).
+    external_store_id: montarExternalStoreId(req, config),
 
     pickup_address: montarEnderecoUber(req.pickup.address),
     pickup_name: truncarTexto(req.pickup.name || 'Loja', 100),
@@ -110,6 +119,11 @@ function montarBodyDelivery(quoteId, req, config) {
     deliverable_action: 'deliverable_action_meet_at_door',
     undeliverable_action: 'return',
   };
+
+  // Delivery windows (REQUIRED) — ISO-8601 UTC, com clamp pras regras da Uber.
+  // Defaults = entrega on-demand (pickup_ready=agora). Offsets configuraveis no
+  // provider (uber_pickup_ready_offset_min, uber_dropoff_deadline_offset_min...).
+  Object.assign(body, montarJanelasUber(config));
 
   // ── Códigos de verificação — gerados aqui e retornados ao caller ──────────
   let pickupCode  = null;
@@ -147,6 +161,28 @@ function montarBodyDelivery(quoteId, req, config) {
       };
       console.log(`[Uber] Verificação de ENTREGA (assinatura) habilitada para OS ${req.externalRef}`);
     }
+  }
+
+  // ── Verificação por FOTO (proof of delivery) — shape oficial { picture: true } ──
+  // Mesma estrutura para pickup / dropoff / return. Flags configuráveis no
+  // provider: uber_pickup_picture, uber_dropoff_picture, uber_return_picture.
+  // ATENÇÃO (doc Uber): no dropoff a foto NÃO combina com assinatura/ID — quando
+  // a foto está ligada ela tem PRECEDÊNCIA e o dropoff_verification vira só foto.
+  if (config && config.uber_pickup_picture) {
+    body.pickup_verification = Object.assign({}, body.pickup_verification, { picture: true });
+    console.log(`[Uber] Verificação por FOTO na COLETA habilitada (OS ${req.externalRef})`);
+  }
+  if (config && config.uber_dropoff_picture) {
+    if (body.dropoff_verification && body.dropoff_verification.signature_requirement) {
+      console.warn(`[Uber] dropoff OS ${req.externalRef}: foto tem precedência sobre assinatura (a Uber não combina os dois)`);
+    }
+    body.dropoff_verification = { picture: true };  // foto pura
+    dropoffCode = null;                              // foto substitui PIN/assinatura no dropoff
+    console.log(`[Uber] Verificação por FOTO na ENTREGA habilitada (OS ${req.externalRef})`);
+  }
+  if (config && config.uber_return_picture) {
+    body.return_verification = { picture: true };
+    console.log(`[Uber] Verificação por FOTO na DEVOLUÇÃO habilitada (OS ${req.externalRef})`);
   }
 
   // Coordenadas
