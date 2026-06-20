@@ -36,8 +36,13 @@ const {
 const { nativeToCanonical } = require('./uber.status-map');
 const { classifyUberError } = require('./uber.errors');
 const { validarAssinaturaUber, parsePayloadUber, detectarTipoEvento } = require('./uber.webhook');
+const { montarMotivoCancelamentoUber } = require('./uber.cancel');
 
+// Base das APIs por ambiente (doc oficial Uber):
+//   Produção: api.uber.com       (pareado com auth.uber.com)
+//   Sandbox : test-api.uber.com  (pareado com sandbox-login.uber.com)
 const UBER_API_BASE = 'https://api.uber.com/v1/customers';
+const UBER_API_BASE_SANDBOX = 'https://test-api.uber.com/v1/customers';
 
 class UberAdapter extends LogisticsProviderAdapter {
   // ════════════════════════════════════════════════════════════
@@ -50,6 +55,14 @@ class UberAdapter extends LogisticsProviderAdapter {
 
   get displayName() {
     return 'Uber Direct';
+  }
+
+  /**
+   * Base da API conforme o ambiente. sandbox_mode=true → test-api.uber.com;
+   * caso contrário → api.uber.com. Casado com o domínio de auth (uber.auth).
+   */
+  get _apiBase() {
+    return this.sandboxMode ? UBER_API_BASE_SANDBOX : UBER_API_BASE;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -81,7 +94,7 @@ class UberAdapter extends LogisticsProviderAdapter {
   async healthCheck() {
     const t0 = Date.now();
     try {
-      const token = await obterTokenUber(this.pool);
+      const token = await obterTokenUber(this.pool, this.sandboxMode);
       const latencyMs = Date.now() - t0;
       return {
         ok: !!token,
@@ -107,7 +120,7 @@ class UberAdapter extends LogisticsProviderAdapter {
    * Para Uber, garante que temos token válido em cache.
    */
   async authenticate() {
-    await obterTokenUber(this.pool);  // garante cache
+    await obterTokenUber(this.pool, this.sandboxMode);  // garante cache
   }
 
   // ════════════════════════════════════════════════════════════
@@ -123,15 +136,14 @@ class UberAdapter extends LogisticsProviderAdapter {
    * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalQuote>}
    */
   async createQuote(req) {
-    super.createQuote && super.createQuote;  // valida shape via assertValidQuoteRequest
-
+    // (req já vem validado pelo Orchestrator via servicoMappToCanonicalQuoteRequest)
     const customerId = this.config.customer_id;
     if (!customerId) {
       throw new Error('UberAdapter: customer_id não configurado em logistics_providers.config');
     }
 
-    const token = await obterTokenUber(this.pool);
-    const url = `${UBER_API_BASE}/${customerId}/delivery_quotes`;
+    const token = await obterTokenUber(this.pool, this.sandboxMode);
+    const url = `${this._apiBase}/${customerId}/delivery_quotes`;
     const body = montarBodyQuote(req);
 
     const resp = await httpRequest(url, {
@@ -194,8 +206,8 @@ class UberAdapter extends LogisticsProviderAdapter {
       throw new Error('UberAdapter: customer_id não configurado');
     }
 
-    const token = await obterTokenUber(this.pool);
-    const url = `${UBER_API_BASE}/${customerId}/deliveries`;
+    const token = await obterTokenUber(this.pool, this.sandboxMode);
+    const url = `${this._apiBase}/${customerId}/deliveries`;
 
     // montarBodyDelivery agora retorna { body, pickupCode, dropoffCode }
     const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config);
@@ -245,34 +257,57 @@ class UberAdapter extends LogisticsProviderAdapter {
   /**
    * Cancela uma delivery ativa no Uber.
    *
-   * @param {string} externalDeliveryId
-   * @returns {Promise<{ok: boolean, msg?: string}>}
+   * ⚠️ CERTIFICAÇÃO: a Uber EXIGE `cancelation_reason` (grafia com 1 L) no corpo,
+   * com um dos enums predefinidos. Para 'other', `additional_description` é
+   * obrigatório. Sem isso o cancelamento é recusado e o entregador pode continuar
+   * atribuído (desalinhamento operacional). O helper montarMotivoCancelamentoUber
+   * garante SEMPRE um enum válido (fallback 'other' + descrição).
+   *
+   * Assinatura em paridade com a 99 (externalOrderRef é aceito mas a Uber cancela
+   * pelo delivery_id 'del_...'; o 2º arg fica por compat de chamada).
+   *
+   * @param {string} externalDeliveryId - delivery_id da Uber (del_...)
+   * @param {string} [externalOrderRef] - compat (não usado pela Uber)
+   * @param {Object} [opts]
+   * @param {string} [opts.cancelationReason] - enum Uber explícito (precedência)
+   * @param {string} [opts.motivo] - texto livre do hub (→ heurística ou additional_description)
+   * @returns {Promise<{ok: boolean, msg?: string, retriable?: boolean}>}
    */
-  async cancelDelivery(externalDeliveryId) {
+  async cancelDelivery(externalDeliveryId, externalOrderRef, opts = {}) {
     const customerId = this.config.customer_id;
     if (!customerId) {
       throw new Error('UberAdapter: customer_id não configurado');
     }
 
-    const token = await obterTokenUber(this.pool);
-    const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}/cancel`;
+    const token = await obterTokenUber(this.pool, this.sandboxMode);
+    const url = `${this._apiBase}/${customerId}/deliveries/${externalDeliveryId}/cancel`;
+
+    const { cancelationReason, additionalDescription } = montarMotivoCancelamentoUber({
+      reason: opts && opts.cancelationReason,
+      motivo: opts && opts.motivo,
+    });
+    const corpo = { cancelation_reason: cancelationReason };
+    if (additionalDescription) corpo.additional_description = additionalDescription;
 
     const resp = await httpRequest(url, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({}),
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(corpo),
     });
 
     const data = resp.json();
 
     if (resp.ok) {
-      console.log(`✅ [UberAdapter] delivery ${externalDeliveryId} cancelada`);
+      console.log(`✅ [UberAdapter] delivery ${externalDeliveryId} cancelada (reason=${cancelationReason})`);
       return { ok: true };
     }
 
     const errInfo = classifyUberError(resp, data);
     console.warn(`⚠️ [UberAdapter] cancel falhou (${errInfo.category}):`, errInfo.message);
-    return { ok: false, msg: errInfo.message };
+    return { ok: false, msg: errInfo.message, retriable: errInfo.retriable };
   }
 
   // ════════════════════════════════════════════════════════════
@@ -291,8 +326,8 @@ class UberAdapter extends LogisticsProviderAdapter {
       throw new Error('UberAdapter: customer_id não configurado');
     }
 
-    const token = await obterTokenUber(this.pool);
-    const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}`;
+    const token = await obterTokenUber(this.pool, this.sandboxMode);
+    const url = `${this._apiBase}/${customerId}/deliveries/${externalDeliveryId}`;
 
     const resp = await httpRequest(url, {
       method: 'GET',
@@ -416,8 +451,8 @@ class UberAdapter extends LogisticsProviderAdapter {
     if (!customerId) return null;
 
     try {
-      const token = await obterTokenUber(this.pool);
-      const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}/proof_of_delivery`;
+      const token = await obterTokenUber(this.pool, this.sandboxMode);
+      const url = `${this._apiBase}/${customerId}/deliveries/${externalDeliveryId}/proof_of_delivery`;
       const resp = await httpRequest(url, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${token}` },
@@ -454,8 +489,8 @@ class UberAdapter extends LogisticsProviderAdapter {
     if (!customerId) return { ok: false, msg: 'customer_id não configurado' };
 
     try {
-      const token = await obterTokenUber(this.pool);
-      const url = `${UBER_API_BASE}/${customerId}/deliveries/${externalDeliveryId}`;
+      const token = await obterTokenUber(this.pool, this.sandboxMode);
+      const url = `${this._apiBase}/${customerId}/deliveries/${externalDeliveryId}`;
       const resp = await httpRequest(url, {
         method: 'PATCH',
         headers: {

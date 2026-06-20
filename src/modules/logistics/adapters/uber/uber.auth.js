@@ -21,8 +21,29 @@
 
 const httpRequest = require('../../../../shared/utils/httpRequest');
 
-const UBER_AUTH_URL = 'https://login.uber.com/oauth/v2/token';
+// Domínios de auth por ambiente (doc oficial Uber):
+//   Produção: auth.uber.com  (pareado com api.uber.com)
+//   Sandbox : sandbox-login.uber.com  (pareado com test-api.uber.com)
+// IMPORTANTE: NUNCA misturar domínio de token com domínio de API — a Uber
+// retorna access_denied / falha de auth quando os ambientes não casam.
+const UBER_AUTH_HOST_PROD = 'https://auth.uber.com';
+const UBER_AUTH_HOST_SANDBOX = 'https://sandbox-login.uber.com';
+const UBER_AUTH_PATH = '/oauth/v2/token';
 const UBER_SCOPE = 'eats.deliveries';
+
+/** URL do token endpoint conforme o ambiente. */
+function getUberAuthUrl(sandboxMode) {
+  return (sandboxMode ? UBER_AUTH_HOST_SANDBOX : UBER_AUTH_HOST_PROD) + UBER_AUTH_PATH;
+}
+
+// Última env usada (in-memory) — se o provider alternar sandbox<->prod em
+// runtime (reload de config), invalidamos o cache pra não reaproveitar um
+// token do outro ambiente (token Uber dura 30 dias).
+let _ultimoEnvUber = null;
+
+// Compat: callers antigos que importavam UBER_AUTH_URL continuam funcionando
+// (aponta pra produção).
+const UBER_AUTH_URL = UBER_AUTH_HOST_PROD + UBER_AUTH_PATH;
 
 /**
  * Busca credenciais Uber em logistics_providers, fallback uber_config.
@@ -30,18 +51,27 @@ const UBER_SCOPE = 'eats.deliveries';
  * @param {import('pg').Pool} pool
  * @returns {Promise<{client_id: string, client_secret: string}>}
  */
-async function _obterCredenciaisUber(pool) {
+async function _obterCredenciaisUber(pool, sandboxMode = false) {
   let client_id = null;
   let client_secret = null;
 
-  // Tentativa 1: logistics_providers
+  // Tentativa 1: logistics_providers. Em sandbox, prioriza chaves dedicadas
+  // (sandbox_client_id / sandbox_client_secret) pra NÃO sobrescrever as
+  // credenciais de produção já cadastradas. Se não houver chaves de sandbox,
+  // cai nas principais (client_id / client_secret).
   try {
     const { rows } = await pool.query(`
       SELECT config FROM logistics_providers WHERE provider_code = 'uber' LIMIT 1
     `);
     if (rows[0]?.config) {
-      client_id = rows[0].config.client_id || null;
-      client_secret = rows[0].config.client_secret || null;
+      const cfg = rows[0].config;
+      if (sandboxMode) {
+        client_id = cfg.sandbox_client_id || cfg.client_id || null;
+        client_secret = cfg.sandbox_client_secret || cfg.client_secret || null;
+      } else {
+        client_id = cfg.client_id || null;
+        client_secret = cfg.client_secret || null;
+      }
     }
   } catch (err) {
     console.warn('[uber.auth] logistics_providers indisponível:', err.message);
@@ -83,7 +113,18 @@ async function _obterCredenciaisUber(pool) {
  * @param {import('pg').Pool} pool
  * @returns {Promise<string>} access_token
  */
-async function obterTokenUber(pool) {
+async function obterTokenUber(pool, sandboxMode = false) {
+  const env = sandboxMode ? 'sandbox' : 'prod';
+
+  // Se o ambiente mudou em runtime (ex.: ligaram/desligaram sandbox_mode e o
+  // provider foi recarregado), invalida o cache: um token de sandbox NÃO vale
+  // contra produção e vice-versa (causaria access_denied silencioso).
+  if (_ultimoEnvUber && _ultimoEnvUber !== env) {
+    console.log(`♻️ [uber.auth] ambiente mudou (${_ultimoEnvUber} -> ${env}) — invalidando cache de token`);
+    await pool.query("DELETE FROM logistics_oauth_tokens WHERE provider_code = 'uber'").catch(() => {});
+  }
+  _ultimoEnvUber = env;
+
   // 1. Verificar token cacheado no banco
   const { rows } = await pool.query(`
     SELECT access_token, expires_at FROM logistics_oauth_tokens
@@ -97,7 +138,7 @@ async function obterTokenUber(pool) {
   }
 
   // 2. Solicitar novo token
-  const creds = await _obterCredenciaisUber(pool);
+  const creds = await _obterCredenciaisUber(pool, sandboxMode);
 
   const body = new URLSearchParams({
     client_id: creds.client_id,
@@ -106,7 +147,7 @@ async function obterTokenUber(pool) {
     scope: UBER_SCOPE,
   }).toString();
 
-  const resp = await httpRequest(UBER_AUTH_URL, {
+  const resp = await httpRequest(getUberAuthUrl(sandboxMode), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
@@ -115,7 +156,7 @@ async function obterTokenUber(pool) {
   const data = resp.json();
 
   if (!resp.ok || !data.access_token) {
-    console.error('❌ [Uber] Erro ao obter token OAuth:', data);
+    console.error(`❌ [Uber] Erro ao obter token OAuth (${env}):`, data);
     throw new Error(`Erro OAuth Uber: ${data.error || 'desconhecido'}`);
   }
 
@@ -137,6 +178,9 @@ async function obterTokenUber(pool) {
 
 module.exports = {
   obterTokenUber,
+  getUberAuthUrl,
   UBER_AUTH_URL,
+  UBER_AUTH_HOST_PROD,
+  UBER_AUTH_HOST_SANDBOX,
   UBER_SCOPE,
 };

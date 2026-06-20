@@ -666,7 +666,7 @@ class DispatchOrchestrator {
         // A doc da 99: order_id MUDA se a corrida e reatribuida a outro
         // entregador; external_order_id (= codigo_os) nunca muda. Cancelar pelo
         // external_order_id evita falha quando houve reatribuicao.
-        const rc = await adapter.cancelDelivery(externalId, entrega.codigo_os);
+        const rc = await adapter.cancelDelivery(externalId, entrega.codigo_os, { motivo });
         if (rc && rc.ok === false) {
           providerCancelado = false;
           providerCancelMsg = rc.msg || 'provider recusou o cancelamento';
@@ -1127,7 +1127,7 @@ class DispatchOrchestrator {
         // Cancela no provider (best effort)
         const adapter = this.registry.get(e.provider_code || 'uber');
         if (adapter && e.external_delivery_id) {
-          await adapter.cancelDelivery(e.external_delivery_id).catch(() => {});
+          await adapter.cancelDelivery(e.external_delivery_id, e.codigo_os, { cancelationReason: 'no_courier_assigned', motivo: 'Timeout sem entregador' }).catch(() => {});
         }
 
         // Marca como fallback_fila
@@ -1142,12 +1142,12 @@ class DispatchOrchestrator {
         await this.mapp.alterarStatus(e.codigo_os, 0).catch(() => {});
 
         this.events.log({
-          providerCode: 'uber',
+          providerCode: e.provider_code || 'uber',
           eventType: EventType.TIMEOUT_FALLBACK,
           eventSource: EventSource.WORKER,
           codigoOS: e.codigo_os,
           deliveryId: e.id,
-          externalDeliveryId: e.uber_delivery_id,
+          externalDeliveryId: e.external_delivery_id,
           payload: { idade_minutos: parseFloat(e.idade_min).toFixed(1), timeout_min: timeoutMin },
         });
 
