@@ -164,7 +164,12 @@ function montarPontosFallback(enderecos) {
 }
 
 function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod }) {
-  const blocos = [`📦 *NOVO RASTREIO*`, `🧾 *OS:* ${os_numero}`];
+  // 2026-06: os 4 ultimos digitos da OS em *negrito* p/ leitura rapida no grupo.
+  const _osStr = String(os_numero == null ? '' : os_numero);
+  const _osFmt = _osStr.length > 4
+    ? `${_osStr.slice(0, -4)}*${_osStr.slice(-4)}*`
+    : (_osStr ? `*${_osStr}*` : _osStr);
+  const blocos = [`📦 *NOVO RASTREIO*`, `🧾 *OS:* ${_osFmt}`];
 
   if (link_rastreio) {
     blocos.push(`🔗 *Link:* ${link_rastreio}`);
