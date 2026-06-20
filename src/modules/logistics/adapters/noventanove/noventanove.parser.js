@@ -250,14 +250,18 @@ function montarBodyCreate(estimateId, req, config) {
   const telSuporte = (config && config.telefone_suporte) || '';
   const pacote = resolverPacote(config);
   const osRef = String(req.externalRef);
+  // 2026-06: na OBSERVACAO mostrada ao courier usamos so os 4 ultimos digitos
+  // da OS (motoboy reclamou que cortava). O external_order_id continua INTEIRO
+  // (idempotencia/rastreio na 99).
+  const osRef4 = osRef.length > 4 ? osRef.slice(-4) : osRef;
 
   // note é obrigatório nos dois lados. Anexa a referência da OS — a doc
   // recomenda incluir o external_order_id no note pro courier.
-  const noteBase = truncarTexto(req.itemDescription || `OS ${osRef}`, 100);
+  const noteBase = truncarTexto(req.itemDescription || `OS ${osRef4}`, 100);
   // Nota por ponto: prioriza a observacao daquele ponto (obs do cliente vem por ponto),
   // caindo no itemDescription geral se o ponto nao tiver instrucoes.
-  const notePickup  = truncarTexto((req.pickup  && req.pickup.instructions)  || req.itemDescription || `OS ${osRef}`, 100);
-  const noteDropoff = truncarTexto((req.dropoff && req.dropoff.instructions) || req.itemDescription || `OS ${osRef}`, 100);
+  const notePickup  = truncarTexto((req.pickup  && req.pickup.instructions)  || req.itemDescription || `OS ${osRef4}`, 100);
+  const noteDropoff = truncarTexto((req.dropoff && req.dropoff.instructions) || req.itemDescription || `OS ${osRef4}`, 100);
 
   // 🆕 Aviso padrao ao entregador (configuravel). Vai no INICIO da note da coleta
   // pra ser a 1a coisa que o courier le antes de aceitar. A note tem limite de
