@@ -412,6 +412,17 @@ class DispatchOrchestrator {
       `, [delivery.externalDeliveryId, delivery.trackingUrl || null,
           opts.vehicleType || quote.vehicleType || null, registro.id]);
 
+      // 6a. Rastreio Tutts: garante o token JA no despacho (agnostico de
+      //     provider), pra o botao Tracking sempre abrir a pagina Tutts
+      //     (/r/token) e nunca o link cru do provedor. Idempotente.
+      try {
+        const _rastreioTk = require('crypto').randomBytes(9).toString('hex');
+        await this.pool.query(
+          'UPDATE logistics_deliveries SET rastreio_token = $1 WHERE id = $2 AND rastreio_token IS NULL',
+          [_rastreioTk, registro.id]
+        );
+      } catch (_eTk) { /* best-effort: nao bloqueia o despacho */ }
+
       // 6a-bis. Salva telefone do destinatario SEMPRE (nao so quando ha codigo).
       //     Prioriza o telefone editado no modal de despacho (opts.telefoneEntrega);
       //     senao usa o do ultimo ponto da OS. Necessario pro 99Entrega: o codigo
