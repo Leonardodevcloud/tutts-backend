@@ -129,6 +129,7 @@ class ConfirmaFacilPoller {
 
     // 🛡️ Verificação de risco de SLA + alerta WhatsApp (a cada 60s)
     setInterval(async () => {
+      if (!_dentroHorarioFullScan()) return; // [CF v3] alerta de risco so em horario comercial
       try { await slaMod.verificarRiscosEAlertar(this.pool); }
       catch (err) { console.error('❌ [CF SLA] erro na verificação de risco:', err.message); }
     }, 60 * 1000);
@@ -145,6 +146,14 @@ class ConfirmaFacilPoller {
   // ══════════════════════════════════════════════════
 
   async _ciclo() {
+    // [CF v3] Fora do horario comercial o ciclo de descoberta (id-tailing/
+    // ocorrencia/cache/full scan) e pausado. NF do CF que cair fora e importada
+    // quando a janela reabrir. Operacao MANUAL via painel segue 24/7 (nao passa
+    // por aqui). Alinhado ao SLA: nota apos 16:30 ja conta a partir de 08:00.
+    if (!_dentroHorarioFullScan()) {
+      console.log('[CF Poller] fora do horario comercial - descoberta pausada (seg-sex 07-19, sab 07-13, dom off). Painel manual segue 24/7.');
+      return;
+    }
     console.log('[CF Poller] iniciando ciclo...');
     const { rows: configs } = await this.pool.query(`
       SELECT
