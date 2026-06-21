@@ -63,6 +63,35 @@ function _minutosAteJanela(d = new Date()) {
   return (1440 - agora) + CF_JANELA_INICIO_MIN;                          // passou do FIM -> amanha 07:30
 }
 
+// ── 🕒 2026-06 (v2): horario de funcionamento do FULL SCAN (rede ampla) ──
+// Fora desta janela, o full scan NAO roda; id-tailing + ocorrencia + cache
+// seguem 24/7 a cada 60s (captacao de NF nova nunca para). TZ = CF_JANELA_TZ.
+// Padrao: Seg-Sex 07:00-19:00, Sab 07:00-13:00, Dom off.
+// Kill-switch: CF_FULLSCAN_HORARIO=false (volta a rodar 24h, so com o throttle).
+const CF_FULLSCAN_HORARIO = process.env.CF_FULLSCAN_HORARIO !== 'false';
+const _DOW = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function _dentroHorarioFullScan(d = new Date()) {
+  if (!CF_FULLSCAN_HORARIO) return true;
+  let dow, min;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: CF_JANELA_TZ, hour12: false,
+      weekday: 'short', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(d);
+    dow = _DOW[parts.find((p) => p.type === 'weekday').value];
+    const h  = Number(parts.find((p) => p.type === 'hour').value);
+    const mm = Number(parts.find((p) => p.type === 'minute').value);
+    min = h * 60 + mm;
+  } catch (_) {
+    const u = d.getUTCHours() * 60 + d.getUTCMinutes();
+    min = ((u - 180) % 1440 + 1440) % 1440; // Bahia = UTC-3
+    dow = d.getUTCDay();
+  }
+  if (dow === 0) return false;                          // domingo: off
+  if (dow === 6) return min >= 7 * 60 && min < 13 * 60; // sabado: 07-13
+  return min >= 7 * 60 && min < 19 * 60;                // seg-sex: 07-19
+}
+
 class ConfirmaFacilPoller {
   constructor(pool) {
     this.pool    = pool;
@@ -170,7 +199,7 @@ class ConfirmaFacilPoller {
     const p = (n) => String(n).padStart(2, '0');
     const DIAS_JANELA = parseInt(process.env.CF_POLLER_DIAS_JANELA, 10) > 0
       ? parseInt(process.env.CF_POLLER_DIAS_JANELA, 10)
-      : 3;
+      : 1;
     const inicio = new Date(agora.getTime() - DIAS_JANELA * 24 * 60 * 60 * 1000);
     const deStr  = `${inicio.getFullYear()}/${p(inicio.getMonth()+1)}/${p(inicio.getDate())} 00:00:00`;
     const ateStr = `${agora.getFullYear()}/${p(agora.getMonth()+1)}/${p(agora.getDate())} 23:59:59`;
@@ -182,12 +211,13 @@ class ConfirmaFacilPoller {
     // [CF throttle 2026-06] A paginacao completa do /filter/embarque (centenas de
     // paginas / milhares de NFs por ciclo) e redundante com id-tailing + ocorrencia
     // + cache, que rodam todo ciclo e ja cacheiam/despacham. Aqui ela vira uma
-    // "rede ampla" periodica. Frequencia via CF_EMBARQUE_FULLSCAN_MIN (default 15).
+    // "rede ampla" periodica. Frequencia via CF_EMBARQUE_FULLSCAN_MIN (default 60).
     const _FULLSCAN_MIN = parseInt(process.env.CF_EMBARQUE_FULLSCAN_MIN, 10) > 0
       ? parseInt(process.env.CF_EMBARQUE_FULLSCAN_MIN, 10)
-      : 15;
+      : 60;
     const _ultFS = this._ultimoFullScan.get(config.id) || 0;
-    const _devesFullScan = (Date.now() - _ultFS) >= _FULLSCAN_MIN * 60 * 1000;
+    const _emHorario = _dentroHorarioFullScan();
+    const _devesFullScan = _emHorario && (Date.now() - _ultFS) >= _FULLSCAN_MIN * 60 * 1000;
 
     if (_devesFullScan) {
       this._ultimoFullScan.set(config.id, Date.now());
@@ -236,6 +266,8 @@ class ConfirmaFacilPoller {
         break;
       }
     }
+    } else if (!_emHorario) {
+      console.log('[CF Poller] full scan fora do horario comercial (seg-sex 07-19, sab 07-13, dom off) - id-tailing/ocorrencia/cache seguem normais 24/7');
     } else {
       const _faltaMs = _FULLSCAN_MIN * 60 * 1000 - (Date.now() - _ultFS);
       const _faltaMin = Math.max(0, Math.ceil(_faltaMs / 60000));
