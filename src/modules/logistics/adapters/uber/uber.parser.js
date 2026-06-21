@@ -60,11 +60,9 @@ function montarBodyQuote(req) {
     body.dropoff_longitude = parseFloat(req.dropoff.longitude);
   }
 
-  // Veículo (motorcycle, car, bicycle, scooter, walker, van).
-  // Se for 'auto' ou null, NÃO inclui o campo — Uber escolhe o mais barato.
-  if (req.vehicleType && req.vehicleType !== 'auto') {
-    body.vehicle_type = req.vehicleType;
-  }
+  // NOTA: o endpoint /delivery_quotes da Uber NAO aceita vehicle_type — apenas o
+  // Create Delivery aceita. Enviar aqui causa "The parameters of your request
+  // were invalid". A Uber cota o veiculo disponivel mais barato.
 
   return body;
 }

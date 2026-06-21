@@ -64,7 +64,19 @@ function classifyUberError(resp, bodyData = null) {
 
   // Tenta extrair código do erro do payload Uber Direct
   const code = String(data.code || data.kind || data.error || '').toLowerCase();
-  const message = data.message || data.error_description || JSON.stringify(data).slice(0, 200);
+  let message = data.message || data.error_description || JSON.stringify(data).slice(0, 200);
+
+  // A Uber manda `metadata` com o CAMPO exato que falhou, ex:
+  //   { "dropoff_address": "This field is required" }  ou  { "vehicle_type": "..." }
+  // Sem isso, "The parameters of your request were invalid" nao diz NADA.
+  // Anexamos o(s) campo(s) na mensagem pra aparecer no painel e no log.
+  const metadata = (data.metadata && typeof data.metadata === 'object') ? data.metadata : null;
+  if (metadata) {
+    const campos = Object.entries(metadata)
+      .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+      .join('; ');
+    if (campos) message += ` [${campos}]`;
+  }
 
   let category = ERROR_CODE_MAP[code] || null;
 
@@ -79,7 +91,7 @@ function classifyUberError(resp, bodyData = null) {
 
   const retriable = ['auth', 'rate_limit', 'transient', 'expired'].includes(category);
 
-  return { category, code, message, retriable, httpStatus };
+  return { category, code, message, retriable, httpStatus, metadata };
 }
 
 module.exports = {

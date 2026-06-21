@@ -160,6 +160,7 @@ class UberAdapter extends LogisticsProviderAdapter {
     if (!resp.ok) {
       const errInfo = classifyUberError(resp, data);
       console.error(`❌ [UberAdapter] createQuote falhou (${errInfo.category}/${errInfo.code}):`, errInfo.message);
+      console.error('   [UberAdapter] body enviado ao quote:', JSON.stringify(body));
       const err = new Error(`Erro cotação Uber: ${errInfo.message}`);
       err.category = errInfo.category;
       err.code = errInfo.code;
