@@ -215,6 +215,50 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // ───────────────────────────────────────────────────────────
+  // GET /_debug/uber/:del_id  — inspeciona o JSON cru da Uber + checklist
+  // (admin-only) Mostra exatamente os campos que a Uber registrou na entrega.
+  // Fonte da verdade = rawProvider (JSON completo devolvido pela Uber).
+  // ───────────────────────────────────────────────────────────
+  router.get('/_debug/uber/:del_id', verificarToken, verificarAdmin, async (req, res) => {
+    const adapter = registry.get('uber');
+    if (!adapter) {
+      return res.status(503).json({ ok: false, msg: "Provider 'uber' nao esta ativo ou registrado" });
+    }
+    try {
+      const result = await adapter.getDelivery(req.params.del_id);
+      const raw = result.rawProvider || {};
+      const itens = Array.isArray(raw.manifest_items) ? raw.manifest_items : [];
+      const checklist = {
+        manifest_reference: raw.manifest_reference ?? null,
+        external_store_id: (raw.pickup && raw.pickup.external_store_id) ?? raw.external_store_id ?? null,
+        manifest_items: itens.map(function (it) {
+          return {
+            name: it.name ?? null,
+            size: it.size ?? null,
+            weight: it.weight ?? it.weight_grams ?? null,
+            dimensions: it.dimensions ?? null,
+          };
+        }),
+        janelas: {
+          pickup_ready_dt: raw.pickup_ready_dt ?? null,
+          pickup_deadline_dt: raw.pickup_deadline_dt ?? null,
+          dropoff_ready_dt: raw.dropoff_ready_dt ?? null,
+          dropoff_deadline_dt: raw.dropoff_deadline_dt ?? null,
+        },
+        verificacao_foto: {
+          pickup: (raw.pickup && (raw.pickup.verification_requirements ?? raw.pickup.verification)) ?? null,
+          dropoff: (raw.dropoff && (raw.dropoff.verification_requirements ?? raw.dropoff.verification)) ?? null,
+          devolucao: raw.return_verification ?? (raw.return && raw.return.verification) ?? null,
+        },
+        status: raw.status ?? result.statusNative ?? null,
+      };
+      res.json({ ok: true, del_id: req.params.del_id, checklist, rawProvider: raw });
+    } catch (err) {
+      res.status(500).json({ ok: false, msg: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
   // POST /quotes  — cota uma OS (1 veículo)
   // body: { codigoOS, providerCode?, vehicleType? }
   // ───────────────────────────────────────────────────────────
