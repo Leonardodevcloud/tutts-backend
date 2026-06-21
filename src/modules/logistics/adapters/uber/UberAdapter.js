@@ -211,7 +211,7 @@ class UberAdapter extends LogisticsProviderAdapter {
     const url = `${this._apiBase}/${customerId}/deliveries`;
 
     // montarBodyDelivery agora retorna { body, pickupCode, dropoffCode }
-    const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config);
+    const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config, this.sandboxMode);
 
     const resp = await httpRequest(url, {
       method: 'POST',

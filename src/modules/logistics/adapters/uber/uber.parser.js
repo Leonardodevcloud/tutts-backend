@@ -75,7 +75,7 @@ function montarBodyQuote(req) {
  * @param {Object} config - logistics_providers.config (manifest_total_value_centavos, telefone_suporte, sandbox_mode)
  * @returns {Object} body completo
  */
-function montarBodyDelivery(quoteId, req, config) {
+function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
   const telSuporte = formatarTelefoneE164(config.telefone_suporte);
 
   const pickupPhone = formatarTelefoneE164(req.pickup.phone) || telSuporte;
@@ -194,7 +194,7 @@ function montarBodyDelivery(quoteId, req, config) {
   }
 
   // Sandbox: Robo Courier auto pra simular ciclo
-  if (config.sandbox_mode === true) {
+  if (sandboxMode === true || config.sandbox_mode === true) {
     body.test_specifications = {
       robo_courier_specification: { mode: 'auto' },
     };
