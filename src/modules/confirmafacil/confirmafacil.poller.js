@@ -68,6 +68,7 @@ class ConfirmaFacilPoller {
     this.pool    = pool;
     this.auth    = getConfirmaFacilAuth();
     this._rodando = false;
+    this._ultimoFullScan = new Map(); // [CF throttle] ts do ultimo full scan por config.id
   }
 
   // ══════════════════════════════════════════════════
@@ -178,7 +179,19 @@ class ConfirmaFacilPoller {
     let page = 0;
     let totalProcessadas = 0;
 
-    while (true) {
+    // [CF throttle 2026-06] A paginacao completa do /filter/embarque (centenas de
+    // paginas / milhares de NFs por ciclo) e redundante com id-tailing + ocorrencia
+    // + cache, que rodam todo ciclo e ja cacheiam/despacham. Aqui ela vira uma
+    // "rede ampla" periodica. Frequencia via CF_EMBARQUE_FULLSCAN_MIN (default 15).
+    const _FULLSCAN_MIN = parseInt(process.env.CF_EMBARQUE_FULLSCAN_MIN, 10) > 0
+      ? parseInt(process.env.CF_EMBARQUE_FULLSCAN_MIN, 10)
+      : 15;
+    const _ultFS = this._ultimoFullScan.get(config.id) || 0;
+    const _devesFullScan = (Date.now() - _ultFS) >= _FULLSCAN_MIN * 60 * 1000;
+
+    if (_devesFullScan) {
+      this._ultimoFullScan.set(config.id, Date.now());
+      while (true) {
       // IMPORTANTE: page/size vao FORA do filtroDTO, como query params na URL.
       // O CF ignora page/size quando enviados dentro do filtroDTO (por isso
       // antes devolvia sempre a primeira pagina). Ver _buscarEmbarques.
@@ -222,6 +235,11 @@ class ConfirmaFacilPoller {
         console.warn('[CF Poller] limite de 300 paginas atingido — parando por seguranca');
         break;
       }
+    }
+    } else {
+      const _faltaMs = _FULLSCAN_MIN * 60 * 1000 - (Date.now() - _ultFS);
+      const _faltaMin = Math.max(0, Math.ceil(_faltaMs / 60000));
+      console.log('[CF Poller] full scan adiado (throttle ' + _FULLSCAN_MIN + 'min) - proximo em ~' + _faltaMin + 'min; id-tailing/ocorrencia/cache seguem normais');
     }
 
     // Fallback via /filter/ocorrencia (endpoint que FUNCIONA e e SCOPED a nossa
