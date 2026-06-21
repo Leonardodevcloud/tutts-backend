@@ -75,7 +75,7 @@ const CANCEL_REASON_ID_DEFAULT = '410018';
 // 🆕 Aviso padrao mostrado ao entregador da 99 na note da COLETA (visivel ao
 // courier, doc: pickup_info.note). Pode ser sobrescrito via config.aviso_entregador.
 // Limite da note: 127 chars — manter a mensagem curta.
-const AVISO_ENTREGADOR_DEFAULT = 'Transporte de pecas automotivas. Antes de aceitar, veja se possui as ferramentas para coletar.';
+const { AVISO_ENTREGADOR_DEFAULT } = require('../../logistics.shared');
 
 // ════════════════════════════════════════════════════════════
 // Helpers

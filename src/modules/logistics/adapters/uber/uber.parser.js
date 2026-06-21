@@ -22,6 +22,7 @@
 
 const { parsearEnderecoBrasileiro, formatarTelefoneE164, truncarTexto } =
   require('../../core/AddressParser');
+const { resolverAvisoEntregador, osUltimos4 } = require('../../logistics.shared');
 const {
   montarJanelasUber,
   montarManifestItem,
@@ -104,7 +105,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     pickup_name: truncarTexto(req.pickup.name || 'Loja', 100),
     pickup_phone_number: pickupPhone,
     pickup_business_name: truncarTexto(req.pickup.name || 'Loja', 100),
-    pickup_notes: truncarTexto(req.pickup.complement, 280),
+    pickup_notes: truncarTexto(resolverAvisoEntregador(config), 280),
 
     dropoff_address: montarEnderecoUber(req.dropoff.address),
     dropoff_name: truncarTexto(req.dropoff.name || 'Cliente', 100),
@@ -250,7 +251,7 @@ function servicoMappToCanonicalQuoteRequest(servico) {
     },
     vehicleType: null, // Decidido pelo caller (Orchestrator decide via regra)
     externalRef: servico.codigoOS,
-    itemDescription: entrega.obs || entrega.observacao || coleta.obs || coleta.observacao || servico.obs || `OS ${servico.codigoOS}`,
+    itemDescription: entrega.obs || entrega.observacao || coleta.obs || coleta.observacao || servico.obs || `OS ${osUltimos4(servico.codigoOS)}`,
   };
 }
 

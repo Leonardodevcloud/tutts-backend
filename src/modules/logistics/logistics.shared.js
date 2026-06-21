@@ -83,6 +83,26 @@ function valorSecretoValido(v) {
   return true;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Paridade entre provedores (99 / Uber). Centralizado aqui pra os
+// adapters nunca divergirem nestes processos.
+// ─────────────────────────────────────────────────────────────
+const AVISO_ENTREGADOR_DEFAULT = 'Transporte de pecas automotivas. Antes de aceitar, veja se possui as ferramentas para coletar.';
+
+function resolverAvisoEntregador(config) {
+  if (config && typeof config.aviso_entregador === 'string' && config.aviso_entregador.trim()) {
+    return config.aviso_entregador.trim();
+  }
+  return AVISO_ENTREGADOR_DEFAULT;
+}
+
+// Numeracao da OS exibida ao motoboy: so os 4 ultimos digitos (igual nos dois
+// provedores). A referencia INTEIRA continua indo nos campos de idempotencia.
+function osUltimos4(externalRef) {
+  const s = String(externalRef == null ? '' : externalRef);
+  return s.length > 4 ? s.slice(-4) : s;
+}
+
 module.exports = {
   LOGISTICS_WS_EVENTS,
   DISPATCH_STRATEGIES,
@@ -94,4 +114,7 @@ module.exports = {
   DEFAULTS,
   ehMascara,
   valorSecretoValido,
+  AVISO_ENTREGADOR_DEFAULT,
+  resolverAvisoEntregador,
+  osUltimos4,
 };
