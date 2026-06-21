@@ -304,8 +304,8 @@ class DispatchOrchestrator {
     const { rows: existente } = await this.pool.query(
       `SELECT id, status_native FROM logistics_deliveries
        WHERE codigo_os = $1
-         AND status_canonico NOT IN ('CANCELED','DELIVERED')
-         AND COALESCE(status_native,'') NOT IN ('cancelado','canceled','delivered','fallback_fila')`,
+         AND status_canonico NOT IN ('CANCELED','DELIVERED','FAILED')
+         AND COALESCE(status_native,'') NOT IN ('cancelado','canceled','delivered','fallback_fila','erro','falhou','failed')`,
       [codigoOS]
     );
     if (existente.length > 0) {
