@@ -94,7 +94,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
 
   const body = {
     quote_id: quoteId,
-    external_id: `OS-${req.externalRef}`,
+    external_id: `OS-${req.externalRef}-${Date.now()}`,
     // manifest_reference: codigo unico do pedido do parceiro (REQUIRED).
     manifest_reference: String(req.externalRef),
     // external_store_id: unico por endereco de retirada/loja (REQUIRED).
