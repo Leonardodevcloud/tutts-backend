@@ -96,14 +96,9 @@ async function reconciliarEntregas(pool) {
     // esgotou as tentativas -> alerta uma vez e para
     if (rec.tentativas >= MAX_TENTATIVAS) {
       if (!rec.alertado) {
-        await _enviarWhats(
-          `🔴 *CF não confirmou uma entrega* — OS ${c.os_numero}\n` +
-          `A corrida foi concluída, mas o ConfirmaFácil não registrou a entrega ` +
-          `após ${MAX_TENTATIVAS} tentativas automáticas.\n` +
-          `👉 Verifique manualmente (pode ser NF não anexada ao ponto ou instabilidade do CF).`
-        );
+        // Alerta "CF nao confirmou uma entrega" desativado a pedido.
+        // Mantemos a marcacao para encerrar o ciclo desta corrida (sem WhatsApp).
         await pool.query(`UPDATE confirmafacil_reconc SET alertado = TRUE WHERE solicitacao_id = $1`, [c.solicitacao_id]);
-        alertas++;
       }
       continue;
     }

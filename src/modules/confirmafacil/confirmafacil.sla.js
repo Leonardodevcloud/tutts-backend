@@ -20,6 +20,10 @@ const CNPJ_GOIANIA = '42580092001148';   // 42.580.092/0011-48
 const META_GOIANIA = 98;
 const META_DEFAULT = 95;
 
+// Apenas estes embarcadores disparam alerta de SLA no WhatsApp (somente digitos).
+// 42.580.092/0011-48 e 42.580.092/0047-59
+const CNPJS_ALERTA_SLA = new Set(['42580092001148', '42580092004759']);
+
 const soDigitos = (s) => String(s || '').replace(/\D/g, '');
 function metaPorCnpj(cnpj) {
   return soDigitos(cnpj) === CNPJ_GOIANIA ? META_GOIANIA : META_DEFAULT;
@@ -194,6 +198,8 @@ async function verificarRiscosEAlertar(pool) {
     if (!r.entregue && r.bucket === 'estourada') estagio = 'estouro';
     else if (r.bucket === 'em_risco') estagio = 'risco';
     if (!estagio || !r.solicitacao_id) continue;
+    // So alerta para os embarcadores configurados (os demais ficam apenas no painel).
+    if (!CNPJS_ALERTA_SLA.has(soDigitos(r.cnpj_embarcador))) continue;
 
     // dedupe atômico: só envia se for a 1ª vez deste (corrida, estágio)
     const ins = await pool.query(
