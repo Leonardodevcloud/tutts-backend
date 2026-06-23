@@ -73,7 +73,8 @@ function verificarCsrf(req, res, next) {
     '/api/indicacao-link/cadastrar',
     '/api/indicacao-link/validar',
     '/api/stark/webhook',
-    '/api/uber/webhook',  // Webhooks da Uber Direct (validados via HMAC-SHA256)
+    '/api/uber/webhook',  // (legado Fase <6) Webhooks da Uber Direct
+    '/api/logistics/webhook',  // Hub logistico canonico (Uber/99) - validado por HMAC no adapter
     '/api/cs/webhook',  // Webhooks do Resend (validados via assinatura Svix)
     '/api/crm',  // server-to-server do CRM Vercel (autenticado por x-service-key)
     '/api/agent/sla-capture/trigger',  // extensão SLA Monitor (validado por Origin + token opcional)
