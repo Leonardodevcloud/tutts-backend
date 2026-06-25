@@ -166,8 +166,10 @@ function montarPontosFallback(enderecos) {
 function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod }) {
   // 2026-06: os 4 ultimos digitos da OS em *negrito* p/ leitura rapida no grupo.
   const _osStr = String(os_numero == null ? '' : os_numero);
+  // WhatsApp só aplica negrito quando o * está separado por espaço ou início/fim de linha.
+  // Formato: "123 *0847*" — prefixo + espaço + *sufixo*
   const _osFmt = _osStr.length > 4
-    ? `${_osStr.slice(0, -4)}*${_osStr.slice(-4)}*`
+    ? `${_osStr.slice(0, -4)} *${_osStr.slice(-4)}*`
     : (_osStr ? `*${_osStr}*` : _osStr);
   const blocos = [`📦 *NOVO RASTREIO*`, `🧾 *OS:* ${_osFmt}`];
 
