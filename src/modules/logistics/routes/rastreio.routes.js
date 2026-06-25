@@ -26,7 +26,7 @@ function createLogisticsRastreioRouter(pool) {
         `SELECT status_canonico, courier_data, ultima_lat, ultima_lng,
                 latitude_coleta, longitude_coleta, endereco_coleta,
                 latitude_entrega, longitude_entrega, endereco_entrega,
-                eta_minutos, updated_at, pontos
+                eta_minutos, updated_at, pontos, id
            FROM logistics_deliveries
           WHERE rastreio_token = $1
           LIMIT 1`,
@@ -41,11 +41,37 @@ function createLogisticsRastreioRouter(pool) {
       const pts = Array.isArray(d.pontos) ? d.pontos : [];
       const nomeDestino = pts.length ? (pts[pts.length - 1] && pts[pts.length - 1].nome) || null : null;
 
+      // etapa_ts: primeiro evento de cada step na logistics_events
+      // step0=DISPATCHED, step1=COURIER_ASSIGNED, step2=PICKED_UP, step3=DELIVERED
+      const STEP_STATUS = [
+        ['PENDING','QUOTED','DISPATCHED'],
+        ['COURIER_ASSIGNED','PICKUP_EN_ROUTE'],
+        ['PICKED_UP','DROPOFF_EN_ROUTE'],
+        ['DELIVERED'],
+      ];
+      const { rows: evtRows } = await pool.query(
+        `SELECT status_canonico, MIN(created_at) AS ts
+           FROM logistics_events
+          WHERE delivery_id = $1
+            AND status_canonico IS NOT NULL
+          GROUP BY status_canonico`,
+        [d.id]
+      );
+      const evtMap = {};
+      evtRows.forEach(r => { evtMap[r.status_canonico] = r.ts; });
+      const etapa_ts = STEP_STATUS.map(statuses => {
+        for (const s of statuses) {
+          if (evtMap[s]) return evtMap[s];
+        }
+        return null;
+      });
+
       res.set('Cache-Control', 'no-store');
       res.json({
         status: d.status_canonico,
         status_label: st.label,
         etapa: st.step,
+        etapa_ts,
         finalizado: ['DELIVERED', 'CANCELED', 'RETURNED'].includes(d.status_canonico),
         entregador: courier.name ? {
           nome: courier.name,
