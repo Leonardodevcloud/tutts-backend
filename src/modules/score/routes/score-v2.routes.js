@@ -37,6 +37,7 @@ const {
   listarAlertasAproveitamento,
   buscarMeuAvisoAproveitamento,
   marcarAvisoAproveitamentoVisto,
+  avaliarAproveitamentoSemanal,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
 const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
@@ -120,6 +121,22 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
     } catch (err) {
       console.error('❌ [Score v2] /aviso-aproveitamento/visto:', err.message);
       res.status(500).json({ error: 'Erro ao marcar aviso', details: err.message });
+    }
+  });
+
+  // ADMIN: força a análise de aproveitamento agora (sem esperar o sábado)
+  router.post('/score-v2/admin/avaliar-aproveitamento', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      console.log('🔁 [Score v2] Avaliação de aproveitamento forçada manualmente...');
+      const r = await avaliarAproveitamentoSemanal(pool);
+      res.json({
+        sucesso: true,
+        mensagem: `Análise concluída: ${r.alertas} alerta(s) em ${r.regioes} praça(s).`,
+        ...r,
+      });
+    } catch (err) {
+      console.error('❌ [Score v2] /admin/avaliar-aproveitamento:', err.message);
+      res.status(500).json({ error: 'Erro ao avaliar aproveitamento', details: err.message });
     }
   });
 
