@@ -8,6 +8,19 @@ const { resolverCodigo } = require('./confirmafacil.map');
 const slaMod = require('./confirmafacil.sla');
 const reconcMod = require('./confirmafacil.reconciliacao');
 
+// 🆕 2026-06: converte 'YYYY-MM-DDTHH:MM' (horário de Salvador/BRT, vindo de
+// um <input type="datetime-local">) num Date UTC, ancorando em -03:00. Assim,
+// ao passar por formatarData/formatarHora (que subtraem 3h), o CF recebe
+// exatamente o horário digitado. Retorna null se a string for inválida/vazia.
+function parseDataFinalizacaoBRT(str) {
+  if (!str || typeof str !== 'string') return null;
+  const m = str.trim().match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  const dt = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s || '00'}-03:00`);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
   const auth   = getConfirmaFacilAuth();
@@ -628,8 +641,14 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // Use para verificar se o CF está recebendo corretamente.
   router.post('/testar-ocorrencia', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { solicitacao_id, status } = req.body;
+      const { solicitacao_id, status, data_finalizacao } = req.body;
       if (!solicitacao_id) throw new AppError('solicitacao_id é obrigatório', 400);
+
+      // 🆕 2026-06: horário manual opcional (correção). Tratado como BRT.
+      const dataOcorrencia = parseDataFinalizacaoBRT(data_finalizacao);
+      if (data_finalizacao && !dataOcorrencia) {
+        throw new AppError('data_finalizacao inválida. Use o formato AAAA-MM-DDTHH:MM.', 400);
+      }
 
       // 1. Buscar OS
       const { rows: [solic] } = await pool.query(
@@ -696,7 +715,19 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         osNumero:      solic.tutts_os_numero,
         novoStatus:    statusUsar,
         pontoStatus:   statusUsar,
+        dataOcorrencia, // 🆕 horário manual (ou null = agora)
       });
+
+      // 🆕 2026-06: registra auditoria quando houve correção manual de horário
+      if (dataOcorrencia && typeof registrarAuditoria === 'function') {
+        try {
+          await registrarAuditoria(req, 'cf.finalizar_manual', 'admin', 'confirmafacil', solicitacao_id, {
+            os_numero: solic.tutts_os_numero,
+            status: statusUsar,
+            data_finalizacao_brt: data_finalizacao,
+          });
+        } catch (_) {}
+      }
 
       // 6. Buscar log criado
       const { rows: logs } = await pool.query(`
@@ -716,6 +747,87 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         status_usado: statusUsar,
         cod_ocorrencia: codMapeado,
         nfs:         pontos.map(p => p.numero_nota),
+        logs,
+      });
+    } catch (err) { next(err); }
+  });
+
+
+  // ── Enviar PROTOCOLO (fotos) manualmente ao CF ───────────────
+  // 🆕 2026-06: pega as fotos do comprovante em solicitacoes_pontos_fotos e
+  // dispara a ocorrência ao CF com elas anexadas. Aceita data_finalizacao
+  // opcional (horário manual, BRT). Use quando a foto chegou atrasada ou o
+  // envio automático não levou o protocolo.
+  router.post('/enviar-protocolo', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { solicitacao_id, status, data_finalizacao } = req.body;
+      if (!solicitacao_id) throw new AppError('solicitacao_id é obrigatório', 400);
+
+      const dataOcorrencia = parseDataFinalizacaoBRT(data_finalizacao);
+      if (data_finalizacao && !dataOcorrencia) {
+        throw new AppError('data_finalizacao inválida. Use o formato AAAA-MM-DDTHH:MM.', 400);
+      }
+
+      // 1. OS
+      const { rows: [solic] } = await pool.query(
+        'SELECT * FROM solicitacoes_corrida WHERE id = $1', [solicitacao_id]
+      );
+      if (!solic) throw new AppError('Solicitação não encontrada', 404);
+
+      // 2. Fotos do protocolo (mesma fonte que o painel exibe)
+      const { rows: fotosRows } = await pool.query(`
+        SELECT foto_url FROM solicitacoes_pontos_fotos
+        WHERE solicitacao_id = $1
+        LIMIT 20
+      `, [solicitacao_id]).catch(() => ({ rows: [] }));
+      const fotos = fotosRows.map(f => f.foto_url).filter(Boolean);
+
+      if (fotos.length === 0) {
+        return res.json({
+          ok: false,
+          mensagem: 'Nenhuma foto de protocolo encontrada para esta corrida. As fotos aparecem quando o motoboy finaliza no app.',
+          logs: [],
+        });
+      }
+
+      // 3. Dispara a ocorrência com as fotos anexadas
+      const statusUsar = status || 'finalizado_ponto';
+      const { getConfirmaFacilService } = require('./confirmafacil.service');
+      const cfService = getConfirmaFacilService(pool);
+
+      await cfService.processar({
+        solicitacaoId: solicitacao_id,
+        osNumero:      solic.tutts_os_numero,
+        novoStatus:    statusUsar,
+        pontoStatus:   statusUsar,
+        fotos,
+        dataOcorrencia,
+      });
+
+      if (typeof registrarAuditoria === 'function') {
+        try {
+          await registrarAuditoria(req, 'cf.enviar_protocolo', 'admin', 'confirmafacil', solicitacao_id, {
+            os_numero: solic.tutts_os_numero,
+            qtd_fotos: fotos.length,
+            data_finalizacao_brt: data_finalizacao || null,
+          });
+        } catch (_) {}
+      }
+
+      // 4. Retorna o log mais recente
+      const { rows: logs } = await pool.query(`
+        SELECT id, numero_nf, cod_ocorrencia, sucesso, erro_msg, resposta, criado_em
+        FROM confirmafacil_log
+        WHERE solicitacao_id = $1
+        ORDER BY criado_em DESC
+        LIMIT 5
+      `, [solicitacao_id]);
+
+      const sucesso = logs.some(l => l.sucesso);
+      res.json({
+        ok: sucesso,
+        mensagem: sucesso ? '✅ Protocolo enviado ao CF (' + fotos.length + ' foto(s))' : '❌ CF rejeitou — veja os logs',
+        qtd_fotos: fotos.length,
         logs,
       });
     } catch (err) { next(err); }

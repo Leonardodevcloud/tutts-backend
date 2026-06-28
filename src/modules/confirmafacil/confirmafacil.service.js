@@ -192,7 +192,19 @@ class ConfirmaFacilService {
     }
 
     // 4. Montar payload (array de CamposEmbarqueDTO)
-    const agora = new Date();
+    // 🆕 2026-06: permite correção manual do horário da ocorrência.
+    // Se o evento trouxe dataOcorrencia (Date ou ISO), usa ela; senão, agora.
+    // O formatarData/formatarHora trata o fuso (espera Date em UTC -> gera BRT).
+    let agora = new Date();
+    if (evento.dataOcorrencia) {
+      const d = (evento.dataOcorrencia instanceof Date) ? evento.dataOcorrencia : new Date(evento.dataOcorrencia);
+      if (!isNaN(d.getTime())) {
+        agora = d;
+        console.log(`🕐 [CF Service] OS ${osNumero} usando horário manual: ${d.toISOString()}`);
+      } else {
+        console.warn(`⚠️ [CF Service] dataOcorrencia inválida ignorada:`, evento.dataOcorrencia);
+      }
+    }
     const itens = pontos.map(p => this._montarItem({
       ponto:          p,
       config,
