@@ -34,6 +34,9 @@ const {
   lerNivelMotoboy,
   rodarSorteiosMensais,
   congelarRankingMensal,
+  listarAlertasAproveitamento,
+  buscarMeuAvisoAproveitamento,
+  marcarAvisoAproveitamentoVisto,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
 const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
@@ -87,6 +90,48 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
     } catch (err) {
       console.error('❌ [Score v2] /minha-evolucao:', err.message);
       res.status(500).json({ error: 'Erro ao buscar evolução', details: err.message });
+    }
+  });
+
+  // ============================================================
+  // 🆕 2026-06: APROVEITAMENTO SEMANAL
+  // ============================================================
+
+  // MOTOBOY: aviso pendente da semana (alimenta o modal ao abrir o app)
+  router.get('/score-v2/meu-aviso-aproveitamento', verificarToken, async (req, res) => {
+    try {
+      const codProf = req.user.codProfissional || req.user.cod_profissional;
+      if (!codProf) return res.json({ tem_aviso: false });
+      const r = await buscarMeuAvisoAproveitamento(pool, codProf);
+      res.json(r);
+    } catch (err) {
+      console.error('❌ [Score v2] /meu-aviso-aproveitamento:', err.message);
+      res.json({ tem_aviso: false });
+    }
+  });
+
+  // MOTOBOY: marcar o aviso da semana como visto (ao fechar o modal)
+  router.post('/score-v2/aviso-aproveitamento/visto', verificarToken, async (req, res) => {
+    try {
+      const codProf = req.user.codProfissional || req.user.cod_profissional;
+      if (!codProf) return res.status(400).json({ error: 'Usuário sem cod_profissional' });
+      const r = await marcarAvisoAproveitamentoVisto(pool, codProf);
+      res.json(r);
+    } catch (err) {
+      console.error('❌ [Score v2] /aviso-aproveitamento/visto:', err.message);
+      res.status(500).json({ error: 'Erro ao marcar aviso', details: err.message });
+    }
+  });
+
+  // ADMIN: lista de motoboys sinalizados na semana (painel da praça)
+  router.get('/score-v2/admin/alertas-aproveitamento', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { regiao, semana } = req.query;
+      const r = await listarAlertasAproveitamento(pool, regiao || null, semana || null);
+      res.json(r);
+    } catch (err) {
+      console.error('❌ [Score v2] /admin/alertas-aproveitamento:', err.message);
+      res.status(500).json({ error: 'Erro ao listar alertas', details: err.message });
     }
   });
 
@@ -278,6 +323,9 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         n3_min_entregas = 150,
         n3_min_dias_16h = 20,
         n3_min_pct_prazo = 88,
+        // 🆕 2026-06: regra de aproveitamento semanal (por praça)
+        regra_aproveitamento_ativa = false,
+        pct_min_aproveitamento = 95,
       } = req.body || {};
 
       if (!regiao || !regiao.trim()) {
@@ -308,8 +356,9 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           saque_teto_n2, saque_teto_n3,
           n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
           n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
+          regra_aproveitamento_ativa, pct_min_aproveitamento,
           criado_por
-        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (regiao) DO UPDATE SET
           ativo = EXCLUDED.ativo,
           niveis_ativos = EXCLUDED.niveis_ativos,
@@ -323,6 +372,8 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           n3_min_entregas = EXCLUDED.n3_min_entregas,
           n3_min_dias_16h = EXCLUDED.n3_min_dias_16h,
           n3_min_pct_prazo = EXCLUDED.n3_min_pct_prazo,
+          regra_aproveitamento_ativa = EXCLUDED.regra_aproveitamento_ativa,
+          pct_min_aproveitamento = EXCLUDED.pct_min_aproveitamento,
           atualizado_em = NOW()
         RETURNING *
       `, [
@@ -331,6 +382,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         parseFloat(saque_teto_n2), parseFloat(saque_teto_n3),
         intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 15), pct(n2_min_pct_prazo, 80),
         intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 20), pct(n3_min_pct_prazo, 88),
+        !!regra_aproveitamento_ativa, pct(pct_min_aproveitamento, 95),
         req.user.userId || req.user.email || 'admin',
       ]);
 

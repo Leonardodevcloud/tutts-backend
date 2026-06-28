@@ -79,6 +79,39 @@ function resolverThresholds(cfg) {
 const HORA_CORTE_NOTURNO = 16; // "após 16h"
 const JANELA_DIAS = 28;
 
+// 🆕 2026-06: janela da regra de aproveitamento semanal (últimos 7 dias).
+const JANELA_APROVEITAMENTO_DIAS = 7;
+
+// ============================================================
+// 🆕 2026-06: NOVA RÉGUA DE PRAZO (padrão de TODO o score)
+// ============================================================
+// O prazo passa a contar do ACEITE da corrida (data_hora_alocado) até
+// finalizado — NÃO mais da criação. Régua por faixa de distância:
+//   ≤10km=50  ≤15=60  ≤20=70  ≤25=80  ≤30=90  ≤35=100  ≤40=110  ≤50=120
+//   acima de 50km: trava em 120 min.
+// Aplicada tanto no nível (N1/N2/N3) quanto na regra de aproveitamento.
+const PRAZO_REGUA_SQL = `(CASE
+  WHEN distancia <= 10 THEN 50
+  WHEN distancia <= 15 THEN 60
+  WHEN distancia <= 20 THEN 70
+  WHEN distancia <= 25 THEN 80
+  WHEN distancia <= 30 THEN 90
+  WHEN distancia <= 35 THEN 100
+  WHEN distancia <= 40 THEN 110
+  WHEN distancia <= 50 THEN 120
+  ELSE 120
+END)`;
+
+// Tempo do profissional em minutos: do aceite (data_hora_alocado) até finalizado.
+const TEMPO_PROF_MIN_SQL = `CASE
+  WHEN finalizado IS NOT NULL AND data_hora_alocado IS NOT NULL
+  THEN EXTRACT(EPOCH FROM (finalizado - data_hora_alocado)) / 60.0
+  ELSE NULL
+END`;
+
+// Uma entrega é "avaliável" pro prazo quando dá pra medir tempo e distância.
+const ENTREGA_AVALIAVEL_SQL = `finalizado IS NOT NULL AND data_hora_alocado IS NOT NULL AND distancia IS NOT NULL`;
+
 // ============================================================
 // 🆕 2026-05 v3: PERÍODO DE CARÊNCIA PÓS-SUBIDA
 // ============================================================
@@ -214,23 +247,34 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
     };
   }
   const result = await pool.query(`
+    WITH base AS (
+      SELECT
+        hora_solicitado,
+        distancia,
+        ${PRAZO_REGUA_SQL} AS prazo_regua,
+        (${TEMPO_PROF_MIN_SQL}) AS tempo_prof_min,
+        (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
+      FROM bi_entregas
+      WHERE cod_prof = $1
+        AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
+        AND data_solicitado <= CURRENT_DATE
+    )
     SELECT
       COUNT(*)::int AS total_entregas,
       COUNT(*) FILTER (
         WHERE hora_solicitado IS NOT NULL AND EXTRACT(HOUR FROM hora_solicitado) >= $2
       )::int AS dias_16h,
-      CASE 
-        WHEN COUNT(*) > 0 THEN
-          ROUND(100.0 * COUNT(*) FILTER (WHERE dentro_prazo = true) / COUNT(*), 2)
+      CASE
+        WHEN COUNT(*) FILTER (WHERE avaliavel) > 0 THEN
+          ROUND(
+            100.0 * COUNT(*) FILTER (WHERE avaliavel AND tempo_prof_min <= prazo_regua)
+            / COUNT(*) FILTER (WHERE avaliavel), 2)
         ELSE 0
       END AS pct_prazo
-    FROM bi_entregas
-    WHERE cod_prof = $1
-      AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
-      AND data_solicitado <= CURRENT_DATE
+    FROM base
   `, [codProfInt, HORA_CORTE_NOTURNO]);
-  // 🔧 2026-05: dias_16h agora é QUANTIDADE TOTAL de entregas após 16h
-  // (não mais "dias distintos"). Nome da chave/coluna mantido pra não migrar banco.
+  // 🆕 2026-06: pct_prazo agora conta do ACEITE (data_hora_alocado) com a nova régua.
+  // Denominador = só entregas avaliáveis (com tempo e distância). dias_16h = qtd total após 16h.
 
   const stats = {
     entregas: parseInt(result.rows[0].total_entregas) || 0,
@@ -1015,6 +1059,17 @@ async function avaliarTodasRegioes(pool) {
   }
 
   console.log(`📅 [Score v2] Avaliação semanal concluída — ${resumo.regioes} regiões, ${resumo.processados} motoboys, ${resumo.mudancas.length} mudanças de nível`);
+
+  // 🆕 2026-06: roda a regra de aproveitamento semanal (últimos 7 dias) logo
+  // após a avaliação de nível. Só atinge praças com regra_aproveitamento_ativa.
+  try {
+    const aprov = await avaliarAproveitamentoSemanal(pool);
+    resumo.aproveitamento = aprov;
+    console.log(`📉 [Score v2] Aproveitamento: ${aprov.alertas} alerta(s) em ${aprov.regioes} praça(s)`);
+  } catch (errAprov) {
+    console.error('❌ [Score v2] Aproveitamento semanal falhou:', errAprov.message);
+  }
+
   // 🔔 TODO (notificação): quando houver telefone do motoboy cadastrado,
   // percorrer resumo.mudancas e disparar mensagem via Evolution aqui.
   return resumo;
@@ -1057,6 +1112,155 @@ async function congelarRankingMensal(pool, mesRef) {
   return { mes: mesRef, linhas: totalLinhas };
 }
 
+// ============================================================
+// 🆕 2026-06: REGRA DE APROVEITAMENTO SEMANAL (por praça)
+// ============================================================
+// Todo sábado o cron avalia os ÚLTIMOS 7 DIAS de cada praça com
+// regra_aproveitamento_ativa = true. Motoboy abaixo de pct_min_aproveitamento
+// vira um alerta (pro admin) + aviso ao abrir o app. Consequência é MANUAL.
+
+/**
+ * Calcula o % de aproveitamento (no prazo, do aceite) de um motoboy nos
+ * últimos N dias usando a nova régua. Retorna null se não houver entrega
+ * avaliável no período.
+ */
+async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAMENTO_DIAS) {
+  const codInt = parseInt(codProf, 10);
+  if (!Number.isFinite(codInt)) return null;
+  const r = await pool.query(`
+    WITH base AS (
+      SELECT
+        distancia,
+        ${PRAZO_REGUA_SQL} AS prazo_regua,
+        (${TEMPO_PROF_MIN_SQL}) AS tempo_prof_min,
+        (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
+      FROM bi_entregas
+      WHERE cod_prof = $1
+        AND data_solicitado >= (CURRENT_DATE - ($2 || ' days')::interval)::date
+        AND data_solicitado <= CURRENT_DATE
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE avaliavel)::int AS total,
+      COUNT(*) FILTER (WHERE avaliavel AND tempo_prof_min <= prazo_regua)::int AS no_prazo
+    FROM base
+  `, [codInt, String(dias - 1)]);
+  const total = parseInt(r.rows[0].total, 10) || 0;
+  const noPrazo = parseInt(r.rows[0].no_prazo, 10) || 0;
+  if (total === 0) return null;
+  return { total, no_prazo: noPrazo, pct: Math.round((10000 * noPrazo) / total) / 100 };
+}
+
+/**
+ * Roda a regra de aproveitamento pra todas as praças com a regra ativa.
+ * Registra um alerta por motoboy que ficou abaixo do piso, calculando
+ * a reincidência (semanas_consecutivas). Idempotente via UNIQUE.
+ */
+async function avaliarAproveitamentoSemanal(pool) {
+  const semanaRef = `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+  const regioes = await pool.query(`
+    SELECT regiao, COALESCE(pct_min_aproveitamento, 95) AS pct_min
+    FROM score_config_regiao
+    WHERE ativo = true AND regra_aproveitamento_ativa = true
+  `);
+
+  let totalAlertas = 0;
+  for (const r of regioes.rows) {
+    const pctMin = parseFloat(r.pct_min) || 95;
+    // Motoboys da praça (usa o snapshot de nível, que já lista todos da região)
+    const motoboys = await pool.query(`
+      SELECT cod_prof, nome_prof FROM score_nivel_motoboy
+      WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}
+    `, [r.regiao]);
+
+    for (const m of motoboys.rows) {
+      try {
+        const aprov = await calcularAproveitamento7d(pool, m.cod_prof);
+        if (!aprov) continue; // sem entrega avaliável na semana — não sinaliza
+        if (aprov.pct >= pctMin) continue; // dentro do piso — ok
+
+        // Reincidência: olha o alerta anterior (de outra semana) mais recente.
+        const ant = await pool.query(`
+          SELECT semanas_consecutivas, criado_em
+          FROM score_alertas_aproveitamento
+          WHERE cod_prof = $1 AND semana_referencia <> $2
+          ORDER BY criado_em DESC LIMIT 1
+        `, [String(m.cod_prof), semanaRef]);
+        let consecutivas = 1;
+        if (ant.rows.length > 0) {
+          const diasAtras = (Date.now() - new Date(ant.rows[0].criado_em).getTime()) / 86400000;
+          if (diasAtras <= 10) consecutivas = (parseInt(ant.rows[0].semanas_consecutivas, 10) || 1) + 1;
+        }
+
+        await pool.query(`
+          INSERT INTO score_alertas_aproveitamento (
+            cod_prof, nome_prof, regiao, semana_referencia,
+            pct_prazo, entregas_prazo, entregas_total, pct_min_aplicado, semanas_consecutivas
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT (cod_prof, semana_referencia) DO UPDATE SET
+            pct_prazo = EXCLUDED.pct_prazo,
+            entregas_prazo = EXCLUDED.entregas_prazo,
+            entregas_total = EXCLUDED.entregas_total,
+            pct_min_aplicado = EXCLUDED.pct_min_aplicado,
+            semanas_consecutivas = EXCLUDED.semanas_consecutivas
+        `, [
+          String(m.cod_prof), m.nome_prof, r.regiao, semanaRef,
+          aprov.pct, aprov.no_prazo, aprov.total, pctMin, consecutivas,
+        ]);
+        totalAlertas++;
+      } catch (err) {
+        console.error(`  ⚠️ [aproveitamento] ${m.cod_prof}:`, err.message);
+      }
+    }
+  }
+  return { semana: semanaRef, regioes: regioes.rows.length, alertas: totalAlertas };
+}
+
+/**
+ * Lista alertas de aproveitamento de uma praça na semana corrente (pro admin).
+ * Reincidentes (mais semanas seguidas) primeiro, depois pior pct.
+ */
+async function listarAlertasAproveitamento(pool, regiao, semanaRef = null) {
+  const semana = semanaRef || `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+  const rows = await pool.query(`
+    SELECT cod_prof, nome_prof, regiao, semana_referencia, pct_prazo,
+           entregas_prazo, entregas_total, pct_min_aplicado, semanas_consecutivas,
+           visto_em, criado_em
+    FROM score_alertas_aproveitamento
+    WHERE semana_referencia = $1
+      ${regiao ? `AND ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$2::text')}` : ''}
+    ORDER BY semanas_consecutivas DESC, pct_prazo ASC
+  `, regiao ? [semana, regiao] : [semana]);
+  return { semana, total: rows.rows.length, alertas: rows.rows };
+}
+
+/**
+ * Aviso pendente (não visto) do motoboy na semana corrente — pro modal do app.
+ * Retorna null se não houver alerta nesta semana ou se já foi visto.
+ */
+async function buscarMeuAvisoAproveitamento(pool, codProf) {
+  const semana = `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+  const r = await pool.query(`
+    SELECT cod_prof, nome_prof, regiao, semana_referencia, pct_prazo,
+           entregas_prazo, entregas_total, pct_min_aplicado, semanas_consecutivas
+    FROM score_alertas_aproveitamento
+    WHERE cod_prof = $1 AND semana_referencia = $2 AND visto_em IS NULL
+    LIMIT 1
+  `, [String(codProf), semana]);
+  if (r.rows.length === 0) return { tem_aviso: false };
+  return { tem_aviso: true, aviso: r.rows[0] };
+}
+
+/** Marca o aviso da semana corrente como visto (motoboy fechou o modal). */
+async function marcarAvisoAproveitamentoVisto(pool, codProf) {
+  const semana = `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+  await pool.query(`
+    UPDATE score_alertas_aproveitamento
+    SET visto_em = NOW()
+    WHERE cod_prof = $1 AND semana_referencia = $2 AND visto_em IS NULL
+  `, [String(codProf), semana]);
+  return { ok: true, semana };
+}
+
 module.exports = {
   // Constantes
   NIVEL_2,
@@ -1078,4 +1282,11 @@ module.exports = {
   // Sorteio
   rodarSorteiosMensais,
   congelarRankingMensal,
+  // 🆕 2026-06: Aproveitamento semanal
+  JANELA_APROVEITAMENTO_DIAS,
+  calcularAproveitamento7d,
+  avaliarAproveitamentoSemanal,
+  listarAlertasAproveitamento,
+  buscarMeuAvisoAproveitamento,
+  marcarAvisoAproveitamentoVisto,
 };

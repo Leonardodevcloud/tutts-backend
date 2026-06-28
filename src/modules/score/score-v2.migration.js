@@ -58,6 +58,17 @@ async function initScoreV2Tables(pool) {
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_cfg_ativo ON score_config_regiao(ativo) WHERE ativo = true').catch(() => {});
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_cfg_regiao_upper ON score_config_regiao(UPPER(regiao))').catch(() => {});
+
+  // 🆕 2026-06: REGRA DE APROVEITAMENTO SEMANAL (ativável por praça)
+  // regra_aproveitamento_ativa: liga/desliga o alerta de aproveitamento nesta praça.
+  // pct_min_aproveitamento: piso de % no prazo (default 95). Quem fica abaixo na
+  //   janela de 7 dias é sinalizado pro admin e recebe aviso ao abrir o app.
+  // A consequência (reduzir direcionamento) é MANUAL — o sistema só sinaliza.
+  await pool.query(`
+    ALTER TABLE score_config_regiao
+      ADD COLUMN IF NOT EXISTS regra_aproveitamento_ativa BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS pct_min_aproveitamento DECIMAL(5,2) DEFAULT 95.00
+  `).catch(e => console.log('⚠️ regra_aproveitamento:', e.message));
   console.log('  ✅ score_config_regiao');
 
   // ============================================================
@@ -225,6 +236,35 @@ async function initScoreV2Tables(pool) {
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_score_bonus_prof ON score_bonus_lancados(cod_prof)').catch(() => {});
   console.log('  ✅ score_bonus_lancados');
+
+  // ============================================================
+  // 6. ALERTAS DE APROVEITAMENTO SEMANAL
+  // ============================================================
+  // 🆕 2026-06: cada sábado o cron avalia os ÚLTIMOS 7 DIAS por praça com
+  // regra_aproveitamento_ativa = true. Quem fica abaixo de pct_min_aproveitamento
+  // vira 1 linha aqui. semana_referencia no formato ISO 'AAAA-Www'.
+  // semanas_consecutivas: nº de semanas seguidas abaixo do piso (reincidência).
+  // visto_em: preenchido quando o motoboy vê o aviso no app.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS score_alertas_aproveitamento (
+      id SERIAL PRIMARY KEY,
+      cod_prof VARCHAR(50) NOT NULL,
+      nome_prof VARCHAR(255),
+      regiao VARCHAR(100),
+      semana_referencia VARCHAR(10) NOT NULL,
+      pct_prazo DECIMAL(5,2) DEFAULT 0,
+      entregas_prazo INT DEFAULT 0,
+      entregas_total INT DEFAULT 0,
+      pct_min_aplicado DECIMAL(5,2) DEFAULT 95,
+      semanas_consecutivas INT DEFAULT 1,
+      visto_em TIMESTAMP,
+      criado_em TIMESTAMP DEFAULT NOW(),
+      UNIQUE(cod_prof, semana_referencia)
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_alerta_aprov_prof ON score_alertas_aproveitamento(cod_prof, criado_em DESC)').catch(() => {});
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_score_alerta_aprov_semana ON score_alertas_aproveitamento(semana_referencia DESC, regiao)').catch(() => {});
+  console.log('  ✅ score_alertas_aproveitamento');
 
   console.log('📊 Score v2 inicializado com sucesso!');
 }
