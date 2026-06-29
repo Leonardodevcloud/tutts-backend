@@ -117,8 +117,31 @@ function parsearEnderecoBrasileiro(str) {
 
   const street = partes.length > 0 ? partes.join(', ') : antes;
 
+  // 🔧 2026-06 (Uber cert): street_address em ATÉ 2 posições [RUA+NÚMERO, BAIRRO]
+  // e remove "N"/"Nº"/"No" antes do número — o "N" atrapalha a normalização de
+  // geolocalização da Uber. Bairro vai na 2ª posição (pode ser omitida).
+  var streetLimpo = String(street || '').replace(/\b[Nn][º°o]?\.?\s+(?=\d)/g, '').replace(/\s{2,}/g, ' ').trim();
+  var segs = streetLimpo.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  var streetArr;
+  if (segs.length <= 1) {
+    streetArr = [streetLimpo || 'Endereço não informado'];
+  } else {
+    // Padrão BR comum: "Rua X, 123, Bairro" — o número vem após a 1ª vírgula.
+    // Se o 2º segmento começa com dígito, é o número: junta com a rua e o
+    // resto vira bairro. Senão, a rua+número já está no 1º segmento.
+    var ruaNumero, bairro;
+    if (/^\d/.test(segs[1])) {
+      ruaNumero = (segs[0] + ' ' + segs[1]).replace(/\s{2,}/g, ' ').trim();
+      bairro = segs.slice(2).join(' ').trim();
+    } else {
+      ruaNumero = segs[0];
+      bairro = segs.slice(1).join(' ').trim();
+    }
+    streetArr = bairro ? [ruaNumero, bairro] : [ruaNumero];
+  }
+
   return {
-    street_address: [street || 'Endereço não informado'],
+    street_address: streetArr,
     city: cidade,
     state: uf,
     zip_code: cep,

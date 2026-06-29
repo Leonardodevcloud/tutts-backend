@@ -62,10 +62,13 @@ function montarJanelasUber(config, agora = Date.now()) {
  * @param {string} nome
  * @param {Object} config
  */
-function montarManifestItem(nome, config) {
+function montarManifestItem(nome, config, priceCents) {
   return {
     name: nome,
     quantity: 1,
+    // 🔧 2026-06 (Uber cert): price (centavos) obrigatório. Com 1 item,
+    // price = manifest_total_value, então Σ(price×quantity) = manifest_total_value.
+    price: parseInt(priceCents != null ? priceCents : ((config && config.manifest_total_value_centavos) || 10000), 10),
     size: (config && config.uber_item_size) || 'small',
     weight: _int(config, 'uber_item_weight_g', 1000),       // gramas
     dimensions: {

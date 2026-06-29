@@ -45,7 +45,7 @@ function montarEnderecoUber(stringEndereco) {
  * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
  * @returns {Object} body que vai pra Uber Direct
  */
-function montarBodyQuote(req) {
+function montarBodyQuote(req, config) {
   const body = {
     pickup_address: montarEnderecoUber(req.pickup.address),
     dropoff_address: montarEnderecoUber(req.dropoff.address),
@@ -59,6 +59,13 @@ function montarBodyQuote(req) {
   if (req.dropoff.latitude != null && req.dropoff.longitude != null) {
     body.dropoff_latitude = parseFloat(req.dropoff.latitude);
     body.dropoff_longitude = parseFloat(req.dropoff.longitude);
+  }
+
+  // 🔧 2026-06 (Uber cert): paridade Quote↔Delivery. Envia os mesmos campos
+  // operacionais do Create Delivery pra consistência entre cotação e criação.
+  if (config) {
+    body.manifest_total_value = parseInt(config.manifest_total_value_centavos || 10000, 10);
+    body.external_store_id = montarExternalStoreId(req, config);
   }
 
   // NOTA: o endpoint /delivery_quotes da Uber NAO aceita vehicle_type — apenas o
@@ -90,7 +97,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
   // manifest_items com weight (g) e dimensions (cm) — REQUIRED na certificacao.
   // Defaults configuraveis no provider (uber_item_weight_g / *_cm).
   const manifestItems = [
-    montarManifestItem(truncarTexto(req.itemDescription || 'Encomenda', 100), config),
+    montarManifestItem(truncarTexto(req.itemDescription || 'Encomenda', 100), config, manifestValueCents),
   ];
 
   const body = {
@@ -105,7 +112,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     pickup_name: truncarTexto(req.pickup.name || 'Loja', 100),
     pickup_phone_number: pickupPhone,
     pickup_business_name: truncarTexto(req.pickup.name || 'Loja', 100),
-    pickup_notes: truncarTexto(resolverAvisoEntregador(config), 280),
+    pickup_notes: truncarTexto(req.pickup.instructions || resolverAvisoEntregador(config), 280),
 
     dropoff_address: montarEnderecoUber(req.dropoff.address),
     dropoff_name: truncarTexto(req.dropoff.name || 'Cliente', 100),

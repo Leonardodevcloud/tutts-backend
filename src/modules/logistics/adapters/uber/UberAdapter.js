@@ -144,7 +144,7 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     const token = await obterTokenUber(this.pool, this.sandboxMode);
     const url = `${this._apiBase}/${customerId}/delivery_quotes`;
-    const body = montarBodyQuote(req);
+    const body = montarBodyQuote(req, this.config);
 
     const resp = await httpRequest(url, {
       method: 'POST',
