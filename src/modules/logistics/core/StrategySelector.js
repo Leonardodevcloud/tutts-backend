@@ -86,6 +86,27 @@ class StrategySelector {
     const eventSource = opts.eventSource || 'worker';
     const vehicleType = regra.vehicle_type_preferido || null;
 
+    // 🆕 2026-06: OVERRIDE DE TESTE — força um provider no despacho AUTOMÁTICO.
+    // Setar LOGISTICS_FORCE_PROVIDER=noventanove (no Railway) faz TODO despacho
+    // automático ir pra 99, ignorando a regra/estratégia, mesmo com a Uber ativa.
+    // O despacho MANUAL (painel) não passa por aqui — testes na Uber seguem normais.
+    // Para voltar ao normal, basta remover/limpar a env var.
+    const forcado = String(process.env.LOGISTICS_FORCE_PROVIDER || '').trim().toLowerCase();
+    if (forcado) {
+      if (this.registry.has(forcado)) {
+        console.log(`🔒 [StrategySelector] OS ${codigoOS}: LOGISTICS_FORCE_PROVIDER=${forcado} — forçando provider no automático (ignora regra/estratégia)`);
+        this.events.log({
+          providerCode: forcado,
+          eventType: 'strategy_forced',
+          eventSource,
+          codigoOS,
+          payload: { motivo: 'LOGISTICS_FORCE_PROVIDER', provider_forcado: forcado, regra_id: regra.id },
+        }).catch(() => {});
+        return { tipo: 'direto', providerCode: forcado, vehicleType };
+      }
+      console.warn(`⚠️ [StrategySelector] LOGISTICS_FORCE_PROVIDER=${forcado} mas esse provider não está ativo no registry — ignorando override`);
+    }
+
     let estrategia = String(regra.estrategia || 'provider_unico').toLowerCase();
     if (!ESTRATEGIAS.includes(estrategia)) {
       console.warn(`[StrategySelector] estratégia desconhecida "${estrategia}" — usando provider_unico`);
