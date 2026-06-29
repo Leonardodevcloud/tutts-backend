@@ -373,8 +373,8 @@ function createGerencialRouter(pool, verificarToken) {
             .filter(function(c){ return /^[0-9]+$/.test(c); })));
           if (codsPlan.length > 0) {
             var ncr = await pool.query(
-              "SELECT cod_cliente::text AS cod, MAX(nome_fantasia) AS nome FROM bi_entregas " +
-              "WHERE cod_cliente::text = ANY($1::text[]) AND nome_fantasia IS NOT NULL AND nome_fantasia <> '' " +
+              "SELECT cod_cliente::text AS cod, MAX(COALESCE(NULLIF(nome_fantasia, ''), centro_custo)) AS nome FROM bi_entregas " +
+              "WHERE cod_cliente::text = ANY($1::text[]) " +
               "GROUP BY cod_cliente", [codsPlan]);
             ncr.rows.forEach(function(r){ if (r.cod) nomeClientePorCod[String(r.cod).trim()] = r.nome; });
           }

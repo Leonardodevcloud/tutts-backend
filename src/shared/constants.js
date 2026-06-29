@@ -30,7 +30,7 @@ const ERRO_MSGS = {
  * Para incluir um novo cliente, basta adicionar o código aqui.
  * Comparação sempre como string — use String(cod) ao verificar.
  */
-const CLIENTES_CC_CONSOLIDADO = ['949', '1165', '1151', '1178', '35', '794', '249'];
+const CLIENTES_CC_CONSOLIDADO = ['949', '1165', '1151', '1178', '1188', '35', '794', '249'];
 
 function ehClienteCcConsolidado(cod) {
   return CLIENTES_CC_CONSOLIDADO.includes(String(cod).trim());
