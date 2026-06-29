@@ -362,6 +362,24 @@ function createGerencialRouter(pool, verificarToken) {
         var mascarasG = {};
         try { var mr2 = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras'); mr2.rows.forEach(function(m) { mascarasG[String(m.cod_cliente)] = m.mascara; }); } catch(e) {}
 
+        // 🆕 2026-06: nome do cliente por código, INDEPENDENTE de onde o motoboy
+        // rodou no dia. Sem isso, linhas COM código (ex: 1165, 1178 consolidados)
+        // caíam no Porto Seco quando o motoboy entregou em outro cliente e não
+        // havia máscara. Restrito aos códigos que aparecem na planilha (leve).
+        var nomeClientePorCod = {};
+        try {
+          var codsPlan = Array.from(new Set(garEntries
+            .map(function(e){ return String(e.codCl || '').trim(); })
+            .filter(function(c){ return /^[0-9]+$/.test(c); })));
+          if (codsPlan.length > 0) {
+            var ncr = await pool.query(
+              "SELECT cod_cliente::text AS cod, MAX(nome_fantasia) AS nome FROM bi_entregas " +
+              "WHERE cod_cliente::text = ANY($1::text[]) AND nome_fantasia IS NOT NULL AND nome_fantasia <> '' " +
+              "GROUP BY cod_cliente", [codsPlan]);
+            ncr.rows.forEach(function(r){ if (r.cod) nomeClientePorCod[String(r.cod).trim()] = r.nome; });
+          }
+        } catch(e) { console.warn('Gerencial nomeClientePorCod erro:', e.message); }
+
         // Processar cada entrada da planilha
         // 🔧 FIX: ondeRodou SEMPRE usa codCl da planilha (não bi_entregas)
         // Se motoboy rodou em múltiplos clientes, não buga mais
@@ -378,7 +396,7 @@ function createGerencialRouter(pool, verificarToken) {
           var codSheet = String(entry.codCl || '').trim();
           var clienteDetail = prod && codSheet ? (prod.clientes[codSheet] || null) : null;
           var ccRodou = clienteDetail ? clienteDetail.cc : '';
-          var nomeBase = mascarasG[codSheet] || (clienteDetail ? clienteDetail.nome : '') || '';
+          var nomeBase = mascarasG[codSheet] || (clienteDetail ? clienteDetail.nome : '') || nomeClientePorCod[codSheet] || '';
           
           var ondeRodou;
           if (!codSheet || !nomeBase) {
