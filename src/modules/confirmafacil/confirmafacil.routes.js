@@ -8,6 +8,19 @@ const { resolverCodigo } = require('./confirmafacil.map');
 const slaMod = require('./confirmafacil.sla');
 const reconcMod = require('./confirmafacil.reconciliacao');
 
+// 🆕 2026-06: converte 'YYYY-MM-DDTHH:MM' (horário de Salvador/BRT, vindo de
+// um <input type="datetime-local">) num Date UTC, ancorando em -03:00. Assim,
+// ao passar por formatarData/formatarHora (que subtraem 3h), o CF recebe
+// exatamente o horário digitado. Retorna null se a string for inválida/vazia.
+function parseDataFinalizacaoBRT(str) {
+  if (!str || typeof str !== 'string') return null;
+  const m = str.trim().match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  const dt = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s || '00'}-03:00`);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
 function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
   const auth   = getConfirmaFacilAuth();
@@ -647,8 +660,14 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // Use para verificar se o CF está recebendo corretamente.
   router.post('/testar-ocorrencia', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      const { solicitacao_id, status } = req.body;
+      const { solicitacao_id, status, data_finalizacao } = req.body;
       if (!solicitacao_id) throw new AppError('solicitacao_id é obrigatório', 400);
+
+      // 🆕 2026-06: horário manual opcional (correção). Tratado como BRT.
+      const dataOcorrencia = parseDataFinalizacaoBRT(data_finalizacao);
+      if (data_finalizacao && !dataOcorrencia) {
+        throw new AppError('data_finalizacao inválida. Use o formato AAAA-MM-DDTHH:MM.', 400);
+      }
 
       // 1. Buscar OS
       const { rows: [solic] } = await pool.query(
@@ -715,7 +734,19 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         osNumero:      solic.tutts_os_numero,
         novoStatus:    statusUsar,
         pontoStatus:   statusUsar,
+        dataOcorrencia, // 🆕 horário manual (ou null = agora)
       });
+
+      // 🆕 2026-06: registra auditoria quando houve correção manual de horário
+      if (dataOcorrencia && typeof registrarAuditoria === 'function') {
+        try {
+          await registrarAuditoria(req, 'cf.finalizar_manual', 'admin', 'confirmafacil', solicitacao_id, {
+            os_numero: solic.tutts_os_numero,
+            status: statusUsar,
+            data_finalizacao_brt: data_finalizacao,
+          });
+        } catch (_) {}
+      }
 
       // 6. Buscar log criado
       const { rows: logs } = await pool.query(`
