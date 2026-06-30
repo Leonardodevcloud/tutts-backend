@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
 const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
+const { buscarHubPorOS } = require('../hub-status.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -584,8 +585,29 @@ router.get('/solicitacao/historico', verificarTokenSolicitacao, async (req, res)
       status ? [req.clienteSolicitacao.id, status] : [req.clienteSolicitacao.id]
     );
     
+    // 🆕 2026-06: enriquece em lote as corridas do Hub (99/Uber) com status real,
+    // motoboy e tracking. Só consulta as OS cujo provider é do Hub.
+    let solicitacoes = result.rows;
+    try {
+      const osDoHub = solicitacoes
+        .filter(s => {
+          const p = String(s.provider_usado || '').toLowerCase();
+          return (p === 'uber' || p === '99' || p === 'noventanove') && s.tutts_os_numero;
+        })
+        .map(s => s.tutts_os_numero);
+      if (osDoHub.length > 0) {
+        const hubMap = await buscarHubPorOS(pool, osDoHub);
+        solicitacoes = solicitacoes.map(s => {
+          const h = hubMap.get(String(s.tutts_os_numero));
+          return h ? { ...s, hub: h } : s;
+        });
+      }
+    } catch (e) {
+      console.error('⚠️ [historico] falha ao enriquecer com Hub:', e.message);
+    }
+
     res.json({
-      solicitacoes: result.rows,
+      solicitacoes,
       total: parseInt(total.rows[0].count),
       pagina: parseInt(pagina),
       limite: parseInt(limite)
@@ -721,9 +743,23 @@ router.get('/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, re
     }
     
     // Retornar dados completos
+    // 🆕 2026-06: se a corrida foi despachada pelo Hub (99/Uber), anexa status
+    // real + motoboy + tracking + posição ao vivo (LEITURA de logistics_*).
+    let hub = null;
+    try {
+      const prov = String(corridaData.provider_usado || '').toLowerCase();
+      if ((prov === 'uber' || prov === '99' || prov === 'noventanove') && corridaData.tutts_os_numero) {
+        const hubMap = await buscarHubPorOS(pool, [corridaData.tutts_os_numero]);
+        hub = hubMap.get(String(corridaData.tutts_os_numero)) || null;
+      }
+    } catch (e) {
+      console.error('⚠️ [corrida/:id] falha ao buscar status do Hub:', e.message);
+    }
+
     res.json({
       ...corridaData,
-      pontos: pontos
+      pontos: pontos,
+      hub,
     });
     
   } catch (err) {
