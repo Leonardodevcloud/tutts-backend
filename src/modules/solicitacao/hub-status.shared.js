@@ -46,6 +46,7 @@ async function buscarHubPorOS(pool, osNumeros) {
     SELECT d.codigo_os, d.provider_code, d.status_canonico, d.status_native,
            d.courier_data, d.tracking_url, d.rastreio_token,
            d.latitude_coleta, d.longitude_coleta, d.latitude_entrega, d.longitude_entrega,
+           d.ultima_lat, d.ultima_lng,
            t.latitude  AS pos_lat,
            t.longitude AS pos_lng,
            t.created_at AS pos_em
@@ -53,7 +54,8 @@ async function buscarHubPorOS(pool, osNumeros) {
     LEFT JOIN LATERAL (
       SELECT latitude, longitude, created_at
       FROM logistics_tracking
-      WHERE delivery_id = d.id
+      WHERE codigo_os = d.codigo_os
+        AND latitude IS NOT NULL AND longitude IS NOT NULL
       ORDER BY created_at DESC
       LIMIT 1
     ) t ON true
@@ -90,9 +92,13 @@ async function buscarHubPorOS(pool, osNumeros) {
         veiculo: courier.vehicle || null,
         rating:  courier.rating != null ? courier.rating : null,
       } : null,
-      posicao: (r.pos_lat != null && r.pos_lng != null) ? {
-        lat: Number(r.pos_lat), lng: Number(r.pos_lng), em: r.pos_em,
-      } : null,
+      posicao: (() => {
+        // Prioriza a última posição na própria entrega; senão, a última do tracking.
+        const lat = (r.ultima_lat != null) ? Number(r.ultima_lat) : (r.pos_lat != null ? Number(r.pos_lat) : null);
+        const lng = (r.ultima_lng != null) ? Number(r.ultima_lng) : (r.pos_lng != null ? Number(r.pos_lng) : null);
+        if (lat == null || lng == null || (lat === 0 && lng === 0)) return null;
+        return { lat, lng, em: r.pos_em || null };
+      })(),
       coleta:  (r.latitude_coleta  != null) ? { lat: Number(r.latitude_coleta),  lng: Number(r.longitude_coleta)  } : null,
       entrega: (r.latitude_entrega != null) ? { lat: Number(r.latitude_entrega), lng: Number(r.longitude_entrega) } : null,
     });
