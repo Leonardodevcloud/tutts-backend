@@ -28,6 +28,9 @@ const STATUS_MAP = {
 
 const PROVIDER_LABEL = { noventanove: '99', '99': '99', uber: 'Uber' };
 
+// Base do rastreio personalizado da Central (mesma env usada no TrackingPoller).
+const RASTREIO_BASE_URL = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
+
 // Busca os dados do Hub para uma lista de OS. Retorna um Map osNumero(String) -> objeto hub.
 async function buscarHubPorOS(pool, osNumeros) {
   // codigo_os em logistics_deliveries é INTEGER; tutts_os_numero é VARCHAR.
@@ -41,7 +44,7 @@ async function buscarHubPorOS(pool, osNumeros) {
 
   const { rows } = await pool.query(`
     SELECT d.codigo_os, d.provider_code, d.status_canonico, d.status_native,
-           d.courier_data, d.tracking_url,
+           d.courier_data, d.tracking_url, d.rastreio_token,
            d.latitude_coleta, d.longitude_coleta, d.latitude_entrega, d.longitude_entrega,
            t.latitude  AS pos_lat,
            t.longitude AS pos_lng,
@@ -75,6 +78,10 @@ async function buscarHubPorOS(pool, osNumeros) {
       etapa: st.etapa,
       terminal: st.terminal,
       tracking_url: r.tracking_url || null,
+      // 🆕 rastreio personalizado da Central (token) — /r/<token>. É o link que
+      // deve ser usado na tela (não o link cru do provedor).
+      rastreio_token: r.rastreio_token || null,
+      rastreio_url: r.rastreio_token ? `${RASTREIO_BASE_URL}/r/${r.rastreio_token}` : null,
       motoboy: (courier.name || courier.photo || courier.phone) ? {
         nome:    courier.name    || null,
         foto:    courier.photo   || null,
