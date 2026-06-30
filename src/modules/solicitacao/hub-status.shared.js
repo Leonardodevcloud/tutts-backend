@@ -30,7 +30,13 @@ const PROVIDER_LABEL = { noventanove: '99', '99': '99', uber: 'Uber' };
 
 // Busca os dados do Hub para uma lista de OS. Retorna um Map osNumero(String) -> objeto hub.
 async function buscarHubPorOS(pool, osNumeros) {
-  const lista = (osNumeros || []).map(o => String(o)).filter(Boolean);
+  // codigo_os em logistics_deliveries é INTEGER; tutts_os_numero é VARCHAR.
+  // Converte pra inteiro e descarta valores não numéricos (evita erro de tipo no Postgres).
+  const lista = [...new Set(
+    (osNumeros || [])
+      .map(o => parseInt(String(o).trim(), 10))
+      .filter(n => Number.isInteger(n))
+  )];
   if (lista.length === 0) return new Map();
 
   const { rows } = await pool.query(`
@@ -48,7 +54,7 @@ async function buscarHubPorOS(pool, osNumeros) {
       ORDER BY criado_em DESC
       LIMIT 1
     ) t ON true
-    WHERE d.codigo_os = ANY($1::text[])
+    WHERE d.codigo_os = ANY($1::int[])
     AND d.id = (
       SELECT id FROM logistics_deliveries d2
       WHERE d2.codigo_os = d.codigo_os
