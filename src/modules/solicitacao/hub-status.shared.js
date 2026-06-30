@@ -48,13 +48,13 @@ async function buscarHubPorOS(pool, osNumeros) {
            d.latitude_coleta, d.longitude_coleta, d.latitude_entrega, d.longitude_entrega,
            t.latitude  AS pos_lat,
            t.longitude AS pos_lng,
-           t.criado_em AS pos_em
+           t.created_at AS pos_em
     FROM logistics_deliveries d
     LEFT JOIN LATERAL (
-      SELECT latitude, longitude, criado_em
+      SELECT latitude, longitude, created_at
       FROM logistics_tracking
       WHERE delivery_id = d.id
-      ORDER BY criado_em DESC
+      ORDER BY created_at DESC
       LIMIT 1
     ) t ON true
     WHERE d.codigo_os = ANY($1::int[])
