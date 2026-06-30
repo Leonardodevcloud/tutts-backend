@@ -887,6 +887,57 @@ class DispatchOrchestrator {
       return { decision: 'os_nao_encontrada', erro: `OS ${codigoOS} não está na Mapp` };
     }
 
+    // 🆕 2026-06: ESCOLHA DO CLIENTE (tela solicitacao.html) MANDA NO DESPACHO.
+    // Quando a corrida foi criada na tela do cliente, gravamos a escolha em
+    // solicitacoes_corrida.provider_usado ('tutts' | 'uber' | '99'). Aqui ela
+    // tem prioridade sobre regra/estratégia/StrategySelector:
+    //   - 'tutts'        → NÃO despacha pelo Hub (fica na plataforma/motoboys).
+    //   - 'uber' / '99'  → despacha forçando esse provider.
+    //   - sem registro   → segue o fluxo normal (OS que não veio da tela do cliente).
+    try {
+      const { rows: escolhaRows } = await this.pool.query(
+        `SELECT provider_usado FROM solicitacoes_corrida
+         WHERE tutts_os_numero = $1
+         ORDER BY id DESC LIMIT 1`,
+        [String(codigoOS)]
+      );
+      if (escolhaRows.length > 0 && escolhaRows[0].provider_usado) {
+        const escolhaCliente = String(escolhaRows[0].provider_usado).trim().toLowerCase();
+        const mapProvider = { '99': 'noventanove', 'noventanove': 'noventanove', 'uber': 'uber' };
+
+        if (escolhaCliente === 'tutts') {
+          console.log(`👤 [Orchestrator] OS ${codigoOS}: cliente escolheu TUTTS (plataforma) — Hub não despacha`);
+          this.events.log({
+            providerCode: 'none',
+            eventType: EventType.DISPATCH_REJECTED_BY_RULE,
+            eventSource,
+            codigoOS,
+            payload: { motivo: 'escolha_cliente_tutts' },
+          }).catch(() => {});
+          return { decision: 'escolha_cliente_tutts' };
+        }
+
+        const provForcado = mapProvider[escolhaCliente];
+        if (provForcado && this.registry.has(provForcado)) {
+          console.log(`👤 [Orchestrator] OS ${codigoOS}: cliente escolheu ${escolhaCliente} → despachando via ${provForcado} (ignora regra/estratégia)`);
+          const decisaoRegra = await this.matcher.match(servico);
+          const regraEscolha = decisaoRegra.regra || {};
+          const vehicleTypeEscolha = regraEscolha.vehicle_type_preferido || null;
+          return await this.dispatch(servico, {
+            providerCode: provForcado,
+            vehicleType: vehicleTypeEscolha,
+            regraId: regraEscolha.id || null,
+            eventSource,
+          });
+        }
+        if (provForcado) {
+          console.warn(`⚠️ [Orchestrator] OS ${codigoOS}: cliente escolheu ${escolhaCliente} mas provider ${provForcado} não está ativo no registry — seguindo fluxo normal`);
+        }
+      }
+    } catch (e) {
+      console.error(`⚠️ [Orchestrator] OS ${codigoOS}: falha ao ler escolha do cliente (seguindo fluxo normal):`, e.message);
+    }
+
     // 1. Match de regra
     const decisao = await this.matcher.match(servico);
     if (!decisao.despachar) {
