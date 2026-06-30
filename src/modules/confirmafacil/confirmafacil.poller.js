@@ -155,6 +155,30 @@ class ConfirmaFacilPoller {
       return;
     }
     console.log('[CF Poller] iniciando ciclo...');
+
+    // 🧹 Limpa vínculos órfãos antes de processar. Corridas que nunca viraram OS
+    // (fantasma) ou foram canceladas deixam o vínculo preso, e como o poller ignora
+    // NF com vínculo, a NF ficaria travada pra sempre. Removendo o órfão, a NF volta
+    // a ser elegível pra recriação automática.
+    try {
+      const { rowCount: orfaos } = await this.pool.query(`
+        DELETE FROM confirmafacil_vinculos v
+        USING solicitacoes_corrida s
+        WHERE v.solicitacao_id = s.id
+          AND (
+            LOWER(COALESCE(s.status, '')) LIKE '%cancel%'
+            OR (
+              s.tutts_os_numero IS NULL
+              AND s.codigo_profissional IS NULL
+              AND s.criado_em < NOW() - INTERVAL '15 minutes'
+            )
+          )
+      `);
+      if (orfaos > 0) console.log(`[CF Poller] 🧹 ${orfaos} vínculo(s) órfão(s) de corrida fantasma/cancelada removido(s) — NFs liberadas`);
+    } catch (e) {
+      console.error('[CF Poller] erro ao limpar vínculos órfãos:', e.message);
+    }
+
     const { rows: configs } = await this.pool.query(`
       SELECT
         cf.id,
