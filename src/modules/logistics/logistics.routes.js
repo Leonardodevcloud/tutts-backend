@@ -45,6 +45,7 @@ const { EventSource } = require('./core/EventLogger');
 const { createDispatchRulesRoutes } = require('./routes/dispatch-rules.routes');
 const { createConfigGlobalRoutes } = require('./routes/config-global.routes');
 const { createDashboardRoutes } = require('./routes/dashboard.routes');
+const { createOcorrenciasRoutes } = require('./routes/ocorrencias.routes');
 const { initLogisticsBackfill } = require('./logistics.backfill');
 
 function notImplemented(fase) {
@@ -670,6 +671,9 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // CRUD de dispatch-rules (Fase 2) — sub-router dedicado
   // ───────────────────────────────────────────────────────────
   router.use(createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+
+  // Ocorrencias + bloqueio de entregadores + motoboys frequentes
+  router.use(createOcorrenciasRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
   // ───────────────────────────────────────────────────────────
   // Config global do hub (guardrail global de margem) — sub-router

@@ -20,6 +20,7 @@ const { initLogisticsTables: initTabelasBase } = require('./logistics.migration'
 const { initLogisticsBackfill } = require('./logistics.backfill');
 const { initLogisticsFase3 } = require('./logistics.migration-fase3');
 const { initLogisticsConfigGlobal } = require('./logistics.migration-config-global');
+const { initLogisticsBloqueadosTables } = require('./logistics.migration-bloqueados');
 const { createLogisticsRouter } = require('./logistics.routes');
 const { createLogisticsWebhookRouter } = require('./routes/webhook.routes');
 const { createLogisticsRastreioRouter } = require('./routes/rastreio.routes');
@@ -56,6 +57,11 @@ async function initLogisticsTables(pool) {
   // idempotente. Bloqueante mas trivial (1 CREATE + 1 INSERT ON CONFLICT).
   await initLogisticsConfigGlobal(pool).catch(err => {
     console.error('⚠️ [logistics] migration config-global falhou:', err.message);
+  });
+
+  // Ocorrencias + blacklist de entregadores. Bloqueante mas trivial (2 CREATE).
+  await initLogisticsBloqueadosTables(pool).catch(err => {
+    console.error('⚠️ [logistics] migration bloqueados falhou:', err.message);
   });
 
   // Fase 2: backfill de entregas (não-bloqueante)

@@ -448,6 +448,81 @@ class WebhookDispatcher {
   }
 
   /**
+   * 🚫 Blacklist: se o courier atribuido bate com um bloqueio ATIVO (por
+   * telefone ou placa), cancela a entrega no provider e dispara nova
+   * atribuicao (reatribuicao automatica). Protegido contra loop por um teto
+   * de reatribuicoes por OS (em memoria).
+   *
+   * @returns {Promise<boolean>} true se barrou (cancelou/reatribuiu) — o
+   *   chamador deve interromper o fluxo normal de courier_update.
+   * @private
+   */
+  async _checarBloqueioEReatribuir(providerCode, entrega, courier) {
+    const { buscarBloqueioAtivo } = require('../logistics.bloqueados');
+    const bloqueio = await buscarBloqueioAtivo(this.pool, courier);
+    if (!bloqueio) return false;
+
+    const codigoOS = entrega.codigo_os;
+
+    // Teto de reatribuicoes por OS (evita loop se o provider insistir no mesmo
+    // entregador barrado). Em memoria — reinicio zera, cenario raro.
+    const TETO = 3;
+    if (!this._reatribBloqueio) this._reatribBloqueio = new Map();
+    const jaFeitas = this._reatribBloqueio.get(codigoOS) || 0;
+
+    console.warn(`🚫 [WebhookDispatcher] OS ${codigoOS}: entregador BLOQUEADO detectado (${courier.name}) — bloqueio id=${bloqueio.id}`);
+
+    // Contabiliza a reatribuicao no bloqueio (metricas do painel)
+    await this.pool.query(
+      'UPDATE logistics_couriers_bloqueados SET reatribuicoes = reatribuicoes + 1 WHERE id = $1',
+      [bloqueio.id]
+    ).catch(() => {});
+
+    // Audita o evento
+    this.events.log({
+      providerCode,
+      eventType: EventType.REDISPATCHED,
+      eventSource: EventSource.SYSTEM,
+      codigoOS,
+      deliveryId: entrega.id,
+      payload: { motivo: 'entregador_bloqueado', bloqueio_id: bloqueio.id, courier: courier.name },
+    }).catch(() => {});
+
+    const { getDispatchOrchestrator } = require('./DispatchOrchestrator');
+    const orchestrator = getDispatchOrchestrator(this.pool);
+
+    // Cancela no provider + reabre a OS na Mapp (reabrirMapp:true default)
+    try {
+      await orchestrator.cancel(entrega.id, {
+        motivo: `Entregador bloqueado (${courier.name || 's/ nome'}) — reatribuicao automatica`,
+        canceladoPor: 'sistema-bloqueio',
+        eventSource: EventSource.SYSTEM,
+        reabrirMapp: true,
+      });
+    } catch (eCancel) {
+      // Se ja estava terminal ou o cancel falhou, ainda assim NAO seguimos o
+      // fluxo normal (nao queremos vincular o bloqueado). Loga e retorna true.
+      console.warn(`[WebhookDispatcher] cancel do bloqueado OS ${codigoOS} nao confirmado: ${eCancel.message}`);
+      return true;
+    }
+
+    // Reatribui (novo chamado) se ainda nao estourou o teto
+    if (jaFeitas < TETO) {
+      this._reatribBloqueio.set(codigoOS, jaFeitas + 1);
+      try {
+        await orchestrator.tryDispatchByOS(codigoOS, { motivo: 'reatribuicao_bloqueio' });
+        console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: reatribuida (tentativa ${jaFeitas + 1}/${TETO})`);
+      } catch (eRe) {
+        console.error(`[WebhookDispatcher] falha ao reatribuir OS ${codigoOS}: ${eRe.message}`);
+      }
+    } else {
+      console.warn(`⚠️ [WebhookDispatcher] OS ${codigoOS}: teto de reatribuicoes (${TETO}) atingido — corrida cancelada, INTERVIR MANUALMENTE`);
+    }
+
+    return true;
+  }
+
+  /**
    * Processa courier_update: salva dados do entregador, vincula na Mapp,
    * grava posição no tracking, faz broadcast WebSocket.
    * @private
@@ -455,6 +530,19 @@ class WebhookDispatcher {
   async _processarCourierUpdate(providerCode, entrega, evento) {
     const codigoOS = entrega.codigo_os;
     const courier = evento.courier;
+
+    // 🚫 BLACKLIST — se o entregador atribuido esta bloqueado, cancela e
+    // reatribui automaticamente ANTES de vincular na Mapp. Cobre 99 e Uber
+    // porque ambos convergem aqui (webhook Uber + TrackingPoller 99).
+    if (courier?.name) {
+      try {
+        const barrado = await this._checarBloqueioEReatribuir(providerCode, entrega, courier);
+        if (barrado) return; // ja foi cancelado/reatribuido — nao segue o fluxo normal
+      } catch (eBloq) {
+        console.error(`[WebhookDispatcher] erro na checagem de bloqueio OS ${codigoOS}:`, eBloq.message);
+        // fail-open: se a checagem falhar, segue o fluxo normal (nao trava a corrida)
+      }
+    }
 
     // Vincula motorista na Mapp se é a primeira vez (entrega ainda sem courier)
     if (courier?.name) {
