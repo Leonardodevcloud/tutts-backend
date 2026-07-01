@@ -233,6 +233,8 @@ function createOcorrenciasRoutes(pool, verificarToken, verificarAdmin, registrar
              MAX(courier_data->>'name')    AS nome,
              MAX(courier_data->>'plate')   AS placa,
              MAX(provider_code)            AS provider,
+             (array_agg(courier_data->>'photo' ORDER BY entregue_at DESC)
+                FILTER (WHERE COALESCE(courier_data->>'photo','') <> ''))[1] AS foto,
              COUNT(*)                      AS pedidos,
              MAX(entregue_at)              AS ultimo
            FROM logistics_deliveries
@@ -263,6 +265,7 @@ function createOcorrenciasRoutes(pool, verificarToken, verificarAdmin, registrar
           telefone: r.tel,
           placa: r.placa,
           provider: r.provider,
+          foto: r.foto || null,
           pedidos: Number(r.pedidos),
           ultimo: r.ultimo,
         })),
