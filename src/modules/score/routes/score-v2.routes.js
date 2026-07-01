@@ -127,8 +127,11 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // ADMIN: força a análise de aproveitamento agora (sem esperar o sábado)
   router.post('/score-v2/admin/avaliar-aproveitamento', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      console.log('🔁 [Score v2] Avaliação de aproveitamento forçada manualmente...');
-      const r = await avaliarAproveitamentoSemanal(pool);
+      const { data_ref } = req.body || {};
+      const optsAprov = {};
+      if (data_ref && /^\d{4}-\d{2}-\d{2}$/.test(data_ref)) optsAprov.dataRef = data_ref;
+      console.log('🔁 [Score v2] Avaliação de aproveitamento forçada' + (optsAprov.dataRef ? ` (fim da janela: ${optsAprov.dataRef})` : ' (últimos 7 dias)'));
+      const r = await avaliarAproveitamentoSemanal(pool, optsAprov);
       res.json({
         sucesso: true,
         mensagem: `Análise concluída: ${r.alertas} alerta(s) em ${r.regioes} praça(s).`,
@@ -288,6 +291,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           saque_teto_n2, saque_teto_n3,
           n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
           n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
+          regra_aproveitamento_ativa, pct_min_aproveitamento,
           criado_em, atualizado_em, criado_por
         FROM score_config_regiao
         ORDER BY regiao
@@ -485,12 +489,14 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
   // Disparo manual de sorteio (debug ou refazer mês perdido)
   router.post('/score-v2/admin/sortear-agora', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const { mes_referencia } = req.body || {};
+      const { mes_referencia, reavaliar } = req.body || {};
       if (!mes_referencia || !/^\d{4}-\d{2}$/.test(mes_referencia)) {
         return res.status(400).json({ error: 'mes_referencia obrigatório no formato YYYY-MM' });
       }
-      const resultados = await rodarSorteiosMensais(pool, mes_referencia);
-      res.json({ sucesso: true, mes: mes_referencia, sorteios: resultados });
+      // 🆕 2026-07: reavaliar=true (default) recalcula as praças antes de sortear (mata "fora do patamar").
+      // Passe reavaliar:false só pra refazer um mês antigo sem recalcular o nível de agora.
+      const resultados = await rodarSorteiosMensais(pool, mes_referencia, { reavaliar: reavaliar !== false });
+      res.json({ sucesso: true, mes: mes_referencia, reavaliado: reavaliar !== false, sorteios: resultados });
     } catch (err) {
       console.error('❌ [Score v2] /sortear-agora:', err);
       res.status(500).json({ error: 'Erro', details: err.message });

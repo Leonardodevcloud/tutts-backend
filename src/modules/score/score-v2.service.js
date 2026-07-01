@@ -688,8 +688,27 @@ async function avaliarMotoboy(pool, codProf) {
  *
  * IDEMPOTENTE: UNIQUE(mes_referencia, regiao, nivel) impede dupla execução.
  */
-async function rodarSorteiosMensais(pool, mesRef) {
+async function rodarSorteiosMensais(pool, mesRef, opts = {}) {
   console.log(`🎲 [Score v2] Rodando sorteios para ${mesRef}...`);
+
+  // 🆕 2026-07: FIX "sorteando fora do patamar" — reavalia todas as praças ativas
+  // ANTES de sortear, pra que score_nivel_motoboy.nivel_atual reflita a realidade
+  // (o snapshot só atualizava quando o motoboy abria a tela / no cron de sábado, então
+  // gente que havia caído de nível continuava congelada no nível antigo e era sorteada).
+  // Pode desligar com { reavaliar: false } (ex: refazer um mês antigo sem mexer no nível de agora).
+  const reavaliar = opts.reavaliar !== false;
+  if (reavaliar) {
+    try {
+      const ativas = await pool.query(`SELECT regiao FROM score_config_regiao WHERE ativo = true`);
+      console.log(`  🔄 [sorteio] reavaliando ${ativas.rows.length} praça(s) antes de sortear...`);
+      for (const rr of ativas.rows) {
+        try { await avaliarRegiaoCompleta(pool, rr.regiao); }
+        catch (e) { console.error(`  ⚠️ [sorteio] reavaliar "${rr.regiao}":`, e.message); }
+      }
+    } catch (e) {
+      console.error('  ⚠️ [sorteio] reavaliação prévia falhou (segue com snapshot atual):', e.message);
+    }
+  }
 
   // 🆕 2026-06: congela a colocacao do mes ANTES de sortear (mesmo regioes
   // sem candidato ficam registradas, pra dar pra ver a colocacao depois).
@@ -1124,9 +1143,14 @@ async function congelarRankingMensal(pool, mesRef) {
  * últimos N dias usando a nova régua. Retorna null se não houver entrega
  * avaliável no período.
  */
-async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAMENTO_DIAS) {
+async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAMENTO_DIAS, dataRef = null) {
   const codInt = parseInt(codProf, 10);
   if (!Number.isFinite(codInt)) return null;
+  // 🆕 2026-07: fim da janela = dataRef ('YYYY-MM-DD') OU hoje. Permite reprocessar
+  // semanas passadas (aba Aproveitamento "processar períodos antigos").
+  const temRef = !!dataRef;
+  const fimSQL = temRef ? '$3::date' : 'CURRENT_DATE';
+  const params = temRef ? [codInt, String(dias - 1), dataRef] : [codInt, String(dias - 1)];
   const r = await pool.query(`
     WITH base AS (
       SELECT
@@ -1136,14 +1160,14 @@ async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAME
         (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
       FROM bi_entregas
       WHERE cod_prof = $1
-        AND data_solicitado >= (CURRENT_DATE - ($2 || ' days')::interval)::date
-        AND data_solicitado <= CURRENT_DATE
+        AND data_solicitado >= (${fimSQL} - ($2 || ' days')::interval)::date
+        AND data_solicitado <= ${fimSQL}
     )
     SELECT
       COUNT(*) FILTER (WHERE avaliavel)::int AS total,
       COUNT(*) FILTER (WHERE avaliavel AND tempo_prof_min <= prazo_regua)::int AS no_prazo
     FROM base
-  `, [codInt, String(dias - 1)]);
+  `, params);
   const total = parseInt(r.rows[0].total, 10) || 0;
   const noPrazo = parseInt(r.rows[0].no_prazo, 10) || 0;
   if (total === 0) return null;
@@ -1155,8 +1179,12 @@ async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAME
  * Registra um alerta por motoboy que ficou abaixo do piso, calculando
  * a reincidência (semanas_consecutivas). Idempotente via UNIQUE.
  */
-async function avaliarAproveitamentoSemanal(pool) {
-  const semanaRef = `${new Date().getFullYear()}-W${String(isoWeek(new Date())).padStart(2, '0')}`;
+async function avaliarAproveitamentoSemanal(pool, opts = {}) {
+  // 🆕 2026-07: opts.dataRef ('YYYY-MM-DD') define o FIM da janela de 7 dias.
+  // Sem dataRef = últimos 7 dias a partir de hoje (comportamento do cron de sábado).
+  const dataRef = opts.dataRef || null;
+  const refDate = dataRef ? new Date(dataRef + 'T12:00:00') : new Date();
+  const semanaRef = opts.semanaRef || `${refDate.getFullYear()}-W${String(isoWeek(refDate)).padStart(2, '0')}`;
   const regioes = await pool.query(`
     SELECT regiao, COALESCE(pct_min_aproveitamento, 95) AS pct_min
     FROM score_config_regiao
@@ -1174,7 +1202,7 @@ async function avaliarAproveitamentoSemanal(pool) {
 
     for (const m of motoboys.rows) {
       try {
-        const aprov = await calcularAproveitamento7d(pool, m.cod_prof);
+        const aprov = await calcularAproveitamento7d(pool, m.cod_prof, JANELA_APROVEITAMENTO_DIAS, dataRef);
         if (!aprov) continue; // sem entrega avaliável na semana — não sinaliza
         if (aprov.pct >= pctMin) continue; // dentro do piso — ok
 
