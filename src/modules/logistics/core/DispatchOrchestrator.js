@@ -932,7 +932,7 @@ class DispatchOrchestrator {
             return { decision: 'hub_sem_provider_ativo' };
           }
           const regraHub = {
-            id: 'hub-virtual',
+            id: null,
             estrategia: 'melhor_preco',
             providers_preferidos: ativosHub,
             vehicle_type_preferido: null,
@@ -957,7 +957,7 @@ class DispatchOrchestrator {
           return await this.dispatch(servico, {
             providerCode: escolhaHub.providerCode,
             vehicleType: escolhaHub.vehicleType || null,
-            regraId: 'hub-virtual',
+            regraId: null,
             eventSource,
           });
         }
