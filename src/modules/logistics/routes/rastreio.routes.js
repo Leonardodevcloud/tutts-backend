@@ -66,6 +66,23 @@ function createLogisticsRastreioRouter(pool) {
         return null;
       });
 
+      // Parceiro frequente: > 3 entregas concluidas pelo mesmo telefone.
+      let entregadorFrequente = false;
+      if (courier.name && courier.phone) {
+        const telNorm = String(courier.phone).replace(/[^0-9]/g, '');
+        if (telNorm) {
+          try {
+            const { rows: cnt } = await pool.query(
+              `SELECT COUNT(*)::int AS n FROM logistics_deliveries
+                WHERE entregue_at IS NOT NULL
+                  AND regexp_replace(COALESCE(courier_data->>'phone',''), '[^0-9]', '', 'g') = $1`,
+              [telNorm]
+            );
+            entregadorFrequente = !!(cnt[0] && cnt[0].n > 3);
+          } catch (_) { /* silencioso: selo e cosmetico */ }
+        }
+      }
+
       res.set('Cache-Control', 'no-store');
       res.json({
         status: d.status_canonico,
@@ -79,6 +96,7 @@ function createLogisticsRastreioRouter(pool) {
           placa: courier.plate || null,
           foto: courier.photo || null,
           telefone: courier.phone || null,
+          frequente: entregadorFrequente,
         } : null,
         posicao: (d.ultima_lat != null && d.ultima_lng != null) ? {
           lat: parseFloat(d.ultima_lat),
