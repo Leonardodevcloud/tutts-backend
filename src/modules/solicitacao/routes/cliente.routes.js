@@ -6,7 +6,6 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
 const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
-const { buscarHubPorOS } = require('../hub-status.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -176,7 +175,15 @@ router.post('/solicitacao/corrida', verificarTokenSolicitacao, async (req, res) 
     // Validar provedor selecionado
     const providerSolicitado = (provider || 'tutts').toLowerCase();
     const provedoresHabilitados = req.clienteSolicitacao.provedores_habilitados || ['tutts'];
-    if (!provedoresHabilitados.includes(providerSolicitado)) {
+    // 🆕 2026-06: 'hub' = despacho automatico (99/Uber decidido pela regra do Hub).
+    // Aceito quando o cliente tem algum provider do Hub habilitado (uber ou 99).
+    // Guarda 'hub' em provider_usado; o DispatchOrchestrator ve 'hub', nao forca
+    // provider e deixa o StrategySelector decidir.
+    const temProviderHub = provedoresHabilitados.includes('uber') || provedoresHabilitados.includes('99');
+    const providerValido = providerSolicitado === 'hub'
+      ? temProviderHub
+      : provedoresHabilitados.includes(providerSolicitado);
+    if (!providerValido) {
       return res.status(400).json({ error: 'Provedor "' + providerSolicitado + '" não habilitado para este cliente' });
     }
 
@@ -585,29 +592,8 @@ router.get('/solicitacao/historico', verificarTokenSolicitacao, async (req, res)
       status ? [req.clienteSolicitacao.id, status] : [req.clienteSolicitacao.id]
     );
     
-    // 🆕 2026-06: enriquece em lote as corridas do Hub (99/Uber) com status real,
-    // motoboy e tracking. Só consulta as OS cujo provider é do Hub.
-    let solicitacoes = result.rows;
-    try {
-      const osDoHub = solicitacoes
-        .filter(s => {
-          const p = String(s.provider_usado || '').toLowerCase();
-          return (p === 'uber' || p === '99' || p === 'noventanove') && s.tutts_os_numero;
-        })
-        .map(s => s.tutts_os_numero);
-      if (osDoHub.length > 0) {
-        const hubMap = await buscarHubPorOS(pool, osDoHub);
-        solicitacoes = solicitacoes.map(s => {
-          const h = hubMap.get(String(s.tutts_os_numero));
-          return h ? { ...s, hub: h } : s;
-        });
-      }
-    } catch (e) {
-      console.error('⚠️ [historico] falha ao enriquecer com Hub:', e.message);
-    }
-
     res.json({
-      solicitacoes,
+      solicitacoes: result.rows,
       total: parseInt(total.rows[0].count),
       pagina: parseInt(pagina),
       limite: parseInt(limite)
@@ -743,23 +729,9 @@ router.get('/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, re
     }
     
     // Retornar dados completos
-    // 🆕 2026-06: se a corrida foi despachada pelo Hub (99/Uber), anexa status
-    // real + motoboy + tracking + posição ao vivo (LEITURA de logistics_*).
-    let hub = null;
-    try {
-      const prov = String(corridaData.provider_usado || '').toLowerCase();
-      if ((prov === 'uber' || prov === '99' || prov === 'noventanove') && corridaData.tutts_os_numero) {
-        const hubMap = await buscarHubPorOS(pool, [corridaData.tutts_os_numero]);
-        hub = hubMap.get(String(corridaData.tutts_os_numero)) || null;
-      }
-    } catch (e) {
-      console.error('⚠️ [corrida/:id] falha ao buscar status do Hub:', e.message);
-    }
-
     res.json({
       ...corridaData,
-      pontos: pontos,
-      hub,
+      pontos: pontos
     });
     
   } catch (err) {
