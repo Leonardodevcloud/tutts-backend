@@ -142,19 +142,26 @@ function createOcorrenciasRoutes(pool, verificarToken, verificarAdmin, registrar
     try {
       const busca = (req.query.busca || '').trim();
       const params = [];
-      let filtro = 'WHERE ativo = true';
+      let filtro = 'WHERE b.ativo = true';
       if (busca) {
         params.push(`%${busca.toLowerCase()}%`);
         params.push(`%${busca.replace(/\D+/g, '')}%`);
-        filtro += ` AND (LOWER(nome) LIKE $1 OR telefone_norm LIKE $2)`;
+        filtro += ` AND (LOWER(b.nome) LIKE $1 OR b.telefone_norm LIKE $2)`;
       }
 
       const lista = await pool.query(
-        `SELECT id, nome, telefone_norm, placa_norm, provider_code, motivo,
-                bloqueado_por, reatribuicoes, criado_em
-           FROM logistics_couriers_bloqueados
+        `SELECT b.id, b.nome, b.telefone_norm, b.placa_norm, b.provider_code, b.motivo,
+                b.bloqueado_por, b.reatribuicoes, b.criado_em,
+                (SELECT d.courier_data->>'photo'
+                   FROM logistics_deliveries d
+                  WHERE COALESCE(d.courier_data->>'photo','') <> ''
+                    AND b.telefone_norm <> ''
+                    AND regexp_replace(COALESCE(d.courier_data->>'phone',''), '[^0-9]', '', 'g') = b.telefone_norm
+                  ORDER BY d.entregue_at DESC NULLS LAST, d.id DESC
+                  LIMIT 1) AS foto
+           FROM logistics_couriers_bloqueados b
            ${filtro}
-           ORDER BY criado_em DESC`,
+           ORDER BY b.criado_em DESC`,
         params
       );
 
@@ -245,6 +252,10 @@ function createOcorrenciasRoutes(pool, verificarToken, verificarAdmin, registrar
          )
          SELECT * FROM base
           WHERE tel <> '' AND pedidos > 3
+            AND tel NOT IN (
+              SELECT telefone_norm FROM logistics_couriers_bloqueados
+               WHERE ativo = true AND telefone_norm IS NOT NULL AND telefone_norm <> ''
+            )
           ORDER BY pedidos DESC, ultimo DESC`,
         [String(dias)]
       );
