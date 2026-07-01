@@ -917,6 +917,51 @@ class DispatchOrchestrator {
           return { decision: 'escolha_cliente_tutts' };
         }
 
+        if (escolhaCliente === 'hub') {
+          const ativosHub = this.registry.listActiveCodes();
+          if (!ativosHub || ativosHub.length === 0) {
+            console.warn(`[Orchestrator] OS ${codigoOS}: cliente escolheu HUB mas nenhum provider do Hub esta ativo no registry`);
+            this.events.log({
+              providerCode: 'none',
+              eventType: EventType.DISPATCH_FAILED,
+              eventSource,
+              codigoOS,
+              erro: 'HUB sem provider ativo no registry',
+              processado: false,
+            }).catch(() => {});
+            return { decision: 'hub_sem_provider_ativo' };
+          }
+          const regraHub = {
+            id: 'hub-virtual',
+            estrategia: 'melhor_preco',
+            providers_preferidos: ativosHub,
+            vehicle_type_preferido: null,
+          };
+          console.log(`[Orchestrator] OS ${codigoOS}: cliente escolheu HUB -> estrategia melhor_preco sobre [${ativosHub.join(',')}] (ignora regra de endereco)`);
+          const escolhaHub = await this.strategySelector.decidir(servico, regraHub, { eventSource });
+          if (escolhaHub.tipo === 'erro') {
+            console.warn(`[Orchestrator] OS ${codigoOS}: HUB nao achou provider viavel (${escolhaHub.motivo})`);
+            this.events.log({
+              providerCode: 'none',
+              eventType: EventType.DISPATCH_FAILED,
+              eventSource,
+              codigoOS,
+              erro: `HUB estrategia falhou: ${escolhaHub.motivo} - ${escolhaHub.detalhe || ''}`,
+              processado: false,
+            }).catch(() => {});
+            return { decision: `hub_rejeitado_${escolhaHub.motivo}` };
+          }
+          if (escolhaHub.tipo === 'fallback_chain') {
+            return await this._dispatchComFallback(codigoOS, servico, regraHub, escolhaHub.chain, null, eventSource);
+          }
+          return await this.dispatch(servico, {
+            providerCode: escolhaHub.providerCode,
+            vehicleType: escolhaHub.vehicleType || null,
+            regraId: 'hub-virtual',
+            eventSource,
+          });
+        }
+
         const provForcado = mapProvider[escolhaCliente];
         if (provForcado && this.registry.has(provForcado)) {
           console.log(`👤 [Orchestrator] OS ${codigoOS}: cliente escolheu ${escolhaCliente} → despachando via ${provForcado} (ignora regra/estratégia)`);
