@@ -184,6 +184,12 @@ const ACOMP_URL = () =>
 const MODAL_INFO_URL = () =>
   process.env.SISTEMA_EXTERNO_MODAL_INFO_URL ||
   'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxModalInformacoesServico.php';
+// 🆕 2026-07 v2.4: modal "Centro de Custo" — resposta contém o centro
+// atribuído à OS (li.ms-selected + idCentroPop). Usado pra clientes
+// multi-centro (767 Comollati, 814 Cobra), em tempo real, sem depender do BI.
+const MODAL_CENTRO_URL = () =>
+  process.env.SISTEMA_EXTERNO_MODAL_CENTRO_URL ||
+  'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxAlterarEmpresasOs.php';
 
 // ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
 // Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
@@ -1239,6 +1245,80 @@ async function coletarOsEmExecucao(opts = {}) {
       }
     }
 
+    // ── 🆕 2026-07 v2.4: centro de custo via modal (clientes multi-centro) ──
+    // GET ajaxAlterarEmpresasOs.php?os=N na MESMA sessão. A resposta traz o
+    // centro atribuído em duas formas (parse com fallback):
+    //   1. <li class="ms-elem-selection ms-selected"><span>NOME</span>
+    //   2. var idCentroPop = 'ID' → casa com <option value="ID">NOME</option>
+    // Só consulta OS de clientes configurados (SLA_MONITOR_CENTRO_CLIENTES)
+    // que ainda não têm centro no snapshot — uma consulta por OS na vida dela.
+    if (opts.buscarCentro) {
+      const TEMPO_MAX_CENTRO_MS = Number(process.env.SLA_MONITOR_CENTRO_TEMPO_MAX_MS || 30_000);
+      const clientesCentro = new Set((opts.buscarCentro.clientes || []).map(String));
+      const pularCentro = new Set(opts.buscarCentro.pular || []);
+      const maxCentro = Number(opts.buscarCentro.max || 20);
+      const concCentro = Math.max(1, Math.min(4, Number(opts.buscarCentro.concorrencia || 3)));
+
+      const alvosCentro = Array.from(todasOsMap.values())
+        .filter((o) => o.cliente_cod && clientesCentro.has(String(o.cliente_cod)) && !pularCentro.has(o.os_numero))
+        .slice(0, maxCentro)
+        .map((o) => o.os_numero);
+
+      etapa('centro_fetch_inicio', { alvos: alvosCentro.length, clientes: [...clientesCentro] });
+
+      if (alvosCentro.length > 0) {
+        try {
+          const centroResultados = await page.evaluate(async ({ alvos, url, tempoMaxMs, conc }) => {
+            const t0 = Date.now();
+            const resultados = {};
+
+            async function buscarUm(os) {
+              try {
+                const r = await fetch(`${url}?os=${encodeURIComponent(os)}`, { method: 'GET' });
+                const html = await r.text();
+                let nome = null;
+                let id = null;
+                // Forma 1: item já selecionado no multi-select
+                const mSel = html.match(/ms-elem-selection[^>]*ms-selected[^>]*>\s*<span[^>]*>\s*([^<]+?)\s*</i);
+                if (mSel) nome = mSel[1].trim();
+                // Forma 2: idCentroPop → option correspondente
+                const mId = html.match(/idCentroPop\s*=\s*'(\d+)'/);
+                if (mId) id = mId[1];
+                if (!nome && id) {
+                  const mOpt = html.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
+                  if (mOpt) nome = mOpt[1].trim();
+                }
+                resultados[os] = { centro_id: id, centro_nome: nome || null };
+              } catch (e) {
+                resultados[os] = { centro_id: null, centro_nome: null, erro: String(e && e.message || e) };
+              }
+            }
+
+            const fila = alvos.slice();
+            async function worker() {
+              while (fila.length > 0) {
+                if (Date.now() - t0 > tempoMaxMs) return;
+                const alvo = fila.shift();
+                if (!alvo) return;
+                await buscarUm(alvo);
+              }
+            }
+            await Promise.all(Array.from({ length: conc }, () => worker()));
+            return resultados;
+          }, { alvos: alvosCentro, url: MODAL_CENTRO_URL(), tempoMaxMs: TEMPO_MAX_CENTRO_MS, conc: concCentro });
+
+          diag.centroPorOs = centroResultados;
+          const comNome = Object.values(centroResultados).filter((c) => c.centro_nome).length;
+          etapa('centro_fetch_fim', { consultadas: Object.keys(centroResultados).length, comNome });
+        } catch (e) {
+          etapa('centro_fetch_erro', { erro: e.message });
+          diag.centroPorOs = {};
+        }
+      } else {
+        diag.centroPorOs = {};
+      }
+    }
+
   } catch (err) {
     log(`❌ [coletarOs] Erro: ${err.message}`);
     return { ok: false, motivo: err.message, sessaoExpirada: false, diag };
@@ -1261,6 +1341,8 @@ async function coletarOsEmExecucao(opts = {}) {
     duracaoMs,
     // 🆕 2026-07 sla-monitor: km/retorno consultados neste tick (se opts.buscarKm)
     kmPorOs: diag.kmPorOs || {},
+    // 🆕 2026-07 v2.4: centros de custo consultados via modal neste tick
+    centroPorOs: diag.centroPorOs || {},
     diag,
   };
 }

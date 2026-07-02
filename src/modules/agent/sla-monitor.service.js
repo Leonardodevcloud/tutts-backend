@@ -38,6 +38,14 @@ const LIMITE_IMINENTE = () => Number(process.env.SLA_MONITOR_LIMITE_IMINENTE || 
 const KM_MAX_POR_TICK  = () => Number(process.env.SLA_MONITOR_KM_MAX_POR_TICK || 40);
 const KM_CONCORRENCIA  = () => Number(process.env.SLA_MONITOR_KM_CONCORRENCIA || 4);
 
+// 🆕 v2.4: clientes multi-centro — o centro de custo vem do modal do MAP
+// em tempo real (o BI fica como fallback pros demais)
+const CENTRO_CLIENTES = () =>
+  (process.env.SLA_MONITOR_CENTRO_CLIENTES || '767,814')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+const CENTRO_MAX_POR_TICK = () => Number(process.env.SLA_MONITOR_CENTRO_MAX_POR_TICK || 20);
+const CENTRO_CONCORRENCIA = () => Number(process.env.SLA_MONITOR_CENTRO_CONCORRENCIA || 3);
+
 // ─────────────────────────────────────────────────────────────────────────
 // CONFIG DE PRAZOS — carregada do banco com cache de 60s
 // ─────────────────────────────────────────────────────────────────────────
@@ -119,6 +127,28 @@ function aplicarNomesExibicao(linhas, nomes) {
     const n = r.cliente_cod != null ? nomes.get(String(r.cliente_cod)) : null;
     if (n) r.cliente_nome = n;
   }
+}
+
+/**
+ * 🆕 2026-07 v2.4: aplica os centros de custo consultados via MODAL do MAP
+ * (fonte em tempo real, primária pros clientes multi-centro). O modal é a
+ * fonte da verdade — sobrescreve inclusive valor anterior se mudou.
+ */
+async function aplicarCentrosModal(pool, centroPorOs) {
+  if (!centroPorOs || Object.keys(centroPorOs).length === 0) return 0;
+  let aplicados = 0;
+  for (const [os, info] of Object.entries(centroPorOs)) {
+    if (!info || !info.centro_nome) continue;
+    const r = await pool.query(
+      `UPDATE sla_monitor_snapshot
+          SET centro_custo = $2, atualizado_em = NOW()
+        WHERE os_numero = $1
+          AND (centro_custo IS DISTINCT FROM $2)`,
+      [os, String(info.centro_nome).slice(0, 255)]
+    );
+    aplicados += r.rowCount || 0;
+  }
+  return aplicados;
 }
 
 /**
@@ -390,7 +420,14 @@ async function tickCompleto(pool) {
   );
   const pular = comKm.map(r => r.os_numero);
 
-  // 2. Coleta ÚNICA (com km dos que faltam + aba Sem profissional)
+  // 1.5 🆕 v2.4: quais OS já têm centro de custo? (modal só consulta uma vez)
+  const { rows: comCentro } = await pool.query(
+    `SELECT os_numero FROM sla_monitor_snapshot
+      WHERE em_execucao = TRUE AND centro_custo IS NOT NULL`
+  );
+  const pularCentro = comCentro.map(r => r.os_numero);
+
+  // 2. Coleta ÚNICA (com km dos que faltam + aba Sem profissional + centros)
   // require tardio — mesmo padrão do sla-detector.service (módulo já no cache)
   const { coletarOsEmExecucao } = require('./playwright-sla-capture');
   const resultado = await coletarOsEmExecucao({
@@ -398,6 +435,13 @@ async function tickCompleto(pool) {
       pular,
       max: KM_MAX_POR_TICK(),
       concorrencia: KM_CONCORRENCIA(),
+    },
+    // 🆕 v2.4: centro de custo em tempo real pros clientes multi-centro
+    buscarCentro: {
+      clientes: CENTRO_CLIENTES(),
+      pular: pularCentro,
+      max: CENTRO_MAX_POR_TICK(),
+      concorrencia: CENTRO_CONCORRENCIA(),
     },
     // 🆕 2026-07 v2.1: SLA também para OS aguardando atribuição
     coletarSemProfissional:
@@ -411,14 +455,16 @@ async function tickCompleto(pool) {
 
   // 3. Snapshot
   const stats = await processarColeta(pool, resultado);
-  // 3.5 🆕 v2.3: centro de custo via bi_entregas (clientes multi-centro)
+  // 3.4 🆕 v2.4: centros vindos do MODAL (tempo real — fonte primária)
+  const centrosModal = await aplicarCentrosModal(pool, resultado.centroPorOs);
+  // 3.5 🆕 v2.3: fallback — centro de custo via bi_entregas (demais clientes)
   const centrosPreenchidos = await enriquecerCentroCusto(pool);
   log(
     `📊 snapshot: ${resultado.ordens.length} OS em tela | ` +
     `${stats.upserts} upserts (${stats.comPrazo} com prazo) | ` +
     `${stats.finalizadas} finalizadas | ` +
     `km consultados: ${Object.keys(resultado.kmPorOs || {}).length} | ` +
-    `centros preenchidos: ${centrosPreenchidos}`
+    `centros: ${centrosModal} via modal, ${centrosPreenchidos} via BI`
   );
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn
@@ -638,6 +684,7 @@ module.exports = {
   carregarPrazos,
   limparCachePrazos,
   enriquecerCentroCusto,
+  aplicarCentrosModal,
   // expostos pra testes unitários
   _internal: { getPrazoPorKm, parseDataBRparaISO, parseNomeProfissional, escolherHorarioInicio },
 };
