@@ -136,6 +136,76 @@ function createSlaMonitorRoutes(pool, verificarToken, verificarAdmin) {
     }
   });
 
+  // ──────────────────────────────────────────────────────────────────────
+  // 🆕 v2.5: CENTROS POR TERMOS DE ENDEREÇO (admin)
+  // Mesmo padrão dos filtros do rastreio-clientes: se o texto da linha da
+  // OS contém o TERMO, ela recebe o CENTRO. Editável sem deploy.
+  // ──────────────────────────────────────────────────────────────────────
+
+  // GET /agent/sla-monitor/centros-termos — listar
+  router.get('/sla-monitor/centros-termos', verificarToken, verificarAdmin, async (_req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, cliente_cod, termo, centro_nome, ativo, criado_em
+           FROM sla_monitor_centros_termos
+          ORDER BY cliente_cod, centro_nome, termo`
+      );
+      return res.json({ ok: true, termos: rows });
+    } catch (err) {
+      console.error('[sla-monitor/centros-termos GET] erro:', err);
+      return res.status(500).json({ ok: false, erro: 'Erro ao listar termos.' });
+    }
+  });
+
+  // PUT /agent/sla-monitor/centros-termos — upsert
+  // Body: { cliente_cod: '767', termo: 'GALBA', centro_nome: 'Comollati Alagoas', ativo: true }
+  router.put('/sla-monitor/centros-termos', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { cliente_cod, termo, centro_nome, ativo } = req.body || {};
+      if (!cliente_cod || !/^\d{2,5}$/.test(String(cliente_cod))) {
+        return res.status(400).json({ ok: false, erro: 'cliente_cod inválido.' });
+      }
+      const termoLimpo = String(termo || '').trim();
+      const centroLimpo = String(centro_nome || '').trim();
+      if (termoLimpo.length < 3 || termoLimpo.length > 255) {
+        return res.status(400).json({ ok: false, erro: 'termo deve ter entre 3 e 255 caracteres.' });
+      }
+      if (!centroLimpo || centroLimpo.length > 255) {
+        return res.status(400).json({ ok: false, erro: 'centro_nome obrigatório (até 255 caracteres).' });
+      }
+
+      const { rows: [row] } = await pool.query(
+        `INSERT INTO sla_monitor_centros_termos (cliente_cod, termo, centro_nome, ativo)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (cliente_cod, termo) DO UPDATE SET
+           centro_nome = EXCLUDED.centro_nome,
+           ativo       = EXCLUDED.ativo
+         RETURNING id, cliente_cod, termo, centro_nome, ativo`,
+        [String(cliente_cod), termoLimpo, centroLimpo, ativo !== false]
+      );
+
+      slaMonitorService.limparCacheTermos();
+      return res.json({ ok: true, termo: row });
+    } catch (err) {
+      console.error('[sla-monitor/centros-termos PUT] erro:', err);
+      return res.status(500).json({ ok: false, erro: 'Erro ao salvar termo.' });
+    }
+  });
+
+  // DELETE /agent/sla-monitor/centros-termos/:id
+  router.delete('/sla-monitor/centros-termos/:id', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id || id < 1) return res.status(400).json({ ok: false, erro: 'id inválido.' });
+      const r = await pool.query('DELETE FROM sla_monitor_centros_termos WHERE id = $1', [id]);
+      slaMonitorService.limparCacheTermos();
+      return res.json({ ok: true, removidos: r.rowCount || 0 });
+    } catch (err) {
+      console.error('[sla-monitor/centros-termos DELETE] erro:', err);
+      return res.status(500).json({ ok: false, erro: 'Erro ao remover termo.' });
+    }
+  });
+
   return router;
 }
 

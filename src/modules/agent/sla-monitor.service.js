@@ -151,6 +151,61 @@ async function aplicarCentrosModal(pool, centroPorOs) {
   return aplicados;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 🆕 2026-07 v2.5: CENTRO POR TERMOS DE ENDEREÇO — mesmo padrão dos filtros
+// do rastreio-clientes. O _balloon de cada linha (já capturado, uppercase,
+// contém o endereço) é comparado com os termos configurados em
+// sla_monitor_centros_termos. Determinístico, sem HTTP extra, editável
+// pela API sem deploy. Tem a PALAVRA FINAL sobre modal e BI.
+// ─────────────────────────────────────────────────────────────────────────
+const TERMOS_CACHE_TTL_MS = 60_000;
+let _termosCache = null;
+let _termosCacheAt = 0;
+
+async function carregarCentrosTermos(pool) {
+  const agora = Date.now();
+  if (_termosCache && (agora - _termosCacheAt) < TERMOS_CACHE_TTL_MS) return _termosCache;
+  const { rows } = await pool.query(
+    `SELECT cliente_cod, termo, centro_nome
+       FROM sla_monitor_centros_termos
+      WHERE ativo = TRUE
+      ORDER BY LENGTH(termo) DESC` // termo mais específico primeiro
+  );
+  _termosCache = rows.map((r) => ({
+    cliente_cod: String(r.cliente_cod),
+    termo: String(r.termo).toUpperCase(),
+    centro_nome: r.centro_nome,
+  }));
+  _termosCacheAt = agora;
+  return _termosCache;
+}
+
+function limparCacheTermos() {
+  _termosCache = null;
+  _termosCacheAt = 0;
+}
+
+/**
+ * Casa cada OS coletada com os termos do seu cliente via _balloon.
+ * Retorna mapa { os_numero: { centro_nome } } (formato do aplicarCentrosModal).
+ */
+function detectarCentrosPorTermos(ordens, termos) {
+  const mapa = {};
+  if (!termos || termos.length === 0) return mapa;
+  for (const o of ordens) {
+    if (!o.os_numero || !o._balloon || !o.cliente_cod) continue;
+    const cod = String(o.cliente_cod);
+    for (const t of termos) {
+      if (t.cliente_cod !== cod) continue;
+      if (o._balloon.includes(t.termo)) {
+        mapa[o.os_numero] = { centro_nome: t.centro_nome };
+        break; // primeiro termo (mais específico) vence
+      }
+    }
+  }
+  return mapa;
+}
+
 /**
  * 🆕 2026-07 v2.3: preenche centro_custo das OS em execução a partir do
  * bi_entregas (o DOM do MAP não expõe o nome do centro — só ícones).
@@ -455,16 +510,21 @@ async function tickCompleto(pool) {
 
   // 3. Snapshot
   const stats = await processarColeta(pool, resultado);
-  // 3.4 🆕 v2.4: centros vindos do MODAL (tempo real — fonte primária)
+  // 3.3 🆕 v2.4: centros vindos do MODAL (quando o parse funciona)
   const centrosModal = await aplicarCentrosModal(pool, resultado.centroPorOs);
-  // 3.5 🆕 v2.3: fallback — centro de custo via bi_entregas (demais clientes)
+  // 3.4 🆕 v2.5: centros por TERMOS de endereço (padrão rastreio-clientes) —
+  // aplicado DEPOIS do modal: os termos configurados têm a palavra final
+  const termos = await carregarCentrosTermos(pool);
+  const centrosTermosMapa = detectarCentrosPorTermos(resultado.ordens, termos);
+  const centrosTermos = await aplicarCentrosModal(pool, centrosTermosMapa);
+  // 3.5 🆕 v2.3: fallback — centro de custo via bi_entregas (só preenche NULL)
   const centrosPreenchidos = await enriquecerCentroCusto(pool);
   log(
     `📊 snapshot: ${resultado.ordens.length} OS em tela | ` +
     `${stats.upserts} upserts (${stats.comPrazo} com prazo) | ` +
     `${stats.finalizadas} finalizadas | ` +
     `km consultados: ${Object.keys(resultado.kmPorOs || {}).length} | ` +
-    `centros: ${centrosModal} via modal, ${centrosPreenchidos} via BI`
+    `centros: ${centrosModal} via modal, ${centrosTermos} via termos, ${centrosPreenchidos} via BI`
   );
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn
@@ -685,6 +745,9 @@ module.exports = {
   limparCachePrazos,
   enriquecerCentroCusto,
   aplicarCentrosModal,
+  carregarCentrosTermos,
+  limparCacheTermos,
+  detectarCentrosPorTermos,
   // expostos pra testes unitários
   _internal: { getPrazoPorKm, parseDataBRparaISO, parseNomeProfissional, escolherHorarioInicio },
 };

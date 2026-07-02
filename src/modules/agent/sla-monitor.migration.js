@@ -140,6 +140,21 @@ async function initSlaMonitorTables(pool) {
     console.log(`✅ sla_monitor_prazos_fixos: seed com ${SEED_PRAZOS_FIXOS.length} clientes`);
   }
 
+  // 🆕 2026-07 v2.5: mapeamento endereço → centro de custo (mesmo padrão
+  // dos filtros do rastreio-clientes: se o texto da linha contém o TERMO,
+  // a OS recebe o CENTRO). Caminho primário — determinístico, sem HTTP extra.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sla_monitor_centros_termos (
+      id           SERIAL PRIMARY KEY,
+      cliente_cod  VARCHAR(10)  NOT NULL,
+      termo        VARCHAR(255) NOT NULL,
+      centro_nome  VARCHAR(255) NOT NULL,
+      ativo        BOOLEAN NOT NULL DEFAULT TRUE,
+      criado_em    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (cliente_cod, termo)
+    );
+  `);
+
   console.log('✅ Tabelas sla_monitor_* verificadas/criadas');
 }
 
