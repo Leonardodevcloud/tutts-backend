@@ -198,6 +198,12 @@ const MODAL_CENTRO_URL = () =>
 const MODAL_CENTRO_ID_URL = () =>
   process.env.SISTEMA_EXTERNO_MODAL_CENTRO_ID_URL ||
   'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxAlterarCentroCustoServico.php';
+// 🆕 2026-07 v2.5.1: modal de ENDEREÇOS — a MESMA rota que o sla-capture já
+// consulta hoje (logs: "GET ...funcaoEnderecoServico.php?...empresa=OS...").
+// É aqui que os termos de centro casam (o endereço não existe na linha).
+const MODAL_ENDERECO_URL = () =>
+  process.env.SISTEMA_EXTERNO_MODAL_ENDERECO_URL ||
+  'https://tutts.com.br/expresso/expressoat/entregasDia/funcaoEnderecoServico.php';
 
 // ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
 // Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
@@ -1001,6 +1007,13 @@ async function coletarOsEmExecucao(opts = {}) {
               || '').replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim() || null;
           }
 
+          // 🆕 2026-07 v2.5.1: numero_pedido — necessário pra buscar o modal
+          // de ENDEREÇOS (funcaoEnderecoServico.php), onde o centro é
+          // identificado por termos (o endereço NÃO existe na linha da tabela)
+          let numero_pedido = null;
+          const btnEnd = tr.querySelector('[data-action="funcaoEnderecoServico"]');
+          if (btnEnd) numero_pedido = btnEnd.getAttribute('data-numero-pedido') || null;
+
           // cliente_nome — primeira célula cujo texto casa "NNN - Nome"
           let cliente_nome = null;
           for (const td of tr.querySelectorAll('td')) {
@@ -1022,7 +1035,7 @@ async function coletarOsEmExecucao(opts = {}) {
             _balloon: balloon,
             horario_inicio_raw, horario_agendamento_attr,
             horario_solicitacao_raw, horario_agendamento_raw,
-            modal_parametro, nome_profissional_raw, cliente_nome,
+            modal_parametro, nome_profissional_raw, cliente_nome, numero_pedido,
             situacao,
           };
         });
@@ -1253,13 +1266,12 @@ async function coletarOsEmExecucao(opts = {}) {
       }
     }
 
-    // ── 🆕 2026-07 v2.4: centro de custo via modal (clientes multi-centro) ──
-    // GET ajaxAlterarEmpresasOs.php?os=N na MESMA sessão. A resposta traz o
-    // centro atribuído em duas formas (parse com fallback):
-    //   1. <li class="ms-elem-selection ms-selected"><span>NOME</span>
-    //   2. var idCentroPop = 'ID' → casa com <option value="ID">NOME</option>
-    // Só consulta OS de clientes configurados (SLA_MONITOR_CENTRO_CLIENTES)
-    // que ainda não têm centro no snapshot — uma consulta por OS na vida dela.
+    // ── 🆕 2026-07 v2.5.1: ENDEREÇOS pra detecção de centro por termos ──────
+    // Descoberta via logs do rastreio: os filtros casam contra os PONTOS do
+    // modal de endereços (funcaoEnderecoServico.php), não contra a linha —
+    // o endereço não existe no DOM da tabela. Este bloco busca o mesmo modal
+    // (GET, mesma sessão) pras OS dos clientes com termos configurados que
+    // ainda não têm centro no snapshot. O matching acontece no service.
     if (opts.buscarCentro) {
       const TEMPO_MAX_CENTRO_MS = Number(process.env.SLA_MONITOR_CENTRO_TEMPO_MAX_MS || 30_000);
       const clientesCentro = new Set((opts.buscarCentro.clientes || []).map(String));
@@ -1270,74 +1282,31 @@ async function coletarOsEmExecucao(opts = {}) {
       const alvosCentro = Array.from(todasOsMap.values())
         .filter((o) => o.cliente_cod && clientesCentro.has(String(o.cliente_cod)) && !pularCentro.has(o.os_numero))
         .slice(0, maxCentro)
-        .map((o) => o.os_numero);
+        .map((o) => ({ os: o.os_numero, ped: o.numero_pedido || '' }));
 
-      etapa('centro_fetch_inicio', { alvos: alvosCentro.length, clientes: [...clientesCentro] });
+      etapa('endereco_fetch_inicio', { alvos: alvosCentro.length, clientes: [...clientesCentro] });
 
       if (alvosCentro.length > 0) {
         try {
-          const centroResultados = await page.evaluate(async ({ alvos, urlOpcoes, urlId, tempoMaxMs, conc }) => {
+          const enderecoResultados = await page.evaluate(async ({ alvos, url, tempoMaxMs, conc }) => {
             const t0 = Date.now();
             const resultados = {};
 
-            // Busca com fallback de método: tenta GET ?os=, se a resposta não
-            // parecer o modal, tenta POST os= (PHP legado varia entre $_GET/$_POST)
-            async function buscarHtml(baseUrl, os) {
-              const tentativas = [
-                { url: `${baseUrl}?os=${encodeURIComponent(os)}`, opts: { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' } } },
-                { url: baseUrl, opts: { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }, body: 'os=' + encodeURIComponent(os) } },
-              ];
-              for (const t of tentativas) {
-                try {
-                  const r = await fetch(t.url, t.opts);
-                  const html = await r.text();
-                  if (/idCentro|idCentroPop|<option/i.test(html)) return html;
-                  // guarda a última resposta mesmo "estranha" pra diagnóstico
-                  if (t === tentativas[tentativas.length - 1]) return html;
-                } catch (_) { /* tenta próximo método */ }
-              }
-              return '';
-            }
-
-            async function buscarUm(os) {
+            async function buscarUm({ os, ped }) {
               try {
-                // 1. idCentroPop (centro SELECIONADO) — endpoint dedicado
-                const htmlId = await buscarHtml(urlId, os);
-                let id = null;
-                const mId = htmlId.match(/idCentroPop\s*=\s*'(\d+)'/);
-                if (mId) id = mId[1];
-
-                // 2. opções (id → nome) — modal principal
-                const htmlOpcoes = await buscarHtml(urlOpcoes, os);
-                let nome = null;
-                if (id) {
-                  const mOpt = htmlOpcoes.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'))
-                    || htmlId.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
-                  if (mOpt) nome = mOpt[1].trim();
-                }
-                // Fallbacks: option com selected / idCentroPop embutido no modal principal
-                if (!nome) {
-                  const mSelAttr = (htmlOpcoes + htmlId).match(/<option[^>]*\sselected[^>]*>\s*([^<]+?)\s*</i);
-                  if (mSelAttr) nome = mSelAttr[1].trim();
-                }
-                if (!id && !nome) {
-                  const mId2 = htmlOpcoes.match(/idCentroPop\s*=\s*'(\d+)'/);
-                  if (mId2) {
-                    id = mId2[1];
-                    const mOpt2 = htmlOpcoes.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
-                    if (mOpt2) nome = mOpt2[1].trim();
-                  }
-                }
-
-                resultados[os] = {
-                  centro_id: id,
-                  centro_nome: nome || null,
-                  // amostras curtas pro diagnóstico quando o parse falhar
-                  _amostraId: nome ? undefined : htmlId.replace(/\s+/g, ' ').slice(0, 180),
-                  _amostraOpcoes: nome ? undefined : htmlOpcoes.replace(/\s+/g, ' ').slice(0, 180),
-                };
+                const u = `${url}?idSolicitante=${encodeURIComponent('../')}&empresa=${encodeURIComponent(os)}&numeroPedido=${encodeURIComponent(ped)}`;
+                const r = await fetch(u, { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const html = await r.text();
+                // Texto plano, uppercase, espaçamento normalizado — pro matching
+                const texto = html
+                  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .toUpperCase()
+                  .slice(0, 1600);
+                resultados[os] = { texto };
               } catch (e) {
-                resultados[os] = { centro_id: null, centro_nome: null, erro: String(e && e.message || e) };
+                resultados[os] = { texto: '', erro: String(e && e.message || e) };
               }
             }
 
@@ -1354,30 +1323,25 @@ async function coletarOsEmExecucao(opts = {}) {
             return resultados;
           }, {
             alvos: alvosCentro,
-            urlOpcoes: MODAL_CENTRO_URL(),
-            urlId: MODAL_CENTRO_ID_URL(),
+            url: MODAL_ENDERECO_URL(),
             tempoMaxMs: TEMPO_MAX_CENTRO_MS,
             conc: concCentro,
           });
 
-          diag.centroPorOs = centroResultados;
-          const comNome = Object.values(centroResultados).filter((c) => c.centro_nome).length;
-          etapa('centro_fetch_fim', { consultadas: Object.keys(centroResultados).length, comNome });
-          // 🔧 v2.4.1: se NADA parseou, loga amostra da primeira resposta pra
-          // enxergarmos o que o servidor devolve pra sessão do worker
-          if (comNome === 0) {
-            const primeira = Object.values(centroResultados)[0] || {};
-            etapa('centro_fetch_amostra', {
-              id: primeira._amostraId || primeira.erro || '(vazio)',
-              opcoes: primeira._amostraOpcoes || '(vazio)',
-            });
+          diag.enderecoPorOs = enderecoResultados;
+          const comTexto = Object.values(enderecoResultados).filter((e) => e.texto && e.texto.length > 20).length;
+          etapa('endereco_fetch_fim', { consultadas: Object.keys(enderecoResultados).length, comTexto });
+          // Diagnóstico: se nada veio, mostra amostra da primeira resposta
+          if (comTexto === 0) {
+            const primeira = Object.values(enderecoResultados)[0] || {};
+            etapa('endereco_fetch_amostra', { amostra: (primeira.texto || primeira.erro || '(vazio)').slice(0, 180) });
           }
         } catch (e) {
-          etapa('centro_fetch_erro', { erro: e.message });
-          diag.centroPorOs = {};
+          etapa('endereco_fetch_erro', { erro: e.message });
+          diag.enderecoPorOs = {};
         }
       } else {
-        diag.centroPorOs = {};
+        diag.enderecoPorOs = {};
       }
     }
 
@@ -1403,8 +1367,9 @@ async function coletarOsEmExecucao(opts = {}) {
     duracaoMs,
     // 🆕 2026-07 sla-monitor: km/retorno consultados neste tick (se opts.buscarKm)
     kmPorOs: diag.kmPorOs || {},
-    // 🆕 2026-07 v2.4: centros de custo consultados via modal neste tick
-    centroPorOs: diag.centroPorOs || {},
+    // 🆕 2026-07 v2.5.1: texto dos ENDEREÇOS consultados neste tick
+    // (matching de centro por termos acontece no service)
+    enderecoPorOs: diag.enderecoPorOs || {},
     diag,
   };
 }

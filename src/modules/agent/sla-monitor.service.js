@@ -185,19 +185,34 @@ function limparCacheTermos() {
   _termosCacheAt = 0;
 }
 
+// Normaliza pra matching: uppercase + sem acentos (o MAP varia grafia)
+function normalizarTexto(s) {
+  return String(s || '')
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 /**
- * Casa cada OS coletada com os termos do seu cliente via _balloon.
+ * 🔧 2026-07 v2.5.1: casa cada OS com os termos do cliente contra o TEXTO
+ * DO MODAL DE ENDEREÇOS (enderecoPorOs, buscado pelo coletor — é onde os
+ * endereços vivem; a linha da tabela NÃO os contém). Fallback: _balloon.
+ * Matching sem acentos nos dois lados.
  * Retorna mapa { os_numero: { centro_nome } } (formato do aplicarCentrosModal).
  */
-function detectarCentrosPorTermos(ordens, termos) {
+function detectarCentrosPorTermos(ordens, termos, enderecoPorOs = {}) {
   const mapa = {};
   if (!termos || termos.length === 0) return mapa;
+  const termosNorm = termos.map((t) => ({ ...t, termoNorm: normalizarTexto(t.termo) }));
   for (const o of ordens) {
-    if (!o.os_numero || !o._balloon || !o.cliente_cod) continue;
+    if (!o.os_numero || !o.cliente_cod) continue;
+    const endereco = enderecoPorOs[o.os_numero] && enderecoPorOs[o.os_numero].texto;
+    const texto = normalizarTexto(endereco || o._balloon || '');
+    if (!texto) continue;
     const cod = String(o.cliente_cod);
-    for (const t of termos) {
+    for (const t of termosNorm) {
       if (t.cliente_cod !== cod) continue;
-      if (o._balloon.includes(t.termo)) {
+      if (texto.includes(t.termoNorm)) {
         mapa[o.os_numero] = { centro_nome: t.centro_nome };
         break; // primeiro termo (mais específico) vence
       }
@@ -475,12 +490,19 @@ async function tickCompleto(pool) {
   );
   const pular = comKm.map(r => r.os_numero);
 
-  // 1.5 🆕 v2.4: quais OS já têm centro de custo? (modal só consulta uma vez)
+  // 1.5 🆕 v2.4: quais OS já têm centro de custo? (endereço só consulta uma vez)
   const { rows: comCentro } = await pool.query(
     `SELECT os_numero FROM sla_monitor_snapshot
       WHERE em_execucao = TRUE AND centro_custo IS NOT NULL`
   );
   const pularCentro = comCentro.map(r => r.os_numero);
+
+  // 1.6 🆕 v2.5.1: clientes-alvo = env ∪ clientes com termos configurados
+  const termosConfig = await carregarCentrosTermos(pool);
+  const clientesCentro = [...new Set([
+    ...CENTRO_CLIENTES(),
+    ...termosConfig.map((t) => t.cliente_cod),
+  ])];
 
   // 2. Coleta ÚNICA (com km dos que faltam + aba Sem profissional + centros)
   // require tardio — mesmo padrão do sla-detector.service (módulo já no cache)
@@ -491,9 +513,9 @@ async function tickCompleto(pool) {
       max: KM_MAX_POR_TICK(),
       concorrencia: KM_CONCORRENCIA(),
     },
-    // 🆕 v2.4: centro de custo em tempo real pros clientes multi-centro
+    // 🆕 v2.5.1: endereços pra detecção de centro por termos
     buscarCentro: {
-      clientes: CENTRO_CLIENTES(),
+      clientes: clientesCentro,
       pular: pularCentro,
       max: CENTRO_MAX_POR_TICK(),
       concorrencia: CENTRO_CONCORRENCIA(),
@@ -510,12 +532,10 @@ async function tickCompleto(pool) {
 
   // 3. Snapshot
   const stats = await processarColeta(pool, resultado);
-  // 3.3 🆕 v2.4: centros vindos do MODAL (quando o parse funciona)
-  const centrosModal = await aplicarCentrosModal(pool, resultado.centroPorOs);
-  // 3.4 🆕 v2.5: centros por TERMOS de endereço (padrão rastreio-clientes) —
-  // aplicado DEPOIS do modal: os termos configurados têm a palavra final
-  const termos = await carregarCentrosTermos(pool);
-  const centrosTermosMapa = detectarCentrosPorTermos(resultado.ordens, termos);
+  // 3.4 🆕 v2.5.1: centros por TERMOS casados contra o modal de ENDEREÇOS
+  const centrosTermosMapa = detectarCentrosPorTermos(
+    resultado.ordens, termosConfig, resultado.enderecoPorOs || {}
+  );
   const centrosTermos = await aplicarCentrosModal(pool, centrosTermosMapa);
   // 3.5 🆕 v2.3: fallback — centro de custo via bi_entregas (só preenche NULL)
   const centrosPreenchidos = await enriquecerCentroCusto(pool);
@@ -524,7 +544,8 @@ async function tickCompleto(pool) {
     `${stats.upserts} upserts (${stats.comPrazo} com prazo) | ` +
     `${stats.finalizadas} finalizadas | ` +
     `km consultados: ${Object.keys(resultado.kmPorOs || {}).length} | ` +
-    `centros: ${centrosModal} via modal, ${centrosTermos} via termos, ${centrosPreenchidos} via BI`
+    `endereços consultados: ${Object.keys(resultado.enderecoPorOs || {}).length} | ` +
+    `centros: ${centrosTermos} via termos, ${centrosPreenchidos} via BI`
   );
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn
