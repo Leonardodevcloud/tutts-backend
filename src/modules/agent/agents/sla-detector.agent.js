@@ -11,7 +11,7 @@
 'use strict';
 
 const { defineAgent } = require('../core/agent-base');
-const slaDetectorService = require('../sla-detector.service');
+const slaMonitorService = require('../sla-monitor.service');
 
 const CRON_DEFAULT = '*/2 8-18 * * 1-5';
 
@@ -23,17 +23,21 @@ module.exports = defineAgent({
   cronExpression: process.env.SLA_DETECTOR_CRON || CRON_DEFAULT,
   timezone: 'America/Bahia',
   // 🛡️ 2026-05 fix-deadlock: timeout máximo do tick cron.
-  // Detector só faz varredura de OS em execução — é rápido (page.goto + parse).
-  // 90s já cobre folgado + retries. Se passar disso, é certeza que travou.
-  timeoutMs: Number(process.env.SLA_DETECTOR_TIMEOUT_MS || 90_000), // 1.5 min
+  // 🆕 2026-07 sla-monitor: tick agora inclui busca de km via modal
+  // (teto SLA_MONITOR_KM_MAX_POR_TICK, tempo máx SLA_MONITOR_KM_TEMPO_MAX_MS
+  // default 60s). Timeout default sobe pra 180s pra acomodar a coleta +
+  // km-fetch + upserts. Se passar disso, é certeza que travou.
+  timeoutMs: Number(process.env.SLA_DETECTOR_TIMEOUT_MS || 180_000), // 3 min
 
   habilitado: () => (process.env.SLA_DETECTOR_ATIVO || 'false').toLowerCase() === 'true',
 
   tickGlobal: async (pool, ctx) => {
-    ctx.log('🔍 Iniciando varredura de OS em execução');
-    // Não passa coletarOsEmExecucao — o service faz o require internamente
-    // quando o módulo playwright-sla-capture já está completo no cache.
-    const resultado = await slaDetectorService.detectarOsNovas(pool);
-    ctx.log('✅ Varredura concluída: ' + JSON.stringify(resultado));
+    ctx.log('🔍 Iniciando tick SLA (snapshot + detecção de rastreio)');
+    // 🆕 2026-07: tickCompleto faz UMA coleta que alimenta:
+    //   1. sla_monitor_snapshot (SLA server-side — substitui extensão v8)
+    //   2. detectarOsNovas (rastreio 814/767 — injeta coleta pronta, sem
+    //      abrir um segundo browser)
+    const resultado = await slaMonitorService.tickCompleto(pool);
+    ctx.log('✅ Tick concluído: ' + JSON.stringify(resultado));
   },
 });

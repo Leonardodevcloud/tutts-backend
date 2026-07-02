@@ -177,6 +177,13 @@ const LOGIN_URL = () => process.env.SISTEMA_EXTERNO_URL;
 const ACOMP_URL = () =>
   process.env.SISTEMA_EXTERNO_ACOMPANHAMENTO_URL ||
   'https://tutts.com.br/expresso/expressoat/acompanhamento-servicos';
+// 🆕 2026-07 sla-monitor: endpoint do modal "Informações do serviço" — é dele
+// que sai a distância (km) e o status de retorno. Mesmo endpoint que a
+// extensão SLA Monitor v8 consultava do browser do operador; agora o fetch
+// roda DENTRO da página Playwright (sessão do worker), com fila e limite.
+const MODAL_INFO_URL = () =>
+  process.env.SISTEMA_EXTERNO_MODAL_INFO_URL ||
+  'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxModalInformacoesServico.php';
 
 // ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
 // Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
@@ -760,7 +767,22 @@ async function garantirSessao() {
  *   { ok, ordens: [...], totalEsperado, paginas, duracaoMs, diag }
  *   ou: { ok: false, motivo, sessaoExpirada, diag }
  */
-async function coletarOsEmExecucao() {
+/**
+ * 🆕 2026-07 sla-monitor: aceita opts opcional (retrocompatível — o detector
+ * antigo chama sem argumentos e nada muda).
+ *
+ * @param {Object}  [opts]
+ * @param {Object}  [opts.buscarKm]              — se presente, após a paginação
+ *                                                 busca km/retorno via modal
+ *                                                 (na MESMA página/sessão)
+ * @param {string[]}[opts.buscarKm.pular]        — os_numero que JÁ têm km no banco
+ * @param {number}  [opts.buscarKm.max=40]       — teto de modais por tick
+ * @param {number}  [opts.buscarKm.concorrencia=4] — fetches simultâneos
+ *
+ * Retorno ganha campo extra `kmPorOs`:
+ *   { [os_numero]: { km: 12.4|null, retorno: bool, motivo: string|null } }
+ */
+async function coletarOsEmExecucao(opts = {}) {
   const TEMPO_MAX_MS = 90_000;
   const MAX_PAGINAS_SANITY = 100; // 1000 OS com 10/página = 100 páginas
 
@@ -917,7 +939,43 @@ async function coletarOsEmExecucao() {
           const textoVisivel = (tr.innerText || '').replace(/\s+/g, ' ').trim();
           const balloon = (balloons.join(' | ') + ' | ' + textoVisivel).toUpperCase();
 
-          return { os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio, _balloon: balloon };
+          // ── 🆕 2026-07 sla-monitor: campos extras pro snapshot SLA ──────────
+          // horario_inicio_raw — botão de editar data/hora carrega o horário
+          // da OS no atributo data-date-hour (formato BR "DD-MM-YYYY HH:MM:SS")
+          let horario_inicio_raw = null;
+          const btnHora = tr.querySelector('[data-action="editarDataHoraServico"]');
+          if (btnHora) horario_inicio_raw = btnHora.getAttribute('data-date-hour') || null;
+
+          // modal_parametro — parâmetro do modal "Informações do serviço"
+          // (usado pra buscar km/retorno via ajaxModalInformacoesServico.php)
+          let modal_parametro = null;
+          const btnModal = tr.querySelector('[data-action="ajaxModalInformacoesServico"]');
+          if (btnModal) modal_parametro = btnModal.getAttribute('data-parameters') || null;
+
+          // nome_profissional_raw — title do botão de trocar motoboy
+          // (parse do nome fica no Node, aqui só coleta o atributo bruto)
+          let nome_profissional_raw = null;
+          const btnMoto = tr.querySelector('[data-action="trocarMotoboyServicoNovo"]');
+          if (btnMoto) {
+            nome_profissional_raw = (btnMoto.getAttribute('data-text-title')
+              || btnMoto.getAttribute('title')
+              || btnMoto.textContent
+              || '').replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim() || null;
+          }
+
+          // cliente_nome — primeira célula cujo texto casa "NNN - Nome"
+          let cliente_nome = null;
+          for (const td of tr.querySelectorAll('td')) {
+            const txt = (td.textContent || '').trim();
+            const mc = txt.match(/^(\d{2,5})\s*[-–]\s*(.+)/);
+            if (mc) { cliente_nome = mc[2].trim().slice(0, 200); break; }
+          }
+
+          return {
+            os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio,
+            _balloon: balloon,
+            horario_inicio_raw, modal_parametro, nome_profissional_raw, cliente_nome,
+          };
         });
       });
 
@@ -1001,6 +1059,78 @@ async function coletarOsEmExecucao() {
       }
     }
 
+    // ── 🆕 2026-07 sla-monitor: busca km/retorno via modal (mesma sessão) ────
+    // Roda DEPOIS da paginação, na mesma page (o fetch não depende do DOM,
+    // só dos cookies da sessão). Concorrência limitada + teto por tick —
+    // exatamente o que a extensão v8 NÃO fazia (60 POSTs paralelos na
+    // sessão do operador).
+    if (opts.buscarKm) {
+      const TEMPO_MAX_KM_MS = Number(process.env.SLA_MONITOR_KM_TEMPO_MAX_MS || 60_000);
+      const pular  = new Set(opts.buscarKm.pular || []);
+      const maxKm  = Number(opts.buscarKm.max || 40);
+      const conc   = Math.max(1, Math.min(6, Number(opts.buscarKm.concorrencia || 4)));
+
+      const alvos = Array.from(todasOsMap.values())
+        .filter(o => o.modal_parametro && !pular.has(o.os_numero))
+        .slice(0, maxKm)
+        .map(o => ({ os: o.os_numero, parametro: o.modal_parametro }));
+
+      etapa('km_fetch_inicio', { alvos: alvos.length, concorrencia: conc });
+
+      if (alvos.length > 0) {
+        try {
+          const kmResultados = await page.evaluate(async ({ alvos, url, tempoMaxMs, conc }) => {
+            const t0 = Date.now();
+            const resultados = {};
+
+            async function buscarUm({ os, parametro }) {
+              try {
+                const r = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                  body: 'parametro=' + encodeURIComponent(parametro),
+                });
+                const html = await r.text();
+                const mKm = html.match(/Dist[aâ]ncia\s*(?:rota)?[:\s]*([\d]+[.,][\d]+)/i);
+                const km  = mKm ? parseFloat(mKm[1].replace(',', '.')) : null;
+                const ret = html.toLowerCase().includes('com retorno');
+                let motivo = null;
+                if (ret) {
+                  const mr = html.match(/(Produto incorreto|Loja fechada[^<]*|Cliente Ausente|Endere[çc]o n[ãa]o localizado|Favor retornar[^<]*)/i);
+                  motivo = mr ? mr[1].trim() : 'Com retorno';
+                }
+                resultados[os] = { km, retorno: ret, motivo };
+              } catch (e) {
+                resultados[os] = { km: null, retorno: false, motivo: null, erro: String(e && e.message || e) };
+              }
+            }
+
+            // Fila com concorrência limitada + respeito ao tempo máximo
+            const fila = alvos.slice();
+            async function worker() {
+              while (fila.length > 0) {
+                if (Date.now() - t0 > tempoMaxMs) return;
+                const alvo = fila.shift();
+                if (!alvo) return;
+                await buscarUm(alvo);
+              }
+            }
+            await Promise.all(Array.from({ length: conc }, () => worker()));
+            return resultados;
+          }, { alvos, url: MODAL_INFO_URL(), tempoMaxMs: TEMPO_MAX_KM_MS, conc });
+
+          diag.kmPorOs = kmResultados;
+          const comKm = Object.values(kmResultados).filter(v => v.km != null).length;
+          etapa('km_fetch_fim', { consultadas: Object.keys(kmResultados).length, comKm });
+        } catch (e) {
+          etapa('km_fetch_erro', { erro: e.message });
+          diag.kmPorOs = {};
+        }
+      } else {
+        diag.kmPorOs = {};
+      }
+    }
+
   } catch (err) {
     log(`❌ [coletarOs] Erro: ${err.message}`);
     return { ok: false, motivo: err.message, sessaoExpirada: false, diag };
@@ -1021,6 +1151,8 @@ async function coletarOsEmExecucao() {
     totalEsperado,
     paginas: diag.paginasColetadas.length,
     duracaoMs,
+    // 🆕 2026-07 sla-monitor: km/retorno consultados neste tick (se opts.buscarKm)
+    kmPorOs: diag.kmPorOs || {},
     diag,
   };
 }

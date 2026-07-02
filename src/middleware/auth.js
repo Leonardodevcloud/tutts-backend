@@ -36,6 +36,10 @@ const PUBLIC_PATHS = [
   // Trigger da extensão SLA Monitor — validado internamente por Origin do
   // tutts.com.br + SLA_CAPTURE_TOKEN opcional (ver sla-capture.routes.js).
   { path: '/api/agent/sla-capture/trigger', method: 'POST', startsWith: false },
+  // 2026-07 sla-monitor: painel SLA consumido pela extensão v9 (thin client).
+  // Validado internamente por Origin tutts.com.br + x-sla-token
+  // (SLA_MONITOR_TOKEN, fallback SLA_CAPTURE_TOKEN) — ver sla-monitor.routes.js.
+  { path: '/api/agent/sla-monitor/status', method: 'GET', startsWith: false },
   // Webhook do Resend — autenticado via assinatura Svix dentro do handler
   { path: '/api/cs/webhook/resend', method: 'POST', startsWith: false },
 ];

@@ -27,6 +27,7 @@
 const { createAgentRouter } = require('./agent.routes');
 const initAgentTablesBase   = require('./agent.migration');
 const initSlaCaptureTables  = require('./sla-capture.migration');
+const initSlaMonitorTables  = require('./sla-monitor.migration');  // 2026-07 sla-monitor
 const initLiberacaoTables   = require('./liberacao.migration');  // 2026-04 v3: novo módulo
 const agentPool             = require('./core/agent-pool');
 
@@ -48,6 +49,12 @@ async function initAgentTables(pool) {
     await initSlaCaptureTables(pool);
   } catch (e) {
     console.error('⚠️ SLA Capture tables error:', e.message);
+  }
+  // 2026-07 sla-monitor: snapshot SLA server-side + config de prazos
+  try {
+    await initSlaMonitorTables(pool);
+  } catch (e) {
+    console.error('⚠️ SLA Monitor tables error:', e.message);
   }
   // 2026-04 v3: tabela do novo módulo Liberar Ponto
   try {
