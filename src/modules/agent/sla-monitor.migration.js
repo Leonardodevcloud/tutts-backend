@@ -70,12 +70,20 @@ async function initSlaMonitorTables(pool) {
     WHERE em_execucao = TRUE;
   `);
 
-  // 🆕 2026-07 v2.1: situação da OS na tela do MAP
+  // 🆕 2026-07 v2.2: situação da OS na tela do MAP
   //   'em_execucao'      — tem profissional, corrida rodando
   //   'sem_profissional' — aguardando atribuição (relógio do SLA já corre!)
   await pool.query(`
     ALTER TABLE sla_monitor_snapshot
     ADD COLUMN IF NOT EXISTS situacao VARCHAR(20) NOT NULL DEFAULT 'em_execucao';
+  `);
+
+  // 🆕 2026-07 v2.3: centro de custo (do bi_entregas, por OS) — clientes
+  // multi-centro (767 Comollati, 814 Cobra) são exibidos por centro,
+  // espelhando o módulo de performance diária
+  await pool.query(`
+    ALTER TABLE sla_monitor_snapshot
+    ADD COLUMN IF NOT EXISTS centro_custo VARCHAR(255);
   `);
 
   // Histórico de compliance por cliente (relatórios BI futuros)

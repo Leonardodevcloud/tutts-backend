@@ -122,6 +122,37 @@ function aplicarNomesExibicao(linhas, nomes) {
 }
 
 /**
+ * 🆕 2026-07 v2.3: preenche centro_custo das OS em execução a partir do
+ * bi_entregas (o DOM do MAP não expõe o nome do centro — só ícones).
+ * Roda no tick do worker; janela de 3 dias pra não varrer a tabela.
+ * Se o BI ainda não importou a OS, fica NULL e preenche num tick futuro.
+ */
+async function enriquecerCentroCusto(pool) {
+  try {
+    const r = await pool.query(
+      `UPDATE sla_monitor_snapshot s
+          SET centro_custo = b.centro_custo,
+              atualizado_em = NOW()
+         FROM (
+           SELECT DISTINCT ON (os) os, centro_custo
+             FROM bi_entregas
+            WHERE data_solicitado >= CURRENT_DATE - 3
+              AND centro_custo IS NOT NULL AND centro_custo <> ''
+            ORDER BY os, id DESC
+         ) b
+        WHERE s.em_execucao = TRUE
+          AND s.centro_custo IS NULL
+          AND s.os_numero ~ '^[0-9]+$'
+          AND b.os = s.os_numero::int`
+    );
+    return r.rowCount || 0;
+  } catch (e) {
+    log(`⚠️ centro_custo do BI indisponível: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
  * Prazo em minutos pela distância. Acima da última faixa, extrapola no
  * mesmo padrão da extensão v8: +15min a cada 5km além do teto.
  */
@@ -380,11 +411,14 @@ async function tickCompleto(pool) {
 
   // 3. Snapshot
   const stats = await processarColeta(pool, resultado);
+  // 3.5 🆕 v2.3: centro de custo via bi_entregas (clientes multi-centro)
+  const centrosPreenchidos = await enriquecerCentroCusto(pool);
   log(
     `📊 snapshot: ${resultado.ordens.length} OS em tela | ` +
     `${stats.upserts} upserts (${stats.comPrazo} com prazo) | ` +
     `${stats.finalizadas} finalizadas | ` +
-    `km consultados: ${Object.keys(resultado.kmPorOs || {}).length}`
+    `km consultados: ${Object.keys(resultado.kmPorOs || {}).length} | ` +
+    `centros preenchidos: ${centrosPreenchidos}`
   );
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn
@@ -448,6 +482,7 @@ async function consultarStatus(pool, opts = {}) {
        retorno,
        retorno_motivo,
        situacao,
+       centro_custo,
        ultima_vista_em,
        CASE
          WHEN deadline IS NULL THEN NULL
@@ -485,7 +520,7 @@ async function consultarStatus(pool, opts = {}) {
     const { rows: fins } = await pool.query(
       `SELECT
          os_numero, cliente_cod, cliente_nome, cod_profissional, nome_profissional,
-         prazo_min, prazo_origem, distancia_km, deadline, finalizada_em, retorno,
+         centro_custo, prazo_min, prazo_origem, distancia_km, deadline, finalizada_em, retorno,
          CASE
            WHEN deadline IS NULL THEN 'CONCLUIDA_SEM_DADOS'
            WHEN finalizada_em <= deadline THEN 'CONCLUIDA_NO_PRAZO'
@@ -602,6 +637,7 @@ module.exports = {
   performanceDiaria,
   carregarPrazos,
   limparCachePrazos,
+  enriquecerCentroCusto,
   // expostos pra testes unitários
   _internal: { getPrazoPorKm, parseDataBRparaISO, parseNomeProfissional, escolherHorarioInicio },
 };
