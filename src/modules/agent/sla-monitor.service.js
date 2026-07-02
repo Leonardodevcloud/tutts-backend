@@ -459,21 +459,28 @@ async function processarColeta(pool, resultado) {
   }
 
   // ── Finaliza OS que sumiram da tela ─────────────────────────────────────
-  // Só quando a coleta veio OK (ordens confiáveis). Uma coleta parcial que
-  // falhou não deve "finalizar" OS por engano — por isso a chamada só
-  // acontece com resultado.ok garantido pelo tickCompleto.
+  // 🛡️ 2026-07 v2.5.2 FIX "entregue em execução": coleta PARCIAL (paginação
+  // quebrou — tabela_vazia_apos_click, timeout, semprof falhou) marcava como
+  // finalizadas dezenas de OS ainda rodando, gerando vereditos falsos na aba
+  // Em execução. A finalização agora SÓ roda quando o coletor declara a
+  // coleta COMPLETA. Incompleta → pula (as finalizações reais acontecem no
+  // próximo tick completo; OS finalizada por engano se reativa sozinha).
   let finalizadas = 0;
-  const emTela = ordens.map(o => o.os_numero).filter(Boolean);
-  const resFinal = await pool.query(
-    `UPDATE sla_monitor_snapshot
-        SET em_execucao = FALSE,
-            finalizada_em = COALESCE(finalizada_em, NOW()),
-            atualizado_em = NOW()
-      WHERE em_execucao = TRUE
-        AND NOT (os_numero = ANY($1::varchar[]))`,
-    [emTela]
-  );
-  finalizadas = resFinal.rowCount || 0;
+  if (resultado.coletaCompleta === false) {
+    log(`🛡️ coleta INCOMPLETA (${resultado.coletaIncompletaMotivo || 'motivo desconhecido'}) — finalização PULADA neste tick`);
+  } else {
+    const emTela = ordens.map(o => o.os_numero).filter(Boolean);
+    const resFinal = await pool.query(
+      `UPDATE sla_monitor_snapshot
+          SET em_execucao = FALSE,
+              finalizada_em = COALESCE(finalizada_em, NOW()),
+              atualizado_em = NOW()
+        WHERE em_execucao = TRUE
+          AND NOT (os_numero = ANY($1::varchar[]))`,
+      [emTela]
+    );
+    finalizadas = resFinal.rowCount || 0;
+  }
 
   return { upserts, comPrazo, finalizadas };
 }
@@ -545,7 +552,8 @@ async function tickCompleto(pool) {
     `${stats.finalizadas} finalizadas | ` +
     `km consultados: ${Object.keys(resultado.kmPorOs || {}).length} | ` +
     `endereços consultados: ${Object.keys(resultado.enderecoPorOs || {}).length} | ` +
-    `centros: ${centrosTermos} via termos, ${centrosPreenchidos} via BI`
+    `centros: ${centrosTermos} via termos, ${centrosPreenchidos} via BI | ` +
+    `coleta ${resultado.coletaCompleta === false ? '⚠️ INCOMPLETA (' + (resultado.coletaIncompletaMotivo || '?') + ')' : 'completa'}`
   );
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn

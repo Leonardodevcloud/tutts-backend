@@ -819,6 +819,11 @@ async function coletarOsEmExecucao(opts = {}) {
   let browser, _browserEhOverride2 = false, context, page;
   const todasOsMap = new Map(); // dedupe por os_numero
   let totalEsperado = null;
+  // 🛡️ 2026-07 v2.5.2: coleta parcial NÃO pode finalizar OS por engano.
+  // Qualquer quebra de paginação marca a coleta como incompleta; o service
+  // pula a finalização nesse tick (auto-corrige no próximo tick completo).
+  let coletaIncompleta = false;
+  let coletaIncompletaMotivo = null;
 
   try {
     etapa('start');
@@ -1052,6 +1057,19 @@ async function coletarOsEmExecucao(opts = {}) {
       return { extraidas: extraidas.length, novos };
     }
 
+    // 🛡️ v2.5.2: espera linhas renderizarem com POLL (até maxMs) em vez de
+    // espera fixa — o MAP re-renderiza lento sob carga e a desistência
+    // precoce era a causa do "tabela_vazia_apos_click" com coleta pela metade
+    async function aguardarLinhas(containerSel, maxMs = 6000) {
+      const inicio = Date.now();
+      while (Date.now() - inicio < maxMs) {
+        const n = await page.locator(`${containerSel} tr[data-order-id]`).count().catch(() => 0);
+        if (n > 0) return n;
+        await page.waitForTimeout(500);
+      }
+      return 0;
+    }
+
     // Primeira página
     const r1 = await extrairOsAtuais();
     diag.paginasColetadas.push({ pagina: 1, ...r1 });
@@ -1061,6 +1079,8 @@ async function coletarOsEmExecucao(opts = {}) {
     for (let pagina = 2; pagina <= MAX_PAGINAS_SANITY; pagina++) {
       if (Date.now() - t0 > TEMPO_MAX_MS) {
         etapa('timeout_estourou', { coletado: todasOsMap.size });
+        coletaIncompleta = true;
+        coletaIncompletaMotivo = 'timeout_paginacao';
         break;
       }
 
@@ -1099,16 +1119,18 @@ async function coletarOsEmExecucao(opts = {}) {
         await elemento.click();
       } catch (e) {
         etapa('erro_click_proximo', { erro: e.message });
+        coletaIncompleta = true;
+        coletaIncompletaMotivo = 'erro_click_proximo';
         break;
       }
 
-      // Aguarda a tabela renderizar novamente — os tr[data-order-id] antigos
-      // são substituídos, então espera por re-render (timer simples + DOM check)
-      await page.waitForTimeout(1200);
-      // Verifica se ainda tem linhas (se não, a paginação quebrou)
-      const ainda = await page.locator('#pills-em-execucao tr[data-order-id]').count().catch(() => 0);
+      // 🛡️ v2.5.2: re-render pode demorar sob carga — poll de até 6s
+      await page.waitForTimeout(700);
+      const ainda = await aguardarLinhas('#pills-em-execucao', 6000);
       if (ainda === 0) {
         etapa('tabela_vazia_apos_click', { pagina });
+        coletaIncompleta = true;
+        coletaIncompletaMotivo = 'tabela_vazia_apos_click';
         break;
       }
 
@@ -1143,6 +1165,9 @@ async function coletarOsEmExecucao(opts = {}) {
 
         if (!alvo) {
           etapa('semprof_pill_nao_encontrada');
+          // OS sem-prof do snapshot seriam finalizadas por engano sem esta flag
+          coletaIncompleta = true;
+          coletaIncompletaMotivo = 'semprof_pill_nao_encontrada';
         } else {
           // 2. Clica na pill (por id se tiver, senão por texto)
           const pillLoc = alvo.id
@@ -1162,7 +1187,12 @@ async function coletarOsEmExecucao(opts = {}) {
 
             // 4. Paginação da aba (mesmo padrão "Próx.")
             for (let pg = 2; pg <= MAX_PAGINAS_SANITY; pg++) {
-              if (Date.now() - tSp > TEMPO_MAX_SEMPROF_MS) { etapa('semprof_timeout', { coletado: todasOsMap.size }); break; }
+              if (Date.now() - tSp > TEMPO_MAX_SEMPROF_MS) {
+                etapa('semprof_timeout', { coletado: todasOsMap.size });
+                coletaIncompleta = true;
+                coletaIncompletaMotivo = 'semprof_timeout';
+                break;
+              }
 
               const proxH = await page.evaluateHandle((sel) => {
                 const paginador = document.querySelector(`${sel} .pagination`);
@@ -1179,8 +1209,20 @@ async function coletarOsEmExecucao(opts = {}) {
 
               const elP = proxH.asElement();
               if (!elP) { etapa('semprof_sem_proximo'); break; }
-              try { await elP.click(); } catch (e) { etapa('semprof_erro_click', { erro: e.message }); break; }
-              await page.waitForTimeout(1200);
+              try { await elP.click(); } catch (e) {
+                etapa('semprof_erro_click', { erro: e.message });
+                coletaIncompleta = true;
+                coletaIncompletaMotivo = 'semprof_erro_click';
+                break;
+              }
+              await page.waitForTimeout(700);
+              const aindaSp = await aguardarLinhas(containerSel, 5000);
+              if (aindaSp === 0) {
+                etapa('semprof_tabela_vazia', { pagina: pg });
+                coletaIncompleta = true;
+                coletaIncompletaMotivo = 'semprof_tabela_vazia';
+                break;
+              }
 
               const rSN = await extrairOsAtuais(containerSel, 'sem_profissional');
               etapa('semprof_pagina', { pagina: pg, ...rSN, acumulado: todasOsMap.size });
@@ -1191,6 +1233,8 @@ async function coletarOsEmExecucao(opts = {}) {
       } catch (e) {
         // Falha aqui NUNCA derruba a coleta principal — em-execução já está no Map
         etapa('semprof_erro', { erro: e.message });
+        coletaIncompleta = true;
+        coletaIncompletaMotivo = 'semprof_erro';
       }
     }
 
@@ -1359,10 +1403,20 @@ async function coletarOsEmExecucao(opts = {}) {
   const duracaoMs = Date.now() - t0;
   log(`✅ [coletarOs] ${ordens.length} OS extraídas em ${diag.paginasColetadas.length} página(s) (${duracaoMs}ms)`);
 
+  // 🛡️ v2.5.2: verificação final — coletou menos que o total anunciado
+  // pela aba? (cobre paginador sumido/quebras silenciosas)
+  const emExecCount = ordens.filter((o) => (o.situacao || 'em_execucao') === 'em_execucao').length;
+  if (!coletaIncompleta && totalEsperado != null && emExecCount < totalEsperado) {
+    coletaIncompleta = true;
+    coletaIncompletaMotivo = `abaixo_do_total (${emExecCount}/${totalEsperado})`;
+  }
+
   return {
     ok: true,
     ordens,
     totalEsperado,
+    coletaCompleta: !coletaIncompleta,
+    coletaIncompletaMotivo: coletaIncompletaMotivo || null,
     paginas: diag.paginasColetadas.length,
     duracaoMs,
     // 🆕 2026-07 sla-monitor: km/retorno consultados neste tick (se opts.buscarKm)
