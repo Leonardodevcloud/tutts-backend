@@ -91,16 +91,40 @@ function getPrazoPorKm(km, faixas) {
 }
 
 /**
- * Parse de "DD-MM-YYYY HH:MM:SS" (ou DD/MM) → ISO com offset -03:00 (Bahia).
- * Retorna string ISO ou null. NUNCA usa new Date(str) direto — o JS
- * interpretaria DD-MM como MM-DD (formato US).
+ * Parse de "DD-MM-YYYY HH:MM:SS" / "DD/MM/YY HH:MM" (ano 2 ou 4 dígitos)
+ * → ISO com offset -03:00 (Bahia). Retorna string ISO ou null.
+ * NUNCA usa new Date(str) direto — o JS interpretaria DD-MM como MM-DD.
  */
 function parseDataBRparaISO(raw) {
   if (!raw) return null;
-  const m = String(raw).trim().match(/^(\d{2})[-/](\d{2})[-/](\d{4})\s+(\d{2}):(\d{2}):?(\d{2})?/);
+  const m = String(raw).trim().match(/^(\d{2})[-/](\d{2})[-/](\d{2,4})\s+(\d{2}):(\d{2}):?(\d{2})?/);
   if (!m) return null;
-  const [, dia, mes, ano, hora, min, seg] = m;
+  const [, dia, mes, anoRaw, hora, min, seg] = m;
+  // Ano 2 dígitos (formato do agendamento "02/07/26") → 20YY
+  const ano = anoRaw.length === 2 ? `20${anoRaw}` : anoRaw;
   return `${ano}-${mes}-${dia}T${hora}:${min}:${seg || '00'}-03:00`;
+}
+
+/**
+ * 🔧 2026-07 hotfix: escolhe o horário de início do SLA entre os candidatos
+ * extraídos da linha, em ordem de prioridade:
+ *   1. data-date-hour do botão editarDataHoraServico (quando a página tem)
+ *   2. agendamento (DD/MM/YY) — OS agendada: o relógio do SLA parte do
+ *      horário combinado, não da solicitação
+ *   3. solicitação (DD-MM-YYYY) — OS imediata
+ * Retorna { iso, raw } ou { iso: null, raw: null }.
+ */
+function escolherHorarioInicio(o) {
+  const candidatos = [
+    o.horario_inicio_raw,
+    o.horario_agendamento_raw,
+    o.horario_solicitacao_raw,
+  ];
+  for (const raw of candidatos) {
+    const iso = parseDataBRparaISO(raw);
+    if (iso) return { iso, raw };
+  }
+  return { iso: null, raw: null };
 }
 
 /**
@@ -135,7 +159,9 @@ async function processarColeta(pool, resultado) {
 
     const kmInfo   = kmPorOs[o.os_numero] || null;
     const km       = kmInfo && kmInfo.km != null ? kmInfo.km : null;
-    const horaISO  = parseDataBRparaISO(o.horario_inicio_raw);
+    // 🔧 2026-07 hotfix: prioridade data-date-hour > agendamento > solicitação
+    const horaEscolhida = escolherHorarioInicio(o);
+    const horaISO  = horaEscolhida.iso;
     const nomeProf = parseNomeProfissional(o.nome_profissional_raw, o.cod_profissional);
 
     // Prazo: fixo por cliente tem precedência; senão por km (se conhecido).
@@ -219,7 +245,7 @@ async function processarColeta(pool, resultado) {
         nomeProf,                                 // $5
         o.cod_rastreio || null,                   // $6
         o.link_rastreio || null,                  // $7
-        o.horario_inicio_raw || null,             // $8
+        horaEscolhida.raw || null,                // $8 (raw da fonte escolhida)
         horaISO,                                  // $9
         km,                                       // $10
         prazoKmNovo,                              // $11 (prazo calculado do km NOVO)
@@ -384,5 +410,5 @@ module.exports = {
   carregarPrazos,
   limparCachePrazos,
   // expostos pra testes unitários
-  _internal: { getPrazoPorKm, parseDataBRparaISO, parseNomeProfissional },
+  _internal: { getPrazoPorKm, parseDataBRparaISO, parseNomeProfissional, escolherHorarioInicio },
 };

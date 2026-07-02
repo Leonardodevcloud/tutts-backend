@@ -946,6 +946,20 @@ async function coletarOsEmExecucao(opts = {}) {
           const btnHora = tr.querySelector('[data-action="editarDataHoraServico"]');
           if (btnHora) horario_inicio_raw = btnHora.getAttribute('data-date-hour') || null;
 
+          // 🔧 2026-07 hotfix: na página acompanhamento-servicos o botão
+          // editarDataHoraServico não existe (data-date-hour vinha null em
+          // TODAS as OS → deadline null → "Sem dados"). Fallback: extrai as
+          // datas do TEXTO da linha (coluna SOLICIT./AGENDAMENTO):
+          //   - solicitação:  "01-07-2026 17:39:38"  (DD-MM-YYYY, ano 4 díg)
+          //   - agendamento:  "02/07/26 08:10:00"    (DD/MM/YY, ano 2 díg)
+          const txtLinha = tr.innerText || '';
+          let horario_solicitacao_raw = null;
+          let horario_agendamento_raw = null;
+          const mSol = txtLinha.match(/\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}(?::\d{2})?/);
+          if (mSol) horario_solicitacao_raw = mSol[0];
+          const mAg = txtLinha.match(/\d{2}\/\d{2}\/\d{2,4}\s+\d{2}:\d{2}(?::\d{2})?/);
+          if (mAg) horario_agendamento_raw = mAg[0];
+
           // modal_parametro — parâmetro do modal "Informações do serviço"
           // (usado pra buscar km/retorno via ajaxModalInformacoesServico.php)
           let modal_parametro = null;
@@ -974,7 +988,8 @@ async function coletarOsEmExecucao(opts = {}) {
           return {
             os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio,
             _balloon: balloon,
-            horario_inicio_raw, modal_parametro, nome_profissional_raw, cliente_nome,
+            horario_inicio_raw, horario_solicitacao_raw, horario_agendamento_raw,
+            modal_parametro, nome_profissional_raw, cliente_nome,
           };
         });
       });
