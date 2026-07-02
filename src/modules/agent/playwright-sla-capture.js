@@ -943,8 +943,16 @@ async function coletarOsEmExecucao(opts = {}) {
           // horario_inicio_raw — botão de editar data/hora carrega o horário
           // da OS no atributo data-date-hour (formato BR "DD-MM-YYYY HH:MM:SS")
           let horario_inicio_raw = null;
+          let horario_agendamento_attr = null;
           const btnHora = tr.querySelector('[data-action="editarDataHoraServico"]');
-          if (btnHora) horario_inicio_raw = btnHora.getAttribute('data-date-hour') || null;
+          if (btnHora) {
+            // 🔧 2026-07: descoberto via HTML inspecionado — data-date-hour vem
+            // em formato ISO "YYYY-MM-DD HH:MM:SS" (solicitação) e o agendamento
+            // vive em data-date-hour-collect (zerado "0000-00-00..." quando
+            // a OS é imediata; o parser do service rejeita datas zeradas).
+            horario_inicio_raw = btnHora.getAttribute('data-date-hour') || null;
+            horario_agendamento_attr = btnHora.getAttribute('data-date-hour-collect') || null;
+          }
 
           // 🔧 2026-07 hotfix: na página acompanhamento-servicos o botão
           // editarDataHoraServico não existe (data-date-hour vinha null em
@@ -988,7 +996,8 @@ async function coletarOsEmExecucao(opts = {}) {
           return {
             os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio,
             _balloon: balloon,
-            horario_inicio_raw, horario_solicitacao_raw, horario_agendamento_raw,
+            horario_inicio_raw, horario_agendamento_attr,
+            horario_solicitacao_raw, horario_agendamento_raw,
             modal_parametro, nome_profissional_raw, cliente_nome,
           };
         });

@@ -91,33 +91,52 @@ function getPrazoPorKm(km, faixas) {
 }
 
 /**
- * Parse de "DD-MM-YYYY HH:MM:SS" / "DD/MM/YY HH:MM" (ano 2 ou 4 dígitos)
- * → ISO com offset -03:00 (Bahia). Retorna string ISO ou null.
+ * Parse de data BR ou ISO → ISO com offset -03:00 (Bahia). Aceita:
+ *   - "DD-MM-YYYY HH:MM:SS" / "DD/MM/YY HH:MM"  (texto visível da linha)
+ *   - "YYYY-MM-DD HH:MM:SS"                      (atributo data-date-hour —
+ *     🔧 2026-07: descoberto via HTML inspecionado que o atributo vem em
+ *     formato ISO, não BR; sem este branch ele falhava o parse → Sem dados)
+ * Retorna string ISO ou null. Rejeita datas zeradas ("0000-00-00...").
  * NUNCA usa new Date(str) direto — o JS interpretaria DD-MM como MM-DD.
  */
 function parseDataBRparaISO(raw) {
   if (!raw) return null;
-  const m = String(raw).trim().match(/^(\d{2})[-/](\d{2})[-/](\d{2,4})\s+(\d{2}):(\d{2}):?(\d{2})?/);
+  const s = String(raw).trim();
+
+  // Formato ISO: YYYY-MM-DD HH:MM(:SS)
+  const mIso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):?(\d{2})?/);
+  if (mIso) {
+    const [, ano, mes, dia, hora, min, seg] = mIso;
+    if (ano === '0000' || mes === '00' || dia === '00') return null; // data zerada do MAP
+    return `${ano}-${mes}-${dia}T${hora}:${min}:${seg || '00'}-03:00`;
+  }
+
+  // Formato BR: DD-MM-YYYY ou DD/MM/YY(YY)
+  const m = s.match(/^(\d{2})[-/](\d{2})[-/](\d{2,4})\s+(\d{2}):(\d{2}):?(\d{2})?/);
   if (!m) return null;
   const [, dia, mes, anoRaw, hora, min, seg] = m;
+  if (anoRaw === '00' || anoRaw === '0000' || mes === '00' || dia === '00') return null;
   // Ano 2 dígitos (formato do agendamento "02/07/26") → 20YY
   const ano = anoRaw.length === 2 ? `20${anoRaw}` : anoRaw;
   return `${ano}-${mes}-${dia}T${hora}:${min}:${seg || '00'}-03:00`;
 }
 
 /**
- * 🔧 2026-07 hotfix: escolhe o horário de início do SLA entre os candidatos
- * extraídos da linha, em ordem de prioridade:
- *   1. data-date-hour do botão editarDataHoraServico (quando a página tem)
- *   2. agendamento (DD/MM/YY) — OS agendada: o relógio do SLA parte do
- *      horário combinado, não da solicitação
- *   3. solicitação (DD-MM-YYYY) — OS imediata
+ * 🔧 2026-07: escolhe o horário de início do SLA entre os candidatos,
+ * em ordem de prioridade:
+ *   1. data-date-hour-collect (agendamento, atributo) — OS agendada: o
+ *      relógio do SLA parte do horário combinado, não da solicitação.
+ *      Vem zerado ("0000-00-00...") em OS imediata → parser rejeita → cai.
+ *   2. agendamento do texto da linha (DD/MM/YY)
+ *   3. data-date-hour (solicitação, atributo — formato ISO YYYY-MM-DD)
+ *   4. solicitação do texto da linha (DD-MM-YYYY)
  * Retorna { iso, raw } ou { iso: null, raw: null }.
  */
 function escolherHorarioInicio(o) {
   const candidatos = [
-    o.horario_inicio_raw,
+    o.horario_agendamento_attr,
     o.horario_agendamento_raw,
+    o.horario_inicio_raw,
     o.horario_solicitacao_raw,
   ];
   for (const raw of candidatos) {
