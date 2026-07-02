@@ -994,6 +994,14 @@ async function coletarOsEmExecucao(opts = {}) {
             const mc = txt.match(/^(\d{2,5})\s*[-–]\s*(.+)/);
             if (mc) { cliente_nome = mc[2].trim().slice(0, 200); break; }
           }
+          // 🆕 2026-07 v2.2: o texto da célula vem TRUNCADO ("Pellegr...");
+          // o balloon do botão de solicitante carrega o Nome Fantasia completo
+          const btnSol = tr.querySelector('[data-action="popAlterarSolicianteServico"]');
+          if (btnSol) {
+            const bal = btnSol.getAttribute('data-balloon') || '';
+            const mNF = bal.match(/Nome Fantasia:\s*(.+?)(?=\s+Tel\b|\s+Celular\b|\s*\||$)/i);
+            if (mNF && mNF[1].trim()) cliente_nome = mNF[1].trim().slice(0, 200);
+          }
 
           return {
             os_numero, cliente_cod, cod_profissional, cod_rastreio, link_rastreio,

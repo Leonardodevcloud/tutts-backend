@@ -74,6 +74,53 @@ function limparCachePrazos() {
   _prazosCacheAt = 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 🆕 2026-07 v2.2: NOMES DE EXIBIÇÃO — a mesma cadeia do módulo de
+// performance diária do BI: bi_mascaras.mascara > bi_entregas.nome_cliente.
+// Enriquecidos em tempo de leitura (cache 5min); se as tabelas do BI não
+// existirem, degrada silenciosamente pro nome raspado do MAP.
+// ─────────────────────────────────────────────────────────────────────────
+const NOMES_CACHE_TTL_MS = 5 * 60_000;
+let _nomesCache = null;
+let _nomesCacheAt = 0;
+
+async function carregarNomesClientes(pool) {
+  const agora = Date.now();
+  if (_nomesCache && (agora - _nomesCacheAt) < NOMES_CACHE_TTL_MS) return _nomesCache;
+
+  const mapa = new Map();
+  try {
+    // Base: nome_cliente do BI (janela de 60 dias pra não varrer a tabela toda)
+    const { rows: nomes } = await pool.query(
+      `SELECT cod_cliente, MAX(nome_cliente) AS nome_cliente
+         FROM bi_entregas
+        WHERE data_solicitado >= CURRENT_DATE - 60
+          AND cod_cliente IS NOT NULL AND nome_cliente IS NOT NULL AND nome_cliente <> ''
+        GROUP BY cod_cliente`
+    );
+    for (const r of nomes) mapa.set(String(r.cod_cliente), r.nome_cliente);
+
+    // Override: máscara (nome de exibição oficial do dashboard)
+    const { rows: masc } = await pool.query('SELECT cod_cliente, mascara FROM bi_mascaras');
+    for (const r of masc) {
+      if (r.mascara) mapa.set(String(r.cod_cliente), r.mascara);
+    }
+  } catch (e) {
+    log(`⚠️ nomes do BI indisponíveis (usando nome raspado do MAP): ${e.message}`);
+  }
+
+  _nomesCache = mapa;
+  _nomesCacheAt = agora;
+  return mapa;
+}
+
+function aplicarNomesExibicao(linhas, nomes) {
+  for (const r of linhas) {
+    const n = r.cliente_cod != null ? nomes.get(String(r.cliente_cod)) : null;
+    if (n) r.cliente_nome = n;
+  }
+}
+
 /**
  * Prazo em minutos pela distância. Acima da última faixa, extrapola no
  * mesmo padrão da extensão v8: +15min a cada 5km além do teto.
@@ -470,6 +517,11 @@ async function consultarStatus(pool, opts = {}) {
     `SELECT MAX(ultima_vista_em) AS ultima_coleta FROM sla_monitor_snapshot`
   );
 
+  // 🆕 v2.2: nomes de exibição do BI (mascara > nome_cliente > raspado do MAP)
+  const nomes = await carregarNomesClientes(pool);
+  aplicarNomesExibicao(rows, nomes);
+  if (finalizadas) aplicarNomesExibicao(finalizadas, nomes);
+
   return {
     geradoEm: new Date().toISOString(),
     ultimaColeta: meta && meta.ultima_coleta ? meta.ultima_coleta : null,
@@ -520,6 +572,15 @@ async function performanceDiaria(pool, { dias = 7, agruparPor = 'cliente' } = {}
      ORDER BY 1 DESC, total DESC`,
     [d]
   );
+
+  // 🆕 v2.2: nome de exibição (mascara do BI) quando agrupado por cliente
+  if (agruparPor === 'cliente') {
+    const nomes = await carregarNomesClientes(pool);
+    for (const r of rows) {
+      const n = r.chave != null ? nomes.get(String(r.chave)) : null;
+      if (n) r.nome = n;
+    }
+  }
 
   return {
     geradoEm: new Date().toISOString(),
