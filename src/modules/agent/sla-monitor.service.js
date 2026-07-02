@@ -199,7 +199,7 @@ async function processarColeta(pool, resultado) {
          os_numero, cliente_cod, cliente_nome, cod_profissional, nome_profissional,
          cod_rastreio, link_rastreio, horario_inicio_raw, horario_inicio,
          distancia_km, prazo_min, prazo_origem, deadline,
-         retorno, retorno_motivo,
+         retorno, retorno_motivo, situacao,
          em_execucao, ultima_vista_em, atualizado_em
        ) VALUES (
          $1, $2, $3, $4, $5,
@@ -212,7 +212,7 @@ async function processarColeta(pool, resultado) {
          CASE WHEN $9::timestamptz IS NOT NULL AND COALESCE($12::int, $11::int) IS NOT NULL
               THEN $9::timestamptz + (COALESCE($12::int, $11::int) || ' minutes')::interval
               ELSE NULL END,
-         $13, $14,
+         $13, $14, $15,
          TRUE, NOW(), NOW()
        )
        ON CONFLICT (os_numero) DO UPDATE SET
@@ -227,6 +227,7 @@ async function processarColeta(pool, resultado) {
          distancia_km       = COALESCE(EXCLUDED.distancia_km, sla_monitor_snapshot.distancia_km),
          retorno            = (sla_monitor_snapshot.retorno OR EXCLUDED.retorno),
          retorno_motivo     = COALESCE(EXCLUDED.retorno_motivo, sla_monitor_snapshot.retorno_motivo),
+         situacao           = EXCLUDED.situacao,
          prazo_min = CASE
            WHEN $12::int IS NOT NULL THEN $12::int
            WHEN COALESCE(EXCLUDED.distancia_km, sla_monitor_snapshot.distancia_km) IS NOT NULL
@@ -271,6 +272,7 @@ async function processarColeta(pool, resultado) {
         prazoFixo,                                // $12 (prazo fixo do cliente, se houver)
         kmInfo ? !!kmInfo.retorno : false,        // $13
         kmInfo ? (kmInfo.motivo || null) : null,  // $14
+        o.situacao === 'sem_profissional' ? 'sem_profissional' : 'em_execucao', // $15
       ]
     );
 
@@ -310,7 +312,7 @@ async function tickCompleto(pool) {
   );
   const pular = comKm.map(r => r.os_numero);
 
-  // 2. Coleta ÚNICA (com km dos que faltam)
+  // 2. Coleta ÚNICA (com km dos que faltam + aba Sem profissional)
   // require tardio — mesmo padrão do sla-detector.service (módulo já no cache)
   const { coletarOsEmExecucao } = require('./playwright-sla-capture');
   const resultado = await coletarOsEmExecucao({
@@ -319,6 +321,9 @@ async function tickCompleto(pool) {
       max: KM_MAX_POR_TICK(),
       concorrencia: KM_CONCORRENCIA(),
     },
+    // 🆕 2026-07 v2.1: SLA também para OS aguardando atribuição
+    coletarSemProfissional:
+      (process.env.SLA_MONITOR_SEM_PROFISSIONAL || 'true').toLowerCase() === 'true',
   });
 
   if (!resultado.ok) {
@@ -337,9 +342,15 @@ async function tickCompleto(pool) {
 
   // 4. Detector de rastreio 814/767 — reusa a MESMA coleta (injeta coletarFn
   //    que devolve o resultado pronto; detectarOsNovas nem abre browser)
+  // 🛡️ 2026-07 v2.1: filtra pra SÓ OS em execução — OS sem profissional
+  //    NUNCA podem disparar rastreio no WhatsApp (não há corrida ainda!)
   let detector = null;
   try {
-    detector = await slaDetectorService.detectarOsNovas(pool, async () => resultado);
+    const resultadoSoExecucao = {
+      ...resultado,
+      ordens: resultado.ordens.filter((o) => (o.situacao || 'em_execucao') === 'em_execucao'),
+    };
+    detector = await slaDetectorService.detectarOsNovas(pool, async () => resultadoSoExecucao);
   } catch (e) {
     log(`⚠️ detector pós-snapshot falhou: ${e.message}`);
     detector = { ok: false, motivo: e.message };
@@ -362,8 +373,14 @@ async function tickCompleto(pool) {
 /**
  * Retorna o painel completo: OS em execução com status SLA calculado
  * pelo Postgres contra NOW() — nunca stale entre ticks do worker.
+ *
+ * 🆕 2026-07 v2.1:
+ *   - inclui OS 'sem_profissional' (aguardando atribuição, relógio correndo)
+ *   - opts.incluirFinalizadas + opts.horasFinalizadas: retorna também as OS
+ *     concluídas na janela, com veredito CONCLUIDA_NO_PRAZO / CONCLUIDA_ATRASADA
+ *     (finalizada_em vs deadline — badge da aba Concluídos na extensão)
  */
-async function consultarStatus(pool) {
+async function consultarStatus(pool, opts = {}) {
   const atencao  = LIMITE_ATENCAO();
   const iminente = LIMITE_IMINENTE();
 
@@ -383,6 +400,7 @@ async function consultarStatus(pool) {
        deadline,
        retorno,
        retorno_motivo,
+       situacao,
        ultima_vista_em,
        CASE
          WHEN deadline IS NULL THEN NULL
@@ -402,9 +420,49 @@ async function consultarStatus(pool) {
   );
 
   const resumo = { NO_PRAZO: 0, ATENCAO: 0, IMINENTE: 0, ATRASADO: 0, SEM_DADOS: 0, RETORNO: 0 };
+  const aguardandoAtribuicao = { total: 0, atrasadas: 0 };
   for (const r of rows) {
     resumo[r.status] = (resumo[r.status] || 0) + 1;
     if (r.retorno) resumo.RETORNO++;
+    if (r.situacao === 'sem_profissional') {
+      aguardandoAtribuicao.total++;
+      if (r.status === 'ATRASADO') aguardandoAtribuicao.atrasadas++;
+    }
+  }
+
+  // ── Finalizadas com veredito (badge da aba Concluídos) ───────────────────
+  let finalizadas = null;
+  let resumoFinalizadas = null;
+  if (opts.incluirFinalizadas) {
+    const horas = Math.max(1, Math.min(72, Number(opts.horasFinalizadas) || 24));
+    const { rows: fins } = await pool.query(
+      `SELECT
+         os_numero, cliente_cod, cliente_nome, cod_profissional, nome_profissional,
+         prazo_min, prazo_origem, distancia_km, deadline, finalizada_em, retorno,
+         CASE
+           WHEN deadline IS NULL THEN 'CONCLUIDA_SEM_DADOS'
+           WHEN finalizada_em <= deadline THEN 'CONCLUIDA_NO_PRAZO'
+           ELSE 'CONCLUIDA_ATRASADA'
+         END AS status,
+         CASE
+           WHEN deadline IS NULL THEN NULL
+           ELSE ROUND(EXTRACT(EPOCH FROM (finalizada_em - deadline)) / 60)::int
+         END AS minutos_diferenca
+       FROM sla_monitor_snapshot
+       WHERE em_execucao = FALSE
+         AND finalizada_em >= NOW() - ($1::int || ' hours')::interval
+       ORDER BY finalizada_em DESC
+       LIMIT 1500`,
+      [horas]
+    );
+    finalizadas = fins;
+    resumoFinalizadas = {
+      total: fins.length,
+      noPrazo: fins.filter((f) => f.status === 'CONCLUIDA_NO_PRAZO').length,
+      atrasadas: fins.filter((f) => f.status === 'CONCLUIDA_ATRASADA').length,
+      semDados: fins.filter((f) => f.status === 'CONCLUIDA_SEM_DADOS').length,
+      horas,
+    };
   }
 
   // Frescor do snapshot — pro cliente (extensão/painel) exibir heartbeat
@@ -417,8 +475,62 @@ async function consultarStatus(pool) {
     ultimaColeta: meta && meta.ultima_coleta ? meta.ultima_coleta : null,
     limites: { atencaoMin: atencao, iminenteMin: iminente },
     resumo,
+    aguardandoAtribuicao,
     total: rows.length,
     ordens: rows,
+    ...(finalizadas ? { finalizadas, resumoFinalizadas } : {}),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PERFORMANCE DIÁRIA — compliance de SLA por dia × cliente ou × profissional
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 🆕 2026-07 v2.1: agrega o histórico do snapshot em performance diária.
+ * Veredito: finalizada_em vs deadline. Dia calculado no fuso America/Bahia.
+ *
+ * ⚠️ Granularidade honesta: finalizada_em é o tick em que a OS sumiu da
+ * tela (~2min de precisão), e OS concluídas fora da janela do cron são
+ * marcadas no primeiro tick seguinte. Para números contratuais, cruzar
+ * com bi_entregas (Fase 3). Para gestão diária, é fiel.
+ *
+ * @param {'cliente'|'profissional'} agruparPor
+ */
+async function performanceDiaria(pool, { dias = 7, agruparPor = 'cliente' } = {}) {
+  const d = Math.max(1, Math.min(90, Number(dias) || 7));
+  const chaveCol  = agruparPor === 'profissional' ? 'cod_profissional' : 'cliente_cod';
+  const nomeCol   = agruparPor === 'profissional' ? 'nome_profissional' : 'cliente_nome';
+
+  const { rows } = await pool.query(
+    `SELECT
+       (finalizada_em AT TIME ZONE 'America/Bahia')::date AS dia,
+       ${chaveCol} AS chave,
+       MIN(${nomeCol}) AS nome,
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE deadline IS NOT NULL AND finalizada_em <= deadline)::int AS no_prazo,
+       COUNT(*) FILTER (WHERE deadline IS NOT NULL AND finalizada_em >  deadline)::int AS atrasadas,
+       COUNT(*) FILTER (WHERE deadline IS NULL)::int AS sem_dados,
+       ROUND(AVG(EXTRACT(EPOCH FROM (finalizada_em - deadline)) / 60)
+             FILTER (WHERE deadline IS NOT NULL AND finalizada_em > deadline))::int AS atraso_medio_min
+     FROM sla_monitor_snapshot
+     WHERE finalizada_em IS NOT NULL
+       AND finalizada_em >= NOW() - ($1::int || ' days')::interval
+     GROUP BY 1, 2
+     ORDER BY 1 DESC, total DESC`,
+    [d]
+  );
+
+  return {
+    geradoEm: new Date().toISOString(),
+    dias: d,
+    agruparPor,
+    linhas: rows.map((r) => ({
+      ...r,
+      pct_no_prazo: (r.no_prazo + r.atrasadas) > 0
+        ? Math.round((r.no_prazo / (r.no_prazo + r.atrasadas)) * 100)
+        : null,
+    })),
   };
 }
 
@@ -426,6 +538,7 @@ module.exports = {
   tickCompleto,
   processarColeta,
   consultarStatus,
+  performanceDiaria,
   carregarPrazos,
   limparCachePrazos,
   // expostos pra testes unitários

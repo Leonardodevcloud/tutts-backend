@@ -70,6 +70,14 @@ async function initSlaMonitorTables(pool) {
     WHERE em_execucao = TRUE;
   `);
 
+  // 🆕 2026-07 v2.1: situação da OS na tela do MAP
+  //   'em_execucao'      — tem profissional, corrida rodando
+  //   'sem_profissional' — aguardando atribuição (relógio do SLA já corre!)
+  await pool.query(`
+    ALTER TABLE sla_monitor_snapshot
+    ADD COLUMN IF NOT EXISTS situacao VARCHAR(20) NOT NULL DEFAULT 'em_execucao';
+  `);
+
   // Histórico de compliance por cliente (relatórios BI futuros)
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_sla_snapshot_cliente_criado

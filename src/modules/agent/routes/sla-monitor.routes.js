@@ -59,11 +59,34 @@ function createSlaMonitorRoutes(pool, verificarToken, verificarAdmin) {
         return res.status(403).json({ ok: false, erro: 'Origem ou token inválido.' });
       }
 
-      const painel = await slaMonitorService.consultarStatus(pool);
+      const painel = await slaMonitorService.consultarStatus(pool, {
+        // ?finalizadas=1&horas=24 → inclui concluídas com veredito
+        // CONCLUIDA_NO_PRAZO / CONCLUIDA_ATRASADA (badge aba Concluídos)
+        incluirFinalizadas: req.query.finalizadas === '1' || req.query.finalizadas === 'true',
+        horasFinalizadas: req.query.horas,
+      });
       return res.json({ ok: true, ...painel });
     } catch (err) {
       console.error('[sla-monitor/status] erro:', err);
       return res.status(500).json({ ok: false, erro: 'Erro interno ao consultar status SLA.' });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /agent/sla-monitor/performance   (admin)
+  // Performance diária de SLA agregada do histórico do snapshot.
+  // Query: ?dias=7&agrupar=cliente|profissional
+  // ──────────────────────────────────────────────────────────────────────
+  router.get('/sla-monitor/performance', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const resultado = await slaMonitorService.performanceDiaria(pool, {
+        dias: req.query.dias,
+        agruparPor: req.query.agrupar === 'profissional' ? 'profissional' : 'cliente',
+      });
+      return res.json({ ok: true, ...resultado });
+    } catch (err) {
+      console.error('[sla-monitor/performance] erro:', err);
+      return res.status(500).json({ ok: false, erro: 'Erro ao calcular performance diária.' });
     }
   });
 

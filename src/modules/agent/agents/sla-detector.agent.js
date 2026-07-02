@@ -23,11 +23,10 @@ module.exports = defineAgent({
   cronExpression: process.env.SLA_DETECTOR_CRON || CRON_DEFAULT,
   timezone: 'America/Bahia',
   // 🛡️ 2026-05 fix-deadlock: timeout máximo do tick cron.
-  // 🆕 2026-07 sla-monitor: tick agora inclui busca de km via modal
-  // (teto SLA_MONITOR_KM_MAX_POR_TICK, tempo máx SLA_MONITOR_KM_TEMPO_MAX_MS
-  // default 60s). Timeout default sobe pra 180s pra acomodar a coleta +
-  // km-fetch + upserts. Se passar disso, é certeza que travou.
-  timeoutMs: Number(process.env.SLA_DETECTOR_TIMEOUT_MS || 180_000), // 3 min
+  // 🆕 2026-07 v2.1: tick agora inclui aba "Sem profissional" (budget 40s,
+  // SLA_MONITOR_SEMPROF_TEMPO_MAX_MS) + busca de km (60s). Timeout default
+  // sobe pra 240s. Se passar disso, é certeza que travou.
+  timeoutMs: Number(process.env.SLA_DETECTOR_TIMEOUT_MS || 240_000), // 4 min
 
   habilitado: () => (process.env.SLA_DETECTOR_ATIVO || 'false').toLowerCase() === 'true',
 

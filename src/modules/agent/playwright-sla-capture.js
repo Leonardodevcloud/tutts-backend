@@ -902,9 +902,11 @@ async function coletarOsEmExecucao(opts = {}) {
     etapa('total_esperado', { totalEsperado });
 
     // Função que extrai OS do DOM atual e acumula no Map
-    async function extrairOsAtuais() {
-      const extraidas = await page.evaluate(() => {
-        const rows = document.querySelectorAll('#pills-em-execucao tr[data-order-id]');
+    // 🆕 2026-07 v2.1: parametrizada por container (em-execução / sem profissional)
+    // e situacao (marcada em cada OS extraída)
+    async function extrairOsAtuais(containerSel = '#pills-em-execucao', situacao = 'em_execucao') {
+      const extraidas = await page.evaluate(({ containerSel, situacao }) => {
+        const rows = document.querySelectorAll(`${containerSel} tr[data-order-id]`);
         return Array.from(rows).map(tr => {
           const os_numero = tr.getAttribute('data-order-id') || '';
 
@@ -999,9 +1001,10 @@ async function coletarOsEmExecucao(opts = {}) {
             horario_inicio_raw, horario_agendamento_attr,
             horario_solicitacao_raw, horario_agendamento_raw,
             modal_parametro, nome_profissional_raw, cliente_nome,
+            situacao,
           };
         });
-      });
+      }, { containerSel, situacao });
 
       let novos = 0;
       for (const o of extraidas) {
@@ -1033,8 +1036,10 @@ async function coletarOsEmExecucao(opts = {}) {
 
       // Acha o link "Próx." — link do paginador cujo texto contém "Próx"
       // (ou ordem alternativa: link do paginador com número da página atual+1)
-      const proximoHandle = await page.evaluateHandle(() => {
-        const paginador = document.querySelector('#em-execucao, #pills-em-execucao .pagination');
+      // 🆕 2026-07 v2.1: busca dentro do container da aba ativa (reuso pelo sem-profissional)
+      const proximoHandle = await page.evaluateHandle((containerSel) => {
+        const paginador = document.querySelector(`${containerSel} .pagination`)
+          || document.querySelector('#em-execucao, #pills-em-execucao .pagination');
         if (!paginador) return null;
         // Primeiro tenta "Próx."
         const links = Array.from(paginador.querySelectorAll('a.page-link'));
@@ -1046,7 +1051,7 @@ async function coletarOsEmExecucao(opts = {}) {
           return proxLink;
         }
         return null;
-      });
+      }, '#pills-em-execucao');
 
       const elemento = proximoHandle.asElement();
       if (!elemento) {
@@ -1080,6 +1085,77 @@ async function coletarOsEmExecucao(opts = {}) {
       if (rN.novos === 0) {
         etapa('pagina_sem_novos', { pagina });
         break;
+      }
+    }
+
+    // ── 🆕 2026-07 v2.1: coleta da aba "SEM PROFISSIONAL" ────────────────────
+    // O relógio do SLA já corre enquanto a OS espera atribuição — sem esta
+    // coleta isso era invisível. Localiza a pill por texto (id pode variar),
+    // descobre o container pelo href/data-target, e reusa a mesma extração.
+    if (opts.coletarSemProfissional) {
+      const TEMPO_MAX_SEMPROF_MS = Number(process.env.SLA_MONITOR_SEMPROF_TEMPO_MAX_MS || 40_000);
+      const tSp = Date.now();
+      try {
+        // 1. Localiza a pill e o container-alvo
+        const alvo = await page.evaluate(() => {
+          const cands = Array.from(document.querySelectorAll('a.nav-link, button.nav-link, a[data-toggle="pill"], a[data-bs-toggle="pill"], .nav-pills a, .nav-pills button'));
+          const el = cands.find(a => /sem\s*profissional/i.test((a.textContent || '').replace(/\s+/g, ' ')));
+          if (!el) return null;
+          const target = el.getAttribute('href') || el.getAttribute('data-bs-target') || el.getAttribute('data-target') || null;
+          const id = el.id || null;
+          return { target: target && target.startsWith('#') ? target : null, id };
+        });
+
+        if (!alvo) {
+          etapa('semprof_pill_nao_encontrada');
+        } else {
+          // 2. Clica na pill (por id se tiver, senão por texto)
+          const pillLoc = alvo.id
+            ? page.locator(`#${alvo.id}`)
+            : page.locator('a.nav-link, button.nav-link').filter({ hasText: /sem\s*profissional/i }).first();
+          await pillLoc.click({ timeout: 5000 });
+          await page.waitForTimeout(1500);
+
+          // 3. Container: alvo declarado > pane ativa
+          const containerSel = alvo.target || '.tab-pane.active';
+          const temRows = await page.locator(`${containerSel} tr[data-order-id]`).count().catch(() => 0);
+          etapa('semprof_aba_ativa', { containerSel, rows: temRows });
+
+          if (temRows > 0) {
+            const rS1 = await extrairOsAtuais(containerSel, 'sem_profissional');
+            etapa('semprof_pagina', { pagina: 1, ...rS1, acumulado: todasOsMap.size });
+
+            // 4. Paginação da aba (mesmo padrão "Próx.")
+            for (let pg = 2; pg <= MAX_PAGINAS_SANITY; pg++) {
+              if (Date.now() - tSp > TEMPO_MAX_SEMPROF_MS) { etapa('semprof_timeout', { coletado: todasOsMap.size }); break; }
+
+              const proxH = await page.evaluateHandle((sel) => {
+                const paginador = document.querySelector(`${sel} .pagination`);
+                if (!paginador) return null;
+                const links = Array.from(paginador.querySelectorAll('a.page-link'));
+                const prox = links.find(a => /pr[oó]x/i.test(a.textContent || ''));
+                if (prox) {
+                  const li = prox.closest('li');
+                  if (li && li.classList.contains('disabled')) return null;
+                  return prox;
+                }
+                return null;
+              }, containerSel);
+
+              const elP = proxH.asElement();
+              if (!elP) { etapa('semprof_sem_proximo'); break; }
+              try { await elP.click(); } catch (e) { etapa('semprof_erro_click', { erro: e.message }); break; }
+              await page.waitForTimeout(1200);
+
+              const rSN = await extrairOsAtuais(containerSel, 'sem_profissional');
+              etapa('semprof_pagina', { pagina: pg, ...rSN, acumulado: todasOsMap.size });
+              if (rSN.novos === 0) break;
+            }
+          }
+        }
+      } catch (e) {
+        // Falha aqui NUNCA derruba a coleta principal — em-execução já está no Map
+        etapa('semprof_erro', { erro: e.message });
       }
     }
 
