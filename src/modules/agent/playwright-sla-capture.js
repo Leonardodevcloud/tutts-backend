@@ -190,6 +190,14 @@ const MODAL_INFO_URL = () =>
 const MODAL_CENTRO_URL = () =>
   process.env.SISTEMA_EXTERNO_MODAL_CENTRO_URL ||
   'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxAlterarEmpresasOs.php';
+// 🔧 2026-07 v2.4.1: o centro SELECIONADO vem de um segundo endpoint —
+// ajaxAlterarCentroCustoServico.php devolve o script com idCentroPop='ID',
+// enquanto o ajaxAlterarEmpresasOs.php devolve o <select> com as opções
+// (id → nome). O li.ms-selected é gerado pelo plugin jQuery no browser e
+// NUNCA vem no HTML cru — por isso o parse anterior zerava (comNome: 0).
+const MODAL_CENTRO_ID_URL = () =>
+  process.env.SISTEMA_EXTERNO_MODAL_CENTRO_ID_URL ||
+  'https://tutts.com.br/expresso/expressoat/entregasStatus/ajaxAlterarCentroCustoServico.php';
 
 // ── Mutex interno (NEUTRALIZADO 2026-04) ────────────────────────────────────
 // Substituído pelo lock global `withBrowserLock` em playwright-lock.js.
@@ -1268,27 +1276,66 @@ async function coletarOsEmExecucao(opts = {}) {
 
       if (alvosCentro.length > 0) {
         try {
-          const centroResultados = await page.evaluate(async ({ alvos, url, tempoMaxMs, conc }) => {
+          const centroResultados = await page.evaluate(async ({ alvos, urlOpcoes, urlId, tempoMaxMs, conc }) => {
             const t0 = Date.now();
             const resultados = {};
 
+            // Busca com fallback de método: tenta GET ?os=, se a resposta não
+            // parecer o modal, tenta POST os= (PHP legado varia entre $_GET/$_POST)
+            async function buscarHtml(baseUrl, os) {
+              const tentativas = [
+                { url: `${baseUrl}?os=${encodeURIComponent(os)}`, opts: { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' } } },
+                { url: baseUrl, opts: { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }, body: 'os=' + encodeURIComponent(os) } },
+              ];
+              for (const t of tentativas) {
+                try {
+                  const r = await fetch(t.url, t.opts);
+                  const html = await r.text();
+                  if (/idCentro|idCentroPop|<option/i.test(html)) return html;
+                  // guarda a última resposta mesmo "estranha" pra diagnóstico
+                  if (t === tentativas[tentativas.length - 1]) return html;
+                } catch (_) { /* tenta próximo método */ }
+              }
+              return '';
+            }
+
             async function buscarUm(os) {
               try {
-                const r = await fetch(`${url}?os=${encodeURIComponent(os)}`, { method: 'GET' });
-                const html = await r.text();
-                let nome = null;
+                // 1. idCentroPop (centro SELECIONADO) — endpoint dedicado
+                const htmlId = await buscarHtml(urlId, os);
                 let id = null;
-                // Forma 1: item já selecionado no multi-select
-                const mSel = html.match(/ms-elem-selection[^>]*ms-selected[^>]*>\s*<span[^>]*>\s*([^<]+?)\s*</i);
-                if (mSel) nome = mSel[1].trim();
-                // Forma 2: idCentroPop → option correspondente
-                const mId = html.match(/idCentroPop\s*=\s*'(\d+)'/);
+                const mId = htmlId.match(/idCentroPop\s*=\s*'(\d+)'/);
                 if (mId) id = mId[1];
-                if (!nome && id) {
-                  const mOpt = html.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
+
+                // 2. opções (id → nome) — modal principal
+                const htmlOpcoes = await buscarHtml(urlOpcoes, os);
+                let nome = null;
+                if (id) {
+                  const mOpt = htmlOpcoes.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'))
+                    || htmlId.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
                   if (mOpt) nome = mOpt[1].trim();
                 }
-                resultados[os] = { centro_id: id, centro_nome: nome || null };
+                // Fallbacks: option com selected / idCentroPop embutido no modal principal
+                if (!nome) {
+                  const mSelAttr = (htmlOpcoes + htmlId).match(/<option[^>]*\sselected[^>]*>\s*([^<]+?)\s*</i);
+                  if (mSelAttr) nome = mSelAttr[1].trim();
+                }
+                if (!id && !nome) {
+                  const mId2 = htmlOpcoes.match(/idCentroPop\s*=\s*'(\d+)'/);
+                  if (mId2) {
+                    id = mId2[1];
+                    const mOpt2 = htmlOpcoes.match(new RegExp(`<option[^>]*value=["']?${id}["']?[^>]*>\\s*([^<]+?)\\s*<`, 'i'));
+                    if (mOpt2) nome = mOpt2[1].trim();
+                  }
+                }
+
+                resultados[os] = {
+                  centro_id: id,
+                  centro_nome: nome || null,
+                  // amostras curtas pro diagnóstico quando o parse falhar
+                  _amostraId: nome ? undefined : htmlId.replace(/\s+/g, ' ').slice(0, 180),
+                  _amostraOpcoes: nome ? undefined : htmlOpcoes.replace(/\s+/g, ' ').slice(0, 180),
+                };
               } catch (e) {
                 resultados[os] = { centro_id: null, centro_nome: null, erro: String(e && e.message || e) };
               }
@@ -1305,11 +1352,26 @@ async function coletarOsEmExecucao(opts = {}) {
             }
             await Promise.all(Array.from({ length: conc }, () => worker()));
             return resultados;
-          }, { alvos: alvosCentro, url: MODAL_CENTRO_URL(), tempoMaxMs: TEMPO_MAX_CENTRO_MS, conc: concCentro });
+          }, {
+            alvos: alvosCentro,
+            urlOpcoes: MODAL_CENTRO_URL(),
+            urlId: MODAL_CENTRO_ID_URL(),
+            tempoMaxMs: TEMPO_MAX_CENTRO_MS,
+            conc: concCentro,
+          });
 
           diag.centroPorOs = centroResultados;
           const comNome = Object.values(centroResultados).filter((c) => c.centro_nome).length;
           etapa('centro_fetch_fim', { consultadas: Object.keys(centroResultados).length, comNome });
+          // 🔧 v2.4.1: se NADA parseou, loga amostra da primeira resposta pra
+          // enxergarmos o que o servidor devolve pra sessão do worker
+          if (comNome === 0) {
+            const primeira = Object.values(centroResultados)[0] || {};
+            etapa('centro_fetch_amostra', {
+              id: primeira._amostraId || primeira.erro || '(vazio)',
+              opcoes: primeira._amostraOpcoes || '(vazio)',
+            });
+          }
         } catch (e) {
           etapa('centro_fetch_erro', { erro: e.message });
           diag.centroPorOs = {};
