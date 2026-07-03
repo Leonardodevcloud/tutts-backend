@@ -44,6 +44,7 @@ const fs = require('fs');
 const { defineAgent } = require('../core/agent-base');
 const { criarBrowserSession } = require('../core/browser-session');
 const { initChat99Tables } = require('../../logistics/chat99.migration');
+const zlib = require('zlib');
 
 // ── Config via env ──────────────────────────────────────────────────────
 const DELIVERS_URL   = process.env.CHAT99_DELIVERS_URL || 'https://entrega.99app.com/v2/delivers';
@@ -84,12 +85,20 @@ function semearSessaoSePreciso(log) {
   _sessaoSemeada = true;
   try {
     if (fs.existsSync(SESSION_FILE)) return;
-    const b64 = process.env.CHAT99_STORAGE_STATE_B64;
+    // Junta os pedacos: CHAT99_STORAGE_STATE_B64 (+ _2, _3, ... quando a sessao
+    // e grande demais pra uma unica env var do Railway - limite 32768 chars).
+    let b64 = process.env.CHAT99_STORAGE_STATE_B64 || '';
+    let n = 2;
+    while (process.env[`CHAT99_STORAGE_STATE_B64_${n}`]) { b64 += process.env[`CHAT99_STORAGE_STATE_B64_${n}`]; n++; }
+    b64 = b64.trim();
     if (!b64) return;
-    const json = Buffer.from(b64, 'base64').toString('utf8');
+    const buf = Buffer.from(b64, 'base64');
+    // Suporta gzip (magic 1f 8b) ou JSON puro (compat com seed antigo).
+    const ehGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+    const json = ehGzip ? zlib.gunzipSync(buf).toString('utf8') : buf.toString('utf8');
     JSON.parse(json); // valida
     fs.writeFileSync(SESSION_FILE, json, 'utf8');
-    log('🌱 storageState semeado a partir de CHAT99_STORAGE_STATE_B64');
+    log(`🌱 storageState semeado (${n - 1} parte(s), ${ehGzip ? 'gzip' : 'plano'})`);
   } catch (e) {
     log(`⚠️ Falha ao semear storageState: ${e.message}`);
   }
