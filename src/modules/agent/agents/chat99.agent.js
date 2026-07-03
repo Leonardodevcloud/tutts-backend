@@ -31,10 +31,11 @@
  *  - limite .......... 140 caracteres por mensagem
  *  (matchers usam substring de classe pra tolerar content_ vs content__)
  *
- * LOGIN: nesta v1 o login é por SESSÃO SEMEADA (storageState). Veja o LEIA-ME
- * — a auto-login (preencher email/senha) fica pra quando inspecionarmos a tela
- * de login da 99. Se a sessão cair e não houver storageState válido, o agente
- * loga o alerta e entra em cooldown (não tenta adivinhar a tela de login).
+ * LOGIN: AUTO-LOGIN por telefone + senha (aba "Entrar com senha" da 99/DiDi).
+ * Vars: CHAT99_LOGIN (telefone, ex 71982138159) + CHAT99_SENHA. O checkbox
+ * "Aceito Termos" é marcado automaticamente (obrigatório). Se cair OTP/captcha
+ * ou o login falhar, o agente entra em cooldown; como fallback opcional ainda
+ * dá pra semear CHAT99_STORAGE_STATE_B64. Veja o LEIA-ME.
  */
 
 'use strict';
@@ -109,13 +110,8 @@ function entrarCooldown(log, motivo) {
 }
 
 // ── Detecção de login ────────────────────────────────────────────────────
-// Consideramos "logado" se, após ir pra /delivers, aparece um elemento que só
-// existe logado (botao "Novo pedido" ou "Pesquisar"). Se não aparece, a sessão
-// caiu (humano logou e derrubou) ou nunca foi semeada.
-async function estaLogado(page) {
-  try {
-    await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  } catch (_) { return false; }
+// "logado" = aparece um elemento que só existe na tela de delivers logada.
+async function temMarcadoresLogado(page) {
   const marcadores = [
     'button:has-text("Novo pedido")',
     'button:has-text("Pesquisar")',
@@ -126,6 +122,100 @@ async function estaLogado(page) {
     if (ok) return true;
   }
   return false;
+}
+
+// Estamos na tela de login da 99/DiDi? (redireciona pra page.didiglobal.com)
+async function ehTelaLogin(page) {
+  const url = page.url() || '';
+  if (url.includes('didiglobal.com') || /\/login\b/.test(url)) return true;
+  const campoSenha = await page.locator('input[type="password"]').first()
+    .isVisible({ timeout: 3000 }).catch(() => false);
+  return campoSenha;
+}
+
+// ── Auto-login: telefone + senha (aba "Entrar com senha") ─────────────────
+// A 99 loga por telefone (o número é o próprio login). O <form> real é
+// display:none (Vue controla o submit), então preenchemos os inputs e clicamos
+// no "Entrar" visível. O checkbox "Aceito Termos" é OBRIGATORIO — sem ele o
+// botao fica travado.
+async function fazerLogin99(page, log) {
+  const telefone = process.env.CHAT99_LOGIN || process.env.CHAT99_TELEFONE;
+  const senha = process.env.CHAT99_SENHA;
+  if (!telefone || !senha) {
+    log('   ⚠️ sem CHAT99_LOGIN/CHAT99_SENHA — auto-login indisponível (use storageState)');
+    return false;
+  }
+  try {
+    // Garante a aba "Entrar com senha" (a de código de verificação exige OTP).
+    const abaSenha = page.getByText('Entrar com senha', { exact: false }).first();
+    if (await abaSenha.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await abaSenha.click().catch(() => {});
+      await page.waitForTimeout(400);
+    }
+
+    // Telefone: input type=tel; fallback = primeiro input do card que não é senha.
+    let tel = page.locator('input[type="tel"]').first();
+    if (!(await tel.count())) {
+      tel = page.locator('.login-card input:not([type="password"]):not([type="checkbox"])').first();
+    }
+    await tel.click({ timeout: 10000 });
+    await tel.fill('');
+    await tel.type(String(telefone), { delay: 40 });
+
+    // Senha
+    const pass = page.locator('input[type="password"]').first();
+    await pass.click({ timeout: 10000 });
+    await pass.fill('');
+    await pass.type(String(senha), { delay: 40 });
+
+    // Checkbox "Aceito Termos e Condições" (obrigatório)
+    const chk = page.locator('input[type="checkbox"]').first();
+    if (await chk.count()) {
+      await chk.check({ force: true }).catch(async () => { await chk.click({ force: true }).catch(() => {}); });
+    } else {
+      // checkbox custom (Vant): clica no elemento ao lado do texto "Aceito"
+      await page.getByText('Aceito', { exact: false }).first().click().catch(() => {});
+    }
+    await page.waitForTimeout(300);
+
+    // Entrar
+    const btnEntrar = page.getByRole('button', { name: 'Entrar' }).first();
+    if (await btnEntrar.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await btnEntrar.click({ timeout: 10000 }).catch(() => {});
+    } else {
+      await page.locator('button:has-text("Entrar")').first().click({ timeout: 10000 }).catch(() => {});
+    }
+
+    // Aguarda voltar pro delivers logado.
+    await page.waitForURL(/entrega\.99app\.com\/v2\/delivers/, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    log('   🔑 auto-login submetido');
+    return true;
+  } catch (e) {
+    log(`   ❌ auto-login falhou: ${e.message}`);
+    return false;
+  }
+}
+
+// Garante sessão logada: vai pro delivers; se não logado, tenta auto-login;
+// se ainda assim não logar (ex: caiu OTP/captcha), retorna false pro cooldown.
+async function garantirLogado(page, log) {
+  try {
+    await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  } catch (_) { return false; }
+
+  if (await temMarcadoresLogado(page)) return true;
+
+  if (!(await ehTelaLogin(page))) return false;
+
+  const tentou = await fazerLogin99(page, log);
+  if (!tentou) return false;
+
+  // Reconfirma no delivers.
+  try {
+    await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  } catch (_) {}
+  return await temMarcadoresLogado(page);
 }
 
 // ── Busca as corridas 99 ativas na NOSSA base (+ as com outbox pendente) ──
@@ -390,11 +480,12 @@ module.exports = defineAgent({
     await bs.comContext(async (context) => {
       const page = await context.newPage();
       try {
-        const logado = await estaLogado(page);
+        const logado = await garantirLogado(page, ctx.log);
         if (!logado) {
           const ss = await screenshotErro(page, 'nao-logado');
-          entrarCooldown(ctx.log, 'sessão da 99 indisponível/derrubada');
-          ctx.log(`   ⚠️ Não logado na 99. Semeie CHAT99_STORAGE_STATE_B64. Screenshot: ${ss}`);
+          entrarCooldown(ctx.log, 'não foi possível logar na 99');
+          ctx.log(`   ⚠️ Não logado na 99 (auto-login falhou ou caiu OTP/captcha). ` +
+                  `Confira CHAT99_LOGIN/CHAT99_SENHA ou semeie CHAT99_STORAGE_STATE_B64. Screenshot: ${ss}`);
           return;
         }
         // Persiste a sessão (renova cookies) pro próximo tick.
