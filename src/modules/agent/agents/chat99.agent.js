@@ -153,10 +153,14 @@ async function fazerLogin99(page, log) {
       await page.waitForTimeout(400);
     }
 
-    // Telefone: input type=tel; fallback = primeiro input do card que não é senha.
-    let tel = page.locator('input[type="tel"]').first();
+    // Telefone: pega o input VISIVEL, excluindo senha e o seletor de pais
+    // (placeholder "Selecione o pais", que fica invisivel/overlay).
+    let tel = page.locator('input[type="tel"]:visible').first();
     if (!(await tel.count())) {
-      tel = page.locator('.login-card input:not([type="password"]):not([type="checkbox"])').first();
+      tel = page.locator('.login-card input:visible:not([type="password"]):not([placeholder="Selecione o país"])').first();
+    }
+    if (!(await tel.count())) {
+      tel = page.locator('.login-right input:visible:not([type="password"])').first();
     }
     await tel.click({ timeout: 10000 });
     await tel.fill('');

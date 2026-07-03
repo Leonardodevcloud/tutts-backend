@@ -30,9 +30,13 @@ function createChat99Routes(pool, verificarToken, verificarAdmin, registrarAudit
   // ──────────────────────────────────────────────────────────────────
   router.get('/chat99/conversas', verificarToken, verificarAdmin, async (req, res) => {
     try {
-      const status = String(req.query.status || 'ativa');
-      const where = status === 'todas' ? '' : 'WHERE status = $1';
-      const params = status === 'todas' ? [] : [status];
+      // Default 'abertas' = mostra ativa + aguardando_aceite (conversa iniciada
+      // pelo atendente nasce como aguardando_aceite e precisa aparecer na lista).
+      const status = String(req.query.status || 'abertas');
+      let where, params;
+      if (status === 'todas') { where = ''; params = []; }
+      else if (status === 'abertas') { where = "WHERE status <> 'encerrada'"; params = []; }
+      else { where = 'WHERE status = $1'; params = [status]; }
 
       const { rows } = await pool.query(`
         SELECT id, codigo_os, pedido_id_99, motoboy_nome, motoboy_telefone,
@@ -156,8 +160,9 @@ function createChat99Routes(pool, verificarToken, verificarAdmin, registrarAudit
       await client.query('COMMIT');
 
       if (typeof registrarAuditoria === 'function') {
-        registrarAuditoria(req, 'chat99_enviar', {
-          codigo_os: codigoOs, operador: nomeOperador(req), tamanho: texto.length,
+        registrarAuditoria(req, {
+          acao: 'CHAT99_ENVIAR',
+          detalhes: `OS ${codigoOs}: ${nomeOperador(req)} enviou ${texto.length} chars`,
         }).catch(() => {});
       }
 
