@@ -29,3 +29,7 @@ _backup-logistics-*/
 # backups locais
 *.bak
 *.bak_*
+
+chat99-b64-parte*.txt
+chat99-storage-b64.txt
+seed-chat99-session.js
