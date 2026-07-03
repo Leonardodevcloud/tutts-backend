@@ -90,9 +90,10 @@ function semearSessaoSePreciso(log) {
     let b64 = process.env.CHAT99_STORAGE_STATE_B64 || '';
     let n = 2;
     while (process.env[`CHAT99_STORAGE_STATE_B64_${n}`]) { b64 += process.env[`CHAT99_STORAGE_STATE_B64_${n}`]; n++; }
-    b64 = b64.trim();
+    b64 = b64.replace(/\s+/g, ''); // paste-safe: remove qualquer espaco/quebra
     if (!b64) return;
     const buf = Buffer.from(b64, 'base64');
+    if (process.env.CHAT99_DEBUG_SEED) { log('[dbg] b64Len=' + b64.length + ' head=' + b64.slice(0,12) + ' bufHead=' + buf.slice(0,4).toString('hex') + ' temParte2=' + (!!process.env.CHAT99_STORAGE_STATE_B64_2)); }
     // Suporta gzip (magic 1f 8b) ou JSON puro (compat com seed antigo).
     const ehGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
     const json = ehGzip ? zlib.gunzipSync(buf).toString('utf8') : buf.toString('utf8');
