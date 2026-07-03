@@ -45,6 +45,7 @@ const { EventSource } = require('./core/EventLogger');
 const { createDispatchRulesRoutes } = require('./routes/dispatch-rules.routes');
 const { createConfigGlobalRoutes } = require('./routes/config-global.routes');
 const { createDashboardRoutes } = require('./routes/dashboard.routes');
+const { createChat99Routes } = require('./routes/chat99.routes');
 const { createOcorrenciasRoutes } = require('./routes/ocorrencias.routes');
 const { initLogisticsBackfill } = require('./logistics.backfill');
 
@@ -684,6 +685,9 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // Dashboard /metrics e /events (Fase 4) — sub-router dedicado
   // ───────────────────────────────────────────────────────────
   router.use(createDashboardRoutes(pool, verificarToken, verificarAdmin));
+
+  // Chat 99 (espelho do chat da 99Entrega via agente Playwright chat99) - sub-router
+  router.use(createChat99Routes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
   // ═══════════════════════════════════════════════════════════
   // 🆕 2026-05 FASE 6 — Endpoints portados de /api/uber/* pro hub.

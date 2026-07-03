@@ -42,6 +42,7 @@ const liberarPontoAgent   = require('./agents/liberar-ponto.agent');     // 2026
 const biImportAgent       = require('./agents/bi-import.agent');         // 2026-04 v3
 const initBiImportTables  = require('./bi-import.migration');            // 2026-04 v3
 const filaValidadorAgent  = require('./agents/fila-validador.agent');    // 2026-05: fila auto-gerenciável
+const chat99Agent         = require('./agents/chat99.agent');            // 2026-07: chat da 99 via RPA
 
 async function initAgentTables(pool) {
   await initAgentTablesBase(pool);
@@ -98,6 +99,8 @@ function startAgentWorker(pool) {
     agentPool.register(biImportAgent);
     // 2026-05: agente da fila auto-gerenciável (varredura periódica)
     agentPool.register(filaValidadorAgent);
+    // 2026-07: agente do Chat 99 (so roda se CHAT99_AGENT_ATIVO=true)
+    agentPool.register(chat99Agent);
     // Cron próprio pra criar job D-1 ao meio-dia (diferente do cron do agent que processa).
     // Esse cron só CRIA o job — o worker do pool pega depois.
     try {

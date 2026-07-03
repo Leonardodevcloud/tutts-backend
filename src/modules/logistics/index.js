@@ -24,6 +24,7 @@ const { initLogisticsBloqueadosTables } = require('./logistics.migration-bloquea
 const { createLogisticsRouter } = require('./logistics.routes');
 const { createLogisticsWebhookRouter } = require('./routes/webhook.routes');
 const { createLogisticsRastreioRouter } = require('./routes/rastreio.routes');
+const { initChat99Tables } = require('./chat99.migration');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
 const { getEventLogger } = require('./core/EventLogger');
 const { UberAdapter } = require('./adapters/uber/UberAdapter');
@@ -62,6 +63,11 @@ async function initLogisticsTables(pool) {
   // Ocorrencias + blacklist de entregadores. Bloqueante mas trivial (2 CREATE).
   await initLogisticsBloqueadosTables(pool).catch(err => {
     console.error('⚠️ [logistics] migration bloqueados falhou:', err.message);
+  });
+
+  // Chat 99: tabelas do espelho do chat da 99Entrega. Idempotente, trivial.
+  await initChat99Tables(pool).catch(err => {
+    console.error('[logistics] migration chat99 falhou:', err.message);
   });
 
   // Fase 2: backfill de entregas (não-bloqueante)

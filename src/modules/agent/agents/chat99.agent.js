@@ -1,0 +1,422 @@
+/**
+ * agents/chat99.agent.js
+ * ─────────────────────────────────────────────────────────────────────────
+ * Agente RPA do Chat 99 (Playwright). A 99Entrega NÃO expõe o chat com o
+ * motoboy via API — ele só existe na plataforma web (entrega.99app.com). Este
+ * agente espelha as mensagens pro nosso banco e envia as nossas de volta.
+ *
+ * MODELO (decidido com o Tutts):
+ *  - CONTA ÚNICA, SESSÃO ÚNICA, SERIAL. A 99 desloga se logar 2x na mesma conta,
+ *    então roda 1 slot só, uma corrida por vez. sessionStrategy: null (a sessão
+ *    do 99 é gerenciada aqui na mão, NÃO é o SISTEMA_EXTERNO dos outros agentes).
+ *  - tickGlobal em loop de ~25s (CHAT99_LOOP_MS). "estável > rápido".
+ *  - Fonte da verdade de "quais corridas vigiar": a NOSSA logistics_deliveries
+ *    (provider noventanove, não-finalizada) — não raspamos a tabela da 99 (frágil
+ *    por índice de coluna). Pra cada corrida, filtramos por OS = "ID do pedido
+ *    externo" na 99, abrimos o chat, capturamos o diff e drenamos a outbox.
+ *  - RECONEXÃO: se a sessão cair (humano logou e derrubou o agente), NÃO briga —
+ *    entra em cooldown de 5min (CHAT99_RECONNECT_COOLDOWN_MS) e volta depois.
+ *
+ * SELETORES DA 99 (confirmados via DevTools nos prints do Tutts):
+ *  - filtro OS ....... input[placeholder="ID do pedido externo"]
+ *  - buscar .......... button "Pesquisar"
+ *  - abrir chat ...... na linha da OS, botao/span "Mensagem"
+ *  - janela .......... .chat__window
+ *  - bolhas .......... li com filho de classe "msg_<id>" (dedup natural)
+ *  - lado ............ box com "isSelf" = nós (out) / sem isSelf = motoboy (in)
+ *  - horario ......... .content_time visivel (o outro fica display:none)
+ *  - lido ............ .content__isread.read
+ *  - input ........... .chat__window textarea (placeholder "Insira o texto aqui")
+ *  - enviar .......... botao "Enviar" no rodape (.window__main--footer)
+ *  - limite .......... 140 caracteres por mensagem
+ *  (matchers usam substring de classe pra tolerar content_ vs content__)
+ *
+ * LOGIN: nesta v1 o login é por SESSÃO SEMEADA (storageState). Veja o LEIA-ME
+ * — a auto-login (preencher email/senha) fica pra quando inspecionarmos a tela
+ * de login da 99. Se a sessão cair e não houver storageState válido, o agente
+ * loga o alerta e entra em cooldown (não tenta adivinhar a tela de login).
+ */
+
+'use strict';
+
+const fs = require('fs');
+const { defineAgent } = require('../core/agent-base');
+const { criarBrowserSession } = require('../core/browser-session');
+const { initChat99Tables } = require('../../logistics/chat99.migration');
+
+// ── Config via env ──────────────────────────────────────────────────────
+const DELIVERS_URL   = process.env.CHAT99_DELIVERS_URL || 'https://entrega.99app.com/v2/delivers';
+const LOOP_MS        = Number(process.env.CHAT99_LOOP_MS || 25_000);
+const COOLDOWN_MS    = Number(process.env.CHAT99_RECONNECT_COOLDOWN_MS || 300_000); // 5min
+const MAX_POR_TICK   = Number(process.env.CHAT99_MAX_POR_TICK || 6);
+const TICK_TIMEOUT   = Number(process.env.CHAT99_TICK_TIMEOUT_MS || 300_000); // 5min
+const SESSION_FILE   = process.env.CHAT99_SESSION_FILE || '/tmp/tutts-chat99-session.json';
+const LIMITE_99      = 140;
+const NAV_TIMEOUT    = Number(process.env.CHAT99_NAV_TIMEOUT_MS || 45_000);
+
+const CHAT99_LAUNCH_OPTS = {
+  headless: true,
+  timeout: 30_000,
+  args: [
+    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+    '--disable-gpu', '--disable-software-rasterizer', '--disable-background-networking',
+    '--disable-default-apps', '--disable-extensions', '--disable-sync', '--disable-translate',
+    '--disable-ipc-flooding-protection', '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI,IsolateOrigins,site-per-process',
+    '--hide-scrollbars', '--metrics-recording-only', '--mute-audio',
+    '--no-first-run', '--safebrowsing-disable-auto-update', '--no-default-browser-check',
+  ],
+};
+
+// ── Estado do módulo (persiste entre ticks) ─────────────────────────────
+let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
+let _tabelasOk = false;    // migration idempotente já rodou neste processo?
+let _sessaoSemeada = false;
+
+function agora() { return Date.now(); }
+
+// Semeia o storageState (login) a partir do env CHAT99_STORAGE_STATE_B64,
+// caso o arquivo de sessão ainda não exista. É o caminho de login da v1.
+function semearSessaoSePreciso(log) {
+  if (_sessaoSemeada) return;
+  _sessaoSemeada = true;
+  try {
+    if (fs.existsSync(SESSION_FILE)) return;
+    const b64 = process.env.CHAT99_STORAGE_STATE_B64;
+    if (!b64) return;
+    const json = Buffer.from(b64, 'base64').toString('utf8');
+    JSON.parse(json); // valida
+    fs.writeFileSync(SESSION_FILE, json, 'utf8');
+    log('🌱 storageState semeado a partir de CHAT99_STORAGE_STATE_B64');
+  } catch (e) {
+    log(`⚠️ Falha ao semear storageState: ${e.message}`);
+  }
+}
+
+async function screenshotErro(page, tag) {
+  try {
+    const p = `/tmp/chat99-${tag}-${Date.now()}.png`;
+    await page.screenshot({ path: p, fullPage: false });
+    return p;
+  } catch (_) { return null; }
+}
+
+function entrarCooldown(log, motivo) {
+  _cooldownAte = agora() + COOLDOWN_MS;
+  const min = Math.round(COOLDOWN_MS / 60000);
+  log(`🟡 Cooldown de ${min}min (${motivo}). Volto às ${new Date(_cooldownAte).toLocaleTimeString('pt-BR')}`);
+}
+
+// ── Detecção de login ────────────────────────────────────────────────────
+// Consideramos "logado" se, após ir pra /delivers, aparece um elemento que só
+// existe logado (botao "Novo pedido" ou "Pesquisar"). Se não aparece, a sessão
+// caiu (humano logou e derrubou) ou nunca foi semeada.
+async function estaLogado(page) {
+  try {
+    await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  } catch (_) { return false; }
+  const marcadores = [
+    'button:has-text("Novo pedido")',
+    'button:has-text("Pesquisar")',
+    'text=ID do pedido externo',
+  ];
+  for (const sel of marcadores) {
+    const ok = await page.locator(sel).first().isVisible({ timeout: 8000 }).catch(() => false);
+    if (ok) return true;
+  }
+  return false;
+}
+
+// ── Busca as corridas 99 ativas na NOSSA base (+ as com outbox pendente) ──
+async function buscarAlvos(pool, limite) {
+  const { rows } = await pool.query(`
+    WITH ativos AS (
+      SELECT DISTINCT codigo_os::text AS os
+      FROM logistics_deliveries
+      WHERE provider_code = 'noventanove'
+        AND COALESCE(status_canonico, '') NOT IN ('DELIVERED','CANCELED','FAILED','RETURNED')
+      UNION
+      SELECT DISTINCT c.codigo_os AS os
+      FROM chat99_conversas c
+      JOIN chat99_mensagens m ON m.conversa_id = c.id
+      WHERE m.direcao = 'out' AND m.status_envio = 'pendente' AND c.status <> 'encerrada'
+    )
+    SELECT a.os,
+           (SELECT ultima_varredura FROM chat99_conversas cc WHERE cc.codigo_os = a.os) AS lv
+    FROM ativos a
+    ORDER BY lv ASC NULLS FIRST
+    LIMIT $1
+  `, [limite]);
+  return rows.map(r => String(r.os));
+}
+
+// ── Filtra por OS e abre o chat. Retorna true se o chat abriu. ────────────
+async function abrirChatDaOS(page, os, log) {
+  // 1) limpa e preenche o filtro "ID do pedido externo"
+  const filtro = page.locator('input[placeholder="ID do pedido externo"]').first();
+  await filtro.click({ timeout: 15000 });
+  await filtro.fill('');
+  await filtro.fill(String(os));
+
+  // 2) Pesquisar
+  await page.locator('button:has-text("Pesquisar")').first().click({ timeout: 15000 });
+  await page.waitForTimeout(2500); // deixa a tabela recarregar
+
+  // 3) acha a linha da OS e o botao "Mensagem"
+  const linha = page.locator('tr', { hasText: String(os) }).first();
+  const temLinha = await linha.isVisible({ timeout: 8000 }).catch(() => false);
+  if (!temLinha) { log(`   OS ${os}: linha não encontrada na 99`); return false; }
+
+  const btnMsg = linha.getByText('Mensagem', { exact: true }).first();
+  const temMsg = await btnMsg.isVisible({ timeout: 5000 }).catch(() => false);
+  if (!temMsg) { log(`   OS ${os}: sem botão Mensagem (aguardando aceite)`); return false; }
+
+  await btnMsg.click({ timeout: 10000 });
+  const abriu = await page.locator('.chat__window').first().isVisible({ timeout: 10000 }).catch(() => false);
+  return abriu;
+}
+
+// ── Extrai dados do motoboy do modal (nome + foto; rating/telefone best-effort)
+async function extrairInfoMotoboy(page) {
+  return await page.evaluate(() => {
+    const pick = (sel) => { const el = document.querySelector(sel); return el ? el.textContent.trim() : null; };
+    const janela = document.querySelector('.chat__window');
+    let nome = null, foto = null;
+    if (janela) {
+      const nav = janela.querySelector('[class*="nav-bar"]');
+      if (nav) nome = nav.textContent.trim() || null;
+      const avatarImg = janela.querySelector('[class*="avatar"] img') || janela.querySelector('img');
+      if (avatarImg && avatarImg.src) foto = avatarImg.src;
+    }
+    // Painel de detalhes (se aberto): rating, telefone, ID do pedido
+    let rating = null, telefone = null, pedidoId = null;
+    const corpo = document.body.innerText || '';
+    const mRating = corpo.match(/★?\s*(\d\.\d{1,2})\b/);
+    if (mRating) rating = mRating[1];
+    const mTel = corpo.match(/\+55\s?\d[\d\s-]{8,}/);
+    if (mTel) telefone = mTel[0].replace(/\s+/g, ' ').trim();
+    const mPed = corpo.match(/ID do pedido\s*[:：]\s*(\d{6,})/);
+    if (mPed) pedidoId = mPed[1];
+    return { nome, foto, rating, telefone, pedidoId };
+  });
+}
+
+// ── Extrai as bolhas do chat (tolerante a content_ vs content__) ──────────
+async function extrairBolhas(page) {
+  return await page.evaluate(() => {
+    const janela = document.querySelector('.chat__window');
+    if (!janela) return [];
+    const msgEls = Array.from(janela.querySelectorAll('[class*="msg_"]'))
+      .filter(el => /(?:^|\s)msg_\d+/.test(el.className || '') && /content/.test(el.className || ''));
+    const out = [];
+    for (const el of msgEls) {
+      const m = String(el.className).match(/msg_(\d+)/);
+      const msgId = m ? m[1] : null;
+      if (!msgId) continue;
+      const li = el.closest('li') || el.parentElement;
+      const box = el.closest('[class*="box"]') || li || el;
+      const isSelf = /isSelf/.test((box && box.className) || '') ||
+                     (li && !!li.querySelector('[class*="isSelf"]'));
+      let horario = '';
+      if (li) {
+        const times = Array.from(li.querySelectorAll('[class*="content_time"], [class*="content__time"]'))
+          .filter(t => (t.style.display || '') !== 'none' && t.textContent.trim());
+        if (times.length) horario = times[times.length - 1].textContent.trim();
+      }
+      const lido = li ? !!li.querySelector('[class*="isread"][class*="read"], [class*="isread"].read') : false;
+      const imgEl = el.querySelector('img');
+      const img = imgEl && imgEl.src ? imgEl.src : null;
+      const texto = (el.textContent || '').trim();
+      out.push({ msgId, direcao: isSelf ? 'out' : 'in', texto, img, horario, lido });
+    }
+    return out;
+  });
+}
+
+// ── Grava mensagens novas do motoboy (dedup por msg_99_id) ────────────────
+async function gravarNovas(pool, conversaId, bolhas) {
+  let novas = 0, ultimaTexto = null;
+  for (const b of bolhas) {
+    if (b.direcao !== 'in' || !b.msgId) continue;
+    const r = await pool.query(`
+      INSERT INTO chat99_mensagens (conversa_id, msg_99_id, direcao, autor, texto, img_url, horario_99, lido, status_envio)
+      VALUES ($1, $2, 'in', 'motoboy', $3, $4, $5, false, 'recebida')
+      ON CONFLICT (conversa_id, msg_99_id) DO NOTHING
+      RETURNING id
+    `, [conversaId, b.msgId, b.texto || null, b.img || null, b.horario || null]);
+    if (r.rows.length > 0) { novas++; ultimaTexto = b.texto || (b.img ? '[imagem]' : ''); }
+  }
+  if (novas > 0) {
+    await pool.query(`
+      UPDATE chat99_conversas
+      SET nao_lidas = nao_lidas + $2, ultima_msg_texto = COALESCE($3, ultima_msg_texto),
+          ultima_msg_em = now(), atualizado_em = now()
+      WHERE id = $1
+    `, [conversaId, novas, ultimaTexto]);
+  }
+  return novas;
+}
+
+// ── Envia uma mensagem na janela, fatiando em blocos de 140 ───────────────
+async function enviarNaJanela(page, texto) {
+  const partes = [];
+  let resto = String(texto);
+  while (resto.length > LIMITE_99) { partes.push(resto.slice(0, LIMITE_99)); resto = resto.slice(LIMITE_99); }
+  if (resto) partes.push(resto);
+
+  const input = page.locator('.chat__window textarea').first();
+  const btnEnviar = page.locator('.chat__window').getByRole('button', { name: 'Enviar' }).last();
+
+  for (const parte of partes) {
+    await input.click({ timeout: 10000 });
+    await input.fill(parte);
+    await page.waitForTimeout(300);
+    await btnEnviar.click({ timeout: 10000 });
+    await page.waitForTimeout(900);
+  }
+}
+
+// ── Drena a outbox (out + pendente) da conversa ───────────────────────────
+async function drenarOutbox(page, pool, conversaId, log) {
+  const { rows } = await pool.query(`
+    SELECT id, texto FROM chat99_mensagens
+    WHERE conversa_id = $1 AND direcao = 'out' AND status_envio = 'pendente'
+    ORDER BY id ASC
+  `, [conversaId]);
+
+  for (const msg of rows) {
+    await pool.query(`UPDATE chat99_mensagens SET status_envio='enviando' WHERE id=$1`, [msg.id]);
+    try {
+      await enviarNaJanela(page, msg.texto || '');
+      await pool.query(`UPDATE chat99_mensagens SET status_envio='enviada', enviado_em=now() WHERE id=$1`, [msg.id]);
+      log(`   ✉️ enviada msg #${msg.id}`);
+    } catch (e) {
+      await pool.query(`UPDATE chat99_mensagens SET status_envio='erro', erro_envio=$2 WHERE id=$1`, [msg.id, String(e.message).slice(0, 300)]);
+      log(`   ❌ falha ao enviar msg #${msg.id}: ${e.message}`);
+    }
+  }
+}
+
+async function fecharChat(page) {
+  try {
+    const x = page.locator('.chat__window [class*="nav-bar"] [class*="close"], .chat__window [class*="nav-bar"] i').first();
+    if (await x.isVisible({ timeout: 2000 }).catch(() => false)) { await x.click({ timeout: 3000 }); return; }
+  } catch (_) {}
+  await page.keyboard.press('Escape').catch(() => {});
+}
+
+async function upsertConversa(pool, os, info) {
+  const r = await pool.query(`
+    INSERT INTO chat99_conversas
+      (codigo_os, pedido_id_99, motoboy_nome, motoboy_telefone, motoboy_foto_url, motoboy_rating, status, ultima_varredura, atualizado_em)
+    VALUES ($1, $2, $3, $4, $5, $6, 'ativa', now(), now())
+    ON CONFLICT (codigo_os) DO UPDATE SET
+      pedido_id_99     = COALESCE(EXCLUDED.pedido_id_99, chat99_conversas.pedido_id_99),
+      motoboy_nome     = COALESCE(EXCLUDED.motoboy_nome, chat99_conversas.motoboy_nome),
+      motoboy_telefone = COALESCE(EXCLUDED.motoboy_telefone, chat99_conversas.motoboy_telefone),
+      motoboy_foto_url = COALESCE(EXCLUDED.motoboy_foto_url, chat99_conversas.motoboy_foto_url),
+      motoboy_rating   = COALESCE(EXCLUDED.motoboy_rating, chat99_conversas.motoboy_rating),
+      status           = CASE WHEN chat99_conversas.status='encerrada' THEN chat99_conversas.status ELSE 'ativa' END,
+      ultima_varredura = now(),
+      atualizado_em    = now()
+    RETURNING id
+  `, [os, info.pedidoId || null, info.nome || null, info.telefone || null, info.foto || null, info.rating || null]);
+  return r.rows[0].id;
+}
+
+async function marcarVarredura(pool, os) {
+  await pool.query(`
+    UPDATE chat99_conversas SET ultima_varredura = now(), atualizado_em = now() WHERE codigo_os = $1
+  `, [os]).catch(() => {});
+}
+
+// ── Processa 1 conversa (serial) ──────────────────────────────────────────
+async function processarConversa(page, pool, os, log) {
+  const abriu = await abrirChatDaOS(page, os, log);
+  if (!abriu) {
+    // Aguardando aceite (ou linha ausente): registra varredura mas não zera nada.
+    await marcarVarredura(pool, os);
+    return;
+  }
+  await page.waitForTimeout(800); // deixa as bolhas renderizarem
+  const info = await extrairInfoMotoboy(page);
+  const conversaId = await upsertConversa(pool, os, info);
+  const bolhas = await extrairBolhas(page);
+  const novas = await gravarNovas(pool, conversaId, bolhas);
+  if (novas > 0) log(`   💬 OS ${os}: ${novas} nova(s) do motoboy`);
+  await drenarOutbox(page, pool, conversaId, log);
+  await fecharChat(page);
+  await page.waitForTimeout(500);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+module.exports = defineAgent({
+  nome: 'chat99',
+  slots: 1,
+  sessionStrategy: null,        // sessão do 99 gerenciada aqui (não é SISTEMA_EXTERNO)
+  intervalo: LOOP_MS,           // ~25s entre ticks
+  timeoutMs: TICK_TIMEOUT,      // teto por tick
+
+  habilitado: () => process.env.CHAT99_AGENT_ATIVO === 'true',
+
+  tickGlobal: async (pool, ctx) => {
+    // Migration idempotente (garante tabelas mesmo se o backend principal ainda
+    // não rodou — os dois serviços compartilham o mesmo Neon).
+    if (!_tabelasOk) {
+      await initChat99Tables(pool).catch(e => ctx.log(`⚠️ initChat99Tables: ${e.message}`));
+      _tabelasOk = true;
+    }
+
+    // Cooldown pós-derrubada: não briga por sessão.
+    if (agora() < _cooldownAte) {
+      const restante = Math.ceil((_cooldownAte - agora()) / 1000);
+      ctx.log(`🟡 Em cooldown (${restante}s restantes)`);
+      return;
+    }
+
+    semearSessaoSePreciso(ctx.log);
+
+    // Browser persistente lazy no slotState (persiste entre ticks).
+    if (!ctx.slotState.browserSession) {
+      ctx.slotState.browserSession = criarBrowserSession({
+        nome: 'chat99-global', launchOpts: CHAT99_LAUNCH_OPTS,
+      });
+      ctx.log('🔧 BrowserSession chat99 criada');
+    }
+    const bs = ctx.slotState.browserSession;
+    const contextOpts = fs.existsSync(SESSION_FILE) ? { storageState: SESSION_FILE } : {};
+
+    await bs.comContext(async (context) => {
+      const page = await context.newPage();
+      try {
+        const logado = await estaLogado(page);
+        if (!logado) {
+          const ss = await screenshotErro(page, 'nao-logado');
+          entrarCooldown(ctx.log, 'sessão da 99 indisponível/derrubada');
+          ctx.log(`   ⚠️ Não logado na 99. Semeie CHAT99_STORAGE_STATE_B64. Screenshot: ${ss}`);
+          return;
+        }
+        // Persiste a sessão (renova cookies) pro próximo tick.
+        await context.storageState({ path: SESSION_FILE }).catch(() => {});
+
+        const alvos = await buscarAlvos(pool, MAX_POR_TICK);
+        if (alvos.length === 0) { ctx.log('nenhuma corrida 99 ativa'); return; }
+        ctx.log(`🔎 ${alvos.length} corrida(s) 99 a varrer: ${alvos.join(', ')}`);
+
+        for (const os of alvos) {
+          if (ctx.ehParaParar()) break;
+          try {
+            await processarConversa(page, pool, os, ctx.log);
+          } catch (e) {
+            const ss = await screenshotErro(page, `os-${os}`);
+            ctx.log(`❌ OS ${os}: ${e.message}. Screenshot: ${ss}`);
+            await fecharChat(page).catch(() => {});
+          }
+        }
+      } finally {
+        await page.close().catch(() => {});
+      }
+    }, contextOpts);
+  },
+});
