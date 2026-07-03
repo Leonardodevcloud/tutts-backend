@@ -57,9 +57,10 @@ const LIMITE_99      = 140;
 const NAV_TIMEOUT    = Number(process.env.CHAT99_NAV_TIMEOUT_MS || 45_000);
 
 const CHAT99_LAUNCH_OPTS = {
-  headless: true,
+  headless: process.env.CHAT99_HEADLESS === 'false' ? false : true,
   timeout: 30_000,
   args: [
+    '--disable-blink-features=AutomationControlled',
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
     '--disable-gpu', '--disable-software-rasterizer', '--disable-background-networking',
     '--disable-default-apps', '--disable-extensions', '--disable-sync', '--disable-translate',
@@ -128,7 +129,7 @@ async function temMarcadoresLogado(page) {
     'text=ID do pedido externo',
   ];
   for (const sel of marcadores) {
-    const ok = await page.locator(sel).first().isVisible({ timeout: 8000 }).catch(() => false);
+    const ok = await page.locator(sel).first().waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
     if (ok) return true;
   }
   return false;
