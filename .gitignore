@@ -33,3 +33,14 @@ _backup-logistics-*/
 chat99-b64-parte*.txt
 chat99-storage-b64.txt
 seed-chat99-session.js
+
+.env
+chat99-session.json
+
+*.bak_*
+chat99-b64-*.txt
+chat99-storage-b64.txt
+chat99-cookies-b64.txt
+.env
+chat99-session.json
+_fix-waitall.js

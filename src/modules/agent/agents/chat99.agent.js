@@ -140,7 +140,7 @@ async function ehTelaLogin(page) {
   const url = page.url() || '';
   if (url.includes('didiglobal.com') || /\/login\b/.test(url)) return true;
   const campoSenha = await page.locator('input[type="password"]').first()
-    .isVisible({ timeout: 3000 }).catch(() => false);
+    .waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false);
   return campoSenha;
 }
 
@@ -159,7 +159,7 @@ async function fazerLogin99(page, log) {
   try {
     // Garante a aba "Entrar com senha" (a de código de verificação exige OTP).
     const abaSenha = page.getByText('Entrar com senha', { exact: false }).first();
-    if (await abaSenha.isVisible({ timeout: 5000 }).catch(() => false)) {
+    if (await abaSenha.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false)) {
       await abaSenha.click().catch(() => {});
       await page.waitForTimeout(400);
     }
@@ -195,7 +195,7 @@ async function fazerLogin99(page, log) {
 
     // Entrar
     const btnEntrar = page.getByRole('button', { name: 'Entrar' }).first();
-    if (await btnEntrar.isVisible({ timeout: 5000 }).catch(() => false)) {
+    if (await btnEntrar.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false)) {
       await btnEntrar.click({ timeout: 10000 }).catch(() => {});
     } else {
       await page.locator('button:has-text("Entrar")').first().click({ timeout: 10000 }).catch(() => {});
@@ -270,15 +270,15 @@ async function abrirChatDaOS(page, os, log) {
 
   // 3) acha a linha da OS e o botao "Mensagem"
   const linha = page.locator('tr', { hasText: String(os) }).first();
-  const temLinha = await linha.isVisible({ timeout: 8000 }).catch(() => false);
+  const temLinha = await linha.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
   if (!temLinha) { log(`   OS ${os}: linha não encontrada na 99`); return false; }
 
   const btnMsg = linha.getByText('Mensagem', { exact: true }).first();
-  const temMsg = await btnMsg.isVisible({ timeout: 5000 }).catch(() => false);
+  const temMsg = await btnMsg.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!temMsg) { log(`   OS ${os}: sem botão Mensagem (aguardando aceite)`); return false; }
 
   await btnMsg.click({ timeout: 10000 });
-  const abriu = await page.locator('.chat__window').first().isVisible({ timeout: 10000 }).catch(() => false);
+  const abriu = await page.locator('.chat__window').first().waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
   return abriu;
 }
 
@@ -406,7 +406,7 @@ async function drenarOutbox(page, pool, conversaId, log) {
 async function fecharChat(page) {
   try {
     const x = page.locator('.chat__window [class*="nav-bar"] [class*="close"], .chat__window [class*="nav-bar"] i').first();
-    if (await x.isVisible({ timeout: 2000 }).catch(() => false)) { await x.click({ timeout: 3000 }); return; }
+    if (await x.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false)) { await x.click({ timeout: 3000 }); return; }
   } catch (_) {}
   await page.keyboard.press('Escape').catch(() => {});
 }
