@@ -455,6 +455,23 @@ async function processarConversa(page, pool, os, log) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Semeia a sessao a partir do banco (tabela chat99_sessao). Robusto: sem
+// paste de base64 gigante. O seed-chat99-db.js escreve a linha id=1.
+async function semearSessaoDoBanco(pool, log) {
+  try {
+    if (fs.existsSync(SESSION_FILE)) return;
+    await pool.query(`CREATE TABLE IF NOT EXISTS chat99_sessao (id INT PRIMARY KEY DEFAULT 1, storage_json TEXT, atualizado_em TIMESTAMPTZ DEFAULT now())`);
+    const r = await pool.query('SELECT storage_json FROM chat99_sessao WHERE id = 1');
+    if (r.rows.length && r.rows[0].storage_json) {
+      JSON.parse(r.rows[0].storage_json);
+      fs.writeFileSync(SESSION_FILE, r.rows[0].storage_json, 'utf8');
+      log('\u{1F331} storageState semeado do banco (chat99_sessao)');
+    }
+  } catch (e) {
+    log('\u26A0\uFE0F Falha ao semear do banco: ' + e.message);
+  }
+}
+
 module.exports = defineAgent({
   nome: 'chat99',
   slots: 1,
@@ -470,6 +487,9 @@ module.exports = defineAgent({
     if (!_tabelasOk) {
       await initChat99Tables(pool).catch(e => ctx.log(`⚠️ initChat99Tables: ${e.message}`));
       _tabelasOk = true;
+    }
+    await semearSessaoDoBanco(pool, ctx.log);
+    if (false) {
     }
 
     // Cooldown pós-derrubada: não briga por sessão.
