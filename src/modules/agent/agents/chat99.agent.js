@@ -503,10 +503,18 @@ module.exports = defineAgent({
     semearSessaoSePreciso(ctx.log);
 
     // Browser persistente lazy no slotState (persiste entre ticks).
+    // Recicla o browser antes do reaper (3min) matar no meio do tick.
+    if (ctx.slotState.browserSession && ctx.slotState._browserNascidoEm &&
+        (Date.now() - ctx.slotState._browserNascidoEm) > 150000) {
+      try { await ctx.slotState.browserSession.fechar(); } catch (_) {}
+      ctx.slotState.browserSession = null;
+      ctx.log('\u267B\uFE0F Browser reciclado (antes do reaper de 3min)');
+    }
     if (!ctx.slotState.browserSession) {
       ctx.slotState.browserSession = criarBrowserSession({
         nome: 'chat99-global', launchOpts: CHAT99_LAUNCH_OPTS,
       });
+      ctx.slotState._browserNascidoEm = Date.now();
       ctx.log('🔧 BrowserSession chat99 criada');
     }
     const bs = ctx.slotState.browserSession;
