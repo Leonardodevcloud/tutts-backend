@@ -72,7 +72,7 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
-const CHAT99_BUILD = 'v3-envio-robusto (footer__send + native-setter + filtro-lixo)';
+const CHAT99_BUILD = 'v4-abrir-chat (clique sintetico anti-sobreposicao + envio robusto + filtro-lixo)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
@@ -305,6 +305,23 @@ async function coletarLinhasPagina(page) {
   });
 }
 
+// Clica no "Mensagem" da linha mesmo quando o card de detalhes do pedido
+// (rider_star / "Informacoes do entregador" / draw_card_item) sobrepoe a tabela
+// e intercepta o ponteiro. Estrategia: clique normal -> click SINTETICO via
+// evaluate (ignora hit-testing/sobreposicao) -> force.
+async function clicarMensagem(btn) {
+  const e1 = await btn.click({ timeout: 4000 }).then(() => null).catch(err => err);
+  if (!e1) return true;
+  const h = await btn.elementHandle().catch(() => null);
+  if (h) {
+    await h.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
+    const okEval = await h.evaluate(el => { el.click(); return true; }).catch(() => false);
+    if (okEval) return true;
+  }
+  const e3 = await btn.click({ timeout: 4000, force: true }).then(() => null).catch(err => err);
+  return !e3;
+}
+
 // Processa UMA linha: abre o chat pelo botao da propria linha (sem re-filtrar
 // por OS), captura bolhas e drena a outbox.
 async function processarLinha(page, pool, linha, log) {
@@ -318,7 +335,8 @@ async function processarLinha(page, pool, linha, log) {
   const btn = tr.getByText(/Mensagem/i).first();
   const ok = await btn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
   if (!ok) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
-  await btn.click({ timeout: 10000 });
+  const clicou = await clicarMensagem(btn);
+  if (!clicou) { log(`   OS ${linha.os}: nao consegui clicar em Mensagem (card do pedido sobrepoe)`); return; }
   const abriu = await page.locator('.chat__window').first()
     .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
   if (!abriu) { log(`   OS ${linha.os}: chat nao abriu`); return; }
@@ -365,7 +383,7 @@ async function abrirChatDaOS(page, os, log) {
   const temMsg = await btnMsg.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!temMsg) { log(`   OS ${os}: sem botão Mensagem (aguardando aceite)`); return false; }
 
-  await btnMsg.click({ timeout: 10000 });
+  await clicarMensagem(btnMsg);
   const abriu = await page.locator('.chat__window').first().waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
   return abriu;
 }
