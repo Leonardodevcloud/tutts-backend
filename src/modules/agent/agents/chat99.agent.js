@@ -72,7 +72,7 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
-const CHAT99_BUILD = 'v5-fechar-chat (close robusto/bloqueante + clique real + envio robusto + filtro-lixo)';
+const CHAT99_BUILD = 'v6-fechar-detalhe (fecha painel do pedido + retry-open com verificacao real)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
@@ -325,21 +325,33 @@ async function processarLinha(page, pool, linha, log) {
   // Garante que nenhum chat anterior ficou aberto (o overlay #im-sdk-warper
   // z-1001 intercepta o clique de abrir a proxima OS).
   await fecharChat(page).catch(() => {});
-  // Acha a linha pela OS (robusto a multi-tabela/reordenacao), nao por indice.
-  let tr;
-  if (linha.os) {
-    tr = page.locator('table tbody tr', { hasText: String(linha.os) }).first();
-  } else {
-    tr = page.locator('table tbody tr').nth(linha.i);
+  // Abre com verificacao real: se o chat nao aparecer, fecha o painel de
+  // detalhes (que sobrepoe as linhas de baixo) e o chat anterior, e tenta de
+  // novo (ate 3x). O force do clique pode "acertar" o painel, por isso a
+  // confirmacao e a visibilidade do .chat__window, nao o retorno do clique.
+  let abriu = false;
+  for (let tent = 1; tent <= 3 && !abriu; tent++) {
+    await fecharChat(page).catch(() => {});
+    const fechouPainel = await fecharDetalhe(page).catch(() => false);
+    if (fechouPainel) { log(`   OS ${linha.os}: painel de detalhes fechado (tentativa ${tent})`); await page.waitForTimeout(300); }
+
+    // re-resolve a linha/botao (o DOM pode ter mudado apos fechar overlays)
+    const tr = linha.os
+      ? page.locator('table tbody tr', { hasText: String(linha.os) }).first()
+      : page.locator('table tbody tr').nth(linha.i);
+    const btn = tr.getByText(/Mensagem/i).first();
+    const vis = await btn.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+    if (!vis) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
+
+    const h = await btn.elementHandle().catch(() => null);
+    if (h) await h.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
+    await clicarMensagem(page, btn);
+
+    abriu = await page.locator('.chat__window').first()
+      .waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+    if (!abriu) await page.waitForTimeout(400);
   }
-  const btn = tr.getByText(/Mensagem/i).first();
-  const ok = await btn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
-  if (!ok) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
-  const clicou = await clicarMensagem(page, btn);
-  if (!clicou) { log(`   OS ${linha.os}: nao consegui clicar em Mensagem (card do pedido sobrepoe)`); return; }
-  const abriu = await page.locator('.chat__window').first()
-    .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
-  if (!abriu) { log(`   OS ${linha.os}: chat nao abriu`); return; }
+  if (!abriu) { log(`   OS ${linha.os}: chat nao abriu (apos 3 tentativas)`); return; }
   // Espera as bolhas renderizarem (carregam assincronas, igual o tbody da tabela).
   await page.locator('.chat__window [class*="msg_"]').first()
     .waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
@@ -760,6 +772,38 @@ async function fecharChat(page) {
   // senao ele intercepta o clique de abrir a proxima OS.
   await cw.waitFor({ state: 'hidden', timeout: 2500 }).catch(() => {});
   await page.waitForTimeout(250);
+}
+
+// Fecha o painel de detalhes do pedido (lado direito: "ID do pedido" /
+// "Informacoes do entregador" / "Cancelar pedido"). Ele sobrepoe as linhas de
+// baixo da tabela e faz o clique de abrir a proxima OS cair no painel (o force
+// "clica" mas acerta o painel -> "chat nao abriu"). Best-effort, via ancora de
+// texto "ID do pedido". Retorna true se clicou num X de fechar.
+async function fecharDetalhe(page) {
+  return await page.evaluate(() => {
+    const clsOf = (x) => (x && x.className && x.className.baseVal !== undefined)
+      ? x.className.baseVal : String((x && x.className) || '');
+    const cabs = Array.from(document.querySelectorAll('div, span, p, header, h1, h2, h3'))
+      .filter(el => /ID do pedido/i.test(el.textContent || '') && el.children.length <= 4);
+    for (const cab of cabs) {
+      let cont = cab;
+      for (let up = 0; up < 5 && cont; up++, cont = cont.parentElement) {
+        const xs = cont.querySelectorAll(
+          '[class*="close"], [class*="cross"], [aria-label], .van-icon-cross, i, svg, img, button, span'
+        );
+        for (const x of xs) {
+          const cs = clsOf(x).toLowerCase();
+          const al = ((x.getAttribute && (x.getAttribute('aria-label') || '')) || '').toLowerCase();
+          const tx = (x.textContent || '').trim();
+          const ehXtexto = (tx === '✕' || tx === '×' || tx === 'X' || tx === 'x') && x.children.length === 0;
+          if (/close|cross|fechar/.test(cs) || /close|fechar/.test(al) || ehXtexto) {
+            try { x.click(); return true; } catch (_) {}
+          }
+        }
+      }
+    }
+    return false;
+  }).catch(() => false);
 }
 
 async function upsertConversa(pool, os, info) {
