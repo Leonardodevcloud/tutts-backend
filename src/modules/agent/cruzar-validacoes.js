@@ -1,5 +1,5 @@
 /**
- * cruzar-validacoes.js (2026-06 v6 — validação RÍGIDA, com bloqueio real)
+ * cruzar-validacoes.js (2026-06 v6.1 — validação RÍGIDA, com bloqueio real)
  *
  * Fluxo:
  *   - Motoboy DIGITA o CNPJ; backend consulta Receita Federal (BrasilAPI/OpenCNPJ).
@@ -15,7 +15,7 @@
  *       A = N/D  → fachada indefinida (não aprova nem reprova sozinha)
  *
  *   ROTA RECEITA (basta 1 path >= 80):
- *     B — Endereço Receita ≈ GPS do motoboy (≤15m → 100; degrade até 80m → 0)
+ *     B — Endereço Receita ≈ GPS do motoboy (≤15m → 90; degrade até 200m → 0)
  *     C — Nome Receita ↔ Google Places
  *     D — Nome Receita ↔ Foto fachada (Gemini)
  *     E — Endereço Receita ↔ Endereço digitado
@@ -26,8 +26,7 @@
  *
  * DECISÃO:
  *   libera = (fachada aprova) OU (receita aprova)
- *   barra  = houve algum sinal calculável E nenhuma rota aprovou
- *   (fail-open: se NENHUM sinal é calculável — ex: infra fora — NÃO barra)
+ *   barra  = nenhuma rota aprovou (fail-CLOSED: apagão de infra também reprova)
  *
  * As melhorias novas (G, CNPJ, K) e o CEP (F) são heurísticas: teto 90, nunca 100.
  */
@@ -128,17 +127,18 @@ function distanciaMetros(lat1, lng1, lat2, lng2) {
 }
 
 /**
- * Distância em metros → score 0-100.
- *  ≤15m → 100 | 15-80m → degrade linear | >80m → 0
+ * Distância em metros → score 0-90 (heurística, teto 90).
+ *  ≤15m → 90 | 15-200m → degrade linear | >200m → 0
  *
- * 2026-06 v6: cauda alargada de 50m → 80m. Em zona urbana densa o drift de GPS
- * + geocoding de telhado passa de 50m mesmo num match correto. Pico 100 mantido.
+ * 2026-06 v6.1: pico rebaixado 100 → 90 e cauda alargada 80m → 200m.
+ * Em zona urbana densa o drift de GPS + geocoding de telhado é grande;
+ * a distância vira sinal de apoio (nunca 100).
  */
 function scoreDistancia(metros) {
   if (metros === null || metros === undefined) return 0;
-  if (metros <= 15) return 100;
-  if (metros >= 80) return 0;
-  return Math.round(100 * (80 - metros) / 65);
+  if (metros <= 15) return 90;
+  if (metros >= 200) return 0;
+  return Math.round(90 * (200 - metros) / 185);
 }
 
 /**
@@ -272,8 +272,9 @@ function cruzarValidacoes({
 
   const algumSinal = fachadaAvaliavel || receitaScores.length > 0;
   const liberado = fachadaAprova || receitaAprova;
-  // fail-open: sem NENHUM sinal calculável (infra fora), não barra.
-  const barrar = algumSinal && !liberado;
+  // 2026-06 v6.1: fail-CLOSED — sem nenhuma rota aprovando, BARRA
+  // (inclusive quando não há sinal calculável: apagão de infra reprova).
+  const barrar = !liberado;
 
   // ── Score final + caminho de aprovação (compat + info) ──
   const valores = Object.values(scores).filter(v => typeof v === 'number');
