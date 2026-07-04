@@ -163,9 +163,12 @@ async function fazerLogin99(page, log) {
     }
 
     // Telefone: input type=tel; fallback = primeiro input do card que não é senha.
-    let tel = page.locator('input[type="tel"]').first();
+    let tel = page.locator('input[type="tel"]:visible').first();
     if (!(await tel.count())) {
-      tel = page.locator('.login-card input:not([type="password"]):not([type="checkbox"])').first();
+      tel = page.locator('.login-card input:visible:not([type="password"]):not([placeholder="Selecione o país"])').first();
+    }
+    if (!(await tel.count())) {
+      tel = page.locator('.login-right input:visible:not([type="password"])').first();
     }
     await tel.click({ timeout: 10000 });
     await tel.fill('');
@@ -177,15 +180,25 @@ async function fazerLogin99(page, log) {
     await pass.fill('');
     await pass.type(String(senha), { delay: 40 });
 
-    // Checkbox "Aceito Termos e Condições" (obrigatório)
-    const chk = page.locator('input[type="checkbox"]').first();
-    if (await chk.count()) {
-      await chk.check({ force: true }).catch(async () => { await chk.click({ force: true }).catch(() => {}); });
-    } else {
-      // checkbox custom (Vant): clica no elemento ao lado do texto "Aceito"
-      await page.getByText('Aceito', { exact: false }).first().click().catch(() => {});
+    // Checkbox "Aceito Termos e Condições" (OBRIGATORIO - trava o botao Entrar).
+    // A DiDi usa um checkbox CUSTOM: <span class="checkbox check-default">, nao um
+    // <input type="checkbox">. Clicamos no span (ou no wrapper) ate marcar.
+    const seletoresChk = [
+      '.input-agreement-wrapper .checkbox',
+      'span.checkbox.check-default',
+      '.input-agreement-wrapper',
+      'input[type="checkbox"]',
+    ];
+    for (const sel of seletoresChk) {
+      const el = page.locator(sel).first();
+      if (await el.count()) {
+        await el.click({ force: true, timeout: 5000 }).catch(() => {});
+        break;
+      }
     }
-    await page.waitForTimeout(300);
+    // fallback: clica no texto "Aceito"
+    await page.getByText('Aceito', { exact: false }).first().click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(400);
 
     // Entrar
     const btnEntrar = page.getByRole('button', { name: 'Entrar' }).first();
