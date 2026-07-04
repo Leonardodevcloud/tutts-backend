@@ -44,7 +44,6 @@ const fs = require('fs');
 const { defineAgent } = require('../core/agent-base');
 const { criarBrowserSession } = require('../core/browser-session');
 const { initChat99Tables } = require('../../logistics/chat99.migration');
-const zlib = require('zlib');
 
 // ── Config via env ──────────────────────────────────────────────────────
 const DELIVERS_URL   = process.env.CHAT99_DELIVERS_URL || 'https://entrega.99app.com/v2/delivers';
@@ -86,21 +85,20 @@ function semearSessaoSePreciso(log) {
   _sessaoSemeada = true;
   try {
     if (fs.existsSync(SESSION_FILE)) return;
-    // Junta os pedacos: CHAT99_STORAGE_STATE_B64 (+ _2, _3, ... quando a sessao
-    // e grande demais pra uma unica env var do Railway - limite 32768 chars).
-    let b64 = process.env.CHAT99_STORAGE_STATE_B64 || '';
-    let n = 2;
-    while (process.env[`CHAT99_STORAGE_STATE_B64_${n}`]) { b64 += process.env[`CHAT99_STORAGE_STATE_B64_${n}`]; n++; }
-    b64 = b64.replace(/\s+/g, ''); // paste-safe: remove qualquer espaco/quebra
+    let b64 = (process.env.CHAT99_STORAGE_STATE_B64 || '').trim();
+    for (let i = 2; i <= 20; i++) {
+      const parte = process.env['CHAT99_STORAGE_STATE_B64_' + i];
+      if (!parte) break;
+      b64 += parte.trim();
+    }
     if (!b64) return;
-    const buf = Buffer.from(b64, 'base64');
-    if (process.env.CHAT99_DEBUG_SEED) { log('[dbg] b64Len=' + b64.length + ' head=' + b64.slice(0,12) + ' bufHead=' + buf.slice(0,4).toString('hex') + ' temParte2=' + (!!process.env.CHAT99_STORAGE_STATE_B64_2)); }
-    // Suporta gzip (magic 1f 8b) ou JSON puro (compat com seed antigo).
-    const ehGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
-    const json = ehGzip ? zlib.gunzipSync(buf).toString('utf8') : buf.toString('utf8');
+    const raw = Buffer.from(b64, 'base64');
+    let json;
+    try { json = require('zlib').gunzipSync(raw).toString('utf8'); }
+    catch (_) { json = raw.toString('utf8'); }
     JSON.parse(json); // valida
     fs.writeFileSync(SESSION_FILE, json, 'utf8');
-    log(`🌱 storageState semeado (${n - 1} parte(s), ${ehGzip ? 'gzip' : 'plano'})`);
+    log('🌱 storageState semeado a partir de CHAT99_STORAGE_STATE_B64');
   } catch (e) {
     log(`⚠️ Falha ao semear storageState: ${e.message}`);
   }
@@ -164,14 +162,10 @@ async function fazerLogin99(page, log) {
       await page.waitForTimeout(400);
     }
 
-    // Telefone: pega o input VISIVEL, excluindo senha e o seletor de pais
-    // (placeholder "Selecione o pais", que fica invisivel/overlay).
-    let tel = page.locator('input[type="tel"]:visible').first();
+    // Telefone: input type=tel; fallback = primeiro input do card que não é senha.
+    let tel = page.locator('input[type="tel"]').first();
     if (!(await tel.count())) {
-      tel = page.locator('.login-card input:visible:not([type="password"]):not([placeholder="Selecione o país"])').first();
-    }
-    if (!(await tel.count())) {
-      tel = page.locator('.login-right input:visible:not([type="password"])').first();
+      tel = page.locator('.login-card input:not([type="password"]):not([type="checkbox"])').first();
     }
     await tel.click({ timeout: 10000 });
     await tel.fill('');
@@ -255,6 +249,56 @@ async function buscarAlvos(pool, limite) {
   `, [limite]);
   return rows.map(r => String(r.os));
 }
+
+// ── Varredura unica da aba "Em andamento" ────────────────────────────────────
+// Le a tabela da 99 e retorna as linhas que TEM o botao "Mensagem" (corrida
+// aceita, chat ativo) na pagina atual: [{ i (indice da tr), os }].
+async function coletarLinhasPagina(page) {
+  return await page.evaluate(() => {
+    const res = [];
+    const table = document.querySelector('table');
+    if (!table) return res;
+    const ths = Array.from(table.querySelectorAll('thead th')).map(t => (t.textContent || '').trim());
+    // coluna "ID do pedido externo" = nossa OS
+    let idx = ths.findIndex(t => /externo/i.test(t));
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    rows.forEach((tr, i) => {
+      const temMsg = Array.from(tr.querySelectorAll('button, a, span'))
+        .some(el => (el.textContent || '').trim() === 'Mensagem');
+      if (!temMsg) return;
+      const tds = Array.from(tr.querySelectorAll('td'));
+      let os = (idx >= 0 && tds[idx]) ? (tds[idx].textContent || '').trim() : '';
+      if (!os) { // fallback: primeiro td que parece OS numerica de 6-8 digitos
+        for (const td of tds) { const t = (td.textContent || '').trim(); if (/^\d{6,8}$/.test(t)) { os = t; break; } }
+      }
+      res.push({ i, os });
+    });
+    return res;
+  });
+}
+
+// Processa UMA linha: abre o chat pelo botao da propria linha (sem re-filtrar
+// por OS), captura bolhas e drena a outbox.
+async function processarLinha(page, pool, linha, log) {
+  const tr = page.locator('tbody tr').nth(linha.i);
+  const btn = tr.getByText('Mensagem', { exact: true }).first();
+  const ok = await btn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
+  if (!ok) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
+  await btn.click({ timeout: 10000 });
+  const abriu = await page.locator('.chat__window').first()
+    .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+  if (!abriu) { log(`   OS ${linha.os}: chat nao abriu`); return; }
+  await page.waitForTimeout(800);
+  const info = await extrairInfoMotoboy(page);
+  const conversaId = await upsertConversa(pool, linha.os, info);
+  const bolhas = await extrairBolhas(page);
+  const novas = await gravarNovas(pool, conversaId, bolhas);
+  if (novas > 0) log(`   \u{1F4AC} OS ${linha.os}: ${novas} nova(s) do motoboy`);
+  await drenarOutbox(page, pool, conversaId, log);
+  await fecharChat(page);
+  await page.waitForTimeout(400);
+}
+
 
 // ── Filtra por OS e abre o chat. Retorna true se o chat abriu. ────────────
 async function abrirChatDaOS(page, os, log) {
@@ -456,8 +500,7 @@ async function processarConversa(page, pool, os, log) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Semeia a sessao a partir do banco (tabela chat99_sessao). Robusto: sem
-// paste de base64 gigante. O seed-chat99-db.js escreve a linha id=1.
+// Semeia a sessao a partir do banco (tabela chat99_sessao).
 async function semearSessaoDoBanco(pool, log) {
   try {
     if (fs.existsSync(SESSION_FILE)) return;
@@ -533,26 +576,46 @@ module.exports = defineAgent({
         }
         // Persiste a sessão (renova cookies) pro próximo tick.
         await context.storageState({ path: SESSION_FILE }).catch(() => {});
-        // Regrava a sessao fresca no banco: renova enquanto roda e sobrevive a redeploy.
         try {
           const _st = await context.storageState();
           await pool.query(`INSERT INTO chat99_sessao (id, storage_json, atualizado_em) VALUES (1, $1, now()) ON CONFLICT (id) DO UPDATE SET storage_json = EXCLUDED.storage_json, atualizado_em = now()`, [JSON.stringify(_st)]);
         } catch (_) {}
 
-        const alvos = await buscarAlvos(pool, MAX_POR_TICK);
-        if (alvos.length === 0) { ctx.log('nenhuma corrida 99 ativa'); return; }
-        ctx.log(`🔎 ${alvos.length} corrida(s) 99 a varrer: ${alvos.join(', ')}`);
+        // VARREDURA UNICA: le a aba "Em andamento" da 99 e processa so as linhas
+        // com botao "Mensagem" (corrida aceita). Pagina a pagina, com orcamento
+        // de tempo pra nao passar do reaper (3min).
+        const MAX_PAGINAS = Number(process.env.CHAT99_MAX_PAGINAS || 10);
+        const BUDGET_MS = Number(process.env.CHAT99_TICK_BUDGET_MS || 140000);
+        const inicioTick = Date.now();
+        let processadas = 0, totalComChat = 0, pagina = 1;
 
-        for (const os of alvos) {
-          if (ctx.ehParaParar()) break;
-          try {
-            await processarConversa(page, pool, os, ctx.log);
-          } catch (e) {
-            const ss = await screenshotErro(page, `os-${os}`);
-            ctx.log(`❌ OS ${os}: ${e.message}. Screenshot: ${ss}`);
-            await fecharChat(page).catch(() => {});
+        while (pagina <= MAX_PAGINAS) {
+          if (ctx.ehParaParar() || (Date.now() - inicioTick) > BUDGET_MS) break;
+          await page.waitForTimeout(1200); // deixa a tabela renderizar
+          const linhas = await coletarLinhasPagina(page);
+          totalComChat += linhas.length;
+          if (pagina === 1 && linhas.length === 0) ctx.log('nenhuma corrida 99 com chat ativo');
+
+          for (const linha of linhas) {
+            if (ctx.ehParaParar() || (Date.now() - inicioTick) > BUDGET_MS) break;
+            try {
+              await processarLinha(page, pool, linha, ctx.log);
+              processadas++;
+            } catch (e) {
+              ctx.log(`❌ OS ${linha.os}: ${e.message}`);
+              await fecharChat(page).catch(() => {});
+            }
           }
+
+          // proxima pagina (Ant): para se o botao "next" estiver desabilitado
+          const next = page.locator('.ant-pagination-next').first();
+          const cls = (await next.getAttribute('class').catch(() => '')) || '';
+          const ariaDis = (await next.getAttribute('aria-disabled').catch(() => '')) || '';
+          if (cls.includes('disabled') || ariaDis === 'true') break;
+          await next.click({ timeout: 5000 }).catch(() => {});
+          pagina++;
         }
+        ctx.log(`🔎 varredura: ${totalComChat} corrida(s) com chat, ${processadas} processada(s)`);
       } finally {
         await page.close().catch(() => {});
       }
