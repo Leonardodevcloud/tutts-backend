@@ -9,13 +9,10 @@
 
 const express = require('express');
 const { validarLocalizacao } = require('../validar-localizacao');
-// 2026-04: validação NF + cruzamento com Receita Federal
-const { validarNotaFiscal } = require('../validar-nota-fiscal');
+// 2026-04: cruzamento com Receita Federal
 const { cruzarValidacoes } = require('../cruzar-validacoes');
 // 2026-04 v3: consulta Receita direto quando motoboy digita CNPJ
 const { consultarReceita } = require('../consultar-receita');
-// 2026-04 v4: pré-validação rápida da foto (camera coaching)
-const { validarFotoNfPreview } = require('../validar-foto-nf-preview');
 
 // ── 2026-05: Geocoding helpers para Path B (distância Receita↔GPS) e Path F (CEP) ──
 // 🔄 2026-05-23: Migrado pro helper compartilhado que usa cache enderecos_geocodificados.
@@ -106,9 +103,9 @@ function validarCNPJ(cnpj) {
   return true;
 }
 
-// 2026-04 v3: motoboy escolhe ENTRE foto_nf OU cnpj_manual.
-// foto_fachada continua sendo SEMPRE obrigatória.
-function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada, cnpj_manual }) {
+// 2026-06 v6: gate agora eh SO cnpj_manual (fluxo foto NF aposentado).
+// foto_fachada continua sendo SEMPRE obrigatoria.
+function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual }) {
   const erros = [];
 
   if (!os_numero || String(os_numero).trim() === '')
@@ -139,16 +136,11 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     }
   }
 
-  // 2026-04 v3: foto_nf OU cnpj_manual obrigatório (XOR — pelo menos um)
-  const temFotoNf = !!(foto_nf && String(foto_nf).trim() !== '');
-  const temCnpjManual = !!(cnpj_manual && String(cnpj_manual).replace(/\D/g, '').length > 0);
-
-  if (!temFotoNf && !temCnpjManual) {
-    erros.push('Envie a foto da nota fiscal OU digite o CNPJ do cliente.');
-  }
-
-  // Se CNPJ digitado, valida dígito verificador (bloqueia inválido)
-  if (temCnpjManual && !validarCNPJ(cnpj_manual)) {
+  // 2026-06 v6: CNPJ obrigatorio sempre (gate SO cnpj_manual).
+  const cnpjDigitos = String(cnpj_manual || '').replace(/\D/g, '');
+  if (cnpjDigitos.length === 0) {
+    erros.push('Digite o CNPJ do cliente.');
+  } else if (!validarCNPJ(cnpj_manual)) {
     erros.push('CNPJ inválido. Confira os dígitos.');
   }
 
@@ -171,12 +163,9 @@ function createCorrecaoRoutes(pool) {
 
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
-    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, foto_nf, cnpj_manual } = req.body || {};
+    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual } = req.body || {};
 
-    // 🔍 DEBUG (remover depois): identificar por que foto_nf chega NULL no banco
-    console.log(`[agent/DEBUG] 📥 BODY OS=${os_numero} | foto_nf: tipo=${typeof foto_nf} truthy=${!!foto_nf} len=${foto_nf ? foto_nf.length : 0} | foto_fachada: len=${foto_fachada ? foto_fachada.length : 0} | cnpj_manual=${cnpj_manual || 'nada'}`);
-
-    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_nf, foto_fachada, cnpj_manual });
+    const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual });
     if (erros.length > 0) {
       return res.status(400).json({ sucesso: false, erros });
     }
@@ -185,9 +174,6 @@ function createCorrecaoRoutes(pool) {
       // Foto da fachada agora é OPCIONAL — só valida tamanho se enviada
       if (foto_fachada && foto_fachada.length > 7_000_000) {
         return res.status(400).json({ sucesso: false, erros: ['Foto da fachada muito grande. Máximo 5MB.'] });
-      }
-      if (foto_nf && foto_nf.length > 7_000_000) {
-        return res.status(400).json({ sucesso: false, erros: ['Foto da NF muito grande. Máximo 5MB.'] });
       }
 
       const usuarioId       = req.user?.id   || null;
@@ -221,39 +207,13 @@ function createCorrecaoRoutes(pool) {
         });
       }
 
-      // ── 1. Obter dados do cliente: por foto da NF (Gemini) OU por CNPJ digitado ──
-      // 2026-04 v3: motoboy escolhe um dos dois caminhos.
+      // ── 1. Obter dados do cliente via CNPJ digitado (consulta Receita) ──
+      // 2026-06 v6: caminho foto NF removido; motoboy sempre digita o CNPJ.
       let validacaoNF = null;
 
-      if (foto_nf) {
-        // Caminho A: foto NF → Gemini extrai dados → consulta Receita (já dentro do validar)
-        try {
-          validacaoNF = await validarNotaFiscal(foto_nf, {
-            latitude: parseFloat(motoboy_lat),
-            longitude: parseFloat(motoboy_lng),
-          });
-
-          // Se NF não passou validação básica (não é NF, ilegível, CNPJ inválido) → BLOQUEAR
-          if (validacaoNF && validacaoNF.nf_rejeitada) {
-            console.log(`[agent] ❌ NF rejeitada: ${validacaoNF.motivo}`);
-            return res.status(400).json({
-              sucesso: false,
-              nf_rejeitada: true,
-              motivo_rejeicao: validacaoNF.motivo,
-              erros: [validacaoNF.motivo],
-            });
-          }
-
-          if (validacaoNF) {
-            console.log(`[agent] ✅ NF analisada: CNPJ=${validacaoNF.dados?.cnpj_formatado} confianca=${validacaoNF.confianca}%`);
-          }
-        } catch (nfErr) {
-          console.error('[agent] ⚠️ Erro validação NF (não-bloqueante):', nfErr.message);
-        }
-      } else if (cnpj_manual) {
-        // Caminho B: CNPJ digitado pelo motoboy → consulta Receita direto, sem Gemini.
-        // Não temos dados extraídos da NF (razão_social, nome_fantasia, endereco_nf etc),
-        // mas a consulta Receita ainda traz tudo isso oficialmente.
+      if (cnpj_manual) {
+        // CNPJ digitado pelo motoboy → consulta Receita direto, sem Gemini.
+        // A consulta Receita traz razão_social, nome_fantasia, endereco etc. oficialmente.
         const cnpjLimpo = String(cnpj_manual).replace(/\D/g, '');
         try {
           const receita = await consultarReceita(cnpjLimpo);
@@ -403,27 +363,9 @@ function createCorrecaoRoutes(pool) {
       }) : null;
 
       // ── 4. Insere job na fila (Playwright vai processar a correção igual) ──
-      // 🔍 DEBUG (remover depois): conferir foto_nf imediatamente antes do INSERT
-      console.log(`[agent/DEBUG] 💾 PRE-INSERT OS=${os_numero} | foto_nf: tipo=${typeof foto_nf} truthy=${!!foto_nf} len=${foto_nf ? foto_nf.length : 0}`);
-
-      // 2026-04: ALERT diagnóstico — Gemini processou OK mas foto sumiu antes do INSERT.
-      // Cenário-alvo: Tela admin mostra dados extraídos mas "Sem foto da NF".
-      // Causa mais provável: foto chegou cortada (rede 4G fraco) e o
-      // foto_nf virou null/undefined em algum middleware. Loga DETALHADO pra
-      // permitir investigar nos logs do Railway sem mudar comportamento.
-      if (validacaoNF && validacaoNF.dados && validacaoNF.dados.cnpj && (!foto_nf || foto_nf.length < 100)) {
-        console.error(
-          `[agent/ALERT] ⚠️ FOTO_NF VAZIA APÓS GEMINI! ` +
-          `OS=${os_numero} CNPJ=${validacaoNF.dados.cnpj_formatado} ` +
-          `tipo=${typeof foto_nf} len=${foto_nf ? foto_nf.length : 0} ` +
-          `origem=${validacaoNF.origem || 'foto_nf'} ` +
-          `usuario=${usuarioNome}. ` +
-          `IA extraiu mas foto não foi salva — verificar payload do request.`
-        );
-      }
-
-      // Garante que foto_nf vai como null explícito (não undefined/string vazia) pro INSERT
-      const fotoNfParaInsert = (foto_nf && typeof foto_nf === 'string' && foto_nf.length > 100) ? foto_nf : null;
+      // 2026-06 v6: foto_nf sempre null (fluxo foto NF aposentado). Coluna mantida
+      // no banco apenas para exibir registros legados no historico admin.
+      const fotoNfParaInsert = null;
 
       const { rows } = await pool.query(
         `INSERT INTO ajustes_automaticos (
@@ -603,45 +545,6 @@ function createCorrecaoRoutes(pool) {
     }
   });
 
-  // 2026-04 v4: POST /agent/validar-foto-nf-preview
-  // Pré-validação RÁPIDA da foto da NF antes do submit final.
-  // Usado pelo camera coaching no frontend pra guiar o motoboy.
-  // NÃO grava nada no banco — só roda Gemini Flash Lite e retorna feedback.
-  router.post('/validar-foto-nf-preview', async (req, res) => {
-    const { foto } = req.body || {};
-
-    if (!foto || typeof foto !== 'string') {
-      return res.status(400).json({
-        ok: false,
-        erro: 'Campo "foto" obrigatório (base64 da imagem).'
-      });
-    }
-
-    if (foto.length > 7_000_000) {
-      return res.status(400).json({
-        ok: false,
-        erro: 'Foto muito grande. Máximo 5MB.'
-      });
-    }
-
-    try {
-      const resultado = await validarFotoNfPreview(foto);
-      return res.json(resultado);
-    } catch (err) {
-      console.error('[agent/validar-foto-nf-preview]', err.message);
-      // Em caso de erro, falha ABERTA (motoboy pode tentar enviar mesmo assim)
-      return res.json({
-        ok: true,
-        qualidade: 'media',
-        eh_nota_fiscal: true,
-        cnpj_legivel: false,
-        cnpj_lido: null,
-        problemas: [],
-        dica: null,
-        erro: 'erro_interno_preview',
-      });
-    }
-  });
 
   // GET /agent/status/:id
   router.get('/status/:id', async (req, res) => {
