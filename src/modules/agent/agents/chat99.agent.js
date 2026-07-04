@@ -183,41 +183,30 @@ async function fazerLogin99(page, log) {
     // Checkbox "Aceito Termos e Condições" (OBRIGATORIO - trava o botao Entrar).
     // A DiDi usa um checkbox CUSTOM: <span class="checkbox check-default">, nao um
     // <input type="checkbox">. Clicamos no span (ou no wrapper) ate marcar.
-    // Checkbox custom (span). PERIGO: clicar 2x DESMARCA. Entao clicamos UMA vez
-    // e usamos o estado do BOTAO ENTRAR como prova (nao a classe do checkbox, que
-    // e ambigua). Se o Entrar nao habilitar, clicamos o checkbox +1 vez (toggle).
+    // Checkbox custom (span). Clica UMA vez (clicar 2x DESMARCA). Como a pagina
+    // e recarregada a cada tentativa (ver garantirLogado), aqui e sempre estado
+    // limpo -> 1 clique = marcado.
     const chkSpan = page.locator('.input-agreement-wrapper .checkbox, span.checkbox').first();
-    const entrar = page.locator('.button-wrap .button, div.button').first();
-
-    // habilitado = a div NAO tem "disabled" nem opacidade de desabilitado.
-    // A DiDi usa "button actived" quando pode clicar; desabilitado costuma ter
-    // classe com "disabled" ou faltar "actived".
-    async function entrarHabilitado() {
-      const cls = (await entrar.getAttribute('class').catch(() => '')) || '';
-      if (/disabled/i.test(cls)) return false;
-      return /actived|active|enabled/i.test(cls) || !/disabled/i.test(cls);
-    }
-
-    for (let i = 0; i < 3; i++) {
-      if (await entrarHabilitado()) break;            // ja pode entrar -> nao mexe mais
-      await chkSpan.click({ force: true, timeout: 3000 }).catch(() => {});
-      await page.waitForTimeout(500);
-    }
+    await chkSpan.click({ force: true, timeout: 5000 }).catch(async () => {
+      await page.locator('.input-agreement-wrapper').first().click({ force: true, timeout: 3000 }).catch(() => {});
+    });
+    // Headless precisa de mais tempo pro Vue propagar o estado (habilitar o botao).
+    await page.waitForTimeout(1000);
 
     // Entrar: e uma <div class="button">, nao <button>.
-    await page.waitForTimeout(300);
-    const okEntrar = await entrar.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
-    if (okEntrar) {
-      await entrar.click({ timeout: 10000 }).catch(() => {});
-    } else {
-      await page.getByText('Entrar', { exact: true }).first().click({ timeout: 10000 }).catch(() => {});
-    }
+    const entrar = page.locator('.button-wrap .button, div.button').first();
+    await entrar.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    await entrar.click({ timeout: 8000 }).catch(async () => {
+      await page.getByText('Entrar', { exact: true }).first().click({ timeout: 6000 }).catch(() => {});
+    });
 
-    // Aguarda voltar pro delivers logado.
-    await page.waitForURL(/entrega\.99app\.com\/v2\/delivers/, { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(1500);
-    log('   🔑 auto-login submetido');
-    return true;
+    // Confirma: espera o redirect pro delivers OU os marcadores de logado.
+    const logou = await page.waitForURL(/entrega\.99app\.com\/v2\/delivers/, { timeout: 18000 })
+      .then(() => true).catch(() => false);
+    await page.waitForTimeout(1200);
+    const ok = logou || await temMarcadoresLogado(page);
+    log(ok ? '   🔑 auto-login OK' : '   🔑 auto-login submetido (sem confirmacao)');
+    return ok;
   } catch (e) {
     log(`   ❌ auto-login falhou: ${e.message}`);
     return false;
@@ -235,14 +224,23 @@ async function garantirLogado(page, log) {
 
   if (!(await ehTelaLogin(page))) return false;
 
-  const tentou = await fazerLogin99(page, log);
-  if (!tentou) return false;
-
-  // Reconfirma no delivers.
-  try {
-    await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  } catch (_) {}
-  return await temMarcadoresLogado(page);
+  // Tenta logar ate 2x. Cada tentativa recarrega a tela de login (estado limpo:
+  // checkbox desmarcado), evitando o toggle acidental do checkbox.
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const ok = await fazerLogin99(page, log);
+    if (ok) return true;
+    // reconfirma pelo delivers (as vezes logou mas o waitForURL nao pegou)
+    try { await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }); } catch (_) {}
+    if (await temMarcadoresLogado(page)) return true;
+    if (tentativa < 2) {
+      log(`   \u21BB login tentativa ${tentativa} falhou, recarregando login...`);
+      try { await page.goto(DELIVERS_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }); } catch (_) {}
+      await page.waitForTimeout(1500);
+      if (await temMarcadoresLogado(page)) return true; // caso raro: logou no meio
+      if (!(await ehTelaLogin(page))) return false;
+    }
+  }
+  return false;
 }
 
 // ── Busca as corridas 99 ativas na NOSSA base (+ as com outbox pendente) ──
