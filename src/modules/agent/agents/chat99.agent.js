@@ -183,29 +183,34 @@ async function fazerLogin99(page, log) {
     // Checkbox "Aceito Termos e Condições" (OBRIGATORIO - trava o botao Entrar).
     // A DiDi usa um checkbox CUSTOM: <span class="checkbox check-default">, nao um
     // <input type="checkbox">. Clicamos no span (ou no wrapper) ate marcar.
-    const seletoresChk = [
-      '.input-agreement-wrapper .checkbox',
-      'span.checkbox.check-default',
-      '.input-agreement-wrapper',
-      'input[type="checkbox"]',
-    ];
-    for (const sel of seletoresChk) {
-      const el = page.locator(sel).first();
-      if (await el.count()) {
-        await el.click({ force: true, timeout: 5000 }).catch(() => {});
-        break;
-      }
-    }
-    // fallback: clica no texto "Aceito"
-    await page.getByText('Aceito', { exact: false }).first().click({ timeout: 3000 }).catch(() => {});
-    await page.waitForTimeout(400);
+    // Checkbox custom (span). PERIGO: clicar 2x DESMARCA. Entao clicamos UMA vez
+    // e usamos o estado do BOTAO ENTRAR como prova (nao a classe do checkbox, que
+    // e ambigua). Se o Entrar nao habilitar, clicamos o checkbox +1 vez (toggle).
+    const chkSpan = page.locator('.input-agreement-wrapper .checkbox, span.checkbox').first();
+    const entrar = page.locator('.button-wrap .button, div.button').first();
 
-    // Entrar
-    const btnEntrar = page.getByRole('button', { name: 'Entrar' }).first();
-    if (await btnEntrar.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false)) {
-      await btnEntrar.click({ timeout: 10000 }).catch(() => {});
+    // habilitado = a div NAO tem "disabled" nem opacidade de desabilitado.
+    // A DiDi usa "button actived" quando pode clicar; desabilitado costuma ter
+    // classe com "disabled" ou faltar "actived".
+    async function entrarHabilitado() {
+      const cls = (await entrar.getAttribute('class').catch(() => '')) || '';
+      if (/disabled/i.test(cls)) return false;
+      return /actived|active|enabled/i.test(cls) || !/disabled/i.test(cls);
+    }
+
+    for (let i = 0; i < 3; i++) {
+      if (await entrarHabilitado()) break;            // ja pode entrar -> nao mexe mais
+      await chkSpan.click({ force: true, timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    // Entrar: e uma <div class="button">, nao <button>.
+    await page.waitForTimeout(300);
+    const okEntrar = await entrar.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+    if (okEntrar) {
+      await entrar.click({ timeout: 10000 }).catch(() => {});
     } else {
-      await page.locator('button:has-text("Entrar")').first().click({ timeout: 10000 }).catch(() => {});
+      await page.getByText('Entrar', { exact: true }).first().click({ timeout: 10000 }).catch(() => {});
     }
 
     // Aguarda voltar pro delivers logado.
