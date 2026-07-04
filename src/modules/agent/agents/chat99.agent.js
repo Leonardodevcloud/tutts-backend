@@ -320,7 +320,10 @@ async function processarLinha(page, pool, linha, log) {
   const abriu = await page.locator('.chat__window').first()
     .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
   if (!abriu) { log(`   OS ${linha.os}: chat nao abriu`); return; }
-  await page.waitForTimeout(800);
+  // Espera as bolhas renderizarem (carregam assincronas, igual o tbody da tabela).
+  await page.locator('.chat__window [class*="msg_"]').first()
+    .waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+  await page.waitForTimeout(700);
   const info = await extrairInfoMotoboy(page);
   const conversaId = await upsertConversa(pool, linha.os, info);
   const bolhas = await extrairBolhas(page);
@@ -386,10 +389,11 @@ async function extrairInfoMotoboy(page) {
 // ── Extrai as bolhas do chat (tolerante a content_ vs content__) ──────────
 async function extrairBolhas(page) {
   return await page.evaluate(() => {
-    const janela = document.querySelector('.chat__window');
+    // Prefere o modal do chat; se nao achar, varre o documento inteiro.
+    const janela = document.querySelector('.chat__window') || document.body;
     if (!janela) return [];
     const msgEls = Array.from(janela.querySelectorAll('[class*="msg_"]'))
-      .filter(el => /(?:^|\s)msg_\d+/.test(el.className || '') && /content/.test(el.className || ''));
+      .filter(el => /(?:^|\s)msg_\d+/.test(el.className || '') && /content/i.test(el.className || ''));
     const out = [];
     for (const el of msgEls) {
       const m = String(el.className).match(/msg_(\d+)/);
@@ -397,7 +401,7 @@ async function extrairBolhas(page) {
       if (!msgId) continue;
       const li = el.closest('li') || el.parentElement;
       const box = el.closest('[class*="box"]') || li || el;
-      const isSelf = /isSelf/.test((box && box.className) || '') ||
+      const isSelf = /isSelf/i.test((box && box.className) || '') ||
                      (li && !!li.querySelector('[class*="isSelf"]'));
       let horario = '';
       if (li) {
@@ -406,9 +410,11 @@ async function extrairBolhas(page) {
         if (times.length) horario = times[times.length - 1].textContent.trim();
       }
       const lido = li ? !!li.querySelector('[class*="isread"][class*="read"], [class*="isread"].read') : false;
+      // texto: prefere o .msg_span interno; senao o textContent do proprio el
+      const span = el.querySelector('[class*="msg_span"], span');
+      const texto = ((span ? span.textContent : el.textContent) || '').trim();
       const imgEl = el.querySelector('img');
       const img = imgEl && imgEl.src ? imgEl.src : null;
-      const texto = (el.textContent || '').trim();
       out.push({ msgId, direcao: isSelf ? 'out' : 'in', texto, img, horario, lido });
     }
     return out;
@@ -446,15 +452,31 @@ async function enviarNaJanela(page, texto) {
   while (resto.length > LIMITE_99) { partes.push(resto.slice(0, LIMITE_99)); resto = resto.slice(LIMITE_99); }
   if (resto) partes.push(resto);
 
-  const input = page.locator('.chat__window textarea').first();
-  const btnEnviar = page.locator('.chat__window').getByRole('button', { name: 'Enviar' }).last();
+  // Input do CHAT (nao o da caixa de endereco "Destinatario"). Placeholder da 99.
+  let input = page.locator('.chat__window textarea[placeholder="Insira o texto aqui"]').first();
+  if (!(await input.count())) input = page.locator('.chat__window .window__main--footer textarea').first();
+  if (!(await input.count())) input = page.locator('.chat__window textarea').last();
 
   for (const parte of partes) {
     await input.click({ timeout: 10000 });
     await input.fill(parte);
-    await page.waitForTimeout(300);
-    await btnEnviar.click({ timeout: 10000 });
-    await page.waitForTimeout(900);
+    await page.waitForTimeout(400);
+
+    // Enviar do chat: pode ser <button> OU <div class="button">. Tenta no rodape
+    // do chat primeiro; se nao houver, cai pro Enter.
+    const escopo = (await page.locator('.chat__window .window__main--footer').count())
+      ? page.locator('.chat__window .window__main--footer')
+      : page.locator('.chat__window');
+    let clicou = false;
+    for (const sel of ['button:has-text("Enviar")', 'div.button:has-text("Enviar")', '[class*="send"]', 'text="Enviar"']) {
+      const btn = escopo.locator(sel).last();
+      if (await btn.count()) {
+        await btn.click({ timeout: 5000 }).then(() => { clicou = true; }).catch(() => {});
+        if (clicou) break;
+      }
+    }
+    if (!clicou) { await input.press('Enter').catch(() => {}); }
+    await page.waitForTimeout(1100);
   }
 }
 
