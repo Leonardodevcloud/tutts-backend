@@ -425,19 +425,27 @@ async function extrairBolhas(page) {
       for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
       return (h >>> 0).toString(36);
     };
+    // id real da 99 vem na classe da bolha: "content__msg msg__65561".
+    // ATENCAO: e underscore DUPLO (msg__), por isso "msg_\d+" da v1 nunca casava.
     const idReal = (el) => {
       for (let up = 0, cur = el; up < 5 && cur; up++, cur = cur.parentElement) {
-        const m = cls(cur).match(/msg[_-](\d{3,})/i);
+        const m = cls(cur).match(/msg[_-]+(\d{3,})/i);
         if (m) return m[1];
       }
       const inner = el.querySelector && el.querySelector('[class*="msg_"]');
-      if (inner) { const m = cls(inner).match(/msg[_-](\d{3,})/i); if (m) return m[1]; }
+      if (inner) { const m = cls(inner).match(/msg[_-]+(\d{3,})/i); if (m) return m[1]; }
       return null;
     };
 
-    // 1) caminho feliz: classe msg_<id> + content
-    let msgEls = Array.from(cont.querySelectorAll('[class*="msg_"]'))
-      .filter(el => /(?:^|\s)msg_\d+/.test(cls(el)) && /content/i.test(cls(el)));
+    // 1) caminho feliz (DOM real da 99, confirmado): a bolha e div.content__msg
+    //    (com msg__<id>); o texto fica num <span class="msg__span"> interno.
+    //    Isso ja EXCLUI o lixo do plugin de endereco / botoes de sistema.
+    let msgEls = Array.from(cont.querySelectorAll('[class*="content__msg"]'));
+    if (msgEls.length === 0) {
+      // layouts antigos: qualquer classe msg_<id>/msg__<id> junto de "content"
+      msgEls = Array.from(cont.querySelectorAll('[class*="msg_"]'))
+        .filter(el => /msg[_-]+\d{3,}/.test(cls(el)) && /content/i.test(cls(el)));
+    }
 
     // 2) fallback generico: folhas com texto util dentro do content
     if (msgEls.length === 0) {
@@ -446,8 +454,8 @@ async function extrairBolhas(page) {
       let n;
       while ((n = walker.nextNode())) {
         const c = cls(n).toLowerCase();
-        // pula chrome do rodape/input/scroll/nav/avatar
-        if (/footer|textarea|van-field|van-cell|van-button|nav-bar|scroll|avatar|__time|isread/.test(c)) continue;
+        // pula chrome do rodape/input/scroll/nav/avatar/plugin de endereco/barras
+        if (/footer|textarea|van-field|van-cell|van-button|nav-bar|scroll|avatar|__time|isread|plugin|newmsg|content__time/.test(c)) continue;
         const txt = (n.innerText || n.textContent || '').trim();
         if (!txt) continue;
         // pega o no MAIS interno que carrega o texto (evita contar o wrapper e a folha)
@@ -469,7 +477,9 @@ async function extrairBolhas(page) {
     const vistos = new Set();
     let ordem = 0;
     for (const el of msgEls) {
-      const txt = (el.innerText || el.textContent || '').trim();
+      // texto: prefere o <span class="msg__span"> interno (evita pegar horario/avatar)
+      const span = el.querySelector && el.querySelector('[class*="msg__span"], [class*="msg_span"]');
+      const txt = ((span ? span.innerText || span.textContent : el.innerText || el.textContent) || '').trim();
       const imgEl = el.querySelector && el.querySelector('img[src]');
       const img = (imgEl && imgEl.src && !/avatar/i.test(cls(imgEl))) ? imgEl.src : null;
       if (!txt && !img) continue;
@@ -572,31 +582,55 @@ async function enviarNaJanela(page, texto) {
   while (resto.length > LIMITE_99) { partes.push(resto.slice(0, LIMITE_99)); resto = resto.slice(LIMITE_99); }
   if (resto) partes.push(resto);
 
-  // Input do CHAT (nao o da caixa de endereco "Destinatario"). Placeholder da 99.
-  let input = page.locator('.chat__window textarea[placeholder="Insira o texto aqui"]').first();
-  if (!(await input.count())) input = page.locator('.chat__window .window__main--footer textarea').first();
+  // O rodape do CHAT (nao a caixa de endereco "Destinatario", que tem um "Enviar"
+  // amarelo no MEIO da janela). Todo o envio e escopado neste footer.
+  const footer = page.locator('.chat__window .window__main--footer').first();
+  const temFooter = await footer.count();
+
+  // Input do CHAT: textarea DENTRO do rodape (placeholder "Insira o texto aqui").
+  let input = (temFooter ? footer : page.locator('.chat__window'))
+    .locator('textarea[placeholder="Insira o texto aqui"]').first();
+  if (!(await input.count())) input = (temFooter ? footer : page.locator('.chat__window')).locator('textarea').first();
   if (!(await input.count())) input = page.locator('.chat__window textarea').last();
 
   for (const parte of partes) {
-    await input.click({ timeout: 10000 });
-    await input.fill(parte);
-    await page.waitForTimeout(400);
+    let enviado = false;
 
-    // Enviar do chat: pode ser <button> OU <div class="button">. Tenta no rodape
-    // do chat primeiro; se nao houver, cai pro Enter.
-    const escopo = (await page.locator('.chat__window .window__main--footer').count())
-      ? page.locator('.chat__window .window__main--footer')
-      : page.locator('.chat__window');
-    let clicou = false;
-    for (const sel of ['button:has-text("Enviar")', 'div.button:has-text("Enviar")', '[class*="send"]', 'text="Enviar"']) {
-      const btn = escopo.locator(sel).last();
-      if (await btn.count()) {
-        await btn.click({ timeout: 5000 }).then(() => { clicou = true; }).catch(() => {});
-        if (clicou) break;
+    for (let tent = 1; tent <= 2 && !enviado; tent++) {
+      // (re)garante o texto no input do chat
+      await input.click({ timeout: 10000 }).catch(() => {});
+      const jaTem = ((await input.inputValue().catch(() => '')) || '').trim() === parte.trim();
+      if (!jaTem) {
+        await input.fill('').catch(() => {});
+        // digitar (pressSequentially) e mais confiavel pro Vue habilitar o botao;
+        // fill como fallback.
+        await input.pressSequentially(parte, { delay: 18 })
+          .catch(async () => { await input.fill(parte).catch(() => {}); });
       }
+      await page.waitForTimeout(350); // deixa o Vue habilitar o footer__send
+
+      // BOTAO CERTO: footer__send (o de BAIXO), so habilita com texto. NUNCA o
+      // "Enviar" generico (pega o amarelo da caixa de endereco, la em cima).
+      // O .click() do Playwright ja espera o botao ficar habilitado.
+      let sendBtn = footer.locator('button.footer__send, .footer__send').first();
+      if (!(await sendBtn.count())) sendBtn = footer.locator('button.van-button--warning').first();
+      if (!(await sendBtn.count())) sendBtn = footer.locator('button:not([disabled])').last();
+
+      if (await sendBtn.count()) {
+        await sendBtn.click({ timeout: 8000 }).catch(() => {});
+      } else {
+        await input.press('Control+Enter').catch(() => {}); // ultimo recurso
+      }
+
+      await page.waitForTimeout(900);
+      // sucesso = o input do chat esvaziou (a 99 limpa apos enviar)
+      enviado = ((await input.inputValue().catch(() => '')) || '').trim() === '';
     }
-    if (!clicou) { await input.press('Enter').catch(() => {}); }
-    await page.waitForTimeout(1100);
+
+    if (!enviado) {
+      throw new Error('nao consegui enviar: botao footer__send nao habilitou ou o input nao limpou');
+    }
+    await page.waitForTimeout(600);
   }
 }
 
