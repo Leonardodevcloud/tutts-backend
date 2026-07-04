@@ -129,7 +129,7 @@ function createHistoricoRoutes(pool, verificarAdmin) {
 
   // GET /agent/historico (admin) — agora retorna coords para o mapa
   router.get('/historico', verificarAdmin, async (req, res) => {
-    const { status, os_numero, de, ate, page = 1, per_page = 30 } = req.query;
+    const { status, os_numero, de, ate, motoboy, grupo, page = 1, per_page = 30 } = req.query;
 
     const conditions = [];
     const params     = [];
@@ -137,8 +137,20 @@ function createHistoricoRoutes(pool, verificarAdmin) {
 
     if (status)    { conditions.push(`status = $${p++}`);        params.push(status); }
     if (os_numero) { conditions.push(`os_numero ILIKE $${p++}`); params.push(`%${os_numero}%`); }
-    if (de)        { conditions.push(`criado_em >= $${p++}`);    params.push(de); }
-    if (ate)       { conditions.push(`criado_em <= $${p++}`);    params.push(ate); }
+    // 2026-07: busca por motoboy (nome OU codigo profissional)
+    if (motoboy)   {
+      conditions.push(`(usuario_nome ILIKE $${p} OR cod_profissional::text ILIKE $${p})`);
+      params.push(`%${motoboy}%`);
+      p++;
+    }
+    // 2026-07: grupo aprovados x barradas
+    if (grupo === 'aprovados')     { conditions.push(`status = 'sucesso'`); }
+    else if (grupo === 'barradas') { conditions.push(`status IN ('erro','falhou','bloqueado_cliente')`); }
+    // 2026-07 FIX datas: BRT + 'ate' inclusivo. Antes 'criado_em <= AAAA-MM-DD'
+    // era lido como meia-noite, excluindo o dia inteiro do "ate" e fazendo a
+    // busca de um unico dia (de=ate) nao retornar nada.
+    if (de)        { conditions.push(`criado_em >= ($${p++}::date AT TIME ZONE 'America/Bahia')`); params.push(de); }
+    if (ate)       { conditions.push(`criado_em < (($${p++}::date + INTERVAL '1 day') AT TIME ZONE 'America/Bahia')`); params.push(ate); }
 
     const where  = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const offset = (parseInt(page, 10) - 1) * parseInt(per_page, 10);
