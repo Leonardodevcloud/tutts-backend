@@ -571,7 +571,7 @@ module.exports = defineAgent({
     }
     if (!ctx.slotState.browserSession) {
       ctx.slotState.browserSession = criarBrowserSession({
-        nome: 'chat99-global', launchOpts: CHAT99_LAUNCH_OPTS,
+        nome: 'chat99-global', launchOpts: CHAT99_LAUNCH_OPTS, protegerDoReaper: true,
       });
       ctx.slotState._browserNascidoEm = Date.now();
       ctx.log('🔧 BrowserSession chat99 criada');
