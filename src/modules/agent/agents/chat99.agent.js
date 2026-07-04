@@ -72,7 +72,7 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
-const CHAT99_BUILD = 'v4-abrir-chat (clique sintetico anti-sobreposicao + envio robusto + filtro-lixo)';
+const CHAT99_BUILD = 'v5-fechar-chat (close robusto/bloqueante + clique real + envio robusto + filtro-lixo)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
@@ -305,26 +305,26 @@ async function coletarLinhasPagina(page) {
   });
 }
 
-// Clica no "Mensagem" da linha mesmo quando o card de detalhes do pedido
-// (rider_star / "Informacoes do entregador" / draw_card_item) sobrepoe a tabela
-// e intercepta o ponteiro. Estrategia: clique normal -> click SINTETICO via
-// evaluate (ignora hit-testing/sobreposicao) -> force.
-async function clicarMensagem(btn) {
-  const e1 = await btn.click({ timeout: 4000 }).then(() => null).catch(err => err);
-  if (!e1) return true;
+// Clica no "Mensagem" da linha. O clique SINTETICO (el.click()) nao dispara o
+// handler da 99 (dava "chat nao abriu"), entao usamos so cliques REAIS: normal
+// -> fecha overlay + scroll + tenta de novo -> force. O overlay do chat anterior
+// (#im-sdk-warper z-1001) e o maior interceptador; fecharChat resolve isso.
+async function clicarMensagem(page, btn) {
+  if (await btn.click({ timeout: 3500 }).then(() => true).catch(() => false)) return true;
+  await fecharChat(page).catch(() => {});
   const h = await btn.elementHandle().catch(() => null);
-  if (h) {
-    await h.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
-    const okEval = await h.evaluate(el => { el.click(); return true; }).catch(() => false);
-    if (okEval) return true;
-  }
-  const e3 = await btn.click({ timeout: 4000, force: true }).then(() => null).catch(err => err);
-  return !e3;
+  if (h) await h.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
+  await page.waitForTimeout(200);
+  if (await btn.click({ timeout: 3500 }).then(() => true).catch(() => false)) return true;
+  return await btn.click({ timeout: 3500, force: true }).then(() => true).catch(() => false);
 }
 
 // Processa UMA linha: abre o chat pelo botao da propria linha (sem re-filtrar
 // por OS), captura bolhas e drena a outbox.
 async function processarLinha(page, pool, linha, log) {
+  // Garante que nenhum chat anterior ficou aberto (o overlay #im-sdk-warper
+  // z-1001 intercepta o clique de abrir a proxima OS).
+  await fecharChat(page).catch(() => {});
   // Acha a linha pela OS (robusto a multi-tabela/reordenacao), nao por indice.
   let tr;
   if (linha.os) {
@@ -335,7 +335,7 @@ async function processarLinha(page, pool, linha, log) {
   const btn = tr.getByText(/Mensagem/i).first();
   const ok = await btn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
   if (!ok) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
-  const clicou = await clicarMensagem(btn);
+  const clicou = await clicarMensagem(page, btn);
   if (!clicou) { log(`   OS ${linha.os}: nao consegui clicar em Mensagem (card do pedido sobrepoe)`); return; }
   const abriu = await page.locator('.chat__window').first()
     .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
@@ -383,7 +383,7 @@ async function abrirChatDaOS(page, os, log) {
   const temMsg = await btnMsg.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!temMsg) { log(`   OS ${os}: sem botão Mensagem (aguardando aceite)`); return false; }
 
-  await clicarMensagem(btnMsg);
+  await clicarMensagem(page, btnMsg);
   const abriu = await page.locator('.chat__window').first().waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
   return abriu;
 }
@@ -724,11 +724,42 @@ async function drenarOutbox(page, pool, conversaId, log) {
 }
 
 async function fecharChat(page) {
-  try {
-    const x = page.locator('.chat__window [class*="nav-bar"] [class*="close"], .chat__window [class*="nav-bar"] i').first();
-    if (await x.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false)) { await x.click({ timeout: 3000 }); return; }
-  } catch (_) {}
+  const cw = page.locator('.chat__window').first();
+  if (!(await cw.isVisible().catch(() => false))) return; // ja fechado
+
+  // 1) tenta os X/voltar do nav-bar do chat (Vant: __right / __left / cross)
+  const alvos = [
+    '.chat__window .van-nav-bar__right',
+    '.chat__window .van-nav-bar__left',
+    '.chat__window [class*="nav-bar"] [class*="cross"]',
+    '.chat__window [class*="nav-bar"] [class*="close"]',
+    '.chat__window [class*="nav-bar"] .van-icon',
+    '.chat__window [class*="nav-bar"] i',
+    '.chat__window [class*="nav-bar"] svg',
+  ];
+  for (const sel of alvos) {
+    const x = page.locator(sel).first();
+    if ((await x.count()) && (await x.isVisible().catch(() => false))) {
+      await x.click({ timeout: 1500 }).catch(() => {});
+      if (!(await cw.isVisible().catch(() => false))) return;
+    }
+  }
+
+  // 2) Escape
   await page.keyboard.press('Escape').catch(() => {});
+  if (await cw.waitFor({ state: 'hidden', timeout: 1500 }).then(() => true).catch(() => false)) return;
+
+  // 3) ultimo recurso: clica no icone de fechar do nav-bar via evaluate (sintetico)
+  await page.evaluate(() => {
+    const win = document.querySelector('.chat__window');
+    const nav = win && win.querySelector('[class*="nav-bar"]');
+    const cand = nav && nav.querySelector('[class*="cross"], [class*="close"], .van-icon, i, svg, [role="button"]');
+    if (cand) cand.click();
+  }).catch(() => {});
+  // Espera o overlay (#im-sdk-warper, z-1001) sumir de fato antes de seguir,
+  // senao ele intercepta o clique de abrir a proxima OS.
+  await cw.waitFor({ state: 'hidden', timeout: 2500 }).catch(() => {});
+  await page.waitForTimeout(250);
 }
 
 async function upsertConversa(pool, os, info) {
