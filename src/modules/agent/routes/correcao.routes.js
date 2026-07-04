@@ -335,8 +335,27 @@ function createCorrecaoRoutes(pool) {
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
           cep_gps: cepGps,
+          // 2026-06 v6: sinais extras pros paths G / CNPJ-na-fachada
+          textos_fachada: (validacaoLoc && validacaoLoc.detalhes && validacaoLoc.detalhes.gemini && validacaoLoc.detalhes.gemini.textos_visiveis) || [],
+          cnpj: (receita && receita.cnpj) || (validacaoNF && validacaoNF.dados && validacaoNF.dados.cnpj) || null,
         });
         console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
+
+        // 2026-06 v6: BLOQUEIO REAL — barra o envio quando nenhuma rota validou.
+        if (cruzamento.barrar) {
+          console.log(`[agent] 🚫 Correção BARRADA (OS ${os_numero} P${ponto}): ${cruzamento.motivo_bloqueio}`);
+          return res.status(400).json({
+            sucesso: false,
+            validacao_rejeitada: true,
+            motivo_rejeicao: cruzamento.motivo_bloqueio,
+            cruzamento: {
+              scores: cruzamento.scores,
+              fachada_score: cruzamento.fachada_score,
+              receita_max: cruzamento.receita_max,
+            },
+            erros: [cruzamento.motivo_bloqueio],
+          });
+        }
       }
 
       // JSON pra coluna validacao_localizacao

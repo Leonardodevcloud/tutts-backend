@@ -1,38 +1,35 @@
 /**
- * cruzar-validacoes.js (2026-05 v2 — pós-remoção de foto da NF)
+ * cruzar-validacoes.js (2026-06 v6 — validação RÍGIDA, com bloqueio real)
  *
- * Fluxo NOVO:
- *   - Motoboy NÃO envia mais foto da NF.
+ * Fluxo:
  *   - Motoboy DIGITA o CNPJ; backend consulta Receita Federal (BrasilAPI/OpenCNPJ).
- *   - Foto da FACHADA continua sendo enviada e validada via Gemini + Google Places.
- *   - Cruzamento usa dados da Receita como fonte primária (em vez da NF/Gemini OCR).
+ *   - Foto da FACHADA é validada via Gemini + Google Places.
+ *   - Este módulo cruza os sinais e DECIDE se libera ou BARRA o envio.
  *
- * 6 PATHS DE APROVAÇÃO (qualquer ≥90% → pode_salvar_no_banco):
+ * DUAS ROTAS DE APROVAÇÃO (fallback mútuo):
  *
- *   A) Fachada (Gemini) ↔ Google Places (nome)
- *       Foto da fachada confirma o estabelecimento que o Google Places vê no GPS.
+ *   ROTA FACHADA (path A):
+ *     A — Fachada (Gemini) ↔ Google Places (nome)
+ *       A >= 50  → aprova pela fachada
+ *       A <  50  → reprova a fachada (mas ainda passa se a Receita aprovar)
+ *       A = N/D  → fachada indefinida (não aprova nem reprova sozinha)
  *
- *   B) Endereço Receita ≈ GPS do motoboy (≤15m → 100; degrade até 50m → 0)
- *       Geocoda o endereço fiscal e mede distância em metros até o GPS.
+ *   ROTA RECEITA (basta 1 path >= 80):
+ *     B — Endereço Receita ≈ GPS do motoboy (≤15m → 100; degrade até 80m → 0)
+ *     C — Nome Receita ↔ Google Places
+ *     D — Nome Receita ↔ Foto fachada (Gemini)
+ *     E — Endereço Receita ↔ Endereço digitado
+ *     F — CEP Receita == CEP reverse-geocoding do GPS (exato → 90; 5 díg → 60)
+ *     G — Nome Receita ↔ textos visíveis na fachada (todos)         [máx 90]
+ *     CNPJ — CNPJ da Receita aparece nos textos da fachada           [90]
+ *     K — Número do logradouro Receita ↔ endereço digitado          [90]
  *
- *   C) Nome Receita (razão OU fantasia) ↔ Google Places (nome)
- *       Empresa cadastrada no Receita == empresa que o Google vê ali.
+ * DECISÃO:
+ *   libera = (fachada aprova) OU (receita aprova)
+ *   barra  = houve algum sinal calculável E nenhuma rota aprovou
+ *   (fail-open: se NENHUM sinal é calculável — ex: infra fora — NÃO barra)
  *
- *   D) Nome Receita (razão OU fantasia) ↔ Foto fachada (Gemini)
- *       Empresa cadastrada no Receita == nome lido na fachada.
- *
- *   E) Endereço Receita ↔ Endereço digitado pelo motoboy
- *       Texto do endereço fiscal vs texto que o motoboy escreveu.
- *
- *   F) CEP Receita == CEP do reverse-geocoding do GPS
- *       Bônus: bate exato → 100; senão → 0.
- *
- * O caller (correcao.routes.js) é responsável por:
- *   - Calcular distância e CEP-do-GPS antes de chamar (helpers exportados aqui).
- *   - Passar os contextos: receita, fachada, motoboy_lat/lng, localizacao_raw, cep_gps.
- *
- * Critério de salvar: score_max ≥ 90 em pelo menos uma das 6 paths.
- *   (Receita ATIVA é informativa, NÃO bloqueia salvamento — conforme Tutts.)
+ * As melhorias novas (G, CNPJ, K) e o CEP (F) são heurísticas: teto 90, nunca 100.
  */
 
 'use strict';
@@ -104,6 +101,17 @@ function scoreEndereco(end1, end2) {
   return scoreSimilaridade(limpar(end1), limpar(end2));
 }
 
+// Extrai o "número" do logradouro de um texto de endereço (best-effort).
+function extrairNumero(endereco) {
+  if (!endereco) return null;
+  // pega o primeiro grupo de dígitos que NÃO seja um CEP (8 dígitos) nem parte dele
+  const semCep = String(endereco).replace(/\b\d{5}-?\d{3}\b/g, ' ');
+  const m = semCep.match(/(?:^|[,\s])n?[ºo]?\s*(\d{1,6})(?![\d/])/i);
+  if (m) return m[1];
+  const any = semCep.match(/\b(\d{1,6})\b/);
+  return any ? any[1] : null;
+}
+
 // ───────── Helpers de geo ─────────
 
 function distanciaMetros(lat1, lng1, lat2, lng2) {
@@ -121,16 +129,30 @@ function distanciaMetros(lat1, lng1, lat2, lng2) {
 
 /**
  * Distância em metros → score 0-100.
- *  ≤15m → 100 | 15-50m → degrade linear | >50m → 0
+ *  ≤15m → 100 | 15-80m → degrade linear | >80m → 0
  *
- * Threshold de 15m confirmado pelo Tutts. Aceita até 50m com degrade pq Receita
- * pode ter endereço fiscal ligeiramente diferente do operacional (matriz/filial).
+ * 2026-06 v6: cauda alargada de 50m → 80m. Em zona urbana densa o drift de GPS
+ * + geocoding de telhado passa de 50m mesmo num match correto. Pico 100 mantido.
  */
 function scoreDistancia(metros) {
   if (metros === null || metros === undefined) return 0;
   if (metros <= 15) return 100;
-  if (metros >= 50) return 0;
-  return Math.round(100 * (50 - metros) / 35);
+  if (metros >= 80) return 0;
+  return Math.round(100 * (80 - metros) / 65);
+}
+
+/**
+ * CEP Receita vs CEP do GPS. Teto 90 (heurística).
+ *  8 dígitos iguais → 90 | mesmos 5 primeiros (sub-região) → 60 | senão 0.
+ *  Retorna null quando não dá pra comparar (algum CEP ausente/inválido).
+ */
+function scoreCepParcial(cepR, cepG) {
+  const a = String(cepR || '').replace(/\D/g, '');
+  const b = String(cepG || '').replace(/\D/g, '');
+  if (a.length !== 8 || b.length !== 8) return null;
+  if (a === b) return 90;
+  if (a.slice(0, 5) === b.slice(0, 5)) return 60;
+  return 0;
 }
 
 // ───────── Função principal ─────────
@@ -143,11 +165,14 @@ function cruzarValidacoes({
   motoboy_lng,
   distancia_receita_gps,
   cep_gps,
+  textos_fachada,
+  cnpj,
 }) {
   const scores = {};
 
   const nomeFachada = fachada && fachada.nome_foto;
   const nomeGoogle = fachada && fachada.match_google && fachada.match_google.nome;
+  const textos = Array.isArray(textos_fachada) ? textos_fachada.filter(Boolean) : [];
 
   // Nomes da Receita: pega fantasia E razão (cliente pode ter cadastro com qualquer um)
   const nomesReceita = [];
@@ -190,16 +215,67 @@ function cruzarValidacoes({
     scores.endereco_receita_vs_motoboy = scoreEndereco(receita.endereco, localizacao_raw);
   }
 
-  // ── Path F: CEP Receita == CEP do reverse-geocoding do GPS ──
+  // ── Path F: CEP Receita == CEP do reverse-geocoding do GPS (teto 90) ──
   if (receita && receita.cep && cep_gps) {
-    const cepR = String(receita.cep).replace(/\D/g, '');
-    const cepG = String(cep_gps).replace(/\D/g, '');
-    if (cepR.length === 8 && cepG.length === 8) {
-      scores.cep_receita_vs_gps = (cepR === cepG) ? 100 : 0;
+    const f = scoreCepParcial(receita.cep, cep_gps);
+    if (f !== null) scores.cep_receita_vs_gps = f;
+  }
+
+  // ── Path G: Nome Receita ↔ textos visíveis na fachada (todos) [máx 90] ──
+  if (nomesReceita.length > 0 && textos.length > 0) {
+    let best = 0;
+    for (const t of textos) {
+      for (const n of nomesReceita) {
+        best = Math.max(best, scoreSimilaridade(n, t));
+        if (best >= 90) break;
+      }
+      if (best >= 90) break;
+    }
+    scores.nome_receita_vs_textos = Math.min(90, best);
+  }
+
+  // ── CNPJ na fachada: CNPJ da Receita aparece nos textos visíveis [90] ──
+  const cnpjDig = String(cnpj || (receita && receita.cnpj) || '').replace(/\D/g, '');
+  if (cnpjDig.length === 14 && textos.length > 0) {
+    const blob = textos.map(t => String(t).replace(/\D/g, '')).join(' ');
+    if (blob.includes(cnpjDig)) scores.cnpj_na_fachada = 90;
+  }
+
+  // ── Path K: Número do logradouro Receita ↔ endereço digitado [90] ──
+  const numReceita = (receita && (receita.numero || extrairNumero(receita.endereco))) || null;
+  if (numReceita && localizacao_raw) {
+    const nR = String(numReceita).replace(/\D/g, '');
+    if (nR) {
+      const nums = String(localizacao_raw).match(/\d+/g) || [];
+      scores.numero_receita_vs_motoboy = nums.includes(nR) ? 90 : 0;
     }
   }
 
-  // ── Score final + caminho de aprovação ──
+  // ── Decisão: duas rotas com fallback mútuo ──
+  const A = scores.fachada_vs_google;
+  const fachadaAvaliavel = typeof A === 'number';
+  const fachadaAprova = fachadaAvaliavel && A >= 50;
+
+  const receitaKeys = [
+    'endereco_receita_vs_gps',
+    'nome_receita_vs_google',
+    'nome_receita_vs_fachada',
+    'endereco_receita_vs_motoboy',
+    'cep_receita_vs_gps',
+    'nome_receita_vs_textos',
+    'cnpj_na_fachada',
+    'numero_receita_vs_motoboy',
+  ];
+  const receitaScores = receitaKeys.map(k => scores[k]).filter(v => typeof v === 'number');
+  const receita_max = receitaScores.length > 0 ? Math.max(...receitaScores) : 0;
+  const receitaAprova = receitaScores.some(v => v >= 80);
+
+  const algumSinal = fachadaAvaliavel || receitaScores.length > 0;
+  const liberado = fachadaAprova || receitaAprova;
+  // fail-open: sem NENHUM sinal calculável (infra fora), não barra.
+  const barrar = algumSinal && !liberado;
+
+  // ── Score final + caminho de aprovação (compat + info) ──
   const valores = Object.values(scores).filter(v => typeof v === 'number');
   const score_max = valores.length > 0 ? Math.max(...valores) : 0;
   const pelo_menos_um_90 = score_max >= 90;
@@ -207,18 +283,42 @@ function cruzarValidacoes({
   const pode_salvar_no_banco = pelo_menos_um_90;
 
   const labels = {
-    fachada_vs_google:           'Fachada↔Google',
-    endereco_receita_vs_gps:     'Endereço Receita↔GPS',
-    nome_receita_vs_google:      'Nome Receita↔Google',
-    nome_receita_vs_fachada:     'Nome Receita↔Fachada',
-    endereco_receita_vs_motoboy: 'Endereço Receita↔Motoboy',
-    cep_receita_vs_gps:          'CEP Receita↔GPS',
+    fachada_vs_google:            'Fachada↔Google',
+    endereco_receita_vs_gps:      'Endereço Receita↔GPS',
+    nome_receita_vs_google:       'Nome Receita↔Google',
+    nome_receita_vs_fachada:      'Nome Receita↔Fachada',
+    endereco_receita_vs_motoboy:  'Endereço Receita↔Motoboy',
+    cep_receita_vs_gps:           'CEP Receita↔GPS',
+    nome_receita_vs_textos:       'Nome Receita↔Textos fachada',
+    cnpj_na_fachada:              'CNPJ na fachada',
+    numero_receita_vs_motoboy:    'Número Receita↔Motoboy',
   };
 
   let caminho_aprovacao = null;
-  if (pelo_menos_um_90) {
-    const vencedor = Object.entries(scores).find(([, v]) => v === score_max);
-    caminho_aprovacao = vencedor ? labels[vencedor[0]] || vencedor[0] : null;
+  if (liberado) {
+    if (fachadaAprova) {
+      caminho_aprovacao = labels.fachada_vs_google;
+    } else {
+      const vencedor = receitaKeys
+        .filter(k => typeof scores[k] === 'number' && scores[k] >= 80)
+        .sort((a, b) => scores[b] - scores[a])[0];
+      caminho_aprovacao = vencedor ? (labels[vencedor] || vencedor) : null;
+    }
+  }
+
+  // ── Motivo de bloqueio (feedback pro motoboy) ──
+  let motivo_bloqueio = null;
+  if (barrar) {
+    if (fachadaAvaliavel && A < 50) {
+      motivo_bloqueio =
+        `A foto da fachada não corresponde ao local (${A}%) e não confirmamos o ` +
+        `endereço pelo CNPJ informado. Confira o endereço digitado e tire a foto ` +
+        `na frente do estabelecimento certo.`;
+    } else {
+      motivo_bloqueio =
+        `Não foi possível validar este endereço com o CNPJ informado. Confira o ` +
+        `CNPJ, o endereço digitado e a foto da fachada, e tente novamente.`;
+    }
   }
 
   let mensagem_motoboy = null;
@@ -226,10 +326,10 @@ function cruzarValidacoes({
     const nome = receita.nome_fantasia || receita.razao_social || 'Estabelecimento';
     if (!receita_ativa) {
       mensagem_motoboy = `⚠️ ${nome} consta como ${receita.situacao} na Receita`;
-    } else if (pelo_menos_um_90) {
-      mensagem_motoboy = `✅ ${nome} confirmado (${caminho_aprovacao}: ${score_max}%)`;
+    } else if (liberado) {
+      mensagem_motoboy = `✅ ${nome} confirmado (${caminho_aprovacao || 'validação cruzada'})`;
     } else {
-      mensagem_motoboy = `ℹ️ ${nome} encontrado na Receita (validação cruzada não atingiu 90%)`;
+      mensagem_motoboy = `ℹ️ ${nome} encontrado na Receita`;
     }
   } else if (receita) {
     mensagem_motoboy = `⚠️ Não consultamos a Receita: ${receita.motivo || 'erro desconhecido'}`;
@@ -240,9 +340,15 @@ function cruzarValidacoes({
   return {
     scores,
     score_max,
+    receita_max,
+    fachada_score: fachadaAvaliavel ? A : null,
     pelo_menos_um_90,
     receita_ativa,
     pode_salvar_no_banco,
+    // 2026-06 v6: decisão de bloqueio
+    liberado,
+    barrar,
+    motivo_bloqueio,
     caminho_aprovacao,
     mensagem_motoboy,
     resumo: resumoPartes.join(' • '),
@@ -255,6 +361,8 @@ module.exports = {
   scoreSimilaridade,
   scoreEndereco,
   scoreDistancia,
+  scoreCepParcial,
   distanciaMetros,
+  extrairNumero,
   normalizar,
 };
