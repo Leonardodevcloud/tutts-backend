@@ -29,6 +29,7 @@ const initAgentTablesBase   = require('./agent.migration');
 const initSlaCaptureTables  = require('./sla-capture.migration');
 const initSlaMonitorTables  = require('./sla-monitor.migration');  // 2026-07 sla-monitor
 const initLiberacaoTables   = require('./liberacao.migration');  // 2026-04 v3: novo módulo
+const initClientesBloqueadosTables = require('./clientes-bloqueados.migration'); // 2026-07
 const agentPool             = require('./core/agent-pool');
 
 // ── Agentes ──────────────────────────────────────────────────
@@ -68,6 +69,12 @@ async function initAgentTables(pool) {
     await initBiImportTables(pool);
   } catch (e) {
     console.error('⚠️ BI Import tables error:', e.message);
+  }
+  // 2026-07: clientes bloqueados para ajuste de localizacao
+  try {
+    await initClientesBloqueadosTables(pool);
+  } catch (e) {
+    console.error('⚠️ Clientes bloqueados tables error:', e.message);
   }
 }
 

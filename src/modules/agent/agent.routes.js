@@ -15,6 +15,7 @@ const { createSlaCaptureRoutes } = require('./routes/sla-capture.routes');
 const { createSlaMonitorRoutes } = require('./routes/sla-monitor.routes');    // 2026-07 sla-monitor
 const { createLiberacaoRoutes }  = require('./routes/liberar-ponto.routes');  // 2026-04 v3
 const { createBiImportRoutes }   = require('./routes/bi-import.routes');      // 2026-04 v3
+const { createClientesBloqueadosRoutes } = require('./routes/clientes-bloqueados.routes'); // 2026-07
 
 const SCREENSHOT_DIR = '/tmp/screenshots';
 
@@ -27,6 +28,7 @@ function createAgentRouter(pool, verificarToken, verificarAdmin) {
   router.use(createSlaMonitorRoutes(pool, verificarToken, verificarAdmin)); // 2026-07 sla-monitor
   router.use(createLiberacaoRoutes(pool));  // 2026-04 v3 — endpoints de liberar ponto
   router.use(createBiImportRoutes(pool));   // 2026-04 v3 — endpoints de import BI
+  router.use(createClientesBloqueadosRoutes(pool, verificarToken, verificarAdmin)); // 2026-07
 
   // ── Pool status (debug) ─────────────────────────────────────────────────────
   // GET /agent/pool/status — snapshot do agent-pool e browser-pool

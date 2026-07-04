@@ -572,12 +572,20 @@ function createCorrecaoRoutes(pool) {
 
     try {
       const { rows } = await pool.query(
-        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em, valores_antes, valores_depois, etapa_atual, progresso
+        `SELECT id, os_numero, ponto, status, detalhe_erro, criado_em, processado_em, valores_antes, valores_depois, etapa_atual, progresso, bloqueio_loja
          FROM ajustes_automaticos WHERE id = $1`,
         [id]
       );
       if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado.' });
-      return res.json(rows[0]);
+      const out = rows[0];
+      // 2026-07: se bloqueado por cliente, anexa o numero de suporte pro botao WhatsApp
+      if (out.status === 'bloqueado_cliente') {
+        try {
+          const cfg = await pool.query(`SELECT numero_suporte FROM ajuste_bloqueio_config WHERE id = 1`);
+          out.numero_suporte = cfg.rows[0]?.numero_suporte || null;
+        } catch (_) {}
+      }
+      return res.json(out);
     } catch (err) {
       console.error('[agent/status]', err.message);
       return res.status(500).json({ erro: 'Erro ao consultar status.' });

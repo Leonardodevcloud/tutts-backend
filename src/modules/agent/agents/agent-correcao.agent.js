@@ -26,6 +26,7 @@ const { criarBrowserSession } = require('../core/browser-session');
 const { normalizeLocation } = require('../location-normalizer');
 const playwrightAgent = require('../playwright-agent');
 const { haversineKm, RAIO_MAXIMO_KM } = require('../routes/correcao.routes');
+const { checarClienteBloqueado } = require('../clientes-bloqueados.service'); // 2026-07
 
 const SLOTS = Number(process.env.POOL_AGENT_CORRECAO_SLOTS || 2);
 
@@ -184,6 +185,7 @@ module.exports = defineAgent({
         latitude:         coords.latitude,
         longitude:        coords.longitude,
         cod_profissional: registro.cod_profissional || null,
+        verificarBloqueio: async (p1) => checarClienteBloqueado(pool, p1 && p1.endereco),
         onProgresso: (etapa, pct) => {
           pool.query(
             `UPDATE ajustes_automaticos SET etapa_atual = $1, progresso = $2 WHERE id = $3`,
@@ -200,6 +202,23 @@ module.exports = defineAgent({
       throw err;
     } finally {
       playwrightAgent.clearOverrides();
+    }
+
+    // 2026-07: cliente bloqueado — marca status especial e NAO ajusta.
+    if (resultado && resultado.bloqueado_cliente) {
+      await pool.query(
+        `UPDATE ajustes_automaticos
+         SET status = 'bloqueado_cliente',
+             bloqueio_loja = $1,
+             erro = $2,
+             etapa_atual = 'bloqueado',
+             progresso = 100,
+             finalizado_em = NOW()
+         WHERE id = $3`,
+        [resultado.loja_bloqueada || null, 'Cliente bloqueado para ajuste de localizacao', registro.id]
+      );
+      ctx.log(`🚫 OS ${registro.os_numero} bloqueada (cliente sem ajuste): ${resultado.loja_bloqueada || ''}`);
+      return;
     }
 
     // 4. Atualizar resultado final

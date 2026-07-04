@@ -346,7 +346,7 @@ async function fazerLogin(page, overrides) {
   log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional, onProgresso }) {
+async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional, onProgresso, verificarBloqueio }) {
   // onProgresso(etapa, percentual) — callback opcional chamado em marcos significativos
   // para reportar avanço ao frontend via banco. Etapas: login, localizando, codificando,
   // confirmando, recalculando, finalizando. Percentual: 0-100.
@@ -812,6 +812,19 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       if (ponto1Info.lat) log('Ponto 1 capturado: ' + ponto1Info.lat + ', ' + ponto1Info.lng + ' — ' + ponto1Info.endereco);
     } catch (e) {
       log('Ponto 1 nao capturado: ' + e.message);
+    }
+
+    // 2026-07: bloqueio por cliente — se o Ponto 1 bate com cliente bloqueado, para aqui.
+    if (typeof verificarBloqueio === 'function') {
+      try {
+        const bloq = await verificarBloqueio(ponto1Info);
+        if (bloq && bloq.bloqueado) {
+          log('🚫 Cliente bloqueado para ajuste: ' + (bloq.nome_loja || ''));
+          return { sucesso: false, bloqueado_cliente: true, loja_bloqueada: bloq.nome_loja || null };
+        }
+      } catch (e) {
+        log('⚠️ verificarBloqueio falhou (nao-bloqueante): ' + e.message);
+      }
     }
 
     try {
