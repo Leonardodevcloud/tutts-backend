@@ -525,6 +525,11 @@ module.exports = defineAgent({
         }
         // Persiste a sessão (renova cookies) pro próximo tick.
         await context.storageState({ path: SESSION_FILE }).catch(() => {});
+        // Regrava a sessao fresca no banco: renova enquanto roda e sobrevive a redeploy.
+        try {
+          const _st = await context.storageState();
+          await pool.query(`INSERT INTO chat99_sessao (id, storage_json, atualizado_em) VALUES (1, $1, now()) ON CONFLICT (id) DO UPDATE SET storage_json = EXCLUDED.storage_json, atualizado_em = now()`, [JSON.stringify(_st)]);
+        } catch (_) {}
 
         const alvos = await buscarAlvos(pool, MAX_POR_TICK);
         if (alvos.length === 0) { ctx.log('nenhuma corrida 99 ativa'); return; }
