@@ -1,5 +1,5 @@
 /**
- * cruzar-validacoes.js (2026-06 v6.1 — validação RÍGIDA, com bloqueio real)
+ * cruzar-validacoes.js (2026-06 v6.2 — validação RÍGIDA, com bloqueio real)
  *
  * Fluxo:
  *   - Motoboy DIGITA o CNPJ; backend consulta Receita Federal (BrasilAPI/OpenCNPJ).
@@ -130,7 +130,7 @@ function distanciaMetros(lat1, lng1, lat2, lng2) {
  * Distância em metros → score 0-90 (heurística, teto 90).
  *  ≤15m → 90 | 15-200m → degrade linear | >200m → 0
  *
- * 2026-06 v6.1: pico rebaixado 100 → 90 e cauda alargada 80m → 200m.
+ * 2026-06 v6.2: pico rebaixado 100 → 90 e cauda alargada 80m → 200m.
  * Em zona urbana densa o drift de GPS + geocoding de telhado é grande;
  * a distância vira sinal de apoio (nunca 100).
  */
@@ -272,7 +272,7 @@ function cruzarValidacoes({
 
   const algumSinal = fachadaAvaliavel || receitaScores.length > 0;
   const liberado = fachadaAprova || receitaAprova;
-  // 2026-06 v6.1: fail-CLOSED — sem nenhuma rota aprovando, BARRA
+  // 2026-06 v6.2: fail-CLOSED — sem nenhuma rota aprovando, BARRA
   // (inclusive quando não há sinal calculável: apagão de infra reprova).
   const barrar = !liberado;
 
@@ -312,7 +312,7 @@ function cruzarValidacoes({
   if (barrar) {
     if (fachadaAvaliavel && A < 50) {
       motivo_bloqueio =
-        `A foto da fachada não corresponde ao local (${A}%) e não confirmamos o ` +
+        `A foto da fachada não corresponde ao local e não confirmamos o ` +
         `endereço pelo CNPJ informado. Confira o endereço digitado e tire a foto ` +
         `na frente do estabelecimento certo.`;
     } else {
