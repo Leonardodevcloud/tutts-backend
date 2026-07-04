@@ -72,7 +72,7 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
-const CHAT99_BUILD = 'v7-filtro-por-os (abre cada OS pelo filtro = 1a linha, sem sobreposicao)';
+const CHAT99_BUILD = 'v8-outbox-retry (retenta erro/enviando travados + cap tentativas + log outbox)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
@@ -729,23 +729,34 @@ async function enviarNaJanela(page, texto, log) {
   }
 }
 
-// ── Drena a outbox (out + pendente) da conversa ───────────────────────────
+// ── Drena a outbox da conversa ────────────────────────────────────────────
+// Pega 'pendente' E TAMBEM as que travaram: 'erro' (falha anterior, ja corrigida)
+// e 'enviando' orfãs (browser reciclou no meio). Cap de tentativas evita loop
+// infinito numa mensagem cronicamente problematica.
+const MAX_TENT_ENVIO = 6;
 async function drenarOutbox(page, pool, conversaId, log) {
   const { rows } = await pool.query(`
-    SELECT id, texto FROM chat99_mensagens
-    WHERE conversa_id = $1 AND direcao = 'out' AND status_envio = 'pendente'
+    SELECT id, texto, status_envio, COALESCE(tentativas,0) AS tentativas
+    FROM chat99_mensagens
+    WHERE conversa_id = $1 AND direcao = 'out'
+      AND status_envio IN ('pendente', 'erro', 'enviando')
+      AND COALESCE(tentativas,0) < $2
     ORDER BY id ASC
-  `, [conversaId]);
+  `, [conversaId, MAX_TENT_ENVIO]);
 
+  if (rows.length) log(`   📤 outbox: ${rows.length} msg(s) para enviar`);
   for (const msg of rows) {
-    await pool.query(`UPDATE chat99_mensagens SET status_envio='enviando' WHERE id=$1`, [msg.id]);
+    await pool.query(
+      `UPDATE chat99_mensagens SET status_envio='enviando', tentativas=COALESCE(tentativas,0)+1 WHERE id=$1`,
+      [msg.id]
+    );
     try {
       await enviarNaJanela(page, msg.texto || '', log);
       await pool.query(`UPDATE chat99_mensagens SET status_envio='enviada', enviado_em=now() WHERE id=$1`, [msg.id]);
       log(`   ✉️ enviada msg #${msg.id}`);
     } catch (e) {
       await pool.query(`UPDATE chat99_mensagens SET status_envio='erro', erro_envio=$2 WHERE id=$1`, [msg.id, String(e.message).slice(0, 300)]);
-      log(`   ❌ falha ao enviar msg #${msg.id}: ${e.message}`);
+      log(`   ❌ falha ao enviar msg #${msg.id} (tent ${msg.tentativas + 1}/${MAX_TENT_ENVIO}): ${e.message}`);
     }
   }
 }
@@ -908,6 +919,8 @@ module.exports = defineAgent({
     // não rodou — os dois serviços compartilham o mesmo Neon).
     if (!_tabelasOk) {
       await initChat99Tables(pool).catch(e => ctx.log(`⚠️ initChat99Tables: ${e.message}`));
+      // coluna p/ contar tentativas de envio (retry da outbox sem loop infinito)
+      await pool.query(`ALTER TABLE chat99_mensagens ADD COLUMN IF NOT EXISTS tentativas INT DEFAULT 0`).catch(() => {});
       _tabelasOk = true;
     }
     await semearSessaoDoBanco(pool, ctx.log);
