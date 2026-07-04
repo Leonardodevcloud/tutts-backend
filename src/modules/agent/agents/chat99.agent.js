@@ -72,9 +72,11 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
+const CHAT99_BUILD = 'v3-envio-robusto (footer__send + native-setter + filtro-lixo)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
+let _versaoLogada = false; // ja logou o build marker neste processo?
 
 function agora() { return Date.now(); }
 
@@ -473,6 +475,20 @@ async function extrairBolhas(page) {
     let contMid = null;
     try { const r = cont.getBoundingClientRect(); if (r.width) contMid = r.left + r.width / 2; } catch (_) {}
 
+    // filtro de LIXO: o plugin de endereco/rota da 99 e alguns botoes de UI
+    // ("Voltar ao mais recente", "Nova mensagem") podem vazar como texto. Barra.
+    const ehLixo = (t) => {
+      if (!t) return true;
+      const s = t.trim();
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s)) return true;        // comeca com data
+      if (/destinat[aá]rio\s*:/i.test(s)) return true;              // "Destinatario:Cliente"
+      if (/^remetente\s*:/i.test(s)) return true;
+      if (/^voltar ao mais recente$/i.test(s)) return true;
+      if (/^nova mensagem$/i.test(s)) return true;
+      if (/,\s*BR\s*$/i.test(s) && /-\s*[A-Z]{2},/.test(s)) return true; // endereco "..- GO, 00000-000, BR"
+      return false;
+    };
+
     const out = [];
     const vistos = new Set();
     let ordem = 0;
@@ -483,6 +499,7 @@ async function extrairBolhas(page) {
       const imgEl = el.querySelector && el.querySelector('img[src]');
       const img = (imgEl && imgEl.src && !/avatar/i.test(cls(imgEl))) ? imgEl.src : null;
       if (!txt && !img) continue;
+      if (txt && !img && ehLixo(txt)) continue; // barra endereco/plugin/botoes de UI
 
       // direcao: 1) classe self/right/mine  2) classe other/left  3) posicao
       let selfCls = false, otherCls = false;
@@ -576,61 +593,94 @@ async function gravarNovas(pool, conversaId, bolhas) {
 }
 
 // ── Envia uma mensagem na janela, fatiando em blocos de 140 ───────────────
-async function enviarNaJanela(page, texto) {
+// DOM real (confirmado): rodape = .window__main--footer com
+//   textarea.van-field__control[placeholder="Insira o texto aqui"]  (input)
+//   button.footer__send.van-button--warning                         (enviar)
+// O problema classico Vant/Vue: preencher via Playwright nao dispara o input
+// que o v-model escuta -> o botao continua "desabilitado" (por classe, sem attr
+// disabled) e o clique vira no-op. Solucao: setar o valor pelo NATIVE SETTER e
+// disparar 'input'/'change', o que o Vue reconhece e habilita o footer__send.
+async function enviarNaJanela(page, texto, log) {
+  const _log = typeof log === 'function' ? log : () => {};
   const partes = [];
   let resto = String(texto);
   while (resto.length > LIMITE_99) { partes.push(resto.slice(0, LIMITE_99)); resto = resto.slice(LIMITE_99); }
   if (resto) partes.push(resto);
 
-  // O rodape do CHAT (nao a caixa de endereco "Destinatario", que tem um "Enviar"
-  // amarelo no MEIO da janela). Todo o envio e escopado neste footer.
   const footer = page.locator('.chat__window .window__main--footer').first();
   const temFooter = await footer.count();
+  const escopo = temFooter ? footer : page.locator('.chat__window');
 
-  // Input do CHAT: textarea DENTRO do rodape (placeholder "Insira o texto aqui").
-  let input = (temFooter ? footer : page.locator('.chat__window'))
-    .locator('textarea[placeholder="Insira o texto aqui"]').first();
-  if (!(await input.count())) input = (temFooter ? footer : page.locator('.chat__window')).locator('textarea').first();
+  // Input do CHAT (nao a caixa de endereco). Placeholder confirmado no DOM.
+  let input = escopo.locator('textarea[placeholder="Insira o texto aqui"]').first();
+  if (!(await input.count())) input = escopo.locator('textarea.van-field__control').first();
+  if (!(await input.count())) input = escopo.locator('textarea').first();
   if (!(await input.count())) input = page.locator('.chat__window textarea').last();
+  if (!(await input.count())) { throw new Error('input do chat (textarea) nao encontrado no rodape'); }
+
+  const acharBotao = async () => {
+    let b = footer.locator('button.footer__send, .footer__send').first();
+    if (await b.count()) return b;
+    b = footer.locator('button.van-button--warning').first();
+    if (await b.count()) return b;
+    return footer.locator('button').last();
+  };
+
+  // Seta o valor de um jeito que o Vue/Vant reconheca (native setter + input).
+  const setarValor = async (val) => {
+    await input.evaluate((el, v) => {
+      const proto = window.HTMLTextAreaElement && window.HTMLTextAreaElement.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, val).catch(() => {});
+  };
 
   for (const parte of partes) {
     let enviado = false;
 
-    for (let tent = 1; tent <= 2 && !enviado; tent++) {
-      // (re)garante o texto no input do chat
+    for (let tent = 1; tent <= 3 && !enviado; tent++) {
       await input.click({ timeout: 10000 }).catch(() => {});
-      const jaTem = ((await input.inputValue().catch(() => '')) || '').trim() === parte.trim();
-      if (!jaTem) {
-        await input.fill('').catch(() => {});
-        // digitar (pressSequentially) e mais confiavel pro Vue habilitar o botao;
-        // fill como fallback.
-        await input.pressSequentially(parte, { delay: 18 })
-          .catch(async () => { await input.fill(parte).catch(() => {}); });
+      // limpa e digita (real key events)
+      await input.fill('').catch(() => {});
+      await input.pressSequentially(parte, { delay: 15 }).catch(() => {});
+      await page.waitForTimeout(200);
+      // confirma o valor; se nao bateu, aplica o native setter (Vue-friendly)
+      let val = ((await input.inputValue().catch(() => '')) || '');
+      if (val.trim() !== parte.trim()) { await setarValor(parte); await page.waitForTimeout(150); }
+      // reforca o input event mesmo quando o texto ja esta la (habilita o botao)
+      await setarValor(((await input.inputValue().catch(() => '')) || '') || parte);
+      await page.waitForTimeout(300);
+
+      const sendBtn = await acharBotao();
+      const st = await sendBtn.evaluate(el => ({
+        disabled: el.hasAttribute('disabled') || /(^|\s)(van-button--disabled|is-disabled|disabled)(\s|$)/i.test(el.className || ''),
+        cls: (el.className || '').toString().slice(0, 80),
+      })).catch(() => null);
+
+      // tenta enviar: clique normal -> clique via evaluate -> Enter
+      await sendBtn.click({ timeout: 6000 }).catch(() => {});
+      let limpou = ((await input.inputValue().catch(() => '')) || '').trim() === '';
+      if (!limpou) {
+        await sendBtn.evaluate(el => el.click()).catch(() => {});
+        await page.waitForTimeout(700);
+        limpou = ((await input.inputValue().catch(() => '')) || '').trim() === '';
       }
-      await page.waitForTimeout(350); // deixa o Vue habilitar o footer__send
-
-      // BOTAO CERTO: footer__send (o de BAIXO), so habilita com texto. NUNCA o
-      // "Enviar" generico (pega o amarelo da caixa de endereco, la em cima).
-      // O .click() do Playwright ja espera o botao ficar habilitado.
-      let sendBtn = footer.locator('button.footer__send, .footer__send').first();
-      if (!(await sendBtn.count())) sendBtn = footer.locator('button.van-button--warning').first();
-      if (!(await sendBtn.count())) sendBtn = footer.locator('button:not([disabled])').last();
-
-      if (await sendBtn.count()) {
-        await sendBtn.click({ timeout: 8000 }).catch(() => {});
-      } else {
-        await input.press('Control+Enter').catch(() => {}); // ultimo recurso
+      if (!limpou) {
+        await input.press('Enter').catch(() => {});
+        await page.waitForTimeout(700);
+        limpou = ((await input.inputValue().catch(() => '')) || '').trim() === '';
       }
 
-      await page.waitForTimeout(900);
-      // sucesso = o input do chat esvaziou (a 99 limpa apos enviar)
-      enviado = ((await input.inputValue().catch(() => '')) || '').trim() === '';
+      enviado = limpou;
+      if (!enviado) {
+        _log(`      ⚠️ envio tentativa ${tent} falhou · botao={${st ? st.cls : 'nao-achado'}} disabled=${st ? st.disabled : '?'} valorInput="${((await input.inputValue().catch(()=> '')) || '').slice(0,20)}"`);
+      }
     }
 
-    if (!enviado) {
-      throw new Error('nao consegui enviar: botao footer__send nao habilitou ou o input nao limpou');
-    }
-    await page.waitForTimeout(600);
+    if (!enviado) throw new Error('nao consegui enviar (botao footer__send nao respondeu apos 3 tentativas)');
+    await page.waitForTimeout(700);
   }
 }
 
@@ -645,7 +695,7 @@ async function drenarOutbox(page, pool, conversaId, log) {
   for (const msg of rows) {
     await pool.query(`UPDATE chat99_mensagens SET status_envio='enviando' WHERE id=$1`, [msg.id]);
     try {
-      await enviarNaJanela(page, msg.texto || '');
+      await enviarNaJanela(page, msg.texto || '', log);
       await pool.query(`UPDATE chat99_mensagens SET status_envio='enviada', enviado_em=now() WHERE id=$1`, [msg.id]);
       log(`   ✉️ enviada msg #${msg.id}`);
     } catch (e) {
@@ -734,6 +784,7 @@ module.exports = defineAgent({
   habilitado: () => process.env.CHAT99_AGENT_ATIVO === 'true',
 
   tickGlobal: async (pool, ctx) => {
+    if (!_versaoLogada) { _versaoLogada = true; ctx.log(`🏷️ chat99 build: ${CHAT99_BUILD}`); }
     // Migration idempotente (garante tabelas mesmo se o backend principal ainda
     // não rodou — os dois serviços compartilham o mesmo Neon).
     if (!_tabelasOk) {
