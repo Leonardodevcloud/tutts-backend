@@ -72,7 +72,7 @@ const CHAT99_LAUNCH_OPTS = {
 };
 
 // ── Estado do módulo (persiste entre ticks) ─────────────────────────────
-const CHAT99_BUILD = 'v6-fechar-detalhe (fecha painel do pedido + retry-open com verificacao real)';
+const CHAT99_BUILD = 'v7-filtro-por-os (abre cada OS pelo filtro = 1a linha, sem sobreposicao)';
 let _cooldownAte = 0;      // timestamp até quando ficar em cooldown
 let _tabelasOk = false;    // migration idempotente já rodou neste processo?
 let _sessaoSemeada = false;
@@ -375,29 +375,44 @@ async function processarLinha(page, pool, linha, log) {
 
 
 // ── Filtra por OS e abre o chat. Retorna true se o chat abriu. ────────────
+// Filtrar por OS deixa a corrida como PRIMEIRA (e unica) linha da tabela — que
+// e sempre clicavel, sem o painel de detalhes de outra OS sobrepondo.
 async function abrirChatDaOS(page, os, log) {
+  // limpa overlays que possam cobrir o filtro/tabela
+  await fecharChat(page).catch(() => {});
+  await fecharDetalhe(page).catch(() => {});
+
   // 1) limpa e preenche o filtro "ID do pedido externo"
   const filtro = page.locator('input[placeholder="ID do pedido externo"]').first();
-  await filtro.click({ timeout: 15000 });
-  await filtro.fill('');
-  await filtro.fill(String(os));
+  await filtro.click({ timeout: 15000 }).catch(() => {});
+  await filtro.fill('').catch(() => {});
+  await filtro.fill(String(os)).catch(() => {});
 
   // 2) Pesquisar
-  await page.locator('button:has-text("Pesquisar")').first().click({ timeout: 15000 });
-  await page.waitForTimeout(2500); // deixa a tabela recarregar
+  await page.locator('button:has-text("Pesquisar")').first().click({ timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(2200); // deixa a tabela recarregar (so a OS filtrada)
 
-  // 3) acha a linha da OS e o botao "Mensagem"
-  const linha = page.locator('tr', { hasText: String(os) }).first();
+  // 3) acha a linha da OS e o botao "Mensagem" (agora e a 1a linha)
+  const linha = page.locator('table tbody tr', { hasText: String(os) }).first();
   const temLinha = await linha.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
   if (!temLinha) { log(`   OS ${os}: linha não encontrada na 99`); return false; }
 
-  const btnMsg = linha.getByText('Mensagem', { exact: true }).first();
+  const btnMsg = linha.getByText(/Mensagem/i).first();
   const temMsg = await btnMsg.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!temMsg) { log(`   OS ${os}: sem botão Mensagem (aguardando aceite)`); return false; }
 
-  await clicarMensagem(page, btnMsg);
-  const abriu = await page.locator('.chat__window').first().waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
-  return abriu;
+  // 4) abre com verificacao real (ate 2x)
+  for (let tent = 1; tent <= 2; tent++) {
+    const h = await btnMsg.elementHandle().catch(() => null);
+    if (h) await h.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
+    await clicarMensagem(page, btnMsg);
+    const abriu = await page.locator('.chat__window').first()
+      .waitFor({ state: 'visible', timeout: 6000 }).then(() => true).catch(() => false);
+    if (abriu) return true;
+    await fecharDetalhe(page).catch(() => {});
+    await page.waitForTimeout(400);
+  }
+  return false;
 }
 
 // ── Extrai dados do motoboy do modal (nome + foto; rating/telefone best-effort)
@@ -831,23 +846,34 @@ async function marcarVarredura(pool, os) {
   `, [os]).catch(() => {});
 }
 
-// ── Processa 1 conversa (serial) ──────────────────────────────────────────
+// ── Processa 1 conversa (serial, abre via FILTRO -> vira a 1a linha) ───────
 async function processarConversa(page, pool, os, log) {
   const abriu = await abrirChatDaOS(page, os, log);
   if (!abriu) {
-    // Aguardando aceite (ou linha ausente): registra varredura mas não zera nada.
+    // Aguardando aceite (ou linha ausente/nao abriu): registra varredura.
     await marcarVarredura(pool, os);
+    log(`   OS ${os}: chat nao abriu`);
     return;
   }
-  await page.waitForTimeout(800); // deixa as bolhas renderizarem
+  // Espera as bolhas renderizarem (carregam assincronas).
+  await page.locator('.chat__window [class*="content__msg"], .chat__window [class*="msg_"]').first()
+    .waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+  await page.waitForTimeout(700);
   const info = await extrairInfoMotoboy(page);
   const conversaId = await upsertConversa(pool, os, info);
   const bolhas = await extrairBolhas(page);
+  const nIn = bolhas.filter(b => b.direcao === 'in').length;
+  const nOut = bolhas.filter(b => b.direcao === 'out').length;
+  log(`   \u{1F52C} OS ${os}: ${bolhas.length} bolha(s) lidas (${nIn} in / ${nOut} out)`);
+  if (bolhas.length === 0) {
+    const arv = await dumpEstrutura(page).catch(() => null);
+    if (arv) log(`   \u{1F9ED} [chat99-dump] OS ${os} estrutura do chat:\n${arv}`);
+  }
   const novas = await gravarNovas(pool, conversaId, bolhas);
-  if (novas > 0) log(`   💬 OS ${os}: ${novas} nova(s) do motoboy`);
+  if (novas > 0) log(`   \u{1F4AC} OS ${os}: ${novas} nova(s) do motoboy`);
   await drenarOutbox(page, pool, conversaId, log);
   await fecharChat(page);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(400);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -933,33 +959,25 @@ module.exports = defineAgent({
           await pool.query(`INSERT INTO chat99_sessao (id, storage_json, atualizado_em) VALUES (1, $1, now()) ON CONFLICT (id) DO UPDATE SET storage_json = EXCLUDED.storage_json, atualizado_em = now()`, [JSON.stringify(_st)]);
         } catch (_) {}
 
-        // VARREDURA UNICA: le a aba "Em andamento" da 99 e processa so as linhas
-        // com botao "Mensagem" (corrida aceita). Pagina a pagina, com orcamento
-        // de tempo pra nao passar do reaper (3min).
+        // VARREDURA EM 2 FASES:
+        //  FASE 1: coleta TODAS as OSs com chat (todas as paginas da lista).
+        //  FASE 2: abre CADA OS pelo FILTRO -> ela vira a 1a (e unica) linha da
+        //          tabela, que e sempre clicavel. Isso elimina a sobreposicao do
+        //          painel de detalhes de outra OS (que travava a 2a linha+).
         const MAX_PAGINAS = Number(process.env.CHAT99_MAX_PAGINAS || 10);
         const BUDGET_MS = Number(process.env.CHAT99_TICK_BUDGET_MS || 140000);
         const inicioTick = Date.now();
-        let processadas = 0, totalComChat = 0, pagina = 1;
+        let processadas = 0, pagina = 1;
+        const osSet = new Set();
 
+        // FASE 1 — coletar
         while (pagina <= MAX_PAGINAS) {
           if (ctx.ehParaParar() || (Date.now() - inicioTick) > BUDGET_MS) break;
           await page.waitForTimeout(1200); // deixa a tabela renderizar
           const linhas = await coletarLinhasPagina(page);
-          totalComChat += linhas.length;
+          for (const l of linhas) if (l.os) osSet.add(String(l.os));
           if (pagina === 1 && linhas.length === 0) ctx.log('nenhuma corrida 99 com chat ativo');
 
-          for (const linha of linhas) {
-            if (ctx.ehParaParar() || (Date.now() - inicioTick) > BUDGET_MS) break;
-            try {
-              await processarLinha(page, pool, linha, ctx.log);
-              processadas++;
-            } catch (e) {
-              ctx.log(`❌ OS ${linha.os}: ${e.message}`);
-              await fecharChat(page).catch(() => {});
-            }
-          }
-
-          // proxima pagina (Ant): para se o botao "next" estiver desabilitado
           const next = page.locator('.ant-pagination-next').first();
           const cls = (await next.getAttribute('class').catch(() => '')) || '';
           const ariaDis = (await next.getAttribute('aria-disabled').catch(() => '')) || '';
@@ -967,7 +985,20 @@ module.exports = defineAgent({
           await next.click({ timeout: 5000 }).catch(() => {});
           pagina++;
         }
-        ctx.log(`🔎 varredura: ${totalComChat} corrida(s) com chat, ${processadas} processada(s)`);
+
+        const todasOS = Array.from(osSet);
+        // FASE 2 — processar cada OS via filtro
+        for (const os of todasOS) {
+          if (ctx.ehParaParar() || (Date.now() - inicioTick) > BUDGET_MS) break;
+          try {
+            await processarConversa(page, pool, os, ctx.log);
+            processadas++;
+          } catch (e) {
+            ctx.log(`❌ OS ${os}: ${e.message}`);
+            await fecharChat(page).catch(() => {});
+          }
+        }
+        ctx.log(`🔎 varredura: ${todasOS.length} corrida(s) com chat, ${processadas} processada(s)`);
       } finally {
         await page.close().catch(() => {});
       }
