@@ -96,6 +96,18 @@ const ZUMBI_ALERTA = Number(process.env.CHROMIUM_ZUMBI_ALERTA || 50); // loga ER
 let _reaperLigado = false;
 // 2026-06: estatisticas do reaper. zumbis altos = init reaper (dumb-init) ausente.
 let _reaperStats = { ultimaVarredura: null, orfaosMortos: 0, zumbisAgora: 0, chromiumVivos: 0 };
+
+// 2026-07: pgrps de browsers PROTEGIDOS do reaper (ex: chat99, que e persistente
+// e legitimamente vive >3min). O reaper pula qualquer processo cujo grupo (pgrp)
+// esteja aqui, mas continua matando leaks reais dos demais agentes.
+const _pgrpsProtegidos = new Set();
+function _pgrpDoPid(pid, fs) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const apos = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    return apos[2]; // campo 5 (pgrp): [state, ppid, pgrp, ...]
+  } catch (_) { return ''; }
+}
 // 2026-06: circuit-breaker de tempestade de launch (N falhas seguidas -> handler).
 let _falhasLaunchSeguidas = 0;
 let _onLaunchStorm = null;
@@ -151,6 +163,8 @@ function _varrerChromiumOrfao() {
     try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch (_) { continue; }
     if (!/headless_shell|chromium|chrome-linux/i.test(cmd)) continue;
     chromiumVivos++;
+    const _pgrp = _pgrpDoPid(pid, fs);
+    if (_pgrp && _pgrpsProtegidos.has(_pgrp)) continue; // browser protegido (ex: chat99)
     const idade = _idadeProcMs(pid, uptime);
     if (idade > REAPER_MAX_IDADE_MS) {
       try { process.kill(Number(pid), 'SIGKILL'); mortos++; } catch (_) {}
@@ -191,6 +205,26 @@ function criarBrowserSession(opts) {
   opts = opts || {};
   const nome = opts.nome || 'browser-session';
   const launchOpts = Object.assign({ headless: true }, opts.launchOpts || {});
+  const protegerReaper = !!opts.protegerDoReaper;
+  let _pgrpProtegido = null;
+  function _registrarProtecaoReaper() {
+    if (!protegerReaper) return;
+    try {
+      const proc = _browser && _browser.process && _browser.process();
+      if (proc && proc.pid) {
+        const fs = require('fs');
+        const pgrp = _pgrpDoPid(proc.pid, fs);
+        if (pgrp) {
+          if (_pgrpProtegido && _pgrpProtegido !== pgrp) _pgrpsProtegidos.delete(_pgrpProtegido);
+          _pgrpsProtegidos.add(pgrp);
+          _pgrpProtegido = pgrp;
+        }
+      }
+    } catch (_) {}
+  }
+  function _removerProtecaoReaper() {
+    if (_pgrpProtegido) { _pgrpsProtegidos.delete(_pgrpProtegido); _pgrpProtegido = null; }
+  }
 
   // Garante --no-sandbox e --disable-dev-shm-usage sempre presentes
   const argsBase = [
@@ -330,6 +364,7 @@ function criarBrowserSession(opts) {
           );
           try {
             _browser = await comTimeout(_launchPromise, TIMEOUT_LAUNCH_MS, 'chromium.launch');
+                _registrarProtecaoReaper();
             break;  // sucesso
           } catch (errTent) {
             _attemptDesistiu = true;  // mata o launch orfao DESTA tentativa
@@ -448,6 +483,7 @@ function criarBrowserSession(opts) {
   async function fechar() {
     if (_encerrado) return;
     _encerrado = true;
+    _removerProtecaoReaper();
     log('🛑 Encerrando sessão...');
     await _matarBrowserAtual();
     log('✅ Sessão encerrada');

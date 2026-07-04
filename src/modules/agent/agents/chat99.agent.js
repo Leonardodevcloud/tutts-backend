@@ -270,23 +270,33 @@ async function buscarAlvos(pool, limite) {
 // Le a tabela da 99 e retorna as linhas que TEM o botao "Mensagem" (corrida
 // aceita, chat ativo) na pagina atual: [{ i (indice da tr), os }].
 async function coletarLinhasPagina(page) {
+  // Espera o corpo da tabela (SPA carrega o tbody via API, depois do thead).
+  await page.waitForSelector('table tbody tr', { timeout: 12000 }).catch(() => {});
+  await page.waitForTimeout(600);
   return await page.evaluate(() => {
     const res = [];
-    const table = document.querySelector('table');
+    const tabelas = Array.from(document.querySelectorAll('table'));
+    let table = null;
+    for (const t of tabelas) {
+      const ths = Array.from(t.querySelectorAll('thead th')).map(x => (x.textContent || '').trim());
+      const temCol = ths.some(x => /externo/i.test(x));
+      const temLinhas = t.querySelectorAll('tbody tr').length > 0;
+      if (temCol && temLinhas) { table = t; break; }
+    }
+    if (!table) {
+      table = tabelas.sort((a, b) => b.querySelectorAll('tbody tr').length - a.querySelectorAll('tbody tr').length)[0];
+    }
     if (!table) return res;
     const ths = Array.from(table.querySelectorAll('thead th')).map(t => (t.textContent || '').trim());
-    // coluna "ID do pedido externo" = nossa OS
     let idx = ths.findIndex(t => /externo/i.test(t));
     const rows = Array.from(table.querySelectorAll('tbody tr'));
     rows.forEach((tr, i) => {
       const temMsg = Array.from(tr.querySelectorAll('button, a, span'))
-        .some(el => (el.textContent || '').trim() === 'Mensagem');
+        .some(el => /Mensagem/i.test(el.textContent || ''));
       if (!temMsg) return;
       const tds = Array.from(tr.querySelectorAll('td'));
       let os = (idx >= 0 && tds[idx]) ? (tds[idx].textContent || '').trim() : '';
-      if (!os) { // fallback: primeiro td que parece OS numerica de 6-8 digitos
-        for (const td of tds) { const t = (td.textContent || '').trim(); if (/^\d{6,8}$/.test(t)) { os = t; break; } }
-      }
+      if (!os) { for (const td of tds) { const t = (td.textContent || '').trim(); if (/^\d{6,8}$/.test(t)) { os = t; break; } } }
       res.push({ i, os });
     });
     return res;
@@ -296,8 +306,14 @@ async function coletarLinhasPagina(page) {
 // Processa UMA linha: abre o chat pelo botao da propria linha (sem re-filtrar
 // por OS), captura bolhas e drena a outbox.
 async function processarLinha(page, pool, linha, log) {
-  const tr = page.locator('tbody tr').nth(linha.i);
-  const btn = tr.getByText('Mensagem', { exact: true }).first();
+  // Acha a linha pela OS (robusto a multi-tabela/reordenacao), nao por indice.
+  let tr;
+  if (linha.os) {
+    tr = page.locator('table tbody tr', { hasText: String(linha.os) }).first();
+  } else {
+    tr = page.locator('table tbody tr').nth(linha.i);
+  }
+  const btn = tr.getByText(/Mensagem/i).first();
   const ok = await btn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
   if (!ok) { log(`   OS ${linha.os}: botao Mensagem sumiu`); return; }
   await btn.click({ timeout: 10000 });
