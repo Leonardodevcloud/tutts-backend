@@ -327,6 +327,13 @@ async function processarLinha(page, pool, linha, log) {
   const info = await extrairInfoMotoboy(page);
   const conversaId = await upsertConversa(pool, linha.os, info);
   const bolhas = await extrairBolhas(page);
+  const nIn = bolhas.filter(b => b.direcao === 'in').length;
+  const nOut = bolhas.filter(b => b.direcao === 'out').length;
+  log(`   \u{1F52C} OS ${linha.os}: ${bolhas.length} bolha(s) lidas (${nIn} in / ${nOut} out)`);
+  if (bolhas.length === 0) {
+    const arv = await dumpEstrutura(page).catch(() => null);
+    if (arv) log(`   \u{1F9ED} [chat99-dump] OS ${linha.os} estrutura do chat:\n${arv}`);
+  }
   const novas = await gravarNovas(pool, conversaId, bolhas);
   if (novas > 0) log(`   \u{1F4AC} OS ${linha.os}: ${novas} nova(s) do motoboy`);
   await drenarOutbox(page, pool, conversaId, log);
@@ -386,38 +393,151 @@ async function extrairInfoMotoboy(page) {
   });
 }
 
-// ── Extrai as bolhas do chat (tolerante a content_ vs content__) ──────────
+// ── Extrai as bolhas do chat ──────────────────────────────────────────────
+// A janela real da 99 e Vant/Vue (.chat__window > .window__main--content). As
+// bolhas NAO tem, garantidamente, a classe "msg_<id>" que a v1 assumia. Este
+// extrator e agnostico de estrutura:
+//   1) se existir "msg_<id>" na classe, usa como dedup natural (caminho feliz);
+//   2) senao, trata cada elemento-folha com texto util dentro do
+//      .window__main--content como uma bolha e infere a direcao por classe
+//      (self/other/left/right) OU pela posicao horizontal (bolha a direita do
+//      meio do container = nossa/out; a esquerda = motoboy/in);
+//   3) dedup por chave estavel: id real da 99, ou
+//      "g_<direcao>_<horario|posicao>_<hash(texto)>" (append-only => estavel).
 async function extrairBolhas(page) {
   return await page.evaluate(() => {
-    // Prefere o modal do chat; se nao achar, varre o documento inteiro.
     const janela = document.querySelector('.chat__window') || document.body;
     if (!janela) return [];
-    const msgEls = Array.from(janela.querySelectorAll('[class*="msg_"]'))
-      .filter(el => /(?:^|\s)msg_\d+/.test(el.className || '') && /content/i.test(el.className || ''));
-    const out = [];
-    for (const el of msgEls) {
-      const m = String(el.className).match(/msg_(\d+)/);
-      const msgId = m ? m[1] : null;
-      if (!msgId) continue;
-      const li = el.closest('li') || el.parentElement;
-      const box = el.closest('[class*="box"]') || li || el;
-      const isSelf = /isSelf/i.test((box && box.className) || '') ||
-                     (li && !!li.querySelector('[class*="isSelf"]'));
-      let horario = '';
-      if (li) {
-        const times = Array.from(li.querySelectorAll('[class*="content_time"], [class*="content__time"]'))
-          .filter(t => (t.style.display || '') !== 'none' && t.textContent.trim());
-        if (times.length) horario = times[times.length - 1].textContent.trim();
+    const cont =
+      janela.querySelector('[class*="window__main--content"]') ||
+      janela.querySelector('[class*="window__main"]') ||
+      janela;
+
+    const cls = (el) => {
+      if (!el) return '';
+      const c = el.className;
+      if (typeof c === 'string') return c;
+      if (c && typeof c.baseVal === 'string') return c.baseVal; // svg
+      return String(c || '');
+    };
+    const hashTexto = (s) => {
+      let h = 0; s = String(s || '');
+      for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    };
+    const idReal = (el) => {
+      for (let up = 0, cur = el; up < 5 && cur; up++, cur = cur.parentElement) {
+        const m = cls(cur).match(/msg[_-](\d{3,})/i);
+        if (m) return m[1];
       }
-      const lido = li ? !!li.querySelector('[class*="isread"][class*="read"], [class*="isread"].read') : false;
-      // texto: prefere o .msg_span interno; senao o textContent do proprio el
-      const span = el.querySelector('[class*="msg_span"], span');
-      const texto = ((span ? span.textContent : el.textContent) || '').trim();
-      const imgEl = el.querySelector('img');
-      const img = imgEl && imgEl.src ? imgEl.src : null;
-      out.push({ msgId, direcao: isSelf ? 'out' : 'in', texto, img, horario, lido });
+      const inner = el.querySelector && el.querySelector('[class*="msg_"]');
+      if (inner) { const m = cls(inner).match(/msg[_-](\d{3,})/i); if (m) return m[1]; }
+      return null;
+    };
+
+    // 1) caminho feliz: classe msg_<id> + content
+    let msgEls = Array.from(cont.querySelectorAll('[class*="msg_"]'))
+      .filter(el => /(?:^|\s)msg_\d+/.test(cls(el)) && /content/i.test(cls(el)));
+
+    // 2) fallback generico: folhas com texto util dentro do content
+    if (msgEls.length === 0) {
+      const cand = [];
+      const walker = document.createTreeWalker(cont, NodeFilter.SHOW_ELEMENT, null);
+      let n;
+      while ((n = walker.nextNode())) {
+        const c = cls(n).toLowerCase();
+        // pula chrome do rodape/input/scroll/nav/avatar
+        if (/footer|textarea|van-field|van-cell|van-button|nav-bar|scroll|avatar|__time|isread/.test(c)) continue;
+        const txt = (n.innerText || n.textContent || '').trim();
+        if (!txt) continue;
+        // pega o no MAIS interno que carrega o texto (evita contar o wrapper e a folha)
+        const filhoIgual = Array.from(n.children).some(ch => (ch.innerText || ch.textContent || '').trim() === txt);
+        if (filhoIgual) continue;
+        if (/^\d{1,2}:\d{2}$/.test(txt)) continue;                 // so horario
+        if (/^(enviad[ao]|lida?|read|✓+|✔+)$/i.test(txt)) continue; // status
+        if (txt.length > 1200) continue;                            // provavelmente wrapper gigante
+        cand.push(n);
+      }
+      msgEls = cand;
+    }
+
+    // centro horizontal do container (pra inferir lado sem classe self)
+    let contMid = null;
+    try { const r = cont.getBoundingClientRect(); if (r.width) contMid = r.left + r.width / 2; } catch (_) {}
+
+    const out = [];
+    const vistos = new Set();
+    let ordem = 0;
+    for (const el of msgEls) {
+      const txt = (el.innerText || el.textContent || '').trim();
+      const imgEl = el.querySelector && el.querySelector('img[src]');
+      const img = (imgEl && imgEl.src && !/avatar/i.test(cls(imgEl))) ? imgEl.src : null;
+      if (!txt && !img) continue;
+
+      // direcao: 1) classe self/right/mine  2) classe other/left  3) posicao
+      let selfCls = false, otherCls = false;
+      for (let up = 0, cur = el; up < 6 && cur; up++, cur = cur.parentElement) {
+        const c = cls(cur).toLowerCase();
+        if (/(isself|--self|_self|--right|--mine|--send|--sent|--me|\bself\b|\bright\b)/.test(c)) { selfCls = true; break; }
+        if (/(--other|--left|--friend|--receive|--received|--them|\bother\b|\bleft\b)/.test(c)) { otherCls = true; break; }
+      }
+      let direcao;
+      if (selfCls) direcao = 'out';
+      else if (otherCls) direcao = 'in';
+      else if (contMid != null) {
+        try { const r = el.getBoundingClientRect(); direcao = (r.left + r.width / 2) >= contMid ? 'out' : 'in'; }
+        catch (_) { direcao = 'in'; }
+      } else direcao = 'in';
+
+      // horario: hh:mm proximo da bolha
+      let horario = '';
+      for (let up = 0, cur = el; up < 4 && cur; up++, cur = cur.parentElement) {
+        const t = Array.from(cur.querySelectorAll('[class*="time"], span, div, p'))
+          .map(x => (x.textContent || '').trim())
+          .find(v => /^\d{1,2}:\d{2}$/.test(v));
+        if (t) { horario = t; break; }
+      }
+
+      const idr = idReal(el);
+      const msgId = idr || ('g_' + direcao + '_' + (horario || ('p' + ordem)) + '_' + hashTexto(txt));
+      if (vistos.has(msgId)) continue;
+      vistos.add(msgId);
+
+      out.push({ msgId, direcao, texto: txt, img, horario, lido: false });
+      ordem++;
     }
     return out;
+  });
+}
+
+// ── Diagnostico: dump da estrutura do .window__main--content ──────────────
+// Usado so quando extrairBolhas volta vazio, pra revelar o DOM real da 99 no
+// log do Railway e travar os seletores definitivos numa proxima passada.
+async function dumpEstrutura(page) {
+  return await page.evaluate(() => {
+    const cls = (el) => {
+      const c = el && el.className;
+      if (typeof c === 'string') return c;
+      if (c && typeof c.baseVal === 'string') return c.baseVal;
+      return String(c || '');
+    };
+    const janela = document.querySelector('.chat__window') || document.body;
+    const cont =
+      (janela && janela.querySelector('[class*="window__main--content"]')) ||
+      (janela && janela.querySelector('[class*="window__main"]')) ||
+      janela;
+    if (!cont) return '(sem .chat__window / window__main--content)';
+    const linhas = [];
+    const push = (el, d) => {
+      if (linhas.length > 80) return;
+      const tag = (el.tagName || '').toLowerCase();
+      const c = cls(el).trim().replace(/\s+/g, ' ').slice(0, 90);
+      const own = (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 45);
+      linhas.push('  '.repeat(d) + tag + (c ? '.' + c : '') + (own ? '  » ' + own : ''));
+      Array.from(el.children || []).forEach(ch => push(ch, d + 1));
+    };
+    try { push(cont, 0); } catch (e) { return 'erro no dump: ' + e.message; }
+    return 'container=' + cls(cont) + '\n' + linhas.join('\n');
   });
 }
 
@@ -429,7 +549,7 @@ async function gravarNovas(pool, conversaId, bolhas) {
     const r = await pool.query(`
       INSERT INTO chat99_mensagens (conversa_id, msg_99_id, direcao, autor, texto, img_url, horario_99, lido, status_envio)
       VALUES ($1, $2, 'in', 'motoboy', $3, $4, $5, false, 'recebida')
-      ON CONFLICT (conversa_id, msg_99_id) DO NOTHING
+      ON CONFLICT (conversa_id, msg_99_id) WHERE msg_99_id IS NOT NULL DO NOTHING
       RETURNING id
     `, [conversaId, b.msgId, b.texto || null, b.img || null, b.horario || null]);
     if (r.rows.length > 0) { novas++; ultimaTexto = b.texto || (b.img ? '[imagem]' : ''); }
