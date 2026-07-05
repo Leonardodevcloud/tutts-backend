@@ -307,6 +307,8 @@ async function initConfigTables(pool) {
   console.log('✅ Tabela admin_permissions verificada');
 
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_modules JSONB DEFAULT '[]'`).catch(() => {});
+  // 2026-07: coluna allowed_tabs — lida/gravada por admin.routes.js mas nunca criada em migration ate agora.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB DEFAULT '{}'`).catch(() => {});
 
   // ==================== FOTO HASHES (Anti-fraude pHash) ====================
   await pool.query(`
