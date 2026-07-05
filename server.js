@@ -30,7 +30,8 @@ const { iniciarCleanupPeriodico, rodarCicloLimpeza } = require('./src/shared/tmp
 const { iniciarMemoryWatchdog } = require('./src/shared/memory-watchdog');
 
 // ─── Middleware ────────────────────────────────────────────
-const { verificarToken, verificarAdmin, verificarAdminOuFinanceiro } = require('./src/middleware/auth');
+const { verificarToken, verificarTokenOpcional, verificarAdmin, verificarAdminOuFinanceiro } = require('./src/middleware/auth');
+const { criarPermissaoModulo } = require('./src/middleware/permissao-modulo');
 const { getClientIP, apiLimiter, loginLimiter, biLimiter, createAccountLimiter } = require('./src/middleware/rateLimiter');
 const { notFoundHandler, globalErrorHandler } = require('./src/middleware/errorHandler');
 const requestLogger = require('./src/middleware/requestLogger');
@@ -147,6 +148,13 @@ app.use(helmetConfig);
 
 // Rate limiting
 app.use('/api/', apiLimiter);
+
+// 2026-07 (Fase 4): enforcement de permissao por modulo (fail-open, so role admin).
+// Global, apos verificarTokenOpcional (nao bloqueia; o verificarToken real de cada
+// rota continua rodando). Ver src/middleware/permissao-modulo.js.
+const { middleware: permissaoModulo, invalidar: invalidarPermissaoModulo } = criarPermissaoModulo(pool);
+global.invalidarPermissaoModuloCache = invalidarPermissaoModulo;
+app.use('/api', verificarTokenOpcional, permissaoModulo);
 
 // Request logging
 app.use(requestLogger);

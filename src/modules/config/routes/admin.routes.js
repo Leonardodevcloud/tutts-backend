@@ -80,6 +80,8 @@ router.patch('/admin-permissions/:codProfissional', verificarToken, async (req, 
       alterado_por: req.user.codProfissional
     });
     
+    // 2026-07 (Fase 4): invalida o cache do enforcement pra aplicar na hora.
+    try { if (typeof global.invalidarPermissaoModuloCache === 'function') global.invalidarPermissaoModuloCache(codProfissional); } catch (_) {}
     console.log(`🔐 Permissões atualizadas: ${codProfissional} (por ${req.user.codProfissional})`);
     res.json({ message: 'Permissões atualizadas com sucesso', user: result.rows[0], success: true });
   } catch (error) {

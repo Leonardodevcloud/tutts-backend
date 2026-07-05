@@ -1,25 +1,17 @@
 /**
- * modulos.registry.js (2026-07) — FASE 1 do refactor de permissoes
+ * modulos.registry.js (2026-07) — FASE 1+4 do refactor de permissoes
  * ---------------------------------------------------------------------------
- * FONTE DE VERDADE unica do catalogo de modulos do sistema.
+ * FONTE DE VERDADE unica do catalogo de modulos.
  *
- * Nesta fase o registry e DESCRITIVO (identidade + UI + abas) e esta INERTE:
- * nada importa ele ainda. Ele existe para, nas proximas fases, aposentar os
- * hardcodes duplicados (SISTEMA_MODULOS_CONFIG no app.js e o mapa manual do login).
+ * v2 (Fase 4): adiciona ownedPaths (prefixos de request que cada modulo dono)
+ * e moduloDoCaminho(), usados pelo middleware de enforcement.
  *
- * Gerado a partir do SISTEMA_MODULOS_CONFIG real (bate 100%).
+ * ownedPaths so foi preenchido nos modulos com prefixo LIMPO e inequivoco
+ * (verificados 1 a 1 contra o server.js). Os demais (solicitacoes, config,
+ * crm-whatsapp) ficam SEM ownedPaths => fail-open no enforcement (sem risco
+ * de trancar por engano). confirmafacil/roadmap sao sempreLiberado.
  *
- * Campos de ROTEAMENTO (mountAt, ownedPaths, roles, mount) NAO estao aqui de
- * proposito — entram na Fase 3, com verificacao rota-a-rota contra o server.js,
- * pra nao arriscar trancar ninguem fora da API.
- *
- * Cada item:
- *   id             slug canonico (bate com users.allowed_modules e o front)
- *   label / icon   exibicao no menu e na tela de permissoes
- *   ordem          posicao no menu
- *   soAdmin        modulo marcado como admin-only no catalogo original
- *   sempreLiberado nunca restringivel (roadmap, confirmafacil)
- *   abas           sub-abas [{id,label}] para nav + permissao granular
+ * Marker de versao: moduloDoCaminho
  */
 
 'use strict';
@@ -135,6 +127,10 @@ const MODULOS = [
         "id": "saldo-plific",
         "label": "💳 Saldo Plific"
       }
+    ],
+    "ownedPaths": [
+      "/financial",
+      "/withdrawals"
     ]
   },
   {
@@ -181,6 +177,11 @@ const MODULOS = [
         "id": "incentivos",
         "label": "Acompanhamento"
       }
+    ],
+    "ownedPaths": [
+      "/avisos-op",
+      "/incentivos-op",
+      "/operacoes"
     ]
   },
   {
@@ -223,6 +224,9 @@ const MODULOS = [
         "id": "config",
         "label": "Configurações"
       }
+    ],
+    "ownedPaths": [
+      "/disponibilidade"
     ]
   },
   {
@@ -273,6 +277,9 @@ const MODULOS = [
         "id": "config",
         "label": "⚙️ Configurações"
       }
+    ],
+    "ownedPaths": [
+      "/bi"
     ]
   },
   {
@@ -282,7 +289,10 @@ const MODULOS = [
     "ordem": 60,
     "soAdmin": true,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/bi-monitoramento"
+    ]
   },
   {
     "id": "todo",
@@ -300,6 +310,9 @@ const MODULOS = [
         "id": "metricas",
         "label": "Métricas"
       }
+    ],
+    "ownedPaths": [
+      "/todo"
     ]
   },
   {
@@ -318,6 +331,9 @@ const MODULOS = [
         "id": "auto",
         "label": "🤖 Auto-gerenciáveis"
       }
+    ],
+    "ownedPaths": [
+      "/filas"
     ]
   },
   {
@@ -340,6 +356,9 @@ const MODULOS = [
         "id": "mensagens",
         "label": "Mensagens"
       }
+    ],
+    "ownedPaths": [
+      "/social"
     ]
   },
   {
@@ -378,6 +397,9 @@ const MODULOS = [
         "id": "emails-automacao",
         "label": "Automação E-mail"
       }
+    ],
+    "ownedPaths": [
+      "/cs"
     ]
   },
   {
@@ -387,7 +409,10 @@ const MODULOS = [
     "ordem": 110,
     "soAdmin": false,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/admin/coleta"
+    ]
   },
   {
     "id": "config",
@@ -439,7 +464,10 @@ const MODULOS = [
     "ordem": 140,
     "soAdmin": false,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/agent"
+    ]
   },
   {
     "id": "rastreio-clientes",
@@ -448,7 +476,10 @@ const MODULOS = [
     "ordem": 150,
     "soAdmin": true,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/rastreio-clientes"
+    ]
   },
   {
     "id": "antifraude",
@@ -457,7 +488,10 @@ const MODULOS = [
     "ordem": 160,
     "soAdmin": false,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/antifraude"
+    ]
   },
   {
     "id": "performance",
@@ -483,6 +517,9 @@ const MODULOS = [
         "id": "jobs",
         "label": "🗂️ Jobs"
       }
+    ],
+    "ownedPaths": [
+      "/performance"
     ]
   },
   {
@@ -492,7 +529,10 @@ const MODULOS = [
     "ordem": 180,
     "soAdmin": false,
     "sempreLiberado": false,
-    "abas": []
+    "abas": [],
+    "ownedPaths": [
+      "/gerencial"
+    ]
   },
   {
     "id": "uber",
@@ -534,6 +574,9 @@ const MODULOS = [
         "id": "chat",
         "label": "💬 Chat 99"
       }
+    ],
+    "ownedPaths": [
+      "/logistics"
     ]
   },
   {
@@ -556,17 +599,15 @@ const MODULOS = [
   }
 ];
 
-// Lista completa (ordenada por ordem)
 function registro() {
   return MODULOS.slice().sort((a, b) => a.ordem - b.ordem);
 }
 
-// So os ids canonicos — util para validar allowed_modules
 function idsCanonicos() {
   return MODULOS.map((m) => m.id);
 }
 
-// Meta publico (o que sera servido ao frontend via /modules-config na Fase 2)
+// Meta publico servido ao frontend (SEM ownedPaths — e info interna de roteamento).
 function metaPublico() {
   return registro().map((m) => ({
     id: m.id,
@@ -579,9 +620,28 @@ function metaPublico() {
   }));
 }
 
-// Busca um modulo pelo id
 function porId(id) {
   return MODULOS.find((m) => m.id === id) || null;
 }
 
-module.exports = { MODULOS, registro, idsCanonicos, metaPublico, porId };
+// Normaliza o path: tira query/hash e barra final.
+function _norm(p) {
+  let s = String(p || '').split('?')[0].split('#')[0];
+  if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1);
+  return s;
+}
+
+// Casa um path (relativo a /api) contra os ownedPaths, com BOUNDARY matching
+// (ex.: "/bi" NAO captura "/bi-monitoramento"). Retorna o meta do modulo ou null.
+function moduloDoCaminho(path) {
+  const p = _norm(path);
+  for (const m of MODULOS) {
+    if (!m.ownedPaths) continue;
+    for (const pref of m.ownedPaths) {
+      if (p === pref || p.startsWith(pref + '/')) return m;
+    }
+  }
+  return null;
+}
+
+module.exports = { MODULOS, registro, idsCanonicos, metaPublico, porId, moduloDoCaminho };
