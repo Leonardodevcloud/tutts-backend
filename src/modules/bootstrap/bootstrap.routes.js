@@ -213,6 +213,29 @@ function createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAd
     }
   });
 
+  // 2026-07 (Fase 2): catalogo de modulos servido pelo registry (fonte de verdade).
+  // Consumido pelo frontend p/ montar nav + tela de permissoes.
+  router.get('/modules-config', verificarToken, (req, res) => {
+    try {
+      const registry = require('../../shared/modulos.registry');
+      const modulos = registry.metaPublico().map(function (m) {
+        return {
+          id: m.id,
+          label: m.label,
+          icon: m.icon,
+          admin: m.soAdmin,            // compat com o shape do SISTEMA_MODULOS_CONFIG
+          ordem: m.ordem,
+          sempreLiberado: m.sempreLiberado,
+          abas: m.abas,
+        };
+      });
+      return res.json({ modulos });
+    } catch (err) {
+      console.error('[modules-config]', err.message);
+      return res.status(500).json({ erro: 'Erro ao carregar catalogo de modulos.' });
+    }
+  });
+
   return router;
 }
 
