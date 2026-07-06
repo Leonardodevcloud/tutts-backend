@@ -221,6 +221,27 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_webhook_logs_os ON webhook_tutts_logs(os_numero)`).catch(() => {});
     console.log('✅ Tabela webhook_tutts_logs verificada');
 
+    // 2026-07: a FK webhook_tutts_logs.solicitacao_id existia sem ON DELETE CASCADE,
+    // bloqueando a exclusao de cliente (cascade cliente -> solicitacoes_corrida ->
+    // webhook_tutts_logs). Recria com CASCADE apenas se ainda nao estiver assim.
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.referential_constraints
+          WHERE constraint_name = 'webhook_tutts_logs_solicitacao_id_fkey'
+            AND delete_rule = 'CASCADE'
+        ) THEN
+          ALTER TABLE webhook_tutts_logs
+            DROP CONSTRAINT IF EXISTS webhook_tutts_logs_solicitacao_id_fkey;
+          ALTER TABLE webhook_tutts_logs
+            ADD CONSTRAINT webhook_tutts_logs_solicitacao_id_fkey
+            FOREIGN KEY (solicitacao_id) REFERENCES solicitacoes_corrida(id) ON DELETE CASCADE;
+        END IF;
+      END $$;
+    `).catch(e => console.log('⚠️ FK webhook_tutts_logs CASCADE:', e.message));
+    console.log('✅ FK webhook_tutts_logs -> ON DELETE CASCADE verificada');
+
     // 🚀 2026-05: rastreamento de envio do link pro cliente (WhatsApp)
     await pool.query(`
       ALTER TABLE solicitacoes_corrida
