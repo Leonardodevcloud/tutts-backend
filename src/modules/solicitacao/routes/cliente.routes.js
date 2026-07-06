@@ -1900,7 +1900,7 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
   try {
     const clienteId = req.clienteSolicitacao.id;
     const precoHub = req.clienteSolicitacao.preco_hub || null;
-    const { de, ate, canal, formato } = req.query;
+    const { de, ate, canal, status, formato } = req.query;
 
     const where = [
       `sc.cliente_id = $1`,
@@ -1965,9 +1965,18 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         status = r.status;
       }
 
-      // Status claro ao cliente; corrida CANCELADA nao contabiliza km/valor
-      const statusNorm = normalizarStatus(status);
-      if (statusNorm === 'Cancelado') { km = null; valor = null; origem = 'cancelado'; }
+      // Cancelamento CONSISTENTE: cancela se QUALQUER sinal disser cancelado
+      // (status do Hub, status da solicitacao, ou o proprio "motoboy" vir como
+      // "Cancelado"/placeholder). Cancelada zera motoboy, km e valor.
+      const cancelada = [r.status_canonico, r.status, motoboy]
+        .some(s => normalizarStatus(s) === 'Cancelado');
+      let statusNorm;
+      if (cancelada) {
+        statusNorm = 'Cancelado';
+        motoboy = null; km = null; valor = null; origem = 'cancelado';
+      } else {
+        statusNorm = normalizarStatus(status);
+      }
 
       return {
         os: r.tutts_os_numero,
@@ -1987,6 +1996,10 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
     // Filtro opcional por canal (tutts|hub)
     if (canal === 'tutts' || canal === 'hub') {
       corridas = corridas.filter(c => c.canal === canal);
+    }
+    // Filtro opcional por status (rotulo normalizado; ex: Entregue, Cancelado)
+    if (status && status !== 'todos') {
+      corridas = corridas.filter(c => c.status === status);
     }
 
     if (String(formato).toLowerCase() === 'csv') {

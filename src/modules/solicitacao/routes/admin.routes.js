@@ -992,7 +992,7 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
 // ============================================================================
 router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => {
   try {
-    const { de, ate, cliente_id, provider, formato } = req.query;
+    const { de, ate, cliente_id, provider, status, formato } = req.query;
 
     const cteWhere = [];
     const params = [];
@@ -1031,16 +1031,26 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
 
     const { rows } = await pool.query(sql, params);
 
-    const corridas = rows.map(r => {
+    let corridas = rows.map(r => {
       const courier = r.courier_data || {};
+      let motoboy = courier.name || null;
       let km = r.distancia_km != null ? Number(r.distancia_km) : null;
       let { valor, origem } = resolverValorCorrida({
         distanciaKm: km,
         precoHub: r.preco_hub,
         valorGravado: r.valor_servico,
       });
-      const statusNorm = normalizarStatus(r.status_canonico);
-      if (statusNorm === 'Cancelado') { km = null; valor = null; origem = 'cancelado'; }
+      // Cancelamento consistente: qualquer sinal (status_canonico ou "motoboy"
+      // vindo como "Cancelado") cancela -> zera motoboy, km e valor.
+      const cancelada = [r.status_canonico, motoboy]
+        .some(s => normalizarStatus(s) === 'Cancelado');
+      let statusNorm;
+      if (cancelada) {
+        statusNorm = 'Cancelado';
+        motoboy = null; km = null; valor = null; origem = 'cancelado';
+      } else {
+        statusNorm = normalizarStatus(r.status_canonico);
+      }
       return {
         os: r.codigo_os,
         provider: r.provider_code,
@@ -1049,7 +1059,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         cliente_nome: r.cliente_nome || null,
         endereco_coleta: r.endereco_coleta || '',
         endereco_entrega: r.endereco_entrega || '',
-        motoboy: courier.name || null,
+        motoboy,
         km,
         valor,
         valor_origem: origem,
@@ -1057,6 +1067,11 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         data: r.created_at,
       };
     });
+
+    // Filtro opcional por status (rotulo normalizado; ex: Entregue, Cancelado)
+    if (status && status !== 'todos') {
+      corridas = corridas.filter(c => c.status === status);
+    }
 
     if (String(formato).toLowerCase() === 'csv') {
       const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data'];
