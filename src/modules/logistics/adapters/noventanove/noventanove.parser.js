@@ -326,8 +326,15 @@ function montarBodyCreate(estimateId, req, config) {
   const returnType = (_rtCfg === 2 || _rtCfg === '2') ? 2 : 1;
   body.return_type = returnType;
   if (returnType === 1) {
-    const _hm = config && config.return_handover_99;
-    body.return_handover_method = (_hm === 3 || _hm === '3') ? 3 : 2;
+    // Codigo na DEVOLUCAO: chave canonica verificacao_devolucao_habilitada
+    // (alias legado return_handover_99 === 3). Habilitado -> 3 (codigo);
+    // senao -> 2 (foto). Independente do codigo de coleta/entrega.
+    const devolucaoCodigo = !!(config && (
+      config.verificacao_devolucao_habilitada ||
+      config.return_handover_99 === 3 || config.return_handover_99 === '3'
+    ));
+    body.return_handover_method = devolucaoCodigo ? 3 : 2;
+    if (devolucaoCodigo) console.log('[99] Verificação de DEVOLUÇÃO (código) habilitada para OS', osRef);
   } else {
     body.return_handover_method = 1;
   }
