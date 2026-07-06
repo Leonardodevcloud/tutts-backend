@@ -7,6 +7,7 @@ const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
 const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
 const { buscarHubPorOS } = require('../hub-status.shared');
+const { resolverValorCorrida, classificarCanal, parseKm, montarCSV, formatarBRL } = require('../preco-hub.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -1883,6 +1884,135 @@ router.get('/solicitacao/profissionais', verificarTokenSolicitacao, async (req, 
   } catch (err) {
     console.error('❌ Erro ao buscar profissionais:', err.message);
     res.status(500).json({ error: 'Erro ao buscar profissionais', detalhe: err.message });
+  }
+});
+
+// ============================================================================
+// RELATORIO DO CLIENTE — corridas do proprio cliente nos DOIS canais:
+//   canal 'hub'   -> despachada via 99/Uber; km/motoboy/enderecos vem de
+//                    logistics_deliveries; VALOR recalculado on-read pela
+//                    tabela de preco do cliente (cliente sempre manda).
+//   canal 'tutts' -> frota propria; km/motoboy/valor vem de solicitacoes_corrida;
+//                    enderecos do 1o ponto (coleta) e ultimo ponto (entrega).
+// GET /solicitacao/relatorio?de=YYYY-MM-DD&ate=YYYY-MM-DD&canal=tutts|hub&formato=csv
+// ============================================================================
+router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const clienteId = req.clienteSolicitacao.id;
+    const precoHub = req.clienteSolicitacao.preco_hub || null;
+    const { de, ate, canal, formato } = req.query;
+
+    const where = [
+      `sc.cliente_id = $1`,
+      `sc.tutts_os_numero IS NOT NULL`,
+    ];
+    const params = [clienteId];
+    let i = 2;
+    if (de)  { where.push(`sc.criado_em >= $${i++}`); params.push(de); }
+    if (ate) { where.push(`sc.criado_em < ($${i++}::date + INTERVAL '1 day')`); params.push(ate); }
+
+    const sql = `
+      SELECT sc.id, sc.tutts_os_numero, sc.provider_usado, sc.criado_em, sc.status,
+             sc.profissional_nome, sc.tutts_distancia, sc.tutts_valor, sc.valor_rota_servico,
+             ld.distancia_km, ld.valor_servico, ld.endereco_coleta AS hub_coleta,
+             ld.endereco_entrega AS hub_entrega, ld.courier_data, ld.status_canonico,
+             pc.endereco AS tutts_coleta, pe.endereco AS tutts_entrega
+      FROM solicitacoes_corrida sc
+      LEFT JOIN LATERAL (
+        SELECT distancia_km, valor_servico, endereco_coleta, endereco_entrega,
+               courier_data, status_canonico
+        FROM logistics_deliveries d
+        WHERE d.codigo_os::text = trim(sc.tutts_os_numero)
+        ORDER BY d.created_at DESC LIMIT 1
+      ) ld ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(NULLIF(endereco_completo,''), NULLIF(concat_ws(', ', rua, numero, bairro),'')) AS endereco
+        FROM solicitacoes_pontos WHERE solicitacao_id = sc.id ORDER BY ordem ASC LIMIT 1
+      ) pc ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(NULLIF(endereco_completo,''), NULLIF(concat_ws(', ', rua, numero, bairro),'')) AS endereco
+        FROM solicitacoes_pontos WHERE solicitacao_id = sc.id ORDER BY ordem DESC LIMIT 1
+      ) pe ON true
+      WHERE ${where.join(' AND ')}
+      ORDER BY sc.criado_em DESC
+      LIMIT 2000
+    `;
+
+    const { rows } = await pool.query(sql, params);
+
+    let corridas = rows.map(r => {
+      const canalRow = classificarCanal(r.provider_usado);
+      const courier = r.courier_data || {};
+      let km, valor, origem, motoboy, coleta, entrega, status;
+
+      if (canalRow === 'hub') {
+        km = r.distancia_km != null ? Number(r.distancia_km) : null;
+        const v = resolverValorCorrida({ distanciaKm: km, precoHub, valorGravado: r.valor_servico });
+        valor = v.valor; origem = v.origem;
+        motoboy = courier.name || r.profissional_nome || null;
+        coleta = r.hub_coleta || r.tutts_coleta || '';
+        entrega = r.hub_entrega || r.tutts_entrega || '';
+        status = r.status_canonico || r.status;
+      } else {
+        km = parseKm(r.tutts_distancia);
+        const vg = r.tutts_valor != null ? Number(r.tutts_valor)
+                 : (r.valor_rota_servico != null ? Number(r.valor_rota_servico) : null);
+        valor = (vg != null && Number.isFinite(vg)) ? Math.round(vg * 100) / 100 : null;
+        origem = 'tutts';
+        motoboy = r.profissional_nome || null;
+        coleta = r.tutts_coleta || '';
+        entrega = r.tutts_entrega || '';
+        status = r.status;
+      }
+
+      return {
+        os: r.tutts_os_numero,
+        canal: canalRow,
+        provider: r.provider_usado,
+        endereco_coleta: coleta,
+        endereco_entrega: entrega,
+        motoboy,
+        km,
+        valor,
+        valor_origem: origem,
+        status,
+        data: r.criado_em,
+      };
+    });
+
+    // Filtro opcional por canal (tutts|hub)
+    if (canal === 'tutts' || canal === 'hub') {
+      corridas = corridas.filter(c => c.canal === canal);
+    }
+
+    if (String(formato).toLowerCase() === 'csv') {
+      const headers = ['OS', 'Canal', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data'];
+      const linhas = corridas.map(c => [
+        c.os, c.canal, c.endereco_coleta, c.endereco_entrega, c.motoboy || '',
+        c.km != null ? String(c.km).replace('.', ',') : '',
+        formatarBRL(c.valor), c.status,
+        c.data ? new Date(c.data).toISOString() : '',
+      ]);
+      const csv = montarCSV(headers, linhas);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="minhas-corridas.csv"');
+      return res.send(csv);
+    }
+
+    const totais = corridas.reduce((acc, c) => {
+      acc.corridas += 1;
+      if (c.canal === 'tutts') acc.tutts += 1; else acc.hub += 1;
+      if (c.km != null) acc.km += c.km;
+      if (c.valor != null) acc.valor += c.valor;
+      return acc;
+    }, { corridas: 0, tutts: 0, hub: 0, km: 0, valor: 0 });
+    totais.km = Math.round(totais.km * 100) / 100;
+    totais.valor = Math.round(totais.valor * 100) / 100;
+
+    res.json({ success: true, totais, corridas });
+  } catch (err) {
+    console.error('❌ Erro no relatório do cliente:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar relatório', detalhe: err.message });
   }
 });
 

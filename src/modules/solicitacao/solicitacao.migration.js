@@ -269,6 +269,14 @@ async function initSolicitacaoTables(pool) {
       ADD COLUMN IF NOT EXISTS provider_usado VARCHAR(20) DEFAULT 'tutts'
     `).catch(e => console.log('⚠️ provider_usado:', e.message));
     console.log('✅ Colunas provedores_habilitados / provider_usado verificadas');
+
+    // 2026-07: tabela de preco do Hub POR CLIENTE (precedencia: cliente sempre manda)
+    // JSONB { ativo, valor_fixo, km_base, valor_km_adicional }. NULL = herda global.
+    await pool.query(`
+      ALTER TABLE clientes_solicitacao
+      ADD COLUMN IF NOT EXISTS preco_hub JSONB
+    `).catch(e => console.log('⚠️ preco_hub:', e.message));
+    console.log('✅ Coluna preco_hub verificada');
 }
 
 module.exports = { initSolicitacaoTables };

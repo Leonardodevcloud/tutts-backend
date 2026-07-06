@@ -3,6 +3,7 @@
  */
 const express = require('express');
 const bcrypt = require('bcrypt');
+const { resolverValorCorrida, classificarCanal, montarCSV, formatarBRL } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
   const router = express.Router();
@@ -243,6 +244,7 @@ router.get('/admin/solicitacao/clientes', verificarToken, async (req, res) => {
         c.tutts_codigo_cliente, c.tutts_codigo_cliente as tutts_cod_cliente, c.observacoes,
         c.categorias_disponiveis,
         c.provedores_habilitados,
+        c.preco_hub,
         (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
       FROM clientes_solicitacao c
       ORDER BY c.criado_em DESC
@@ -907,6 +909,180 @@ router.put('/admin/solicitacao/clientes/:id/provedores', verificarToken, async (
   } catch (err) {
     console.error('❌ Erro ao salvar provedores:', err);
     res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// ============================================================================
+// PRECO DO HUB POR CLIENTE (2026-07)
+// GET  /admin/solicitacao/clientes/:id/preco-hub  -> tabela atual do cliente
+// PUT  /admin/solicitacao/clientes/:id/preco-hub  -> salva/atualiza a tabela
+// Body PUT: { ativo, valor_fixo, km_base, valor_km_adicional }
+// ============================================================================
+router.get('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT preco_hub FROM clientes_solicitacao WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    res.json({ preco_hub: rows[0].preco_hub || null });
+  } catch (err) {
+    console.error('❌ Erro ao buscar preco_hub:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (req, res) => {
+  try {
+    const b = req.body || {};
+
+    // Permite limpar a tabela (voltar a herdar global) enviando null/vazio.
+    if (b.preco_hub === null || (b.limpar === true)) {
+      const { rows } = await pool.query(
+        'UPDATE clientes_solicitacao SET preco_hub = NULL WHERE id = $1 RETURNING id',
+        [req.params.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+      return res.json({ sucesso: true, preco_hub: null });
+    }
+
+    const num = (v) => {
+      if (v === '' || v === null || v === undefined) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const valorFixo = num(b.valor_fixo);
+    const kmBase = num(b.km_base);
+    const valorKmAdic = num(b.valor_km_adicional);
+
+    if (valorFixo === null || valorFixo < 0) {
+      return res.status(400).json({ error: 'valor_fixo é obrigatório e deve ser >= 0' });
+    }
+    if (kmBase !== null && kmBase < 0) {
+      return res.status(400).json({ error: 'km_base deve ser >= 0' });
+    }
+    if (valorKmAdic !== null && valorKmAdic < 0) {
+      return res.status(400).json({ error: 'valor_km_adicional deve ser >= 0' });
+    }
+
+    const tabela = {
+      ativo: b.ativo === false ? false : true,
+      valor_fixo: valorFixo,
+      km_base: kmBase != null ? kmBase : 0,
+      valor_km_adicional: valorKmAdic != null ? valorKmAdic : 0,
+    };
+
+    const { rows } = await pool.query(
+      'UPDATE clientes_solicitacao SET preco_hub = $1 WHERE id = $2 RETURNING id',
+      [JSON.stringify(tabela), req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Cliente não encontrado' });
+    console.log('[admin] preco_hub do cliente ' + req.params.id + ' atualizado:', tabela);
+    res.json({ sucesso: true, preco_hub: tabela });
+  } catch (err) {
+    console.error('❌ Erro ao salvar preco_hub:', err);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// ============================================================================
+// RELATORIO HUB — corridas despachadas via Hub (uber/99), valor RECALCULADO
+// on-read pela tabela do cliente (cliente sempre manda), senao valor gravado.
+// GET /admin/relatorio/hub-corridas?de=YYYY-MM-DD&ate=YYYY-MM-DD&cliente_id=&provider=&formato=csv
+// ============================================================================
+router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => {
+  try {
+    const { de, ate, cliente_id, provider, formato } = req.query;
+
+    const cteWhere = [];
+    const params = [];
+    let i = 1;
+    if (de)  { cteWhere.push(`d.created_at >= $${i++}`); params.push(de); }
+    if (ate) { cteWhere.push(`d.created_at < ($${i++}::date + INTERVAL '1 day')`); params.push(ate); }
+    if (provider) { cteWhere.push(`d.provider_code = $${i++}`); params.push(provider); }
+    const cteWhereSql = cteWhere.length ? `WHERE ${cteWhere.join(' AND ')}` : '';
+
+    const outWhere = [];
+    if (cliente_id) { outWhere.push(`sc.cliente_id = $${i++}`); params.push(parseInt(cliente_id, 10)); }
+    const outWhereSql = outWhere.length ? `WHERE ${outWhere.join(' AND ')}` : '';
+
+    const sql = `
+      WITH ld AS (
+        SELECT DISTINCT ON (d.codigo_os)
+          d.codigo_os, d.provider_code, d.distancia_km, d.valor_servico,
+          d.endereco_coleta, d.endereco_entrega, d.courier_data,
+          d.status_canonico, d.created_at
+        FROM logistics_deliveries d
+        ${cteWhereSql}
+        ORDER BY d.codigo_os, d.created_at DESC
+      )
+      SELECT ld.*, sc.cliente_id, cs.nome AS cliente_nome, cs.preco_hub
+      FROM ld
+      LEFT JOIN LATERAL (
+        SELECT cliente_id FROM solicitacoes_corrida
+        WHERE trim(tutts_os_numero) = ld.codigo_os::text
+        ORDER BY id DESC LIMIT 1
+      ) sc ON true
+      LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+      ${outWhereSql}
+      ORDER BY ld.created_at DESC
+      LIMIT 2000
+    `;
+
+    const { rows } = await pool.query(sql, params);
+
+    const corridas = rows.map(r => {
+      const courier = r.courier_data || {};
+      const km = r.distancia_km != null ? Number(r.distancia_km) : null;
+      const { valor, origem } = resolverValorCorrida({
+        distanciaKm: km,
+        precoHub: r.preco_hub,
+        valorGravado: r.valor_servico,
+      });
+      return {
+        os: r.codigo_os,
+        provider: r.provider_code,
+        canal: classificarCanal(r.provider_code),
+        cliente_id: r.cliente_id || null,
+        cliente_nome: r.cliente_nome || null,
+        endereco_coleta: r.endereco_coleta || '',
+        endereco_entrega: r.endereco_entrega || '',
+        motoboy: courier.name || null,
+        km,
+        valor,
+        valor_origem: origem,
+        status: r.status_canonico,
+        data: r.created_at,
+      };
+    });
+
+    if (String(formato).toLowerCase() === 'csv') {
+      const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data'];
+      const linhas = corridas.map(c => [
+        c.os, c.cliente_nome || '', c.canal, c.provider, c.endereco_coleta, c.endereco_entrega,
+        c.motoboy || '', c.km != null ? String(c.km).replace('.', ',') : '',
+        formatarBRL(c.valor), c.status,
+        c.data ? new Date(c.data).toISOString() : '',
+      ]);
+      const csv = montarCSV(headers, linhas);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="relatorio-hub.csv"');
+      return res.send(csv);
+    }
+
+    const totais = corridas.reduce((acc, c) => {
+      acc.corridas += 1;
+      if (c.km != null) acc.km += c.km;
+      if (c.valor != null) acc.valor += c.valor;
+      return acc;
+    }, { corridas: 0, km: 0, valor: 0 });
+    totais.km = Math.round(totais.km * 100) / 100;
+    totais.valor = Math.round(totais.valor * 100) / 100;
+
+    res.json({ success: true, totais, corridas });
+  } catch (err) {
+    console.error('❌ Erro no relatório hub:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar relatório', detalhe: err.message });
   }
 });
 
