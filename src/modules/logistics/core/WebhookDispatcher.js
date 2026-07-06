@@ -340,6 +340,10 @@ class WebhookDispatcher {
    * @private
    */
   async _dispararAcaoMapp(codigoOS, entrega, evento, statusCanonico) {
+    // skipMappAction: grava o status_canonico (ex: RETURNED no SendBack, pra
+    // mostrar no kanban) mas NAO dispara nenhuma acao na Mapp. Usado quando a
+    // devolucao INICIA — a acao Mapp so acontece no SendBackCompleted.
+    if (evento && evento.skipMappAction) return;
     // mappActionStatus (quando presente no evento) permite gravar um
     // status_canonico mas disparar a ACAO Mapp de outro status. Ex.: devolucao
     // concluida grava RETURNED mas FINALIZA a OS (acao de DELIVERED) em vez de

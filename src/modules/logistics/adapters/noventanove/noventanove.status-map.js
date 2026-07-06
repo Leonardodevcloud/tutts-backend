@@ -95,12 +95,12 @@ const WEBHOOK_EVENTOS_FINAIS = Object.freeze([
 /**
  * Eventos meramente informativos — NÃO disparam ação na Mapp.
  *  - OrderClosed: chega depois de OrderCompleted/DriverCanceled, é administrativo.
- *  - SendBack: a devolução só vira ação quando CONCLUI (SendBackCompleted).
+ * (SendBack saiu daqui em 2026-07: agora grava RETURNED pra refletir a coluna
+ *  "Devolução" do kanban assim que a devolução inicia — ver noventanove.webhook.)
  * O noventanove.webhook classifica esses como eventType 'other'.
  */
 const WEBHOOK_EVENTOS_INFORMATIVOS = Object.freeze([
   'OrderClosed',
-  'SendBack',
 ]);
 
 /**
