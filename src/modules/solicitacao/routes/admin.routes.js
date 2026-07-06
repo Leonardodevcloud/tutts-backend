@@ -3,7 +3,7 @@
  */
 const express = require('express');
 const bcrypt = require('bcrypt');
-const { resolverValorCorrida, classificarCanal, montarCSV, formatarBRL } = require('../preco-hub.shared');
+const { resolverValorCorrida, classificarCanal, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
   const router = express.Router();
@@ -1033,12 +1033,14 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
 
     const corridas = rows.map(r => {
       const courier = r.courier_data || {};
-      const km = r.distancia_km != null ? Number(r.distancia_km) : null;
-      const { valor, origem } = resolverValorCorrida({
+      let km = r.distancia_km != null ? Number(r.distancia_km) : null;
+      let { valor, origem } = resolverValorCorrida({
         distanciaKm: km,
         precoHub: r.preco_hub,
         valorGravado: r.valor_servico,
       });
+      const statusNorm = normalizarStatus(r.status_canonico);
+      if (statusNorm === 'Cancelado') { km = null; valor = null; origem = 'cancelado'; }
       return {
         os: r.codigo_os,
         provider: r.provider_code,
@@ -1051,7 +1053,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         km,
         valor,
         valor_origem: origem,
-        status: r.status_canonico,
+        status: statusNorm,
         data: r.created_at,
       };
     });

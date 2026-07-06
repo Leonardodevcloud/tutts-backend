@@ -7,7 +7,7 @@ const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
 const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
 const { buscarHubPorOS } = require('../hub-status.shared');
-const { resolverValorCorrida, classificarCanal, parseKm, montarCSV, formatarBRL } = require('../preco-hub.shared');
+const { resolverValorCorrida, classificarCanal, parseKm, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -1965,6 +1965,10 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         status = r.status;
       }
 
+      // Status claro ao cliente; corrida CANCELADA nao contabiliza km/valor
+      const statusNorm = normalizarStatus(status);
+      if (statusNorm === 'Cancelado') { km = null; valor = null; origem = 'cancelado'; }
+
       return {
         os: r.tutts_os_numero,
         canal: canalRow,
@@ -1975,7 +1979,7 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         km,
         valor,
         valor_origem: origem,
-        status,
+        status: statusNorm,
         data: r.criado_em,
       };
     });

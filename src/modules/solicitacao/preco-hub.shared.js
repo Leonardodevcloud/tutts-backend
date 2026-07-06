@@ -118,6 +118,24 @@ function parseKm(v) {
   return Math.round(n * 100) / 100;
 }
 
+/**
+ * Normaliza status de qualquer canal (Hub status_canonico ou Tutts status)
+ * para rotulos claros ao cliente, em pt-BR.
+ * @param {string|null} status
+ * @returns {string}
+ */
+function normalizarStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+  if (!s) return '\u2014';
+  if (['delivered', 'finalizado', 'concluido', 'conclu\u00eddo', 'entregue', 'completed', 'success'].includes(s)) return 'Entregue';
+  if (['canceled', 'cancelled', 'cancelado'].includes(s)) return 'Cancelado';
+  if (['failed', 'falhou', 'nao_entregue', 'n\u00e3o_entregue', 'error'].includes(s)) return 'N\u00e3o entregue';
+  if (['returned', 'devolvido', 'return'].includes(s)) return 'Devolvido';
+  if (['pending', 'aguardando', 'pendente', 'created', 'novo'].includes(s)) return 'Pendente';
+  if (['dispatched', 'assigned', 'picked_up', 'in_transit', 'em_rota', 'em_andamento', 'a_caminho', 'coletado', 'ongoing'].includes(s)) return 'Em rota';
+  return String(status);
+}
+
 /** Formata numero como R$ pt-BR (string). Aceita null. */
 function formatarBRL(n) {
   if (n == null || !Number.isFinite(Number(n))) return '';
@@ -152,6 +170,7 @@ module.exports = {
   resolverValorCorrida,
   classificarCanal,
   parseKm,
+  normalizarStatus,
   formatarBRL,
   montarCSV,
 };
