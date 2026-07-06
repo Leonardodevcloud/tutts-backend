@@ -30,6 +30,30 @@
  * Na Fase 4, o array vira ordenação de fallback ou input pra estratégia melhor_preço.
  */
 
+/**
+ * 2026-07: normaliza endereco pra comparacao ROBUSTA de regra de despacho.
+ * Remove acentos, expande abreviacoes de logradouro (r.->rua, av.->avenida, etc),
+ * troca pontuacao por espaco e colapsa espacos. Aplicado nos DOIS lados (endereco
+ * da OS e trecho da regra) antes do .includes(), pra que
+ * "r. jose carneiro,970 a" case com "RUA JOSE TAVARES CARNEIRO, 970 A".
+ */
+function normalizarEnderecoParaMatch(texto) {
+  if (!texto) return '';
+  let s = String(texto).toLowerCase();
+  s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // remove acentos
+  s = s                                                     // expande abreviacoes
+    .replace(/\br\.?\s/g, 'rua ')
+    .replace(/\bav\.?\s/g, 'avenida ')
+    .replace(/\btv\.?\s/g, 'travessa ')
+    .replace(/\bpc\.?\s/g, 'praca ')
+    .replace(/\bpca\.?\s/g, 'praca ')
+    .replace(/\bal\.?\s/g, 'alameda ')
+    .replace(/\brod\.?\s/g, 'rodovia ')
+    .replace(/\bestr\.?\s/g, 'estrada ');
+  s = s.replace(/[.,;:\-\/()]+/g, ' ').replace(/\s+/g, ' ').trim(); // pontuacao -> espaco
+  return s;
+}
+
 class DispatchRuleMatcher {
   /**
    * @param {import('pg').Pool} pool
@@ -55,8 +79,8 @@ class DispatchRuleMatcher {
       return { despachar: false, motivo: 'sem_regras_cadastradas' };
     }
 
-    const enderecoColeta = (servico.endereco?.[0]?.rua || '').toLowerCase();
-    const enderecoEntrega = (servico.endereco?.[1]?.rua || '').toLowerCase();
+    const enderecoColeta = normalizarEnderecoParaMatch(servico.endereco?.[0]?.rua || '');
+    const enderecoEntrega = normalizarEnderecoParaMatch(servico.endereco?.[1]?.rua || '');
 
     if (!enderecoColeta) {
       return { despachar: false, motivo: 'endereco_coleta_vazio' };
@@ -66,8 +90,8 @@ class DispatchRuleMatcher {
     // substring no endereço de coleta. Comportamento idêntico ao legado.
     let regraCasada = null;
     for (const regra of regras) {
-      const trechoEnd = (regra.trecho_endereco || regra.cliente_nome || '').toLowerCase().trim();
-      const trechoIdent = (regra.cliente_identificador || '').toLowerCase().trim();
+      const trechoEnd = normalizarEnderecoParaMatch(regra.trecho_endereco || regra.cliente_nome || '');
+      const trechoIdent = normalizarEnderecoParaMatch(regra.cliente_identificador || '');
 
       if (trechoIdent && trechoIdent.length >= 4 && enderecoColeta.includes(trechoIdent)) {
         regraCasada = regra;
@@ -106,7 +130,7 @@ class DispatchRuleMatcher {
     // Validar região (se definida)
     if (Array.isArray(regraCasada.regioes_permitidas) && regraCasada.regioes_permitidas.length > 0) {
       const casouRegiao = regraCasada.regioes_permitidas.some(reg => {
-        const r = (reg || '').toLowerCase().trim();
+        const r = normalizarEnderecoParaMatch(reg || '');
         if (!r) return false;
         return enderecoColeta.includes(r) || enderecoEntrega.includes(r);
       });
