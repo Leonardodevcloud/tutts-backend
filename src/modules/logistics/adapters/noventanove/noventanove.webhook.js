@@ -86,10 +86,12 @@ function validarAssinatura99(req, opts = {}) {
   }
 
   // Calcula o HMAC nos dois formatos — a doc da 99 é ambígua quanto a isso.
-  const hmac = crypto.createHmac('sha256', webhookSecret).update(rawBody, 'utf8');
-  const esperadoHex    = hmac.copy().digest('hex');
-  const esperadoBase64 = crypto.createHmac('sha256', webhookSecret)
-    .update(rawBody, 'utf8').digest('base64');
+  // 2026-07 FIX: crypto.Hmac NAO tem .copy() (so crypto.Hash tem) — isso lançava
+  // "hmac.copy is not a function" e derrubava o webhook do 99 com 500. Digere uma
+  // vez como Buffer e converte pros dois encodings.
+  const hmacBuf = crypto.createHmac('sha256', webhookSecret).update(rawBody, 'utf8').digest();
+  const esperadoHex    = hmacBuf.toString('hex');
+  const esperadoBase64 = hmacBuf.toString('base64');
 
   const recebida = String(signature);
   if (_comparaSeguro(recebida, esperadoHex) || _comparaSeguro(recebida, esperadoBase64)) {
