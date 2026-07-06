@@ -476,6 +476,7 @@ function startTrackingPoller(pool) {
                       providerNome: 'Tutts',
                       nomeDestinatario: dst.nome,
                       papel: dst.papel,
+                      codigoColeta: entrega.pickup_code || '',
                     }).catch(() => ({ enviado: false }))
                   )).then((resultados) => {
                     if (resultados.some((x) => x && x.enviado)) {

@@ -103,7 +103,7 @@ async function enviarCodigoEntrega(telefone, opts) {
  * @param {{codigoOS:(number|string), link:string, providerNome?:string, nomeDestinatario?:string, papel?:string}} opts
  */
 async function enviarRastreioCliente(telefone, opts) {
-  const { codigoOS, link, providerNome = 'parceiro logístico', nomeDestinatario = '', papel = '' } = opts || {};
+  const { codigoOS, link, providerNome = 'parceiro logístico', nomeDestinatario = '', papel = '', codigoColeta = '' } = opts || {};
   const tel = normalizarTelefone(telefone);
   if (!tel) {
     console.warn(`⚠️ [Logistics-WPP] enviarRastreioCliente OS ${codigoOS}: telefone inválido (${telefone})`);
@@ -114,10 +114,15 @@ async function enviarRastreioCliente(telefone, opts) {
   }
 
   const saudacao = nomeDestinatario ? `Olá, *${nomeDestinatario.split(' ')[0]}*!` : 'Olá!';
+  // Codigo de coleta so faz sentido pra loja (ponto de retirada).
+  const linhaCodigo = (papel === 'loja' && codigoColeta)
+    ? `\n\n🔑 Código de coleta: *${codigoColeta}* (informe ao entregador na retirada)`
+    : '';
   const texto =
     `🛵 *Tutts Logística — Entregador a caminho!*\n\n` +
     `${saudacao} A entrega (OS ${codigoOS}) já tem um motoboy do *${providerNome}* designado.\n\n` +
-    `Acompanhe em tempo real pelo link:\n${link}`;
+    `Acompanhe em tempo real pelo link:\n${link}` +
+    linhaCodigo;
 
   return _enviar(tel, texto, `rastreio OS ${codigoOS}${papel ? ' (' + papel + ')' : ''}`);
 }
