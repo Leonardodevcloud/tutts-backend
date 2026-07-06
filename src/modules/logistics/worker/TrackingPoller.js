@@ -211,7 +211,20 @@ function startTrackingPoller(pool) {
     // ação Mapp. Terminais (DELIVERED) também passam por aqui.
     const idxDetail = indiceStatus(det.statusCanonico);
     const idxHub = indiceStatus(entrega.status_canonico);
-    if (det.statusCanonico && idxDetail > idxHub && idxDetail !== -1) {
+    // Terminais RETURNED/CANCELED/FAILED NAO estao na ORDEM_STATUS (indice -1),
+    // entao o avanco normal nunca os alcanca e a entrega fica presa no poll pra
+    // sempre (99 reporta sendbackCompleted/canceled/closed mas o hub nunca
+    // sincroniza -> poller vivo 24/7). Detectamos esses terminais e sincronizamos
+    // o status local (a entrega sai do STATUS_EM_TRANSITO). Usamos skipMappAction:
+    // a acao Mapp (finalizar/reabrir) e do webhook em tempo real; nao a refazemos
+    // aqui pra nao reabrir OS antigas. DELIVERED continua pelo avanco normal (esta
+    // na ORDEM) e mantem a acao Mapp de finalizacao.
+    const TERMINAIS_FORA_ORDEM = ['CANCELED', 'RETURNED', 'FAILED'];
+    const TERMINAIS = ['DELIVERED', 'CANCELED', 'RETURNED', 'FAILED'];
+    const avancoNormal = det.statusCanonico && idxDetail > idxHub && idxDetail !== -1;
+    const avancoTerminal = TERMINAIS_FORA_ORDEM.includes(det.statusCanonico)
+      && !TERMINAIS.includes(entrega.status_canonico);
+    if (avancoNormal || avancoTerminal) {
       await dispatcher.processarEventoCanonico(PROVIDER_CODE, {
         eventType: 'status_change',
         externalDeliveryId: det.externalDeliveryId,
@@ -219,6 +232,7 @@ function startTrackingPoller(pool) {
         statusNative: det.statusNative,
         trackingUrl: det.trackingUrl || null,
         rawProvider: det.rawProvider || null,
+        skipMappAction: avancoTerminal,
       });
       avancou = true;
     }
