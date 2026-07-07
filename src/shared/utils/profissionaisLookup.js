@@ -427,6 +427,36 @@ async function listarProfissionais(pool) {
     console.warn('[profissionaisLookup] listarProfissionais planilha falhou:', err.message);
   }
 
+  // users (motoboys com login, role='user') — SEMPRE incluidos (so preenche quem
+  // faltar; CRM e planilha tem prioridade). Garante que qualquer motoboy que
+  // exista no banco atual apareca pra vinculacao (ex: fila), mesmo quando a
+  // planilha esta fora do ar (HTTP 401) ou ele nunca passou pelo CRM/planilha.
+  try {
+    const { rows } = await pool.query(
+      `SELECT cod_profissional, full_name
+         FROM users
+        WHERE role = 'user'
+          AND cod_profissional IS NOT NULL
+          AND TRIM(cod_profissional) <> ''`
+    );
+    for (const r of rows) {
+      const _cod = String(r.cod_profissional).trim();
+      if (!_cod || map.has(_cod)) continue;
+      map.set(_cod, {
+        codigo:       _cod,
+        nome:         r.full_name || `#${_cod}`,
+        telefone:     '',
+        regiao:       '',
+        cidade:       '',
+        dataAtivacao: '',
+        quemAtivou:   '',
+        origem:       'users',
+      });
+    }
+  } catch (err) {
+    console.warn('[profissionaisLookup] listarProfissionais users falhou:', err.message);
+  }
+
   return Array.from(map.values());
 }
 
