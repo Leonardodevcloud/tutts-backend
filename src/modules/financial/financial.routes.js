@@ -906,12 +906,32 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
         }
         console.log(`✅ [SALDO] ${userCod}: saldo Plific R$ ${saldoNumero.toFixed(2)} >= saque R$ ${valorArredondado.toFixed(2)}`);
       } else {
-        console.log(`⚠️ [SALDO] Não foi possível verificar saldo Plific para ${userCod} - prosseguindo sem verificação`);
+        // 🔒 FAIL-CLOSED (2026-07): resposta da Plific SEM o campo saldo
+        // (erro/estrutura inesperada). Nao da pra confirmar que ha saldo ->
+        // BLOQUEIA o saque. Antes prosseguia sem verificar (fail-open), o que
+        // permitia saque sem saldo quando a leitura falhava.
+        await client.query('ROLLBACK');
+        client.release();
+        console.error(`🛑 [SALDO] ${userCod}: resposta Plific sem campo saldo — saque BLOQUEADO (fail-closed). Resposta: ${JSON.stringify(dataSaldo).slice(0, 300)}`);
+        return res.status(503).json({
+          error: 'Não foi possível confirmar seu saldo agora. Aguarde alguns instantes e tente novamente.',
+          tipo_limite: 'saldo_indisponivel',
+          saldo_indisponivel: true,
+        });
       }
     } catch (erroSaldo) {
-      // Se a consulta de saldo falhar, prossegue sem bloquear (fail-open)
-      // O auto-débito depois vai falhar se não tiver saldo
-      console.log(`⚠️ [SALDO] Erro ao consultar saldo Plific para ${userCod}: ${erroSaldo.message} - prosseguindo`);
+      // 🔒 FAIL-CLOSED (2026-07): se a consulta de saldo Plific falhar (rede,
+      // timeout, JSON invalido, API fora), NAO da pra confirmar saldo ->
+      // BLOQUEIA o saque. Antes era fail-open ("prossegue sem bloquear"), o que
+      // permitia o motoboy sacar mesmo com erro na leitura de saldo.
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      try { client.release(); } catch (_) {}
+      console.error(`🛑 [SALDO] ${userCod}: erro ao consultar saldo Plific (${erroSaldo.message}) — saque BLOQUEADO (fail-closed)`);
+      return res.status(503).json({
+        error: 'Não foi possível confirmar seu saldo agora. Aguarde alguns instantes e tente novamente.',
+        tipo_limite: 'saldo_indisponivel',
+        saldo_indisponivel: true,
+      });
     }
 
     // Verificar se está restrito
