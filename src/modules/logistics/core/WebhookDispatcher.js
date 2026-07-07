@@ -567,7 +567,19 @@ class WebhookDispatcher {
         photo:   courier.photo   || _atual.photo   || null,
         rating:  courier.rating != null ? courier.rating : (_atual.rating != null ? _atual.rating : null),
       };
+      // Troca de entregador FORA da reatribuicao-null (99 troca o driver sem
+      // DriverCanceled+new_order_id). Detecta pelo nome: se mudou, precisa
+      // re-vincular na Mapp (senao a Mapp fica no nome antigo) e registrar na
+      // trilha. Comparacao normalizada (trim/lower) pra nao disparar por
+      // diferenca de caixa/espaco do mesmo motoboy.
+      const _norm = (s) => String(s || '').trim().toLowerCase();
+      const nomeAntigo = _atual.name || null;
+      const nomeNovo   = courier.name || null;
+      const trocouMotoboy = !ehPrimeiraVez && nomeNovo && nomeAntigo
+        && _norm(nomeNovo) !== _norm(nomeAntigo);
+
       const _mudou = ehPrimeiraVez
+        || trocouMotoboy
         || (_merged.plate   || null) !== (_atual.plate   || null)
         || (_merged.vehicle || null) !== (_atual.vehicle || null)
         || (_merged.photo   || null) !== (_atual.photo   || null)
@@ -595,6 +607,20 @@ class WebhookDispatcher {
         } catch (eRast) {
           console.warn(`[WebhookDispatcher] rastreio imediato OS ${codigoOS}:`, eRast.message);
         }
+      } else if (trocouMotoboy) {
+        // Re-vincula o NOVO motoboy na Mapp (troca o nome la) e registra a troca
+        // na trilha (payload.reatribuicao=true -> aparece no TrilhaEntrega).
+        await this._vincularMotorista(codigoOS, entrega, courier);
+        this.events.log({
+          providerCode,
+          eventType: EventType.STATUS_CHANGED,
+          eventSource: EventSource.WEBHOOK,
+          codigoOS,
+          deliveryId: entrega.id,
+          externalDeliveryId: entrega.external_delivery_id,
+          payload: { reatribuicao: true, nome_anterior: nomeAntigo, nome_novo: nomeNovo },
+        }).catch(() => {});
+        console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: troca de entregador ${nomeAntigo} → ${nomeNovo} — re-vinculado na Mapp`);
       }
     }
 
