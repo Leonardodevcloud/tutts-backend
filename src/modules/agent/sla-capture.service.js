@@ -163,7 +163,7 @@ function montarPontosFallback(enderecos) {
     .map((p, i) => ({ numero: i + 2, ...p }));
 }
 
-function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod }) {
+function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod, codigo_coleta }) {
   // 2026-06: os 4 ultimos digitos da OS em *negrito* p/ leitura rapida no grupo.
   const _osStr = String(os_numero == null ? '' : os_numero);
   // WhatsApp só aplica negrito quando o * está separado por espaço ou início/fim de linha.
@@ -175,6 +175,11 @@ function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod 
 
   if (link_rastreio) {
     blocos.push(`🔗 *Link:* ${link_rastreio}`);
+  }
+
+  // Codigo de coleta do Hub (99) — a loja informa ao motoboy na coleta.
+  if (codigo_coleta) {
+    blocos.push(`🔑 *Código de coleta:* ${codigo_coleta}`);
   }
 
   pontos.forEach((pe) => {
@@ -384,7 +389,16 @@ async function processarCaptura(pool, registro) {
       const _base = (process.env.RASTREIO_BASE_URL || 'https://centraltutts.online').replace(/\/+$/, '');
       _linkGrupo = `${_base}/r/${_tuttsToken}`;
     }
-    const texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod });
+    // Codigo de coleta do Hub (99): busca FRESCO (o poller pode ter capturado
+    // depois do lookup inicial do _ld). So p/ entrega Hub; null se ainda nao veio.
+    let _codigoColeta = null;
+    if (_hubDeliveryId) {
+      try {
+        const _pc = (await pool.query('SELECT pickup_code FROM logistics_deliveries WHERE id = $1', [_hubDeliveryId])).rows[0];
+        _codigoColeta = (_pc && _pc.pickup_code) || null;
+      } catch (_) {}
+    }
+    const texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod, codigo_coleta: _codigoColeta });
 
     // 3. Envia via Evolution — usa grupo do cadastro escolhido (configMatched)
     // ou fallback pra env var legada se não houver match.
@@ -556,7 +570,7 @@ async function processarCaptura(pool, registro) {
  */
 async function enviarRastreioGrupoImediato(pool, deliveryId) {
   const { rows } = await pool.query(
-    'SELECT id, codigo_os, rastreio_token, rastreio_grupo_em, pontos FROM logistics_deliveries WHERE id = $1',
+    'SELECT id, codigo_os, rastreio_token, rastreio_grupo_em, pontos, pickup_code FROM logistics_deliveries WHERE id = $1',
     [deliveryId]
   );
   const ent = rows[0];
@@ -638,6 +652,7 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
     link_rastreio: linkTutts,
     pontos: Array.isArray(pts) ? pts : [],
     cliente_cod: String(clienteCod),
+    codigo_coleta: ent.pickup_code || null,
   });
 
   // CLAIM atomico: so um emissor (webhook/poller/agente) ganha o grupo.
