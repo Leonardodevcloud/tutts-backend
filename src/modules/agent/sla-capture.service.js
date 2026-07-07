@@ -163,6 +163,25 @@ function montarPontosFallback(enderecos) {
     .map((p, i) => ({ numero: i + 2, ...p }));
 }
 
+// Janela de graca (min) pra segurar o rastreio do grupo ate o codigo de coleta
+// chegar. Passada a janela, envia mesmo sem codigo (a corrida pode nao exigir).
+const RASTREIO_CODIGO_GRACE_MIN = parseInt(process.env.RASTREIO_CODIGO_GRACE_MIN || '4', 10);
+
+/**
+ * Decide se deve SEGURAR o envio do rastreio ao grupo aguardando o codigo de
+ * coleta. Retorna true = segura (nao envia agora); false = pode enviar.
+ * Regra: se ja tem codigo -> envia. Se nao tem E a corrida e recente (dentro da
+ * janela de graca) -> segura (o poller re-tenta e o codigo costuma chegar). Se
+ * nao tem E passou da janela -> envia mesmo assim (evita travar corridas que
+ * nunca terao codigo).
+ */
+function _segurarAteCodigoColeta({ pickup_code, created_at }) {
+  if (pickup_code) return false;
+  if (!created_at) return false; // sem data confiavel -> nao trava
+  const idadeMin = (Date.now() - new Date(created_at).getTime()) / 60000;
+  return idadeMin >= 0 && idadeMin < RASTREIO_CODIGO_GRACE_MIN;
+}
+
 function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod, codigo_coleta }) {
   // 2026-06: os 4 ultimos digitos da OS em *negrito* p/ leitura rapida no grupo.
   const _osStr = String(os_numero == null ? '' : os_numero);
@@ -392,10 +411,12 @@ async function processarCaptura(pool, registro) {
     // Codigo de coleta do Hub (99): busca FRESCO (o poller pode ter capturado
     // depois do lookup inicial do _ld). So p/ entrega Hub; null se ainda nao veio.
     let _codigoColeta = null;
+    let _hubCreatedAt = null;
     if (_hubDeliveryId) {
       try {
-        const _pc = (await pool.query('SELECT pickup_code FROM logistics_deliveries WHERE id = $1', [_hubDeliveryId])).rows[0];
+        const _pc = (await pool.query('SELECT pickup_code, created_at FROM logistics_deliveries WHERE id = $1', [_hubDeliveryId])).rows[0];
         _codigoColeta = (_pc && _pc.pickup_code) || null;
+        _hubCreatedAt = (_pc && _pc.created_at) || null;
       } catch (_) {}
     }
     const texto = montarMensagemRastreio({ os_numero, link_rastreio: _linkGrupo, pontos, cliente_cod, codigo_coleta: _codigoColeta });
@@ -413,12 +434,22 @@ async function processarCaptura(pool, registro) {
     // So um emissor (webhook/poller/agente) ganha; os outros pulam. Legado: sempre.
     let _mandarGrupo = true;
     if (_hubDelivery && _hubDeliveryId) {
-      const _claim = await pool.query(
-        'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
-        [_hubDeliveryId]
-      ).catch(() => ({ rows: [] }));
-      _mandarGrupo = _claim.rows.length > 0;
-      if (!_mandarGrupo) log(`↩️ OS ${os_numero}: grupo ja recebeu o rastreio (outro emissor) - pulando duplicata`);
+      // Segura o rastreio ate o codigo de coleta (janela de graca). Se segurar,
+      // NAO reivindica o claim -> o poller re-tenta depois (com o codigo, ou
+      // passada a janela). Assim a mensagem ao grupo so sai com o codigo quando
+      // aplicavel. A captura rica ja fica salva em pontos_json, entao o poller
+      // reaproveita os mesmos pontos.
+      if (_segurarAteCodigoColeta({ pickup_code: _codigoColeta, created_at: _hubCreatedAt })) {
+        log(`⏳ OS ${os_numero}: segurando rastreio do grupo ate o codigo de coleta (janela de graca)`);
+        _mandarGrupo = false;
+      } else {
+        const _claim = await pool.query(
+          'UPDATE logistics_deliveries SET rastreio_grupo_em = NOW() WHERE id = $1 AND rastreio_grupo_em IS NULL RETURNING id',
+          [_hubDeliveryId]
+        ).catch(() => ({ rows: [] }));
+        _mandarGrupo = _claim.rows.length > 0;
+        if (!_mandarGrupo) log(`↩️ OS ${os_numero}: grupo ja recebeu o rastreio (outro emissor) - pulando duplicata`);
+      }
     }
     if (_mandarGrupo) {
       try {
@@ -570,11 +601,18 @@ async function processarCaptura(pool, registro) {
  */
 async function enviarRastreioGrupoImediato(pool, deliveryId) {
   const { rows } = await pool.query(
-    'SELECT id, codigo_os, rastreio_token, rastreio_grupo_em, pontos, pickup_code FROM logistics_deliveries WHERE id = $1',
+    'SELECT id, codigo_os, rastreio_token, rastreio_grupo_em, pontos, pickup_code, created_at FROM logistics_deliveries WHERE id = $1',
     [deliveryId]
   );
   const ent = rows[0];
   if (!ent || ent.rastreio_grupo_em) return false;
+
+  // Segura o rastreio ate o codigo de coleta chegar (janela de graca). Retorna
+  // false SEM reivindicar o claim -> o poller re-tenta no proximo ciclo; quando
+  // o pickup_code chegar (ou passar a janela), envia.
+  if (_segurarAteCodigoColeta({ pickup_code: ent.pickup_code, created_at: ent.created_at })) {
+    return false;
+  }
 
   const { rows: capt } = await pool.query(
     'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
