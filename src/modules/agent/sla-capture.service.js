@@ -566,7 +566,40 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
     'SELECT cliente_cod, pontos_json FROM sla_capturas WHERE os_numero = $1 LIMIT 1',
     [String(ent.codigo_os)]
   );
-  const clienteCod = capt[0]?.cliente_cod || null;
+  const clienteCod0 = capt[0]?.cliente_cod || null;
+  let clienteCod = clienteCod0;
+  let ptsSolic = null;
+  // Fallback: corrida originada no solicitacao.html NAO tem linha em sla_capturas.
+  // Resolve o cliente_cod via clientes_solicitacao.tutts_id_cliente e os pontos
+  // via solicitacoes_pontos, pra o link do Hub ir pro grupo configurado em
+  // rastreio_clientes_config (mesmo formato dos demais).
+  if (!clienteCod) {
+    const { rows: sol } = await pool.query(
+      `SELECT cs.tutts_id_cliente AS cliente_cod
+         FROM solicitacoes_corrida sc
+         JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+        WHERE sc.tutts_os_numero = $1
+        ORDER BY sc.id DESC LIMIT 1`,
+      [String(ent.codigo_os)]
+    );
+    clienteCod = (sol[0] && sol[0].cliente_cod) ? String(sol[0].cliente_cod).trim() : null;
+    if (clienteCod) {
+      const { rows: pcs } = await pool.query(
+        `SELECT sp.ordem, sp.endereco_completo, sp.procurar_por, sp.numero_nota
+           FROM solicitacoes_pontos sp
+           JOIN solicitacoes_corrida sc ON sc.id = sp.solicitacao_id
+          WHERE sc.tutts_os_numero = $1
+          ORDER BY sp.ordem ASC`,
+        [String(ent.codigo_os)]
+      );
+      ptsSolic = pcs.map(p => ({
+        numero: p.ordem,
+        endereco: p.endereco_completo || null,
+        nomeCliente: p.procurar_por || null,
+        nota: p.numero_nota || null,
+      }));
+    }
+  }
   if (!clienteCod) return false;
 
   const { rows: grupos } = await pool.query(
@@ -588,6 +621,10 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
 
   let pts = capt[0] && capt[0].pontos_json;
   if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = []; } }
+  // Corrida do solicitacao.html (sem sla_capturas): usa os pontos da solicitacao.
+  if ((!Array.isArray(pts) || !pts.length) && ptsSolic && ptsSolic.length) {
+    pts = ptsSolic;
+  }
   if (!Array.isArray(pts) || !pts.length) {
     // 2026-06: captura rica ainda nao pronta -> o AGENTE e o dono e manda a
     // captura RICA + link Hub. Aqui NAO mandamos o fallback (evita preempcao

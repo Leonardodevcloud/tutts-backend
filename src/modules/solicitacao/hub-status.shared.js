@@ -45,6 +45,7 @@ async function buscarHubPorOS(pool, osNumeros) {
   const { rows } = await pool.query(`
     SELECT d.codigo_os, d.provider_code, d.status_canonico, d.status_native,
            d.courier_data, d.tracking_url, d.rastreio_token,
+           d.pickup_code, d.dropoff_code, d.return_code,
            d.latitude_coleta, d.longitude_coleta, d.latitude_entrega, d.longitude_entrega,
            d.ultima_lat, d.ultima_lng,
            t.latitude  AS pos_lat,
@@ -84,6 +85,12 @@ async function buscarHubPorOS(pool, osNumeros) {
       // deve ser usado na tela (não o link cru do provedor).
       rastreio_token: r.rastreio_token || null,
       rastreio_url: r.rastreio_token ? `${RASTREIO_BASE_URL}/r/${r.rastreio_token}` : null,
+      // codigos de verificacao do Hub (99/Uber) — pro cliente ver na corrida ativa.
+      codigos: {
+        coleta:    r.pickup_code  || null,
+        entrega:   r.dropoff_code || null,
+        devolucao: r.return_code  || null,
+      },
       motoboy: (courier.name || courier.photo || courier.phone) ? {
         nome:    courier.name    || null,
         foto:    courier.photo   || null,
