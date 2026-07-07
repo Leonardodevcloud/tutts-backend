@@ -134,7 +134,7 @@ function startTrackingPoller(pool) {
    */
   async function buscarEntregasEmTransito() {
     const { rows } = await pool.query(`
-      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, codigo_wpp_enviado, rastreio_wpp_enviado, telefone_entrega, rastreio_grupo_em
+      SELECT id, codigo_os, external_delivery_id, pickup_code, dropoff_code, return_code, codigo_wpp_enviado, rastreio_wpp_enviado, telefone_entrega, rastreio_grupo_em
       FROM logistics_deliveries
       WHERE provider_code = $1
         AND status_canonico = ANY($2)
@@ -198,7 +198,7 @@ function startTrackingPoller(pool) {
    * Só envia ao dispatcher quando há novidade real — evita ação Mapp repetida
    * e linha de tracking duplicada.
    *
-   * @returns {Promise<'avancou'|'posicao'|'sem_novidade'|'sem_courier'>}
+   * @returns {Promise<'avancou'|'posicao'|'avancou_posicao'|'sem_novidade'|'sem_courier'>}
    */
   async function processarEntrega(adapter, entrega) {
     const det = await adapter.getDelivery(entrega.external_delivery_id);
@@ -271,7 +271,7 @@ function startTrackingPoller(pool) {
     if (primeiraVez || posMudou) {
       await dispatcher.processarEventoCanonico(PROVIDER_CODE, evento);
       ultimasPosicoes.set(chave, posAtual);
-      return 'posicao';
+      return avancou ? 'avancou_posicao' : 'posicao';
     }
 
     return avancou ? 'avancou' : 'sem_novidade';
@@ -337,6 +337,7 @@ function startTrackingPoller(pool) {
           const r = await processarEntrega(adapter, entrega);
           if (r === 'avancou') avancos++;
           else if (r === 'posicao') posicoes++;
+          else if (r === 'avancou_posicao') { avancos++; posicoes++; }
           else if (r === 'sem_novidade') semNovidade++;
           else semCourier++;
 
@@ -348,12 +349,13 @@ function startTrackingPoller(pool) {
               console.log(`🔎 [TrackingPoller] OS ${entrega.codigo_os} detail: pickup=${det.pickupCode || 'null'} dropoff=${det.dropoffCode || 'null'} courier=${det.courier ? (det.courier.name || 'sem-nome') : 'null'} tel=${entrega.telefone_entrega || 'null'} wppEnviado=${entrega.codigo_wpp_enviado || false}`);
               const temNovoCodigo = (
                 (det.pickupCode  && !entrega.pickup_code)  ||
-                (det.dropoffCode && !entrega.dropoff_code)
+                (det.dropoffCode && !entrega.dropoff_code) ||
+                (det.returnCode  && !entrega.return_code)
               );
               if (temNovoCodigo) {
                 await pool.query(
-                  'UPDATE logistics_deliveries SET pickup_code = COALESCE($1, pickup_code), dropoff_code = COALESCE($2, dropoff_code), updated_at = NOW() WHERE id = $3',
-                  [det.pickupCode || null, det.dropoffCode || null, entrega.id]
+                  'UPDATE logistics_deliveries SET pickup_code = COALESCE($1, pickup_code), dropoff_code = COALESCE($2, dropoff_code), return_code = COALESCE($3, return_code), updated_at = NOW() WHERE id = $4',
+                  [det.pickupCode || null, det.dropoffCode || null, det.returnCode || null, entrega.id]
                 );
                 // Envia WhatsApp do dropoff_code se ainda não enviado
                 if (det.dropoffCode && !entrega.dropoff_code && !entrega.codigo_wpp_enviado) {

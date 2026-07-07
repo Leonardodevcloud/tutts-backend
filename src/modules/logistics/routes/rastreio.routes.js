@@ -26,7 +26,7 @@ function createLogisticsRastreioRouter(pool) {
         `SELECT status_canonico, courier_data, ultima_lat, ultima_lng,
                 latitude_coleta, longitude_coleta, endereco_coleta,
                 latitude_entrega, longitude_entrega, endereco_entrega,
-                pickup_code,
+                pickup_code, return_code,
                 eta_minutos, updated_at, pontos, id
            FROM logistics_deliveries
           WHERE rastreio_token = $1
@@ -114,6 +114,9 @@ function createLogisticsRastreioRouter(pool) {
           lng: d.longitude_entrega != null ? parseFloat(d.longitude_entrega) : null,
           endereco: d.endereco_entrega || null,
           nome: nomeDestino,
+        },
+        devolucao: {
+          codigo: d.return_code || null,
         },
         eta_minutos: d.eta_minutos != null ? d.eta_minutos : null,
         atualizado_em: d.updated_at,

@@ -464,9 +464,11 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const _vi = (data && data.verify_info) || {};
     const _pick = _vi.pickup_verify_code  || data.pickup_code  || data.pickup_info?.code  || null;
     const _drop = _vi.dropoff_verify_code || data.dropoff_code || data.dropoff_info?.code || null;
+    const _ret  = _vi.return_handover_code || null;
     // 99 devolve "" (string vazia) quando não exige código — normaliza pra null.
     const pickupCode  = (_pick && String(_pick).trim()) ? String(_pick).trim() : null;
     const dropoffCode = (_drop && String(_drop).trim()) ? String(_drop).trim() : null;
+    const returnCode  = (_ret  && String(_ret).trim())  ? String(_ret).trim()  : null;
 
     return {
       externalDeliveryId: String(externalDeliveryId),
@@ -478,6 +480,7 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
       rawProvider: data,
       pickupCode:  pickupCode  ? String(pickupCode)  : null,
       dropoffCode: dropoffCode ? String(dropoffCode) : null,
+      returnCode:  returnCode  ? String(returnCode)  : null,
       // price_info do /detail (centavos -> reais). fee=preco, delivery_fee=entrega,
       // return_fee=devolucao, sendback_fee=sendback. Usado na reconciliacao.
       precoProvider: (function (pi) {

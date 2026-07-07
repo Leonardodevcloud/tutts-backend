@@ -112,6 +112,7 @@ async function initLogisticsTables(pool) {
   // Toggle POR REGRA: muda o valor do cliente na Mapp (alterarValores). Default true.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS alterar_valor_mapp_ativo BOOLEAN DEFAULT true`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS dropoff_code VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS return_code VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS telefone_entrega VARCHAR(30)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS codigo_wpp_enviado BOOLEAN DEFAULT FALSE`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS alerta_10_em TIMESTAMPTZ`).catch(() => {});
