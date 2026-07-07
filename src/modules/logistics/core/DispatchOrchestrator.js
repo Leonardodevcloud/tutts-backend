@@ -791,6 +791,14 @@ class DispatchOrchestrator {
    *                      origem: ('regra'|'global'|'nenhum') }>}
    */
   async _resolverGuardrailMargem(regra) {
+    // 🔧 GUARDRAIL DE MARGEM DESLIGADO (decisao do Tutts, 2026-07): o despacho
+    // automatico NAO rejeita mais por margem baixa/negativa. O mecanismo continua
+    // intacto abaixo — so curto-circuitado aqui. Para RELIGAR sem alterar codigo,
+    // defina a env LOGISTICS_GUARDRAIL_MARGEM=on no Railway.
+    if (String(process.env.LOGISTICS_GUARDRAIL_MARGEM || 'off').toLowerCase() !== 'on') {
+      return { absMin: null, pctMin: null, origem: 'desativado' };
+    }
+
     const regraAbs = regra && regra.margem_minima_aceita != null
       ? parseFloat(regra.margem_minima_aceita) : null;
     const regraPct = regra && regra.margem_pct_minima != null
