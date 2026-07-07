@@ -999,6 +999,22 @@ class DispatchOrchestrator {
     const regra = decisao.regra;
     const vehicleType = regra.vehicle_type_preferido || null;
 
+    // 🔧 Fallback providers_preferidos=[]: a regra casou mas nao tem provedor
+    // preferido configurado. Sem isso o StrategySelector retorna
+    // 'nenhum_provider_ativo' e a OS NUNCA despacha (fica presa a cada ciclo).
+    // Tratamos lista vazia como "qualquer provedor ativo do Hub" (melhor preco),
+    // igual ao caminho "cliente escolheu HUB". So quando a lista e REALMENTE
+    // vazia (nao quando tem provedor mas esta inativo — ai a regra escolheu um
+    // provedor de proposito).
+    if (!Array.isArray(regra.providers_preferidos) || regra.providers_preferidos.length === 0) {
+      const ativosHub = this.registry.listActiveCodes();
+      if (ativosHub && ativosHub.length > 0) {
+        console.warn(`⚠️ [Orchestrator] OS ${codigoOS}: regra ${regra.id} sem providers_preferidos — usando todos os ativos do Hub [${ativosHub.join(',')}] (melhor_preco)`);
+        regra.providers_preferidos = ativosHub;
+        if (!regra.estrategia || regra.estrategia === 'provider_unico') regra.estrategia = 'melhor_preco';
+      }
+    }
+
     // ─── Fase 4: decisão de provider via StrategySelector ───
     // Antes (Fases 1-3): providerCode = regra.providers_preferidos[0] (fixo).
     // Agora: o selector decide conforme regra.estrategia (provider_unico,
