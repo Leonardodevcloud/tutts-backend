@@ -56,6 +56,14 @@ const CanonicalStatus = Object.freeze({
   /** Devolvido ao remetente (Uber expõe; 99 normalmente trata como CANCELED). */
   RETURNED: 'RETURNED',
 
+  /**
+   * Devolução EM ANDAMENTO — o entregador está levando o pacote de volta ao
+   * remetente (99: SendBack / sendback). NÃO é terminal: o hub continua
+   * acompanhando (poller ativo) pra capturar o código de devolução e a posição.
+   * Vira RETURNED quando a devolução CONCLUI (SendBackCompleted).
+   */
+  RETURNING: 'RETURNING',
+
   /** Falha técnica (OAuth expirou, provider não criou, etc). */
   FAILED: 'FAILED',
 
@@ -89,6 +97,8 @@ const ACTIVE_STATUSES = Object.freeze([
   CanonicalStatus.PICKED_UP,
   CanonicalStatus.DROPOFF_EN_ROUTE,
   CanonicalStatus.ARRIVED_DROPOFF,
+  // Devolucao em andamento: ainda ativa (poller acompanha ate concluir).
+  CanonicalStatus.RETURNING,
 ]);
 
 /**
@@ -117,6 +127,7 @@ const STATUS_TO_MAPP_ACTION = Object.freeze({
   [CanonicalStatus.DELIVERED]:         { type: 'finalizar_servico', ponto: 2 },
   [CanonicalStatus.CANCELED]:          { type: 'alterar_status', status: 0 },
   [CanonicalStatus.RETURNED]:          { type: 'alterar_status', status: 0 },
+  [CanonicalStatus.RETURNING]:         null,  // devolucao em andamento — sem acao Mapp (so no SendBackCompleted)
   [CanonicalStatus.FAILED]:            { type: 'alterar_status', status: 0 },
   [CanonicalStatus.FALLBACK_QUEUE]:    { type: 'alterar_status', status: 0 },
 });

@@ -22,6 +22,7 @@ const STATUS_MAP = {
   DELIVERED:         { label: 'Entregue', etapa: 6, terminal: true },
   CANCELED:          { label: 'Cancelada', etapa: 6, terminal: true },
   RETURNED:          { label: 'Devolvida', etapa: 6, terminal: true },
+  RETURNING:         { label: 'Devolvendo', etapa: 6, terminal: false },
   FAILED:            { label: 'Falhou', etapa: 6, terminal: true },
   FALLBACK_QUEUE:    { label: 'Redirecionada para a fila', etapa: 0, terminal: false },
 };

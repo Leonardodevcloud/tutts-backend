@@ -50,7 +50,7 @@ const ORDER_STATUS_TO_CANONICAL = Object.freeze({
   'canceled':   CanonicalStatus.CANCELED,
   'cancelled':  CanonicalStatus.CANCELED,   // variante britânica, defensivo
   'closed':     CanonicalStatus.FAILED,     // doc 99: overdue/sem courier OU fechado pelo suporte — NAO e entrega
-  'sendback':   CanonicalStatus.RETURNED,
+  'sendback':   CanonicalStatus.RETURNING,   // devolucao EM ANDAMENTO (nao-terminal; poller segue capturando codigo/posicao)
   'sendbackcompleted': CanonicalStatus.RETURNED,  // devolucao concluida (doc: sendbackCompleted)
 });
 
@@ -71,7 +71,7 @@ const WEBHOOK_EVENT_TO_CANONICAL = Object.freeze({
   'broadcasttimeout':  CanonicalStatus.FAILED,
   'ordercompleted':    CanonicalStatus.DELIVERED,
   'orderclosed':       CanonicalStatus.DELIVERED,
-  'sendback':          CanonicalStatus.RETURNED,
+  'sendback':          CanonicalStatus.RETURNING,
   // SendBackCompleted = devolução CONCLUÍDA — item já voltou ao remetente.
   // Mapeamos pra DELIVERED (e não RETURNED) pra finalizar o serviço via
   // finalizarEndereco(2) em vez de reabrir a OS na fila interna.

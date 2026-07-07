@@ -221,10 +221,18 @@ function startTrackingPoller(pool) {
     // na ORDEM) e mantem a acao Mapp de finalizacao.
     const TERMINAIS_FORA_ORDEM = ['CANCELED', 'RETURNED', 'FAILED'];
     const TERMINAIS = ['DELIVERED', 'CANCELED', 'RETURNED', 'FAILED'];
-    const avancoNormal = det.statusCanonico && idxDetail > idxHub && idxDetail !== -1;
+    // Devolucao em andamento: RETURNING esta FORA da ORDEM_STATUS (indice -1).
+    // Quando o hub ja esta devolvendo, NAO deixa o avanco normal regredir pra um
+    // status "anterior" (ex: PICKED_UP) so porque a 99 ainda reporta delivering.
+    const hubDevolvendo = entrega.status_canonico === 'RETURNING';
+    const avancoNormal = !hubDevolvendo && det.statusCanonico && idxDetail > idxHub && idxDetail !== -1;
     const avancoTerminal = TERMINAIS_FORA_ORDEM.includes(det.statusCanonico)
       && !TERMINAIS.includes(entrega.status_canonico);
-    if (avancoNormal || avancoTerminal) {
+    // Entra em devolucao (RETURNING) se a 99 reporta sendback e o hub ainda nao e
+    // terminal nem ja esta devolvendo. Sem acao Mapp.
+    const avancoReturning = det.statusCanonico === 'RETURNING'
+      && !hubDevolvendo && !TERMINAIS.includes(entrega.status_canonico);
+    if (avancoNormal || avancoTerminal || avancoReturning) {
       await dispatcher.processarEventoCanonico(PROVIDER_CODE, {
         eventType: 'status_change',
         externalDeliveryId: det.externalDeliveryId,
@@ -232,7 +240,7 @@ function startTrackingPoller(pool) {
         statusNative: det.statusNative,
         trackingUrl: det.trackingUrl || null,
         rawProvider: det.rawProvider || null,
-        skipMappAction: avancoTerminal,
+        skipMappAction: avancoTerminal || avancoReturning,
       });
       avancou = true;
     }

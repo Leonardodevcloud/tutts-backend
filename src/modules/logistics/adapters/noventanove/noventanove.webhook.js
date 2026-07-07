@@ -223,12 +223,16 @@ function parsePayload99(payload) {
   // SEM acao Mapp (skipMappAction) — a finalizacao na Mapp so ocorre no
   // SendBackCompleted. A idempotencia do dispatcher e por status_native
   // ('SendBack' != 'SendBackCompleted'), entao o completed ainda finaliza.
+  // SendBack = devolucao INICIADA. Grava RETURNING ("Devolvendo") — nao-terminal,
+  // pra (1) aparecer na coluna Devolucao do kanban como EM ANDAMENTO e (2) o
+  // poller seguir ativo capturando o codigo de devolucao e a posicao. Sem acao
+  // Mapp. Vira RETURNED ("Devolvido") no SendBackCompleted.
   if (eventoLower === 'sendback') {
     return {
       eventType: 'status_change',
       externalDeliveryId: orderId,
       statusNative: nomeEvento,
-      statusCanonico: CanonicalStatus.RETURNED,
+      statusCanonico: CanonicalStatus.RETURNING,
       skipMappAction: true,
       rawProvider: payload,
     };
