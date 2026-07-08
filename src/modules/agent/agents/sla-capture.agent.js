@@ -36,7 +36,10 @@ function getPlaywrightSlaCapture() {
   return _playwrightSlaCapture;
 }
 
-const SLOTS = Number(process.env.POOL_SLA_CAPTURE_SLOTS || 3);
+// 🆕 2026-07 anti-Cloudflare: default reduzido de 3 → 2. Menos browsers headless
+// batendo simultaneos no mesmo IP = menos gatilho de bot-fight do Cloudflare.
+// Durante um storm de bloqueio, setar POOL_SLA_CAPTURE_SLOTS=1 no Railway.
+const SLOTS = Number(process.env.POOL_SLA_CAPTURE_SLOTS || 2);
 
 const SLA_LAUNCH_OPTS = {
   headless: true,

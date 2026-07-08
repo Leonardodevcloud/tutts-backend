@@ -544,6 +544,26 @@ async function processarCaptura(pool, registro) {
 
     logErr(`❌ OS ${os_numero} falhou (tentativa ${tentativaAtual}): ${mensagemErro}`);
 
+    // 🆕 2026-07 anti-Cloudflare: bloqueio CF e TRANSITORIO e NAO e culpa da OS.
+    // NAO conta como tentativa (senao esgota MAX e marca 'falhou', perdendo o
+    // rastreio do cliente) e usa backoff longo pra dar tempo do IP/challenge
+    // normalizar. Ajustavel via env SLA_CLOUDFLARE_BACKOFF_MS.
+    if (/cloudflare_bloqueio/i.test(mensagemErro)) {
+      const cfBackoff = Number(process.env.SLA_CLOUDFLARE_BACKOFF_MS || 90_000);
+      const proximoCf = new Date(Date.now() + cfBackoff);
+      await pool.query(
+        `UPDATE sla_capturas
+         SET status = 'pendente',
+             erro = $1,
+             proximo_retry_em = $2,
+             atualizado_em = NOW()
+         WHERE id = $3`,
+        [mensagemErro.slice(0, 500), proximoCf, id]
+      );
+      logErr(`🛑 OS ${os_numero}: bloqueio Cloudflare — re-enfileirada SEM contar tentativa (retry em ${cfBackoff}ms)`);
+      return { sucesso: false, esgotado: false, cloudflare: true, erro: mensagemErro };
+    }
+
     if (tentativaAtual >= MAX_TENTATIVAS) {
       // Esgotou retries — marca como falhou e alerta admin
       await pool.query(

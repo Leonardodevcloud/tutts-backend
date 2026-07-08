@@ -348,6 +348,90 @@ const CHROMIUM_LAUNCH_OPTS = {
 // removida para nao divergir do core/dispensar-feriados.js usado pelos demais agentes.
 const { dispensarFeriados } = require('./core/dispensar-feriados');
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 🆕 2026-07 ANTI-CLOUDFLARE — fingerprint de Chrome real + deteccao de bloqueio
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// CAUSA RAIZ do "Access denied | tutts.com.br used Cloudflare to restrict
+// access": os contextos do sla-capture eram criados PELADOS
+// (browser.newContext()), vazando o UA "HeadlessChrome/..." e a plataforma
+// Linux + navigator.webdriver=true. O Cloudflare detecta e devolve 403.
+// (O agent-correcao NAO sofria tanto porque JA setava um UA de Chrome real.)
+//
+// Este helper centraliza a criacao de contexto com:
+//   - userAgent de Chrome/Windows real (mata o "HeadlessChrome")
+//   - viewport + locale pt-BR + timezone America/Bahia (parece BR)
+//   - initScript que mascara navigator.webdriver e languages
+//
+// UA sobrescrivel por env SLA_USER_AGENT sem rebuild.
+const _SLA_USER_AGENT =
+  process.env.SLA_USER_AGENT ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+async function _novoContextoSLA(browser) {
+  // Jitter opcional (default 0 = sem efeito) pra nao abrir N contextos no MESMO
+  // instante contra o Cloudflare. Ligar via SLA_CONTEXT_JITTER_MS durante storm.
+  const jitter = Number(process.env.SLA_CONTEXT_JITTER_MS || 0);
+  if (jitter > 0) {
+    await new Promise((r) => setTimeout(r, Math.floor(Math.random() * jitter)));
+  }
+
+  const opts = {
+    userAgent: _SLA_USER_AGENT,
+    viewport: { width: 1366, height: 768 },
+    locale: 'pt-BR',
+    timezoneId: 'America/Bahia',
+  };
+
+  let context;
+  if (fs.existsSync(getSessionFile())) {
+    try {
+      context = await browser.newContext(Object.assign({ storageState: getSessionFile() }, opts));
+    } catch (e) {
+      context = await browser.newContext(opts);
+    }
+  } else {
+    context = await browser.newContext(opts);
+  }
+
+  // Mascara sinais obvios de automacao ANTES de qualquer navegacao.
+  try {
+    await context.addInitScript(function () {
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: function () { return undefined; } });
+      } catch (e) {}
+      try {
+        if (!navigator.languages || navigator.languages.length === 0) {
+          Object.defineProperty(navigator, 'languages', { get: function () { return ['pt-BR', 'pt']; } });
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+
+  return context;
+}
+
+// Detecta a pagina de bloqueio do Cloudflare ("Access denied"). Quando isso
+// acontece NAO adianta re-logar (a tela de login vem bloqueada tambem) e
+// apagar o cookie cf_clearance so PIORA (garante o proximo bloqueio). Melhor
+// recuar e re-enfileirar com backoff longo.
+async function _ehBloqueioCloudflare(page) {
+  try {
+    return await page.evaluate(function () {
+      var t = (document.title || '').toLowerCase();
+      var b = (document.body ? (document.body.innerText || '') : '').toLowerCase();
+      var bloqueado =
+        t.indexOf('access denied') !== -1 ||
+        t.indexOf('attention required') !== -1 ||
+        b.indexOf('used cloudflare to restrict access') !== -1 ||
+        b.indexOf('sorry, you have been blocked') !== -1;
+      return { bloqueado: bloqueado, titulo: document.title || '' };
+    });
+  } catch (e) {
+    return { bloqueado: false, titulo: '' };
+  }
+}
+
 async function isLoggedIn(page) {
   const url = page.url();
   if (!url.includes('/expresso') || url.includes('loginFuncionarioNovo')) return false;
@@ -418,6 +502,13 @@ async function fazerLogin(page, overrides) {
       await page.waitForTimeout(1500);
 
       const urlAtual = page.url();
+      // 🆕 2026-07 anti-Cloudflare: se caiu em "Access denied" nao adianta
+      // insistir NEM limpar cookies (cf_clearance) — isso so garante o proximo
+      // bloqueio. Propaga um erro CF distinto que o catch NAO reprocessa.
+      const _cfLogin = await _ehBloqueioCloudflare(page);
+      if (_cfLogin.bloqueado) {
+        throw new Error(`cloudflare_bloqueio_login ${JSON.stringify({ titulo: _cfLogin.titulo, url: urlAtual })}`);
+      }
       // Estados "ja logado via cookie" sao detectados pela URL (nao dependem do
       // formulario renderizar). So aceita como OK se ja passou pelo fluxo certo.
       const urlOK = urlAtual.includes('/notificacao-feriados') || urlAtual.includes('/acompanhamento-servicos');
@@ -468,6 +559,9 @@ async function fazerLogin(page, overrides) {
       return; // sucesso!
     } catch (err) {
       ultimoErro = err.message;
+      // 🆕 anti-Cloudflare: bloqueio CF nao se resolve insistindo/limpando
+      // cookies — propaga direto pro service tratar com backoff longo.
+      if (/^cloudflare_/.test(err.message || '')) throw err;
       log(`⚠️ [tentativa ${i + 1}/${tentativas.length}] erro: ${err.message}`);
     }
   }
@@ -649,15 +743,8 @@ async function garantirSessao() {
   try {
     ({ browser, _ehOverride: _browserEhOverride1 } = await _getBrowser());
 
-    if (fs.existsSync(getSessionFile())) {
-      try {
-        context = await browser.newContext({ storageState: getSessionFile() });
-      } catch {
-        context = await browser.newContext();
-      }
-    } else {
-      context = await browser.newContext();
-    }
+    // 🆕 2026-07 anti-Cloudflare: contexto com fingerprint de Chrome real
+    context = await _novoContextoSLA(browser);
 
     // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
     await aplicarBloqueio(context, 'sla-capture/capturarPontos');
@@ -828,18 +915,9 @@ async function coletarOsEmExecucao(opts = {}) {
     ({ browser, _ehOverride: _browserEhOverride2 } = await _getBrowser());
     etapa('browser_launched');
 
-    if (fs.existsSync(getSessionFile())) {
-      try {
-        context = await browser.newContext({ storageState: getSessionFile() });
-        etapa('context_with_storage');
-      } catch (e) {
-        etapa('context_storage_failed', { erro: e.message });
-        context = await browser.newContext();
-      }
-    } else {
-      context = await browser.newContext();
-      etapa('context_no_storage');
-    }
+    // 🆕 2026-07 anti-Cloudflare: contexto com fingerprint de Chrome real
+    context = await _novoContextoSLA(browser);
+    etapa('context_with_storage');
 
     // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
     await aplicarBloqueio(context, 'sla-capture/coletarOs');
@@ -1465,16 +1543,9 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
   try {
     ({ browser, _ehOverride: _browserEhOverride3 } = await _getBrowser());
 
-    // Reusa cookies se possível
-    if (fs.existsSync(getSessionFile())) {
-      try {
-        context = await browser.newContext({ storageState: getSessionFile() });
-      } catch {
-        context = await browser.newContext();
-      }
-    } else {
-      context = await browser.newContext();
-    }
+    // 🆕 2026-07 anti-Cloudflare: contexto com fingerprint de Chrome real
+    // (Reusa cookies internamente se o session file existir.)
+    context = await _novoContextoSLA(browser);
 
     // 2026-04 egress-fix: bloqueia trackers externos (Facebook, GA, etc)
     await aplicarBloqueio(context, 'sla-capture/3');
@@ -1562,6 +1633,15 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
       }
 
       if (!inputVisivel) {
+        // 🆕 2026-07 anti-Cloudflare: ANTES de assumir "sessao morreu", checa se
+        // a pagina e um bloqueio do Cloudflare. Se for, re-logar NAO resolve (a
+        // tela de login vem bloqueada tambem) e apagar cf_clearance PIORA.
+        // Recua e re-enfileira com backoff longo (tratado no service).
+        const _cf = await _ehBloqueioCloudflare(page);
+        if (_cf.bloqueado) {
+          log(`🛑 Bloqueio Cloudflare detectado (titulo="${_cf.titulo}") — NAO re-logando, NAO apagando sessao. Re-enfileirando com backoff.`);
+          throw new Error(`cloudflare_bloqueio ${JSON.stringify({ titulo: _cf.titulo, url: page.url() })}`);
+        }
         // Sessão provavelmente morreu — força re-login e retry
         log('⚠️ Campo de busca não apareceu — forçando re-login');
         try {
