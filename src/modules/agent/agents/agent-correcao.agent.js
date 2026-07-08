@@ -77,6 +77,9 @@ module.exports = defineAgent({
     const browserSession = criarBrowserSession({
       nome: `agent-correcao-slot-${ctx.slotIdx}`,
       launchOpts: CORRECAO_LAUNCH_OPTS,
+      // 🛡️ Browser persistente vive >3min → sem isso o chromium-reaper o mata
+      // no meio da correção de endereço (Target page closed).
+      protegerDoReaper: true,
     });
     ctx.log('✅ BrowserSession pronta (browser lancado no 1o job)');
     return { browserSession };

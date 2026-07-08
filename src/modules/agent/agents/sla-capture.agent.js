@@ -84,6 +84,9 @@ module.exports = defineAgent({
     const browserSession = criarBrowserSession({
       nome: `sla-capture-slot-${ctx.slotIdx}`,
       launchOpts: SLA_LAUNCH_OPTS,
+      // 🛡️ Browser persistente vive >3min → sem isso o chromium-reaper o mata
+      // no meio da coleta (Target page closed) e derruba SLA/detector em cascata.
+      protegerDoReaper: true,
     });
     ctx.log('✅ BrowserSession pronta (browser lancado no 1o job)');
     return { browserSession };
