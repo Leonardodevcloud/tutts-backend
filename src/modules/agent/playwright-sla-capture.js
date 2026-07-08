@@ -465,6 +465,10 @@ async function fazerLogin(page, overrides) {
 
       await page.waitForURL((url) => !url.toString().includes('loginFuncionarioNovo'), {
         timeout: TIMEOUT,
+        // 'load' (default) trava neste site (Cloudflare/RUM + recursos bloqueados
+        // pelo net-blocker fazem o evento 'load' nao disparar). 'domcontentloaded'
+        // espera a URL mudar + DOM pronto, sem depender de todos os recursos.
+        waitUntil: 'domcontentloaded',
       });
       log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}) — URL: ${page.url()}`);
       return; // sucesso!
