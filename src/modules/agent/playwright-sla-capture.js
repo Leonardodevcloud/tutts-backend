@@ -418,47 +418,41 @@ async function fazerLogin(page, overrides) {
       await page.waitForTimeout(1500);
 
       const urlAtual = page.url();
-      const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
+      // Estados "ja logado via cookie" sao detectados pela URL (nao dependem do
+      // formulario renderizar). So aceita como OK se ja passou pelo fluxo certo.
+      const urlOK = urlAtual.includes('/notificacao-feriados') || urlAtual.includes('/acompanhamento-servicos');
+      const urlPrincipal = urlAtual.includes('/principal') || (urlAtual.includes('/expressoat/') && !urlOK);
 
-      if (!temEmail) {
-        // 🔧 v22 (2026-05-28): LÓGICA DE "JÁ LOGADO VIA COOKIE" revisada
-        //
-        // Problema v18-v21: quando cookie redireciona goto(loginFuncionarioNovo) pra
-        // principal.php, o servidor NÃO marcou a sessão como "pós-feriados".
-        // Qualquer goto a /acompanhamento-servicos faz redirect chain:
-        //   acompanhamento-servicos → index.php → principal.php (loop)
-        //
-        // Fix: só aceita sessão como "OK" se URL já é /notificacao-feriados ou
-        // /acompanhamento-servicos (estados pós-fluxo-de-login correto).
-        // Se está em /principal: limpa cookies → próxima tentativa vai direto
-        // ao formulário de login e o servidor redireciona para notificacao-feriados,
-        // desbloqueando o acompanhamento-servicos.
-        const urlOK = urlAtual.includes('/notificacao-feriados') || urlAtual.includes('/acompanhamento-servicos');
-        const urlPrincipal = urlAtual.includes('/principal') || (urlAtual.includes('/expressoat/') && !urlOK);
-
-        if (urlOK) {
-          // Sessão válida no estado certo — retorna sem navegar
-          log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_cookie_ok) — URL: ${urlAtual}`);
-          return;
-        }
-
-        if (urlPrincipal) {
-          // Cookie válido mas sessão presa em principal.php sem passar por feriados.
-          // Limpa cookies + session file → próxima iteração fará login com credenciais
-          // e o servidor vai direcionar para notificacao-feriados naturalmente.
-          log(`🗑️ [tentativa ${i + 1}/${tentativas.length}] Sessão em ${urlAtual} sem feriados — limpando cookies, forçando login completo`);
-          try {
-            await page.context().clearCookies();
-            const sf = getSessionFile();
-            if (fs.existsSync(sf)) { fs.unlinkSync(sf); log('🧹 Session file removido'); }
-          } catch (eLimpa) { log(`⚠️ clearCookies: ${eLimpa.message}`); }
-          ultimoErro = 'sessao_principal_sem_feriados';
-          continue; // → próxima tentativa vai achar #loginEmail e fazer login completo
-        }
-        continue; // próxima tentativa
+      if (urlOK) {
+        log(`✅ Login SLA OK (tentativa ${i + 1}/${tentativas.length}, motivo=${t.motivo}_cookie_ok) — URL: ${urlAtual}`);
+        return;
       }
 
-      // #loginEmail encontrado → preenche e submete
+      if (urlPrincipal) {
+        log(`🗑️ [tentativa ${i + 1}/${tentativas.length}] Sessão em ${urlAtual} sem feriados — limpando cookies, forçando login completo`);
+        try {
+          await page.context().clearCookies();
+          const sf = getSessionFile();
+          if (fs.existsSync(sf)) { fs.unlinkSync(sf); log('🧹 Session file removido'); }
+        } catch (eLimpa) { log(`⚠️ clearCookies: ${eLimpa.message}`); }
+        ultimoErro = 'sessao_principal_sem_feriados';
+        continue;
+      }
+
+      // Deve ser a tela de login (loginFuncionarioNovo). Sob latência alta o
+      // formulário demora a renderizar — antes esperávamos só 1500ms fixos e
+      // caíamos num continue SEM erro ("Último erro: null"). Agora esperamos até
+      // 12s o #loginEmail ficar visível.
+      const temEmail = await page.locator('#loginEmail')
+        .waitFor({ state: 'visible', timeout: 12000 })
+        .then(() => true).catch(() => false);
+      if (!temEmail) {
+        ultimoErro = `formulario de login (#loginEmail) nao renderizou em 12s — url=${page.url()}`;
+        log(`⚠️ [tentativa ${i + 1}/${tentativas.length}] ${ultimoErro}`);
+        continue;
+      }
+
+      // #loginEmail visível → preenche e submete
       await page.fill('#loginEmail', email);
       await page.fill('input[type="password"]', senha);
       await page.locator('input[name="logar"]').first().click();
@@ -1560,7 +1554,8 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
 
       let inputVisivel = false;
       try {
-        await inputBusca.waitFor({ state: 'visible', timeout: 8000 });
+        // 15s (era 8s): sob latência o campo de busca demora a aparecer.
+        await inputBusca.waitFor({ state: 'visible', timeout: 15000 });
         inputVisivel = true;
       } catch {
         inputVisivel = false;
@@ -1602,7 +1597,27 @@ async function capturarPontosOS({ os_numero, cliente_cod, configEntries }) {
           } catch (_) {}
         }
 
-        await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+        try {
+          await inputBusca.waitFor({ state: 'visible', timeout: TIMEOUT });
+        } catch (eBusca) {
+          // Campo de busca não apareceu NEM após re-login completo. Loga um
+          // diagnóstico no próprio log (você consegue ver): URL, título, e se os
+          // elementos-chave existem no DOM. Distingue "site mudou o campo" de
+          // "página errada/redirect" de "campo existe mas escondido".
+          let _diag = {};
+          try {
+            _diag = await page.evaluate(() => ({
+              url: location.href,
+              titulo: document.title,
+              temInput: !!document.querySelector('#search-autocomplete-input'),
+              temPlaceholderServico: !!document.querySelector('input[placeholder*="serviço"]'),
+              temBarraPesquisa: !!Array.from(document.querySelectorAll('*')).some(e => (e.childElementCount === 0) && e.textContent && e.textContent.trim() === 'Pesquisar serviços'),
+              temAbaEmExecucao: !!document.querySelector('#pills-em-execucao-tab'),
+            }));
+          } catch (_) {}
+          log(`❌ campo de busca (#search-autocomplete-input) não apareceu após re-login — DIAG: ${JSON.stringify(_diag)}`);
+          throw new Error(`campo_busca_ausente_pos_relogin ${JSON.stringify(_diag)}`);
+        }
       }
 
       await inputBusca.fill(String(os_numero));
