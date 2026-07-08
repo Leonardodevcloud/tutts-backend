@@ -137,9 +137,9 @@ async function geocodeReverse(pool, lat, lng, opts = {}) {
     const r = await pool.query(
       `SELECT endereco_formatado, latitude, longitude, fonte
          FROM enderecos_geocodificados
-        WHERE latitude BETWEEN $1 - $3 AND $1 + $3
-          AND longitude BETWEEN $2 - $3 AND $2 + $3
-        ORDER BY (POWER(latitude - $1, 2) + POWER(longitude - $2, 2)) ASC
+        WHERE latitude BETWEEN $1::float8 - $3::float8 AND $1::float8 + $3::float8
+          AND longitude BETWEEN $2::float8 - $3::float8 AND $2::float8 + $3::float8
+        ORDER BY (POWER(latitude - $1::float8, 2) + POWER(longitude - $2::float8, 2)) ASC
         LIMIT 1`,
       [latNum, lngNum, tol]
     );
