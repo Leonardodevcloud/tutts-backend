@@ -17,7 +17,7 @@ const express = require('express');
 const XLSX = require('xlsx');
 const crypto = require('crypto');
 // 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
-const { sqlDataInicio, sqlDataFim } = require('../financial.shared');
+const { sqlDataInicio, sqlDataFim, parsePlificSaldo } = require('../financial.shared');
 
 // ==================== VALIDAÇÃO DE FORMATO PIX ====================
 function validarFormatoPix(chave) {
@@ -296,7 +296,7 @@ function createAcertoRoutes(pool, verificarToken, verificarAdminOuFinanceiro, re
         if (typeof saldoRaw === 'number') {
           saldo = saldoRaw;
         } else if (typeof saldoRaw === 'string') {
-          saldo = parseFloat(saldoRaw.replace(/\./g, '').replace(',', '.')) || 0;
+          saldo = parsePlificSaldo(saldoRaw);
         }
 
         // Ignorar saldo zero

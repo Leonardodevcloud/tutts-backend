@@ -3,6 +3,31 @@
  */
 const rateLimit = require('express-rate-limit');
 
+/**
+ * Converte o saldo retornado pela Plific em número — de forma robusta ao FORMATO.
+ * A Plific pode devolver:
+ *   - número (34.8)                  -> usa direto
+ *   - BR string "1.000,00" / "34,80" -> ponto=milhar, vírgula=decimal
+ *   - US/plano "34.8" / "348"        -> ponto=DECIMAL (parseFloat direto)
+ *
+ * ⚠️ BUG CORRIGIDO (2026-07): a parsing antiga fazia SEMPRE
+ * `str.replace(/\./g,'').replace(',','.')`, removendo o ponto DECIMAL quando o
+ * valor vinha como número/US. Ex.: "34.8" -> "348" -> R$ 348 (10x!). Isso
+ * inflava o saldo exibido E o check de saldo do saque, deixando o motoboy sacar
+ * muito além do que tinha. Espelha o parseSaldoBR (correto) do front.
+ */
+function parsePlificSaldo(valor) {
+  if (typeof valor === 'number') return Number.isFinite(valor) ? valor : 0;
+  if (valor === null || valor === undefined || valor === '') return 0;
+  const str = String(valor).trim();
+  if (str.includes(',')) {
+    // Formato BR: ponto é separador de milhar, vírgula é decimal.
+    return parseFloat(str.replace(/\./g, '').replace(',', '.')) || 0;
+  }
+  // Sem vírgula: número puro ou US ("34.8", "348") — o ponto é o decimal.
+  return parseFloat(str) || 0;
+}
+
 function createFinancialHelpers(getClientIP) {
   const withdrawalCreateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
@@ -42,7 +67,8 @@ function createFinancialHelpers(getClientIP) {
   return {
     withdrawalCreateLimiter,
     PLIFIC_CONFIG, PLIFIC_AMBIENTE, PLIFIC_BASE_URL, PLIFIC_TOKEN,
-    plificSaldoCache
+    plificSaldoCache,
+    parsePlificSaldo
   };
 }
 
@@ -75,4 +101,4 @@ function sqlDataFim(coluna, idxParam) {
   return `${coluna} < ((($${idxParam}::date + 1)::timestamp AT TIME ZONE '${TZ_NEGOCIO}') AT TIME ZONE 'UTC')`;
 }
 
-module.exports = { createFinancialHelpers, TZ_NEGOCIO, sqlDataInicio, sqlDataFim };
+module.exports = { createFinancialHelpers, TZ_NEGOCIO, sqlDataInicio, sqlDataFim, parsePlificSaldo };

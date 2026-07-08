@@ -260,7 +260,7 @@ router.get('/plific/saldo/:idProf', verificarToken, verificarAdminOuFinanceiro, 
             // Remove pontos de milhar e troca vírgula por ponto
             const saldoStr = String(profissionalData.saldo);
             profissionalData.saldoOriginal = saldoStr;
-            profissionalData.saldo = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+            profissionalData.saldo = helpers.parsePlificSaldo(saldoStr);
         }
         
         const resultado = {
@@ -474,9 +474,7 @@ router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, a
                     const cached = helpers.plificSaldoCache.get(cacheKey);
                     if (Date.now() - cached.timestamp < helpers.PLIFIC_CONFIG.CACHE_TTL) {
                         const saldoCached = cached.data.profissional?.saldo;
-                        const saldoNum = typeof saldoCached === 'string' 
-                            ? parseFloat(saldoCached.replace(/\./g, '').replace(',', '.')) || 0
-                            : parseFloat(saldoCached || 0);
+                        const saldoNum = helpers.parsePlificSaldo(saldoCached);
                         resultados.push({
                             codigo: prof.codigo,
                             nome: prof.nome,
@@ -500,7 +498,7 @@ router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, a
                     let saldoNum = 0;
                     if (profData && profData.saldo) {
                         const saldoStr = String(profData.saldo);
-                        saldoNum = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+                        saldoNum = helpers.parsePlificSaldo(profData.saldo);
                     }
                     
                     resultados.push({

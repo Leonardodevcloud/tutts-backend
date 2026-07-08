@@ -11,6 +11,7 @@
  */
 
 const express = require('express');
+const { parsePlificSaldo } = require('../financial.shared');
 
 function createLimitesRoutes(pool, verificarToken, verificarAdminOuFinanceiro, registrarAuditoria, AUDIT_CATEGORIES) {
   const router = express.Router();
@@ -217,7 +218,7 @@ function createLimitesRoutes(pool, verificarToken, verificarAdminOuFinanceiro, r
           
           if (saldoData.status === '200' || saldoData.status === 200) {
             const saldoStr = String(saldoData.dados?.profissional?.saldo || '0');
-            const saldoNum = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+            const saldoNum = parsePlificSaldo(saldoData.dados?.profissional?.saldo);
             
             if (saldoNum <= 0) {
               return res.status(400).json({ 

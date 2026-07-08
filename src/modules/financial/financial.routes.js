@@ -6,7 +6,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 // 🆕 2026-05 Helpers de filtro de data com correção de fuso (Bug D±1)
-const { sqlDataInicio, sqlDataFim } = require('./financial.shared');
+const { sqlDataInicio, sqlDataFim, parsePlificSaldo } = require('./financial.shared');
 // 🆕 2026-05 Integração com módulo Máquinas (bloqueio de saque + consumo de liberação)
 const { verificarMaquinaPendente, consumirLiberacaoSeExistir } = require('../maquinas/maquinas.shared');
 
@@ -891,7 +891,7 @@ router.post('/withdrawals', verificarToken, withdrawalCreateLimiter, async (req,
       
       if (dataSaldo.dados?.profissional?.saldo !== undefined) {
         const saldoStr = String(dataSaldo.dados.profissional.saldo);
-        const saldoNumero = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+        const saldoNumero = parsePlificSaldo(dataSaldo.dados.profissional.saldo);
         
         if (saldoNumero < valorArredondado) {
           await client.query('ROLLBACK');
@@ -2380,7 +2380,7 @@ router.get('/plific/saldo/:idProf', verificarToken, async (req, res) => {
             // Remove pontos de milhar e troca vírgula por ponto
             const saldoStr = String(profissionalData.saldo);
             profissionalData.saldoOriginal = saldoStr;
-            profissionalData.saldo = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+            profissionalData.saldo = parsePlificSaldo(saldoStr);
         }
         
         const resultado = {
@@ -2594,9 +2594,7 @@ router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, a
                     const cached = plificSaldoCache.get(cacheKey);
                     if (Date.now() - cached.timestamp < PLIFIC_CONFIG.CACHE_TTL) {
                         const saldoCached = cached.data.profissional?.saldo;
-                        const saldoNum = typeof saldoCached === 'string' 
-                            ? parseFloat(saldoCached.replace(/\./g, '').replace(',', '.')) || 0
-                            : parseFloat(saldoCached || 0);
+                        const saldoNum = parsePlificSaldo(saldoCached);
                         resultados.push({
                             codigo: prof.codigo,
                             nome: prof.nome,
@@ -2620,7 +2618,7 @@ router.get('/plific/saldos-todos', verificarToken, verificarAdminOuFinanceiro, a
                     let saldoNum = 0;
                     if (profData && profData.saldo) {
                         const saldoStr = String(profData.saldo);
-                        saldoNum = parseFloat(saldoStr.replace(/\./g, '').replace(',', '.')) || 0;
+                        saldoNum = parsePlificSaldo(profData.saldo);
                     }
                     
                     resultados.push({
