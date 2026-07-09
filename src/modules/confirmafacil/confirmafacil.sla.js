@@ -56,6 +56,7 @@ async function _buscarClassificado(pool, dataRef = null) {
         c.status_cf,
         COALESCE(c.dias_atraso, 0) AS dias_atraso,
         c.destinatario_nome, c.destinatario_cidade, c.destinatario_uf,
+        c.numero_nf, c.serie_nf,
         v.solicitacao_id,
         sc.tutts_os_numero,
         ${DEADLINE_UTC} AS deadline,
@@ -70,6 +71,7 @@ async function _buscarClassificado(pool, dataRef = null) {
     SELECT
       cnpj_embarcador, nome_embarcador, status_cf,
       destinatario_nome, destinatario_cidade, destinatario_uf,
+      numero_nf, serie_nf,
       solicitacao_id, tutts_os_numero, deadline, entregue_em,
       (status_cf = 'ENTREGUE' OR entregue_em IS NOT NULL) AS entregue,
       CASE
@@ -153,6 +155,8 @@ async function calcularPainel(pool, dataRef = null) {
       filial: r.nome_embarcador,
       cliente: r.destinatario_nome,
       destino: [r.destinatario_cidade, r.destinatario_uf].filter(Boolean).join(' / '),
+      numero_nf: r.numero_nf,
+      serie_nf: r.serie_nf,
       deadline: r.deadline,
       entregue_em: r.entregue_em,
       bucket: r.bucket, // 'no_prazo' | 'estourada'
