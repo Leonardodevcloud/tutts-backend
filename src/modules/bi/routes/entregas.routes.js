@@ -516,7 +516,7 @@ router.post('/bi/entregas/upload', async (req, res) => {
     // PASSO 8: Disparar análise anti-fraude automática
     // ============================================
     try {
-      const { executarVarreduraCompleta } = require('../antifraude/antifraude-worker');
+      const { executarVarreduraCompleta } = require('../../antifraude/antifraude-worker');
       const usuario = req.user?.fullName || req.user?.nome || 'Upload BI';
       // Analisar nas datas do upload
       const dataMin = datasAfetadas.length > 0 ? datasAfetadas.sort()[0] : null;
