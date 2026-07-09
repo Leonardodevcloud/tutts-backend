@@ -35,7 +35,9 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   // ── SLA: painel por filial + lista de risco (para a aba "Risco de SLA") ──
   router.get('/sla-painel', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
-      res.json(await slaMod.calcularPainel(pool));
+      // 🆕 filtro por data (BRT, YYYY-MM-DD) para consultar dias anteriores; sem data = hoje
+      const dataRef = (req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data)) ? req.query.data : null;
+      res.json(await slaMod.calcularPainel(pool, dataRef));
     } catch (err) { next(err); }
   });
 

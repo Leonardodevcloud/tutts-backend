@@ -36,12 +36,18 @@ const INICIO_BRT   = `(CASE WHEN ${CRIADO_BRT}::time > TIME '16:30'
                             THEN ((date(${CRIADO_BRT}) + 1) + TIME '08:00')
                             ELSE ${CRIADO_BRT} END)`;
 const DEADLINE_UTC = `((${INICIO_BRT} + INTERVAL '2 hours') AT TIME ZONE 'America/Sao_Paulo')`;
-// Entrega real (data_finalizado é UTC naive) -> timestamptz
-const ENTREGA_UTC  = `((SELECT MAX(sp.data_finalizado) FROM solicitacoes_pontos sp
-                        WHERE sp.solicitacao_id = v.solicitacao_id) AT TIME ZONE 'UTC')`;
+// Entrega real -> timestamptz. Prioriza o horario CF-owned (finalizado_em,
+// que respeita a correcao manual de horario); se ausente, cai no MAX(data_finalizado)
+// do Tutts. Ambos sao UTC naive -> AT TIME ZONE 'UTC'.
+const ENTREGA_UTC  = `COALESCE(
+                        (v.finalizado_em AT TIME ZONE 'UTC'),
+                        ((SELECT MAX(sp.data_finalizado) FROM solicitacoes_pontos sp
+                          WHERE sp.solicitacao_id = v.solicitacao_id) AT TIME ZONE 'UTC')
+                      )`;
 
-// Busca as corridas do DIA já classificadas (uma linha por corrida)
-async function _buscarClassificado(pool) {
+// Busca as corridas de um DIA (BRT) já classificadas (uma linha por corrida).
+// dataRef = 'YYYY-MM-DD' (BRT) ou null = hoje.
+async function _buscarClassificado(pool, dataRef = null) {
   const sql = `
     WITH base AS (
       SELECT
@@ -58,7 +64,7 @@ async function _buscarClassificado(pool) {
       JOIN confirmafacil_vinculos v
         ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
       JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-      WHERE date(${CRIADO_BRT}) = (now() AT TIME ZONE 'America/Sao_Paulo')::date
+      WHERE date(${CRIADO_BRT}) = COALESCE($1::date, (now() AT TIME ZONE 'America/Sao_Paulo')::date)
         AND COALESCE(c.status_cf, '') NOT IN ('CANCELADO', 'DEVOLVIDO')
     )
     SELECT
@@ -77,7 +83,7 @@ async function _buscarClassificado(pool) {
       END AS bucket
     FROM base
   `;
-  const { rows } = await pool.query(sql);
+  const { rows } = await pool.query(sql, [dataRef]);
   return rows;
 }
 
@@ -117,9 +123,10 @@ function _agregar(rows) {
   return filiais;
 }
 
-// Endpoint do painel: filiais + lista de risco (para a aba)
-async function calcularPainel(pool) {
-  const rows = await _buscarClassificado(pool);
+// Endpoint do painel: filiais + lista de risco + finalizadas (para a aba).
+// dataRef = 'YYYY-MM-DD' (BRT) ou null = hoje (historico).
+async function calcularPainel(pool, dataRef = null) {
+  const rows = await _buscarClassificado(pool, dataRef);
   const filiais = _agregar(rows);
   const riscos = rows
     .filter((r) => r.bucket === 'em_risco' || (r.bucket === 'estourada' && !r.entregue))
@@ -134,7 +141,25 @@ async function calcularPainel(pool) {
       bucket: r.bucket,
     }))
     .sort((a, b) => new Date(a.deadline) - new Date(b.deadline));
-  return { geradoEm: new Date().toISOString(), filiais, riscos };
+
+  // 🆕 Finalizadas do dia (entregues), classificadas dentro/fora do prazo,
+  // com o horario efetivo de finalizacao (entregue_em).
+  const finalizadas = rows
+    .filter((r) => r.entregue && (r.bucket === 'no_prazo' || r.bucket === 'estourada'))
+    .map((r) => ({
+      solicitacao_id: r.solicitacao_id,
+      os: r.tutts_os_numero,
+      cnpj: r.cnpj_embarcador,
+      filial: r.nome_embarcador,
+      cliente: r.destinatario_nome,
+      destino: [r.destinatario_cidade, r.destinatario_uf].filter(Boolean).join(' / '),
+      deadline: r.deadline,
+      entregue_em: r.entregue_em,
+      bucket: r.bucket, // 'no_prazo' | 'estourada'
+    }))
+    .sort((a, b) => new Date(b.entregue_em || 0) - new Date(a.entregue_em || 0));
+
+  return { geradoEm: new Date().toISOString(), dataRef: dataRef || null, filiais, riscos, finalizadas };
 }
 
 // ── Alerta WhatsApp (mesmo padrão/grupo da disponibilidade) ─────────────

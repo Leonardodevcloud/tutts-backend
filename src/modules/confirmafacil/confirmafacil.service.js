@@ -262,6 +262,19 @@ class ConfirmaFacilService {
           ).catch(() => {});
         }
       }
+
+      // 🆕 SLA 2026-07: quando a ocorrencia e ENTREGUE, grava o horario de
+      // finalizacao (o 'agora' ja considera a correcao manual de horario) na
+      // coluna CF-owned. Armazenado como UTC-naive para casar com a convencao
+      // do painel de SLA (data_finalizado do Tutts tambem e UTC-naive).
+      if (novoStatusCache === 'ENTREGUE') {
+        await this.pool.query(
+          `UPDATE confirmafacil_vinculos
+              SET finalizado_em = ($2::timestamptz AT TIME ZONE 'UTC')
+            WHERE solicitacao_id = $1`,
+          [solicitacaoId, agora.toISOString()]
+        ).catch(() => {});
+      }
     }
   }
 

@@ -123,6 +123,12 @@ async function initConfirmaFacilTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_log_solicitacao  ON confirmafacil_log      (solicitacao_id)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_vinculos_embarque ON confirmafacil_vinculos (id_embarque)`).catch(() => {});
 
+  // SLA (2026-07): horario de finalizacao CF-owned. Preenchido quando a
+  // ocorrencia ENTREGUE e enviada ao CF (inclusive com correcao manual de
+  // horario). O painel de SLA prioriza esta coluna sobre o data_finalizado
+  // do Tutts, para que finalizacao no prazo reclassifique de estourada -> no prazo.
+  await pool.query(`ALTER TABLE confirmafacil_vinculos ADD COLUMN IF NOT EXISTS finalizado_em TIMESTAMP`).catch(() => {});
+
   // SLA: garante a coluna created_at (marco zero do SLA) em solicitacoes_corrida.
   // Linhas antigas ficam NULL (sem SLA); novas corridas recebem NOW() pelo default.
   await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS created_at TIMESTAMP`).catch(() => {});
