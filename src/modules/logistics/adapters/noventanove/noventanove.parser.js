@@ -250,6 +250,12 @@ function montarBodyCreate(estimateId, req, config) {
   const telSuporte = (config && config.telefone_suporte) || '';
   const pacote = resolverPacote(config);
   const osRef = String(req.externalRef);
+  // 2026-07: external_order_id UNICO por tentativa. No re-despacho, o Orchestrator
+  // manda req.externalOrderId = "<codigo_os>-<id_registro>" pra nao colidir com o
+  // pedido anterior na 99 ("The same external_id"). O `note`/osRef4 continua usando
+  // req.externalRef (o codigo_os puro), pra o courier ver a OS certa.
+  const externalOrderId = String((req.externalOrderId != null && String(req.externalOrderId).trim())
+    ? req.externalOrderId : osRef);
   // 2026-06: na OBSERVACAO mostrada ao courier usamos so os 4 ultimos digitos
   // da OS (motoboy reclamou que cortava). O external_order_id continua INTEIRO
   // (idempotencia/rastreio na 99).
@@ -293,7 +299,7 @@ function montarBodyCreate(estimateId, req, config) {
 
   const body = {
     vehicle_type: resolverVeiculo(req.vehicleType),
-    external_order_id: osRef,       // codigo_os da Mapp — idempotente
+    external_order_id: externalOrderId,  // unico por tentativa (idempotencia 99)
     estimate_id: String(estimateId),
     pickup_info: pickupInfo,
     dropoff_info: dropoffInfo,

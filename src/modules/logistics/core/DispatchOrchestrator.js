@@ -393,12 +393,21 @@ class DispatchOrchestrator {
         request.dropoff.name = String(_ponte.nome).trim().slice(0, 100);
       }
 
+      // 🆕 2026-07: external_order_id UNICO por tentativa. A 99 usa o external_order_id
+      // como chave de idempotencia; no re-despacho, reusar o codigo_os do pedido
+      // cancelado faz a 99 recusar ("The same external_id was already used").
+      // Usamos "<codigo_os>-<id_registro>" (o id do registro e unico por tentativa)
+      // e guardamos no registro pra o cancelamento apontar pro MESMO ref.
+      const externalOrderRef = `${codigoOS}-${registro.id}`;
+      if (request) request.externalOrderId = externalOrderRef;
+
       await this.pool.query(`
         UPDATE logistics_deliveries
         SET external_quote_id = $1, valor_provider = $2, eta_minutos = $3,
+            external_order_ref = $4,
             status_canonico = 'PENDING', status_native = 'cotacao_recebida', updated_at = NOW()
-        WHERE id = $4
-      `, [quote.quoteId, quote.valor, quote.etaMinutos, registro.id]);
+        WHERE id = $5
+      `, [quote.quoteId, quote.valor, quote.etaMinutos, externalOrderRef, registro.id]);
 
       // 5. Criar delivery no provider
       const delivery = await adapter.createDelivery(quote, request);
@@ -672,12 +681,13 @@ class DispatchOrchestrator {
     if (externalId) {
       const providerCode = entrega.provider_code || 'uber';
       const adapter = this._getAdapterOrThrow(providerCode);
+      // 🆕 2026-07: usa o external_order_ref UNICO salvo no despacho (ex:
+      // "<codigo_os>-<id>"). Registros antigos nao tem o ref -> cai no codigo_os
+      // (comportamento anterior). O ref precisa casar com o que foi usado na
+      // criacao, senao a 99 nao acha o pedido pra cancelar.
+      const cancelRef = entrega.external_order_ref || entrega.codigo_os;
       try {
-        // 🆕 passa o codigo_os (external_order_id ESTAVEL da 99) como 2o arg.
-        // A doc da 99: order_id MUDA se a corrida e reatribuida a outro
-        // entregador; external_order_id (= codigo_os) nunca muda. Cancelar pelo
-        // external_order_id evita falha quando houve reatribuicao.
-        const rc = await adapter.cancelDelivery(externalId, entrega.codigo_os, { motivo });
+        const rc = await adapter.cancelDelivery(externalId, cancelRef, { motivo });
         if (rc && rc.ok === false) {
           providerCancelado = false;
           providerCancelMsg = rc.msg || 'provider recusou o cancelamento';
@@ -685,7 +695,7 @@ class DispatchOrchestrator {
           // errno=1001 "too frequently") -> reagenda o cancel em background,
           // espacado (acima do rate limit). Nao bloqueia a resposta ao operador.
           if (rc.retriable) {
-            this._agendarRetryCancel99(adapter, entregaId, externalId, entrega.codigo_os);
+            this._agendarRetryCancel99(adapter, entregaId, externalId, cancelRef);
           }
         }
       } catch (err) {

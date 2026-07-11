@@ -480,7 +480,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       if (codigos.length === 0) return res.json({ success: true, porOs: {} });
 
       const TIPOS = [
-        'dispatch_success', 'dispatch_failed',
+        'dispatch_success', 'dispatch_failed', 'error',
         'dispatch_rejected_by_rule', 'dispatch_rejected_by_margin',
         'redispatched', 'canceled',
       ];
@@ -538,7 +538,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
             continue;
           }
 
-          // dispatch_success / dispatch_failed / rejected_*
+          // dispatch_success / dispatch_failed / error / rejected_*
           passos.push({
             tipo: e.event_type,
             provider: e.provider_code || null,
@@ -548,9 +548,11 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           });
         }
 
-        // conta so as tentativas de mandar (sucesso/falha/rejeicao) pro badge
+        // conta as tentativas de MANDAR pro provider (deu certo, falhou ou foi
+        // recusada na criacao). O 'error' (ex: createDelivery "The same external_id")
+        // conta como tentativa que falhou — por isso entra aqui.
         const totalTentativas = passos.filter(x =>
-          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' ||
+          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' || x.tipo === 'error' ||
           x.tipo === 'dispatch_rejected_by_rule' || x.tipo === 'dispatch_rejected_by_margin'
         ).length;
 
