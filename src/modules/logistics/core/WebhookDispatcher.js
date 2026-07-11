@@ -324,6 +324,14 @@ class WebhookDispatcher {
 
     // Dispara ação Mapp conforme o status canônico
     await this._dispararAcaoMapp(codigoOS, entrega, evento, novoStatusCanonico);
+
+    // 2026-07: entregador cancelou e a 99 NAO reatribuiu (DriverCanceled sem
+    // new_order_id). Relancamos por conta propria — forcado, como no bloqueio.
+    // Cancelamento MANUAL nao chega aqui (vem por orch.cancel), entao esta
+    // protegido: so o cancelamento do ENTREGADOR dispara relancamento automatico.
+    if (evento.relancarPorDriverCancel) {
+      await this._relancarAposDriverCancel(providerCode, codigoOS);
+    }
   }
 
   /**
@@ -528,6 +536,40 @@ class WebhookDispatcher {
     }
 
     return true;
+  }
+
+  /**
+   * Relanca uma OS depois que o ENTREGADOR cancelou e a 99 NAO reatribuiu
+   * (DriverCanceled sem new_order_id). Forcado — como no bloqueio, ignora escolha
+   * do cliente/regra e relanca pelo Hub (melhor_preco). Teto pra evitar loop numa
+   * corrida que entregadores seguidos recusam (env DRIVER_CANCEL_RELANCE_MAX,
+   * default 5). O contador vive na memoria do processo (zera em restart), so pra
+   * cortar loop rapido.
+   *
+   * Cancelamento MANUAL nunca chega aqui (vem por orch.cancel, nao por webhook),
+   * entao esta garantido que so o cancelamento do entregador dispara isso.
+   * @private
+   */
+  async _relancarAposDriverCancel(providerCode, codigoOS) {
+    const MAX = parseInt(process.env.DRIVER_CANCEL_RELANCE_MAX, 10) || 5;
+    if (!this._relancDriverCancel) this._relancDriverCancel = new Map();
+    const jaFeitas = this._relancDriverCancel.get(codigoOS) || 0;
+    if (jaFeitas >= MAX) {
+      console.warn(`⚠️ [WebhookDispatcher] OS ${codigoOS}: teto de relancamento por cancelamento de entregador atingido (${MAX}) — deixando cancelada.`);
+      return;
+    }
+    const { getDispatchOrchestrator } = require('./DispatchOrchestrator');
+    const orchestrator = getDispatchOrchestrator(this.pool);
+    this._relancDriverCancel.set(codigoOS, jaFeitas + 1);
+    try {
+      const rd = await orchestrator.tryDispatchByOS(codigoOS, {
+        motivo: 'entregador_cancelou',
+        forcar: true,
+      });
+      console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: entregador cancelou (99 nao reatribuiu), relancado (tentativa ${jaFeitas + 1}/${MAX}) -> ${rd && rd.decision ? rd.decision : 'ok'}`);
+    } catch (e) {
+      console.error(`[WebhookDispatcher] falha ao relancar OS ${codigoOS} apos cancelamento do entregador: ${e.message}`);
+    }
   }
 
   /**

@@ -189,12 +189,16 @@ function parsePayload99(payload) {
         rawProvider: payload,
       };
     }
-    // Sem new_order_id → cancelamento de verdade (a 99 nao achou outro entregador).
+    // Sem new_order_id → a 99 NAO reatribuiu (nao achou outro entregador).
+    // Marcamos cancelamento MAS sinalizamos pro Dispatcher relancar por conta
+    // propria. IMPORTANTE: cancelamento MANUAL (pelo painel) vem por orch.cancel,
+    // NAO por este webhook — entao nunca tera essa flag e nunca sera relancado.
     return {
       eventType: 'status_change',
       externalDeliveryId: oldId,
       statusNative: nomeEvento,
       statusCanonico: nativeToCanonical(nomeEvento),
+      relancarPorDriverCancel: true,
       rawProvider: payload,
     };
   }
