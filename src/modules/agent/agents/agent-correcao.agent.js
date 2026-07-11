@@ -25,8 +25,38 @@ const { defineAgent } = require('../core/agent-base');
 const { criarBrowserSession } = require('../core/browser-session');
 const { normalizeLocation } = require('../location-normalizer');
 const playwrightAgent = require('../playwright-agent');
+const playwrightLiberar = require('../playwright-liberar-ponto'); // 2026-07 auto-liberacao
 const { haversineKm, RAIO_MAXIMO_KM } = require('../routes/correcao.routes');
 const { checarClienteBloqueado } = require('../clientes-bloqueados.service'); // 2026-07
+
+// 2026-07 auto-liberacao: erros que NAO devem disparar liberacao automatica.
+// Sao os casos "OS morta" ou de endereco: liberar o ponto seria inocuo, errado
+// ou suspeito. Erros TECNICOS (confirmar sem efeito, timeout, login) NAO entram
+// aqui -> a OS esta viva e o ponto deve ser liberado.
+const PADROES_NAO_LIBERAR = [
+  /\[Valida[çc][ãa]o\]/i,                 // OS concluida/cancelada, ponto inexistente
+  /\[Seguran[çc]a\]/i,                    // motoboy divergente, ponto 1
+  /ENDERECO_JA_CORRIGIDO|j[áa] foi corrigido/i,
+  /Dist[âa]ncia\s+[\d.,]+\s*km/i,         // fora do raio
+  /n[ãa]o reconhecidas pelo geocoder/i,   // coordenada invalida
+  /Segurança: Ponto 1|Ponto 1 nunca pode/i,
+];
+
+/**
+ * Decide se uma correcao que FALHOU deve disparar auto-liberacao do ponto.
+ * Regra: IA validou a localizacao E ponto >= 2 (correcao nunca mexe no ponto 1)
+ * E o erro nao e um dos casos "OS morta"/endereco.
+ */
+function deveAutoLiberar(registro, resultado) {
+  let vloc = registro && registro.validacao_localizacao;
+  if (typeof vloc === 'string') { try { vloc = JSON.parse(vloc); } catch (_) { vloc = null; } }
+  if (!vloc || !vloc.valido) return false;                 // IA nao validou
+  const ponto = parseInt(registro && registro.ponto, 10);
+  if (!Number.isInteger(ponto) || ponto < 2) return false; // ponto 1 fora
+  const erro = String((resultado && resultado.erro) || '');
+  if (PADROES_NAO_LIBERAR.some((re) => re.test(erro))) return false;
+  return true;
+}
 
 const SLOTS = Number(process.env.POOL_AGENT_CORRECAO_SLOTS || 2);
 
@@ -294,6 +324,86 @@ module.exports = defineAgent({
         ]
       );
       ctx.log(`❌ OS ${registro.os_numero} falhou: ${resultado && resultado.erro}`);
+
+      // 2026-07 auto-liberacao: correcao falhou MAS a IA validou o endereco e o
+      // caso e liberavel (OS viva). Libera o ponto correspondente NO MESMO job,
+      // reusando o browser persistente e a sessao que a correcao acabou de salvar
+      // (login instantaneo, mesma conta). Nao reenfileira, nao usa o worker.
+      // Nao-bloqueante: qualquer erro aqui nao altera o status 'falhou' ja gravado.
+      try {
+        if (deveAutoLiberar(registro, resultado) && !registro.liberacao_auto_id) {
+          const pontoLib = parseInt(registro.ponto, 10);
+          ctx.log(`🔓 Auto-liberacao: OS ${registro.os_numero} Ponto ${pontoLib} (IA validou)`);
+
+          const libIns = await pool.query(
+            `INSERT INTO liberacoes_pontos
+               (os_numero, ponto, status, origem, ajuste_id,
+                usuario_id, usuario_nome, cod_profissional, etapa_atual, progresso)
+             VALUES ($1, $2, 'processando', 'auto_correcao', $3, $4, $5, $6, 'liberacao_iniciando', 5)
+             RETURNING id`,
+            [
+              String(registro.os_numero), pontoLib, registro.id,
+              registro.usuario_id || null, registro.usuario_nome || null,
+              registro.cod_profissional || null,
+            ]
+          );
+          const libId = libIns.rows[0].id;
+          await pool.query(
+            `UPDATE ajustes_automaticos SET liberacao_auto_id = $1 WHERE id = $2`,
+            [libId, registro.id]
+          );
+
+          const browserParaLib = (browserVivo && typeof browserVivo.isConnected === 'function' && browserVivo.isConnected())
+            ? browserVivo : null;
+
+          let libRes;
+          try {
+            libRes = await playwrightLiberar.executarLiberacaoInline({
+              os_numero:   registro.os_numero,
+              ponto:       pontoLib,
+              browser:     browserParaLib,
+              sessionFile,
+              credentials: { email: creds.email, senha: creds.senha },
+              onProgresso: (etapa, pct) => {
+                pool.query(
+                  `UPDATE liberacoes_pontos SET etapa_atual = $1, progresso = $2 WHERE id = $3`,
+                  [etapa, pct, libId]
+                ).catch(() => {});
+              },
+            });
+          } catch (errLib) {
+            if (browserSession && browserVivo && typeof browserVivo.isConnected === 'function' && !browserVivo.isConnected()) {
+              try { browserSession._marcarMorto(); } catch (_) {}
+            }
+            libRes = { sucesso: false, erro: `Excecao na liberacao: ${errLib.message}` };
+          }
+
+          if (libRes && libRes.sucesso) {
+            await pool.query(
+              `UPDATE liberacoes_pontos
+                 SET status = 'sucesso', etapa_atual = 'concluido', progresso = 100,
+                     finalizado_em = NOW(), mensagem_retorno = $1
+               WHERE id = $2`,
+              [String(libRes.mensagem_retorno || 'Enviado').slice(0, 300), libId]
+            );
+            ctx.log(`✅ Auto-liberacao OK: OS ${registro.os_numero} Ponto ${pontoLib}`);
+          } else {
+            await pool.query(
+              `UPDATE liberacoes_pontos
+                 SET status = 'falhou', etapa_atual = 'falhou', progresso = 100,
+                     finalizado_em = NOW(), erro = $1, screenshot_path = $2
+               WHERE id = $3`,
+              [
+                String((libRes && libRes.erro) || 'Erro desconhecido').slice(0, 500),
+                (libRes && libRes.screenshot_path) || null, libId,
+              ]
+            );
+            ctx.log(`❌ Auto-liberacao falhou: OS ${registro.os_numero} Ponto ${pontoLib}: ${libRes && libRes.erro}`);
+          }
+        }
+      } catch (eAuto) {
+        ctx.log(`⚠️ Auto-liberacao (nao-bloqueante) erro: ${eAuto.message}`);
+      }
     }
   },
 

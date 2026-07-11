@@ -49,6 +49,24 @@ async function initLiberacaoTables(pool) {
     console.log(`⚠️ Constraint status liberacoes_pontos: ${err.message}`);
   }
 
+  // 2026-07 auto-liberacao: colunas para liberar o ponto correspondente (2-7) de
+  // uma correcao de endereco que falhou mas teve a IA validada.
+  //   ponto     — qual ponto liberar (default 1 = fluxo antigo do app, intacto)
+  //   origem    — 'app' (fluxo padrao) | 'auto_correcao' (disparo automatico)
+  //   ajuste_id — FK logica pro ajustes_automaticos que originou a liberacao
+  const colsLib = [
+    { nome: 'ponto',     tipo: 'SMALLINT DEFAULT 1' },
+    { nome: 'origem',    tipo: "VARCHAR(20) DEFAULT 'app'" },
+    { nome: 'ajuste_id', tipo: 'INTEGER' },
+  ];
+  for (const col of colsLib) {
+    try {
+      await pool.query(`ALTER TABLE liberacoes_pontos ADD COLUMN IF NOT EXISTS ${col.nome} ${col.tipo}`);
+    } catch (err) {
+      console.log(`⚠️ Coluna liberacoes_pontos.${col.nome}: ${err.message}`);
+    }
+  }
+
   // Índices
   const indices = [
     'CREATE INDEX IF NOT EXISTS idx_liberacoes_status_criado ON liberacoes_pontos(status, criado_em ASC)',

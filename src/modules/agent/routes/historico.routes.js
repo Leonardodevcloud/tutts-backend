@@ -131,6 +131,64 @@ function createHistoricoRoutes(pool, verificarAdmin) {
   router.get('/historico', verificarAdmin, async (req, res) => {
     const { status, os_numero, de, ate, motoboy, grupo, page = 1, per_page = 30 } = req.query;
 
+    // 2026-07 auto-liberacao: grupo dedicado "Falha/Liberacao IA" — junta o ajuste
+    // (que falhou + IA validou) com o registro de liberacao gerado. Query isolada
+    // (aliases a./l.) pra nao mexer no fluxo dos outros grupos.
+    if (grupo === 'liberacao_ia') {
+      const condL = ['a.liberacao_auto_id IS NOT NULL'];
+      const parL  = [];
+      let   pl    = 1;
+      if (os_numero) { condL.push(`a.os_numero ILIKE $${pl++}`); parL.push(`%${os_numero}%`); }
+      if (motoboy)   {
+        condL.push(`(a.usuario_nome ILIKE $${pl} OR a.cod_profissional::text ILIKE $${pl})`);
+        parL.push(`%${motoboy}%`); pl++;
+      }
+      if (de)  { condL.push(`a.criado_em >= ($${pl++}::date AT TIME ZONE 'America/Bahia')`); parL.push(de); }
+      if (ate) { condL.push(`a.criado_em < (($${pl++}::date + INTERVAL '1 day') AT TIME ZONE 'America/Bahia')`); parL.push(ate); }
+      const whereL  = `WHERE ${condL.join(' AND ')}`;
+      const offsetL = (parseInt(page, 10) - 1) * parseInt(per_page, 10);
+      try {
+        const [dataL, countL] = await Promise.all([
+          pool.query(
+            `SELECT a.id, a.os_numero, a.ponto, a.status, a.erro, a.detalhe_erro,
+                    a.criado_em, a.finalizado_em, a.etapa_atual, a.progresso,
+                    a.usuario_id, a.usuario_nome, a.cod_profissional,
+                    a.endereco_antigo, a.endereco_corrigido,
+                    a.latitude, a.longitude, a.motoboy_lat, a.motoboy_lng,
+                    a.endereco_antigo_lat, a.endereco_antigo_lng,
+                    a.validacao_localizacao, a.validacao_nf,
+                    (a.foto_nf IS NOT NULL) AS tem_foto_nf,
+                    (a.foto_fachada IS NOT NULL) AS tem_foto_fachada,
+                    l.id            AS liberacao_id,
+                    l.status        AS liberacao_status,
+                    l.ponto         AS liberacao_ponto,
+                    l.origem        AS liberacao_origem,
+                    l.finalizado_em AS liberacao_finalizado_em,
+                    l.mensagem_retorno AS liberacao_mensagem,
+                    l.erro          AS liberacao_erro,
+                    l.etapa_atual   AS liberacao_etapa,
+                    l.progresso     AS liberacao_progresso
+             FROM ajustes_automaticos a
+             LEFT JOIN liberacoes_pontos l ON l.id = a.liberacao_auto_id
+             ${whereL}
+             ORDER BY a.criado_em DESC
+             LIMIT $${pl} OFFSET $${pl + 1}`,
+            [...parL, parseInt(per_page, 10), offsetL]
+          ),
+          pool.query(`SELECT COUNT(*) AS total FROM ajustes_automaticos a ${whereL}`, parL),
+        ]);
+        return res.json({
+          registros: dataL.rows,
+          total:     parseInt(countL.rows[0].total, 10),
+          page:      parseInt(page, 10),
+          per_page:  parseInt(per_page, 10),
+        });
+      } catch (err) {
+        console.error('[agent/historico liberacao_ia]', err.message);
+        return res.status(500).json({ erro: 'Erro ao carregar liberacoes.' });
+      }
+    }
+
     const conditions = [];
     const params     = [];
     let   p          = 1;

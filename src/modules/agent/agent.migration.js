@@ -60,6 +60,10 @@ async function initAgentTables(pool) {
     // progresso é 0-100 — lidos pelo frontend via /agent/status/:id e exibidos na animação.
     { nome: 'etapa_atual',  tipo: 'VARCHAR(30)' },
     { nome: 'progresso',    tipo: 'SMALLINT DEFAULT 0' },
+    // 2026-07 auto-liberacao: id do registro em liberacoes_pontos gerado quando a
+    // correcao falhou porem a IA validou o endereco (auto-liberacao do ponto).
+    // Usado pela sub-aba "Falha/Liberacao IA" pra listar/juntar o status da liberacao.
+    { nome: 'liberacao_auto_id', tipo: 'INTEGER' },
   ];
 
   for (const col of colunas) {

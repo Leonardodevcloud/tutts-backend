@@ -561,4 +561,231 @@ async function executarLiberacaoOS({ os_numero, onProgresso }) {
   }
 }
 
-module.exports = { executarLiberacaoOS, setOverrides, clearOverrides };
+/**
+ * 2026-07 auto-liberacao — versao GENERICA por ponto (2-7).
+ * Espelha executarLiberacaoPonto1 (que fica intacta pro fluxo do app), mas
+ * procura o checkbox do "ponto N" informado. Idempotente: se o ponto ja estiver
+ * liberado (checkbox sumiu/desabilitado), retorna ja_liberado sem tocar em outros.
+ */
+async function executarLiberacaoPontoN(page, os_numero, ponto) {
+  const pontoNum = parseInt(ponto, 10);
+  if (!Number.isInteger(pontoNum) || pontoNum < 1) {
+    throw new Error(`Ponto invalido para liberacao: ${ponto}`);
+  }
+  if (pontoNum === 1) {
+    // Seguranca: ponto 1 sempre pela funcao imutavel dedicada.
+    return executarLiberacaoPonto1(page, os_numero);
+  }
+
+  log(`☑️  Marcando checkbox do Ponto ${pontoNum}`);
+
+  const checkboxes = page.locator('#modalPadrao input[type="checkbox"][name="liberar"]');
+  const total = await checkboxes.count();
+  log(`🔎 Total de checkboxes no modal: ${total}`);
+
+  if (total === 0) {
+    const ss = await screenshot(page, os_numero, 'sem_checkbox');
+    throw new Error(`Nenhum checkbox de liberação no modal. Screenshot: ${ss}`);
+  }
+
+  // Procura o checkbox cujo texto vizinho menciona "ponto N". So marca esse.
+  let checkboxPontoN = null;
+  let textoVizinho = '';
+  for (let i = 0; i < total; i++) {
+    const cb = checkboxes.nth(i);
+    const cont = cb.locator('xpath=ancestor::div[contains(@class,"checkbox")][1]');
+    const txt = (await cont.innerText().catch(() => '')).trim();
+    if (txt.toLowerCase().includes(`ponto ${pontoNum}`)) {
+      checkboxPontoN = cb;
+      textoVizinho = txt;
+      break;
+    }
+  }
+
+  const MSG_JA_LIBERADO = `O Ponto ${pontoNum} ja esta liberado (ou nao consta como liberavel). Nada a fazer.`;
+
+  if (!checkboxPontoN) {
+    log(`ℹ️ Nenhum checkbox de "Ponto ${pontoNum}" no modal — provavelmente ja liberado. Nada a fazer.`);
+    return { sucesso: true, ja_liberado: true, mensagem_retorno: MSG_JA_LIBERADO };
+  }
+
+  const desabilitado = await checkboxPontoN.isDisabled().catch(() => false);
+  if (desabilitado) {
+    log(`ℹ️ Checkbox do Ponto ${pontoNum} desabilitado — ja liberado. Nada a fazer.`);
+    return { sucesso: true, ja_liberado: true, mensagem_retorno: MSG_JA_LIBERADO };
+  }
+
+  log(`☑️  Checkbox do Ponto ${pontoNum} localizado (texto: "${textoVizinho}")`);
+
+  const jaMarcado = await checkboxPontoN.isChecked().catch(() => false);
+  if (!jaMarcado) {
+    await checkboxPontoN.check();
+    log(`✅ Checkbox Ponto ${pontoNum} marcado`);
+  } else {
+    log(`ℹ️ Checkbox Ponto ${pontoNum} já estava marcado`);
+  }
+
+  await page.waitForTimeout(300);
+
+  const seletoresBtnLiberar = [
+    '#modalPadrao input[type="button"][value="Liberar"]',
+    '#modalPadrao input[type="button"].btn-primary',
+    '#modalPadrao input[value*="Liberar"]:not([value*="ponto"])',
+    '#modalPadrao button.btn-primary',
+  ];
+
+  let clicouLiberar = false;
+  for (const sel of seletoresBtnLiberar) {
+    const btn = page.locator(sel).first();
+    if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await btn.click();
+      log(`✅ Botão "Liberar" clicado (seletor: ${sel})`);
+      clicouLiberar = true;
+      break;
+    }
+  }
+  if (!clicouLiberar) {
+    const ss = await screenshot(page, os_numero, 'btn_liberar_nao_achado');
+    throw new Error(`Botão "Liberar" não encontrado no modal. Screenshot: ${ss}`);
+  }
+
+  log(`⏳ Aguardando confirmação "Enviado"...`);
+  try {
+    await page.locator('#divRetornoModal:has-text("Enviado"), #divRetornoModal:has-text("enviado")').waitFor({
+      state: 'visible',
+      timeout: 30000,
+    });
+    log(`✅ "Enviado" detectado — Ponto ${pontoNum} liberado`);
+  } catch (err) {
+    const conteudoRetorno = await page.locator('#divRetornoModal').innerText().catch(() => '');
+    const ss = await screenshot(page, os_numero, 'sem_confirmacao');
+    throw new Error(`Sistema externo não confirmou "Enviado" em 30s. Conteúdo: "${conteudoRetorno}". Screenshot: ${ss}`);
+  }
+
+  return { sucesso: true, mensagem_retorno: 'Enviado', ponto: pontoNum };
+}
+
+/**
+ * 2026-07 auto-liberacao — fluxo INLINE, chamado no MESMO job da correcao.
+ *
+ * Diferente de executarLiberacaoOS (que usa o estado global via setOverrides e o
+ * worker da fila), esta funcao recebe TUDO por parametro (sem estado global, sem
+ * race entre slots) e reaproveita:
+ *   - o browser persistente do slot da correcao (params.browser)
+ *   - a sessao que a correcao acabou de salvar (params.sessionFile) -> login
+ *     instantaneo; so faz login de fato se a sessao expirou.
+ *
+ * Assim nao reenfileira nem faz relogin caro: apenas abre um context novo, busca
+ * a OS (sessao ja valida) e libera o ponto informado.
+ *
+ * @param {object} params { browser, sessionFile, credentials, os_numero, ponto, onProgresso }
+ * @returns {object} { sucesso, mensagem_retorno?, ja_liberado?, erro?, screenshot_path? }
+ */
+async function executarLiberacaoInline(params) {
+  params = params || {};
+  const { os_numero, ponto, onProgresso } = params;
+  const reportar = typeof onProgresso === 'function'
+    ? (etapa, pct) => { try { onProgresso(etapa, pct); } catch (_) {} }
+    : () => {};
+
+  if (!process.env.SISTEMA_EXTERNO_URL) {
+    return { sucesso: false, erro: 'SISTEMA_EXTERNO_URL não configurada.' };
+  }
+
+  // 🔒 fontes por parametro (sem global) — mesmo principio do fix de concorrencia.
+  const _sessionFileLocal = params.sessionFile || getSessionFile();
+  const _credentialsLocal = params.credentials || _credentialsOverride;
+  const _browserLocal     = params.browser || _browserOverride;
+
+  let browser = null;
+  let context = null;
+  let page = null;
+  let browserEhOverride = false;
+
+  try {
+    log(`🚀 [inline] OS ${os_numero} | Liberando Ponto ${ponto}`);
+    reportar('liberacao_iniciando', 5);
+
+    if (_browserLocal) {
+      browser = _browserLocal;
+      browserEhOverride = true;
+      log('♻️ [inline] Usando browser persistente do slot');
+    } else {
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      });
+    }
+
+    const sessionExiste = fs.existsSync(_sessionFileLocal);
+    context = await browser.newContext(
+      sessionExiste ? { storageState: _sessionFileLocal } : {}
+    );
+    page = await context.newPage();
+    page.setDefaultTimeout(TIMEOUT);
+
+    // Login (quase sempre reusa a sessao que a correcao acabou de salvar)
+    reportar('liberacao_login', 15);
+    let logado = false;
+    if (sessionExiste) {
+      logado = await isLoggedIn(page);
+      if (!logado) {
+        log(`⚠️ [inline] Sessão expirada — relogando`);
+        try { fs.unlinkSync(_sessionFileLocal); } catch (_) {}
+      }
+    }
+    if (!logado) {
+      await fazerLogin(page, _credentialsLocal);
+      await context.storageState({ path: _sessionFileLocal });
+      log(`💾 [inline] Sessão salva`);
+    }
+
+    await dispensarFeriados(page, log);
+    await page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    await page.waitForTimeout(1500);
+
+    // Localizar OS
+    reportar('liberacao_localizando', 40);
+    const achou = await localizarOS(page, os_numero);
+    if (!achou) {
+      const ss = await screenshot(page, os_numero, 'inline_os_nao_encontrada');
+      return {
+        sucesso: false,
+        erro: `OS ${os_numero} não encontrada para liberar o Ponto ${ponto}.`,
+        screenshot_path: ss,
+      };
+    }
+
+    // Abrir "Liberar App" e liberar o ponto informado
+    reportar('liberacao_abrindo_modal', 65);
+    await abrirModalLiberarApp(page, os_numero);
+
+    reportar('liberacao_liberando', 85);
+    const resultado = await executarLiberacaoPontoN(page, os_numero, ponto);
+
+    reportar('liberacao_concluido', 100);
+    log(`✅ [inline] OS ${os_numero} Ponto ${ponto} — liberação concluída`);
+    return resultado;
+
+  } catch (err) {
+    log(`❌ [inline] Erro: ${err.message}`);
+    let ss = null;
+    if (page) { ss = await screenshot(page, os_numero, 'inline_erro').catch(() => null); }
+    // browser morto deve subir pro orquestrador recriar o BrowserSession
+    if (/Target (page|frame)?.*closed|browser.*closed|Connection closed/i.test(err.message || '')) {
+      throw err;
+    }
+    return { sucesso: false, erro: err.message.slice(0, 500), screenshot_path: ss };
+  } finally {
+    if (browserEhOverride) {
+      if (context) {
+        try { await comTimeout(context.close(), 3_000, 'context.close'); }
+        catch (e) { log(`⚠️ [inline] context.close pendurou: ${e.message}`); }
+      }
+    } else {
+      await fecharBrowserSeguro(browser);
+    }
+  }
+}
+
+module.exports = { executarLiberacaoOS, executarLiberacaoInline, setOverrides, clearOverrides };
