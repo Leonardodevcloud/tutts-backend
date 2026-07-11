@@ -68,7 +68,10 @@ module.exports = defineAgent({
   // de frete (várias chamadas Playwright). 4 min é folgado mas evita slot
   // preso pra sempre quando BrowserSession fica zumbi (caso observado em log:
   // travou após "Usando sessão salva" em browser.newContext sem timeout).
-  timeoutMs: Number(process.env.POOL_AGENT_CORRECAO_TIMEOUT_MS || 240_000), // 4 min
+  // 🔁 2026-07 retry: com retentativas por reload (default 2), um job pode
+  // encadear 2 execuções completas. 6 min dá folga sem deixar slot preso.
+  // Ajustável por POOL_AGENT_CORRECAO_TIMEOUT_MS.
+  timeoutMs: Number(process.env.POOL_AGENT_CORRECAO_TIMEOUT_MS || 360_000), // 6 min
 
   // 2026-05 fix-eagain: cria BrowserSession persistente por slot.
   // Browser sobe lazy no 1o job (não bloqueia o startup do worker).
@@ -182,7 +185,7 @@ module.exports = defineAgent({
 
     let resultado;
     try {
-      resultado = await playwrightAgent.executarCorrecaoEndereco({
+      resultado = await playwrightAgent.executarCorrecaoEnderecoComRetry({
         os_numero:        registro.os_numero,
         ponto:            registro.ponto,
         latitude:         coords.latitude,

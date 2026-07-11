@@ -328,6 +328,18 @@ async function fazerLogin(page, overrides) {
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
   if (!temEmail) {
+    // 🔧 Erro C fix: a tela de login pode ter redirecionado pra principal.php /
+    // notificacao-feriados quando AINDA HÁ sessão ativa nos cookies do context
+    // (apagar o arquivo .json local não limpa os cookies já carregados). Nesse
+    // caso NÃO é erro: a sessão está viva, só presa na tela de feriados. Dispensa
+    // e retorna como autenticado, em vez de estourar "Página de login não carregou".
+    const urlAtual = page.url();
+    const sessaoAtiva = urlAtual.includes('/expresso') && !urlAtual.includes('loginFuncionarioNovo');
+    if (sessaoAtiva) {
+      log(`ℹ️ #loginEmail ausente porém sessão ativa (URL: ${urlAtual}) — dispensando feriados e seguindo`);
+      await dispensarFeriados(page, log);
+      return; // sessão já autenticada — não precisa preencher login
+    }
     const ss = await screenshot(page, 'login', 'pagina_nao_carregou');
     throw new Error(`Página de login não carregou. URL: ${page.url()}. Screenshot: ${ss}`);
   }
@@ -428,28 +440,36 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     );
     await page.waitForTimeout(2000);
 
+    // 🔧 Erro C fix: dispensar feriados ANTES de avaliar login. A sessão pode
+    // estar válida porém presa em /notificacao-feriados|principal.php, o que faz
+    // isLoggedIn() retornar false e disparar um re-login que quebra (LOGIN_URL
+    // redireciona pra principal.php e #loginEmail nunca aparece). Destravar os
+    // feriados primeiro evita esse falso "não logado" e o erro de página de login.
+    await dispensarFeriados(page, log);
+    await comRetryTimeout(
+      () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+      'page.goto ACOMP_URL (pós-feriados pré-login)'
+    );
+    await page.waitForTimeout(1500);
+
     if (!(await isLoggedIn(page))) {
       if (fs.existsSync(getSessionFile())) {
         fs.unlinkSync(getSessionFile());
         log('🗑️  Sessão inválida removida');
       }
       await fazerLogin(page, _credentialsOverride);
+      // Pós-login o servidor pode reexibir feriados — dispensa de novo e reabre.
+      await dispensarFeriados(page, log);
+      await comRetryTimeout(
+        () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
+        'page.goto ACOMP_URL (pós-login)'
+      );
+      await page.waitForTimeout(1500);
       await context.storageState({ path: getSessionFile() });
       log('💾 Sessão salva');
     } else {
       log('✅ Já logado');
     }
-
-    // 🔧 2026-06-01 FIX: dispensar feriados SEMPRE (mesmo com "Já logado").
-    // A sessão pode estar válida porém presa na tela de feriados (principal.php),
-    // onde #search-autocomplete-input não existe → Timeout 25000ms. Dispensar e
-    // reabrir o acompanhamento cobre tanto login novo quanto sessão persistente.
-    await dispensarFeriados(page, log);
-    await comRetryTimeout(
-      () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
-      'page.goto ACOMP_URL (pós-feriados)'
-    );
-    await page.waitForTimeout(2000);
 
 
     // ── Passo 1b: Garantir que está na aba "Em execução" ────────────────────
@@ -588,13 +608,27 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
       // Retry: às vezes o sistema externo demora mais que TIMEOUT pra renderizar
       // o resultado da busca — tenta de novo depois de 5s antes de marcar falhou
-      await comRetryTimeout(
-        () => page.waitForSelector(
-          `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
-          { state: 'attached', timeout: TIMEOUT }
-        ),
-        `waitForSelector btn END (OS ${os_numero})`
-      );
+      // 🔧 Erro B fix: se mesmo após as tentativas o botão não aparecer, devolve
+      // um erro LEGÍVEL e marcado como retentável (o MAP costuma renderizar o
+      // resultado ao recarregar), em vez de propagar "Erro inesperado: Timeout...".
+      try {
+        await comRetryTimeout(
+          () => page.waitForSelector(
+            `button.btn-modal[data-action="funcaoEnderecoServico"][data-id="${os_numero}"], button.btn-modal[data-action="funcaoEnderecoServico"][data-text-id="${os_numero}"]`,
+            { state: 'attached', timeout: TIMEOUT }
+          ),
+          `waitForSelector btn END (OS ${os_numero})`
+        );
+      } catch (eBusca) {
+        const ss = await screenshot(page, os_numero, 'passo2_os_nao_localizada').catch(() => null);
+        log(`⚠️ OS ${os_numero} não localizada na busca: ${eBusca.message}`);
+        return {
+          sucesso: false,
+          retentavel: true,
+          erro: `OS ${os_numero} não localizada na busca do sistema externo. Pode estar concluída/cancelada ou o MAP não renderizou o resultado a tempo. Será retentado.`,
+          screenshot: ss,
+        };
+      }
     }
 
     // Scroll até o botão para garantir que está visível no viewport
@@ -1029,48 +1063,61 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
 
     await page.locator('button.btn-confirmar-alteracao:visible').first().click();
 
-    // Aguardar processamento — verificar que algo mudou
-    await page.waitForTimeout(1500);
+    // 🔧 Erro A fix: NÃO reclicar cego (o reclique podia disparar uma SEGUNDA
+    // confirmação e duplicar a alteração). Em vez disso, fazemos polling do
+    // ESTADO REAL por até ~9s. Sucesso = qualquer um destes sinais:
+    //   (a) o botão Confirmar sumiu (form fechou)
+    //   (b) apareceu alerta/toast de sucesso
+    //   (c) o botão Corrigir do ponto sumiu OU o span do endereço antigo mudou
+    // O MAP às vezes deixa o botão visível por lag mesmo tendo aplicado — por
+    // isso confiar SÓ no desaparecimento do botão gerava falso "falhou".
+    let confirmacaoOk = false;
+    for (let t = 0; t < 15; t++) {
+      await page.waitForTimeout(600);
 
-    // Verificar que a confirmação realmente aplicou:
-    // 1. O botão btn-confirmar-alteracao deve ter sumido
-    // 2. Ou o span end-antigo mudou
-    // 3. Ou apareceu mensagem de sucesso
-    const confirmarAindaVisivel = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
-    
-    if (confirmarAindaVisivel) {
-      // Pode ter aparecido um dialog que não foi tratado, ou erro
-      log('⚠️ Botão Confirmar ainda visível após clique — tentando novamente');
-      await page.locator('button.btn-confirmar-alteracao:visible').first().click();
-      await page.waitForTimeout(1500);
-      
-      const aindaVisivel2 = await page.locator('button.btn-confirmar-alteracao:visible').isVisible().catch(() => false);
-      if (aindaVisivel2) {
-        const ss = await screenshot(page, os_numero, 'passo6_confirmar_falhou');
-        // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
-        return {
-          sucesso: false,
-          erro: `Falha ao confirmar alteração. O botão "Confirmar" permanece visível após 2 tentativas. O endereço pode não ter sido alterado.`,
-          screenshot: ss,
-        };
+      const estado = await page.evaluate((args) => {
+        const { pontoNum, endAntes } = args;
+        // (a) botão Confirmar ainda visível?
+        const btnConf = document.querySelector('button.btn-confirmar-alteracao');
+        const btnConfVisivel = !!(btnConf && btnConf.offsetParent !== null);
+        // (b) alerta/toast de sucesso visível?
+        let sucessoMsg = false;
+        const alertas = document.querySelectorAll('.alert-success, .swal2-success, .toast-success, .swal2-icon-success');
+        for (const a of alertas) {
+          if (a.offsetParent !== null) { sucessoMsg = true; break; }
+        }
+        // (c) endereço aplicado? (btn Corrigir sumiu ou span mudou)
+        let mudou = false;
+        const btn = document.querySelector(`.btn-corrigir-endereco[data-ponto="${pontoNum}"]`);
+        if (!btn) {
+          mudou = true; // botão de corrigir sumiu = form fechou = aplicado
+        } else {
+          const idEnd = btn.getAttribute('data-id-endereco');
+          if (idEnd) {
+            const span = document.getElementById(`end-antigo-${idEnd}`);
+            const atual = span ? (span.textContent || '').trim() : '';
+            if (endAntes && atual && atual !== endAntes) mudou = true;
+          }
+        }
+        return { btnConfVisivel, sucessoMsg, mudou };
+      }, { pontoNum: ponto, endAntes: endAntigoSpan }).catch(() => ({ btnConfVisivel: true, sucessoMsg: false, mudou: false }));
+
+      if (!estado.btnConfVisivel || estado.sucessoMsg || estado.mudou) {
+        confirmacaoOk = true;
+        log(`✅ Confirmação aplicada (btnVisivel=${estado.btnConfVisivel} | sucessoMsg=${estado.sucessoMsg} | enderecoMudou=${estado.mudou})`);
+        break;
       }
     }
 
-    // Verificar se o endereço mudou comparando o span
-    const endNovoSpan = await page.evaluate((pontoNum) => {
-      const btn = document.querySelector(`.btn-corrigir-endereco[data-ponto="${pontoNum}"]`);
-      if (!btn) return 'btn-sumiu'; // botão sumiu = form fechou = sucesso provável
-      const idEnd = btn.getAttribute('data-id-endereco');
-      if (!idEnd) return '';
-      const span = document.getElementById(`end-antigo-${idEnd}`);
-      return span ? (span.textContent || '').trim() : '';
-    }, ponto).catch(() => '');
-
-    if (endAntigoSpan && endNovoSpan && endAntigoSpan !== 'btn-sumiu' && endNovoSpan !== 'btn-sumiu' && endAntigoSpan === endNovoSpan) {
-      log(`⚠️ Endereço NÃO mudou no DOM. Antes: "${endAntigoSpan}" | Depois: "${endNovoSpan}"`);
-      // Não retorna erro pois pode ser que o DOM ainda não atualizou
-    } else {
-      log('✅ Confirmação aplicada com sucesso');
+    if (!confirmacaoOk) {
+      const ss = await screenshot(page, os_numero, 'passo6_confirmar_sem_efeito');
+      // [refactor] browser.close() aqui foi removido; finally faz fecharBrowserSeguro
+      return {
+        sucesso: false,
+        retentavel: true,
+        erro: `Confirmação não surtiu efeito após ~9s (botão permaneceu e endereço não mudou). Sistema externo pode estar instável — será retentado.`,
+        screenshot: ss,
+      };
     }
 
     log('✅ Endereço confirmado');
@@ -1598,4 +1645,97 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
   }
 }
 
-module.exports = { executarCorrecaoEndereco, setOverrides, clearOverrides };
+// ─────────────────────────────────────────────────────────────────────────
+// 🔁 Retry com "reload" — o sistema externo (MAP) é instável e às vezes só volta
+// ao normal recarregando a página. Como executarCorrecaoEndereco cria um CONTEXT
+// NOVO a cada chamada (página limpa), basta chamá-la de novo pra ter o efeito de
+// "recarregar e tentar de novo".
+//
+// Só retenta erros TRANSITÓRIOS (instabilidade do MAP). Erros DETERMINÍSTICOS
+// (OS concluída/cancelada, ponto inexistente, cliente bloqueado, endereço já
+// corrigido, fora do raio, coords inválidas) falham na 1ª — retentar desperdiça
+// tempo e, no caso de "já corrigido", poderia transformar um sucesso em erro.
+// ─────────────────────────────────────────────────────────────────────────
+const PADROES_RETENTAVEIS = [
+  /permanece vis[íi]vel/i,
+  /n[ãa]o surtiu efeito/i,
+  /n[ãa]o localizada na busca/i,
+  /waitForSelector btn END/i,
+  /waitForSelector modal/i,
+  /P[áa]gina de login n[ãa]o carregou/i,
+  /login n[ãa]o carregou/i,
+  /Timeout \d+ms/i,
+];
+
+const PADROES_DETERMINISTICOS = [
+  /\[Valida[çc][ãa]o\]/i,
+  /\[Seguran[çc]a\]/i,
+  /ENDERECO_JA_CORRIGIDO/i,
+  /j[áa] foi corrigido/i,
+  /Dist[âa]ncia .* km/i,
+  /Ponto 1 nunca pode/i,
+  /n[ãa]o reconhecidas pelo geocoder/i,
+  /SISTEMA_EXTERNO_URL n[ãa]o configurada/i,
+];
+
+function ehResultadoRetentavel(resultado) {
+  if (!resultado || resultado.sucesso) return false;
+  if (resultado.bloqueado_cliente) return false;      // nunca retentar bloqueio
+  if (resultado.retentavel === true) return true;      // flag explícita ganha
+  if (resultado.retentavel === false) return false;
+  const erro = String(resultado.erro || '');
+  if (PADROES_DETERMINISTICOS.some((re) => re.test(erro))) return false;
+  return PADROES_RETENTAVEIS.some((re) => re.test(erro));
+}
+
+/**
+ * Executa a correção com retry por reload. Mesma assinatura de
+ * executarCorrecaoEndereco. Configurável por env:
+ *   AGENT_CORRECAO_MAX_RETENTATIVAS  (default 2)  — total de tentativas
+ *   AGENT_CORRECAO_RETRY_DELAY_MS    (default 3000) — pausa entre tentativas
+ */
+async function executarCorrecaoEnderecoComRetry(params) {
+  const MAX = Math.max(1, Number(process.env.AGENT_CORRECAO_MAX_RETENTATIVAS || 2));
+  const DELAY_MS = Number(process.env.AGENT_CORRECAO_RETRY_DELAY_MS || 3000);
+  const onProgresso = params && params.onProgresso;
+
+  let resultado = null;
+  for (let tentativa = 1; tentativa <= MAX; tentativa++) {
+    if (tentativa > 1) {
+      log(`🔄 Retentativa ${tentativa}/${MAX} da OS ${params && params.os_numero} (context novo = reload)`);
+      if (typeof onProgresso === 'function') {
+        try { onProgresso('retentando', 8); } catch (_) {}
+      }
+      await new Promise((r) => setTimeout(r, DELAY_MS));
+    }
+
+    try {
+      resultado = await executarCorrecaoEndereco(params);
+    } catch (err) {
+      // executarCorrecaoEndereco tem catch interno e normalmente NÃO lança;
+      // isto é defensivo. Browser morto deve subir pro orquestrador recriar.
+      if (/Target (page|frame)?.*closed|browser.*closed|Connection closed/i.test(err.message || '')) {
+        throw err;
+      }
+      resultado = { sucesso: false, erro: `Erro inesperado: ${err.message}`, retentavel: ehErroDeTimeout(err) };
+    }
+
+    if (resultado && resultado.sucesso) return resultado;
+    if (resultado && resultado.bloqueado_cliente) return resultado;
+
+    if (!ehResultadoRetentavel(resultado)) {
+      return resultado; // erro determinístico — não insiste
+    }
+
+    log(`⚠️ OS ${params && params.os_numero} falhou (retentável) na tentativa ${tentativa}/${MAX}: ${resultado && resultado.erro}`);
+  }
+
+  // Esgotou as tentativas — anexa contador pra ficar visível no histórico
+  if (resultado && resultado.erro) {
+    resultado.erro = `[${MAX} tentativas] ${resultado.erro}`;
+    resultado.tentativas = MAX;
+  }
+  return resultado;
+}
+
+module.exports = { executarCorrecaoEndereco, executarCorrecaoEnderecoComRetry, ehResultadoRetentavel, setOverrides, clearOverrides };
