@@ -895,6 +895,16 @@ class DispatchOrchestrator {
       return { decision: 'os_nao_encontrada', erro: `OS ${codigoOS} não está na Mapp` };
     }
 
+    // 🆕 2026-07: RE-DESPACHO FORCADO (ex: reatribuicao por entregador bloqueado).
+    // Quando o SISTEMA cancela a corrida (nao o motoboy), ele mesmo tem que
+    // relancar — INDEPENDENTE de escolha do cliente ('tutts') e de ter regra de
+    // endereco casada. Relanca sempre pelo Hub (melhor_preco sobre providers
+    // ativos), ignorando escolha/regra/margem. Isso e o que faz o "sistema
+    // cancelou X -> sistema relanca X".
+    if (opts.forcar) {
+      return await this._dispatchForcado(codigoOS, servico, eventSource, opts);
+    }
+
     // 🆕 2026-06: ESCOLHA DO CLIENTE (tela solicitacao.html) MANDA NO DESPACHO.
     // Quando a corrida foi criada na tela do cliente, gravamos a escolha em
     // solicitacoes_corrida.provider_usado ('tutts' | 'uber' | '99'). Aqui ela
@@ -1130,6 +1140,71 @@ class DispatchOrchestrator {
     }
 
     return { decision: 'despachado', regra, registro, providerCode, estrategia: escolha._estrategia || regra.estrategia };
+  }
+
+  /**
+   * 🆕 2026-07: RE-DESPACHO FORCADO — usado quando o SISTEMA cancela a corrida
+   * (entregador bloqueado) e precisa relancar ele mesmo. Ao contrario do fluxo
+   * normal do tryDispatchByOS, aqui NAO ha short-circuit:
+   *   - ignora a escolha do cliente ('tutts'/'uber'/'99' em solicitacoes_corrida)
+   *   - ignora a regra de endereco (nao exige match)
+   *   - ignora o guardrail de margem
+   * Relanca sempre pelo Hub: melhor_preco sobre os providers ativos no registry
+   * (mesma mecanica do caminho "cliente escolheu HUB"). Se nenhum provider do Hub
+   * estiver ativo, ai sim retorna erro (nao ha pra onde relancar).
+   *
+   * @private
+   * @returns {Promise<Object>} decisão final
+   */
+  async _dispatchForcado(codigoOS, servico, eventSource, opts = {}) {
+    const motivo = opts.motivo || 'redespacho_forcado';
+
+    const ativosHub = this.registry.listActiveCodes();
+    if (!ativosHub || ativosHub.length === 0) {
+      console.warn(`[Orchestrator] OS ${codigoOS}: redespacho forcado (${motivo}) mas nenhum provider do Hub esta ativo`);
+      this.events.log({
+        providerCode: 'none',
+        eventType: EventType.DISPATCH_FAILED,
+        eventSource,
+        codigoOS,
+        erro: `Redespacho forcado sem provider ativo no Hub (${motivo})`,
+        processado: false,
+      }).catch(() => {});
+      return { decision: 'forcado_sem_provider_ativo' };
+    }
+
+    const regraForcada = {
+      id: null,
+      estrategia: 'melhor_preco',
+      providers_preferidos: ativosHub,
+      vehicle_type_preferido: null,
+    };
+    console.log(`🔁 [Orchestrator] OS ${codigoOS}: redespacho FORCADO (${motivo}) -> melhor_preco sobre [${ativosHub.join(',')}] (ignora escolha/regra/margem)`);
+
+    const escolha = await this.strategySelector.decidir(servico, regraForcada, { eventSource });
+    if (escolha.tipo === 'erro') {
+      console.warn(`[Orchestrator] OS ${codigoOS}: redespacho forcado nao achou provider viavel (${escolha.motivo})`);
+      this.events.log({
+        providerCode: 'none',
+        eventType: EventType.DISPATCH_FAILED,
+        eventSource,
+        codigoOS,
+        erro: `Redespacho forcado falhou: ${escolha.motivo} - ${escolha.detalhe || ''}`,
+        processado: false,
+      }).catch(() => {});
+      return { decision: `forcado_rejeitado_${escolha.motivo}` };
+    }
+
+    if (escolha.tipo === 'fallback_chain') {
+      return await this._dispatchComFallback(codigoOS, servico, regraForcada, escolha.chain, null, eventSource);
+    }
+
+    return await this.dispatch(servico, {
+      providerCode: escolha.providerCode,
+      vehicleType: escolha.vehicleType || null,
+      regraId: null,
+      eventSource,
+    });
   }
 
   /**

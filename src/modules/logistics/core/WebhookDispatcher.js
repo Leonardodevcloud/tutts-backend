@@ -468,9 +468,9 @@ class WebhookDispatcher {
 
     const codigoOS = entrega.codigo_os;
 
-    // Teto de reatribuicoes por OS (evita loop se o provider insistir no mesmo
-    // entregador barrado). Em memoria — reinicio zera, cenario raro.
-    const TETO = 3;
+    // Contagem de reatribuicoes por OS (em memoria) — SO metrica/log, NAO barra.
+    // A pedido: SEM teto. Se o sistema cancelou a corrida por bloqueio, o sistema
+    // relanca sempre — quantas vezes forem necessarias.
     if (!this._reatribBloqueio) this._reatribBloqueio = new Map();
     const jaFeitas = this._reatribBloqueio.get(codigoOS) || 0;
 
@@ -510,17 +510,18 @@ class WebhookDispatcher {
       return true;
     }
 
-    // Reatribui (novo chamado) se ainda nao estourou o teto
-    if (jaFeitas < TETO) {
-      this._reatribBloqueio.set(codigoOS, jaFeitas + 1);
-      try {
-        await orchestrator.tryDispatchByOS(codigoOS, { motivo: 'reatribuicao_bloqueio' });
-        console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: reatribuida (tentativa ${jaFeitas + 1}/${TETO})`);
-      } catch (eRe) {
-        console.error(`[WebhookDispatcher] falha ao reatribuir OS ${codigoOS}: ${eRe.message}`);
-      }
-    } else {
-      console.warn(`⚠️ [WebhookDispatcher] OS ${codigoOS}: teto de reatribuicoes (${TETO}) atingido — corrida cancelada, INTERVIR MANUALMENTE`);
+    // Reatribui (novo chamado) — SEM teto e FORCADO: ignora escolha do cliente
+    // e regra de endereco, relanca sempre pelo Hub (melhor_preco). O sistema
+    // cancelou, entao o sistema relanca.
+    this._reatribBloqueio.set(codigoOS, jaFeitas + 1);
+    try {
+      const rd = await orchestrator.tryDispatchByOS(codigoOS, {
+        motivo: 'reatribuicao_bloqueio',
+        forcar: true,
+      });
+      console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: reatribuida (tentativa ${jaFeitas + 1}) -> ${rd && rd.decision ? rd.decision : 'ok'}`);
+    } catch (eRe) {
+      console.error(`[WebhookDispatcher] falha ao reatribuir OS ${codigoOS}: ${eRe.message}`);
     }
 
     return true;
