@@ -358,7 +358,21 @@ async function fazerLogin(page, overrides) {
   log(`✅ Login OK — URL: ${page.url()}`);
 }
 
-async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude, cod_profissional, onProgresso, verificarBloqueio }) {
+async function executarCorrecaoEndereco(params) {
+  params = params || {};
+  const { os_numero, ponto, latitude, longitude, cod_profissional, onProgresso, verificarBloqueio } = params;
+
+  // 🔒 fix-concorrencia: resolve as fontes AGORA, em variaveis LOCAIS, com os
+  // parametros explicitos tendo prioridade sobre o estado global do modulo
+  // (_sessionFileOverride/_credentialsOverride/_browserOverride). Isso elimina a
+  // race entre slots concorrentes: antes, dois motoboys simultaneos podiam
+  // sobrescrever o override um do outro no meio do fluxo (login com conta errada,
+  // sessao salva no arquivo errado, browser trocado). Capturado antes do 1o await
+  // e usado no restante da funcao — nenhum outro slot altera isto depois.
+  const _sessionFileLocal = params.sessionFile || getSessionFile();
+  const _credentialsLocal = params.credentials || _credentialsOverride;
+  const _browserLocal     = params.browser || _browserOverride;
+
   // onProgresso(etapa, percentual) — callback opcional chamado em marcos significativos
   // para reportar avanço ao frontend via banco. Etapas: login, localizando, codificando,
   // confirmando, recalculando, finalizando. Percentual: 0-100.
@@ -391,8 +405,8 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
   let browserEhOverride = false;
 
   try {
-    if (_browserOverride) {
-      browser = _browserOverride;
+    if (_browserLocal) {
+      browser = _browserLocal;
       browserEhOverride = true;
       log('♻️ Usando browser persistente (BrowserSession)');
     } else {
@@ -413,8 +427,8 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     }
 
     let contextOptions = {};
-    if (fs.existsSync(getSessionFile())) {
-      contextOptions = { storageState: getSessionFile() };
+    if (fs.existsSync(_sessionFileLocal)) {
+      contextOptions = { storageState: _sessionFileLocal };
       log('♻️  Usando sessão salva');
     }
 
@@ -453,11 +467,11 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
     await page.waitForTimeout(1500);
 
     if (!(await isLoggedIn(page))) {
-      if (fs.existsSync(getSessionFile())) {
-        fs.unlinkSync(getSessionFile());
+      if (fs.existsSync(_sessionFileLocal)) {
+        fs.unlinkSync(_sessionFileLocal);
         log('🗑️  Sessão inválida removida');
       }
-      await fazerLogin(page, _credentialsOverride);
+      await fazerLogin(page, _credentialsLocal);
       // Pós-login o servidor pode reexibir feriados — dispensa de novo e reabre.
       await dispensarFeriados(page, log);
       await comRetryTimeout(
@@ -465,7 +479,7 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
         'page.goto ACOMP_URL (pós-login)'
       );
       await page.waitForTimeout(1500);
-      await context.storageState({ path: getSessionFile() });
+      await context.storageState({ path: _sessionFileLocal });
       log('💾 Sessão salva');
     } else {
       log('✅ Já logado');
@@ -542,18 +556,18 @@ async function executarCorrecaoEndereco({ os_numero, ponto, latitude, longitude,
       if (!inputVisivel) {
         // Sessão pode ter expirado — forçar re-login
         log('⚠️ Campo de busca não apareceu — forçando re-login...');
-        if (fs.existsSync(getSessionFile())) {
-          fs.unlinkSync(getSessionFile());
+        if (fs.existsSync(_sessionFileLocal)) {
+          fs.unlinkSync(_sessionFileLocal);
           log('🗑️  Sessão removida');
         }
-        await fazerLogin(page, _credentialsOverride);
+        await fazerLogin(page, _credentialsLocal);
         await dispensarFeriados(page, log);
         await comRetryTimeout(
           () => page.goto(ACOMP_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
           'page.goto ACOMP_URL (re-login fallback)'
         );
         await page.waitForTimeout(2000);
-        await context.storageState({ path: getSessionFile() });
+        await context.storageState({ path: _sessionFileLocal });
         log('💾 Sessão renovada');
 
         // Re-clicar na aba Em execução
@@ -1699,10 +1713,22 @@ async function executarCorrecaoEnderecoComRetry(params) {
   const DELAY_MS = Number(process.env.AGENT_CORRECAO_RETRY_DELAY_MS || 3000);
   const onProgresso = params && params.onProgresso;
 
+  // 🔒 fix-concorrencia: congela as fontes AGORA (sincrono, antes de qualquer
+  // await), com params explicito tendo prioridade sobre o global. Todas as
+  // retentativas reusam este objeto — assim a 2a tentativa (que tem await antes)
+  // nunca le um _sessionFileOverride/_credentialsOverride/_browserOverride que
+  // outro slot ja sobrescreveu no meio tempo.
+  const paramsIsolado = {
+    ...(params || {}),
+    sessionFile: (params && params.sessionFile) || getSessionFile(),
+    credentials: (params && params.credentials) || _credentialsOverride,
+    browser:     (params && params.browser) || _browserOverride,
+  };
+
   let resultado = null;
   for (let tentativa = 1; tentativa <= MAX; tentativa++) {
     if (tentativa > 1) {
-      log(`🔄 Retentativa ${tentativa}/${MAX} da OS ${params && params.os_numero} (context novo = reload)`);
+      log(`🔄 Retentativa ${tentativa}/${MAX} da OS ${paramsIsolado.os_numero} (context novo = reload)`);
       if (typeof onProgresso === 'function') {
         try { onProgresso('retentando', 8); } catch (_) {}
       }
@@ -1710,7 +1736,7 @@ async function executarCorrecaoEnderecoComRetry(params) {
     }
 
     try {
-      resultado = await executarCorrecaoEndereco(params);
+      resultado = await executarCorrecaoEndereco(paramsIsolado);
     } catch (err) {
       // executarCorrecaoEndereco tem catch interno e normalmente NÃO lança;
       // isto é defensivo. Browser morto deve subir pro orquestrador recriar.
@@ -1727,7 +1753,7 @@ async function executarCorrecaoEnderecoComRetry(params) {
       return resultado; // erro determinístico — não insiste
     }
 
-    log(`⚠️ OS ${params && params.os_numero} falhou (retentável) na tentativa ${tentativa}/${MAX}: ${resultado && resultado.erro}`);
+    log(`⚠️ OS ${paramsIsolado.os_numero} falhou (retentável) na tentativa ${tentativa}/${MAX}: ${resultado && resultado.erro}`);
   }
 
   // Esgotou as tentativas — anexa contador pra ficar visível no histórico

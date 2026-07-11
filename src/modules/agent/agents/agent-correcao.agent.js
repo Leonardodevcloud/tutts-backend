@@ -177,6 +177,10 @@ module.exports = defineAgent({
       }
     }
 
+    // 🔒 fix-concorrencia: setOverrides mantido como fallback, MAS as fontes vao
+    // via parametros abaixo (que tem prioridade e sao isolados por chamada). Isso
+    // impede que dois slots simultaneos cruzem sessao/credencial/browser pelo
+    // estado global do modulo.
     playwrightAgent.setOverrides({
       sessionFile,
       credentials: { email: creds.email, senha: creds.senha },
@@ -191,6 +195,10 @@ module.exports = defineAgent({
         latitude:         coords.latitude,
         longitude:        coords.longitude,
         cod_profissional: registro.cod_profissional || null,
+        // 🔒 fontes isoladas por chamada (nao dependem do global):
+        sessionFile:      sessionFile,
+        credentials:      { email: creds.email, senha: creds.senha },
+        browser:          browserVivo,  // null = fallback pra launch normal
         verificarBloqueio: async (p1) => checarClienteBloqueado(pool, p1 && p1.endereco),
         onProgresso: (etapa, pct) => {
           pool.query(
