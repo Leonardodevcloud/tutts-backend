@@ -479,9 +479,11 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         .slice(0, 200);
       if (codigos.length === 0) return res.json({ success: true, porOs: {} });
 
+      // 2026-07: rejected_by_rule ("nenhuma_regra_casou") e rejected_by_margin sao
+      // decisoes de NAO despachar (worker passando sem regra) — nao sao tentativas
+      // de despacho, entao ficam FORA da trilha pra nao poluir.
       const TIPOS = [
         'dispatch_success', 'dispatch_failed', 'error',
-        'dispatch_rejected_by_rule', 'dispatch_rejected_by_margin',
         'redispatched', 'canceled',
       ];
 
@@ -538,7 +540,15 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
             continue;
           }
 
-          // dispatch_success / dispatch_failed / error / rejected_*
+          // 'error' so vira passo se for falha ao CRIAR o pedido (createDelivery).
+          // A 99/Uber tambem loga 'error' em getDelivery (polling de status) e em
+          // cancelDelivery — esses NAO sao tentativas de despacho, sao ruido aqui.
+          if (e.event_type === 'error') {
+            const errTxt = String(e.erro || (p && p.motivo) || '');
+            if (!/createDelivery/i.test(errTxt)) continue;
+          }
+
+          // dispatch_success / dispatch_failed / error(createDelivery)
           passos.push({
             tipo: e.event_type,
             provider: e.provider_code || null,
@@ -548,12 +558,10 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           });
         }
 
-        // conta as tentativas de MANDAR pro provider (deu certo, falhou ou foi
-        // recusada na criacao). O 'error' (ex: createDelivery "The same external_id")
-        // conta como tentativa que falhou — por isso entra aqui.
+        // conta as tentativas de MANDAR pro provider (deu certo, falhou ou
+        // recusou na criacao). O 'error' que chega aqui ja e so o de createDelivery.
         const totalTentativas = passos.filter(x =>
-          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' || x.tipo === 'error' ||
-          x.tipo === 'dispatch_rejected_by_rule' || x.tipo === 'dispatch_rejected_by_margin'
+          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' || x.tipo === 'error'
         ).length;
 
         porOs[os] = { eventos: passos, total_tentativas: totalTentativas };
