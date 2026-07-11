@@ -224,12 +224,15 @@ class WebhookDispatcher {
     const codigoOS = entrega.codigo_os;
 
     // ─── Reatribuição de external_delivery_id ───
-    // Alguns providers reatribuem o pedido a outro entregador e geram um id
-    // novo (ex: 99Entrega DriverCanceled com new_order_id). O parser do adapter
-    // expõe isso em evento.reassignedExternalDeliveryId — atualizamos a coluna
-    // pra que os próximos webhooks (que virão com o id novo) localizem a entrega.
-    if (evento.reassignedExternalDeliveryId
-        && evento.reassignedExternalDeliveryId !== entrega.external_delivery_id) {
+    // Alguns providers reatribuem o pedido a outro entregador (ex: 99Entrega
+    // DriverCanceled com new_order_id). O parser expõe isso em
+    // evento.reassignedExternalDeliveryId. 2026-07: a 99 pode reatribuir MANTENDO
+    // o mesmo order_id (new == old) — nesse caso o id nao muda mas o entregador
+    // SIM, entao resetamos o courier de qualquer jeito. Atualizamos a coluna
+    // (mesmo com valor igual e inofensivo) e limpamos os dados do entregador
+    // antigo pra o proximo courier_update trazer o novo.
+    if (evento.reassignedExternalDeliveryId) {
+      const idMudou = evento.reassignedExternalDeliveryId !== entrega.external_delivery_id;
       await this.pool.query(
         `UPDATE logistics_deliveries
             SET external_delivery_id = $1,
@@ -242,7 +245,7 @@ class WebhookDispatcher {
           WHERE id = $2`,
         [evento.reassignedExternalDeliveryId, entrega.id]
       );
-      console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: external_delivery_id reatribuído ${entrega.external_delivery_id} → ${evento.reassignedExternalDeliveryId}`);
+      console.log(`🔄 [WebhookDispatcher] OS ${codigoOS}: reatribuicao 99 ${idMudou ? `(${entrega.external_delivery_id} → ${evento.reassignedExternalDeliveryId})` : '(mesmo order_id, novo entregador)'}`);
       this.events.log({
         providerCode,
         eventType: EventType.STATUS_CHANGED,

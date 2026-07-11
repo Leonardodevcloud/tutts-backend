@@ -170,18 +170,26 @@ function parsePayload99(payload) {
 
     if (!oldId) return null;  // sem id antigo não dá pra localizar a entrega
 
-    if (newId && newId !== oldId) {
-      // Reatribuição — pedido continua vivo com um id novo.
+    // Log de diagnostico: revela se a 99 reatribuiu (mandou new_order_id) ou
+    // simplesmente cancelou (sem new_order_id).
+    console.log(`📩 [99 webhook] DriverCanceled old=${oldId} new=${newId || '(vazio)'} -> ${newId ? 'REATRIBUICAO' : 'cancelamento (99 nao reatribuiu)'}`);
+
+    // 2026-07 FIX: a doc oficial da 99 diz "new_order_id MAY BE THE SAME as the
+    // old_order_id". Antes exigiamos newId !== oldId, entao quando a 99 reatribuia
+    // pro MESMO order_id (novo entregador, id igual) caia no cancelamento e a
+    // corrida morria. Agora: qualquer new_order_id presente = reatribuicao viva.
+    if (newId) {
+      // Reatribuição — pedido continua vivo (id novo OU o mesmo).
       return {
         eventType: 'status_change',
         externalDeliveryId: oldId,                  // id ANTIGO — localiza a entrega
-        reassignedExternalDeliveryId: newId,        // id NOVO — o Dispatcher atualiza
+        reassignedExternalDeliveryId: newId,        // id NOVO (pode == oldId) — Dispatcher reseta o courier
         statusNative: nomeEvento,
         statusCanonico: CanonicalStatus.DISPATCHED, // volta a "procurando entregador"
         rawProvider: payload,
       };
     }
-    // Sem new_order_id → cancelamento de verdade.
+    // Sem new_order_id → cancelamento de verdade (a 99 nao achou outro entregador).
     return {
       eventType: 'status_change',
       externalDeliveryId: oldId,
