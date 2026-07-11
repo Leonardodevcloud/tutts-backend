@@ -464,7 +464,13 @@ class NinetyNineAdapter extends LogisticsProviderAdapter {
     const _vi = (data && data.verify_info) || {};
     const _pick = _vi.pickup_verify_code  || data.pickup_code  || data.pickup_info?.code  || null;
     const _drop = _vi.dropoff_verify_code || data.dropoff_code || data.dropoff_info?.code || null;
-    const _ret  = _vi.return_handover_code || null;
+    // 2026-07: a chave do codigo de DEVOLUCAO nao e 100% consistente com pickup/
+    // dropoff (que usam *_verify_code). Tenta as variacoes conhecidas pra nao
+    // depender de uma so. Se nenhuma casar, o log de verify_info abaixo revela a
+    // chave real pra ajuste fino.
+    const _ret  = _vi.return_handover_code || _vi.return_verify_code
+               || _vi.return_code || _vi.handover_verify_code
+               || data.return_code || null;
     // 99 devolve "" (string vazia) quando não exige código — normaliza pra null.
     const pickupCode  = (_pick && String(_pick).trim()) ? String(_pick).trim() : null;
     const dropoffCode = (_drop && String(_drop).trim()) ? String(_drop).trim() : null;

@@ -388,7 +388,13 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   // ───────────────────────────────────────────────────────────
   router.get('/deliveries', verificarToken, async (req, res) => {
     try {
-      const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+      // Sem filtro de data: 50 recentes (comportamento antigo). COM ?data=YYYY-MM-DD:
+      // traz o dia inteiro (limite alto), pra o painel nao cortar corridas do dia
+      // nem falhar ao voltar em datas passadas.
+      const temData = !!(req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data));
+      const limit = temData
+        ? Math.min(parseInt(req.query.limit, 10) || 1000, 2000)
+        : Math.min(parseInt(req.query.limit, 10) || 50, 200);
       const offset = parseInt(req.query.offset, 10) || 0;
 
       // ── Caminho LEGADO (rollback) — lê uber_entregas ──
@@ -433,6 +439,13 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       }
       if (req.query.provider) {
         where.push(`ld.provider_code = $${i++}`); params.push(req.query.provider);
+      }
+      // 2026-07: filtro de data no BACKEND (dia em America/Sao_Paulo, = BRT do
+      // painel). Antes o filtro era so no front sobre os 50 recentes — datas
+      // passadas voltavam vazias porque os registros nem chegavam na lista.
+      if (temData) {
+        where.push(`(ld.created_at AT TIME ZONE 'America/Sao_Paulo')::date = $${i++}`);
+        params.push(req.query.data);
       }
       const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
