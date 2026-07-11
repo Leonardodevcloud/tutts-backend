@@ -114,6 +114,11 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_km_adicional DECIMAL(10,2)`).catch(() => {});
   // Toggle POR REGRA: muda o valor do cliente na Mapp (alterarValores). Default true.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS alterar_valor_mapp_ativo BOOLEAN DEFAULT true`).catch(() => {});
+  // Perfil de mensagem pro entregador (99) POR REGRA. Vazio = usa Cliente API / global.
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS nome_remetente     VARCHAR(100)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS package_type       VARCHAR(20)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS package_weight     VARCHAR(10)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS aviso_entregador   VARCHAR(127)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS dropoff_code VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS return_code VARCHAR(20)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS telefone_entrega VARCHAR(30)`).catch(() => {});

@@ -33,6 +33,23 @@ const express = require('express');
 const PROVIDERS_VALIDOS = ['uber', 'noventanove'];
 const ESTRATEGIAS_VALIDAS = ['provider_unico', 'melhor_preco', 'melhor_eta', 'fallback'];
 
+// Perfil de mensagem pro entregador (99). Enums da doc oficial da 99Entrega.
+const PACKAGE_TYPES_99 = ['groceries', 'food', 'documents', 'apparel', 'medication', 'electronics', 'others'];
+const PACKAGE_WEIGHTS_99 = ['1kg', '5kg', '10kg', '20kg', '30kg'];
+
+/** texto do perfil: '' -> null (vazio = usa global). undefined = não veio. */
+function normalizarTextoPerfil(v, max) {
+  if (v === undefined) return undefined;
+  const s = (v == null) ? '' : String(v).trim();
+  return s ? s.slice(0, max) : null;
+}
+/** enum do perfil: valida contra a lista; fora do enum ou vazio -> null. */
+function normalizarEnumPerfil(v, lista) {
+  if (v === undefined) return undefined;
+  const s = (v == null) ? '' : String(v).trim();
+  return lista.includes(s) ? s : null;
+}
+
 /**
  * Normaliza regioes_permitidas: aceita array ou CSV, retorna array lowercase.
  * @returns {string[]|null|undefined} undefined = não mexer, null = limpar
@@ -120,6 +137,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         margem_minima_aceita, margem_pct_minima,
         preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
         alterar_valor_mapp_ativo,
+        // perfil de mensagem pro entregador (99) — por cliente
+        nome_remetente, package_type, package_weight, aviso_entregador,
         // compat: aceita usar_uber do formato legado
         usar_uber,
       } = req.body || {};
@@ -155,6 +174,12 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       // Toggle por regra (default true se nao enviado).
       const _alterarValorMapp = (alterar_valor_mapp_ativo === false) ? false : true;
 
+      // Perfil de mensagem por cliente ('' ou fora do enum -> null = usa global).
+      const _nomeRem  = normalizarTextoPerfil(nome_remetente, 100) ?? null;
+      const _pkgType  = normalizarEnumPerfil(package_type, PACKAGE_TYPES_99) ?? null;
+      const _pkgWeight = normalizarEnumPerfil(package_weight, PACKAGE_WEIGHTS_99) ?? null;
+      const _avisoEnt = normalizarTextoPerfil(aviso_entregador, 127) ?? null;
+
       const { rows: [regra] } = await pool.query(`
         INSERT INTO logistics_dispatch_rules (
           cliente_nome, trecho_endereco, cliente_identificador,
@@ -163,9 +188,10 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           regioes_permitidas, ativo,
           margem_minima_aceita, margem_pct_minima,
           preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
-          alterar_valor_mapp_ativo
+          alterar_valor_mapp_ativo,
+          nome_remetente, package_type, package_weight, aviso_entregador
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
         RETURNING *
       `, [
         cliente_nome.trim(),
@@ -186,6 +212,10 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         precoKmBase,
         precoKmAdic,
         _alterarValorMapp,
+        _nomeRem,
+        _pkgType,
+        _pkgWeight,
+        _avisoEnt,
       ]);
 
       if (registrarAuditoria) {
@@ -214,6 +244,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         regioes_permitidas, ativo,
         margem_minima_aceita, margem_pct_minima,
         alterar_valor_mapp_ativo,
+        nome_remetente, package_type, package_weight, aviso_entregador,
         usar_uber,
       } = req.body || {};
 
@@ -245,6 +276,12 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       // no UPDATE) que referenciava preco_* nao destructurado -> ReferenceError -> 500 no PUT.
       // O preco por regra e gravado no POST (criar). Persistir edicao de preco via PUT sera tratado a parte.
 
+      // Perfil de mensagem (undefined = nao mexe, '' = limpa/usa global, valor = grava).
+      const _nomeRem   = normalizarTextoPerfil(nome_remetente, 100);
+      const _pkgType   = normalizarEnumPerfil(package_type, PACKAGE_TYPES_99);
+      const _pkgWeight = normalizarEnumPerfil(package_weight, PACKAGE_WEIGHTS_99);
+      const _avisoEnt  = normalizarTextoPerfil(aviso_entregador, 127);
+
       const { rows: [regra] } = await pool.query(`
         UPDATE logistics_dispatch_rules SET
           cliente_nome           = COALESCE($1, cliente_nome),
@@ -262,8 +299,12 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           margem_minima_aceita   = CASE WHEN $14::boolean THEN $13 ELSE margem_minima_aceita END,
           margem_pct_minima      = CASE WHEN $16::boolean THEN $15 ELSE margem_pct_minima END,
           alterar_valor_mapp_ativo = COALESCE($17, alterar_valor_mapp_ativo),
+          nome_remetente         = CASE WHEN $18::boolean THEN $19 ELSE nome_remetente END,
+          package_type           = CASE WHEN $20::boolean THEN $21 ELSE package_type END,
+          package_weight         = CASE WHEN $22::boolean THEN $23 ELSE package_weight END,
+          aviso_entregador       = CASE WHEN $24::boolean THEN $25 ELSE aviso_entregador END,
           updated_at             = NOW()
-        WHERE id = $18
+        WHERE id = $26
         RETURNING *
       `, [
         cliente_nome ? cliente_nome.trim() : null,
@@ -279,6 +320,10 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         margemPctParsed === undefined ? null : margemPctParsed,
         margemPctParsed !== undefined,
         typeof alterar_valor_mapp_ativo === 'boolean' ? alterar_valor_mapp_ativo : null,
+        _nomeRem   !== undefined, _nomeRem   === undefined ? null : _nomeRem,
+        _pkgType   !== undefined, _pkgType   === undefined ? null : _pkgType,
+        _pkgWeight !== undefined, _pkgWeight === undefined ? null : _pkgWeight,
+        _avisoEnt  !== undefined, _avisoEnt  === undefined ? null : _avisoEnt,
         id,
       ]);
 

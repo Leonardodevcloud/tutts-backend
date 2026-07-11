@@ -203,6 +203,13 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS ultima_atualizacao TIMESTAMP`).catch(() => {});
     console.log('✅ Colunas webhook solicitacoes_corrida verificadas');
 
+    // Perfil de mensagem pro entregador (99) POR CLIENTE API. Vazio = usa global.
+    await pool.query(`ALTER TABLE clientes_solicitacao ADD COLUMN IF NOT EXISTS nome_remetente   VARCHAR(100)`).catch(() => {});
+    await pool.query(`ALTER TABLE clientes_solicitacao ADD COLUMN IF NOT EXISTS package_type     VARCHAR(20)`).catch(() => {});
+    await pool.query(`ALTER TABLE clientes_solicitacao ADD COLUMN IF NOT EXISTS package_weight   VARCHAR(10)`).catch(() => {});
+    await pool.query(`ALTER TABLE clientes_solicitacao ADD COLUMN IF NOT EXISTS aviso_entregador VARCHAR(127)`).catch(() => {});
+    console.log('✅ Colunas perfil-mensagem clientes_solicitacao verificadas');
+
     // Tabela de logs detalhados do webhook (handler /api/webhook/tutts)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS webhook_tutts_logs (

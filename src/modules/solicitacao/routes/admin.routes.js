@@ -245,6 +245,7 @@ router.get('/admin/solicitacao/clientes', verificarToken, async (req, res) => {
         c.categorias_disponiveis,
         c.provedores_habilitados,
         c.preco_hub,
+        c.nome_remetente, c.package_type, c.package_weight, c.aviso_entregador,
         (SELECT COUNT(*) FROM solicitacoes_corrida WHERE cliente_id = c.id) as total_solicitacoes
       FROM clientes_solicitacao c
       ORDER BY c.criado_em DESC
@@ -342,6 +343,37 @@ router.patch('/admin/solicitacao/clientes/:id', verificarToken, async (req, res)
   } catch (err) {
     console.error('❌ Erro ao atualizar cliente:', err);
     res.status(500).json({ error: 'Erro ao atualizar cliente' });
+  }
+});
+
+// Perfil de mensagem pro entregador (99) do cliente API.
+// Vazio = usa a configuracao global. Aplicado nas corridas que saem pela
+// solicitacao.html (via solicitacoes_corrida -> cliente_id) no despacho do Hub.
+router.patch('/admin/solicitacao/clientes/:id/perfil-mensagem', verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const PACKAGE_TYPES_99 = ['groceries', 'food', 'documents', 'apparel', 'medication', 'electronics', 'others'];
+    const PACKAGE_WEIGHTS_99 = ['1kg', '5kg', '10kg', '20kg', '30kg'];
+    const _txt = (v, max) => { const s = (v == null) ? '' : String(v).trim(); return s ? s.slice(0, max) : null; };
+    const _enum = (v, lista) => { const s = (v == null) ? '' : String(v).trim(); return lista.includes(s) ? s : null; };
+
+    const nome_remetente   = _txt(req.body.nome_remetente, 100);
+    const package_type     = _enum(req.body.package_type, PACKAGE_TYPES_99);
+    const package_weight   = _enum(req.body.package_weight, PACKAGE_WEIGHTS_99);
+    const aviso_entregador = _txt(req.body.aviso_entregador, 127);
+
+    const { rowCount } = await pool.query(`
+      UPDATE clientes_solicitacao
+         SET nome_remetente = $1, package_type = $2, package_weight = $3, aviso_entregador = $4,
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5
+    `, [nome_remetente, package_type, package_weight, aviso_entregador, id]);
+
+    if (!rowCount) return res.status(404).json({ error: 'Cliente não encontrado' });
+    res.json({ sucesso: true, perfil: { nome_remetente, package_type, package_weight, aviso_entregador } });
+  } catch (err) {
+    console.error('❌ Erro ao salvar perfil de mensagem:', err);
+    res.status(500).json({ error: 'Erro ao salvar perfil de mensagem' });
   }
 });
 

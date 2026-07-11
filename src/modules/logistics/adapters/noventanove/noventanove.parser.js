@@ -189,15 +189,17 @@ function montarInfoEndereco(addr, opts) {
 }
 
 /**
- * Resolve package_type / package_weight a partir da config, validando contra
- * os enums da 99Entrega. Valor inválido cai no default (a 99 rejeita fora do enum).
+ * Resolve package_type / package_weight validando contra os enums da 99Entrega.
+ * Prioridade: request (perfil por cliente, resolvido pelo Orchestrator) → config
+ * global do provider → default. Valor inválido cai no default (a 99 rejeita fora do enum).
  *
  * @param {Object} config - logistics_providers.config
+ * @param {Object} [req]  - request canônico (req.packageType / req.packageWeight, por cliente)
  * @returns {{ package_type: string, package_weight: string }}
  */
-function resolverPacote(config) {
-  const tipo = config && config.package_type;
-  const peso = config && config.package_weight;
+function resolverPacote(config, req) {
+  const tipo = (req && req.packageType) || (config && config.package_type);
+  const peso = (req && req.packageWeight) || (config && config.package_weight);
   return {
     package_type: PACKAGE_TYPES_99.includes(tipo) ? tipo : PACKAGE_TYPE_DEFAULT,
     package_weight: PACKAGE_WEIGHTS_99.includes(peso) ? peso : PACKAGE_WEIGHT_DEFAULT,
@@ -248,7 +250,7 @@ function montarBodyCreate(estimateId, req, config) {
   }
 
   const telSuporte = (config && config.telefone_suporte) || '';
-  const pacote = resolverPacote(config);
+  const pacote = resolverPacote(config, req);
   const osRef = String(req.externalRef);
   // 2026-07: external_order_id UNICO por tentativa. No re-despacho, o Orchestrator
   // manda req.externalOrderId = "<codigo_os>-<id_registro>" pra nao colidir com o
@@ -272,9 +274,14 @@ function montarBodyCreate(estimateId, req, config) {
   // 🆕 Aviso padrao ao entregador (configuravel). Vai no INICIO da note da coleta
   // pra ser a 1a coisa que o courier le antes de aceitar. A note tem limite de
   // 127 chars; o truncarTexto em montarInfoEndereco garante o corte seguro.
-  const avisoEntregador = (config && typeof config.aviso_entregador === 'string' && config.aviso_entregador.trim())
-    ? config.aviso_entregador.trim()
-    : AVISO_ENTREGADOR_DEFAULT;
+  // Prioridade: request (perfil por cliente, resolvido pelo Orchestrator) ->
+  // config global do provider -> default.
+  const avisoReq = (req && typeof req.avisoEntregador === 'string' && req.avisoEntregador.trim())
+    ? req.avisoEntregador.trim() : null;
+  const avisoEntregador = avisoReq
+    || ((config && typeof config.aviso_entregador === 'string' && config.aviso_entregador.trim())
+      ? config.aviso_entregador.trim()
+      : AVISO_ENTREGADOR_DEFAULT);
 
   const pickupInfo = montarInfoEndereco(req.pickup, {
     nomeDefault: 'Loja',

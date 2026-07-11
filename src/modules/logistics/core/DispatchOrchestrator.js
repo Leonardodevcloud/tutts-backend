@@ -401,6 +401,26 @@ class DispatchOrchestrator {
       const externalOrderRef = `${codigoOS}-${registro.id}`;
       if (request) request.externalOrderId = externalOrderRef;
 
+      // 🆕 2026-07: perfil de mensagem pro entregador POR CLIENTE. Cascata por
+      // campo: regra do Hub -> Cliente API (via solicitacoes_corrida) -> global.
+      // Personaliza nome do remetente, tipo/peso do pacote e o aviso ao courier
+      // (ex: farmacia nao recebe "autopecas"). O nome manual do modal (opts.nomeRemetente)
+      // continua tendo prioridade sobre o perfil.
+      try {
+        const perfilMsg = await this._resolverPerfilMensagem(opts.regra || null, codigoOS);
+        if (request) {
+          const nomeManual = opts.nomeRemetente && String(opts.nomeRemetente).trim();
+          if (!nomeManual && perfilMsg.nome_remetente && request.pickup) {
+            request.pickup.name = String(perfilMsg.nome_remetente).slice(0, 100);
+          }
+          if (perfilMsg.package_type)     request.packageType     = perfilMsg.package_type;
+          if (perfilMsg.package_weight)   request.packageWeight   = perfilMsg.package_weight;
+          if (perfilMsg.aviso_entregador) request.avisoEntregador = perfilMsg.aviso_entregador;
+        }
+      } catch (ePerfil) {
+        console.warn(`[Orchestrator] OS ${codigoOS}: falha ao resolver perfil de mensagem (usando global): ${ePerfil.message}`);
+      }
+
       await this.pool.query(`
         UPDATE logistics_deliveries
         SET external_quote_id = $1, valor_provider = $2, eta_minutos = $3,
@@ -880,6 +900,59 @@ class DispatchOrchestrator {
     }
 
     return { tabela: null, origem: 'nenhum' };
+  }
+
+  /**
+   * Resolve o perfil de mensagem pro entregador (99) por cliente. Cascata POR
+   * CAMPO: regra do Hub (override) -> Cliente API (via solicitacoes_corrida) ->
+   * global (null aqui; o parser aplica o default/config do provider). Cada campo
+   * resolve sozinho, entao da pra preencher so a observacao no Cliente API e
+   * deixar o resto no global.
+   *
+   * O elo com o Cliente API: a OS que saiu pela solicitacao.html gravou o vinculo
+   * em solicitacoes_corrida (tutts_os_numero -> cliente_id). OS vindas da Mapp nao
+   * tem esse vinculo -> so a regra do Hub + global.
+   *
+   * @param {object|null} regra - logistics_dispatch_rules casada
+   * @param {string|number} codigoOS
+   * @returns {Promise<{nome_remetente:?string, package_type:?string, package_weight:?string, aviso_entregador:?string}>}
+   * @private
+   */
+  async _resolverPerfilMensagem(regra, codigoOS) {
+    const perfil = {
+      nome_remetente:   (regra && regra.nome_remetente)   || null,
+      package_type:     (regra && regra.package_type)     || null,
+      package_weight:   (regra && regra.package_weight)   || null,
+      aviso_entregador: (regra && regra.aviso_entregador) || null,
+    };
+
+    // Regra ja cobriu tudo -> nem consulta o Cliente API.
+    if (perfil.nome_remetente && perfil.package_type && perfil.package_weight && perfil.aviso_entregador) {
+      return perfil;
+    }
+
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT c.nome_remetente, c.package_type, c.package_weight, c.aviso_entregador
+          FROM solicitacoes_corrida s
+          JOIN clientes_solicitacao c ON c.id = s.cliente_id
+         WHERE s.tutts_os_numero = $1
+         ORDER BY s.id DESC
+         LIMIT 1
+      `, [String(codigoOS)]);
+      if (rows.length) {
+        const cli = rows[0];
+        perfil.nome_remetente   = perfil.nome_remetente   || cli.nome_remetente   || null;
+        perfil.package_type     = perfil.package_type     || cli.package_type     || null;
+        perfil.package_weight   = perfil.package_weight   || cli.package_weight   || null;
+        perfil.aviso_entregador = perfil.aviso_entregador || cli.aviso_entregador || null;
+      }
+    } catch (err) {
+      // fail-open: sem perfil do cliente, cai no global (default do parser).
+      console.warn(`[Orchestrator] perfil-mensagem: falha ao consultar Cliente API da OS ${codigoOS}: ${err.message}`);
+    }
+
+    return perfil;
   }
 
   /**
