@@ -459,6 +459,112 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   });
 
   // ───────────────────────────────────────────────────────────
+  // GET /deliveries/tentativas?os=101,102,103
+  //   Tentativas de despacho por OS (batch), lidas de logistics_events.
+  //   Alimenta a secao "Tentativas de despacho" do card no painel.
+  //   Colapsa o par redispatched+canceled do bloqueio: o courier bloqueado
+  //   (que vem no redispatched) e anexado ao passo 'canceled' seguinte.
+  //   IMPORTANTE: declarada ANTES de /deliveries/:id senao o :id captura
+  //   "tentativas".
+  // ───────────────────────────────────────────────────────────
+  router.get('/deliveries/tentativas', verificarToken, async (req, res) => {
+    try {
+      const osParam = String(req.query.os || '').trim();
+      if (!osParam) return res.json({ success: true, porOs: {} });
+
+      const codigos = osParam
+        .split(',')
+        .map(s => parseInt(String(s).trim(), 10))
+        .filter(n => Number.isInteger(n))
+        .slice(0, 200);
+      if (codigos.length === 0) return res.json({ success: true, porOs: {} });
+
+      const TIPOS = [
+        'dispatch_success', 'dispatch_failed',
+        'dispatch_rejected_by_rule', 'dispatch_rejected_by_margin',
+        'redispatched', 'canceled',
+      ];
+
+      const { rows } = await pool.query(
+        `SELECT codigo_os, provider_code, event_type, status_native, payload, erro, created_at
+           FROM logistics_events
+          WHERE codigo_os = ANY($1::int[])
+            AND event_type = ANY($2::text[])
+          ORDER BY codigo_os ASC, created_at ASC, id ASC`,
+        [codigos, TIPOS]
+      );
+
+      // extrai "Fulano" de "Entregador bloqueado (Fulano) - reatribuicao..."
+      const courierDoMotivo = (txt) => {
+        if (!txt) return null;
+        const m = /\(([^)]+)\)/.exec(String(txt));
+        return m ? m[1].trim() : null;
+      };
+      const parsePayload = (p) => {
+        if (!p) return {};
+        if (typeof p === 'string') { try { return JSON.parse(p); } catch (_) { return {}; } }
+        return p;
+      };
+
+      const byOs = {};
+      for (const r of rows) (byOs[r.codigo_os] = byOs[r.codigo_os] || []).push(r);
+
+      const porOs = {};
+      for (const os of Object.keys(byOs)) {
+        const evs = byOs[os];
+        const passos = [];
+        let courierBloqueioPendente = null; // vem do redispatched, anexa no canceled
+
+        for (const e of evs) {
+          const p = parsePayload(e.payload);
+
+          // redispatched: nao vira passo — so carrega o courier bloqueado
+          if (e.event_type === 'redispatched') {
+            courierBloqueioPendente = p.courier || null;
+            continue;
+          }
+
+          if (e.event_type === 'canceled') {
+            const canceladoPor = p.cancelado_por || null;
+            passos.push({
+              tipo: 'canceled',
+              provider: e.provider_code || null,
+              hora: e.created_at,
+              cancelado_por: canceladoPor,
+              courier: courierBloqueioPendente || courierDoMotivo(p.motivo),
+              motivo: p.motivo || null,
+            });
+            courierBloqueioPendente = null;
+            continue;
+          }
+
+          // dispatch_success / dispatch_failed / rejected_*
+          passos.push({
+            tipo: e.event_type,
+            provider: e.provider_code || null,
+            hora: e.created_at,
+            erro: e.erro || p.motivo || null,
+            motivo: p.motivo || null,
+          });
+        }
+
+        // conta so as tentativas de mandar (sucesso/falha/rejeicao) pro badge
+        const totalTentativas = passos.filter(x =>
+          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' ||
+          x.tipo === 'dispatch_rejected_by_rule' || x.tipo === 'dispatch_rejected_by_margin'
+        ).length;
+
+        porOs[os] = { eventos: passos, total_tentativas: totalTentativas };
+      }
+
+      return res.json({ success: true, porOs });
+    } catch (err) {
+      console.error('[logistics/routes] /deliveries/tentativas:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
   // GET /deliveries/:id  — detalhe (read-flip Fase 6)
   // ───────────────────────────────────────────────────────────
   router.get('/deliveries/:id', verificarToken, async (req, res) => {
