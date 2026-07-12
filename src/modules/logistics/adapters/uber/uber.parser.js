@@ -112,7 +112,10 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     pickup_name: truncarTexto(req.pickup.name || 'Loja', 100),
     pickup_phone_number: pickupPhone,
     pickup_business_name: truncarTexto(req.pickup.name || 'Loja', 100),
-    pickup_notes: truncarTexto(req.pickup.instructions || resolverAvisoEntregador(config), 280),
+    // pickup_notes: instrucoes do ponto -> aviso POR CLIENTE (perfil de mensagem,
+    // injetado pelo Orchestrator via req.avisoEntregador) -> aviso global. Alinha
+    // a Uber com a 99: farmacia nao recebe mais o texto generico de autopecas.
+    pickup_notes: truncarTexto(req.pickup.instructions || req.avisoEntregador || resolverAvisoEntregador(config), 280),
 
     dropoff_address: montarEnderecoUber(req.dropoff.address),
     dropoff_name: truncarTexto(req.dropoff.name || 'Cliente', 100),
