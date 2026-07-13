@@ -294,6 +294,8 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
           n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
           regra_aproveitamento_ativa, pct_min_aproveitamento,
+          min_entregas_elegivel, pct_prata, pct_ouro,
+          dias_pico_prata, dias_pico_ouro, hora_corte_pico,
           criado_em, atualizado_em, criado_por
         FROM score_config_regiao
         ORDER BY regiao
@@ -349,6 +351,13 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         // 🆕 2026-06: regra de aproveitamento semanal (por praça)
         regra_aproveitamento_ativa = false,
         pct_min_aproveitamento = 95,
+        // 🆕 2026-07: modelo novo de nível (qualidade define + presença no pico destrava)
+        min_entregas_elegivel = 40,
+        pct_prata = 85,
+        pct_ouro = 92,
+        dias_pico_prata = 12,
+        dias_pico_ouro = 18,
+        hora_corte_pico = 16,
       } = req.body || {};
 
       if (!regiao || !regiao.trim()) {
@@ -380,8 +389,10 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
           n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
           regra_aproveitamento_ativa, pct_min_aproveitamento,
+          min_entregas_elegivel, pct_prata, pct_ouro,
+          dias_pico_prata, dias_pico_ouro, hora_corte_pico,
           criado_por
-        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
         ON CONFLICT (regiao) DO UPDATE SET
           ativo = EXCLUDED.ativo,
           niveis_ativos = EXCLUDED.niveis_ativos,
@@ -397,6 +408,12 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           n3_min_pct_prazo = EXCLUDED.n3_min_pct_prazo,
           regra_aproveitamento_ativa = EXCLUDED.regra_aproveitamento_ativa,
           pct_min_aproveitamento = EXCLUDED.pct_min_aproveitamento,
+          min_entregas_elegivel = EXCLUDED.min_entregas_elegivel,
+          pct_prata = EXCLUDED.pct_prata,
+          pct_ouro = EXCLUDED.pct_ouro,
+          dias_pico_prata = EXCLUDED.dias_pico_prata,
+          dias_pico_ouro = EXCLUDED.dias_pico_ouro,
+          hora_corte_pico = EXCLUDED.hora_corte_pico,
           atualizado_em = NOW()
         RETURNING *
       `, [
@@ -406,6 +423,8 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 15), pct(n2_min_pct_prazo, 80),
         intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 20), pct(n3_min_pct_prazo, 88),
         !!regra_aproveitamento_ativa, pct(pct_min_aproveitamento, 95),
+        intMin0(min_entregas_elegivel, 40), pct(pct_prata, 85), pct(pct_ouro, 92),
+        intMin0(dias_pico_prata, 12), intMin0(dias_pico_ouro, 18), intMin0(hora_corte_pico, 16),
         req.user.userId || req.user.email || 'admin',
       ]);
 

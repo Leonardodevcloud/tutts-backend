@@ -69,6 +69,22 @@ async function initScoreV2Tables(pool) {
       ADD COLUMN IF NOT EXISTS regra_aproveitamento_ativa BOOLEAN DEFAULT false,
       ADD COLUMN IF NOT EXISTS pct_min_aproveitamento DECIMAL(5,2) DEFAULT 95.00
   `).catch(e => console.log('⚠️ regra_aproveitamento:', e.message));
+
+  // 🆕 2026-07: MODELO NOVO DE NIVEL (qualidade define + presenca no pico destrava).
+  //   min_entregas_elegivel: porta de entrada (minimo de entregas pra competir).
+  //   pct_prata / pct_ouro: faixas de % no prazo que definem o nivel merecido.
+  //   dias_pico_prata / dias_pico_ouro: dias distintos com entrega apos o corte
+  //     (gate de presenca — destrava o nivel; sem presenca, trava embaixo).
+  //   hora_corte_pico: hora em que comeca o "pico" (default 16h).
+  await pool.query(`
+    ALTER TABLE score_config_regiao
+      ADD COLUMN IF NOT EXISTS min_entregas_elegivel INT DEFAULT 40,
+      ADD COLUMN IF NOT EXISTS pct_prata DECIMAL(5,2) DEFAULT 85.00,
+      ADD COLUMN IF NOT EXISTS pct_ouro DECIMAL(5,2) DEFAULT 92.00,
+      ADD COLUMN IF NOT EXISTS dias_pico_prata INT DEFAULT 12,
+      ADD COLUMN IF NOT EXISTS dias_pico_ouro INT DEFAULT 18,
+      ADD COLUMN IF NOT EXISTS hora_corte_pico INT DEFAULT 16
+  `).catch(e => console.log('⚠️ modelo_nivel:', e.message));
   console.log('  ✅ score_config_regiao');
 
   // ============================================================

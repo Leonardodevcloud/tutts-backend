@@ -56,6 +56,33 @@ const NIVEL_3_DEFAULT = {
 const NIVEL_2 = NIVEL_2_DEFAULT;
 const NIVEL_3 = NIVEL_3_DEFAULT;
 
+// 🆕 2026-07: MODELO NOVO. Qualidade (% no prazo) define o nivel merecido;
+// presenca no pico (dias com entrega apos o corte) destrava/veta; volume vira
+// so porta de entrada. Todos os valores sao configuraveis por praca.
+const MODELO_DEFAULT = {
+  min_entregas_elegivel: 40,
+  pct_prata: 85.0,
+  pct_ouro: 92.0,
+  dias_pico_prata: 12,
+  dias_pico_ouro: 18,
+  hora_corte_pico: 16,
+};
+
+/**
+ * Resolve os parametros do modelo novo a partir da config da praca.
+ * Campo NULL/ausente cai no default. Config inteira null = defaults puros.
+ */
+function resolverConfigModelo(cfg) {
+  return {
+    min_elegivel: cfg?.min_entregas_elegivel != null ? parseInt(cfg.min_entregas_elegivel, 10) : MODELO_DEFAULT.min_entregas_elegivel,
+    pct_prata: cfg?.pct_prata != null ? parseFloat(cfg.pct_prata) : MODELO_DEFAULT.pct_prata,
+    pct_ouro: cfg?.pct_ouro != null ? parseFloat(cfg.pct_ouro) : MODELO_DEFAULT.pct_ouro,
+    dias_pico_prata: cfg?.dias_pico_prata != null ? parseInt(cfg.dias_pico_prata, 10) : MODELO_DEFAULT.dias_pico_prata,
+    dias_pico_ouro: cfg?.dias_pico_ouro != null ? parseInt(cfg.dias_pico_ouro, 10) : MODELO_DEFAULT.dias_pico_ouro,
+    hora_corte: cfg?.hora_corte_pico != null ? parseInt(cfg.hora_corte_pico, 10) : MODELO_DEFAULT.hora_corte_pico,
+  };
+}
+
 /**
  * Resolve thresholds a partir da config da região.
  * Se algum campo está NULL/undefined na config, usa o default.
@@ -234,8 +261,8 @@ function SQL_NORM_REGIAO(expr) {
  *   }
  */
 async function calcularNivelMotoboy(pool, codProf, cfg = null) {
-  // Resolve thresholds (config da região OU defaults)
-  const thresholds = resolverThresholds(cfg);
+  // 🆕 2026-07: modelo novo (qualidade define + presenca no pico destrava)
+  const modelo = resolverConfigModelo(cfg);
 
   const codProfInt = parseInt(codProf, 10);
   if (!Number.isFinite(codProfInt)) {
@@ -243,12 +270,13 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
     return {
       nivel: 1,
       stats: { entregas: 0, dias_16h: 0, pct_prazo: 0 },
-      progresso: montarProgresso({ entregas: 0, dias_16h: 0, pct_prazo: 0 }, 2, thresholds),
+      progresso: montarProgresso({ entregas: 0, dias_16h: 0, pct_prazo: 0 }, 2, modelo),
     };
   }
   const result = await pool.query(`
     WITH base AS (
       SELECT
+        data_solicitado,
         hora_solicitado,
         distancia,
         ${PRAZO_REGUA_SQL} AS prazo_regua,
@@ -262,9 +290,9 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
     )
     SELECT
       COUNT(*)::int AS total_entregas,
-      COUNT(*) FILTER (
+      COUNT(DISTINCT data_solicitado) FILTER (
         WHERE hora_solicitado IS NOT NULL AND EXTRACT(HOUR FROM hora_solicitado) >= $2
-      )::int AS dias_16h,
+      )::int AS dias_pico,
       CASE
         WHEN COUNT(*) FILTER (WHERE avaliavel) > 0 THEN
           ROUND(
@@ -273,45 +301,78 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
         ELSE 0
       END AS pct_prazo
     FROM base
-  `, [codProfInt, HORA_CORTE_NOTURNO]);
-  // 🆕 2026-06: pct_prazo agora conta do ACEITE (data_hora_alocado) com a nova régua.
-  // Denominador = só entregas avaliáveis (com tempo e distância). dias_16h = qtd total após 16h.
+  `, [codProfInt, modelo.hora_corte]);
+  // 🆕 2026-07: dias_pico = DIAS DISTINTOS com >=1 entrega apos o corte (presenca
+  // recorrente no pico), nao mais a quantidade total. Hora de corte vem da praca.
+  // total_entregas e pct_prazo alinhados com o BI (ponto>=2, sobre avaliaveis).
 
   const stats = {
     entregas: parseInt(result.rows[0].total_entregas) || 0,
-    dias_16h: parseInt(result.rows[0].dias_16h) || 0,
+    dias_16h: parseInt(result.rows[0].dias_pico) || 0, // dias distintos no pico (chave mantida p/ persistencia)
     pct_prazo: parseFloat(result.rows[0].pct_prazo) || 0,
   };
 
-  // 🚀 2026-05: lógica nova SEM faixa (≥80% = N2, ≥88% sobe pra N3)
-  // Quem tem entregas/dias suficientes mas % menor que pct_prazo_min do N2 → fica N1
+  // 🆕 2026-07: MODELO NOVO. Qualidade define o nivel merecido; presenca no pico
+  // destrava (teto); porta de entrada filtra quem tem poucos dados. Nivel final =
+  // o MENOR entre o que a qualidade da e o que a presenca permite.
   let nivel = 1;
-  if (
-    stats.entregas >= thresholds.n3.entregas_min &&
-    stats.dias_16h >= thresholds.n3.dias_16h_min &&
-    stats.pct_prazo >= thresholds.n3.pct_prazo_min
-  ) {
-    nivel = 3;
-  } else if (
-    stats.entregas >= thresholds.n2.entregas_min &&
-    stats.dias_16h >= thresholds.n2.dias_16h_min &&
-    stats.pct_prazo >= thresholds.n2.pct_prazo_min
-  ) {
-    nivel = 2;
+  if (stats.entregas >= modelo.min_elegivel) {
+    let candQualidade = 1;
+    if (stats.pct_prazo >= modelo.pct_ouro) candQualidade = 3;
+    else if (stats.pct_prazo >= modelo.pct_prata) candQualidade = 2;
+
+    let tetoPresenca = 1;
+    if (stats.dias_16h >= modelo.dias_pico_ouro) tetoPresenca = 3;
+    else if (stats.dias_16h >= modelo.dias_pico_prata) tetoPresenca = 2;
+
+    nivel = Math.min(candQualidade, tetoPresenca);
   }
 
-  // Calcula progresso pro PRÓXIMO nível (mostrar barra ao motoboy)
+  // Progresso pro próximo nível (barra ao motoboy)
   let progresso = null;
   if (nivel === 1) {
-    progresso = montarProgresso(stats, 2, thresholds);
+    progresso = montarProgresso(stats, 2, modelo);
   } else if (nivel === 2) {
-    progresso = montarProgresso(stats, 3, thresholds);
+    progresso = montarProgresso(stats, 3, modelo);
   }
 
-  return { nivel, stats, progresso, thresholds };
+  return { nivel, stats, progresso, modelo };
 }
 
-function montarProgresso(stats, alvo, thresholds) {
+function montarProgresso(stats, alvo, modelo) {
+  const pctMeta = alvo === 3 ? modelo.pct_ouro : modelo.pct_prata;
+  const diasMeta = alvo === 3 ? modelo.dias_pico_ouro : modelo.dias_pico_prata;
+  const reqs = [
+    {
+      metrica: 'elegibilidade',
+      label: 'Entregas no período (mínimo pra competir)',
+      atual: stats.entregas,
+      meta: modelo.min_elegivel,
+      ok: stats.entregas >= modelo.min_elegivel,
+      pct: Math.min(100, Math.round((stats.entregas / Math.max(modelo.min_elegivel, 1)) * 100)),
+    },
+    {
+      metrica: 'pct_prazo',
+      label: '% no prazo',
+      atual: stats.pct_prazo,
+      meta: pctMeta,
+      ok: stats.pct_prazo >= pctMeta,
+      pct: Math.min(100, Math.round((stats.pct_prazo / Math.max(pctMeta, 1)) * 100)),
+      sufixo: '%',
+    },
+    {
+      metrica: 'dias_pico',
+      label: `Dias com entrega após ${modelo.hora_corte}h`,
+      atual: stats.dias_16h,
+      meta: diasMeta,
+      ok: stats.dias_16h >= diasMeta,
+      pct: Math.min(100, Math.round((stats.dias_16h / Math.max(diasMeta, 1)) * 100)),
+    },
+  ];
+  return { proximo_nivel: alvo, requisitos: reqs };
+}
+
+function montarProgressoLegado(stats, alvo, thresholds) {
   const config = alvo === 3 ? thresholds.n3 : thresholds.n2;
   const reqs = [
     {
@@ -595,8 +656,8 @@ async function avaliarMotoboy(pool, codProf) {
     };
   }
 
-  // 3. Calcula nível atual usando thresholds da região
-  const { nivel, stats, progresso, thresholds } = await calcularNivelMotoboy(pool, codProf, regiaoConfig);
+  // 3. Calcula nível atual (modelo novo: qualidade + presença)
+  const { nivel, stats, progresso, modelo } = await calcularNivelMotoboy(pool, codProf, regiaoConfig);
 
   // 4. Persiste (snapshot + histórico de mudanças)
   // 🔧 FIX: usa a grafia canônica da config (regiaoConfig.regiao) em vez da do CRM/planilha,
@@ -650,7 +711,7 @@ async function avaliarMotoboy(pool, codProf) {
     nivel,
     stats,
     progresso,
-    thresholds, // 🚀 enviado pro frontend mostrar critérios reais da região no roadmap
+    modelo, // 🆕 parâmetros do modelo novo (pro frontend mostrar as metas da praça)
     // Valores monetários da config (pro roadmap mostrar)
     sorteio_valor_n2: regiaoConfig?.sorteio_valor_n2 != null ? Number(regiaoConfig.sorteio_valor_n2) : 50,
     sorteio_valor_n3: regiaoConfig?.sorteio_valor_n3 != null ? Number(regiaoConfig.sorteio_valor_n3) : 150,
@@ -971,7 +1032,7 @@ async function lerNivelMotoboy(pool, codProf) {
     };
   }
 
-  const thresholds = resolverThresholds(regiaoConfig);
+  const modeloAoVivo = resolverConfigModelo(regiaoConfig);
 
   // 3. Lê o nível CONGELADO (última avaliação semanal)
   const row = await pool.query(
@@ -991,8 +1052,8 @@ async function lerNivelMotoboy(pool, codProf) {
 
   // Progresso pro próximo nível (baseado no nível CONGELADO + stats ao vivo)
   let progresso = null;
-  if (nivel === 1) progresso = montarProgresso(statsAoVivo, 2, thresholds);
-  else if (nivel === 2) progresso = montarProgresso(statsAoVivo, 3, thresholds);
+  if (nivel === 1) progresso = montarProgresso(statsAoVivo, 2, modeloAoVivo);
+  else if (nivel === 2) progresso = montarProgresso(statsAoVivo, 3, modeloAoVivo);
 
   const carencia = calcularCarencia(nivelDesde);
   const dias_no_nivel = diasNoNivel(nivelDesde);
@@ -1010,7 +1071,7 @@ async function lerNivelMotoboy(pool, codProf) {
     },
     stats_ao_vivo: statsAoVivo,
     progresso,
-    thresholds,
+    modelo: modeloAoVivo,
     sorteio_valor_n2: regiaoConfig.sorteio_valor_n2 != null ? Number(regiaoConfig.sorteio_valor_n2) : 50,
     sorteio_valor_n3: regiaoConfig.sorteio_valor_n3 != null ? Number(regiaoConfig.sorteio_valor_n3) : 150,
     saque_teto_n2: regiaoConfig.saque_teto_n2 != null ? Number(regiaoConfig.saque_teto_n2) : 500,
