@@ -392,7 +392,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           min_entregas_elegivel, pct_prata, pct_ouro,
           dias_pico_prata, dias_pico_ouro, hora_corte_pico,
           criado_por
-        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         ON CONFLICT (regiao) DO UPDATE SET
           ativo = EXCLUDED.ativo,
           niveis_ativos = EXCLUDED.niveis_ativos,
