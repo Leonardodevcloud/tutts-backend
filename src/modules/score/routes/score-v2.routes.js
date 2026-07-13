@@ -203,6 +203,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           data_chegada, hora_chegada, data_saida, hora_saida
         FROM bi_entregas
         WHERE cod_prof = $1
+          AND COALESCE(ponto, 1) >= 2
           AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
           AND data_solicitado <= CURRENT_DATE
         ORDER BY data_solicitado DESC, hora_solicitado DESC
@@ -222,6 +223,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           )::int AS apos_16h
         FROM bi_entregas
         WHERE cod_prof = $1
+          AND COALESCE(ponto, 1) >= 2
           AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
           AND data_solicitado <= CURRENT_DATE
         GROUP BY data_solicitado

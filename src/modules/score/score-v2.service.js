@@ -256,6 +256,7 @@ async function calcularNivelMotoboy(pool, codProf, cfg = null) {
         (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
       FROM bi_entregas
       WHERE cod_prof = $1
+        AND COALESCE(ponto, 1) >= 2
         AND data_solicitado >= (CURRENT_DATE - INTERVAL '27 days')::date
         AND data_solicitado <= CURRENT_DATE
     )
@@ -1160,18 +1161,24 @@ async function calcularAproveitamento7d(pool, codProf, dias = JANELA_APROVEITAME
         (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
       FROM bi_entregas
       WHERE cod_prof = $1
+        AND COALESCE(ponto, 1) >= 2
         AND data_solicitado >= (${fimSQL} - ($2 || ' days')::interval)::date
         AND data_solicitado <= ${fimSQL}
     )
     SELECT
-      COUNT(*) FILTER (WHERE avaliavel)::int AS total,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE avaliavel)::int AS avaliaveis,
       COUNT(*) FILTER (WHERE avaliavel AND tempo_prof_min <= prazo_regua)::int AS no_prazo
     FROM base
   `, params);
+  // 🆕 2026-07: total = entregas reais (ponto>=2), alinhado com o BI. O % de prazo
+  // continua sobre as AVALIAVEIS (que tem aceite+distancia+finalizado), pois so
+  // essas dao pra medir tempo. Sem nenhuma avaliavel, nao sinaliza.
   const total = parseInt(r.rows[0].total, 10) || 0;
+  const avaliaveis = parseInt(r.rows[0].avaliaveis, 10) || 0;
   const noPrazo = parseInt(r.rows[0].no_prazo, 10) || 0;
-  if (total === 0) return null;
-  return { total, no_prazo: noPrazo, pct: Math.round((10000 * noPrazo) / total) / 100 };
+  if (avaliaveis === 0) return null;
+  return { total, avaliaveis, no_prazo: noPrazo, pct: Math.round((10000 * noPrazo) / avaliaveis) / 100 };
 }
 
 /**
