@@ -69,7 +69,9 @@ function montarManifestItem(nome, config, priceCents) {
     // 🔧 2026-06 (Uber cert): price (centavos) obrigatório. Com 1 item,
     // price = manifest_total_value, então Σ(price×quantity) = manifest_total_value.
     price: parseInt(priceCents != null ? priceCents : ((config && config.manifest_total_value_centavos) || 10000), 10),
-    size: (config && config.uber_item_size) || 'small',
+    // 🔧 2026-07 (Uber cert item 5): enviar APENAS weight + dimensions (nao size
+    // junto). A Uber rejeita size e dimensions no mesmo item. Optamos por
+    // dimensions + weight (mais preciso e ja configuravel por provider).
     weight: _int(config, 'uber_item_weight_g', 1000),       // gramas
     dimensions: {
       length: _int(config, 'uber_item_length_cm', 20),       // cm

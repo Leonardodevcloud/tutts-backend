@@ -40,6 +40,20 @@ function montarEnderecoUber(stringEndereco) {
 }
 
 /**
+ * 🔧 2026-07 (Uber cert item 4): evita placeholders no nome que o entregador ve no
+ * pickup/dropoff. Filtra strings curtas ou repetitivas ("eeee", "xx", "aaaa") e
+ * placeholders obvios de teste; cai no fallback. Nome real passa direto.
+ */
+function nomeRealOuFallback(nome, fallback) {
+  var n = String(nome == null ? '' : nome).trim();
+  if (n.length < 3) return fallback;
+  if (/^(.)\1*$/.test(n.replace(/\s/g, ''))) return fallback; // 1 caractere repetido
+  var placeholders = ['teste', 'test', 'asdf', 'qwer', 'sem nome', 'nao informado', 'nome'];
+  if (placeholders.indexOf(n.toLowerCase()) !== -1) return fallback;
+  return n;
+}
+
+/**
  * Monta body para POST /delivery_quotes
  *
  * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
@@ -109,18 +123,21 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     external_store_id: montarExternalStoreId(req, config),
 
     pickup_address: montarEnderecoUber(req.pickup.address),
-    pickup_name: truncarTexto(req.pickup.name || 'Loja', 100),
+    pickup_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
     pickup_phone_number: pickupPhone,
-    pickup_business_name: truncarTexto(req.pickup.name || 'Loja', 100),
+    pickup_business_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
     // pickup_notes: instrucoes do ponto -> aviso POR CLIENTE (perfil de mensagem,
     // injetado pelo Orchestrator via req.avisoEntregador) -> aviso global. Alinha
     // a Uber com a 99: farmacia nao recebe mais o texto generico de autopecas.
     pickup_notes: truncarTexto(req.pickup.instructions || req.avisoEntregador || resolverAvisoEntregador(config), 280),
 
     dropoff_address: montarEnderecoUber(req.dropoff.address),
-    dropoff_name: truncarTexto(req.dropoff.name || 'Cliente', 100),
+    dropoff_name: truncarTexto(nomeRealOuFallback(req.dropoff.name, 'Cliente'), 100),
     dropoff_phone_number: dropoffPhone,
-    dropoff_notes: truncarTexto(req.dropoff.complement, 280),
+    // 🔧 2026-07 (Uber cert item 2): dropoff_notes = complemento (sala/apto/portaria/
+    // referencia) + instrucoes de entrega. Antes usava so o complement e ignorava
+    // as instrucoes (entrega.obs), por isso vinha vazio em varias OS.
+    dropoff_notes: truncarTexto([req.dropoff.complement, req.dropoff.instructions].filter(Boolean).join(' - '), 280) || undefined,
 
     manifest_items: manifestItems,
     manifest_total_value: manifestValueCents,
