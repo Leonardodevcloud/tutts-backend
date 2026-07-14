@@ -145,6 +145,7 @@ class UberAdapter extends LogisticsProviderAdapter {
     const token = await obterTokenUber(this.pool, this.sandboxMode);
     const url = `${this._apiBase}/${customerId}/delivery_quotes`;
     const body = montarBodyQuote(req, this.config);
+    console.log('📤 [UberAdapter] QUOTE body enviado:', JSON.stringify(body));
 
     const resp = await httpRequest(url, {
       method: 'POST',
@@ -212,6 +213,7 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     // montarBodyDelivery agora retorna { body, pickupCode, dropoffCode }
     const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config, this.sandboxMode);
+    console.log('📤 [UberAdapter] CREATE body enviado:', JSON.stringify(body));
 
     const resp = await httpRequest(url, {
       method: 'POST',
