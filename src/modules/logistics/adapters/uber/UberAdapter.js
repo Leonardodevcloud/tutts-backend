@@ -135,6 +135,48 @@ class UberAdapter extends LogisticsProviderAdapter {
    * @param {import('../../contracts/CanonicalTypes').CanonicalQuoteRequest} req
    * @returns {Promise<import('../../contracts/CanonicalTypes').CanonicalQuote>}
    */
+  /**
+   * 🔧 2026-07 (Uber): resolve o CEP de um ponto por geocode reverso (Google) a
+   * partir de lat/lng. A Uber geocodifica pelo texto e erra sem CEP; o hub sempre
+   * manda lat/lng. Best-effort: se falhar, devolve null e o fluxo segue.
+   * @private
+   */
+  async _resolverCEPPorCoordenada(lat, lng) {
+    const key = process.env.GOOGLE_GEOCODING_API_KEY;
+    if (!key || lat == null || lng == null) return null;
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}&language=pt-BR`;
+      const resp = await httpRequest(url);
+      if (!resp.ok) return null;
+      const data = resp.json();
+      for (const r of (data.results || [])) {
+        const comp = (r.address_components || []).find(c => (c.types || []).includes('postal_code'));
+        if (comp && comp.long_name) return comp.long_name;
+      }
+      return null;
+    } catch (_e) { return null; }
+  }
+
+  /**
+   * Garante CEP em pickup e dropoff de um CanonicalQuoteRequest. Usa o CEP que ja
+   * veio; se ausente, resolve por geocode. Muta o req in-place. Best-effort.
+   * @private
+   */
+  async _garantirCEP(req) {
+    for (const ponto of ['pickup', 'dropoff']) {
+      const p = req && req[ponto];
+      if (!p) continue;
+      const temCep = p.cep && String(p.cep).replace(/\D/g, '').length >= 8;
+      if (!temCep && p.latitude != null && p.longitude != null) {
+        const cep = await this._resolverCEPPorCoordenada(p.latitude, p.longitude);
+        if (cep) {
+          p.cep = cep;
+          console.log(`📍 [UberAdapter] CEP do ${ponto} resolvido por geocode: ${cep}`);
+        }
+      }
+    }
+  }
+
   async createQuote(req) {
     // (req já vem validado pelo Orchestrator via servicoMappToCanonicalQuoteRequest)
     const customerId = this.config.customer_id;
@@ -144,6 +186,10 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     const token = await obterTokenUber(this.pool, this.sandboxMode);
     const url = `${this._apiBase}/${customerId}/delivery_quotes`;
+    // 🔧 2026-07 (Uber): garante CEP em pickup/dropoff antes de cotar. Sem CEP a
+    // Uber geocodifica o ponto errado e recusa por "outside delivery radius"
+    // (ex: loja de Campinas sem CEP na OS). O hub sempre tem lat/lng.
+    await this._garantirCEP(req);
     const body = montarBodyQuote(req, this.config);
     console.log('📤 [UberAdapter] QUOTE body enviado:', JSON.stringify(body));
 

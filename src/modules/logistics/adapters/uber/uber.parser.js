@@ -35,8 +35,14 @@ const {
  * @param {string} stringEndereco - endereço completo em string única
  * @returns {string} JSON-stringified
  */
-function montarEnderecoUber(stringEndereco) {
-  return JSON.stringify(parsearEnderecoBrasileiro(stringEndereco));
+function montarEnderecoUber(stringEndereco, cepFallback) {
+  const parsed = parsearEnderecoBrasileiro(stringEndereco);
+  // 🔧 2026-07 (Uber): se o texto nao trouxe CEP, usa o resolvido por geocode
+  // (req.pickup/dropoff.cep). Sem CEP a Uber geocodifica errado e recusa a corrida.
+  if (cepFallback && (!parsed.zip_code || String(parsed.zip_code).replace(/\D/g, '').length < 8)) {
+    parsed.zip_code = String(cepFallback);
+  }
+  return JSON.stringify(parsed);
 }
 
 /**
@@ -61,8 +67,8 @@ function nomeRealOuFallback(nome, fallback) {
  */
 function montarBodyQuote(req, config) {
   const body = {
-    pickup_address: montarEnderecoUber(req.pickup.address),
-    dropoff_address: montarEnderecoUber(req.dropoff.address),
+    pickup_address: montarEnderecoUber(req.pickup.address, req.pickup.cep),
+    dropoff_address: montarEnderecoUber(req.dropoff.address, req.dropoff.cep),
   };
 
   // Coordenadas — recomendado pra Brasil
@@ -122,7 +128,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     // external_store_id: unico por endereco de retirada/loja (REQUIRED).
     external_store_id: montarExternalStoreId(req, config),
 
-    pickup_address: montarEnderecoUber(req.pickup.address),
+    pickup_address: montarEnderecoUber(req.pickup.address, req.pickup.cep),
     pickup_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
     pickup_phone_number: pickupPhone,
     pickup_business_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
@@ -131,7 +137,7 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     // a Uber com a 99: farmacia nao recebe mais o texto generico de autopecas.
     pickup_notes: truncarTexto(req.pickup.instructions || req.avisoEntregador || resolverAvisoEntregador(config), 280),
 
-    dropoff_address: montarEnderecoUber(req.dropoff.address),
+    dropoff_address: montarEnderecoUber(req.dropoff.address, req.dropoff.cep),
     dropoff_name: truncarTexto(nomeRealOuFallback(req.dropoff.name, 'Cliente'), 100),
     dropoff_phone_number: dropoffPhone,
     // 🔧 2026-07 (Uber cert item 2): dropoff_notes = complemento (sala/apto/portaria/
