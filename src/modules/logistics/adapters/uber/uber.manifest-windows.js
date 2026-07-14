@@ -94,22 +94,16 @@ function montarExternalStoreId(req, config) {
   if (config && config.uber_external_store_id_fixo) {
     return String(config.uber_external_store_id_fixo).slice(0, 128);
   }
-  // 🔧 2026-07 (Uber): store_id ESTAVEL por loja = codigo do cliente (req.storeId),
-  // resolvido pelo Orchestrator ANTES do quote. Fallback: cep+slug do nome.
-  if (req && req.storeId) {
-    return String(req.storeId).slice(0, 128);
-  }
+  // 🔧 2026-07 (Uber): store_id ESTAVEL por loja fisica = CEP da coleta (so digitos).
+  // Escolha do parceiro: 100% consistente (mesma loja = mesmo id, tenha ou nao cliente
+  // vinculado). O _garantirCEP do UberAdapter resolve o CEP por geocode quando a OS nao
+  // traz, entao ate loja sem CEP no cadastro fica com id estavel.
   const p = (req && req.pickup) || {};
-  const cep = p.cep ? String(p.cep).replace(/\D/g, '') : '';
-  const nome = p.name ? String(p.name) : 'loja';
-  const slug = nome
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // tira acentos
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40);
-  const base = [cep, slug].filter(Boolean).join('-') || 'loja-default';
-  return base.slice(0, 128);
+  const cepDigits = p.cep ? String(p.cep).replace(/\D/g, '') : '';
+  if (cepDigits) {
+    return cepDigits.slice(0, 128);
+  }
+  return 'loja-default';
 }
 
 module.exports = {

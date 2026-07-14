@@ -257,6 +257,9 @@ class UberAdapter extends LogisticsProviderAdapter {
     const token = await obterTokenUber(this.pool, this.sandboxMode);
     const url = `${this._apiBase}/${customerId}/deliveries`;
 
+    // 🔧 2026-07 (Uber): garante CEP tambem aqui. O store_id e o zip_code usam
+    // req.pickup.cep; se o create rodar sem ter passado pelo createQuote, resolve.
+    await this._garantirCEP(req);
     // montarBodyDelivery agora retorna { body, pickupCode, dropoffCode }
     const { body, pickupCode, dropoffCode } = montarBodyDelivery(quote.quoteId, req, this.config, this.sandboxMode);
     console.log('📤 [UberAdapter] CREATE body enviado:', JSON.stringify(body));
