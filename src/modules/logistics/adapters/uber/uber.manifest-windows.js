@@ -94,6 +94,11 @@ function montarExternalStoreId(req, config) {
   if (config && config.uber_external_store_id_fixo) {
     return String(config.uber_external_store_id_fixo).slice(0, 128);
   }
+  // 🔧 2026-07 (Uber): store_id ESTAVEL por loja = codigo do cliente (req.storeId),
+  // resolvido pelo Orchestrator ANTES do quote. Fallback: cep+slug do nome.
+  if (req && req.storeId) {
+    return String(req.storeId).slice(0, 128);
+  }
   const p = (req && req.pickup) || {};
   const cep = p.cep ? String(p.cep).replace(/\D/g, '') : '';
   const nome = p.name ? String(p.name) : 'loja';

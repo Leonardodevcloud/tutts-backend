@@ -166,6 +166,11 @@ class DispatchOrchestrator {
     const request = servicoMappToCanonicalQuoteRequest(servico);
     request.vehicleType = vehicleType || request.vehicleType;
 
+    // 🔧 2026-07 (Uber): external_store_id ESTAVEL por loja = codigo do cliente,
+    // resolvido ANTES do quote. A Uber ancora o store_id na cotacao, entao quote e
+    // create precisam do mesmo valor. Sem isso o quote saia com nome vazio ("loja").
+    request.storeId = await this._resolverStoreId(codigoOS);
+
     // Cota no adapter
     const quote = await adapter.createQuote(request);
 
@@ -918,6 +923,32 @@ class DispatchOrchestrator {
    * @returns {Promise<{nome_remetente:?string, package_type:?string, package_weight:?string, aviso_entregador:?string}>}
    * @private
    */
+  /**
+   * 🔧 2026-07 (Uber): resolve o external_store_id ESTAVEL da loja de coleta a
+   * partir do codigo do cliente da OS (clientes_solicitacao.id via
+   * solicitacoes_corrida). Retorna "loja-<id>" (unico e estavel por loja, e o
+   * que a Uber exige) ou null se a OS nao tem cliente vinculado (cai no fallback
+   * cep+nome do parser).
+   */
+  async _resolverStoreId(codigoOS) {
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT s.cliente_id
+          FROM solicitacoes_corrida s
+         WHERE s.tutts_os_numero = $1
+           AND s.cliente_id IS NOT NULL
+         ORDER BY s.id DESC
+         LIMIT 1
+      `, [String(codigoOS)]);
+      if (rows.length && rows[0].cliente_id != null) {
+        return `loja-${rows[0].cliente_id}`;
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] store_id: falha ao resolver cliente da OS ${codigoOS}: ${err.message}`);
+    }
+    return null;
+  }
+
   async _resolverPerfilMensagem(regra, codigoOS) {
     const perfil = {
       nome_remetente:   (regra && regra.nome_remetente)   || null,
