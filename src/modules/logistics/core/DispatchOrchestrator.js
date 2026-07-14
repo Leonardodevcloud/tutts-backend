@@ -384,6 +384,11 @@ class DispatchOrchestrator {
       if (request && request.dropoff && opts.nomeCliente && String(opts.nomeCliente).trim()) {
         request.dropoff.name = String(opts.nomeCliente).trim().slice(0, 100);
       }
+      // 🔧 2026-07: complemento/observacao manual do modal -> dropoff.complement.
+      // O parser junta complement + instructions no dropoff_notes (Uber) / obs (99).
+      if (request && request.dropoff && opts.complementoEntrega && String(opts.complementoEntrega).trim()) {
+        request.dropoff.complement = String(opts.complementoEntrega).trim().slice(0, 280);
+      }
 
       // Ponte rastreio-cliente: nome + telefone do CORPO da OS.
       // Quando os dados do cliente final nao vem em campo estruturado (ficam
