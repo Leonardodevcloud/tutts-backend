@@ -183,6 +183,109 @@ function createLogisticsPortalRouter(pool) {
     }
   });
 
+  // ---------------------------------------------------------
+  // GET /deliveries/tentativas?os=101,102  (PORTAL_CLIENTE_TENTATIVAS_V2)
+  //   MESMA trilha do painel admin (Despachado / Re-despachado / Cancelado /
+  //   Falha), porem ESCOPADA: so devolve tentativas das OS que pertencem a
+  //   regra do token. Le de logistics_events.
+  // ---------------------------------------------------------
+  router.get('/deliveries/tentativas', verificarPortalToken, async (req, res) => {
+    try {
+      const osParam = String(req.query.os || '').trim();
+      if (!osParam) return res.json({ success: true, porOs: {} });
+
+      const pedidos = osParam
+        .split(',')
+        .map(s => parseInt(String(s).trim(), 10))
+        .filter(n => Number.isInteger(n))
+        .slice(0, 200);
+      if (pedidos.length === 0) return res.json({ success: true, porOs: {} });
+
+      // Escopo: so as OS dessa regra (evita a loja ler tentativas de outro cliente).
+      const { rows: doCliente } = await pool.query(
+        `SELECT DISTINCT codigo_os FROM logistics_deliveries
+          WHERE regra_id = $1 AND codigo_os = ANY($2::int[])`,
+        [req.portal.regra_id, pedidos]
+      );
+      const codigos = doCliente.map(r => r.codigo_os);
+      if (codigos.length === 0) return res.json({ success: true, porOs: {} });
+
+      const TIPOS = ['dispatch_success', 'dispatch_failed', 'error', 'redispatched', 'canceled'];
+      const { rows } = await pool.query(
+        `SELECT codigo_os, provider_code, event_type, status_native, payload, erro, created_at
+           FROM logistics_events
+          WHERE codigo_os = ANY($1::int[])
+            AND event_type = ANY($2::text[])
+          ORDER BY codigo_os ASC, created_at ASC, id ASC`,
+        [codigos, TIPOS]
+      );
+
+      const courierDoMotivo = (txt) => {
+        if (!txt) return null;
+        const m = /\(([^)]+)\)/.exec(String(txt));
+        return m ? m[1].trim() : null;
+      };
+      const parsePayload = (p) => {
+        if (!p) return {};
+        if (typeof p === 'string') { try { return JSON.parse(p); } catch (_) { return {}; } }
+        return p;
+      };
+
+      const byOs = {};
+      for (const r of rows) (byOs[r.codigo_os] = byOs[r.codigo_os] || []).push(r);
+
+      const porOs = {};
+      for (const os of Object.keys(byOs)) {
+        const evs = byOs[os];
+        const passos = [];
+        let courierBloqueioPendente = null;
+
+        for (const e of evs) {
+          const p = parsePayload(e.payload);
+          if (e.event_type === 'redispatched') {
+            courierBloqueioPendente = p.courier || null;
+            continue;
+          }
+          if (e.event_type === 'canceled') {
+            passos.push({
+              tipo: 'canceled',
+              provider: e.provider_code || null,
+              hora: e.created_at,
+              cancelado_por: p.cancelado_por || null,
+              courier: courierBloqueioPendente || courierDoMotivo(p.motivo),
+              motivo: p.motivo || null,
+            });
+            courierBloqueioPendente = null;
+            continue;
+          }
+          if (e.event_type === 'error') {
+            const errTxt = String(e.erro || (p && p.motivo) || '');
+            if (!/createDelivery/i.test(errTxt)) continue;
+          }
+          passos.push({
+            tipo: e.event_type,
+            provider: e.provider_code || null,
+            hora: e.created_at,
+            erro: e.erro || p.motivo || null,
+            motivo: p.motivo || null,
+          });
+        }
+
+        const totalTentativas = passos.filter(x =>
+          x.tipo === 'dispatch_success' || x.tipo === 'dispatch_failed' || x.tipo === 'error'
+        ).length;
+
+        porOs[os] = { eventos: passos, total_tentativas: totalTentativas };
+      }
+
+      res.set('Cache-Control', 'no-store');
+      return res.json({ success: true, porOs });
+    } catch (e) {
+      console.error('[logistics/portal] erro /deliveries/tentativas:', e.message);
+      return res.status(500).json({ erro: 'erro_interno' });
+    }
+  });
+
   return router;
 }
 

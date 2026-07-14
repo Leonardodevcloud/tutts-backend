@@ -295,8 +295,17 @@ class DispatchOrchestrator {
   async dispatch(servico, opts = {}) {
     const providerCode = opts.providerCode || 'uber';
     const codigoOS = servico.codigoOS;
-    const regraId = opts.regraId || null;
+    let regraId = opts.regraId || null;
     const eventSource = opts.eventSource || EventSource.WORKER;
+    // PORTAL_CLIENTE_MATCH_MANUAL: se veio sem regra (ex: despacho manual "Despachar OS"),
+    // casa por endereco de coleta com a MESMA logica das regras, so pra ATRIBUIR o cliente
+    // (nome + visibilidade no painel da loja). NAO muda provider/estrategia/margem.
+    if (!regraId) {
+      try {
+        const _mm = await this.matcher.match(servico);
+        if (_mm && _mm.regra && _mm.regra.id) regraId = _mm.regra.id;
+      } catch (_) { /* atribuicao best-effort */ }
+    }
 
     const adapter = this._getAdapterOrThrow(providerCode);
 
