@@ -60,6 +60,13 @@ function parsearEnderecoBrasileiro(str) {
   limpo = limpo.replace(/\s*N[°ºo°]?\s*nota\s*:.*$/i, '').trim();
   limpo = limpo.replace(/[,\s\-]+Brasil\s*$/i, '').trim();
 
+  // 🔧 2026-07 (Uber): descola numero grudado no nome da rua que quebra o
+  // geocoding (ex: "RONDON395" -> "RONDON 395", "CRESPI619Q" -> "CRESPI 619Q").
+  // So quando 2+ letras estao coladas ao digito, pra preservar abreviacoes
+  // curtas como "L10", "H2", "A1". Sem isso a Uber joga o ponto pra longe e
+  // recusa ("outside delivery radius").
+  limpo = limpo.replace(/([A-Za-zÀ-Úà-ú]{2,})(\d)/g, '$1 $2').replace(/\s{2,}/g, ' ').trim();
+
   const UFS = '(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)';
 
   // 2. Tentar achar o padrão UF imediatamente seguida de CEP — é o caso típico:
