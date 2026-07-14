@@ -605,6 +605,11 @@ app.use('/api/logistics/webhook', createLogisticsWebhookRouter(pool));
 const { createLogisticsRastreioRouter } = require('./src/modules/logistics');
 app.use('/api/logistics/rastreio', createLogisticsRastreioRouter(pool));
 
+// Logistics Hub - PORTAL DO CLIENTE (loja): login publico + kanban read-only por regra.
+// Token proprio (PORTAL_JWT_SECRET), isolado do auth interno. Marker: PORTAL_CLIENTE_MOUNT
+const { createLogisticsPortalRouter } = require('./src/modules/logistics');
+app.use('/api/logistics/portal', createLogisticsPortalRouter(pool));
+
 // 🔒 SECURITY FIX (AUDIT-10): Rotas de init/overrides extraídas para módulo próprio
 const { createBootstrapRoutes } = require('./src/modules/bootstrap/bootstrap.routes');
 app.use('/api', createBootstrapRoutes(pool, verificarToken, verificarAdmin, verificarAdminOuFinanceiro));

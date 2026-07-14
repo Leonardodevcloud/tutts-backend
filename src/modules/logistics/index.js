@@ -25,6 +25,9 @@ const { createLogisticsRouter } = require('./logistics.routes');
 const { createLogisticsWebhookRouter } = require('./routes/webhook.routes');
 const { createLogisticsRastreioRouter } = require('./routes/rastreio.routes');
 const { initChat99Tables } = require('./chat99.migration');
+// Portal do cliente (loja): colunas de acesso na regra + router read-only isolado.
+const { initLogisticsPortalTables } = require('./logistics.migration-portal');
+const { createLogisticsPortalRouter } = require('./routes/portal.routes');
 const { getProviderRegistry } = require('./core/ProviderRegistry');
 const { getEventLogger } = require('./core/EventLogger');
 const { UberAdapter } = require('./adapters/uber/UberAdapter');
@@ -68,6 +71,12 @@ async function initLogisticsTables(pool) {
   // Chat 99: tabelas do espelho do chat da 99Entrega. Idempotente, trivial.
   await initChat99Tables(pool).catch(err => {
     console.error('[logistics] migration chat99 falhou:', err.message);
+  });
+
+  // Portal do cliente (loja): colunas portal_* na regra. Idempotente, trivial.
+  // Marker: PORTAL_CLIENTE_MIGRATION_V1
+  await initLogisticsPortalTables(pool).catch(err => {
+    console.error('[logistics] migration portal-cliente falhou:', err.message);
   });
 
   // Fase 2: backfill de entregas (não-bloqueante)
@@ -123,5 +132,6 @@ module.exports = {
   initLogisticsRoutes,
   createLogisticsWebhookRouter,
   createLogisticsRastreioRouter,
+  createLogisticsPortalRouter,
   startLogisticsWorker,
 };

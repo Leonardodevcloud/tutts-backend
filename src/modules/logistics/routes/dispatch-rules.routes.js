@@ -27,6 +27,7 @@
  */
 
 const express = require('express');
+const bcrypt = require('bcrypt');
 
 // Providers válidos pra providers_preferidos. Fase 2: só uber.
 // Fase 3 adiciona 'noventanove'. Mantido como lista pra validação.
@@ -89,6 +90,60 @@ function parseMargem(valor) {
   return isNaN(n) ? null : n;
 }
 
+// ============================================================
+// PORTAL DO CLIENTE (loja) - acesso vive na propria regra.
+// Marker: PORTAL_CLIENTE_ROUTES_V1
+// ============================================================
+
+/**
+ * Nunca devolve o hash da senha ao front. Expoe apenas portal_tem_senha.
+ */
+function limparRegra(r) {
+  if (!r) return r;
+  const out = Object.assign({}, r);
+  out.portal_tem_senha = !!out.portal_senha_hash;
+  delete out.portal_senha_hash;
+  return out;
+}
+
+/**
+ * Aplica os campos de acesso do portal (login / senha / ativo) via UPDATE
+ * separado. De proposito NAO entra no INSERT/UPDATE principal pra nao mexer
+ * na contagem de placeholders daquelas queries.
+ */
+async function aplicarPortalNaRegra(pool, regraId, body) {
+  const temLogin = body.portal_login !== undefined;
+  const temSenha = body.portal_senha !== undefined && body.portal_senha !== null && String(body.portal_senha) !== '';
+  const temAtivo = body.portal_ativo !== undefined;
+  if (!temLogin && !temSenha && !temAtivo) return;
+
+  const sets = [];
+  const params = [];
+  let p = 1;
+
+  if (temLogin) {
+    const login = String(body.portal_login || '').trim().toLowerCase() || null;
+    sets.push(`portal_login = $${p++}`);
+    params.push(login);
+  }
+  if (temSenha) {
+    const hash = await bcrypt.hash(String(body.portal_senha), 10);
+    sets.push(`portal_senha_hash = $${p++}`);
+    params.push(hash);
+  }
+  if (temAtivo) {
+    const ativo = (body.portal_ativo === true || body.portal_ativo === 'true');
+    sets.push(`portal_ativo = $${p++}`);
+    params.push(ativo);
+  }
+
+  params.push(regraId);
+  await pool.query(
+    `UPDATE logistics_dispatch_rules SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${p}`,
+    params
+  );
+}
+
 function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
 
@@ -100,7 +155,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       const { rows } = await pool.query(
         'SELECT * FROM logistics_dispatch_rules ORDER BY cliente_nome'
       );
-      res.json({ success: true, regras: rows });
+      res.json({ success: true, regras: rows.map(limparRegra) });
     } catch (error) {
       console.error('[logistics/dispatch-rules] erro listar:', error.message);
       res.status(500).json({ error: 'Erro ao listar regras' });
@@ -117,7 +172,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         [parseInt(req.params.id, 10)]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Regra não encontrada' });
-      res.json({ success: true, regra: rows[0] });
+      res.json({ success: true, regra: limparRegra(rows[0]) });
     } catch (error) {
       console.error('[logistics/dispatch-rules] erro detalhe:', error.message);
       res.status(500).json({ error: 'Erro ao obter regra' });
@@ -224,7 +279,18 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           .catch(() => {});
       }
 
-      res.json({ success: true, regra });
+      // Acesso do portal da loja (login/senha/ativo), se enviado. UPDATE separado.
+      let regraFinal = regra;
+      try {
+        await aplicarPortalNaRegra(pool, regra.id, req.body || {});
+        const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
+        if (rf[0]) regraFinal = rf[0];
+      } catch (ePortal) {
+        console.error('[logistics/dispatch-rules] erro portal (criar):', ePortal.message);
+        return res.status(409).json({ error: 'Login do portal ja esta em uso', detalhe: ePortal.message });
+      }
+
+      res.json({ success: true, regra: limparRegra(regraFinal) });
     } catch (error) {
       console.error('[logistics/dispatch-rules] erro criar:', error.message);
       res.status(500).json({ error: 'Erro ao criar regra' });
@@ -335,7 +401,18 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           .catch(() => {});
       }
 
-      res.json({ success: true, regra });
+      // Acesso do portal da loja (login/senha/ativo), se enviado. UPDATE separado.
+      let regraFinal = regra;
+      try {
+        await aplicarPortalNaRegra(pool, regra.id, req.body || {});
+        const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
+        if (rf[0]) regraFinal = rf[0];
+      } catch (ePortal) {
+        console.error('[logistics/dispatch-rules] erro portal (atualizar):', ePortal.message);
+        return res.status(409).json({ error: 'Login do portal ja esta em uso', detalhe: ePortal.message });
+      }
+
+      res.json({ success: true, regra: limparRegra(regraFinal) });
     } catch (error) {
       console.error('[logistics/dispatch-rules] erro atualizar:', error.message);
       res.status(500).json({ error: 'Erro ao atualizar regra' });
