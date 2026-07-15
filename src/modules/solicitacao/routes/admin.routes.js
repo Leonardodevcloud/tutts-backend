@@ -1048,13 +1048,30 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         ${cteWhereSql}
         ORDER BY d.codigo_os, d.created_at DESC
       )
+      -- RELATORIO_PERF_V1
+      -- Aqui havia um join lateral que resolvia o cliente UMA VEZ POR ENTREGA.
+      -- Como o predicado aplicava trim() na coluna, o indice existente (que e
+      -- sobre a coluna crua) nao podia ser usado: cada execucao varria
+      -- solicitacoes_corrida inteira. Em 30 dias isso vira milhares de scans e
+      -- a request nunca volta. Era a causa do relatorio girar sem responder.
+      --
+      -- Agora a CTE abaixo resolve o cliente de CADA OS numa passada so, e o
+      -- resultado entra por hash join. O DISTINCT ON com ORDER BY id DESC
+      -- preserva exatamente a semantica anterior (a solicitacao mais recente
+      -- da OS). O IN (SELECT ...) limita ao periodo ja filtrado.
+      , sc_os AS (
+        SELECT DISTINCT ON (trim(tutts_os_numero))
+               trim(tutts_os_numero) AS os_txt,
+               cliente_id
+          FROM solicitacoes_corrida
+         WHERE tutts_os_numero IS NOT NULL
+           AND trim(tutts_os_numero) <> ''
+           AND trim(tutts_os_numero) IN (SELECT codigo_os::text FROM ld)
+         ORDER BY trim(tutts_os_numero), id DESC
+      )
       SELECT ld.*, sc.cliente_id, cs.nome AS cliente_nome, cs.preco_hub
       FROM ld
-      LEFT JOIN LATERAL (
-        SELECT cliente_id FROM solicitacoes_corrida
-        WHERE trim(tutts_os_numero) = ld.codigo_os::text
-        ORDER BY id DESC LIMIT 1
-      ) sc ON true
+      LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
       ${outWhereSql}
       ORDER BY ld.created_at DESC

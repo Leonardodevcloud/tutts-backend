@@ -167,6 +167,16 @@ async function initSolicitacaoTables(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_cliente ON solicitacoes_corrida(cliente_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_status ON solicitacoes_corrida(status)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_os ON solicitacoes_corrida(tutts_os_numero)`).catch(() => {});
+    // RELATORIO_PERF_V1 — indice FUNCIONAL em trim(tutts_os_numero).
+    //
+    // O indice acima (na coluna crua) NAO serve pra `WHERE trim(col) = x`:
+    // um b-tree em `col` nao casa com um predicado em `trim(col)`, entao o
+    // Postgres ignora ele e varre a tabela inteira. Era isso que fazia o
+    // relatorio de corridas girar sem responder.
+    //
+    // Este indice e sobre a EXPRESSAO, entao o planner consegue usar.
+    // Mantemos os dois: o cru serve pras buscas exatas que ja existiam.
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_corrida_os_trim ON solicitacoes_corrida ((trim(tutts_os_numero)))`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_pontos_corrida ON solicitacoes_pontos(solicitacao_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_favoritos_cliente ON solicitacao_favoritos(cliente_id)`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_solic_favoritos_grupo ON solicitacao_favoritos(grupo_enderecos_id)`).catch(() => {});
