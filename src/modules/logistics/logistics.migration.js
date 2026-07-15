@@ -130,6 +130,20 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rastreio_token VARCHAR(40)`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_logdelivery_rastreio_token ON logistics_deliveries (rastreio_token)`).catch(() => {});
 
+  // PORTAL_MAPA_ROTA_V1 — rota real (por rua) da coleta ate a entrega, via ORS.
+  //   rota_json:         [[lat,lng],...] ja no eixo do Leaflet, reduzida a 120 pontos
+  //   rota_metros:       distancia REAL de rua (o summary do ORS)
+  //   rota_segundos:     duracao estimada pelo ORS pra esse trajeto
+  //   rota_calculada_at: marca a TENTATIVA (sucesso ou falha).
+  //
+  // Cache permanente de proposito: os dois pontos nao mudam depois do
+  // despacho, entao a rota e calculada UMA vez por OS. rota_calculada_at
+  // impede que uma OS com coordenada ruim chame o ORS a cada 30s pra sempre.
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_json JSONB`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_metros INTEGER`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_segundos INTEGER`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_calculada_at TIMESTAMPTZ`).catch(() => {});
+
   console.log('✅ [logistics] tabela logistics_deliveries verificada');
 
   // FK provider_code → logistics_providers.provider_code (validação na app, não no DB,

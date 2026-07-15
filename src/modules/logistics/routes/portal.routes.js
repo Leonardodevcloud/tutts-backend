@@ -26,9 +26,11 @@ const bcrypt = require('bcrypt');
 const { extrairClienteFinalENota } = require('../core/ClienteFinalParser');
 // PORTAL_MAPA_V1: haversine + ETA estimado.
 // PORTAL_MAPA_BACK_V2: reduzirPontos saiu — o front nao desenha mais o
-// breadcrumb do GPS, so a linha coleta->entrega. A funcao continua em
-// geo.js caso o tracado volte.
+// breadcrumb do GPS. A funcao continua em geo.js caso o tracado volte.
 const { haversineKm, estimarEtaMin } = require('../core/geo');
+// PORTAL_MAPA_ROTA_V1: rota real por rua (ORS), calculada 1x por OS e cacheada.
+const { garantirRotas } = require('../core/rota');
+const httpRequest = require('../../../shared/utils/httpRequest');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 // Segredo proprio do portal. Fallback derivado do JWT_SECRET (mesmo padrao do
@@ -297,6 +299,7 @@ function createLogisticsPortalRouter(pool) {
                 ld.latitude_entrega, ld.longitude_entrega,
                 ld.ultima_lat, ld.ultima_lng,
                 ld.distancia_km, ld.distancia_origem,
+                ld.rota_json, ld.rota_metros, ld.rota_calculada_at,
                 ld.courier_data, ld.pontos, ld.rastreio_token,
                 sc.cliente_cod AS cliente_cod_rastreio,
                 sc.pontos_json AS pontos_rastreio
@@ -312,13 +315,24 @@ function createLogisticsPortalRouter(pool) {
         [req.portal.regra_id, EM_ANDAMENTO]
       );
 
-      // PORTAL_MAPA_BACK_V2: a query em logistics_tracking saiu daqui.
-      // O front parou de desenhar o breadcrumb do GPS (com 5+ corridas
-      // virava espaguete), entao montar o tracado era trabalho jogado fora
-      // a cada 30s — mais a query, mais o payload.
-      // A posicao AO VIVO do motoboy nao depende disso: vem de
-      // ld.ultima_lat/ultima_lng, que o WebhookDispatcher (Uber) e o
-      // TrackingPoller (99) mantem atualizados.
+      // PORTAL_MAPA_BACK_V2: a query em logistics_tracking saiu daqui — o
+      // front nao desenha mais o breadcrumb do GPS. A posicao AO VIVO do
+      // motoboy nao depende disso: vem de ld.ultima_lat/ultima_lng, que o
+      // WebhookDispatcher (Uber) e o TrackingPoller (99) mantem atualizados.
+
+      // PORTAL_MAPA_ROTA_V1: rota real por rua, da coleta ate a entrega.
+      // Calcula SO as que ainda nao tem (cap por request) e cacheia no banco.
+      // Como os dois pontos nao mudam depois do despacho, e ~1 chamada ORS
+      // por OS pra sempre — nao por refresh.
+      // Se o ORS falhar ou nao estiver configurado, rotasPorId fica vazio e
+      // o front cai na linha reta sozinho.
+      let rotasPorId = {};
+      try {
+        rotasPorId = await garantirRotas(pool, httpRequest, rows);
+      } catch (eRota) {
+        console.warn('[logistics/portal] rotas indisponiveis:', eRota.message);
+      }
+
       const entregas = rows.map(ld => {
         const courier = ld.courier_data || {};
         const coletado = !!ld.coletado_at ||
@@ -386,6 +400,10 @@ function createLogisticsPortalRouter(pool) {
           eta_min: etaMin,
           eta_fonte: 'estimado',
           rastreio_token: ld.rastreio_token || null,
+          // rota real por rua (ORS). null => o front desenha a linha reta.
+          rota: rotasPorId[ld.id] || null,
+          // distancia REAL de rua da corrida (o summary do ORS)
+          rota_km: ld.rota_metros != null ? Math.round(Number(ld.rota_metros) / 100) / 10 : null,
         };
       });
 
