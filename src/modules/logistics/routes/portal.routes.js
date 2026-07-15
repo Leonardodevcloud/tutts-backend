@@ -326,11 +326,18 @@ function createLogisticsPortalRouter(pool) {
       // por OS pra sempre — nao por refresh.
       // Se o ORS falhar ou nao estiver configurado, rotasPorId fica vazio e
       // o front cai na linha reta sozinho.
+      // PORTAL_MAPA_ROTA_DIAG_V1: garantirRotas agora devolve { rotas, diag }.
+      // O diag vai na resposta pra dizer POR QUE a rota esta faltando —
+      // a v1 falhava calada quando a ORS_API_KEY nao existia.
       let rotasPorId = {};
+      let rotaDiag = null;
       try {
-        rotasPorId = await garantirRotas(pool, httpRequest, rows);
+        const rr = await garantirRotas(pool, httpRequest, rows);
+        rotasPorId = rr.rotas;
+        rotaDiag = rr.diag;
       } catch (eRota) {
-        console.warn('[logistics/portal] rotas indisponiveis:', eRota.message);
+        console.error('[logistics/portal] rotas indisponiveis:', eRota.message);
+        rotaDiag = { erro: eRota.message };
       }
 
       const entregas = rows.map(ld => {
@@ -413,6 +420,9 @@ function createLogisticsPortalRouter(pool) {
         total: entregas.length,
         a_coletar: entregas.filter(e => !e.coletado).length,
         em_entrega: entregas.filter(e => e.coletado).length,
+        // Abra o devtools > Network > mapa e olhe este campo pra saber por
+        // que uma corrida esta com linha reta em vez de rota.
+        rota_diag: rotaDiag,
         entregas,
       });
     } catch (err) {

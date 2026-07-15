@@ -3,6 +3,7 @@
  *
  * Rota real (por rua) entre coleta e entrega, via OpenRouteService.
  * Marker: PORTAL_MAPA_ROTA_V1
+ * Marker: PORTAL_MAPA_ROTA_DIAG_V1 — diagnostico (v1 falhava calado)
  *
  * POR QUE ISSO E BARATO
  * ---------------------
@@ -42,9 +43,18 @@ const MAX_ROTAS_POR_REQUEST = (() => {
  * [lat, lng]. Inverter e o bug classico aqui — a rota apareceria no meio
  * do Atlantico. Convertemos na saida.
  */
-async function buscarRotaORS(httpRequest, coleta, entrega) {
+async function buscarRotaORS(httpRequest, coleta, entrega, diag) {
   const key = process.env.ORS_API_KEY;
-  if (!key) return null;
+  if (!key) {
+    // A v1 retornava null AQUI, calado. O mapa caia na linha reta e nao
+    // havia como saber se era chave, cota, deploy ou bug. Nunca mais.
+    if (diag && !diag.ors_configurado_avisado) {
+      console.error('[logistics/rota] ORS_API_KEY NAO CONFIGURADA — o mapa vai desenhar linha reta. Defina a env no Railway (tutts-backend).');
+      diag.ors_configurado_avisado = true;
+    }
+    if (diag) diag.motivo = 'ORS_API_KEY ausente no ambiente';
+    return null;
+  }
   if (!coleta || !entrega) return null;
   if (coleta.lat == null || coleta.lng == null) return null;
   if (entrega.lat == null || entrega.lng == null) return null;
@@ -61,12 +71,23 @@ async function buscarRotaORS(httpRequest, coleta, entrega) {
       }),
     });
     if (!resp.ok) {
-      console.warn('[logistics/rota] ORS respondeu', resp.status);
+      // O corpo do ORS diz o que houve: chave invalida (403), cota
+      // estourada (429), sem rota possivel (2010). So o status nao ajuda.
+      let corpo = '';
+      try { corpo = JSON.stringify(resp.json()).slice(0, 300); } catch (_) { corpo = String(resp.text && resp.text()).slice(0, 300); }
+      const msg = 'ORS HTTP ' + resp.status + ' ' + corpo;
+      console.error('[logistics/rota]', msg);
+      if (diag) { diag.motivo = msg; diag.erros = (diag.erros || 0) + 1; }
       return null;
     }
     const data = resp.json();
     const feat = data && data.features && data.features[0];
-    if (!feat || !feat.geometry || !Array.isArray(feat.geometry.coordinates)) return null;
+    if (!feat || !feat.geometry || !Array.isArray(feat.geometry.coordinates)) {
+      const msg = 'ORS respondeu sem geometria: ' + JSON.stringify(data).slice(0, 200);
+      console.warn('[logistics/rota]', msg);
+      if (diag) { diag.motivo = msg; diag.erros = (diag.erros || 0) + 1; }
+      return null;
+    }
 
     // [lng,lat] -> [lat,lng] pro Leaflet
     const pontos = feat.geometry.coordinates
@@ -81,7 +102,8 @@ async function buscarRotaORS(httpRequest, coleta, entrega) {
       segundos: Number.isFinite(Number(sum.duration)) ? Math.round(Number(sum.duration)) : null,
     };
   } catch (e) {
-    console.warn('[logistics/rota] erro ORS:', e.message);
+    console.error('[logistics/rota] erro ORS:', e.message);
+    if (diag) { diag.motivo = 'excecao: ' + e.message; diag.erros = (diag.erros || 0) + 1; }
     return null;
   }
 }
@@ -111,29 +133,48 @@ function reduzirRota(pontos, max = 120) {
 async function garantirRotas(pool, httpRequest, linhas) {
   const saida = {};
   const pendentes = [];
+  // Diagnostico: vai junto na resposta do /portal/mapa. Abrir o devtools
+  // na aba Network e olhar rota_diag responde "por que esta reta?" sem
+  // precisar caçar log no Railway.
+  const diag = {
+    ors_configurado: !!process.env.ORS_API_KEY,
+    total: linhas.length,
+    em_cache: 0,
+    calculadas: 0,
+    pendentes: 0,
+    sem_coordenada: 0,
+    aguardando_janela: 0,
+    erros: 0,
+    motivo: null,
+  };
 
   for (const ld of linhas) {
     if (ld.rota_json) {
       let r = ld.rota_json;
       if (typeof r === 'string') { try { r = JSON.parse(r); } catch (_) { r = null; } }
-      if (Array.isArray(r) && r.length > 1) { saida[ld.id] = r; continue; }
+      if (Array.isArray(r) && r.length > 1) { saida[ld.id] = r; diag.em_cache++; continue; }
     }
-    if (ld.latitude_coleta == null || ld.longitude_coleta == null) continue;
-    if (ld.latitude_entrega == null || ld.longitude_entrega == null) continue;
+    if (ld.latitude_coleta == null || ld.longitude_coleta == null ||
+        ld.latitude_entrega == null || ld.longitude_entrega == null) {
+      diag.sem_coordenada++;
+      continue;
+    }
     // Ja tentamos ha pouco e falhou? Deixa quieto ate a janela passar.
     if (ld.rota_calculada_at) {
       const idadeMin = (Date.now() - new Date(ld.rota_calculada_at).getTime()) / 60000;
-      if (idadeMin < 30) continue;
+      if (idadeMin < 30) { diag.aguardando_janela++; continue; }
     }
     pendentes.push(ld);
   }
+  diag.pendentes = pendentes.length;
 
   const lote = pendentes.slice(0, MAX_ROTAS_POR_REQUEST);
   for (const ld of lote) {
     const r = await buscarRotaORS(
       httpRequest,
       { lat: ld.latitude_coleta, lng: ld.longitude_coleta },
-      { lat: ld.latitude_entrega, lng: ld.longitude_entrega }
+      { lat: ld.latitude_entrega, lng: ld.longitude_entrega },
+      diag
     );
     const pontos = r ? reduzirRota(r.pontos, 120) : null;
     try {
@@ -146,10 +187,13 @@ async function garantirRotas(pool, httpRequest, linhas) {
     } catch (e) {
       console.warn('[logistics/rota] erro ao gravar rota da OS', ld.codigo_os, e.message);
     }
-    if (pontos) saida[ld.id] = pontos;
+    if (pontos) { saida[ld.id] = pontos; diag.calculadas++; }
   }
 
-  return saida;
+  if (diag.pendentes > 0 && diag.calculadas === 0 && !diag.motivo) {
+    diag.motivo = 'havia rotas pendentes mas nenhuma foi calculada — ver os logs [logistics/rota]';
+  }
+  return { rotas: saida, diag };
 }
 
 module.exports = { buscarRotaORS, garantirRotas, reduzirRota, MAX_ROTAS_POR_REQUEST };
