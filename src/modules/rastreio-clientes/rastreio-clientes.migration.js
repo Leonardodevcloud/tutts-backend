@@ -84,6 +84,23 @@ async function initRastreioClientesTables(pool) {
       ADD COLUMN IF NOT EXISTS rastreio_cliente_nome_exibicao VARCHAR(120) DEFAULT NULL
   `).catch(e => console.warn('[rastreio-clientes] rastreio_cliente_nome_exibicao:', e.message));
 
+  // ENVIAR_GRUPO_FLAG_V1
+  // Separa "capturar" de "enviar no grupo".
+  //
+  // POR QUE: o toggle `ativo` desliga o DETECTOR — sem detector, nao entra
+  // linha em sla_capturas, e sem sla_capturas o card do Hub perde a NF e o
+  // nome do cliente final (o pontos_json e a fonte deles). Quem so quer
+  // parar o WhatsApp precisava derrubar a captura junto.
+  //
+  // Com este flag: detector e captura seguem normais (o card continua
+  // alimentado) e so o envio no grupo e pulado.
+  //
+  // DEFAULT TRUE: nada muda pra quem ja esta cadastrado.
+  await pool.query(`
+    ALTER TABLE rastreio_clientes_config
+      ADD COLUMN IF NOT EXISTS enviar_grupo BOOLEAN DEFAULT TRUE
+  `).catch(e => console.warn('[rastreio-clientes] enviar_grupo:', e.message));
+
   console.log('✅ Colunas rastreio_cliente_* verificadas');
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_rcc_ativo ON rastreio_clientes_config(ativo);`);

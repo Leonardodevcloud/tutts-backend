@@ -439,7 +439,16 @@ async function processarCaptura(pool, registro) {
     // Hub: CLAIM atomico via rastreio_grupo_em (UPDATE ... WHERE IS NULL RETURNING).
     // So um emissor (webhook/poller/agente) ganha; os outros pulam. Legado: sempre.
     let _mandarGrupo = true;
-    if (_hubDelivery && _hubDeliveryId) {
+
+    // ENVIAR_GRUPO_FLAG_V1: gate de config. Roda ANTES de tudo — a captura ja
+    // foi salva em pontos_json la em cima, entao o card do Hub continua com
+    // NF e cliente final mesmo com o grupo desligado.
+    if (resultado.configMatched && resultado.configMatched.enviarGrupo === false) {
+      log(`🔕 OS ${os_numero}: envio no grupo desligado no cadastro "${resultado.configMatched.nomeExibicao || resultado.configMatched.id}" - captura mantida`);
+      _mandarGrupo = false;
+    }
+
+    if (_mandarGrupo && _hubDelivery && _hubDeliveryId) {
       // Segura o rastreio ate o codigo de coleta (janela de graca). Se segurar,
       // NAO reivindica o claim -> o poller re-tenta depois (com o codigo, ou
       // passada a janela). Assim a mensagem ao grupo so sai com o codigo quando

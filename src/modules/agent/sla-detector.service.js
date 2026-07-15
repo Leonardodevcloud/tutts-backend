@@ -128,6 +128,7 @@ async function carregarConfig(pool) {
   if (colNames.includes('rastreio_cliente_ativo')) selectCols.push('rastreio_cliente_ativo');
   if (colNames.includes('rastreio_cliente_nome_exibicao')) selectCols.push('rastreio_cliente_nome_exibicao');
   if (colNames.includes('usa_hub')) selectCols.push('usa_hub');
+  if (colNames.includes('enviar_grupo')) selectCols.push('enviar_grupo'); // ENVIAR_GRUPO_FLAG_V1
   if (colFiltros) selectCols.push(`${colFiltros} AS filtros_balao`);
 
   const { rows } = await pool.query(
@@ -166,6 +167,9 @@ async function carregarConfig(pool) {
       rastreioClienteAtivo: row.rastreio_cliente_ativo === true,
       rastreioClienteNomeExibicao: row.rastreio_cliente_nome_exibicao || null,
       usaHub: row.usa_hub === true,
+      // ENVIAR_GRUPO_FLAG_V1: default TRUE. `!== false` cobre o caso da coluna
+      // ainda nao existir (undefined) — o comportamento antigo fica intacto.
+      enviarGrupo: row.enviar_grupo !== false,
     };
 
     if (!config[cod]) config[cod] = [];
