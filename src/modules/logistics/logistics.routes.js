@@ -77,18 +77,43 @@ const { extrairClienteFinalENota } = require('./core/ClienteFinalParser');
 
 /**
  * Resolve {cliente_final, nota_fiscal} do ponto de ENTREGA de uma delivery.
- * Texto vem de pontos[ultimo].rua (campo livre da Mapp) com fallback pro
- * endereco_entrega. cliente_cod_rastreio vem do JOIN com sla_capturas.
+ *
+ * NF_FONTE_AGENT_V1 — DUAS FONTES, NESTA ORDEM:
+ *
+ *   1) sla_capturas.pontos_json  (PREFERIDA)
+ *      O agent (Playwright) le a TELA da Mapp, que traz "No nota: 01-0011...".
+ *      E a mesma fonte que alimenta a mensagem de rastreio do grupo — por isso
+ *      o grupo acertava a NF enquanto o card ficava vazio.
+ *      Formato: [{ endereco, nomeCliente, nota }] — ultimo item = entrega.
+ *
+ *   2) logistics_deliveries.pontos  (FALLBACK)
+ *      Vem da API da Mapp e, na pratica, quase nunca traz o "No nota:".
+ *      Serve pras OS que ainda nao passaram pelo agent.
+ *
+ * cliente_cod_rastreio e pontos_rastreio vem do JOIN com sla_capturas.
  */
 function _clienteFinalDaEntrega(ld) {
+  // Fonte 1: o que o agent scrapeou da tela.
+  let ptsR = ld.pontos_rastreio;
+  if (typeof ptsR === 'string') { try { ptsR = JSON.parse(ptsR); } catch (_) { ptsR = null; } }
+  // pontos_json pode ter 1 item (so a entrega) ou 2 (coleta + entrega):
+  // o ultimo e sempre a entrega.
+  const ultR = Array.isArray(ptsR) && ptsR.length > 0 ? ptsR[ptsR.length - 1] : null;
+
+  // Fonte 2: o que veio da API.
   let pts = ld.pontos;
   if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = null; } }
   const ultimo = Array.isArray(pts) && pts.length > 1 ? pts[pts.length - 1] : null;
-  const texto = (ultimo && (ultimo.rua || ultimo.endereco)) || ld.endereco_entrega || null;
+
+  const texto = (ultR && (ultR.textoBruto || ultR.endereco))
+    || (ultimo && (ultimo.rua || ultimo.endereco))
+    || ld.endereco_entrega
+    || null;
+
   return extrairClienteFinalENota({
     texto,
-    nome: (ultimo && (ultimo.nome || ultimo.nomeCliente)) || null,
-    nota: (ultimo && ultimo.nota) || null,
+    nome: (ultR && ultR.nomeCliente) || (ultimo && (ultimo.nome || ultimo.nomeCliente)) || null,
+    nota: (ultR && ultR.nota) || (ultimo && ultimo.nota) || null,
     clienteCod: ld.cliente_cod_rastreio || null,
   });
 }
@@ -479,9 +504,15 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
-        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
+        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra,
+                sc.cliente_cod AS cliente_cod_rastreio,
+                sc.pontos_json AS pontos_rastreio
          FROM logistics_deliveries ld
          LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         LEFT JOIN LATERAL (
+           SELECT cliente_cod, pontos_json FROM sla_capturas
+            WHERE os_numero = ld.codigo_os::text LIMIT 1
+         ) sc ON true
          ${whereSql}
          ORDER BY ld.id DESC LIMIT ${limit} OFFSET ${offset}`,
         params

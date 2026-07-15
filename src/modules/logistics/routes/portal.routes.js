@@ -38,14 +38,22 @@ const PORTAL_EXPIRES_IN = process.env.PORTAL_JWT_EXPIRES || '12h';
  */
 function mapearPortal(ld) {
   const courier = ld.courier_data || {};
-  // CLIENTE_FINAL_NF_PORTAL_V1: cliente final + NF limpa, mesmo tratamento do admin.
+  // CLIENTE_FINAL_NF_PORTAL_V1 + NF_FONTE_AGENT_V1: mesma cascata do admin.
+  // Fonte 1 = sla_capturas.pontos_json (o agent le a TELA da Mapp, que tem o
+  // "No nota:"). Fonte 2 = pontos da API, que quase nunca traz a nota.
+  let _ptsR = ld.pontos_rastreio;
+  if (typeof _ptsR === 'string') { try { _ptsR = JSON.parse(_ptsR); } catch (_) { _ptsR = null; } }
+  const _ultR = Array.isArray(_ptsR) && _ptsR.length > 0 ? _ptsR[_ptsR.length - 1] : null;
+
   let _pts = ld.pontos;
   if (typeof _pts === 'string') { try { _pts = JSON.parse(_pts); } catch (_) { _pts = null; } }
   const _ult = Array.isArray(_pts) && _pts.length > 1 ? _pts[_pts.length - 1] : null;
+
   const _cf = extrairClienteFinalENota({
-    texto: (_ult && (_ult.rua || _ult.endereco)) || ld.endereco_entrega || null,
-    nome: (_ult && (_ult.nome || _ult.nomeCliente)) || null,
-    nota: (_ult && _ult.nota) || null,
+    texto: (_ultR && (_ultR.textoBruto || _ultR.endereco))
+      || (_ult && (_ult.rua || _ult.endereco)) || ld.endereco_entrega || null,
+    nome: (_ultR && _ultR.nomeCliente) || (_ult && (_ult.nome || _ult.nomeCliente)) || null,
+    nota: (_ultR && _ultR.nota) || (_ult && _ult.nota) || null,
     clienteCod: ld.cliente_cod_rastreio || null,
   });
   return {
@@ -184,11 +192,12 @@ function createLogisticsPortalRouter(pool) {
       const params = [req.portal.regra_id];
       let sql = `
         SELECT ld.*, r.cliente_nome AS cliente_nome_regra,
-               sc.cliente_cod AS cliente_cod_rastreio
+               sc.cliente_cod AS cliente_cod_rastreio,
+               sc.pontos_json AS pontos_rastreio
           FROM logistics_deliveries ld
           LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
           LEFT JOIN LATERAL (
-            SELECT cliente_cod FROM sla_capturas
+            SELECT cliente_cod, pontos_json FROM sla_capturas
              WHERE os_numero = ld.codigo_os::text LIMIT 1
           ) sc ON true
          WHERE ld.regra_id = $1`;
