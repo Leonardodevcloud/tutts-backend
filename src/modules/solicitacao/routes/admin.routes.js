@@ -3,7 +3,8 @@
  */
 const express = require('express');
 const bcrypt = require('bcrypt');
-const { resolverValorCorrida, classificarCanal, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
+// RELATORIO_PRECO_REGRA_V1: + calcularPrecoDistancia (identica a do dispatch)
+const { resolverValorCorrida, calcularPrecoDistancia, classificarCanal, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
   const router = express.Router();
@@ -1080,7 +1081,12 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
          ORDER BY trim(tutts_os_numero), id DESC
       )
       SELECT ld.*, sc.cliente_id, cs.nome AS cliente_nome, cs.preco_hub,
-             dr.cliente_nome AS regra_cliente_nome
+             dr.cliente_nome AS regra_cliente_nome,
+             -- RELATORIO_PRECO_REGRA_V1: tabela de preco da regra. E ela que
+             -- define o valor do Hub; o valor_servico gravado nao serve porque
+             -- o dispatch nunca chega a aplicar a tabela (opts.regra fica
+             -- undefined la), entao ele guarda o valor da Mapp.
+             dr.preco_valor_fixo, dr.preco_km_base, dr.preco_valor_km_adicional
       FROM ld
       LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
@@ -1104,6 +1110,27 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
     // O passo 2 roda em JS de proposito: reusa normalizarEnderecoParaMatch,
     // a MESMA funcao do despacho. Em SQL seria outra implementacao pra manter
     // em sincronia — e ela ia divergir.
+    // RELATORIO_PRECO_REGRA_V1 — tabela global, lida UMA vez.
+    // Mesma ordem do dispatch (_resolverTabelaPreco): regra -> global -> nada.
+    // Se a linha id=1 nao existir, simplesmente nao ha tabela global.
+    let _tabGlobal = null;
+    try {
+      const { rows: _cg } = await pool.query(
+        `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+           FROM logistics_config_global WHERE id = 1`
+      );
+      const _c = _cg[0];
+      if (_c && _c.tabela_preco_ativa && _c.preco_valor_fixo != null) {
+        _tabGlobal = {
+          valorFixo: Number(_c.preco_valor_fixo),
+          kmBase: _c.preco_km_base != null ? Number(_c.preco_km_base) : 0,
+          valorKmAdicional: _c.preco_valor_km_adicional != null ? Number(_c.preco_valor_km_adicional) : 0,
+        };
+      }
+    } catch (e) {
+      console.warn('[relatorio] tabela global indisponivel:', e.message);
+    }
+
     let _regrasMatch = [];
     try {
       const { normalizarEnderecoParaMatch } = require('../../logistics/core/DispatchRuleMatcher');
@@ -1140,11 +1167,38 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       const courier = r.courier_data || {};
       let motoboy = courier.name || null;
       let km = r.distancia_km != null ? Number(r.distancia_km) : null;
-      let { valor, origem } = resolverValorCorrida({
-        distanciaKm: km,
-        precoHub: r.preco_hub,
-        valorGravado: r.valor_servico,
-      });
+      // RELATORIO_PRECO_REGRA_V1 — valor do Hub pela tabela, na ordem do dispatch:
+      //   1. tabela da REGRA do cliente
+      //   2. tabela GLOBAL (se ativa)
+      //   3. preco_hub do clientes_solicitacao (corridas via Solicitacao)
+      //   4. valor gravado (= o que a Mapp mandou)
+      //
+      // Calculado aqui e nao lido de valor_servico porque o dispatch nunca
+      // aplica a tabela: ele le opts.regra, que nenhum caller preenche. Assim
+      // o relatorio fica certo inclusive pras corridas ja gravadas.
+      let valor = null, origem = 'indefinido';
+      const _tabRegra = r.preco_valor_fixo != null ? {
+        valorFixo: Number(r.preco_valor_fixo),
+        kmBase: r.preco_km_base != null ? Number(r.preco_km_base) : 0,
+        valorKmAdicional: r.preco_valor_km_adicional != null ? Number(r.preco_valor_km_adicional) : 0,
+      } : null;
+
+      const _vRegra = _tabRegra ? calcularPrecoDistancia(km, _tabRegra) : null;
+      if (_vRegra != null) {
+        valor = _vRegra; origem = 'regra';
+      } else {
+        const _vGlobal = _tabGlobal ? calcularPrecoDistancia(km, _tabGlobal) : null;
+        if (_vGlobal != null) {
+          valor = _vGlobal; origem = 'global';
+        } else {
+          const _rv = resolverValorCorrida({
+            distanciaKm: km,
+            precoHub: r.preco_hub,
+            valorGravado: r.valor_servico,
+          });
+          valor = _rv.valor; origem = _rv.origem;
+        }
+      }
       // Cancelamento consistente: qualquer sinal (status_canonico ou "motoboy"
       // vindo como "Cancelado") cancela -> zera motoboy, km e valor.
       const cancelada = [r.status_canonico, motoboy]
