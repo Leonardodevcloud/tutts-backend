@@ -297,14 +297,45 @@ class DispatchOrchestrator {
     const codigoOS = servico.codigoOS;
     let regraId = opts.regraId || null;
     const eventSource = opts.eventSource || EventSource.WORKER;
+    // DISPATCH_REGRA_OBJ_V1 — o objeto da regra, nao so o id.
+    //
+    // O BUG: tres pontos deste metodo leem `opts.regra` (o OBJETO):
+    //   - _resolverPerfilMensagem(opts.regra || null, ...)
+    //   - _resolverTabelaPreco(opts.regra || null)      <- a tabela de preco
+    //   - opts.regra.alterar_valor_mapp_ativo           <- o toggle da Mapp
+    // ...mas NENHUM dos 6 callers de dispatch() passa `regra`. Todos passam
+    // `regraId`. Entao opts.regra sempre foi undefined, e:
+    //   - a tabela de preco da regra nunca foi aplicada (caia direto na
+    //     global) -> valor_servico ficava com o valor da Mapp
+    //   - alterar_valor_mapp_ativo nunca valeu (sempre o default true)
+    //   - o perfil de mensagem por regra nunca valeu
+    //
+    // Resolver aqui, uma vez, conserta os tres de uma vez. Se o matcher ja
+    // casou, aproveitamos o objeto dele e nao voltamos no banco.
+    let _regraObj = opts.regra || null;
     // PORTAL_CLIENTE_MATCH_MANUAL: se veio sem regra (ex: despacho manual "Despachar OS"),
     // casa por endereco de coleta com a MESMA logica das regras, so pra ATRIBUIR o cliente
     // (nome + visibilidade no painel da loja). NAO muda provider/estrategia/margem.
     if (!regraId) {
       try {
         const _mm = await this.matcher.match(servico);
-        if (_mm && _mm.regra && _mm.regra.id) regraId = _mm.regra.id;
+        if (_mm && _mm.regra && _mm.regra.id) {
+          regraId = _mm.regra.id;
+          _regraObj = _regraObj || _mm.regra;
+        }
       } catch (_) { /* atribuicao best-effort */ }
+    }
+    // Veio regraId (caller) mas nao o objeto -> busca. Best-effort: se falhar,
+    // o comportamento e o de antes (sem tabela da regra), nunca pior.
+    if (!_regraObj && regraId) {
+      try {
+        const { rows: _rg } = await this.pool.query(
+          'SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regraId]
+        );
+        _regraObj = _rg[0] || null;
+      } catch (e) {
+        console.warn(`[Orchestrator] OS ${codigoOS}: nao consegui ler a regra ${regraId}: ${e.message}`);
+      }
     }
 
     const adapter = this._getAdapterOrThrow(providerCode);
@@ -426,7 +457,7 @@ class DispatchOrchestrator {
       // (ex: farmacia nao recebe "autopecas"). O nome manual do modal (opts.nomeRemetente)
       // continua tendo prioridade sobre o perfil.
       try {
-        const perfilMsg = await this._resolverPerfilMensagem(opts.regra || null, codigoOS);
+        const perfilMsg = await this._resolverPerfilMensagem(_regraObj, codigoOS); // DISPATCH_REGRA_OBJ_V1
         if (request) {
           const nomeManual = opts.nomeRemetente && String(opts.nomeRemetente).trim();
           if (!nomeManual && perfilMsg.nome_remetente && request.pickup) {
@@ -574,13 +605,13 @@ class DispatchOrchestrator {
           console.log(`📏 [Orchestrator] OS ${codigoOS}: distancia ${_distKm.toFixed(2)}km (origem=${_distOrigem}${_distMetros != null ? ', ' + _distMetros + 'm' : ''})`);
 
           const _valorProvider2 = parseFloat(quote.valor) || 0;
-          const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(opts.regra || null);
+          const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(_regraObj); // DISPATCH_REGRA_OBJ_V1
           const _novoValorServico = calcularPrecoDistancia(_distKm, _tabPreco);
 
           // Toggle POR REGRA: cada cliente liga/desliga "alterar valor na Mapp"
           // na sua regra de despacho. Default = ativo (regra sem a flag = mantem).
           // Como "sem regra = sem despacho automatico", a regra sempre existe aqui.
-          const _alterarMapp = !(opts.regra && opts.regra.alterar_valor_mapp_ativo === false);
+          const _alterarMapp = !(_regraObj && _regraObj.alterar_valor_mapp_ativo === false); // DISPATCH_REGRA_OBJ_V1
 
           if (_novoValorServico != null) {
             console.log(`💰 [Orchestrator] OS ${codigoOS}: preço por km [${_origemPreco}] — ${_distKm.toFixed(1)}km → cliente=R$${_novoValorServico.toFixed(2)} provider=R$${_valorProvider2.toFixed(2)}`);
