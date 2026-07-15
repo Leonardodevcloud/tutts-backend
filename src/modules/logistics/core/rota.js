@@ -1,34 +1,51 @@
 /**
  * MODULO LOGISTICS - core/rota.js
  *
- * Rota real (por rua) entre coleta e entrega, via OpenRouteService.
+ * Rota real (por rua) entre coleta e entrega.
  * Marker: PORTAL_MAPA_ROTA_V1
- * Marker: PORTAL_MAPA_ROTA_DIAG_V1 — diagnostico (v1 falhava calado)
+ * Marker: PORTAL_MAPA_ROTA_DIAG_V1  — diagnostico
+ * Marker: PORTAL_MAPA_ROTA_OSRM_V1  — ORS -> OSRM
+ *
+ * POR QUE OSRM E NAO ORS
+ * ----------------------
+ * A v1 usava OpenRouteService, que exige ORS_API_KEY. Sem a env, ela
+ * falhava e o mapa caia na linha reta.
+ *
+ * O solicitacao.html JA resolvia isso em producao com OSRM
+ * (router.project-osrm.org): servidor publico, SEM CHAVE. Nao ha motivo
+ * pra este modulo inventar outro caminho — passou a usar o mesmo.
+ *
+ * Diferencas do ORS que importam aqui:
+ *   - GET, nao POST. Coordenadas na URL.
+ *   - Sem Authorization.
+ *   - Resposta: { code:'Ok', routes:[{ geometry:{coordinates}, distance, duration }] }
+ *     (o ORS devolvia features[0].properties.summary)
+ *   - EIXO IGUAL: OSRM tambem fala [lng,lat] (GeoJSON). A inversao pro
+ *     Leaflet continua necessaria.
  *
  * POR QUE ISSO E BARATO
  * ---------------------
- * A rota COLETA -> ENTREGA nao muda enquanto o motoboy anda. Os dois
- * pontos sao fixos desde o despacho. Entao ela e calculada UMA VEZ por
- * corrida e gravada em logistics_deliveries.rota_json.
+ * A rota COLETA -> ENTREGA nao muda enquanto o motoboy anda: os dois
+ * pontos sao fixos desde o despacho. Calculada UMA vez por corrida e
+ * gravada em logistics_deliveries.rota_json.
  *
- * Isso e o oposto do cenario caro que eu tinha estimado antes (rota do
- * MOTOBOY ate o alvo, que muda a cada 30s e daria ~840 chamadas/hora).
- * Aqui e ~1 chamada por OS, pra sempre. Com ~100 OS/dia, fica bem abaixo
- * do free tier do ORS (2.000/dia).
+ * O ETA continua por haversine (core/geo.js) — ele mede motoboy -> alvo
+ * AGORA, e isso muda a cada refresh. Esta rota e so o DESENHO.
  *
- * O ETA continua por haversine (core/geo.js). Nao troquei: o ETA e do
- * motoboy ate o alvo AGORA, e isso sim mudaria a cada refresh.
- * Esta rota e so o DESENHO da corrida.
+ * O SERVIDOR PUBLICO DO OSRM nao tem SLA e pede uso moderado. Como
+ * cacheamos no banco, sao ~1 chamada por OS. Se um dia precisar de
+ * garantia, da pra subir um OSRM proprio e trocar so a env OSRM_BASE_URL.
  */
 
 'use strict';
 
-const ORS_URL = 'https://api.openrouteservice.org/v2/directions/driving-car/geojson';
+/** Base do OSRM. Publico por padrao; da pra apontar pra um self-hosted. */
+const OSRM_BASE = (process.env.OSRM_BASE_URL || 'https://router.project-osrm.org').replace(/\/+$/, '');
 
 /**
  * Quantas rotas calcular por request do /portal/mapa.
- * O ORS free tier permite ~40 directions/min. Com poll de 30s, 4 por
- * request = no maximo 8/min. Folga grande, e a resposta nao trava.
+ * O servidor publico do OSRM pede uso moderado. Com poll de 30s, 4 por
+ * request = no maximo 8/min. E a resposta nao trava.
  * As que sobrarem entram no proximo refresh.
  */
 const MAX_ROTAS_POR_REQUEST = (() => {
@@ -37,72 +54,63 @@ const MAX_ROTAS_POR_REQUEST = (() => {
 })();
 
 /**
- * Busca a rota no ORS. Devolve { pontos, metros, segundos } ou null.
+ * Busca a rota no OSRM. Devolve { pontos, metros, segundos } ou null.
  *
- * ATENCAO AO EIXO: o ORS fala [lng, lat] (padrao GeoJSON); o Leaflet fala
+ * ATENCAO AO EIXO: o OSRM fala [lng, lat] (padrao GeoJSON); o Leaflet fala
  * [lat, lng]. Inverter e o bug classico aqui — a rota apareceria no meio
  * do Atlantico. Convertemos na saida.
  */
-async function buscarRotaORS(httpRequest, coleta, entrega, diag) {
-  const key = process.env.ORS_API_KEY;
-  if (!key) {
-    // A v1 retornava null AQUI, calado. O mapa caia na linha reta e nao
-    // havia como saber se era chave, cota, deploy ou bug. Nunca mais.
-    if (diag && !diag.ors_configurado_avisado) {
-      console.error('[logistics/rota] ORS_API_KEY NAO CONFIGURADA — o mapa vai desenhar linha reta. Defina a env no Railway (tutts-backend).');
-      diag.ors_configurado_avisado = true;
-    }
-    if (diag) diag.motivo = 'ORS_API_KEY ausente no ambiente';
-    return null;
-  }
+async function buscarRotaOSRM(httpRequest, coleta, entrega, diag) {
   if (!coleta || !entrega) return null;
   if (coleta.lat == null || coleta.lng == null) return null;
   if (entrega.lat == null || entrega.lng == null) return null;
 
+  // OSRM: /route/v1/driving/{lng},{lat};{lng},{lat}
+  const url = OSRM_BASE + '/route/v1/driving/'
+    + Number(coleta.lng) + ',' + Number(coleta.lat) + ';'
+    + Number(entrega.lng) + ',' + Number(entrega.lat)
+    + '?overview=full&geometries=geojson';
+
   try {
-    const resp = await httpRequest(ORS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: key },
-      body: JSON.stringify({
-        coordinates: [
-          [Number(coleta.lng), Number(coleta.lat)],   // ORS: [lng, lat]
-          [Number(entrega.lng), Number(entrega.lat)],
-        ],
-      }),
-    });
+    const resp = await httpRequest(url);
     if (!resp.ok) {
-      // O corpo do ORS diz o que houve: chave invalida (403), cota
-      // estourada (429), sem rota possivel (2010). So o status nao ajuda.
       let corpo = '';
-      try { corpo = JSON.stringify(resp.json()).slice(0, 300); } catch (_) { corpo = String(resp.text && resp.text()).slice(0, 300); }
-      const msg = 'ORS HTTP ' + resp.status + ' ' + corpo;
+      try { corpo = JSON.stringify(resp.json()).slice(0, 300); } catch (_) { corpo = ''; }
+      const msg = 'OSRM HTTP ' + resp.status + ' ' + corpo;
       console.error('[logistics/rota]', msg);
       if (diag) { diag.motivo = msg; diag.erros = (diag.erros || 0) + 1; }
       return null;
     }
     const data = resp.json();
-    const feat = data && data.features && data.features[0];
-    if (!feat || !feat.geometry || !Array.isArray(feat.geometry.coordinates)) {
-      const msg = 'ORS respondeu sem geometria: ' + JSON.stringify(data).slice(0, 200);
+    // OSRM sinaliza problema no campo `code` mesmo com HTTP 200.
+    if (!data || data.code !== 'Ok' || !data.routes || !data.routes[0]) {
+      const msg = 'OSRM sem rota: ' + JSON.stringify(data).slice(0, 200);
+      console.warn('[logistics/rota]', msg);
+      if (diag) { diag.motivo = msg; diag.erros = (diag.erros || 0) + 1; }
+      return null;
+    }
+    const rota = data.routes[0];
+    const coords = rota.geometry && rota.geometry.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) {
+      const msg = 'OSRM devolveu geometria vazia';
       console.warn('[logistics/rota]', msg);
       if (diag) { diag.motivo = msg; diag.erros = (diag.erros || 0) + 1; }
       return null;
     }
 
     // [lng,lat] -> [lat,lng] pro Leaflet
-    const pontos = feat.geometry.coordinates
+    const pontos = coords
       .filter((c) => Array.isArray(c) && c.length >= 2)
       .map((c) => [Number(c[1]), Number(c[0])]);
     if (pontos.length < 2) return null;
 
-    const sum = (feat.properties && feat.properties.summary) || {};
     return {
       pontos,
-      metros: Number.isFinite(Number(sum.distance)) ? Math.round(Number(sum.distance)) : null,
-      segundos: Number.isFinite(Number(sum.duration)) ? Math.round(Number(sum.duration)) : null,
+      metros: Number.isFinite(Number(rota.distance)) ? Math.round(Number(rota.distance)) : null,
+      segundos: Number.isFinite(Number(rota.duration)) ? Math.round(Number(rota.duration)) : null,
     };
   } catch (e) {
-    console.error('[logistics/rota] erro ORS:', e.message);
+    console.error('[logistics/rota] erro OSRM:', e.message);
     if (diag) { diag.motivo = 'excecao: ' + e.message; diag.erros = (diag.erros || 0) + 1; }
     return null;
   }
@@ -137,7 +145,10 @@ async function garantirRotas(pool, httpRequest, linhas) {
   // na aba Network e olhar rota_diag responde "por que esta reta?" sem
   // precisar caçar log no Railway.
   const diag = {
-    ors_configurado: !!process.env.ORS_API_KEY,
+    // OSRM nao usa chave. O campo fica pra nao quebrar quem ja le o diag.
+    ors_configurado: true,
+    motor: 'osrm',
+    base: OSRM_BASE,
     total: linhas.length,
     em_cache: 0,
     calculadas: 0,
@@ -170,7 +181,7 @@ async function garantirRotas(pool, httpRequest, linhas) {
 
   const lote = pendentes.slice(0, MAX_ROTAS_POR_REQUEST);
   for (const ld of lote) {
-    const r = await buscarRotaORS(
+    const r = await buscarRotaOSRM(
       httpRequest,
       { lat: ld.latitude_coleta, lng: ld.longitude_coleta },
       { lat: ld.latitude_entrega, lng: ld.longitude_entrega },
@@ -196,4 +207,5 @@ async function garantirRotas(pool, httpRequest, linhas) {
   return { rotas: saida, diag };
 }
 
-module.exports = { buscarRotaORS, garantirRotas, reduzirRota, MAX_ROTAS_POR_REQUEST };
+// buscarRotaORS sai do export: o ORS nao e mais usado.
+module.exports = { buscarRotaOSRM, garantirRotas, reduzirRota, MAX_ROTAS_POR_REQUEST };
