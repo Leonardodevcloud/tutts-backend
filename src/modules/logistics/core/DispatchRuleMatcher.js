@@ -199,4 +199,11 @@ function getDispatchRuleMatcher(pool) {
   return _instance;
 }
 
-module.exports = { DispatchRuleMatcher, getDispatchRuleMatcher };
+// RELATORIO_CLIENTE_V1
+// normalizarEnderecoParaMatch passa a ser exportada.
+//
+// POR QUE: o relatorio de corridas precisa do MESMO match por endereco que o
+// despacho usa. Reescrever essa normalizacao em SQL (lower, unaccent, expandir
+// "av." -> "avenida"...) daria trabalho e, pior, divergiria daqui na primeira
+// vez que alguem mexesse numa das duas copias. Exportando, existe UMA regra.
+module.exports = { DispatchRuleMatcher, getDispatchRuleMatcher, normalizarEnderecoParaMatch };

@@ -1024,7 +1024,7 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
 // ============================================================================
 router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => {
   try {
-    const { de, ate, cliente_id, provider, status, formato } = req.query;
+    const { de, ate, cliente_id, provider, status, formato, lojas } = req.query; // RELATORIO_CLIENTE_V1: + lojas
 
     const cteWhere = [];
     const params = [];
@@ -1043,7 +1043,17 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         SELECT DISTINCT ON (d.codigo_os)
           d.codigo_os, d.provider_code, d.distancia_km, d.valor_servico,
           d.endereco_coleta, d.endereco_entrega, d.courier_data,
-          d.status_canonico, d.created_at
+          d.status_canonico, d.created_at,
+          -- RELATORIO_CLIENTE_V1
+          -- regra_id: e daqui que o card da loja tira o nome do cliente. O
+          -- relatorio usava so solicitacoes_corrida, que existe apenas pra
+          -- corrida criada via Solicitacao — por isso a coluna vinha "—" na
+          -- maioria das linhas.
+          d.regra_id,
+          -- valor_servico_mapp_original: gravado no despacho a partir do que a
+          -- Mapp mandou. O valor_servico pode ser reescrito depois pela tabela
+          -- de preco do cliente; este aqui nao muda.
+          d.valor_servico_mapp_original
         FROM logistics_deliveries d
         ${cteWhereSql}
         ORDER BY d.codigo_os, d.created_at DESC
@@ -1069,16 +1079,62 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
            AND trim(tutts_os_numero) IN (SELECT codigo_os::text FROM ld)
          ORDER BY trim(tutts_os_numero), id DESC
       )
-      SELECT ld.*, sc.cliente_id, cs.nome AS cliente_nome, cs.preco_hub
+      SELECT ld.*, sc.cliente_id, cs.nome AS cliente_nome, cs.preco_hub,
+             dr.cliente_nome AS regra_cliente_nome
       FROM ld
       LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+      -- RELATORIO_CLIENTE_V1: mesma fonte do card da loja.
+      LEFT JOIN logistics_dispatch_rules dr ON dr.id = ld.regra_id
       ${outWhereSql}
       ORDER BY ld.created_at DESC
       LIMIT 2000
     `;
 
     const { rows } = await pool.query(sql, params);
+
+    // RELATORIO_CLIENTE_V1 — resolucao do nome do cliente, em 3 degraus:
+    //
+    //   1. regra_id gravado na entrega  -> EXATAMENTE o que o card mostra
+    //   2. match por endereco de coleta -> cobre as entregas antigas, que
+    //      foram despachadas antes do match manual passar a gravar regra_id
+    //   3. clientes_solicitacao         -> preserva o que ja funcionava pras
+    //      corridas criadas via Solicitacao
+    //
+    // O passo 2 roda em JS de proposito: reusa normalizarEnderecoParaMatch,
+    // a MESMA funcao do despacho. Em SQL seria outra implementacao pra manter
+    // em sincronia — e ela ia divergir.
+    let _regrasMatch = [];
+    try {
+      const { normalizarEnderecoParaMatch } = require('../../logistics/core/DispatchRuleMatcher');
+      // ORDER BY id ASC = mesmo desempate do matcher (a primeira que casar vence).
+      // Sem filtro de ativo: aqui o objetivo e NOMEAR, nao decidir despacho —
+      // uma regra desativada hoje ainda identifica de quem era aquela corrida.
+      const { rows: _rr } = await pool.query(
+        `SELECT cliente_nome, trecho_endereco, cliente_identificador
+           FROM logistics_dispatch_rules ORDER BY id ASC`
+      );
+      _regrasMatch = _rr.map(rg => ({
+        nome: rg.cliente_nome,
+        trecho: normalizarEnderecoParaMatch(rg.trecho_endereco || rg.cliente_nome || ''),
+        ident: normalizarEnderecoParaMatch(rg.cliente_identificador || ''),
+      }));
+      var _normEnd = normalizarEnderecoParaMatch;
+    } catch (e) {
+      console.warn('[relatorio] match por endereco indisponivel:', e.message);
+    }
+
+    // Mesmos limiares do DispatchRuleMatcher: identificador >= 4, trecho >= 5.
+    const _clientePorEndereco = (endereco) => {
+      if (!_normEnd || !_regrasMatch.length) return null;
+      const alvo = _normEnd(endereco || '');
+      if (!alvo) return null;
+      for (const rg of _regrasMatch) {
+        if (rg.ident && rg.ident.length >= 4 && alvo.includes(rg.ident)) return rg.nome;
+        if (rg.trecho && rg.trecho.length >= 5 && alvo.includes(rg.trecho)) return rg.nome;
+      }
+      return null;
+    };
 
     let corridas = rows.map(r => {
       const courier = r.courier_data || {};
@@ -1100,12 +1156,30 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       } else {
         statusNorm = normalizarStatus(r.status_canonico);
       }
+      // RELATORIO_CLIENTE_V1: degraus 1 -> 2 -> 3 (ver comentario acima).
+      let _cliente = r.regra_cliente_nome || null;
+      let _clienteOrigem = _cliente ? 'regra' : null;
+      if (!_cliente) {
+        _cliente = _clientePorEndereco(r.endereco_coleta);
+        if (_cliente) _clienteOrigem = 'endereco';
+      }
+      if (!_cliente && r.cliente_nome) {
+        _cliente = r.cliente_nome;
+        _clienteOrigem = 'solicitacao';
+      }
+      // valor_servico_mapp_original: zerado quando cancelada, igual km/valor.
+      // Se ficasse cru, o total da coluna Mapp nao bateria com o de Valor e
+      // pareceria bug.
+      const _valorMapp = cancelada || r.valor_servico_mapp_original == null
+        ? null : Number(r.valor_servico_mapp_original);
       return {
         os: r.codigo_os,
         provider: r.provider_code,
         canal: classificarCanal(r.provider_code),
         cliente_id: r.cliente_id || null,
-        cliente_nome: r.cliente_nome || null,
+        cliente_nome: _cliente || null,
+        cliente_origem: _clienteOrigem,
+        valor_mapp: _valorMapp,
         endereco_coleta: r.endereco_coleta || '',
         endereco_entrega: r.endereco_entrega || '',
         motoboy,
@@ -1122,12 +1196,31 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       corridas = corridas.filter(c => c.status === status);
     }
 
+    // RELATORIO_CLIENTE_V1 — lista de lojas do periodo, ANTES de filtrar por
+    // loja: senao a propria selecao encolheria as opcoes disponiveis e nao
+    // daria pra remarcar o que foi desmarcado.
+    const lojasDisponiveis = Array.from(
+      new Set(corridas.map(c => c.cliente_nome).filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    const temSemCliente = corridas.some(c => !c.cliente_nome);
+
+    // Filtro por loja. O front filtra na tela (resposta instantanea), mas o
+    // parametro existe pro CSV sair igual ao que esta na tela.
+    // '__sem__' = as corridas sem cliente resolvido.
+    if (lojas) {
+      const sel = new Set(String(lojas).split(',').map(s => s.trim()).filter(Boolean));
+      if (sel.size) {
+        corridas = corridas.filter(c => sel.has(c.cliente_nome || '__sem__'));
+      }
+    }
+
     if (String(formato).toLowerCase() === 'csv') {
-      const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data'];
+      // RELATORIO_CLIENTE_V1: + coluna do valor original da Mapp
+      const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Valor Mapp (R$)', 'Status', 'Data'];
       const linhas = corridas.map(c => [
         c.os, c.cliente_nome || '', c.canal, c.provider, c.endereco_coleta, c.endereco_entrega,
         c.motoboy || '', c.km != null ? String(c.km).replace('.', ',') : '',
-        formatarBRL(c.valor), c.status,
+        formatarBRL(c.valor), formatarBRL(c.valor_mapp), c.status,
         c.data ? new Date(c.data).toISOString() : '',
       ]);
       const csv = montarCSV(headers, linhas);
@@ -1145,7 +1238,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
     totais.km = Math.round(totais.km * 100) / 100;
     totais.valor = Math.round(totais.valor * 100) / 100;
 
-    res.json({ success: true, totais, corridas });
+    res.json({ success: true, totais, corridas, lojas_disponiveis: lojasDisponiveis, tem_sem_cliente: temSemCliente }); // RELATORIO_CLIENTE_V1
   } catch (err) {
     console.error('❌ Erro no relatório hub:', err.message);
     res.status(500).json({ error: 'Erro ao gerar relatório', detalhe: err.message });
