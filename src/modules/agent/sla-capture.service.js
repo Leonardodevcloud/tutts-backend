@@ -148,6 +148,9 @@ async function enviarRastreioWhatsApp({ texto, clienteCod, grupoIdOverride }) {
  * (logistics_deliveries.pontos = enderecos do dispatch, com .rua e .nome).
  * Mapeia pro formato do montarMensagemRastreio e pula a coleta (indice 0).
  */
+// CLIENTE_FINAL_NF_V1: fonte unica de nome do cliente final + NF limpa.
+const { extrairClienteFinalENota } = require('../logistics/core/ClienteFinalParser');
+
 function montarPontosFallback(enderecos) {
   if (typeof enderecos === 'string') {
     try { enderecos = JSON.parse(enderecos); } catch (_) { return []; }
@@ -204,15 +207,18 @@ function montarMensagemRastreio({ os_numero, link_rastreio, pontos, cliente_cod,
   pontos.forEach((pe) => {
     if (pontos.length > 1) blocos.push(`*Ponto ${pe.numero}*`);
     if (pe.endereco) blocos.push(`📍 *Endereço:* ${pe.endereco}`);
-    // 1165: o nome do cliente vem corrompido pelo parser de endereço
-    // (vira lixo tipo "1 - 9834"); mostra a NF no lugar.
-    if (['1165', '1178'].includes(cliente_cod)) {
-      if (pe.nota) blocos.push(`🧾 *NF:* ${pe.nota}`);
-    } else {
-      if (pe.nomeCliente) blocos.push(`🏪 *Cliente:* ${pe.nomeCliente}`);
-      if (cliente_cod === '767' && pe.nota) {
-        blocos.push(`🧾 *NF:* ${pe.nota}`);
-      }
+    // CLIENTE_FINAL_NF_V1: fonte unica. O parser descarta o "nome" quando o
+    // cliente e sabidamente so-NF (1165/1178/1188) ou quando o texto e lixo
+    // (sem letras), e devolve a NF ja limpa (01-001148140-1 -> 1148140).
+    const _cf = extrairClienteFinalENota({
+      texto: pe.textoBruto || pe.endereco || null,
+      nome: pe.nomeCliente || null,
+      nota: pe.nota || null,
+      clienteCod: cliente_cod,
+    });
+    if (_cf.cliente_final) blocos.push(`🏪 *Cliente:* ${_cf.cliente_final}`);
+    if (_cf.nota_fiscal && (!_cf.cliente_final || cliente_cod === '767')) {
+      blocos.push(`🧾 *NF:* ${_cf.nota_fiscal}`);
     }
   });
 

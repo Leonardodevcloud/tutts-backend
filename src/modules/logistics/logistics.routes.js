@@ -72,9 +72,33 @@ function notImplemented(fase) {
 // função traduz, pra o front não precisar mudar nada.
 const LOGISTICS_READ_SOURCE = process.env.LOGISTICS_READ_SOURCE || 'canonico';
 
+// CLIENTE_FINAL_NF_V1: nome do cliente final + NF, tratados numa fonte unica.
+const { extrairClienteFinalENota } = require('./core/ClienteFinalParser');
+
+/**
+ * Resolve {cliente_final, nota_fiscal} do ponto de ENTREGA de uma delivery.
+ * Texto vem de pontos[ultimo].rua (campo livre da Mapp) com fallback pro
+ * endereco_entrega. cliente_cod_rastreio vem do JOIN com sla_capturas.
+ */
+function _clienteFinalDaEntrega(ld) {
+  let pts = ld.pontos;
+  if (typeof pts === 'string') { try { pts = JSON.parse(pts); } catch (_) { pts = null; } }
+  const ultimo = Array.isArray(pts) && pts.length > 1 ? pts[pts.length - 1] : null;
+  const texto = (ultimo && (ultimo.rua || ultimo.endereco)) || ld.endereco_entrega || null;
+  return extrairClienteFinalENota({
+    texto,
+    nome: (ultimo && (ultimo.nome || ultimo.nomeCliente)) || null,
+    nota: (ultimo && ultimo.nota) || null,
+    clienteCod: ld.cliente_cod_rastreio || null,
+  });
+}
+
 function mapearCanonicoParaLegado(ld) {
   const courier = ld.courier_data || {};
+  const _cf = _clienteFinalDaEntrega(ld);
   return {
+    cliente_final:      _cf.cliente_final,   // CLIENTE_FINAL_NF_V1
+    nota_fiscal:        _cf.nota_fiscal,     // CLIENTE_FINAL_NF_V1 (ja limpa)
     id:                 ld.id,
     codigo_os:          ld.codigo_os,
     provider_code:      ld.provider_code,
