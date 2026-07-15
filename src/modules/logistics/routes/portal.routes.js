@@ -51,6 +51,13 @@ function mapearPortal(ld) {
   return {
     cliente_final:      _cf.cliente_final,
     nota_fiscal:        _cf.nota_fiscal,
+    // EXTRAVIADOS_PORTAL_V1: a loja ve SO o selo. extraviado_motivo e
+    // extraviado_por sao internos e NUNCA saem daqui.
+    extraviado:           !!ld.extraviado_em,
+    // FREQUENTE_PORTAL_V1: booleano por entrega. De proposito NAO expomos a
+    // lista /frequentes pro portal — ela traz nome+telefone de TODOS os
+    // motoboys, e a loja so precisa saber se o SEU entregador e frequente.
+    entregador_frequente: !!ld.entregador_frequente,
     id:                 ld.id,
     codigo_os:          ld.codigo_os,
     provider_code:      ld.provider_code,
@@ -194,6 +201,39 @@ function createLogisticsPortalRouter(pool) {
       sql += ` ORDER BY ld.id DESC LIMIT 1000`;
 
       const { rows } = await pool.query(sql, params);
+
+      // FREQUENTE_PORTAL_V1: mesma regra do painel admin (> 3 entregas
+      // concluidas em 30 dias, telefone nao bloqueado). Uma query so pros
+      // telefones que aparecem nesta pagina — nao varre a base inteira.
+      try {
+        const tels = [...new Set(
+          rows.map(r => String((r.courier_data && r.courier_data.phone) || '').replace(/[^0-9]/g, ''))
+              .filter(Boolean)
+        )];
+        if (tels.length > 0) {
+          const { rows: fr } = await pool.query(
+            `SELECT regexp_replace(COALESCE(courier_data->>'phone',''), '[^0-9]', '', 'g') AS tel
+               FROM logistics_deliveries
+              WHERE entregue_at IS NOT NULL
+                AND entregue_at >= NOW() - INTERVAL '30 days'
+                AND regexp_replace(COALESCE(courier_data->>'phone',''), '[^0-9]', '', 'g') = ANY($1::text[])
+              GROUP BY 1
+             HAVING COUNT(*) > 3`,
+            [tels]
+          );
+          const setFreq = new Set(fr.map(x => x.tel));
+          if (setFreq.size > 0) {
+            for (const r of rows) {
+              const t = String((r.courier_data && r.courier_data.phone) || '').replace(/[^0-9]/g, '');
+              if (t && setFreq.has(t)) r.entregador_frequente = true;
+            }
+          }
+        }
+      } catch (eFreq) {
+        // Best-effort: sem a moldura o painel continua funcionando.
+        console.warn('[logistics/portal] frequentes indisponivel:', eFreq.message);
+      }
+
       res.set('Cache-Control', 'no-store');
       res.json({ success: true, total: rows.length, entregas: rows.map(mapearPortal) });
     } catch (e) {

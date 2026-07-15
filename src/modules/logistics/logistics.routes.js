@@ -134,6 +134,10 @@ function mapearCanonicoParaLegado(ld) {
     finalizado_at:      ld.finalizado_at,
     cancelado_por:      ld.cancelado_por,
     cancelado_motivo:   ld.cancelado_motivo,
+    // EXTRAVIADOS_V1: marcador soberano — o kanban olha ele antes do status.
+    extraviado_em:      ld.extraviado_em     || null,
+    extraviado_por:     ld.extraviado_por    || null,
+    extraviado_motivo:  ld.extraviado_motivo || null,
     pickup_code:        ld.pickup_code   || null,  // 🆕 codigo de coleta (99/Uber)
     dropoff_code:       ld.dropoff_code  || null,  // 🆕 codigo de entrega (99/Uber)
     return_code:        ld.return_code   || null,  // 🆕 codigo de devolucao (99)
@@ -677,6 +681,90 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       res.json({ success: true, ...result });
     } catch (err) {
       res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // EXTRAVIADOS_V1
+  // POST /deliveries/:id/extraviar          { motivo? }  -> marca
+  // POST /deliveries/:id/extraviar/desfazer              -> desmarca
+  //
+  // NAO cancela nada no provedor: e so um marcador interno. Cancelamento
+  // continua exclusivo do orch.cancel -> adapter.cancelDelivery.
+  //
+  // Regra: so da pra extraviar o que JA FOI COLETADO — antes disso o pacote
+  // nem saiu da loja. Aceita coletado_at preenchido OU status pos-coleta.
+  // ───────────────────────────────────────────────────────────
+  const STATUS_POS_COLETA = ['PICKED_UP', 'DROPOFF_EN_ROUTE', 'ARRIVED_DROPOFF', 'DELIVERED', 'RETURNING', 'RETURNED'];
+
+  router.post('/deliveries/:id/extraviar', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'id invalido' });
+
+      const { rows } = await pool.query(
+        'SELECT id, codigo_os, status_canonico, coletado_at, extraviado_em FROM logistics_deliveries WHERE id = $1',
+        [id]
+      );
+      const ent = rows[0];
+      if (!ent) return res.status(404).json({ error: 'Entrega nao encontrada' });
+
+      const coletou = !!ent.coletado_at || STATUS_POS_COLETA.includes(String(ent.status_canonico || '').toUpperCase());
+      if (!coletou) {
+        return res.status(409).json({ error: 'So da pra marcar extravio depois da coleta' });
+      }
+
+      const motivo = String(req.body?.motivo || '').trim().slice(0, 500) || null;
+      const quem = (req.user && (req.user.nome || req.user.email)) || 'admin';
+
+      const { rows: upd } = await pool.query(
+        `UPDATE logistics_deliveries
+            SET extraviado_em = COALESCE(extraviado_em, NOW()),
+                extraviado_por = $2,
+                extraviado_motivo = $3,
+                updated_at = NOW()
+          WHERE id = $1
+      RETURNING id, codigo_os, extraviado_em, extraviado_por, extraviado_motivo`,
+        [id, quem, motivo]
+      );
+
+      if (registrarAuditoria) {
+        await registrarAuditoria(req, 'MARCAR_EXTRAVIO_LOGISTICS', 'operacional',
+          'logistics_deliveries', id, { codigo_os: ent.codigo_os, motivo })
+          .catch(() => {});
+      }
+      console.log(`[logistics] OS ${ent.codigo_os} marcada como EXTRAVIADA por ${quem}`);
+      res.json({ success: true, entrega: upd[0] });
+    } catch (err) {
+      console.error('[logistics/routes] POST /extraviar erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/deliveries/:id/extraviar/desfazer', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'id invalido' });
+
+      const { rows: upd } = await pool.query(
+        `UPDATE logistics_deliveries
+            SET extraviado_em = NULL, extraviado_por = NULL, extraviado_motivo = NULL,
+                updated_at = NOW()
+          WHERE id = $1
+      RETURNING id, codigo_os`,
+        [id]
+      );
+      if (!upd[0]) return res.status(404).json({ error: 'Entrega nao encontrada' });
+
+      if (registrarAuditoria) {
+        await registrarAuditoria(req, 'DESFAZER_EXTRAVIO_LOGISTICS', 'operacional',
+          'logistics_deliveries', id, { codigo_os: upd[0].codigo_os })
+          .catch(() => {});
+      }
+      res.json({ success: true, entrega: upd[0] });
+    } catch (err) {
+      console.error('[logistics/routes] POST /extraviar/desfazer erro:', err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 
