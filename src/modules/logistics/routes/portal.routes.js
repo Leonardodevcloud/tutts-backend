@@ -22,6 +22,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+// CLIENTE_FINAL_NF_PORTAL_V1: mesma fonte unica usada no card do admin.
+const { extrairClienteFinalENota } = require('../core/ClienteFinalParser');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 // Segredo proprio do portal. Fallback derivado do JWT_SECRET (mesmo padrao do
@@ -36,7 +38,19 @@ const PORTAL_EXPIRES_IN = process.env.PORTAL_JWT_EXPIRES || '12h';
  */
 function mapearPortal(ld) {
   const courier = ld.courier_data || {};
+  // CLIENTE_FINAL_NF_PORTAL_V1: cliente final + NF limpa, mesmo tratamento do admin.
+  let _pts = ld.pontos;
+  if (typeof _pts === 'string') { try { _pts = JSON.parse(_pts); } catch (_) { _pts = null; } }
+  const _ult = Array.isArray(_pts) && _pts.length > 1 ? _pts[_pts.length - 1] : null;
+  const _cf = extrairClienteFinalENota({
+    texto: (_ult && (_ult.rua || _ult.endereco)) || ld.endereco_entrega || null,
+    nome: (_ult && (_ult.nome || _ult.nomeCliente)) || null,
+    nota: (_ult && _ult.nota) || null,
+    clienteCod: ld.cliente_cod_rastreio || null,
+  });
   return {
+    cliente_final:      _cf.cliente_final,
+    nota_fiscal:        _cf.nota_fiscal,
     id:                 ld.id,
     codigo_os:          ld.codigo_os,
     provider_code:      ld.provider_code,
@@ -162,9 +176,14 @@ function createLogisticsPortalRouter(pool) {
       const temData = !!(req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data));
       const params = [req.portal.regra_id];
       let sql = `
-        SELECT ld.*, r.cliente_nome AS cliente_nome_regra
+        SELECT ld.*, r.cliente_nome AS cliente_nome_regra,
+               sc.cliente_cod AS cliente_cod_rastreio
           FROM logistics_deliveries ld
           LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+          LEFT JOIN LATERAL (
+            SELECT cliente_cod FROM sla_capturas
+             WHERE os_numero = ld.codigo_os::text LIMIT 1
+          ) sc ON true
          WHERE ld.regra_id = $1`;
       if (temData) {
         sql += ` AND (ld.created_at AT TIME ZONE 'America/Sao_Paulo')::date = $2`;
