@@ -24,8 +24,11 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 // CLIENTE_FINAL_NF_PORTAL_V1: mesma fonte unica usada no card do admin.
 const { extrairClienteFinalENota } = require('../core/ClienteFinalParser');
-// PORTAL_MAPA_V1: haversine + ETA estimado + reducao do tracado.
-const { haversineKm, estimarEtaMin, reduzirPontos } = require('../core/geo');
+// PORTAL_MAPA_V1: haversine + ETA estimado.
+// PORTAL_MAPA_BACK_V2: reduzirPontos saiu — o front nao desenha mais o
+// breadcrumb do GPS, so a linha coleta->entrega. A funcao continua em
+// geo.js caso o tracado volte.
+const { haversineKm, estimarEtaMin } = require('../core/geo');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 // Segredo proprio do portal. Fallback derivado do JWT_SECRET (mesmo padrao do
@@ -309,30 +312,13 @@ function createLogisticsPortalRouter(pool) {
         [req.portal.regra_id, EM_ANDAMENTO]
       );
 
-      // Tracado percorrido: uma query so pra todas as entregas da tela.
-      // (N+1 aqui seria 1 query por entrega a cada 30s — nao)
-      let tracadoPorId = {};
-      const ids = rows.map(r => r.id);
-      if (ids.length > 0) {
-        try {
-          const { rows: trk } = await pool.query(
-            `SELECT delivery_id, latitude, longitude
-               FROM logistics_tracking
-              WHERE delivery_id = ANY($1::int[])
-                AND latitude IS NOT NULL AND longitude IS NOT NULL
-              ORDER BY delivery_id, created_at ASC`,
-            [ids]
-          );
-          for (const t of trk) {
-            if (!tracadoPorId[t.delivery_id]) tracadoPorId[t.delivery_id] = [];
-            tracadoPorId[t.delivery_id].push([Number(t.latitude), Number(t.longitude)]);
-          }
-        } catch (eTrk) {
-          // Sem tracado o mapa ainda funciona (marcadores + linha reta).
-          console.warn('[logistics/portal] tracking indisponivel:', eTrk.message);
-        }
-      }
-
+      // PORTAL_MAPA_BACK_V2: a query em logistics_tracking saiu daqui.
+      // O front parou de desenhar o breadcrumb do GPS (com 5+ corridas
+      // virava espaguete), entao montar o tracado era trabalho jogado fora
+      // a cada 30s — mais a query, mais o payload.
+      // A posicao AO VIVO do motoboy nao depende disso: vem de
+      // ld.ultima_lat/ultima_lng, que o WebhookDispatcher (Uber) e o
+      // TrackingPoller (99) mantem atualizados.
       const entregas = rows.map(ld => {
         const courier = ld.courier_data || {};
         const coletado = !!ld.coletado_at ||
@@ -400,7 +386,6 @@ function createLogisticsPortalRouter(pool) {
           eta_min: etaMin,
           eta_fonte: 'estimado',
           rastreio_token: ld.rastreio_token || null,
-          tracado: reduzirPontos(tracadoPorId[ld.id] || [], 60),
         };
       });
 
