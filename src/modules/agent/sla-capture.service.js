@@ -689,8 +689,22 @@ async function enviarRastreioGrupoImediato(pool, deliveryId) {
   }
   if (!clienteCod) return false;
 
+  // ENVIAR_GRUPO_EMISSORES_V1
+  // O gate por configMatched cobria SO o agente. Este caminho (chamado pelo
+  // WebhookDispatcher) e o do TrackingPoller tinham envio proprio, sem gate.
+  // Pior: como o gate do agente impede o CLAIM, rastreio_grupo_em ficava
+  // NULL — e ai estes dois ganhavam o claim e mandavam. O gate estava
+  // literalmente entregando o envio pros outros emissores.
+  //
+  // Filtrar aqui e melhor que replicar o gate: sem grupo, o `if` abaixo ja
+  // aborta ANTES do claim, que e exatamente o que queremos.
+  //
+  // COALESCE: linha antiga com NULL = manda (comportamento de antes).
   const { rows: grupos } = await pool.query(
-    "SELECT evolution_group_id FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true AND evolution_group_id IS NOT NULL",
+    "SELECT evolution_group_id FROM rastreio_clientes_config"
+    + " WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true"
+    + " AND evolution_group_id IS NOT NULL"
+    + " AND COALESCE(enviar_grupo, TRUE) = TRUE",
     [String(clienteCod)]
   );
   if (!grupos.length) return false;

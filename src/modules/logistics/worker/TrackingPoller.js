@@ -422,8 +422,17 @@ function startTrackingPoller(pool) {
                   );
                   const clienteCodHub = capt[0]?.cliente_cod || null;
                   if (clienteCodHub) {
+                    // ENVIAR_GRUPO_EMISSORES_V1: respeita o flag enviar_grupo.
+                    // Sem isto, o poller mandava a mensagem mesmo com o envio
+                    // desligado — e justamente porque o gate do agente NAO
+                    // reivindica o claim, deixando rastreio_grupo_em NULL.
+                    // Sem grupo, o `if (gruposHub.length)` abaixo ja pula tudo,
+                    // inclusive o claim.
                     const { rows: gruposHub } = await pool.query(
-                      "SELECT evolution_group_id FROM rastreio_clientes_config WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true AND evolution_group_id IS NOT NULL",
+                      "SELECT evolution_group_id FROM rastreio_clientes_config"
+                      + " WHERE cliente_cod = $1 AND ativo = true AND usa_hub = true"
+                      + " AND evolution_group_id IS NOT NULL"
+                      + " AND COALESCE(enviar_grupo, TRUE) = TRUE",
                       [String(clienteCodHub)]
                     );
                     if (gruposHub.length) {
