@@ -1137,28 +1137,37 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       // ORDER BY id ASC = mesmo desempate do matcher (a primeira que casar vence).
       // Sem filtro de ativo: aqui o objetivo e NOMEAR, nao decidir despacho —
       // uma regra desativada hoje ainda identifica de quem era aquela corrida.
+      // RELATORIO_PRECO_ENDERECO_V1: carrega TAMBEM a tabela de preco.
+      // Antes so vinha o nome, e ai a corrida casada por endereco ganhava
+      // cliente mas nao ganhava preco -> caia no valor da Mapp.
       const { rows: _rr } = await pool.query(
-        `SELECT cliente_nome, trecho_endereco, cliente_identificador
+        `SELECT cliente_nome, trecho_endereco, cliente_identificador,
+                preco_valor_fixo, preco_km_base, preco_valor_km_adicional
            FROM logistics_dispatch_rules ORDER BY id ASC`
       );
       _regrasMatch = _rr.map(rg => ({
         nome: rg.cliente_nome,
         trecho: normalizarEnderecoParaMatch(rg.trecho_endereco || rg.cliente_nome || ''),
         ident: normalizarEnderecoParaMatch(rg.cliente_identificador || ''),
+        precoValorFixo: rg.preco_valor_fixo,
+        precoKmBase: rg.preco_km_base,
+        precoValorKmAdicional: rg.preco_valor_km_adicional,
       }));
       var _normEnd = normalizarEnderecoParaMatch;
     } catch (e) {
       console.warn('[relatorio] match por endereco indisponivel:', e.message);
     }
 
+    // RELATORIO_PRECO_ENDERECO_V1: devolve a REGRA inteira, nao so o nome —
+    // quem chama precisa do preco tambem.
     // Mesmos limiares do DispatchRuleMatcher: identificador >= 4, trecho >= 5.
-    const _clientePorEndereco = (endereco) => {
+    const _regraPorEndereco = (endereco) => {
       if (!_normEnd || !_regrasMatch.length) return null;
       const alvo = _normEnd(endereco || '');
       if (!alvo) return null;
       for (const rg of _regrasMatch) {
-        if (rg.ident && rg.ident.length >= 4 && alvo.includes(rg.ident)) return rg.nome;
-        if (rg.trecho && rg.trecho.length >= 5 && alvo.includes(rg.trecho)) return rg.nome;
+        if (rg.ident && rg.ident.length >= 4 && alvo.includes(rg.ident)) return rg;
+        if (rg.trecho && rg.trecho.length >= 5 && alvo.includes(rg.trecho)) return rg;
       }
       return null;
     };
@@ -1177,11 +1186,43 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       // aplica a tabela: ele le opts.regra, que nenhum caller preenche. Assim
       // o relatorio fica certo inclusive pras corridas ja gravadas.
       let valor = null, origem = 'indefinido';
-      const _tabRegra = r.preco_valor_fixo != null ? {
-        valorFixo: Number(r.preco_valor_fixo),
-        kmBase: r.preco_km_base != null ? Number(r.preco_km_base) : 0,
-        valorKmAdicional: r.preco_valor_km_adicional != null ? Number(r.preco_valor_km_adicional) : 0,
-      } : null;
+      // RELATORIO_PRECO_ENDERECO_V1 — a regra da corrida, resolvida ANTES do
+      // valor. Antes o cliente era resolvido la embaixo, depois do calculo:
+      // dava pra nomear pelo endereco, mas nao dava pra PRECIFICAR por ele,
+      // porque a regra casada nem existia ainda nesse ponto.
+      //
+      // Duas fontes, mesma prioridade do nome:
+      //   1. regra_id gravado na entrega (veio no JOIN)
+      //   2. match por endereco de coleta (despacho sem regra)
+      let _cliente = r.regra_cliente_nome || null;
+      let _clienteOrigem = _cliente ? 'regra' : null;
+      let _regraEnd = null;
+      if (!_cliente) {
+        _regraEnd = _regraPorEndereco(r.endereco_coleta);
+        if (_regraEnd) { _cliente = _regraEnd.nome; _clienteOrigem = 'endereco'; }
+      }
+      if (!_cliente && r.cliente_nome) {
+        _cliente = r.cliente_nome;
+        _clienteOrigem = 'solicitacao';
+      }
+
+      // Tabela: do regra_id, ou da regra casada por endereco. Sem isso, a
+      // corrida sem regra_id ficava com o valor da Mapp mesmo tendo uma regra
+      // com tabela batendo no endereco dela.
+      let _tabRegra = null;
+      if (r.preco_valor_fixo != null) {
+        _tabRegra = {
+          valorFixo: Number(r.preco_valor_fixo),
+          kmBase: r.preco_km_base != null ? Number(r.preco_km_base) : 0,
+          valorKmAdicional: r.preco_valor_km_adicional != null ? Number(r.preco_valor_km_adicional) : 0,
+        };
+      } else if (_regraEnd && _regraEnd.precoValorFixo != null) {
+        _tabRegra = {
+          valorFixo: Number(_regraEnd.precoValorFixo),
+          kmBase: _regraEnd.precoKmBase != null ? Number(_regraEnd.precoKmBase) : 0,
+          valorKmAdicional: _regraEnd.precoValorKmAdicional != null ? Number(_regraEnd.precoValorKmAdicional) : 0,
+        };
+      }
 
       const _vRegra = _tabRegra ? calcularPrecoDistancia(km, _tabRegra) : null;
       if (_vRegra != null) {
@@ -1210,17 +1251,8 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       } else {
         statusNorm = normalizarStatus(r.status_canonico);
       }
-      // RELATORIO_CLIENTE_V1: degraus 1 -> 2 -> 3 (ver comentario acima).
-      let _cliente = r.regra_cliente_nome || null;
-      let _clienteOrigem = _cliente ? 'regra' : null;
-      if (!_cliente) {
-        _cliente = _clientePorEndereco(r.endereco_coleta);
-        if (_cliente) _clienteOrigem = 'endereco';
-      }
-      if (!_cliente && r.cliente_nome) {
-        _cliente = r.cliente_nome;
-        _clienteOrigem = 'solicitacao';
-      }
+      // RELATORIO_PRECO_ENDERECO_V1: o cliente ja foi resolvido la em cima,
+      // junto com a regra — o bloco que ficava aqui saiu pra nao duplicar.
       // valor_servico_mapp_original: zerado quando cancelada, igual km/valor.
       // Se ficasse cru, o total da coluna Mapp nao bateria com o de Valor e
       // pareceria bug.
