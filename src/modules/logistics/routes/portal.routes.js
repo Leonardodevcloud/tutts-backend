@@ -24,6 +24,8 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 // CLIENTE_FINAL_NF_PORTAL_V1: mesma fonte unica usada no card do admin.
 const { extrairClienteFinalENota } = require('../core/ClienteFinalParser');
+// PORTAL_MAPA_V1: haversine + ETA estimado + reducao do tracado.
+const { haversineKm, estimarEtaMin, reduzirPontos } = require('../core/geo');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 // Segredo proprio do portal. Fallback derivado do JWT_SECRET (mesmo padrao do
@@ -257,6 +259,165 @@ function createLogisticsPortalRouter(pool) {
   //   Falha), porem ESCOPADA: so devolve tentativas das OS que pertencem a
   //   regra do token. Le de logistics_events.
   // ---------------------------------------------------------
+  // ───────────────────────────────────────────────────────────
+  // PORTAL_MAPA_V1
+  // GET /portal/mapa  -> tudo que a aba Mapa precisa, em 2 queries.
+  //
+  // Devolve SO o que esta EM ANDAMENTO: despachada, com entregador, e ainda
+  // nao terminal. Entrega terminada nao tem o que acompanhar no mapa.
+  //
+  // O ETA e CALCULADO aqui (haversine * fator de rua / velocidade media) —
+  // nenhum provedor manda ETA ao vivo. E estimativa, e o front rotula como
+  // tal ("~11 min").
+  // ───────────────────────────────────────────────────────────
+  router.get('/mapa', verificarPortalToken, async (req, res) => {
+    try {
+      // Status pos-coleta: o alvo do motoboy passa a ser a ENTREGA.
+      const POS_COLETA = ['PICKED_UP', 'DROPOFF_EN_ROUTE', 'ARRIVED_DROPOFF', 'RETURNING'];
+
+      // "Em andamento" = ja saiu do papel e ainda nao acabou. Lista EXPLICITA
+      // (whitelist) em vez de "NOT IN terminais": PENDING/QUOTED sao entregas
+      // que nem foram despachadas — nao tem motoboy nem o que mostrar no mapa.
+      // RETURNING esta FORA da ORDEM_STATUS do poller, mas e andamento (o
+      // motoboy esta voltando com o pacote), entao entra.
+      const EM_ANDAMENTO = [
+        'DISPATCHED', 'COURIER_ASSIGNED',
+        'PICKUP_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP',
+        'DROPOFF_EN_ROUTE', 'ARRIVED_DROPOFF', 'RETURNING',
+      ];
+
+      const { rows } = await pool.query(
+        `SELECT ld.id, ld.codigo_os, ld.status_canonico, ld.status_native,
+                ld.coletado_at, ld.atribuido_at, ld.provider_code,
+                ld.endereco_coleta, ld.endereco_entrega,
+                ld.latitude_coleta, ld.longitude_coleta,
+                ld.latitude_entrega, ld.longitude_entrega,
+                ld.ultima_lat, ld.ultima_lng,
+                ld.distancia_km, ld.distancia_origem,
+                ld.courier_data, ld.pontos, ld.rastreio_token,
+                sc.cliente_cod AS cliente_cod_rastreio,
+                sc.pontos_json AS pontos_rastreio
+           FROM logistics_deliveries ld
+           LEFT JOIN LATERAL (
+             SELECT cliente_cod, pontos_json FROM sla_capturas
+              WHERE os_numero = ld.codigo_os::text LIMIT 1
+           ) sc ON true
+          WHERE ld.regra_id = $1
+            AND ld.status_canonico = ANY($2)
+          ORDER BY ld.id DESC
+          LIMIT 200`,
+        [req.portal.regra_id, EM_ANDAMENTO]
+      );
+
+      // Tracado percorrido: uma query so pra todas as entregas da tela.
+      // (N+1 aqui seria 1 query por entrega a cada 30s — nao)
+      let tracadoPorId = {};
+      const ids = rows.map(r => r.id);
+      if (ids.length > 0) {
+        try {
+          const { rows: trk } = await pool.query(
+            `SELECT delivery_id, latitude, longitude
+               FROM logistics_tracking
+              WHERE delivery_id = ANY($1::int[])
+                AND latitude IS NOT NULL AND longitude IS NOT NULL
+              ORDER BY delivery_id, created_at ASC`,
+            [ids]
+          );
+          for (const t of trk) {
+            if (!tracadoPorId[t.delivery_id]) tracadoPorId[t.delivery_id] = [];
+            tracadoPorId[t.delivery_id].push([Number(t.latitude), Number(t.longitude)]);
+          }
+        } catch (eTrk) {
+          // Sem tracado o mapa ainda funciona (marcadores + linha reta).
+          console.warn('[logistics/portal] tracking indisponivel:', eTrk.message);
+        }
+      }
+
+      const entregas = rows.map(ld => {
+        const courier = ld.courier_data || {};
+        const coletado = !!ld.coletado_at ||
+          POS_COLETA.includes(String(ld.status_canonico || '').toUpperCase());
+
+        const cLat = ld.ultima_lat != null ? Number(ld.ultima_lat) : null;
+        const cLng = ld.ultima_lng != null ? Number(ld.ultima_lng) : null;
+
+        // Alvo atual do motoboy: se ainda nao coletou, ele vai pra LOJA.
+        const alvo = coletado ? 'entrega' : 'coleta';
+        const aLat = coletado ? ld.latitude_entrega : ld.latitude_coleta;
+        const aLng = coletado ? ld.longitude_entrega : ld.longitude_coleta;
+
+        const restanteKm = haversineKm(cLat, cLng, aLat, aLng);
+        const etaMin = estimarEtaMin(restanteKm);
+
+        // Cliente final + NF: mesma cascata do card (agent primeiro, API depois).
+        let _ptsR = ld.pontos_rastreio;
+        if (typeof _ptsR === 'string') { try { _ptsR = JSON.parse(_ptsR); } catch (_) { _ptsR = null; } }
+        const _ultR = Array.isArray(_ptsR) && _ptsR.length > 0 ? _ptsR[_ptsR.length - 1] : null;
+        let _pts = ld.pontos;
+        if (typeof _pts === 'string') { try { _pts = JSON.parse(_pts); } catch (_) { _pts = null; } }
+        const _ult = Array.isArray(_pts) && _pts.length > 1 ? _pts[_pts.length - 1] : null;
+        const _cf = extrairClienteFinalENota({
+          texto: (_ultR && (_ultR.textoBruto || _ultR.endereco))
+            || (_ult && (_ult.rua || _ult.endereco)) || ld.endereco_entrega || null,
+          nome: (_ultR && _ultR.nomeCliente) || (_ult && (_ult.nome || _ult.nomeCliente)) || null,
+          nota: (_ultR && _ultR.nota) || (_ult && _ult.nota) || null,
+          clienteCod: ld.cliente_cod_rastreio || null,
+        });
+
+        return {
+          id: ld.id,
+          codigo_os: ld.codigo_os,
+          status_canonico: ld.status_canonico,
+          // mesmo nome de campo que o /deliveries do portal ja usa
+          status_uber: ld.status_native || ld.status_canonico,
+          provider_code: ld.provider_code || null,
+          coletado,
+          alvo,
+          coleta: {
+            lat: ld.latitude_coleta != null ? Number(ld.latitude_coleta) : null,
+            lng: ld.longitude_coleta != null ? Number(ld.longitude_coleta) : null,
+            endereco: ld.endereco_coleta || null,
+          },
+          entrega: {
+            lat: ld.latitude_entrega != null ? Number(ld.latitude_entrega) : null,
+            lng: ld.longitude_entrega != null ? Number(ld.longitude_entrega) : null,
+            endereco: ld.endereco_entrega || null,
+          },
+          courier: (courier.name || cLat != null) ? {
+            nome: courier.name || null,
+            telefone: courier.phone || null,
+            foto: courier.photo || null,
+            lat: cLat,
+            lng: cLng,
+          } : null,
+          cliente_final: _cf.cliente_final,
+          nota_fiscal: _cf.nota_fiscal,
+          // distancia_km e a da corrida inteira (vem do provider ou do
+          // fallback haversine). restante_km e do motoboy ate o alvo AGORA.
+          distancia_km: ld.distancia_km != null ? Number(ld.distancia_km) : null,
+          distancia_origem: ld.distancia_origem || null,
+          restante_km: restanteKm != null ? Math.round(restanteKm * 10) / 10 : null,
+          eta_min: etaMin,
+          eta_fonte: 'estimado',
+          rastreio_token: ld.rastreio_token || null,
+          tracado: reduzirPontos(tracadoPorId[ld.id] || [], 60),
+        };
+      });
+
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        total: entregas.length,
+        a_coletar: entregas.filter(e => !e.coletado).length,
+        em_entrega: entregas.filter(e => e.coletado).length,
+        entregas,
+      });
+    } catch (err) {
+      console.error('[logistics/portal] GET /mapa erro:', err.message);
+      res.status(500).json({ erro: err.message });
+    }
+  });
+
   router.get('/deliveries/tentativas', verificarPortalToken, async (req, res) => {
     try {
       const osParam = String(req.query.os || '').trim();
