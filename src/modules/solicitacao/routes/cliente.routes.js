@@ -2035,6 +2035,101 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
 
 // RASTREIO PÚBLICO - Acompanhar corrida sem login (para compartilhar)
 
+  // ─────────────────────────────────────────────────────────────
+  // REDESPACHO_EXCLUSAO_V1
+  // POST /solicitacao/corridas/:os/redespachar
+  //
+  // Cancela a corrida atual no provedor e chama outro entregador, excluindo
+  // o atual DESTA OS. Espelha a rota admin
+  // (/logistics/deliveries/:id/redispatch), com duas diferencas:
+  //
+  //   1. e por CODIGO DA OS, nao pelo id da entrega — o painel do cliente
+  //      nao conhece logistics_deliveries.id
+  //   2. exige que a OS seja DELE (cliente_id) — sem isso qualquer cliente
+  //      logado redespacharia corrida dos outros so trocando o numero na URL
+  // ─────────────────────────────────────────────────────────────
+  router.post('/solicitacao/corridas/:os/redespachar', verificarTokenSolicitacao, async (req, res) => {
+    try {
+      const codigoOS = parseInt(req.params.os, 10);
+      if (!codigoOS) return res.status(400).json({ error: 'OS invalida' });
+
+      // 1. DONO: a OS e deste cliente? (checagem obrigatoria)
+      const dono = await pool.query(
+        'SELECT id FROM solicitacoes_corrida WHERE trim(tutts_os_numero) = $1 AND cliente_id = $2 LIMIT 1',
+        [String(codigoOS), req.clienteSolicitacao.id]
+      );
+      if (dono.rows.length === 0) {
+        return res.status(404).json({ error: 'Corrida nao encontrada' });
+      }
+
+      // 2. Entrega ativa mais recente da OS
+      const { rows } = await pool.query(
+        `SELECT * FROM logistics_deliveries
+          WHERE codigo_os = $1 ORDER BY created_at DESC LIMIT 1`,
+        [codigoOS]
+      );
+      if (rows.length === 0) return res.status(404).json({ error: 'Corrida nao esta no Hub' });
+      const original = rows[0];
+
+      // 3. Trava de estagio — a mesma da rota admin.
+      // Passou da coleta, o provedor nao cancela mais: a corrida segue viva e
+      // cobrada, e redespachar pagaria duas.
+      const ANTES_DA_COLETA = ['PENDING', 'QUOTED', 'DISPATCHED', 'COURIER_ASSIGNED', 'PICKUP_EN_ROUTE', 'ARRIVED_PICKUP'];
+      if (!ANTES_DA_COLETA.includes(original.status_canonico)) {
+        return res.status(409).json({
+          error: 'O entregador ja coletou o pacote — nao da mais pra trocar.',
+        });
+      }
+
+      const { getDispatchOrchestrator } = require('../../logistics/core/DispatchOrchestrator');
+      const { getMappClient } = require('../../logistics/core/MappClient');
+      const { EventSource } = require('../../logistics/contracts/EventTypes');
+      const orch = getDispatchOrchestrator(pool);
+
+      // 4. Exclui o entregador atual DESTA OS (senao o provedor devolve o mesmo)
+      if (original.courier_data) {
+        const { excluirCourierDaOS } = require('../../logistics/logistics.bloqueados');
+        await excluirCourierDaOS(pool, codigoOS, original.courier_data, {
+          motivo: 'redespacho pelo cliente',
+          criadoPor: `cliente:${req.clienteSolicitacao.id}`,
+        }).catch((e) => console.warn('[redespachar/cliente] falha ao excluir entregador:', e.message));
+      }
+
+      // 5. Cancela sem reabrir a Mapp — vamos despachar de novo agora
+      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_native)) {
+        await orch.cancel(original.id, {
+          motivo: 'Redespacho solicitado pelo cliente',
+          canceladoPor: 'cliente',
+          reabrirMapp: false,
+          eventSource: EventSource.API,
+        });
+      }
+
+      // 6. Redespacha no MESMO provedor da corrida original
+      const servicos = await getMappClient(pool).listarServicos(0, 0);
+      const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+      if (!servico) {
+        await getMappClient(pool).alterarStatus(codigoOS, 0).catch(() => {});
+        return res.status(409).json({ error: 'Corrida nao esta mais disponivel para redespacho' });
+      }
+
+      const novo = await orch.dispatch(servico, {
+        providerCode: original.provider_code,
+        vehicleType: null,
+        regraId: original.regra_id || null,
+        eventSource: EventSource.API,
+      });
+      if (!novo) {
+        return res.status(409).json({ error: 'Nao foi possivel chamar outro entregador agora' });
+      }
+
+      res.json({ success: true, mensagem: 'Chamando outro entregador' });
+    } catch (err) {
+      console.error('[solicitacao] redespachar erro:', err.message);
+      res.status(500).json({ error: 'Erro ao redespachar' });
+    }
+  });
+
   return router;
 }
 

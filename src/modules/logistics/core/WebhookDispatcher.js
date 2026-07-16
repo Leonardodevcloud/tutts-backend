@@ -473,11 +473,33 @@ class WebhookDispatcher {
    * @private
    */
   async _checarBloqueioEReatribuir(providerCode, entrega, courier) {
-    const { buscarBloqueioAtivo } = require('../logistics.bloqueados');
-    const bloqueio = await buscarBloqueioAtivo(this.pool, courier);
-    if (!bloqueio) return false;
-
+    const { buscarBloqueioAtivo, buscarExclusaoOS, contarExclusoesOS } = require('../logistics.bloqueados');
     const codigoOS = entrega.codigo_os;
+
+    let bloqueio = await buscarBloqueioAtivo(this.pool, courier);
+
+    // REDESPACHO_EXCLUSAO_V1 — se nao ha bloqueio GLOBAL, ainda pode haver
+    // exclusao POR OS (o operador/cliente apertou Redespachar e o provedor
+    // devolveu o mesmo cara).
+    //
+    // TETO, ao contrario do bloqueio global: cancelar CUSTA (a 99 grava taxa
+    // em CANCELED). Numa praca com poucos motoboys o mesmo cara volta varias
+    // vezes e cada volta e uma taxa. O bloqueio global roda sem teto de
+    // proposito — "esse nunca mais, custe o que custar". Redespacho e mais
+    // brando: "esse nao, agora". Estourou o teto, aceita e loga.
+    if (!bloqueio) {
+      const excl = await buscarExclusaoOS(this.pool, codigoOS, courier);
+      if (!excl) return false;
+
+      const MAX = parseInt(process.env.REDESPACHO_EXCLUSAO_MAX, 10) || 3;
+      const jaExcluidos = await contarExclusoesOS(this.pool, codigoOS);
+      if (jaExcluidos >= MAX) {
+        console.warn(`⚠️ [WebhookDispatcher] OS ${codigoOS}: teto de exclusao por redespacho atingido (${jaExcluidos}/${MAX}) — aceitando ${courier.name}. Cada relance custa taxa de cancelamento.`);
+        return false;
+      }
+      console.warn(`🔄 [WebhookDispatcher] OS ${codigoOS}: entregador EXCLUIDO por redespacho voltou (${courier.name}) — relancando (${jaExcluidos}/${MAX})`);
+      bloqueio = { id: null, _porOS: true, _exclusaoId: excl.id };
+    }
 
     // Contagem de reatribuicoes por OS (em memoria) — SO metrica/log, NAO barra.
     // A pedido: SEM teto. Se o sistema cancelou a corrida por bloqueio, o sistema
@@ -487,11 +509,15 @@ class WebhookDispatcher {
 
     console.warn(`🚫 [WebhookDispatcher] OS ${codigoOS}: entregador BLOQUEADO detectado (${courier.name}) — bloqueio id=${bloqueio.id}`);
 
-    // Contabiliza a reatribuicao no bloqueio (metricas do painel)
-    await this.pool.query(
-      'UPDATE logistics_couriers_bloqueados SET reatribuicoes = reatribuicoes + 1 WHERE id = $1',
-      [bloqueio.id]
-    ).catch(() => {});
+    // Contabiliza a reatribuicao no bloqueio (metricas do painel).
+    // REDESPACHO_EXCLUSAO_V1: exclusao por OS nao tem linha em
+    // logistics_couriers_bloqueados — o id e null e o UPDATE nao se aplica.
+    if (bloqueio.id) {
+      await this.pool.query(
+        'UPDATE logistics_couriers_bloqueados SET reatribuicoes = reatribuicoes + 1 WHERE id = $1',
+        [bloqueio.id]
+      ).catch(() => {});
+    }
 
     // Audita o evento
     this.events.log({

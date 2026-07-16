@@ -869,7 +869,13 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const entregaId = parseInt(req.params.id, 10);
-      const { providerCode = 'uber', vehicleType = null, motivo } = req.body || {};
+      // REDESPACHO_EXCLUSAO_V1: providerCode NAO tem mais default 'uber'.
+      //
+      // Era bug: uma corrida despachada na 99 e redespachada sem body ia
+      // parar na Uber, em silencio. O redespacho tem que ir pro MESMO
+      // provedor que foi pedido — 99 continua 99, Uber continua Uber.
+      // O default agora e o provider_code da propria entrega (mais abaixo).
+      const { providerCode: provReq = null, vehicleType = null, motivo, excluirEntregador = false } = req.body || {};
 
       const orch = getDispatchOrchestrator(pool);
 
@@ -880,6 +886,38 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       }
       const original = rows[0];
       const codigoOS = original.codigo_os;
+      const providerCode = provReq || original.provider_code || 'uber';
+
+      // REDESPACHO_EXCLUSAO_V1 — trava de estagio.
+      //
+      // Doc oficial da 99 (Cancel Order): "If the courier has picked up the
+      // package, order cancellation is not supported." Depois da COLETA a 99
+      // recusa o cancelamento e a corrida segue viva SENDO COBRADA — um
+      // redespacho ali pagaria DUAS corridas.
+      //
+      // A fronteira e a coleta, nao o aceite: entre COURIER_ASSIGNED e
+      // ARRIVED_PICKUP ainda da pra cancelar.
+      const ANTES_DA_COLETA = ['PENDING', 'QUOTED', 'DISPATCHED', 'COURIER_ASSIGNED', 'PICKUP_EN_ROUTE', 'ARRIVED_PICKUP'];
+      if (!ANTES_DA_COLETA.includes(original.status_canonico)) {
+        return res.status(409).json({
+          error: `Redespacho indisponivel: a corrida ja passou da coleta (${original.status_canonico}). O provedor nao cancela depois da coleta — a corrida seria cobrada e voce pagaria duas.`,
+        });
+      }
+
+      // REDESPACHO_EXCLUSAO_V1 — exclui o entregador atual DESTA OS.
+      //
+      // Sem isso o provedor pode devolver o mesmo cara e o botao vira enfeite:
+      // nem a 99 nem a Uber aceitam "nao mande o Fulano" no pedido. A checagem
+      // e reativa, no WebhookDispatcher: quando o provedor atribuir, se for um
+      // excluido desta OS, cancela e relanca (com teto, ver
+      // REDESPACHO_EXCLUSAO_MAX).
+      if (excluirEntregador !== false && original.courier_data) {
+        const { excluirCourierDaOS } = require('./logistics.bloqueados');
+        await excluirCourierDaOS(pool, codigoOS, original.courier_data, {
+          motivo: motivo || 'redespacho manual',
+          criadoPor: (req.usuario && (req.usuario.nome || req.usuario.email)) || 'admin',
+        }).catch((e) => console.warn('[redispatch] falha ao excluir entregador da OS:', e.message));
+      }
 
       // 2. Cancela a entrega atual (sem reabrir Mapp ainda — vamos redespachar já)
       if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_native)) {

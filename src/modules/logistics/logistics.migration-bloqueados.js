@@ -60,7 +60,31 @@ async function initLogisticsBloqueadosTables(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_bloq_tel ON logistics_couriers_bloqueados (telefone_norm) WHERE ativo = true`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_bloq_placa ON logistics_couriers_bloqueados (placa_norm) WHERE ativo = true`).catch(() => {});
 
-  console.log('✅ [logistics] tabelas de ocorrencias + bloqueados verificadas');
+  // REDESPACHO_EXCLUSAO_V1 — exclusao de entregador POR OS.
+  //
+  // Diferente de logistics_couriers_bloqueados, que e GLOBAL (o cara nunca
+  // mais pega corrida nenhuma). Aqui e "esse nao, NESTA OS" — o que o botao
+  // Redespachar precisa: chamar outro motoboy sem barrar ninguem pra sempre.
+  //
+  // Nao da pra pedir isso ao provedor: nem a 99 nem a Uber aceitam "nao mande
+  // o Fulano". O bloqueio e REATIVO — so descobrimos quem foi atribuido depois
+  // que ja foi, e ai cancelamos e relancamos.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS logistics_os_exclusoes (
+      id            SERIAL PRIMARY KEY,
+      codigo_os     BIGINT NOT NULL,
+      telefone_norm VARCHAR(32),
+      placa_norm    VARCHAR(16),
+      nome          VARCHAR(255),
+      motivo        TEXT,
+      criado_por    VARCHAR(255),
+      criado_em     TIMESTAMPTZ DEFAULT NOW(),
+      ativo         BOOLEAN DEFAULT true
+    )
+  `).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_osexcl_os ON logistics_os_exclusoes (codigo_os) WHERE ativo = true`).catch(() => {});
+
+  console.log('✅ [logistics] tabelas de ocorrencias + bloqueados + exclusoes por OS verificadas');
 }
 
 module.exports = { initLogisticsBloqueadosTables };

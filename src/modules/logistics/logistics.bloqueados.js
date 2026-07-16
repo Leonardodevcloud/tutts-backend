@@ -55,8 +55,59 @@ async function buscarBloqueioAtivo(pool, courier) {
   return rows[0] || null;
 }
 
+// REDESPACHO_EXCLUSAO_V1 — exclusao POR OS (nao e o bloqueio global).
+// Registra que este entregador nao deve pegar ESTA OS. Usado pelo botao
+// Redespachar: sem isso o provedor pode devolver o mesmo cara e o botao vira
+// enfeite.
+async function excluirCourierDaOS(pool, codigoOS, courier, opts = {}) {
+  const tel = normalizarTelefone(courier && courier.phone);
+  const placa = normalizarPlaca(courier && courier.plate);
+  // Sem telefone nem placa nao ha como casar depois — nao adianta gravar.
+  if (!tel && !placa) return null;
+  const { rows } = await pool.query(
+    `INSERT INTO logistics_os_exclusoes
+       (codigo_os, telefone_norm, placa_norm, nome, motivo, criado_por)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [codigoOS, tel || null, placa || null, (courier && courier.name) || null,
+     opts.motivo || 'redespacho manual', opts.criadoPor || 'sistema']
+  );
+  return rows[0] || null;
+}
+
+// Mesma mecanica do buscarBloqueioAtivo, mas amarrada a uma OS.
+async function buscarExclusaoOS(pool, codigoOS, courier) {
+  if (!courier || !codigoOS) return null;
+  const tel = normalizarTelefone(courier.phone);
+  const placa = normalizarPlaca(courier.plate);
+  if (!tel && !placa) return null;
+
+  const cond = [];
+  const params = [codigoOS];
+  if (tel) { params.push(tel); cond.push(`telefone_norm = $${params.length}`); }
+  if (placa) { params.push(placa); cond.push(`placa_norm = $${params.length}`); }
+
+  const { rows } = await pool.query(
+    `SELECT * FROM logistics_os_exclusoes
+      WHERE ativo = true AND codigo_os = $1 AND (${cond.join(' OR ')})
+      ORDER BY criado_em DESC LIMIT 1`,
+    params
+  );
+  return rows[0] || null;
+}
+
+async function contarExclusoesOS(pool, codigoOS) {
+  const { rows } = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM logistics_os_exclusoes WHERE codigo_os = $1 AND ativo = true',
+    [codigoOS]
+  );
+  return (rows[0] && rows[0].n) || 0;
+}
+
 module.exports = {
   normalizarTelefone,
   normalizarPlaca,
   buscarBloqueioAtivo,
+  excluirCourierDaOS,
+  buscarExclusaoOS,
+  contarExclusoesOS,
 };
