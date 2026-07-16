@@ -277,9 +277,12 @@ function createCorrecaoRoutes(pool) {
         //     Longe demais → barra de qualquer jeito. E ja confirmando → nao
         //     precisa. O resto paga. E a unica chamada paga desta rota.
         let lugaresProximos = [];
+        // REGRA_B_RESGATE_V1: localizacao_raw saiu da chamada. Ela NAO e um
+        // endereco — e a coordenada crua do GPS ("-12.962936, -38.469274"), montada
+        // no front pelo botao "Enviar minha localização atual". Passar isso pra uma
+        // comparacao de endereco so produzia 7% e a ilusao de um sinal.
         const precisaGoogle = precisaConsultarGoogle({
           receita,
-          localizacao_raw: String(localizacao_raw || '').trim(),
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
@@ -297,9 +300,10 @@ function createCorrecaoRoutes(pool) {
           console.log('[agent] 💰 Places dispensado — a resposta dele não mudaria a decisão');
         }
 
+        // REGRA_B_RESGATE_V1: idem — sem localizacao_raw. O que decide e a
+        // distancia (B) e, na faixa de resgate, o Google (C).
         cruzamento = cruzarValidacoes({
           receita,
-          localizacao_raw: String(localizacao_raw || '').trim(),
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
