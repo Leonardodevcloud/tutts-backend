@@ -153,6 +153,11 @@ function mapearCanonicoParaLegado(ld) {
     distancia_origem:   ld.distancia_origem,   // 🆕 'provider' | 'haversine'
     distancia_metros:   ld.distancia_metros,   // 🆕 metros crus do provider
     regra_id:           ld.regra_id,
+    // CLIENTE_MANUAL_MAPPER_V1: o mapper e whitelist — sem estes o front nao ve a
+    // atribuicao e o selo "manual" nunca aparece.
+    regra_id_manual:    ld.regra_id_manual || null,
+    regra_manual_por:   ld.regra_manual_por || null,
+    regra_manual_em:    ld.regra_manual_em || null,
     cliente_nome_regra: ld.cliente_nome_regra || null, // vem do JOIN
     tentativas:         ld.tentativas,
     erro_ultimo:        ld.erro_ultimo,
