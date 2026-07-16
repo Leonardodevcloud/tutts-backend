@@ -105,6 +105,19 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS atribuido_at TIMESTAMPTZ`).catch(() => {});
   // 99Entrega: reconciliacao de preco final (price_info do /detail, em reais)
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_provider_final DECIMAL(10,2)`).catch(() => {});
+
+  // CLIENTE_MANUAL_V1 — atribuicao manual de cliente (regra) a uma corrida.
+  //
+  // Por que NAO sobrescrever regra_id: ele e a verdade historica — qual regra
+  // DESPACHOU a corrida. Numa corrida manual cujo endereco nao casou com
+  // regra nenhuma, a resposta e "nenhuma", e tem que continuar sendo.
+  // regra_id_manual e outra coisa: o que um humano decidiu DEPOIS.
+  //
+  // Separar mantem auditavel (quem/quando) e reversivel, e nao mente sobre
+  // o despacho.
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_id_manual INTEGER`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_manual_por VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_manual_em TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_entrega_99     DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_devolucao_99   DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_sendback_99    DECIMAL(10,2)`).catch(() => {});

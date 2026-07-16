@@ -866,6 +866,74 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
     }
   });
 
+  // ───────────────────────────────────────────────────────────
+  // CLIENTE_MANUAL_V1
+  // PUT /deliveries/:id/cliente   body: { regraId: number|null }
+  //
+  // Atribui a corrida a um cliente (= uma REGRA — no Hub "cliente" nao e
+  // entidade propria, o nome vem de logistics_dispatch_rules.cliente_nome).
+  //
+  // Serve pra corrida manual cujo endereco nao casou com regra nenhuma: nem
+  // o trecho nem o identificador batem quando o endereco foi digitado
+  // diferente, porque os DOIS sao substring do mesmo endereco.
+  //
+  // CONSEQUENCIA: a TABELA DE PRECO da regra passa a valer nessa corrida. O
+  // relatorio junta nome e preco pelo mesmo COALESCE — nao da pra atribuir
+  // so o nome.
+  //
+  // regraId: null desfaz a atribuicao.
+  // ───────────────────────────────────────────────────────────
+  router.put('/deliveries/:id/cliente', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const entregaId = parseInt(req.params.id, 10);
+      const { regraId } = req.body || {};
+
+      const { rows: ent } = await pool.query('SELECT id, codigo_os FROM logistics_deliveries WHERE id = $1', [entregaId]);
+      if (ent.length === 0) return res.status(404).json({ error: 'Entrega nao encontrada' });
+
+      let regra = null;
+      if (regraId != null) {
+        const { rows } = await pool.query(
+          'SELECT id, cliente_nome, preco_valor_fixo, preco_km_base, preco_valor_km_adicional FROM logistics_dispatch_rules WHERE id = $1',
+          [parseInt(regraId, 10)]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Cliente/regra nao encontrado' });
+        regra = rows[0];
+      }
+
+      const quem = (req.usuario && (req.usuario.nome || req.usuario.email)) || 'admin';
+      await pool.query(
+        `UPDATE logistics_deliveries
+            SET regra_id_manual = $1,
+                regra_manual_por = $2,
+                regra_manual_em = CASE WHEN $1::int IS NULL THEN NULL ELSE NOW() END,
+                updated_at = NOW()
+          WHERE id = $3`,
+        [regra ? regra.id : null, regra ? quem : null, entregaId]
+      );
+
+      // Assinatura posicional, igual ao resto do modulo:
+      // (req, ACAO, categoria, tabela, id, dados)
+      if (registrarAuditoria) {
+        await registrarAuditoria(req,
+          regra ? 'ATRIBUIR_CLIENTE_LOGISTICS' : 'REMOVER_CLIENTE_LOGISTICS', 'operacional',
+          'logistics_deliveries', entregaId,
+          { codigo_os: ent[0].codigo_os, cliente_nome: regra ? regra.cliente_nome : null, regra_id: regra ? regra.id : null })
+          .catch(() => {});
+      }
+
+      res.json({
+        success: true,
+        regra: regra ? { id: regra.id, cliente_nome: regra.cliente_nome } : null,
+        // O front avisa o operador que o valor vai mudar.
+        tem_tabela: !!(regra && regra.preco_valor_fixo != null),
+      });
+    } catch (err) {
+      console.error('[logistics] PUT /deliveries/:id/cliente erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const entregaId = parseInt(req.params.id, 10);

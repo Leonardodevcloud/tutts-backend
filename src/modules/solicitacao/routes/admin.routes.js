@@ -1051,6 +1051,8 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           -- corrida criada via Solicitacao — por isso a coluna vinha "—" na
           -- maioria das linhas.
           d.regra_id,
+          -- CLIENTE_MANUAL_V1: atribuicao manual (tem prioridade sobre regra_id)
+          d.regra_id_manual, d.regra_manual_por, d.regra_manual_em,
           -- RELATORIO_CUSTO_V1 — custo do provedor, duas fontes:
           --   valor_provider       = a COTACAO do despacho. E o unico que a
           --                          Uber tem.
@@ -1099,7 +1101,10 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
       -- RELATORIO_CLIENTE_V1: mesma fonte do card da loja.
-      LEFT JOIN logistics_dispatch_rules dr ON dr.id = ld.regra_id
+      -- CLIENTE_MANUAL_V1 — o COALESCE faz o trabalho todo.
+      -- Atribuiu a corrida a uma loja? Entao o nome E A TABELA DE PRECO
+      -- daquela regra passam a valer, porque as duas coisas saem deste join.
+      LEFT JOIN logistics_dispatch_rules dr ON dr.id = COALESCE(ld.regra_id_manual, ld.regra_id)
       ${outWhereSql}
       ORDER BY ld.created_at DESC
     `;
@@ -1216,7 +1221,10 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       //   1. regra_id gravado na entrega (veio no JOIN)
       //   2. match por endereco de coleta (despacho sem regra)
       let _cliente = r.regra_cliente_nome || null;
-      let _clienteOrigem = _cliente ? 'regra' : null;
+      // CLIENTE_MANUAL_V1: origem 'manual' quando foi atribuida na mao — o
+      // relatorio mostra isso no title da celula, pra nao confundir com match
+      // automatico.
+      let _clienteOrigem = _cliente ? (r.regra_id_manual ? 'manual' : 'regra') : null;
       let _regraEnd = null;
       if (!_cliente) {
         _regraEnd = _regraPorEndereco(r.endereco_coleta);
