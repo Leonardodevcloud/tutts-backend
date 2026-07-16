@@ -8,9 +8,15 @@
 'use strict';
 
 const express = require('express');
-const { validarLocalizacao } = require('../validar-localizacao');
+// AGENTE_BCE_V1 (import) — a foto saiu do fluxo.
+// validarLocalizacao (Gemini Vision) NAO e mais chamada aqui. Do modulo de
+// localizacao sobra so a busca de estabelecimentos proximos, que alimenta o
+// Path C e nao depende de foto nenhuma. O arquivo continua existindo porque o
+// modulo coletaEnderecos ainda usa o caminho com foto.
+const { buscarEstabelecimentosProximos } = require('../validar-localizacao');
 // 2026-04: cruzamento com Receita Federal
-const { cruzarValidacoes } = require('../cruzar-validacoes');
+// AGENTE_BCE_V1: precisaConsultarGoogle e o gate de custo do Places.
+const { cruzarValidacoes, precisaConsultarGoogle } = require('../cruzar-validacoes');
 // 2026-04 v3: consulta Receita direto quando motoboy digita CNPJ
 const { consultarReceita } = require('../consultar-receita');
 
@@ -18,47 +24,25 @@ const { consultarReceita } = require('../consultar-receita');
 // 🔄 2026-05-23: Migrado pro helper compartilhado que usa cache enderecos_geocodificados.
 // Antes: chamava maps.googleapis.com direto, ignorando cache → desperdício de US$.
 // Agora: passa pelo geocodeHelper centralizado.
-const { geocodeForward, geocodeReverse } = require('../../../shared/geocodeHelper');
+// AGENTE_BCE_V1 (geocode): so o forward. O geocodeReverse era usado unicamente
+// pela reverseGeocodeCep, que saiu junto com o Path F.
+const { geocodeForward } = require('../../../shared/geocodeHelper');
 
 async function geocodarEndereco(pool, enderecoTexto) {
   const r = await geocodeForward(pool, enderecoTexto, { source: 'agent-correcao-forward' });
   return r ? { lat: r.latitude, lng: r.longitude } : null;
 }
 
-async function reverseGeocodeCep(pool, lat, lng) {
-  // Usa o helper pra reverse geocoding (cache + Google fallback).
-  // Mas precisamos do CEP especificamente — então se o resultado vier do cache
-  // sem CEP gravado, ainda assim batemos no Google pra pegar address_components.
-  // Otimização: poderia ter coluna `postal_code` no enderecos_geocodificados.
-  const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY;
-  if (!key || !Number.isFinite(parseFloat(lat)) || !Number.isFinite(parseFloat(lng))) return null;
-
-  // Primeiro tenta pegar do cache via helper (não custa nada)
-  const cached = await geocodeReverse(pool, lat, lng, { source: 'agent-correcao-cep', tolerancia_graus: 0.0003 });
-  // Cache só tem endereco_formatado, não tem CEP estruturado.
-  // Tenta extrair CEP do texto formatado (Google usa padrão "XXXXX-XXX, ...")
-  if (cached && cached.endereco_formatado) {
-    const m = String(cached.endereco_formatado).match(/(\d{5})-?(\d{3})/);
-    if (m) return m[1] + m[2];
-  }
-
-  // Sem CEP no cache → busca direta no Google (caso raro depois da migração)
-  try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}&language=pt-BR`;
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const data = await r.json();
-    if (data.status !== 'OK' || !data.results) return null;
-    for (const result of data.results) {
-      const comp = (result.address_components || []).find(c => (c.types || []).includes('postal_code'));
-      if (comp && comp.long_name) {
-        return String(comp.long_name).replace(/\D/g, '');
-      }
-    }
-    return null;
-  } catch (_) {
-    return null;
-  }
-}
+// AGENTE_BCE_V1 (cep morto) — reverseGeocodeCep() foi removida.
+//
+// Ela existia por dois motivos, e os dois morreram junto com a reforma:
+//   1. alimentar o Path F (CEP Receita == CEP do GPS), que saiu da regra;
+//   2. servir de gate de custo do Google Places, papel que agora e do
+//      precisaConsultarGoogle() em cruzar-validacoes.js.
+//
+// Ficar no arquivo sem caller nao e neutro: e uma funcao que bate no Google com
+// a API key na mao, esperando o proximo a achar que ela ainda serve pra alguma
+// coisa. Some tambem a chamada de reverse geocoding por correcao.
 
 // ── Haversine: distância em km entre dois pontos ────────────────────────────
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -144,10 +128,9 @@ function validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motobo
     erros.push('CNPJ inválido. Confira os dígitos.');
   }
 
-  // Foto fachada continua sempre obrigatória
-  if (!foto_fachada || String(foto_fachada).trim() === '') {
-    erros.push('Foto da fachada é obrigatória.');
-  }
+  // AGENTE_BCE_V1 (entrada) — foto da fachada NAO e mais exigida nem usada.
+  // O parametro continua na assinatura porque o app antigo ainda manda o campo
+  // ate o deploy do front; ele e ignorado e nao e gravado.
 
   return erros;
 }
@@ -171,10 +154,9 @@ function createCorrecaoRoutes(pool) {
     }
 
     try {
-      // Foto da fachada agora é OPCIONAL — só valida tamanho se enviada
-      if (foto_fachada && foto_fachada.length > 7_000_000) {
-        return res.status(400).json({ sucesso: false, erros: ['Foto da fachada muito grande. Máximo 5MB.'] });
-      }
+      // AGENTE_BCE_V1 (tamanho) — a checagem de tamanho da foto saiu junto com a
+      // foto. Nada mais le foto_fachada: recusar por tamanho um campo ignorado
+      // so barraria motoboy por um dado que nao usamos.
 
       const usuarioId       = req.user?.id   || null;
       const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
@@ -247,68 +229,32 @@ function createCorrecaoRoutes(pool) {
         }
       }
 
-      // 💰 GATE DE CUSTO (2026-06): confirma CEP da Receita == CEP reverso do GPS.
-      // O CEP da Receita ja veio do brasilapi (gratis) no passo 1; o reverse e cacheado
-      // e e REUSADO no passo 3a (Path F) — nao adiciona chamada. Se baterem, pulamos o
-      // Google Places (caro: ate ~US$0.16/correcao) na validacao da fachada.
-      let cepGps = null;
-      try {
-        if (Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
-          cepGps = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
-        }
-      } catch (gateErr) {
-        console.error('[agent] ⚠️ reverseGeocodeCep (gate) falhou (nao-bloqueante):', gateErr.message);
-      }
-      const _receitaCep = (validacaoNF && validacaoNF.receita && validacaoNF.receita.ok)
-        ? validacaoNF.receita.cep : null;
-      const confirmadoBarato = !!(_receitaCep && cepGps &&
-        String(_receitaCep).slice(0, 8) === String(cepGps).slice(0, 8));
-      if (confirmadoBarato) {
-        console.log(`[agent] 💰 CEP Receita == CEP GPS (${cepGps}) — pulando Google Places (economia)`);
-      }
+      // AGENTE_BCE_V1 (fluxo) — o miolo da validacao, sem foto.
+      //
+      // O QUE SAIU DAQUI:
+      //   - o GATE DE CUSTO por CEP: ele existia pra decidir se valia pagar o
+      //     Google Places na validacao da FACHADA. Sem fachada, quem decide isso
+      //     e o precisaConsultarGoogle(), que olha a propria regra de aprovacao.
+      //     O reverseGeocodeCep saiu junto — era uma chamada de geocoding por
+      //     correcao alimentando o Path F, que morreu.
+      //   - validarLocalizacao() (Gemini Vision) e o 400 de foto_rejeitada.
+      //
+      // validacaoLoc fica declarada e SEMPRE null de proposito: meia duzia de
+      // trechos abaixo (JSON da coluna, payload do WS, resposta 201) leem
+      // `validacaoLoc ? {...} : null` e continuam corretos sem alteracao.
+      const validacaoLoc = null;
 
-      // ── 2. Validar fachada (obrigatória) — foto + Google Places (gateado) ──
-      let validacaoLoc = null;
-      if (foto_fachada) {
-        try {
-          validacaoLoc = await validarLocalizacao(
-            foto_fachada,
-            parseFloat(motoboy_lat),
-            parseFloat(motoboy_lng),
-            { pularPlaces: confirmadoBarato }
-          );
-
-          if (validacaoLoc && validacaoLoc.foto_rejeitada) {
-            // Fachada inválida — BLOQUEAR (motoboy enviou fachada errada)
-            console.log(`[agent] ❌ Foto fachada rejeitada: ${validacaoLoc.motivo}`);
-            return res.status(400).json({
-              sucesso: false,
-              foto_rejeitada: true,
-              motivo_rejeicao: validacaoLoc.motivo,
-              erros: [validacaoLoc.motivo],
-            });
-          }
-
-          if (validacaoLoc && validacaoLoc.valido) {
-            console.log(`[agent] ✅ Fachada validada: "${validacaoLoc.nome_foto}" → "${validacaoLoc.match_google?.nome || 'N/A'}" (${validacaoLoc.confianca}%)`);
-          } else if (validacaoLoc) {
-            console.log(`[agent] ⚠️ Fachada não validada: ${validacaoLoc.motivo} — prosseguindo com aviso`);
-          }
-        } catch (valErr) {
-          console.error('[agent] ⚠️ Erro validação fachada (não-bloqueante):', valErr.message);
-        }
-      }
-
-      // ── 3. Cruzar tudo: Receita + Fachada + GPS → 6 paths (2026-05 v2) ──
-      // Novo fluxo: motoboy DIGITA CNPJ (sem foto NF). Receita vira fonte primária.
-      // Em paralelo: geocoda endereço da Receita (Path B) e busca CEP do GPS (Path F).
+      // ── 3. Cruzar: Receita + GPS + endereco digitado → 3 conferencias (B/C/E) ──
+      // Motoboy DIGITA o CNPJ; a Receita e a fonte da verdade. B mede presenca
+      // fisica, C e E confirmam de quem e o lugar.
       let cruzamento = null;
       if (validacaoNF && !validacaoNF.nf_rejeitada) {
         const receita = validacaoNF.receita;
         let distanciaReceitaGps;
-        // cepGps ja foi computado no GATE DE CUSTO acima (reusado aqui, SEM nova chamada)
 
-        // 3a. Geocoda endereço da Receita pra calcular distância até o GPS (Path B)
+        // 3a. Geocoda o endereco da Receita pra medir a distancia ate o GPS (Path B).
+        //     Sem isso nao ha B, e sem B nada libera — por isso o resultado null
+        //     vira "nao deu pra checar" na tela do motoboy, nao "voce errou".
         if (receita && receita.ok && receita.endereco && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
           try {
             const geoReceita = await geocodarEndereco(pool, receita.endereco);
@@ -327,32 +273,64 @@ function createCorrecaoRoutes(pool) {
           }
         }
 
-        cruzamento = cruzarValidacoes({
+        // 3b. Google Places (Path C) — SO quando a resposta muda a decisao.
+        //     Longe demais → barra de qualquer jeito. E ja confirmando → nao
+        //     precisa. O resto paga. E a unica chamada paga desta rota.
+        let lugaresProximos = [];
+        const precisaGoogle = precisaConsultarGoogle({
           receita,
-          fachada: validacaoLoc,
           localizacao_raw: String(localizacao_raw || '').trim(),
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
-          cep_gps: cepGps,
-          // 2026-06 v6: sinais extras pros paths G / CNPJ-na-fachada
-          textos_fachada: (validacaoLoc && validacaoLoc.detalhes && validacaoLoc.detalhes.gemini && validacaoLoc.detalhes.gemini.textos_visiveis) || [],
-          cnpj: (receita && receita.cnpj) || (validacaoNF && validacaoNF.dados && validacaoNF.dados.cnpj) || null,
+        });
+        if (precisaGoogle) {
+          try {
+            lugaresProximos = await buscarEstabelecimentosProximos(
+              parseFloat(motoboy_lat), parseFloat(motoboy_lng), 500
+            );
+            console.log(`[agent] 🔎 Places: ${lugaresProximos.length} estabelecimento(s) no ponto do motoboy`);
+          } catch (placesErr) {
+            console.error('[agent] ⚠️ Places falhou (não-bloqueante):', placesErr.message);
+          }
+        } else {
+          console.log('[agent] 💰 Places dispensado — a resposta dele não mudaria a decisão');
+        }
+
+        cruzamento = cruzarValidacoes({
+          receita,
+          localizacao_raw: String(localizacao_raw || '').trim(),
+          motoboy_lat: parseFloat(motoboy_lat),
+          motoboy_lng: parseFloat(motoboy_lng),
+          distancia_receita_gps: distanciaReceitaGps,
+          lugares_proximos: lugaresProximos,
         });
         console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
 
         // 2026-06 v6: BLOQUEIO REAL — barra o envio quando nenhuma rota validou.
         if (cruzamento.barrar) {
           console.log(`[agent] 🚫 Correção BARRADA (OS ${os_numero} P${ponto}): ${cruzamento.motivo_bloqueio}`);
+          // AGENTE_BCE_V1 (resposta) — a tela do motoboy desenha `checks`.
+          //
+          // Antes ia so `scores`, e o front nao sabia o que fazer com numero: caia
+          // no ecra generico de "Foto Invalida" ate quando o problema era o CNPJ.
+          // `checks` ja vem com o texto e o status (ok|falhou|nd) de cada
+          // conferencia — o front so pinta.
+          //
+          // `indisponivel` separa "nao deu pra checar" (geocoding fora) de "voce
+          // errou". Sem a foto como rede, um apagao de infra barra o motoboy; ele
+          // merece ler que nao e culpa dele, e um botao de tentar de novo.
+          //
+          // De proposito NAO mandamos distancia_metros nem os scores crus pro
+          // motoboy: numero na tela vira jogo (ele anda ate o score subir) e
+          // ensina onde fica o endereco da Receita. O painel admin ve tudo.
           return res.status(400).json({
             sucesso: false,
             validacao_rejeitada: true,
+            indisponivel: cruzamento.indisponivel,
             motivo_rejeicao: cruzamento.motivo_bloqueio,
-            cruzamento: {
-              scores: cruzamento.scores,
-              fachada_score: cruzamento.fachada_score,
-              receita_max: cruzamento.receita_max,
-            },
+            checks: cruzamento.checks,
+            cnpj: (validacaoNF.receita && validacaoNF.receita.cnpj) || null,
             erros: [cruzamento.motivo_bloqueio],
           });
         }
@@ -400,7 +378,11 @@ function createCorrecaoRoutes(pool) {
           String(localizacao_raw).trim(),
           parseFloat(motoboy_lat),
           parseFloat(motoboy_lng),
-          foto_fachada || null,
+          // AGENTE_BCE_V1 (insert) — foto_fachada sempre null: ela saiu do fluxo.
+          // A coluna fica no banco pra exibir registro antigo no historico admin,
+          // igual ja tinha sido feito com foto_nf. Gravar base64 de uma foto que
+          // ninguem le seria pagar armazenamento por enfeite.
+          null,
           fotoNfParaInsert,
           usuarioId,
           usuarioNome,
@@ -412,11 +394,9 @@ function createCorrecaoRoutes(pool) {
 
       const reg = rows[0];
 
-      // 🔍 DEBUG (remover depois): confirmar gravação
-      try {
-        const c = await pool.query('SELECT (foto_nf IS NOT NULL) AS tem, LENGTH(foto_nf) AS tam FROM ajustes_automaticos WHERE id = $1', [reg.id]);
-        console.log(`[agent/DEBUG] ✅ POS-INSERT id=${reg.id} OS=${os_numero} | foto_nf no banco: tem=${c.rows[0]?.tem} tam=${c.rows[0]?.tam}`);
-      } catch(_) {}
+      // AGENTE_BCE_V1 (debug) — o SELECT de debug do foto_nf saiu. Ele rodava uma
+      // query por correcao so pra logar que a coluna estava null, o que agora e a
+      // regra e nao mais uma duvida. O proprio comentario pedia "remover depois".
 
       // ── 5. Se cruzamento confirmou (Receita ATIVA + score≥90), grava endereço no banco de consulta ──
       // Tabela alvo: solicitacao_favoritos (consultada pelo módulo Coleta).
