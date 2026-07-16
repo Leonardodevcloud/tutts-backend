@@ -1102,8 +1102,21 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       LEFT JOIN logistics_dispatch_rules dr ON dr.id = ld.regra_id
       ${outWhereSql}
       ORDER BY ld.created_at DESC
-      LIMIT 2000
     `;
+    // RELATORIO_SEM_LIMITE_V1 — o LIMIT 2000 saiu.
+    //
+    // Ele nao era um teto de seguranca: era um TRUNCAMENTO SILENCIOSO. Num
+    // periodo de 30 dias a consulta batia nas 2000 e o relatorio mostrava
+    // "661 de 2000" — os totais, o custo e o liquido eram calculados em cima
+    // de um pedaco dos dados, sem nenhum aviso de que faltava coisa.
+    //
+    // O que limita a consulta e a JANELA DE DATAS, que e obrigatoria na
+    // pratica e agora vem com "hoje" por padrao. Com o indice funcional do
+    // pkg-relatorio-perf-v2 a consulta e rapida.
+    //
+    // CUIDADO: um intervalo muito largo (um ano) passa a trazer tudo pro
+    // navegador. Se isso virar problema, o caminho e paginacao de verdade —
+    // nao um teto mudo que mente no total.
 
     const { rows } = await pool.query(sql, params);
 
