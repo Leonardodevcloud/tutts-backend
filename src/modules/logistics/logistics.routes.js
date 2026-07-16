@@ -48,6 +48,9 @@ const { createDashboardRoutes } = require('./routes/dashboard.routes');
 const { createChat99Routes } = require('./routes/chat99.routes');
 const { createOcorrenciasRoutes } = require('./routes/ocorrencias.routes');
 const { initLogisticsBackfill } = require('./logistics.backfill');
+// CLIENTE_CARD_ENDERECO_V1 (import) — resolve o nome do cliente por endereco de coleta
+// nas corridas sem regra_id (despachadas antes da regra existir).
+const { resolverClienteEmLote } = require('./core/ClienteRegraResolver');
 
 function notImplemented(fase) {
   return (req, res) => res.status(501).json({
@@ -159,6 +162,12 @@ function mapearCanonicoParaLegado(ld) {
     regra_manual_por:   ld.regra_manual_por || null,
     regra_manual_em:    ld.regra_manual_em || null,
     cliente_nome_regra: ld.cliente_nome_regra || null, // vem do JOIN
+    // CLIENTE_CARD_ENDERECO_V1 (mapper) — o mapper e whitelist: sem estas duas linhas o
+    // nome resolvido por endereco morre aqui e o card segue "Manual / sem regra".
+    //   cliente_origem: 'manual' | 'regra' | 'endereco' | null
+    //   cliente_regra_id: so vem no caso 'endereco' (a regra que casou agora)
+    cliente_origem:     ld.cliente_origem || null,
+    cliente_regra_id:   ld.cliente_regra_id || null,
     tentativas:         ld.tentativas,
     erro_ultimo:        ld.erro_ultimo,
     finalizado_at:      ld.finalizado_at,
@@ -525,6 +534,14 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const { rows: countRows } = await pool.query(
         `SELECT COUNT(*) AS total FROM logistics_deliveries ld ${whereSql}`, params);
 
+      // CLIENTE_CARD_ENDERECO_V1 (lista) — degrau 3 do nome do cliente.
+      // O JOIN acima so acha a regra que foi GRAVADA no despacho. Corrida
+      // despachada antes da regra existir tem regra_id NULL e vinha "Manual /
+      // sem regra" no card enquanto o relatorio ja mostrava o nome (ele casa
+      // por endereco na leitura). Aqui o card passa a fazer o mesmo, com a
+      // MESMA funcao de normalizacao — uma implementacao so.
+      await resolverClienteEmLote(pool, rows);
+
       res.json({
         success: true,
         total: parseInt(countRows[0].total, 10),
@@ -673,6 +690,9 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
         [id]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Entrega não encontrada' });
+      // CLIENTE_CARD_ENDERECO_V1 (detalhe) — mesmo degrau da listagem, pro modal de
+      // detalhes nao divergir do card que o abriu.
+      await resolverClienteEmLote(pool, rows);
       const entrega = mapearCanonicoParaLegado(rows[0]);
 
       // 🆕 Fase 6 — o modal de detalhes do frontend espera tracking + webhooks.

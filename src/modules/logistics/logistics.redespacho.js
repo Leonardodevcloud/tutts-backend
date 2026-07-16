@@ -37,6 +37,40 @@ const ANTES_DA_COLETA = ['PENDING', 'QUOTED', 'DISPATCHED', 'COURIER_ASSIGNED', 
 const NAO_CANCELAVEIS = ['cancelado', 'canceled', 'delivered', 'fallback_fila'];
 
 /**
+ * REDESPACHO_MAPP_REABRE_V1 (servicoDoRegistro) — reconstroi o servico Mapp.
+ *
+ * dispatch() precisa de: codigoOS, endereco[] (>= 2 pontos), valorServico,
+ * valorProfissional e obs. Tudo isso ja esta gravado na entrega original:
+ * `pontos` e o array de enderecos como a Mapp mandou.
+ *
+ * Usa os *_mapp_original de proposito: valor_servico pode ter sido REESCRITO
+ * pela tabela de preco da regra no despacho anterior. Reusar ele aqui
+ * precificaria em cima do ja precificado a cada redespacho.
+ *
+ * @param {object} reg - linha de logistics_deliveries
+ * @returns {object|null} servico no formato Mapp, ou null se nao der pra montar
+ */
+function servicoDoRegistro(reg) {
+  let pontos = reg.pontos;
+  if (typeof pontos === 'string') {
+    try { pontos = JSON.parse(pontos); } catch (e) { pontos = null; }
+  }
+  if (!Array.isArray(pontos) || pontos.length < 2) return null;
+
+  const num = (v) => (v == null ? null : Number(v));
+  const vServico = num(reg.valor_servico_mapp_original);
+  const vProf = num(reg.valor_profissional_mapp_original);
+
+  return {
+    codigoOS: reg.codigo_os,
+    endereco: pontos,
+    valorServico: vServico != null ? vServico : num(reg.valor_servico),
+    valorProfissional: vProf != null ? vProf : num(reg.valor_profissional),
+    obs: reg.obs || '',
+  };
+}
+
+/**
  * @param {object} pool
  * @param {number} entregaId
  * @param {object} opts
@@ -95,22 +129,50 @@ async function redespacharEntrega(pool, entregaId, opts = {}) {
     }).catch((e) => console.warn('[redispatch] falha ao excluir entregador da OS:', e.message));
   }
 
-  // 2. Cancela a entrega atual (sem reabrir Mapp ainda — vamos redespachar já)
+  // 2. Cancela a entrega atual (sem reabrir a Mapp aqui — quem reabre e o passo
+  //    2.1, de proposito: assim o reabre acontece UMA vez e SEMPRE, inclusive
+  //    quando o status ja era nao-cancelavel e este if nao roda)
   if (!NAO_CANCELAVEIS.includes(original.status_native)) {
     await orch.cancel(entregaId, {
       motivo: motivo || 'Redespacho solicitado',
       canceladoPor: 'operador',
-      reabrirMapp: false,        // não reabre — vamos despachar de novo agora
+      reabrirMapp: false,
       eventSource: EventSource.API,
     });
   }
 
-  // 3. Busca o serviço atualizado na Mapp e despacha de novo
-  const servicos = await getMappClient(pool).listarServicos(0, 0);
-  const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+  // ══════════════════════════════════════════════════════════════════════
+  // REDESPACHO_MAPP_REABRE_V1 (reabre) — a causa do botao dar erro.
+  //
+  // O despacho RESERVA a OS na Mapp (alterarStatus 0 -> 1) e, quando o
+  // entregador e atribuido, ela vai pra vinculada. O cancelamento acima nao
+  // reabria (reabrirMapp:false). So que o passo 3 procurava a OS em
+  // listarServicos(0) — e o `status=0` e um FILTRO da propria Mapp: ela so
+  // devolve OS na fila. A OS redespachada nunca estava la, entao TODO
+  // redespacho caia em `409 OS nao esta mais disponivel na Mapp`.
+  //
+  // E nao era so a busca: mesmo achando o servico, o dispatch() faz a reserva
+  // 0 -> 1, que a Mapp recusa numa OS que ja esta em 1 — cairia no outro 409
+  // ("Redespacho falhou"). Os dois sintomas tem a mesma raiz: ninguem devolvia
+  // a OS pro estado 0 antes de despachar de novo.
+  //
+  // Reabrir aqui conserta os dois. E o mesmo alterarStatus(0) que o cancel
+  // normal faz — caminho ja estabelecido, nao e novidade nenhuma pra Mapp.
+  // ══════════════════════════════════════════════════════════════════════
+  const mapp = getMappClient(pool);
+  await mapp.alterarStatus(codigoOS, 0).catch((e) =>
+    console.warn(`[redispatch] falha ao reabrir OS ${codigoOS} na Mapp: ${e.message}`));
+
+  // 3. Busca o servico atualizado na Mapp e despacha de novo.
+  //
+  //    FALLBACK: se a listagem ainda nao trouxer a OS (propagacao da Mapp, ou o
+  //    poller reservou ela no meio do caminho), reconstroi o servico do proprio
+  //    registro. Nao e chute: pontos, valores originais e obs foram gravados no
+  //    despacho justamente porque sao a copia do que a Mapp mandou.
+  const servicos = await mapp.listarServicos(0, 0).catch(() => []);
+  let servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+  if (!servico) servico = servicoDoRegistro(original);
   if (!servico) {
-    // A OS não está mais aberta na Mapp — reabre só pra registrar e avisa
-    await getMappClient(pool).alterarStatus(codigoOS, 0).catch(() => {});
     return {
       ok: false,
       status: 409,
@@ -122,15 +184,33 @@ async function redespacharEntrega(pool, entregaId, opts = {}) {
   const novoRegistro = await orch.dispatch(servico, {
     providerCode,
     vehicleType,
-    regraId: original.regra_id || null,
+    // CLIENTE_MANUAL_V1: a atribuicao manual vence o regra_id, igual ao resto do
+    // modulo. Sem isso o redespacho jogava fora o cliente atribuido na mao — e
+    // com ele a tabela de preco daquela loja.
+    regraId: original.regra_id_manual || original.regra_id || null,
     eventSource: EventSource.API,
   });
 
   if (!novoRegistro) {
+    // dispatch() devolve null quando a OS ja tem entrega ativa. Depois do
+    // reabre, isso pode ser o POLLER tendo despachado a OS no meio do caminho:
+    // o redespacho ACONTECEU, so nao por esta chamada. Dizer "falhou" aqui faria
+    // o operador clicar de novo numa corrida que ja esta viva — e ai sim seriam
+    // duas.
+    const { rows: ativa } = await pool.query(
+      `SELECT id FROM logistics_deliveries
+        WHERE codigo_os = $1 AND id <> $2
+          AND status_canonico NOT IN ('CANCELED','DELIVERED','FAILED')
+        ORDER BY id DESC LIMIT 1`,
+      [codigoOS, entregaId]
+    );
+    if (ativa.length > 0) {
+      return { ok: true, entregaAnterior: entregaId, entregaNova: ativa[0].id, registro: null };
+    }
     return {
       ok: false,
       status: 409,
-      error: 'Redespacho falhou (OS já tem entrega ativa ou erro no despacho)',
+      error: 'Redespacho falhou (erro no despacho). A OS foi reaberta na Mapp e volta pra fila.',
       entregaCancelada: entregaId,
     };
   }
