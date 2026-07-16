@@ -508,7 +508,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
                 sc.cliente_cod AS cliente_cod_rastreio,
                 sc.pontos_json AS pontos_rastreio
          FROM logistics_deliveries ld
-         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
          LEFT JOIN LATERAL (
            SELECT cliente_cod, pontos_json FROM sla_capturas
             WHERE os_numero = ld.codigo_os::text LIMIT 1
@@ -663,7 +663,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const { rows } = await pool.query(
         `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
          FROM logistics_deliveries ld
-         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
          WHERE ld.id = $1`,
         [id]
       );
@@ -1170,7 +1170,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
           COALESCE(AVG(ld.valor_servico - ld.valor_provider), 0)::numeric AS margem_media,
           ROUND(AVG(EXTRACT(EPOCH FROM (ld.coletado_at - ld.atribuido_at)) / 60.0) FILTER (WHERE ld.coletado_at IS NOT NULL AND ld.atribuido_at IS NOT NULL))::int AS medio_coleta_min
         FROM logistics_deliveries ld
-        LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+        LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
         WHERE ld.created_at BETWEEN $1 AND $2 AND ld.valor_provider IS NOT NULL
         GROUP BY r.cliente_nome, ld.regra_id
         ORDER BY margem_total DESC
@@ -1260,7 +1260,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
            WHERE t.codigo_os = ld.codigo_os
            ORDER BY t.created_at DESC LIMIT 1) AS ultima_posicao
         FROM logistics_deliveries ld
-        LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+        LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
         WHERE ld.status_canonico NOT IN ('DELIVERED','CANCELED','FAILED','RETURNED')
           AND ld.cancelado_por IS NULL
         ORDER BY ld.created_at DESC
@@ -1413,7 +1413,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const { rows } = await pool.query(
         `SELECT ld.*, r.cliente_nome AS cliente_nome_regra
          FROM logistics_deliveries ld
-         LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+         LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
          WHERE ld.id = $1`,
         [parseInt(req.params.id, 10)]
       );
