@@ -1051,6 +1051,14 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           -- corrida criada via Solicitacao — por isso a coluna vinha "—" na
           -- maioria das linhas.
           d.regra_id,
+          -- RELATORIO_CUSTO_V1 — custo do provedor, duas fontes:
+          --   valor_provider       = a COTACAO do despacho. E o unico que a
+          --                          Uber tem.
+          --   valor_provider_final = o custo REAL, com taxas. So a 99 preenche,
+          --                          e so quando a entrega chega em status
+          --                          terminal (TrackingPoller).
+          -- O COALESCE la embaixo prefere o final; sem ele, usa a cotacao.
+          d.valor_provider, d.valor_provider_final,
           -- valor_servico_mapp_original: gravado no despacho a partir do que a
           -- Mapp mandou. O valor_servico pode ser reescrito depois pela tabela
           -- de preco do cliente; este aqui nao muda.
@@ -1258,6 +1266,23 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       // pareceria bug.
       const _valorMapp = cancelada || r.valor_servico_mapp_original == null
         ? null : Number(r.valor_servico_mapp_original);
+
+      // RELATORIO_CUSTO_V1 — custo do provedor e faturamento liquido.
+      //
+      // NAO zeramos o custo quando cancelada, ao contrario de km/valor: a 99
+      // grava valor_provider_final tambem em CANCELED/RETURNED, e taxa de
+      // cancelamento e dinheiro que saiu de verdade. Esconder isso mostraria
+      // um liquido melhor do que o real.
+      const _custoFinal = r.valor_provider_final != null ? Number(r.valor_provider_final) : null;
+      const _custoCot   = r.valor_provider != null ? Number(r.valor_provider) : null;
+      const _custo = _custoFinal != null ? _custoFinal : _custoCot;
+      const _custoOrigem = _custoFinal != null ? 'final' : (_custoCot != null ? 'cotacao' : null);
+
+      // liquido = valor do Hub - custo. Cancelada com taxa da uma liquida
+      // NEGATIVA, que e exatamente o que aconteceu.
+      const _liquido = (valor != null || _custo != null)
+        ? Math.round(((valor || 0) - (_custo || 0)) * 100) / 100
+        : null;
       return {
         os: r.codigo_os,
         provider: r.provider_code,
@@ -1266,6 +1291,10 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         cliente_nome: _cliente || null,
         cliente_origem: _clienteOrigem,
         valor_mapp: _valorMapp,
+        // RELATORIO_CUSTO_V1
+        custo_provedor: _custo,
+        custo_origem: _custoOrigem,
+        faturamento_liquido: _liquido,
         endereco_coleta: r.endereco_coleta || '',
         endereco_entrega: r.endereco_entrega || '',
         motoboy,
@@ -1302,11 +1331,14 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
 
     if (String(formato).toLowerCase() === 'csv') {
       // RELATORIO_CLIENTE_V1: + coluna do valor original da Mapp
-      const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Valor Mapp (R$)', 'Status', 'Data'];
+      // RELATORIO_CUSTO_V1: + custo do provedor e faturamento liquido
+      const headers = ['OS', 'Cliente', 'Canal', 'Provedor', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor Hub (R$)', 'Valor Mapp (R$)', 'Custo Provedor (R$)', 'Faturamento Liquido (R$)', 'Status', 'Data'];
       const linhas = corridas.map(c => [
         c.os, c.cliente_nome || '', c.canal, c.provider, c.endereco_coleta, c.endereco_entrega,
         c.motoboy || '', c.km != null ? String(c.km).replace('.', ',') : '',
-        formatarBRL(c.valor), formatarBRL(c.valor_mapp), c.status,
+        formatarBRL(c.valor), formatarBRL(c.valor_mapp),
+        formatarBRL(c.custo_provedor), formatarBRL(c.faturamento_liquido),
+        c.status,
         c.data ? new Date(c.data).toISOString() : '',
       ]);
       const csv = montarCSV(headers, linhas);
@@ -1319,10 +1351,15 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       acc.corridas += 1;
       if (c.km != null) acc.km += c.km;
       if (c.valor != null) acc.valor += c.valor;
+      // RELATORIO_CUSTO_V1
+      if (c.custo_provedor != null) acc.custo += c.custo_provedor;
+      if (c.faturamento_liquido != null) acc.liquido += c.faturamento_liquido;
       return acc;
-    }, { corridas: 0, km: 0, valor: 0 });
+    }, { corridas: 0, km: 0, valor: 0, custo: 0, liquido: 0 });
     totais.km = Math.round(totais.km * 100) / 100;
     totais.valor = Math.round(totais.valor * 100) / 100;
+    totais.custo = Math.round(totais.custo * 100) / 100;
+    totais.liquido = Math.round(totais.liquido * 100) / 100;
 
     res.json({ success: true, totais, corridas, lojas_disponiveis: lojasDisponiveis, tem_sem_cliente: temSemCliente }); // RELATORIO_CLIENTE_V1
   } catch (err) {
