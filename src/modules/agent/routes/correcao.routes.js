@@ -13,10 +13,16 @@ const express = require('express');
 // localizacao sobra so a busca de estabelecimentos proximos, que alimenta o
 // Path C e nao depende de foto nenhuma. O arquivo continua existindo porque o
 // modulo coletaEnderecos ainda usa o caminho com foto.
-const { buscarEstabelecimentosProximos } = require('../validar-localizacao');
-// 2026-04: cruzamento com Receita Federal
-// AGENTE_BCE_V1: precisaConsultarGoogle e o gate de custo do Places.
-const { cruzarValidacoes, precisaConsultarGoogle } = require('../cruzar-validacoes');
+// VALIDACAO_B_UNICA_V1: os dois imports do Google sairam.
+//
+// buscarEstabelecimentosProximos (Places) e precisaConsultarGoogle (o gate de
+// custo dele) nao tem mais chamador: a decisao e so a distancia. O arquivo
+// validar-localizacao.js CONTINUA existindo — o modulo coletaEnderecos ainda usa
+// o caminho com foto dele. Aqui ele nao entra mais.
+//
+// precisaConsultarGoogle nem existe mais no cruzar-validacoes: se alguem
+// reintroduzir a chamada, quebra no import. E o aviso que se quer.
+const { cruzarValidacoes } = require('../cruzar-validacoes');
 // 2026-04 v3: consulta Receita direto quando motoboy digita CNPJ
 const { consultarReceita } = require('../consultar-receita');
 
@@ -273,42 +279,26 @@ function createCorrecaoRoutes(pool) {
           }
         }
 
-        // 3b. Google Places (Path C) — SO quando a resposta muda a decisao.
-        //     Longe demais → barra de qualquer jeito. E ja confirmando → nao
-        //     precisa. O resto paga. E a unica chamada paga desta rota.
-        let lugaresProximos = [];
-        // REGRA_B_RESGATE_V1: localizacao_raw saiu da chamada. Ela NAO e um
-        // endereco — e a coordenada crua do GPS ("-12.962936, -38.469274"), montada
-        // no front pelo botao "Enviar minha localização atual". Passar isso pra uma
-        // comparacao de endereco so produzia 7% e a ilusao de um sinal.
-        const precisaGoogle = precisaConsultarGoogle({
-          receita,
-          motoboy_lat: parseFloat(motoboy_lat),
-          motoboy_lng: parseFloat(motoboy_lng),
-          distancia_receita_gps: distanciaReceitaGps,
-        });
-        if (precisaGoogle) {
-          try {
-            lugaresProximos = await buscarEstabelecimentosProximos(
-              parseFloat(motoboy_lat), parseFloat(motoboy_lng), 500
-            );
-            console.log(`[agent] 🔎 Places: ${lugaresProximos.length} estabelecimento(s) no ponto do motoboy`);
-          } catch (placesErr) {
-            console.error('[agent] ⚠️ Places falhou (não-bloqueante):', placesErr.message);
-          }
-        } else {
-          console.log('[agent] 💰 Places dispensado — a resposta dele não mudaria a decisão');
-        }
-
-        // REGRA_B_RESGATE_V1: idem — sem localizacao_raw. O que decide e a
-        // distancia (B) e, na faixa de resgate, o Google (C).
+        // VALIDACAO_B_UNICA_V1 — o Google Places saiu do fluxo.
+        //
+        // Aqui rodavam o gate de custo (precisaConsultarGoogle) e a chamada ao
+        // buscarEstabelecimentosProximos, que alimentavam o Path C. Com a decisao
+        // sendo so a distancia, nao ha o que o Google possa responder que mude o
+        // resultado — e era a UNICA parte paga desta rota (~US$0.032 por miss de
+        // cache). Some tambem a latencia dele no caminho do motoboy.
+        //
+        // O que se perde, dito na cara: o C resgatava quem o geocoder jogava longe
+        // (endereco da Receita caindo no centroide do CEP erra 200m e barra quem
+        // esta na porta). Nao ha mais rede. O unico botao e o DIST_LIBERA_METROS,
+        // no topo do cruzar-validacoes.js.
         cruzamento = cruzarValidacoes({
           receita,
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
-          lugares_proximos: lugaresProximos,
         });
+
+        console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
         console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
 
         // 2026-06 v6: BLOQUEIO REAL — barra o envio quando nenhuma rota validou.

@@ -1,84 +1,62 @@
 /**
- * cruzar-validacoes.js (2026-07 v9 — REGRA_B_RESGATE_V1 + CNPJ_CODIGO_V1)
- *
- * CNPJ_CODIGO_V1: a decisao passa a ler `receita.codigo` pra separar "esse CNPJ
- * nao existe" (erro do motoboy, tela vermelha) de "a consulta caiu" (erro nosso,
- * tela ambar). Antes os dois viravam `indisponivel`, e quem digitava um CNPJ
- * inexistente lia "não é erro seu, tente de novo em um minuto" — mentira que ele
- * repetiria pra sempre, porque o CNPJ continuaria nao existindo.
+ * cruzar-validacoes.js (2026-07 v10 — VALIDACAO_B_UNICA_V1)
  *
  * ─────────────────────────────────────────────────────────────────────────
- * POR QUE ESTA VERSAO EXISTE: o Path E nunca passou. Nem aqui, nem na v6.
+ * UMA validação. Uma só:
  *
- * O E comparava `receita.endereco` com `localizacao_raw`. Acontece que
- * localizacao_raw NAO e um endereco digitado — e a coordenada crua do GPS,
- * montada no modulo-agente.js pelo botao "Enviar minha localização atual":
+ *     O motoboy está, ou não está, no endereço que a Receita tem pra o CNPJ
+ *     que ele digitou.  ->  distância <= DIST_LIBERA_METROS
  *
- *     const coordStr = `${gps.lat}, ${gps.lng}`;
- *     setForm(f => ({ ...f, localizacao_raw: coordStr }));
- *
- * Entao o E media a similaridade entre
- *     "CHILE, 703, RECREIO IPITANGA, LAURO DE FREITAS, BA"
- *     "-12.962936, -38.469274"
- * Resultado: 7%. Sempre. Nao existe CNPJ que faca isso chegar a 80.
- *
- * Consequencias, todas silenciosas:
- *   - a regra `B E (C OU E)` era, na pratica, `B E C`: o Google TINHA que
- *     conhecer a loja, senao barrava motoboy honesto (galeria, predio, loja
- *     sem cadastro no Places);
- *   - o gate de custo nunca economizava — ele so pulava o Places quando
- *     E >= 80, que nao acontecia nunca. Pagava sempre;
- *   - o mesmo valia pro antigo Path K (numero do logradouro).
- *
+ * Não tem "ou". Não tem desempate. Não tem Google.
  * ─────────────────────────────────────────────────────────────────────────
- * A REGRA AGORA — o C deixa de restringir e passa a RESGATAR:
  *
- *     dist <= DIST_LIBERA_METROS   -> LIBERA (nao consulta o Google)
- *     dist <= DIST_RESGATE_METROS  -> libera SE o Google confirmar a loja ali
- *     dist  > DIST_RESGATE_METROS  -> BARRA
- *     dist indisponivel            -> BARRA como 'indisponivel' (nao e erro dele)
+ * COMO CHEGAMOS AQUI (a história inteira, pra ninguém reconstruir por engano):
  *
- * POR QUE O B SOZINHO BASTA DENTRO DE 100m:
- * B >= significa que o motoboy esta a <=100m do endereco que a RECEITA tem pra
- * o CNPJ que ele digitou, e o ponto e gravado com a coordenada DELE. Se o CNPJ
- * e o da nota, isso E a correcao certa — nao ha o que confirmar depois.
+ * v6 tinha 7 caminhos (A..K) e aprovava se QUALQUER um batesse 80%. Quatro
+ * deles liam a FOTO da fachada via Gemini Vision. Dois eram cegos sem saber:
  *
- * O que o B nao pega: ele digitar um CNPJ qualquer registrado perto de onde
- * quer botar o ponto (o MEI dele, o do vizinho). Mas o C tambem nao pegava
- * isso — se o Google conhece o MEI dele ali, o C passa. NADA aqui confere que o
- * CNPJ e o cliente da OS. Quem limita esse abuso e outra coisa, que ja existe:
- * o agente barra correcao que jogue o ponto a mais de RAIO_MAXIMO_KM (2 km) do
- * endereco original da OS — agent-correcao.agent.js:176.
+ *   E (endereco_receita_vs_motoboy) comparava o TEXTO do endereço da Receita
+ *     com `localizacao_raw` — que nunca foi endereço, é a coordenada crua do
+ *     GPS ("-16.6799, -49.2553"), montada pelo botão "Enviar minha localização
+ *     atual". Ele dava 8% no mesmo registro em que o B dava 90% sobre a MESMA
+ *     loja, a 7 metros. Os dois mediam a mesma coisa: o B em metros, acertando;
+ *     o E comparando letra com letra, sendo que um dos lados nunca foi letra.
+ *   K (numero_receita_vs_motoboy) morria pelo mesmo motivo.
  *
- * POR QUE EXISTE A FAIXA DE RESGATE (100–300m):
- * Geocoding de endereco da Receita no Brasil cai no centroide do CEP com
- * frequencia. Erra 200m e barra quem esta na porta da loja. Na faixa cinza, se
- * o Google enxerga a empresa naquele ponto, a duvida e do geocoder, nao do
- * motoboy. E o unico lugar onde vale pagar o Places: e o unico lugar onde a
- * resposta dele muda a decisao.
+ * v7 tirou a foto (e com ela A, D, G e o Gemini). Sobraram B, C e E.
+ * v8 descobriu o E morto e rebaixou o C a "resgate" na faixa 100-300m.
+ * v9 separou "CNPJ não existe" de "a consulta caiu".
+ * v10 (esta) tira o C também.
  *
- * Pra voltar ao "B e ponto": DIST_RESGATE_METROS = DIST_LIBERA_METROS. A faixa
- * some, o Places nunca e consultado e nada mais precisa mudar.
+ * POR QUE O C SAIU:
+ * Ele nunca protegeu de nada. O medo era "o motoboy digita um CNPJ qualquer
+ * registrado perto de onde quer botar o ponto" — mas se o Google conhece esse
+ * CNPJ ali (o MEI dele, o do vizinho), o C aprova junto. NADA aqui confere que
+ * o CNPJ é o cliente da OS. Quem limita esse abuso é outra coisa, que já existe
+ * e não depende deste arquivo: o agente barra correção que jogue o ponto a mais
+ * de RAIO_MAXIMO_KM (2 km) do endereço original da OS — agent-correcao.agent.js.
  *
- * POR QUE O CORTE E EM METROS E NAO EM "80%":
- * scoreDistancia() tem teto 90 e cauda longa de proposito (drift de GPS +
- * geocoding de telhado). Nessa curva, "B >= 80" seria 35 METROS — 35m nao
- * existe em galeria nem em rua com predio alto. O score continua sendo
- * calculado, mas so pra exibir no painel; quem decide sao os metros.
+ * O que se perde: o C resgatava quem o geocoder jogou longe (endereço da Receita
+ * caindo no centroide do CEP erra 200m e barra quem está na porta). Sem ele não
+ * há rede: o único botão passa a ser DIST_LIBERA_METROS. Se aparecer barrada de
+ * gente honesta, é esse número que sobe — e é uma linha.
+ *
+ * O que se ganha: o Google Places sai do fluxo. Zero chamada paga, zero latência,
+ * zero dependência de terceiro pra liberar uma corrida.
+ *
+ * POR QUE O CORTE É EM METROS E NÃO EM "80%":
+ * scoreDistancia() tem teto 90 e cauda longa de propósito (drift de GPS +
+ * geocoding de telhado). Nessa curva, "B >= 80" seria 35 METROS — 35m não existe
+ * em galeria nem em rua com prédio alto. O score continua sendo calculado, mas só
+ * pra aparecer no painel; quem decide são os metros.
  */
 
 'use strict';
 
-// ───────── Parâmetros da decisão ─────────
+// ───────── Parâmetro da decisão ─────────
 
-/** Dentro disso, a presença física basta. */
+/** A única régua: metros entre o GPS do motoboy e o endereço da Receita. */
 const DIST_LIBERA_METROS = 100;
-
-/** Até aqui, ainda dá pra ser erro do geocoder — o Google desempata. */
-const DIST_RESGATE_METROS = 300;
-
-/** Corte de similaridade de texto (0-100) do Path C. */
-const LIMIAR_TEXTO = 80;
 
 // ───────── Helpers de string ─────────
 
@@ -184,37 +162,8 @@ function scoreDistancia(metros) {
 
 // ───────── Cálculo dos sinais ─────────
 
-/** Nomes oficiais do CNPJ: fantasia E razão. */
-function nomesDaReceita(receita) {
-  const out = [];
-  if (receita && receita.nome_fantasia) out.push(receita.nome_fantasia);
-  if (receita && receita.razao_social) out.push(receita.razao_social);
-  return out;
-}
-
-/**
- * Path C — nome oficial ↔ estabelecimentos que o Google vê no ponto do GPS.
- * Compara com TODOS os vizinhos e fica com o melhor: a pergunta é "o Google
- * conhece essa empresa AQUI?", não "qual das lojas é ela".
- *
- * @returns {number|undefined} undefined = não deu pra calcular
- */
-function calcularC(receita, lugares_proximos) {
-  const nomes = nomesDaReceita(receita);
-  const lugares = Array.isArray(lugares_proximos) ? lugares_proximos.filter(Boolean) : [];
-  if (nomes.length === 0 || lugares.length === 0) return undefined;
-
-  let best = 0;
-  for (const lugar of lugares) {
-    const nomeLugar = (lugar && (lugar.nome || lugar.displayName)) || '';
-    if (!nomeLugar) continue;
-    for (const n of nomes) {
-      best = Math.max(best, scoreSimilaridade(n, nomeLugar));
-      if (best >= 100) return 100;
-    }
-  }
-  return best;
-}
+// VALIDACAO_B_UNICA_V1: nomesDaReceita() e calcularC() foram removidos junto com
+// o Path C. Eram os únicos consumidores de `lugares_proximos`.
 
 /** Distância Receita↔GPS: usa a que veio pronta ou calcula do lat/lng da Receita. */
 function calcularDistancia({ receita, motoboy_lat, motoboy_lng, distancia_receita_gps }) {
@@ -227,25 +176,11 @@ function calcularDistancia({ receita, motoboy_lat, motoboy_lng, distancia_receit
   return null;
 }
 
-// ───────── Gate de custo ─────────
-
-/**
- * O Google Places é a única parte PAGA desta validação (~US$0.032 por miss de
- * cache). Só pagamos onde a resposta MUDA a decisão: a faixa de resgate.
- *
- *   dist <= 100m  -> ja libera        -> nao paga
- *   dist  > 300m  -> barra de qualquer jeito -> nao paga
- *   100–300m      -> o C decide       -> paga
- *
- * Na v7 este gate era letra morta: ele dependia do Path E, que nunca passava.
- *
- * @returns {boolean}
- */
-function precisaConsultarGoogle({ receita, motoboy_lat, motoboy_lng, distancia_receita_gps }) {
-  const dist = calcularDistancia({ receita, motoboy_lat, motoboy_lng, distancia_receita_gps });
-  if (dist === null) return false;
-  return dist > DIST_LIBERA_METROS && dist <= DIST_RESGATE_METROS;
-}
+// VALIDACAO_B_UNICA_V1: precisaConsultarGoogle() foi removida.
+//
+// Ela existia pra decidir QUANDO valia pagar o Places. Sem Places no fluxo, não
+// há o que decidir. A rota também não a chama mais — se alguém reintroduzir a
+// chamada, vai quebrar no import, que é exatamente o aviso que se quer.
 
 // ───────── Função principal ─────────
 
@@ -255,41 +190,28 @@ function precisaConsultarGoogle({ receita, motoboy_lat, motoboy_lng, distancia_r
  * @param {number}   p.motoboy_lat
  * @param {number}   p.motoboy_lng
  * @param {number}  [p.distancia_receita_gps] metros, se já calculado pela rota
- * @param {Array}   [p.lugares_proximos]      saída de buscarEstabelecimentosProximos
  */
 function cruzarValidacoes({
   receita,
   motoboy_lat,
   motoboy_lng,
   distancia_receita_gps,
-  lugares_proximos,
 }) {
   const scores = {};
 
-  // ── B: endereço da Receita ≈ GPS ──
+  // ── A única conferência: endereço da Receita ≈ GPS ──
   const distancia = calcularDistancia({ receita, motoboy_lat, motoboy_lng, distancia_receita_gps });
   const temDistancia = distancia !== null && distancia !== undefined;
   if (temDistancia) scores.endereco_receita_vs_gps = scoreDistancia(distancia);
 
-  // ── C: nome da Receita ↔ Google Places (só existe na faixa de resgate) ──
-  const C = calcularC(receita, lugares_proximos);
-  if (C !== undefined) scores.nome_receita_vs_google = C;
-
   // ── Decisão ──
-  const confirmaC = typeof C === 'number' && C >= LIMIAR_TEXTO;
-  const presencaOk = temDistancia && distancia <= DIST_LIBERA_METROS;
-  const resgatado = temDistancia
-    && distancia > DIST_LIBERA_METROS
-    && distancia <= DIST_RESGATE_METROS
-    && confirmaC;
-
-  const liberado = presencaOk || resgatado;
+  const liberado = temDistancia && distancia <= DIST_LIBERA_METROS;
   const barrar = !liberado;
 
-  // CNPJ_CODIGO_V1: a Receita respondeu que esse CNPJ não existe (as duas bases
-  // concordaram) ou o número é inválido. Isso é erro DELE e tem conserto: digitar
-  // certo. Não pode virar 'indisponivel' — "tente de novo em um minuto" faria ele
-  // repetir o mesmo CNPJ pra sempre.
+  // A Receita respondeu que esse CNPJ não existe (as duas bases concordaram) ou o
+  // número é inválido. Isso é erro DELE e tem conserto: digitar certo. Não pode
+  // virar 'indisponivel' — "tente de novo em um minuto" faria ele repetir o mesmo
+  // CNPJ pra sempre.
   const cnpjNaoEncontrado = !!receita && receita.ok === false
     && (receita.codigo === 'nao_encontrado' || receita.codigo === 'invalido');
 
@@ -307,10 +229,7 @@ function cruzarValidacoes({
   }
 
   // ── O que o motoboy vê ──
-  // Uma linha só, e é a única coisa que ele controla: onde está e qual CNPJ
-  // digitou. O C é um resgate que roda por baixo — ele não precisa saber que
-  // existe, e mostrar "o Google não conhece essa empresa" só ensinaria a
-  // discutir com o Google.
+  // Uma linha, e é a única coisa que ele controla: onde está e qual CNPJ digitou.
   const checks = [
     {
       id: 'B',
@@ -321,21 +240,20 @@ function cruzarValidacoes({
   ];
 
   // ── Compat: campos que o resto do módulo já lê ──
-  const valores = Object.values(scores).filter(v => typeof v === 'number');
-  const score_max = valores.length > 0 ? Math.max(...valores) : 0;
+  const score_max = temDistancia ? scores.endereco_receita_vs_gps : 0;
   const receita_max = score_max;
   const pelo_menos_um_90 = score_max >= 90;
   const receita_ativa = !!(receita && receita.ok && receita.ativa);
+  // Salva o endereço nos favoritos só com prova forte: score 90 = <=15m.
   const pode_salvar_no_banco = pelo_menos_um_90;
 
   const labels = {
     endereco_receita_vs_gps: 'Endereço Receita↔GPS',
-    nome_receita_vs_google:  'Nome Receita↔Google',
   };
 
-  let caminho_aprovacao = null;
-  if (presencaOk) caminho_aprovacao = `Presença confirmada (<=${DIST_LIBERA_METROS}m)`;
-  else if (resgatado) caminho_aprovacao = `Resgate pelo Google (${distancia}m, geocoder impreciso)`;
+  const caminho_aprovacao = liberado
+    ? `Presença confirmada (${distancia}m, limite ${DIST_LIBERA_METROS}m)`
+    : null;
 
   // ── Motivo do bloqueio: uma frase, e ela tem que dizer o que FAZER ──
   let motivo_bloqueio = null;
@@ -380,26 +298,24 @@ function cruzarValidacoes({
     indisponivel,
     codigo_bloqueio,
     cnpj_nao_encontrado: cnpjNaoEncontrado,
-    resgatado,
     motivo_bloqueio,
     caminho_aprovacao,
     mensagem_motoboy,
     resumo: resumoPartes.join(' • '),
     distancia_metros: temDistancia ? distancia : null,
     limite_metros: DIST_LIBERA_METROS,
-    limite_resgate_metros: DIST_RESGATE_METROS,
   };
 }
 
 module.exports = {
   cruzarValidacoes,
-  precisaConsultarGoogle,
+  // scoreSimilaridade / scoreEndereco / normalizar NAO sao mais usados pela
+  // decisao — ficam exportados porque clientes-bloqueados.service.js e o modulo
+  // Coleta comparam endereco de verdade, escrito por gente.
   scoreSimilaridade,
   scoreEndereco,
   scoreDistancia,
   distanciaMetros,
   normalizar,
   DIST_LIBERA_METROS,
-  DIST_RESGATE_METROS,
-  LIMIAR_TEXTO,
 };
