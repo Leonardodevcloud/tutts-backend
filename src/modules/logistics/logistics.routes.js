@@ -939,100 +939,40 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
     }
   });
 
+  // REDESPACHO_EXTRAIR_V1 — a logica saiu daqui pra logistics.redespacho.js.
+  //
+  // Motivo: o portal da loja precisa do MESMO comportamento. Duplicar um
+  // caminho que cancela e recontrata corrida e como as duas copias divergem —
+  // e o sintoma seria corrida cobrada em dobro.
+  //
+  // Esta rota agora e casca fina: autoriza (verificarToken + verificarAdmin),
+  // le o body, chama a funcao e traduz o resultado pra HTTP. A rota da loja
+  // chama a MESMA funcao com autorizacao propria. Elas divergem so na
+  // autorizacao, que e onde devem divergir.
+  //
+  // O comportamento nao mudou: mesmas mensagens, mesmos status, mesma ordem.
   router.post('/deliveries/:id/redispatch', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const entregaId = parseInt(req.params.id, 10);
-      // REDESPACHO_EXCLUSAO_V1: providerCode NAO tem mais default 'uber'.
-      //
-      // Era bug: uma corrida despachada na 99 e redespachada sem body ia
-      // parar na Uber, em silencio. O redespacho tem que ir pro MESMO
-      // provedor que foi pedido — 99 continua 99, Uber continua Uber.
-      // O default agora e o provider_code da propria entrega (mais abaixo).
-      const { providerCode: provReq = null, vehicleType = null, motivo, excluirEntregador = false } = req.body || {};
+      const { providerCode = null, vehicleType = null, motivo, excluirEntregador = false } = req.body || {};
 
-      const orch = getDispatchOrchestrator(pool);
-
-      // 1. Busca a entrega original
-      const { rows } = await pool.query('SELECT * FROM logistics_deliveries WHERE id = $1', [entregaId]);
-      if (rows.length === 0) {
-        return res.status(404).json({ error: 'Entrega não encontrada' });
-      }
-      const original = rows[0];
-      const codigoOS = original.codigo_os;
-      const providerCode = provReq || original.provider_code || 'uber';
-
-      // REDESPACHO_EXCLUSAO_V1 — trava de estagio.
-      //
-      // Doc oficial da 99 (Cancel Order): "If the courier has picked up the
-      // package, order cancellation is not supported." Depois da COLETA a 99
-      // recusa o cancelamento e a corrida segue viva SENDO COBRADA — um
-      // redespacho ali pagaria DUAS corridas.
-      //
-      // A fronteira e a coleta, nao o aceite: entre COURIER_ASSIGNED e
-      // ARRIVED_PICKUP ainda da pra cancelar.
-      const ANTES_DA_COLETA = ['PENDING', 'QUOTED', 'DISPATCHED', 'COURIER_ASSIGNED', 'PICKUP_EN_ROUTE', 'ARRIVED_PICKUP'];
-      if (!ANTES_DA_COLETA.includes(original.status_canonico)) {
-        return res.status(409).json({
-          error: `Redespacho indisponivel: a corrida ja passou da coleta (${original.status_canonico}). O provedor nao cancela depois da coleta — a corrida seria cobrada e voce pagaria duas.`,
-        });
-      }
-
-      // REDESPACHO_EXCLUSAO_V1 — exclui o entregador atual DESTA OS.
-      //
-      // Sem isso o provedor pode devolver o mesmo cara e o botao vira enfeite:
-      // nem a 99 nem a Uber aceitam "nao mande o Fulano" no pedido. A checagem
-      // e reativa, no WebhookDispatcher: quando o provedor atribuir, se for um
-      // excluido desta OS, cancela e relanca (com teto, ver
-      // REDESPACHO_EXCLUSAO_MAX).
-      if (excluirEntregador !== false && original.courier_data) {
-        const { excluirCourierDaOS } = require('./logistics.bloqueados');
-        await excluirCourierDaOS(pool, codigoOS, original.courier_data, {
-          motivo: motivo || 'redespacho manual',
-          criadoPor: (req.usuario && (req.usuario.nome || req.usuario.email)) || 'admin',
-        }).catch((e) => console.warn('[redispatch] falha ao excluir entregador da OS:', e.message));
-      }
-
-      // 2. Cancela a entrega atual (sem reabrir Mapp ainda — vamos redespachar já)
-      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_native)) {
-        await orch.cancel(entregaId, {
-          motivo: motivo || 'Redespacho solicitado',
-          canceladoPor: 'operador',
-          reabrirMapp: false,        // não reabre — vamos despachar de novo agora
-          eventSource: EventSource.API,
-        });
-      }
-
-      // 3. Busca o serviço atualizado na Mapp e despacha de novo
-      const servicos = await getMappClient(pool).listarServicos(0, 0);
-      const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
-      if (!servico) {
-        // A OS não está mais aberta na Mapp — reabre só pra registrar e avisa
-        await getMappClient(pool).alterarStatus(codigoOS, 0).catch(() => {});
-        return res.status(409).json({
-          error: `OS ${codigoOS} não está mais disponível na Mapp para redespacho`,
-          entrega_cancelada: entregaId,
-        });
-      }
-
-      const novoRegistro = await orch.dispatch(servico, {
-        providerCode,
-        vehicleType,
-        regraId: original.regra_id || null,
-        eventSource: EventSource.API,
+      const { redespacharEntrega } = require('./logistics.redespacho');
+      const r = await redespacharEntrega(pool, entregaId, {
+        providerCode, vehicleType, motivo, excluirEntregador,
+        criadoPor: (req.usuario && (req.usuario.nome || req.usuario.email)) || 'admin',
       });
 
-      if (!novoRegistro) {
-        return res.status(409).json({
-          error: 'Redespacho falhou (OS já tem entrega ativa ou erro no despacho)',
-          entrega_cancelada: entregaId,
-        });
+      if (!r.ok) {
+        const corpo = { error: r.error };
+        if (r.entregaCancelada) corpo.entrega_cancelada = r.entregaCancelada;
+        return res.status(r.status).json(corpo);
       }
 
       res.json({
         success: true,
-        entrega_anterior: entregaId,
-        entrega_nova: novoRegistro.id,
-        registro: novoRegistro,
+        entrega_anterior: r.entregaAnterior,
+        entrega_nova: r.entregaNova,
+        registro: r.registro,
       });
     } catch (err) {
       console.error('[logistics/routes] POST /deliveries/:id/redispatch erro:', err.message);
