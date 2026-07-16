@@ -1,7 +1,11 @@
 /**
  * MODULO LOGISTICS - Portal do Cliente (loja)
  *
- * Superficie READ-ONLY e ISOLADA pra loja acompanhar as proprias entregas.
+ * Superficie ISOLADA pra loja acompanhar as proprias entregas.
+ *
+ * REDESPACHO_LOJA_V1 — deixou de ser 100% read-only. A loja ganhou UMA acao
+ * de escrita: POST /deliveries/:id/redispatch. Foi decisao consciente do dono,
+ * nao descuido. Se for mexer aqui, mantenha as tres travas.
  * A loja NUNCA entra no auth interno: token proprio (PORTAL_JWT_SECRET),
  * escopo 'portal', sem role. Um token de loja nao passa no verificarToken
  * interno (assinado com JWT_SECRET) e vice-versa.
@@ -199,6 +203,67 @@ function createLogisticsPortalRouter(pool) {
   //   Sem data: dia atual (America/Sao_Paulo). Com data: aquele dia.
   //   Sempre filtrado por regra_id do token. Read-only.
   // ---------------------------------------------------------
+  // ---------------------------------------------------------
+  // REDESPACHO_LOJA_V1
+  // POST /deliveries/:id/redispatch
+  //
+  // UNICA acao de escrita da loja. Chama a MESMA funcao do admin
+  // (logistics.redespacho.js) — nao ha copia da regra aqui, so autorizacao.
+  //
+  // Tres travas que o admin nao tem:
+  //  1. ESCOPO: so entrega cuja regra EFETIVA e a do token. Sem isso a loja
+  //     redespacharia corrida das outras trocando o id na URL.
+  //  2. ESTAGIO: a funcao ja barra depois da coleta (409).
+  //  3. TETO: REDESPACHO_LOJA_MAX (default 1), separado do teto do admin.
+  //     Quem clica aqui nao paga o provedor.
+  // ---------------------------------------------------------
+  router.post('/deliveries/:id/redispatch', verificarPortalToken, async (req, res) => {
+    try {
+      const entregaId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(entregaId)) return res.status(400).json({ error: 'id invalido' });
+
+      // Trava 1 — escopo. A regra EFETIVA tem que ser a do token.
+      // (efetiva = COALESCE(regra_id_manual, regra_id): corrida atribuida na
+      //  mao pertence a loja pra quem foi atribuida.)
+      const { rows } = await pool.query(
+        `SELECT id, codigo_os FROM logistics_deliveries
+          WHERE id = $1 AND COALESCE(regra_id_manual, regra_id) = $2`,
+        [entregaId, req.portal.regra_id]
+      );
+      if (rows.length === 0) return res.status(404).json({ error: 'Entrega nao encontrada' });
+
+      // Trava 3 — teto proprio da loja (o estagio quem barra e a funcao).
+      const MAX = parseInt(process.env.REDESPACHO_LOJA_MAX, 10) || 1;
+      let usadas = 0;
+      try {
+        const { rows: ex } = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM logistics_os_exclusoes WHERE codigo_os = $1`,
+          [rows[0].codigo_os]
+        );
+        usadas = ex[0] ? ex[0].n : 0;
+      } catch (_) { usadas = 0; }
+      if (usadas >= MAX) {
+        return res.status(429).json({
+          error: `Esta corrida ja foi redespachada ${MAX === 1 ? 'uma vez' : MAX + ' vezes'}. Fale com a Central.`,
+        });
+      }
+
+      const { redespacharEntrega } = require('../logistics.redespacho');
+      const r = await redespacharEntrega(pool, entregaId, {
+        motivo: 'Redespacho pela loja',
+        excluirEntregador: true,
+        criadoPor: `loja:${req.portal.login || req.portal.regra_id}`,
+      });
+      if (!r.ok) return res.status(r.status).json({ error: r.error });
+
+      console.log(`[portal] OS ${rows[0].codigo_os} redespachada pela loja ${req.portal.login || req.portal.regra_id}`);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[portal] redispatch erro:', err.message);
+      res.status(500).json({ error: 'Nao foi possivel redespachar agora.' });
+    }
+  });
+
   router.get('/deliveries', verificarPortalToken, async (req, res) => {
     try {
       const temData = !!(req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data));
