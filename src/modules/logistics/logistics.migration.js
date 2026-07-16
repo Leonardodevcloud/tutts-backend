@@ -118,6 +118,12 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_id_manual INTEGER`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_manual_por VARCHAR(255)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS regra_manual_em TIMESTAMPTZ`).catch(() => {});
+  // CLIENTE_MANUAL_PORTAL_V1 — indice FUNCIONAL da regra efetiva.
+  // O portal da loja filtra por COALESCE(regra_id_manual, regra_id), e uma
+  // expressao dessas NAO usa indice comum de regra_id. Sem este indice o
+  // kanban da loja vira seq scan em logistics_deliveries.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_logdel_regra_efetiva
+                      ON logistics_deliveries ((COALESCE(regra_id_manual, regra_id)))`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_entrega_99     DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_devolucao_99   DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS taxa_sendback_99    DECIMAL(10,2)`).catch(() => {});

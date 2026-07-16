@@ -7,7 +7,13 @@
  * interno (assinado com JWT_SECRET) e vice-versa.
  *
  * 1 login por regra: o token carrega { regra_id } e o /deliveries filtra
- * WHERE regra_id = token.regra_id. So enxerga as entregas daquela regra.
+ * pela regra EFETIVA da entrega. So enxerga as entregas daquela regra.
+ *
+ * CLIENTE_MANUAL_PORTAL_V1 — regra efetiva = COALESCE(regra_id_manual, regra_id).
+ * regra_id  = qual regra DESPACHOU (null na corrida manual sem match)
+ * regra_id_manual = a que um admin ATRIBUIU depois, pela tela de detalhes
+ * Atribuiu a corrida a uma loja? Ela passa a aparecer no portal DAQUELA loja.
+ * E some do portal da anterior, se havia — a atribuicao manual e a verdade.
  *
  * Endpoints (montados em /api/logistics/portal):
  *   POST /login       -> publico (isento de CSRF via lista em middleware/csrf.js)
@@ -202,12 +208,12 @@ function createLogisticsPortalRouter(pool) {
                sc.cliente_cod AS cliente_cod_rastreio,
                sc.pontos_json AS pontos_rastreio
           FROM logistics_deliveries ld
-          LEFT JOIN logistics_dispatch_rules r ON r.id = ld.regra_id
+          LEFT JOIN logistics_dispatch_rules r ON r.id = COALESCE(ld.regra_id_manual, ld.regra_id)
           LEFT JOIN LATERAL (
             SELECT cliente_cod, pontos_json FROM sla_capturas
              WHERE os_numero = ld.codigo_os::text LIMIT 1
           ) sc ON true
-         WHERE ld.regra_id = $1`;
+         WHERE COALESCE(ld.regra_id_manual, ld.regra_id) = $1`;
       if (temData) {
         sql += ` AND (ld.created_at AT TIME ZONE 'America/Sao_Paulo')::date = $2`;
         params.push(req.query.data);
@@ -308,7 +314,7 @@ function createLogisticsPortalRouter(pool) {
              SELECT cliente_cod, pontos_json FROM sla_capturas
               WHERE os_numero = ld.codigo_os::text LIMIT 1
            ) sc ON true
-          WHERE ld.regra_id = $1
+          WHERE COALESCE(ld.regra_id_manual, ld.regra_id) = $1
             AND ld.status_canonico = ANY($2)
           ORDER BY ld.id DESC
           LIMIT 200`,
@@ -446,7 +452,7 @@ function createLogisticsPortalRouter(pool) {
       // Escopo: so as OS dessa regra (evita a loja ler tentativas de outro cliente).
       const { rows: doCliente } = await pool.query(
         `SELECT DISTINCT codigo_os FROM logistics_deliveries
-          WHERE regra_id = $1 AND codigo_os = ANY($2::int[])`,
+          WHERE COALESCE(regra_id_manual, regra_id) = $1 AND codigo_os = ANY($2::int[])`,
         [req.portal.regra_id, pedidos]
       );
       const codigos = doCliente.map(r => r.codigo_os);
