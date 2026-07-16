@@ -1,5 +1,11 @@
 /**
- * cruzar-validacoes.js (2026-07 v8 — REGRA_B_RESGATE_V1)
+ * cruzar-validacoes.js (2026-07 v9 — REGRA_B_RESGATE_V1 + CNPJ_CODIGO_V1)
+ *
+ * CNPJ_CODIGO_V1: a decisao passa a ler `receita.codigo` pra separar "esse CNPJ
+ * nao existe" (erro do motoboy, tela vermelha) de "a consulta caiu" (erro nosso,
+ * tela ambar). Antes os dois viravam `indisponivel`, e quem digitava um CNPJ
+ * inexistente lia "não é erro seu, tente de novo em um minuto" — mentira que ele
+ * repetiria pra sempre, porque o CNPJ continuaria nao existindo.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * POR QUE ESTA VERSAO EXISTE: o Path E nunca passou. Nem aqui, nem na v6.
@@ -280,10 +286,25 @@ function cruzarValidacoes({
   const liberado = presencaOk || resgatado;
   const barrar = !liberado;
 
+  // CNPJ_CODIGO_V1: a Receita respondeu que esse CNPJ não existe (as duas bases
+  // concordaram) ou o número é inválido. Isso é erro DELE e tem conserto: digitar
+  // certo. Não pode virar 'indisponivel' — "tente de novo em um minuto" faria ele
+  // repetir o mesmo CNPJ pra sempre.
+  const cnpjNaoEncontrado = !!receita && receita.ok === false
+    && (receita.codigo === 'nao_encontrado' || receita.codigo === 'invalido');
+
   // indisponivel: barrou por FALTA DE DADO, não por culpa do motoboy. Sem
   // distância não há como checar presença, e não existe nada que ele possa
   // digitar diferente pra resolver.
-  const indisponivel = barrar && !temDistancia;
+  const indisponivel = barrar && !temDistancia && !cnpjNaoEncontrado;
+
+  // codigo_bloqueio: contrato pra tela. O front escolhe título/ícone/instrução por
+  // este campo — nunca farejando o texto do motivo, que é copy e muda.
+  let codigo_bloqueio = null;
+  if (barrar) {
+    codigo_bloqueio = cnpjNaoEncontrado ? 'cnpj_nao_encontrado'
+      : (indisponivel ? 'indisponivel' : 'presenca');
+  }
 
   // ── O que o motoboy vê ──
   // Uma linha só, e é a única coisa que ele controla: onde está e qual CNPJ
@@ -318,7 +339,10 @@ function cruzarValidacoes({
 
   // ── Motivo do bloqueio: uma frase, e ela tem que dizer o que FAZER ──
   let motivo_bloqueio = null;
-  if (indisponivel) {
+  if (codigo_bloqueio === 'cnpj_nao_encontrado') {
+    motivo_bloqueio =
+      'Não achamos esse CNPJ na Receita Federal. Confira os dígitos na nota fiscal.';
+  } else if (codigo_bloqueio === 'indisponivel') {
     motivo_bloqueio =
       'Não conseguimos consultar os dados agora. Não é erro seu — tente de novo em um minuto.';
   } else if (barrar) {
@@ -354,6 +378,8 @@ function cruzarValidacoes({
     liberado,
     barrar,
     indisponivel,
+    codigo_bloqueio,
+    cnpj_nao_encontrado: cnpjNaoEncontrado,
     resgatado,
     motivo_bloqueio,
     caminho_aprovacao,

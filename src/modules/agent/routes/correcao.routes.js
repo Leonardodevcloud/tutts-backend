@@ -385,6 +385,10 @@ function createCorrecaoRoutes(pool) {
             sucesso: false,
             validacao_rejeitada: true,
             indisponivel: cruzamento.indisponivel,
+            // CNPJ_CODIGO_V1: 'presenca' | 'cnpj_nao_encontrado' | 'indisponivel'.
+            // A tela escolhe titulo/icone/instrucao por ESTE campo. `indisponivel`
+            // continua indo pra nao quebrar app que ainda nao atualizou.
+            codigo_bloqueio: cruzamento.codigo_bloqueio,
             motivo_rejeicao: cruzamento.motivo_bloqueio,
             checks: cruzamento.checks,
             // BARRADO_CNPJ_V1 — o CNPJ e a razao social vao pra tela.
