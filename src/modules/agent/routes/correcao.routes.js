@@ -387,7 +387,24 @@ function createCorrecaoRoutes(pool) {
             indisponivel: cruzamento.indisponivel,
             motivo_rejeicao: cruzamento.motivo_bloqueio,
             checks: cruzamento.checks,
-            cnpj: (validacaoNF.receita && validacaoNF.receita.cnpj) || null,
+            // BARRADO_CNPJ_V1 — o CNPJ e a razao social vao pra tela.
+            //
+            // O CNPJ sai do validacaoNF.dados, nao do receita: `dados.cnpj` e o que
+            // ELE DIGITOU (so limpo de pontuacao), e existe sempre. O receita.cnpj so
+            // existe quando a consulta deu certo — ou seja, na tela 'indisponivel'
+            // (Receita fora do ar) o card ficaria vazio justamente na hora em que o
+            // motoboy mais precisa conferir o que digitou.
+            //
+            // A razao social e o unico jeito de ele descobrir sozinho que digitou o
+            // CNPJ da loja errada — hoje isso vira ligacao pro suporte. Nao vaza nada:
+            // o CNPJ e dele e o nome e publico na Receita. O ENDERECO da Receita
+            // continua fora da resposta, que era o que nao podiamos entregar.
+            cnpj: (validacaoNF.dados && validacaoNF.dados.cnpj)
+              || (validacaoNF.receita && validacaoNF.receita.cnpj)
+              || null,
+            razao_social: (validacaoNF.receita && validacaoNF.receita.ok)
+              ? (validacaoNF.receita.razao_social || validacaoNF.receita.nome_fantasia || null)
+              : null,
             erros: [cruzamento.motivo_bloqueio],
           });
         }
