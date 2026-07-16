@@ -203,7 +203,9 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
     // 2026-07: grupo aprovados x barradas
     if (grupo === 'aprovados')     { conditions.push(`status = 'sucesso'`); }
-    else if (grupo === 'barradas') { conditions.push(`status IN ('erro','falhou','bloqueado_cliente')`); }
+    // BARRADO_HISTORICO_V1: 'barrado' = reprovada pela regra B/C/E (nunca virou job).
+    // Os outros tres sao correcoes que ENTRARAM e quebraram depois, no Playwright.
+    else if (grupo === 'barradas') { conditions.push(`status IN ('barrado','erro','falhou','bloqueado_cliente')`); }
     // 2026-07 FIX datas: BRT + 'ate' inclusivo. Antes 'criado_em <= AAAA-MM-DD'
     // era lido como meia-noite, excluindo o dia inteiro do "ate" e fazendo a
     // busca de um unico dia (de=ate) nao retornar nada.

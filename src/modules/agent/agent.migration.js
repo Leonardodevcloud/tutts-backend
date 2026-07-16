@@ -92,14 +92,25 @@ async function initAgentTables(pool) {
   // 2026-04: Aceitar status 'falhou' (usado pelos agentes do pool — Etapa 1)
   // CHECK constraint original só aceitava 'pendente'/'processando'/'sucesso'/'erro'.
   // Idempotente: se constraint não existir ou já estiver atualizada, não quebra.
+  //
+  // BARRADO_HISTORICO_V1 — entram 'barrado' e 'bloqueado_cliente'.
+  //
+  //   'barrado'           = a validacao B/C/E reprovou. A tentativa nunca vira job
+  //                         do Playwright; ela existe so pra ficar registrada.
+  //   'bloqueado_cliente' = corrida de cliente que nao aceita ajuste.
+  //
+  // O 'bloqueado_cliente' JA era procurado pelo filtro da aba "Solicitacoes
+  // Barradas" (historico.routes.js) — mas nao estava nesta lista, entao um INSERT
+  // com ele violaria a constraint. Ou seja: aquele ramo do filtro nunca teve o que
+  // achar. Entra aqui pra parar de ser decorativo.
   try {
     await pool.query(`ALTER TABLE ajustes_automaticos DROP CONSTRAINT IF EXISTS ajustes_automaticos_status_check`);
     await pool.query(`
       ALTER TABLE ajustes_automaticos
       ADD CONSTRAINT ajustes_automaticos_status_check
-      CHECK (status IN ('pendente', 'processando', 'sucesso', 'erro', 'falhou'))
+      CHECK (status IN ('pendente', 'processando', 'sucesso', 'erro', 'falhou', 'barrado', 'bloqueado_cliente'))
     `);
-    console.log('✅ Constraint status atualizado (aceita "falhou")');
+    console.log('✅ Constraint status atualizado (aceita "falhou", "barrado", "bloqueado_cliente")');
   } catch (err) {
     console.log(`⚠️ Constraint status: ${err.message}`);
   }

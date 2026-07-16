@@ -310,6 +310,59 @@ function createCorrecaoRoutes(pool) {
         // 2026-06 v6: BLOQUEIO REAL — barra o envio quando nenhuma rota validou.
         if (cruzamento.barrar) {
           console.log(`[agent] 🚫 Correção BARRADA (OS ${os_numero} P${ponto}): ${cruzamento.motivo_bloqueio}`);
+
+          // ══════════════════════════════════════════════════════════════════
+          // BARRADO_HISTORICO_V1 — a tentativa barrada vira LINHA no banco.
+          //
+          // Antes ela morria aqui: o 400 sai no passo 3 e o INSERT so acontece no
+          // passo 4. Resultado: a aba "Solicitacoes Barradas" so mostrava correcao
+          // que ENTROU e quebrou depois no Playwright — justamente as que a regra
+          // reprovou, que sao as que interessam, nunca apareciam. Quem barrou mais
+          // e por que era pergunta sem resposta possivel.
+          //
+          // status='barrado' e um estado TERMINAL e NAO e job: nao entra em
+          // ('pendente','processando'), entao nao trava o motoboy de tentar de novo
+          // — cada tentativa vira uma linha, que e exatamente o historico.
+          //
+          // Guardamos o cruzamento inteiro no validacao_nf (scores + checks +
+          // distancia + Receita). O painel admin ve o numero; o motoboy nao.
+          //
+          // Best-effort de proposito: se o INSERT falhar, o motoboy TEM que receber
+          // o 400 do mesmo jeito. Falha de auditoria nao pode virar corrida
+          // liberada.
+          try {
+            const { rows: rowsBarrado } = await pool.query(
+              `INSERT INTO ajustes_automaticos (
+                 os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng,
+                 status, detalhe_erro, erro,
+                 usuario_id, usuario_nome, cod_profissional,
+                 validacao_nf, finalizado_em
+               ) VALUES ($1, $2, $3, $4, $5, 'barrado', $6, $7, $8, $9, $10, $11, NOW())
+               RETURNING id`,
+              [
+                String(os_numero).trim(),
+                pontoNum,
+                String(localizacao_raw).trim(),
+                parseFloat(motoboy_lat),
+                parseFloat(motoboy_lng),
+                cruzamento.motivo_bloqueio,
+                cruzamento.indisponivel ? 'validacao_indisponivel' : 'validacao_reprovou',
+                usuarioId,
+                usuarioNome,
+                codProfissional,
+                JSON.stringify({
+                  origem: validacaoNF.origem || 'cnpj_manual',
+                  dados: validacaoNF.dados,
+                  receita: validacaoNF.receita,
+                  cruzamento,
+                }),
+              ]
+            );
+            console.log(`[agent] 📝 Barrada registrada (id=${rowsBarrado[0].id})`);
+          } catch (barrErr) {
+            console.error('[agent] ⚠️ Falha ao registrar a barrada (não-bloqueante):', barrErr.message);
+          }
+          // ══════════════════════════════════════════════════════════════════
           // AGENTE_BCE_V1 (resposta) — a tela do motoboy desenha `checks`.
           //
           // Antes ia so `scores`, e o front nao sabia o que fazer com numero: caia
