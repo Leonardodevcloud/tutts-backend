@@ -324,7 +324,37 @@ async function fazerLogin(page, overrides) {
     () => page.goto(LOGIN_URL(), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }),
     'page.goto LOGIN_URL'
   );
-  await page.waitForTimeout(1500);
+  // RPA_ESPERAS_V1 — aqui morriam 4 de cada 12 jobs.
+  //
+  // A linha era:  await page.waitForTimeout(1500);
+  //
+  // Seguida de um isVisible(), que NAO espera — e uma foto do instante. Ou seja,
+  // a regra real era "o campo de login tem 1,5 segundo pra aparecer, senao eu
+  // desisto e digo que a pagina nao carregou". Num sistema legado, num container,
+  // com a rede da Railway ate o tutts.com.br, 1,5s e sorte. O erro "Página de
+  // login não carregou" quase nunca era a pagina fora do ar: era ela demorando
+  // 1,6s.
+  //
+  // Agora espera ATE 15s pelo primeiro dos dois desfechos possiveis:
+  //   a) o campo de login apareceu       -> segue e preenche
+  //   b) a URL nao e mais a de login     -> sessao ja estava ativa
+  //
+  // Isso importa: um waitFor so no #loginEmail torraria 15s toda vez que a sessao
+  // estivesse viva (caso (b), que retorna com sucesso). Esperar os DOIS resolve no
+  // instante em que qualquer um acontece — rapido quando a pagina esta rapida,
+  // paciente quando esta lenta.
+  //
+  // offsetParent !== null e o mesmo teste de visibilidade que o resto do arquivo
+  // ja usa (ver o #btnChamarMotoboy no passo 10).
+  //
+  // O .catch() e proposital: se estourar os 15s, NAO estoura aqui. Deixa a
+  // decisao pro codigo abaixo, que ja sabe distinguir "sem sessao" de "sessao
+  // presa na tela de feriados" e produz a mensagem certa. Este patch troca o
+  // sleep pela espera — nao mexe em quem decide.
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#loginEmail');
+    return (el && el.offsetParent !== null) || !location.href.includes('loginFuncionarioNovo');
+  }, { timeout: TIMEOUT }).catch(() => {});
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
   if (!temEmail) {
@@ -351,9 +381,19 @@ async function fazerLogin(page, overrides) {
   await page.locator('input[name="logar"]').first().click();
 
   // Aguardar sair da página de login
+  //
+  // RPA_ESPERAS_V1: faltava o waitUntil. O default do Playwright e 'load', que so
+  // dispara depois que TODO recurso da pagina terminou — imagem, fonte, iframe,
+  // script de terceiro. Num sistema legado o 'load' pode nao acontecer nunca em
+  // 25s, mesmo com a pagina perfeitamente usavel ha 20. Era o
+  // "page.waitForURL: Timeout 25000ms exceeded ... waiting for navigation until
+  // 'load'" do historico.
+  //
+  // O page.goto() deste mesmo arquivo ja usa 'domcontentloaded'; o waitForURL
+  // ficou de fora. Agora usam o mesmo criterio: o DOM esta pronto, pode trabalhar.
   await page.waitForURL(
     url => !url.toString().includes('loginFuncionarioNovo'),
-    { timeout: TIMEOUT }
+    { timeout: TIMEOUT, waitUntil: 'domcontentloaded' }
   );
   log(`✅ Login OK — URL: ${page.url()}`);
 }
@@ -595,7 +635,32 @@ async function executarCorrecaoEndereco(params) {
       }
 
       await inputBusca.fill(String(os_numero));
-      await page.waitForTimeout(1500); // Aguardar jQuery UI autocomplete carregar
+      // RPA_ESPERAS_V1 — aqui morriam outros 4 de cada 12.
+      //
+      // A linha era:  await page.waitForTimeout(1500); // Aguardar jQuery UI autocomplete
+      //
+      // O autocomplete do jQuery UI dispara um AJAX. Se ele voltasse em 1,6s, o
+      // isVisible() logo abaixo dava false, o robo caia no fallback do
+      // press('Enter'), a busca nao resolvia, e o erro dizia:
+      //
+      //     "OS 1260753 não localizada na busca do sistema externo.
+      //      Pode estar concluída/cancelada..."
+      //
+      // A OS estava viva o tempo todo. A mensagem culpava a OS por um problema de
+      // cronometro nosso — e foi o maior buraco do sistema (120 de 283 perdas em
+      // 30 dias, todas em 'localizando').
+      //
+      // Agora espera ate 10s o menu do autocomplete existir no DOM. Se o AJAX
+      // voltar em 200ms, segue em 200ms.
+      //
+      // O .catch() mantem o fallback do Enter vivo pro caso do autocomplete
+      // realmente nao vir (OS inexistente de verdade): a decisao continua sendo do
+      // codigo abaixo, intacto. Este patch so garante que ele decida com a resposta
+      // do AJAX na mao, em vez de decidir antes dela chegar.
+      await page.waitForFunction(
+        () => document.querySelectorAll('.ui-menu-item .ui-menu-item-wrapper, .ui-menu-item-wrapper').length > 0,
+        { timeout: 10000 }
+      ).catch(() => {});
 
       // Clicar no item do autocomplete (jQuery UI: .ui-menu-item-wrapper)
       const autoItem = page.locator('.ui-menu-item .ui-menu-item-wrapper').filter({ hasText: String(os_numero) }).first();
@@ -617,7 +682,12 @@ async function executarCorrecaoEndereco(params) {
         }
       }
 
-      await page.waitForTimeout(2000); // Aguardar resultado carregar
+      // RPA_ESPERAS_V1: os 2000ms sairam. Nao foram trocados por nada — eram
+      // redundantes. A linha seguinte e um comRetryTimeout(waitForSelector do
+      // botao END, timeout 25s, com retry), que ja e exatamente "espere o
+      // resultado carregar", so que de verdade e por mais tempo. O sleep era 2s
+      // de espera cega ANTES de uma espera inteligente: atrasava todo job que
+      // funcionava e nao salvava nenhum que falhava.
 
       // Aguardar botão END. aparecer no DOM após busca (não precisa estar visível)
       // Retry: às vezes o sistema externo demora mais que TIMEOUT pra renderizar
@@ -936,7 +1006,18 @@ async function executarCorrecaoEndereco(params) {
     });
 
     await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-    await page.waitForTimeout(800);
+    // RPA_ESPERAS_V1: era waitForTimeout(800) + count(). Mesmo padrao dos outros:
+    // dorme um tempo chutado e olha uma vez. Se o form levasse 900ms pra abrir, o
+    // count() dava 0 e o robo clicava DE NOVO no botao — o que, num modal jQuery,
+    // costuma fechar o que tinha acabado de abrir. O segundo clique nao era um
+    // conserto, era o comeco do problema.
+    //
+    // Agora espera ate 8s o input de Latitude ficar visivel. O reclique embaixo
+    // continua existindo pro caso do clique realmente nao ter pegado.
+    await page.waitForFunction(() => {
+      const el = document.querySelector('input[placeholder="Latitude"]');
+      return !!(el && el.offsetParent !== null);
+    }, { timeout: 8000 }).catch(() => {});
 
     // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
     const formAbriu = await page.locator('input[placeholder="Latitude"]:visible').count().catch(() => 0);
@@ -1503,12 +1584,17 @@ async function executarCorrecaoEndereco(params) {
         log('\u{1f4cc} Passo 10: Salvando alteracoes');
 
         if (!salvarApareceu) {
-          for (let j = 0; j < 10; j++) {
-            await page.waitForTimeout(1000);
-            const visivel = await page.locator('#btnChamarMotoboy').isVisible().catch(() => false);
-            if (visivel) { salvarApareceu = true; break; }
-            if (j === 3) log('\u23f3 Aguardando botao Salvar aparecer...');
-          }
+          // RPA_ESPERAS_V1: era um loop manual de 10x (sleep 1000 + isVisible) —
+          // um waitFor escrito a mao, com dois defeitos: a granularidade e de 1
+          // segundo (se o botao aparece em 50ms, o robo so descobre 950ms depois),
+          // e o `if (j === 3)` logava no meio do caminho, nao no fim.
+          //
+          // O Playwright ja tem isso pronto, com polling continuo:
+          salvarApareceu = await page.locator('#btnChamarMotoboy')
+            .waitFor({ state: 'visible', timeout: 12000 })
+            .then(() => true)
+            .catch(() => false);
+          if (!salvarApareceu) log('\u23f3 Botao Salvar nao apareceu em 12s');
         }
 
         if (salvarApareceu) {
