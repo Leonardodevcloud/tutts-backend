@@ -1,5 +1,12 @@
 /**
- * cruzar-validacoes.js (2026-07 v10 — VALIDACAO_B_UNICA_V1)
+ * cruzar-validacoes.js (2026-07 v11 — VALIDACAO_B_UNICA_V1 + GPS_ACC_BACKEND_V1)
+ *
+ * GPS_ACC_BACKEND_V1: a precisao do GPS entrou na decisao, e entrou AQUI de
+ * proposito. Ela chegou a viver no celular (o front travava o botao quando a
+ * accuracy passava de 60m) — ideia ruim por dois motivos: bloqueio no celular
+ * nao deixa rastro nenhum no banco (o dono do sistema descobre pelo WhatsApp do
+ * suporte, nao pelo painel), e mexer no numero exigia deploy da Vercel. Regra
+ * que barra gente mora onde grava e onde se ajusta.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * UMA validação. Uma só:
@@ -57,6 +64,21 @@
 
 /** A única régua: metros entre o GPS do motoboy e o endereço da Receita. */
 const DIST_LIBERA_METROS = 100;
+
+/**
+ * Precisão máxima aceitável do GPS (o raio, em metros, que o próprio aparelho
+ * reporta em position.coords.accuracy).
+ *
+ * Existe porque a régua acima é uma distância. Um aparelho que diz "estou aqui,
+ * mais ou menos 96 metros" — e ±96m já apareceu em produção — não consegue
+ * responder uma pergunta de 100m: a medida vira cara ou coroa. Nesse caso a
+ * resposta honesta não é "ele não está lá", é "não dá pra saber daqui".
+ *
+ * 60m é chute educado: dentro de loja, coberto, o típico é 30-60m. Se começar a
+ * barrar gente honesta, o número está aqui — mas veja o dado antes: a accuracy
+ * agora é gravada em toda tentativa.
+ */
+const GPS_ACC_LIMITE = 60;
 
 // ───────── Helpers de string ─────────
 
@@ -190,12 +212,14 @@ function calcularDistancia({ receita, motoboy_lat, motoboy_lng, distancia_receit
  * @param {number}   p.motoboy_lat
  * @param {number}   p.motoboy_lng
  * @param {number}  [p.distancia_receita_gps] metros, se já calculado pela rota
+ * @param {number}  [p.gps_accuracy]          raio de erro do GPS, em metros
  */
 function cruzarValidacoes({
   receita,
   motoboy_lat,
   motoboy_lng,
   distancia_receita_gps,
+  gps_accuracy,
 }) {
   const scores = {};
 
@@ -205,7 +229,32 @@ function cruzarValidacoes({
   if (temDistancia) scores.endereco_receita_vs_gps = scoreDistancia(distancia);
 
   // ── Decisão ──
-  const liberado = temDistancia && distancia <= DIST_LIBERA_METROS;
+  //
+  // GPS_ACC_BACKEND_V1: a precisão só atrapalha quando ela MUDA A RESPOSTA.
+  //
+  // `accuracy` é o raio de um círculo de 95% de confiança: "estou aqui, mais ou
+  // menos X metros". Então a distância real está em [medida - acc, medida + acc].
+  //
+  // O erro que quase foi pra produção: barrar por 'gps_impreciso' sempre que
+  // acc > 60. Alguém a 500m com ±96 estaria, no mínimo, a 404m — dá pra afirmar
+  // com folga que ele não está na loja. Dizer "seu GPS está impreciso" nesse caso
+  // esconde o problema real dele e ainda sugere que é só tentar de novo.
+  //
+  // Então: se o PIOR CASO a favor dele ainda está fora do limite, é presença
+  // mesmo, e o motivo tem que dizer isso. A imprecisão só vira bloqueio quando o
+  // círculo de erro cruza a linha dos 100m — aí, honestamente, não dá pra saber.
+  const acc = (typeof gps_accuracy === 'number' && Number.isFinite(gps_accuracy))
+    ? Math.round(gps_accuracy) : null;
+
+  // Melhor caso pra ele: assume que ele está na borda do círculo, do lado da loja.
+  const distanciaMinima = temDistancia ? Math.max(0, distancia - (acc || 0)) : null;
+  const claramenteLonge = temDistancia && distanciaMinima > DIST_LIBERA_METROS;
+
+  // Só é "impreciso" quando ainda poderia estar dentro — ou seja, quando a medida
+  // não decide.
+  const gpsImpreciso = acc !== null && acc > GPS_ACC_LIMITE && !claramenteLonge;
+
+  const liberado = temDistancia && !gpsImpreciso && distancia <= DIST_LIBERA_METROS;
   const barrar = !liberado;
 
   // A Receita respondeu que esse CNPJ não existe (as duas bases concordaram) ou o
@@ -218,13 +267,14 @@ function cruzarValidacoes({
   // indisponivel: barrou por FALTA DE DADO, não por culpa do motoboy. Sem
   // distância não há como checar presença, e não existe nada que ele possa
   // digitar diferente pra resolver.
-  const indisponivel = barrar && !temDistancia && !cnpjNaoEncontrado;
+  const indisponivel = barrar && !temDistancia && !cnpjNaoEncontrado && !gpsImpreciso;
 
   // codigo_bloqueio: contrato pra tela. O front escolhe título/ícone/instrução por
   // este campo — nunca farejando o texto do motivo, que é copy e muda.
   let codigo_bloqueio = null;
   if (barrar) {
     codigo_bloqueio = cnpjNaoEncontrado ? 'cnpj_nao_encontrado'
+      : gpsImpreciso ? 'gps_impreciso'
       : (indisponivel ? 'indisponivel' : 'presenca');
   }
 
@@ -257,7 +307,11 @@ function cruzarValidacoes({
 
   // ── Motivo do bloqueio: uma frase, e ela tem que dizer o que FAZER ──
   let motivo_bloqueio = null;
-  if (codigo_bloqueio === 'cnpj_nao_encontrado') {
+  if (codigo_bloqueio === 'gps_impreciso') {
+    motivo_bloqueio =
+      `Seu GPS está impreciso (±${acc}m) e não dá pra confirmar o local. ` +
+      'Chegue perto da porta da loja ou saia de baixo da cobertura e tente de novo.';
+  } else if (codigo_bloqueio === 'cnpj_nao_encontrado') {
     motivo_bloqueio =
       'Não achamos esse CNPJ na Receita Federal. Confira os dígitos na nota fiscal.';
   } else if (codigo_bloqueio === 'indisponivel') {
@@ -304,6 +358,15 @@ function cruzarValidacoes({
     resumo: resumoPartes.join(' • '),
     distancia_metros: temDistancia ? distancia : null,
     limite_metros: DIST_LIBERA_METROS,
+    // GPS_ACC_BACKEND_V1: a precisão vai pro JSON de TODA tentativa. É o dado que
+    // responde "a massa barrada é GPS ruim ou motoboy longe?" — sem ele, a próxima
+    // discussão sobre o limite seria chute de novo.
+    gps_accuracy: acc,
+    gps_impreciso: gpsImpreciso,
+    limite_accuracy: GPS_ACC_LIMITE,
+    // O piso da distância dado o erro do GPS. É o que separa "não dá pra saber"
+    // de "dá pra saber que não". Vai pro painel junto do resto.
+    distancia_minima: distanciaMinima,
   };
 }
 
@@ -318,4 +381,5 @@ module.exports = {
   distanciaMetros,
   normalizar,
   DIST_LIBERA_METROS,
+  GPS_ACC_LIMITE,
 };

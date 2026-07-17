@@ -150,12 +150,105 @@ function createCorrecaoRoutes(pool) {
   // requests legítimos com foto fachada (5mb) + foto NF (5mb) + overhead
   // de outros campos. Express body parser global é suficiente.
 
+  // ════════════════════════════════════════════════════════════════════════
+  // TODA_TENTATIVA_V1 — toda tentativa vira linha, com a fase onde morreu.
+  //
+  // Antes, so a barrada pela REGRA (distancia/CNPJ) era gravada. Tudo que morria
+  // antes disso sumia sem deixar rastro: OS ja corrigida, correcao em andamento,
+  // CNPJ com digito errado, exception nossa. O motoboy tentava 4 vezes, desistia,
+  // ligava pro suporte — e o painel nao tinha uma linha sequer contando isso.
+  //
+  // Best-effort DE PROPOSITO: se o INSERT falhar, a resposta pro motoboy sai do
+  // mesmo jeito. Falha de auditoria nao pode virar corrida travada — nem corrida
+  // liberada.
+  //
+  // ┌─ LIMITE CONHECIDO ────────────────────────────────────────────────────┐
+  // │ A tabela exige os_numero NOT NULL e ponto CHECK (>= 2 AND <= 7).      │
+  // │                                                                       │
+  // │ Entao tentativa SEM os_numero, ou com ponto fora de 2-7 (o ponto 1 e  │
+  // │ coleta e nao se corrige), NAO cabe aqui — o banco recusa. Isso so     │
+  // │ acontece na fase 'entrada', e so com app modificado ou bug: o front   │
+  // │ ja valida os dois antes de enviar. Quando acontece, fica no log do    │
+  // │ Railway com o payload, e nao no painel.                               │
+  // │                                                                       │
+  // │ Se um dia isso precisar de 100% de cobertura, o caminho e uma tabela  │
+  // │ propria (agent_tentativas_recusadas) sem essas amarras — nao afrouxar │
+  // │ o CHECK daqui, que protege o job de verdade.                          │
+  // └───────────────────────────────────────────────────────────────────────┘
+  async function registrarTentativa({
+    os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, motoboy_accuracy,
+    usuarioId, usuarioNome, codProfissional,
+    fase, motivo, erro, validacao_nf,
+  }) {
+    try {
+      const os = String(os_numero == null ? '' : os_numero).trim();
+      const p  = parseInt(ponto, 10);
+      if (!os || !Number.isInteger(p) || p < 2 || p > 7) {
+        console.warn(
+          `[agent] ⚠️ Tentativa NAO registravel (fase=${fase}): os="${os}" ponto=${ponto}. ` +
+          `A tabela exige os_numero e ponto entre 2 e 7. Motivo original: ${motivo}`
+        );
+        return null;
+      }
+
+      const acc = Number(motoboy_accuracy);
+      const lat = parseFloat(motoboy_lat);
+      const lng = parseFloat(motoboy_lng);
+
+      const { rows } = await pool.query(
+        `INSERT INTO ajustes_automaticos (
+           os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, gps_accuracy,
+           status, fase_falha, detalhe_erro, erro,
+           usuario_id, usuario_nome, cod_profissional,
+           validacao_nf, finalizado_em
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'barrado', $7, $8, $9, $10, $11, $12, $13, NOW())
+         RETURNING id`,
+        [
+          os,
+          p,
+          localizacao_raw == null ? null : String(localizacao_raw).trim(),
+          Number.isFinite(lat) ? lat : null,
+          Number.isFinite(lng) ? lng : null,
+          Number.isFinite(acc) ? acc : null,
+          fase,
+          motivo,
+          erro,
+          usuarioId || null,
+          usuarioNome || null,
+          codProfissional || null,
+          validacao_nf ? JSON.stringify(validacao_nf) : null,
+        ]
+      );
+      console.log(`[agent] 📝 Tentativa registrada (id=${rows[0].id}, fase=${fase}): ${motivo}`);
+      return rows[0].id;
+    } catch (err) {
+      console.error(`[agent] ⚠️ Falha ao registrar tentativa (fase=${fase}, nao-bloqueante):`, err.message);
+      return null;
+    }
+  }
+
   // POST /agent/corrigir-endereco
   router.post('/corrigir-endereco', async (req, res) => {
-    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual } = req.body || {};
+    // TODA_TENTATIVA_V1: motoboy_accuracy entra no payload. O front manda o
+    // position.coords.accuracy do mesmo instante do GPS.
+    const { os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual, motoboy_accuracy } = req.body || {};
+
+    const usuarioId       = req.user?.id   || null;
+    const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
+    const codProfissional = req.user?.codProfissional || req.user?.cod_profissional || null;
+
+    // Contexto fixo de toda tentativa desta request — o registrarTentativa completa
+    // com fase/motivo/erro em cada ponto de recusa.
+    const ctxTentativa = {
+      os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, motoboy_accuracy,
+      usuarioId, usuarioNome, codProfissional,
+    };
 
     const erros = validarEntrada({ os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng, foto_fachada, cnpj_manual });
     if (erros.length > 0) {
+      // TODA_TENTATIVA_V1: grava antes de recusar. Esta e a unica fase que pode NAO
+      // gravar — ver o aviso dentro de registrarTentativa.
+      await registrarTentativa({ ...ctxTentativa, fase: 'entrada', motivo: erros.join(' | '), erro: 'entrada_invalida' });
       return res.status(400).json({ sucesso: false, erros });
     }
 
@@ -164,9 +257,8 @@ function createCorrecaoRoutes(pool) {
       // foto. Nada mais le foto_fachada: recusar por tamanho um campo ignorado
       // so barraria motoboy por um dado que nao usamos.
 
-      const usuarioId       = req.user?.id   || null;
-      const usuarioNome     = req.user?.nome || req.user?.name || req.user?.email || null;
-      const codProfissional = req.user?.codProfissional || req.user?.cod_profissional || null;
+      // TODA_TENTATIVA_V1: usuarioId/Nome/codProfissional subiram pro topo da rota
+      // (o registrarTentativa da fase 'entrada' precisa deles antes daqui).
 
       // Validar OS+Ponto duplicada
       const pontoNum = parseInt(ponto, 10);
@@ -177,10 +269,12 @@ function createCorrecaoRoutes(pool) {
         [String(os_numero).trim(), pontoNum]
       );
       if (jaCorrigida.rows.length > 0) {
-        return res.status(409).json({
-          sucesso: false,
-          erros: [`O Ponto ${pontoNum} da OS ${os_numero} já foi corrigido com sucesso anteriormente. Entre em contato com o suporte caso precise de outra correção.`],
-        });
+        const msgJa = `O Ponto ${pontoNum} da OS ${os_numero} já foi corrigido com sucesso anteriormente. Entre em contato com o suporte caso precise de outra correção.`;
+        // TODA_TENTATIVA_V1: ele TENTOU. Sem esta linha, motoboy que insiste numa OS
+        // ja corrigida e invisivel — e insistir e sinal de que a correcao anterior
+        // nao resolveu o problema dele.
+        await registrarTentativa({ ...ctxTentativa, fase: 'ja_corrigida', motivo: msgJa, erro: 'os_ja_corrigida' });
+        return res.status(409).json({ sucesso: false, erros: [msgJa] });
       }
 
       // 2. Já tem pendente/processando neste ponto?
@@ -189,10 +283,11 @@ function createCorrecaoRoutes(pool) {
         [String(os_numero).trim(), pontoNum]
       );
       if (emAndamento.rows.length > 0) {
-        return res.status(409).json({
-          sucesso: false,
-          erros: [`O Ponto ${pontoNum} da OS ${os_numero} já está sendo processado. Aguarde a conclusão antes de enviar novamente.`],
-        });
+        const msgAnd = `O Ponto ${pontoNum} da OS ${os_numero} já está sendo processado. Aguarde a conclusão antes de enviar novamente.`;
+        // Repetido aqui costuma ser ansiedade (o RPA demora), mas se aparecer MUITO
+        // pro mesmo ponto e sinal de que o polling nao esta dando feedback.
+        await registrarTentativa({ ...ctxTentativa, fase: 'em_andamento', motivo: msgAnd, erro: 'os_em_andamento' });
+        return res.status(409).json({ sucesso: false, erros: [msgAnd] });
       }
 
       // ── 1. Obter dados do cliente via CNPJ digitado (consulta Receita) ──
@@ -296,6 +391,11 @@ function createCorrecaoRoutes(pool) {
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
+          // GPS_ACC_BACKEND_V1: a precisao decide se a distancia PODE decidir.
+          // A regra mora no cruzar-validacoes junto com o DIST_LIBERA_METROS —
+          // nao no celular, onde bloqueava sem deixar rastro e exigia deploy da
+          // Vercel pra ajustar um numero.
+          gps_accuracy: Number(motoboy_accuracy),
         });
 
         console.log(`[agent] 🧮 Cruzamento: ${cruzamento.resumo} | score_max=${cruzamento.score_max}% | caminho=${cruzamento.caminho_aprovacao || 'nenhum'} | salvar=${cruzamento.pode_salvar_no_banco}`);
@@ -306,56 +406,42 @@ function createCorrecaoRoutes(pool) {
           console.log(`[agent] 🚫 Correção BARRADA (OS ${os_numero} P${ponto}): ${cruzamento.motivo_bloqueio}`);
 
           // ══════════════════════════════════════════════════════════════════
-          // BARRADO_HISTORICO_V1 — a tentativa barrada vira LINHA no banco.
+          // TODA_TENTATIVA_V1 — o INSERT inline daqui virou registrarTentativa().
           //
-          // Antes ela morria aqui: o 400 sai no passo 3 e o INSERT so acontece no
-          // passo 4. Resultado: a aba "Solicitacoes Barradas" so mostrava correcao
-          // que ENTROU e quebrou depois no Playwright — justamente as que a regra
-          // reprovou, que sao as que interessam, nunca apareciam. Quem barrou mais
-          // e por que era pergunta sem resposta possivel.
+          // Era o mesmo INSERT, escrito a mao, so pra esta fase. Agora e um helper
+          // usado por TODAS as recusas da rota — assim nao existe caminho de saida
+          // que "esqueceu" de gravar, e a coluna fase_falha diz qual foi.
           //
-          // status='barrado' e um estado TERMINAL e NAO e job: nao entra em
-          // ('pendente','processando'), entao nao trava o motoboy de tentar de novo
-          // — cada tentativa vira uma linha, que e exatamente o historico.
+          // A fase sai do codigo_bloqueio, que ja e o contrato da tela:
+          //   presenca            -> ele nao esta no endereco do CNPJ
+          //   cnpj_nao_encontrado -> as duas bases da Receita deram 404  } fase
+          //   indisponivel        -> a consulta caiu, nao e culpa dele   } 'receita'
+          //   gps_impreciso       -> o aparelho nao sabe onde ele esta
+          //
+          // O `erro` (coluna curta, boa pra GROUP BY) continua separando o que e
+          // culpa dele do que e nossa: validacao_reprovou x validacao_indisponivel.
           //
           // Guardamos o cruzamento inteiro no validacao_nf (scores + checks +
-          // distancia + Receita). O painel admin ve o numero; o motoboy nao.
-          //
-          // Best-effort de proposito: se o INSERT falhar, o motoboy TEM que receber
-          // o 400 do mesmo jeito. Falha de auditoria nao pode virar corrida
-          // liberada.
-          try {
-            const { rows: rowsBarrado } = await pool.query(
-              `INSERT INTO ajustes_automaticos (
-                 os_numero, ponto, localizacao_raw, motoboy_lat, motoboy_lng,
-                 status, detalhe_erro, erro,
-                 usuario_id, usuario_nome, cod_profissional,
-                 validacao_nf, finalizado_em
-               ) VALUES ($1, $2, $3, $4, $5, 'barrado', $6, $7, $8, $9, $10, $11, NOW())
-               RETURNING id`,
-              [
-                String(os_numero).trim(),
-                pontoNum,
-                String(localizacao_raw).trim(),
-                parseFloat(motoboy_lat),
-                parseFloat(motoboy_lng),
-                cruzamento.motivo_bloqueio,
-                cruzamento.indisponivel ? 'validacao_indisponivel' : 'validacao_reprovou',
-                usuarioId,
-                usuarioNome,
-                codProfissional,
-                JSON.stringify({
-                  origem: validacaoNF.origem || 'cnpj_manual',
-                  dados: validacaoNF.dados,
-                  receita: validacaoNF.receita,
-                  cruzamento,
-                }),
-              ]
-            );
-            console.log(`[agent] 📝 Barrada registrada (id=${rowsBarrado[0].id})`);
-          } catch (barrErr) {
-            console.error('[agent] ⚠️ Falha ao registrar a barrada (não-bloqueante):', barrErr.message);
-          }
+          // distancia + accuracy + Receita). O painel admin ve o numero; o motoboy
+          // nao — numero na tela vira jogo.
+          const faseBarrada =
+            cruzamento.codigo_bloqueio === 'gps_impreciso'       ? 'gps_impreciso'
+            : cruzamento.codigo_bloqueio === 'cnpj_nao_encontrado' ? 'receita'
+            : cruzamento.codigo_bloqueio === 'indisponivel'        ? 'receita'
+            : 'presenca';
+
+          await registrarTentativa({
+            ...ctxTentativa,
+            fase: faseBarrada,
+            motivo: cruzamento.motivo_bloqueio,
+            erro: cruzamento.indisponivel ? 'validacao_indisponivel' : 'validacao_reprovou',
+            validacao_nf: {
+              origem: validacaoNF.origem || 'cnpj_manual',
+              dados: validacaoNF.dados,
+              receita: validacaoNF.receita,
+              cruzamento,
+            },
+          });
           // ══════════════════════════════════════════════════════════════════
           // AGENTE_BCE_V1 (resposta) — a tela do motoboy desenha `checks`.
           //
@@ -608,6 +694,19 @@ function createCorrecaoRoutes(pool) {
       });
     } catch (err) {
       console.error('[agent/corrigir-endereco]', err.message);
+      // TODA_TENTATIVA_V1: exception nossa tambem e tentativa perdida. Sem esta
+      // linha, um bug que derruba 30 correcoes por dia aparece como... nada. O
+      // motoboy le "erro interno", tenta de novo, desiste, liga pro suporte — e o
+      // painel continua limpo.
+      //
+      // O detalhe_erro leva a mensagem TECNICA de proposito: essa linha e pra voce,
+      // nao pra ele. Ele ja leu o "erro interno" generico na tela.
+      await registrarTentativa({
+        ...ctxTentativa,
+        fase: 'erro_interno',
+        motivo: `Erro interno: ${err.message}`.slice(0, 500),
+        erro: 'erro_interno',
+      });
       return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enfileirar.' });
     }
   });

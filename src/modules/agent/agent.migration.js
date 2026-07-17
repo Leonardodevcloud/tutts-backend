@@ -64,6 +64,32 @@ async function initAgentTables(pool) {
     // correcao falhou porem a IA validou o endereco (auto-liberacao do ponto).
     // Usado pela sub-aba "Falha/Liberacao IA" pra listar/juntar o status da liberacao.
     { nome: 'liberacao_auto_id', tipo: 'INTEGER' },
+    // TODA_TENTATIVA_V1 — em que fase a tentativa morreu.
+    //
+    // A aba "Solicitacoes Barradas" mostrava POR QUE (o motivo, em portugues) mas
+    // nao ONDE. "Voce nao esta no endereco desse CNPJ" e "O ponto 3 ja foi
+    // corrigido" viravam a mesma coisa na hora de contar: linha barrada. Sem isso
+    // nao da pra responder "onde a gente mais perde motoboy?" — que e a pergunta
+    // que decide o que consertar primeiro.
+    //
+    // Valores possiveis (a rota escreve; ver registrarTentativa em correcao.routes):
+    //   entrada        dados invalidos (CNPJ com DV errado, campo faltando)
+    //   ja_corrigida   o ponto ja tinha correcao com sucesso
+    //   em_andamento   ja tem uma correcao rodando pra esse ponto
+    //   receita        CNPJ nao existe, ou a consulta a Receita caiu
+    //   gps_impreciso  o aparelho nao sabe onde ele esta com precisao suficiente
+    //   presenca       a distancia reprovou (ele nao esta la)
+    //   erro_interno   exception nossa
+    //
+    // Falha do RPA (depois de entrar na fila) NAO usa esta coluna: pra essas o
+    // `etapa_atual` ja diz a fase (login/localizando/codificando/...). O painel le
+    // COALESCE(fase_falha, etapa_atual).
+    { nome: 'fase_falha', tipo: 'VARCHAR(40)' },
+    // Precisao do GPS em metros, no instante do envio (position.coords.accuracy).
+    // Gravada em TODA tentativa, inclusive nas que passam. E o dado que responde
+    // "a massa barrada entre 100 e 500m e GPS ruim ou motoboy longe?" — sem ele a
+    // proxima discussao sobre o limite seria chute de novo.
+    { nome: 'gps_accuracy', tipo: 'NUMERIC' },
   ];
 
   for (const col of colunas) {
