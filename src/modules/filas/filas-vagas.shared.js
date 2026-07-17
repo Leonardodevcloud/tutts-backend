@@ -97,20 +97,54 @@ async function verificarEOcuparVaga(pool, { central_id, cod_profissional, nome_p
     }
 
     // ── Escalado da diária fura a trava ──
+    //
+    // FILAS_VAGAS_FUROU_FIX_V1_CALC — eu estava gravando uma coisa no campo de outra.
+    //
+    // Era:
+    //     const escalado = await estaNaEscalaDiaria(...);
+    //     if (!escalado) { ...conta as vagas, barra se cheia... }
+    //     INSERT ... furou_trava) VALUES (..., escalado)
+    //                                         ^^^^^^^^ o bug
+    //
+    // `escalado` e `furou` são coisas diferentes:
+    //     escalado = está na escala da diária
+    //     furou    = a fila ESTAVA CHEIA e ele entrou assim mesmo
+    //
+    // Gravando `escalado` no campo `furou_trava`, TODO escalado aparecia como
+    // "FUROU" na tela do admin — inclusive entrando às 07:41 numa fila vazia,
+    // com vaga sobrando. A etiqueta mentia.
+    //
+    // O print que denunciou tinha a assinatura exata do bug: toda linha com
+    // DIÁRIA tinha FUROU junto, 100% das vezes. Duas etiquetas que na verdade
+    // eram o mesmo booleano. Se "furou" significasse o que devia, seria raro.
+    //
+    // E eu nunca cheguei a CALCULAR "furou": o COUNT das vagas só rodava pra
+    // quem não era escalado (dentro do `if (!escalado)`). Pro escalado, o
+    // código nunca sabia se a fila estava cheia — não tinha como a etiqueta
+    // estar certa nem por acidente.
+    //
+    // Agora o COUNT roda pra todo mundo. Custa uma query a mais por ingresso de
+    // escalado — irrelevante: ingressos são alguns por minuto, e a linha da
+    // central já está travada com FOR UPDATE de qualquer forma.
     const escalado = await estaNaEscalaDiaria(pool, { central_id, cod_profissional });
 
-    if (!escalado) {
-      const ocupR = await client.query(
-        `SELECT COUNT(*)::int AS n FROM filas_vagas_dia
-          WHERE central_id = $1 AND data_ref = $2 AND liberada_em IS NULL`,
-        [central_id, dataRef]
-      );
-      const ocupadas = ocupR.rows[0].n;
-      if (ocupadas >= limite) {
-        await client.query('ROLLBACK');
-        return { ok: false, motivo: 'fila_cheia', limite, ocupadas };
-      }
+    const ocupR = await client.query(
+      `SELECT COUNT(*)::int AS n FROM filas_vagas_dia
+        WHERE central_id = $1 AND data_ref = $2 AND liberada_em IS NULL`,
+      [central_id, dataRef]
+    );
+    const ocupadas = ocupR.rows[0].n;
+    const cheia = ocupadas >= limite;
+
+    if (cheia && !escalado) {
+      await client.query('ROLLBACK');
+      return { ok: false, motivo: 'fila_cheia', limite, ocupadas };
     }
+
+    // A etiqueta "FUROU" só faz sentido aqui: a fila estava cheia, ele entrou
+    // porque está na escala. É o caso que o admin precisa ver — significa que o
+    // limite está errado pra escala montada.
+    const furou = cheia && escalado;
 
     // ── Ocupa ──
     //
@@ -126,11 +160,12 @@ async function verificarEOcuparVaga(pool, { central_id, cod_profissional, nome_p
        DO UPDATE SET ocupada_em = NOW(), liberada_em = NULL,
                      liberada_por_cod = NULL, liberada_por_nome = NULL,
                      furou_trava = EXCLUDED.furou_trava`,
-      [central_id, cod_profissional, nome_profissional || null, dataRef, escalado]
+      // FILAS_VAGAS_FUROU_FIX_V1_INSERT: `furou`, não `escalado`.
+      [central_id, cod_profissional, nome_profissional || null, dataRef, furou]
     );
 
     await client.query('COMMIT');
-    return { ok: true, ocupou: true, ja_tinha: false, furou: escalado };
+    return { ok: true, ocupou: true, ja_tinha: false, furou };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('❌ [filas/vagas]', err.message);
