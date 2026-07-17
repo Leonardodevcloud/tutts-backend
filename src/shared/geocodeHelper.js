@@ -90,10 +90,37 @@ async function geocodeForward(pool, endereco, opts = {}) {
       }
       return null;
     }
+    // GEOCODE_PRECISO_V1_HELPER — o Google não falha. Ele chuta, calado.
+    //
+    // Quando ele não acha o endereço exato, ele NÃO devolve erro: devolve o
+    // centroide do bairro ou da cidade com location_type='APPROXIMATE' e
+    // partial_match=true, e o status continua 'OK'.
+    //
+    // Este código pegava r0.geometry.location.lat sem olhar mais nada. Resultado
+    // medido em produção (17/07): endereços de CNPJ que não parseavam viravam o
+    // centro de Goiânia, e o cruzamento media 6.014m, 11.869m, 12.699m até o
+    // motoboy — e concluía que o motoboy estava mentindo.
+    //
+    // Um geocode que devolve o centro da cidade calado é PIOR que um que falha.
+    // Se falhasse, a gente sabia. Assim ele produz um número com cara de verdade
+    // e a culpa cai em quem está do lado certo.
+    //
+    // location_type, do mais preciso pro menos:
+    //   ROOFTOP             -> o ponto exato do imóvel
+    //   RANGE_INTERPOLATED  -> interpolado entre dois números da rua (~10-50m)
+    //   GEOMETRIC_CENTER    -> centro de uma rua/polígono
+    //   APPROXIMATE         -> centroide de bairro/cidade. NÃO É ENDEREÇO.
+    //
+    // Quem chama decide o que fazer. O helper só para de esconder.
     const r0 = data.results[0];
-    const lat = r0.geometry.location.lat;
+    const lat = r0.geometry.location.lat; // GEOCODE_PRECISO_V1_HELPER
     const lng = r0.geometry.location.lng;
     const formatado = r0.formatted_address;
+    const location_type = (r0.geometry && r0.geometry.location_type) || null;
+    const partial_match = !!r0.partial_match;
+    if (location_type === 'APPROXIMATE' || partial_match) {
+      console.warn(`[geocodeHelper:${source}] ⚠️ IMPRECISO (${location_type}${partial_match ? ', partial_match' : ''}) — ${endereco.slice(0, 70)} -> ${formatado ? formatado.slice(0, 50) : '?'}`);
+    }
 
     // 3) Popula cache (best-effort)
     pool.query(
@@ -111,6 +138,11 @@ async function geocodeForward(pool, endereco, opts = {}) {
       longitude: lng,
       endereco_formatado: formatado,
       fonte: 'google',
+      // GEOCODE_PRECISO_V1_RETURN: campos novos. Quem já usa este helper e não
+      // conhece location_type continua funcionando igual — só ignora.
+      location_type,
+      partial_match,
+      preciso: location_type !== 'APPROXIMATE' && !partial_match,
     };
   } catch (e) {
     console.warn(`[geocodeHelper:${source}] google falhou:`, e.message);

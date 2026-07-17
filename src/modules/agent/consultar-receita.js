@@ -80,6 +80,8 @@ function normalizarSituacao(s) {
  * Monta endereço completo formatado.
  */
 function formatarEndereco(dados) {
+  // GEOCODE_PRECISO_V1_STRING: isto e pra HUMANO ler na tela — o complemento
+  // importa pra ele. Pro Google, use enderecoParaGeocode() logo abaixo.
   const partes = [
     dados.logradouro,
     dados.numero,
@@ -87,6 +89,37 @@ function formatarEndereco(dados) {
     dados.bairro,
     dados.municipio,
     dados.uf,
+  ].map(p => (p || '').toString().trim()).filter(Boolean);
+  return partes.join(', ');
+}
+
+/**
+ * GEOCODE_PRECISO_V1_STRING — endereço LIMPO, só pra geocodificar.
+ *
+ * O formatarEndereco() acima continua igual: ele é pra HUMANO ver na tela, e o
+ * complemento importa pro humano ("SALA 302" é onde a loja fica).
+ *
+ * Pro Google, o complemento é veneno. "RUA X, 123, SALA 302 QUADRA 5 LOTE 8,
+ * SETOR BUENO, GOIÂNIA, GO" não parseia — ele desiste do endereço exato e
+ * devolve o centroide do bairro com location_type=APPROXIMATE. E aí o
+ * cruzamento mede 6km até o motoboy e barra ele.
+ *
+ * Duas diferenças, e as duas importam:
+ *   - SEM complemento: é o que quebra o parser.
+ *   - COM CEP no fim: no Brasil o CEP é a âncora mais forte que existe. Ele
+ *     sozinho já leva o Google pro quarteirão certo mesmo se o resto vier torto.
+ *
+ * Formato: "RUA X, 123, SETOR BUENO, GOIÂNIA, GO, 74000-000"
+ */
+function enderecoParaGeocode(dados) {
+  const cep = String(dados.cep || '').replace(/\D/g, '');
+  const partes = [
+    dados.logradouro,
+    dados.numero,
+    dados.bairro,
+    dados.municipio,
+    dados.uf,
+    cep.length === 8 ? `${cep.slice(0, 5)}-${cep.slice(5)}` : null,
   ].map(p => (p || '').toString().trim()).filter(Boolean);
   return partes.join(', ');
 }
@@ -123,6 +156,8 @@ async function consultarBrasilAPI(cnpj) {
       municipio: (d.municipio || '').trim() || null,
       uf: (d.uf || '').trim() || null,
       endereco: formatarEndereco(d),
+      // GEOCODE_PRECISO_V1_BRASILAPI
+      endereco_geocode: enderecoParaGeocode(d),
       telefone: (d.ddd_telefone_1 || '').toString().replace(/\D/g, '') || null,
       consultado_em: new Date().toISOString(),
     };
@@ -167,6 +202,11 @@ async function consultarOpenCNPJ(cnpj) {
       municipio: (d.municipio || '').trim() || null,
       uf: (d.uf || '').trim() || null,
       endereco: formatarEndereco(d),
+      // GEOCODE_PRECISO_V1_OPENCNPJ: a 2a fonte precisa do mesmo tratamento.
+      // Se só a BrasilAPI recebesse a string limpa, todo CNPJ que caísse no
+      // fallback voltaria a ser barrado — e ninguém entenderia por que "às vezes"
+      // funciona.
+      endereco_geocode: enderecoParaGeocode(d),
       telefone: tel || null,
       consultado_em: new Date().toISOString(),
     };

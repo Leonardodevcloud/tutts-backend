@@ -35,8 +35,33 @@ const { consultarReceita } = require('../consultar-receita');
 const { geocodeForward } = require('../../../shared/geocodeHelper');
 
 async function geocodarEndereco(pool, enderecoTexto) {
+  // GEOCODE_PRECISO_V1_ROTA: aceita o chute do Google. Use geocodarEnderecoPreciso().
   const r = await geocodeForward(pool, enderecoTexto, { source: 'agent-correcao-forward' });
   return r ? { lat: r.latitude, lng: r.longitude } : null;
+}
+
+/**
+ * GEOCODE_PRECISO_V1_ROTA — geocode que admite quando não sabe.
+ *
+ * Devolve null quando o Google não achou o endereço exato (APPROXIMATE ou
+ * partial_match), em vez de devolver o centro da cidade fingindo que é a loja.
+ *
+ * Por que isso é o conserto e não firula: medido no log de 17/07, o cruzamento
+ * media 6.014m / 11.869m / 12.699m e barrava o motoboy com "Você não está no
+ * endereço desse CNPJ". O motoboy ESTAVA no endereço. Quem não estava era o
+ * ponto de referência — era o centro de Goiânia.
+ *
+ * Com null, a distância não é calculada, a rota B não pontua, e o cruzamento
+ * decide com as outras rotas. Nenhum número inventado entra na conta.
+ */
+async function geocodarEnderecoPreciso(pool, enderecoTexto) {
+  const r = await geocodeForward(pool, enderecoTexto, { source: 'agent-correcao-forward' });
+  if (!r) return null;
+  if (r.preciso === false) {
+    console.log(`[agent] 🎯 Geocode IMPRECISO (${r.location_type}${r.partial_match ? '+partial' : ''}) — NÃO vou medir distância contra isto: "${String(enderecoTexto).slice(0, 60)}"`);
+    return null;
+  }
+  return { lat: r.latitude, lng: r.longitude, location_type: r.location_type };
 }
 
 // AGENTE_BCE_V1 (cep morto) — reverseGeocodeCep() foi removida.
@@ -356,18 +381,26 @@ function createCorrecaoRoutes(pool) {
         // 3a. Geocoda o endereco da Receita pra medir a distancia ate o GPS (Path B).
         //     Sem isso nao ha B, e sem B nada libera — por isso o resultado null
         //     vira "nao deu pra checar" na tela do motoboy, nao "voce errou".
-        if (receita && receita.ok && receita.endereco && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
+        // GEOCODE_PRECISO_V1_USO
+        // 1) usa a string LIMPA (sem complemento, com CEP) — cai no `endereco`
+        //    antigo só se a Receita for de um cache velho sem o campo novo.
+        // 2) usa o geocode que admite quando não sabe.
+        const _endGeo = receita && (receita.endereco_geocode || receita.endereco);
+        if (receita && receita.ok && _endGeo && Number.isFinite(parseFloat(motoboy_lat)) && Number.isFinite(parseFloat(motoboy_lng))) {
           try {
-            const geoReceita = await geocodarEndereco(pool, receita.endereco);
+            const geoReceita = await geocodarEnderecoPreciso(pool, _endGeo);
             if (geoReceita) {
               const { distanciaMetros } = require('../cruzar-validacoes');
               distanciaReceitaGps = distanciaMetros(geoReceita.lat, geoReceita.lng, motoboy_lat, motoboy_lng);
               // Anota lat/lng da Receita pra exibir/auditar depois
               receita.lat = geoReceita.lat;
               receita.lng = geoReceita.lng;
-              console.log(`[agent] 📍 Receita geocodada: ${geoReceita.lat.toFixed(6)},${geoReceita.lng.toFixed(6)} | distância até GPS: ${distanciaReceitaGps}m`);
+              console.log(`[agent] 📍 Receita geocodada [${geoReceita.location_type}]: ${geoReceita.lat.toFixed(6)},${geoReceita.lng.toFixed(6)} | distância até GPS: ${distanciaReceitaGps}m`);
             } else {
-              console.log(`[agent] ⚠️ Não conseguimos geocodar endereço da Receita`);
+              // Não é "não achamos o CNPJ". É "não achamos o ENDEREÇO dele com
+              // precisão suficiente pra usar como régua". A diferença importa:
+              // no primeiro caso o motoboy errou, no segundo fomos nós.
+              console.log(`[agent] ⚠️ Sem geocode preciso pra "${String(_endGeo).slice(0, 60)}" — a rota Endereço↔GPS não vai pontuar`);
             }
           } catch (geoErr) {
             console.error(`[agent] ⚠️ Erro geocoding Receita (não-bloqueante):`, geoErr.message);
