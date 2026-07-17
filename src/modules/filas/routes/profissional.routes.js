@@ -8,6 +8,10 @@ const { calcularDistanciaHaversine } = require('../filas.service');
 const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 // 🆕 2026-05-31: integração filas → garantido (registra 1º ingresso do dia)
 const { registrarGarantidoIngresso } = require('../../garantido/garantido.shared');
+// FILAS_VAGAS_V1_PROF_IMPORTS + DIARIA (17/07) — a fila clássica tem as mesmas regras.
+// Se a trava valesse só na auto-gerenciável, bastaria entrar pela outra porta.
+const { registrarDiariaIngresso } = require('../../diaria/diaria.shared');
+const { verificarEOcuparVaga } = require('../filas-vagas.shared');
 
 // Tempos de penalidade por saída voluntária (em minutos)
 const PENALIDADES_MINUTOS = [30, 120, 1440]; // 30min, 2h, 24h
@@ -164,6 +168,27 @@ function createFilasProfRoutes(pool, verificarToken, registrarAuditoria) {
         }
       }
       
+      // FILAS_VAGAS_V1_PROF_TRAVA — mesma trava da fila auto-gerenciável, mesmo lugar no
+      // fluxo: depois do "já está na fila", antes do INSERT.
+      //
+      // ATENÇÃO ao que ficou de fora: o caminho de RETORNO (o motoboy voltando
+      // de rota, lá em cima no `if (posicaoAtual)`) NÃO passa por aqui — e não
+      // pode passar. Ele já ocupou vaga quando entrou de manhã; cobrar de novo
+      // barraria o cara na volta da própria corrida.
+      const vaga = await verificarEOcuparVaga(pool, {
+        central_id: central.central_id,
+        cod_profissional,
+        nome_profissional,
+      });
+      if (!vaga.ok) {
+        return res.status(409).json({
+          error: 'fila_cheia',
+          codigo_bloqueio: 'fila_cheia',
+          limite: vaga.limite,
+          mensagem: `Esta central trabalha com ${vaga.limite} motos por dia e as ${vaga.limite} vagas já foram ocupadas hoje. As vagas zeram à meia-noite.`,
+        });
+      }
+
       const ultimaPosicao = await pool.query('SELECT COALESCE(MAX(posicao), 0) as max_pos FROM filas_posicoes WHERE central_id = $1 AND status = $2', [central.central_id, 'aguardando']);
       const posicao = parseInt(ultimaPosicao.rows[0].max_pos) + 1;
       

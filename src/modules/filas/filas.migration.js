@@ -202,6 +202,48 @@ async function initFilasTables(pool) {
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS abertura_horario_ativa BOOLEAN DEFAULT false`).catch(() => {});
   await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS abertura_horario       TIME`).catch(() => {});
   console.log('✅ Colunas de trava de horário de abertura verificadas');
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FILAS_VAGAS_V1_MIGRATION — trava de vagas por dia
+  //
+  // A regra: "15 pessoas entraram. Elas ficam registradas. Por mais que saiam
+  // da fila, o registro delas na contagem continua."
+  //
+  // Isto NÃO é um contador de quantos estão na fila AGORA. É um contador de
+  // quantos JÁ ENTRARAM HOJE. A diferença é a funcionalidade inteira — se fosse
+  // ocupação atual, o 16º entraria assim que alguém saísse pro almoço.
+  //
+  // Fica aqui e não no módulo da diária de propósito: a trava vale pra qualquer
+  // fila, com ou sem diária.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 0 = sem trava. É o default, então nenhuma central existente acorda travada
+  // depois do deploy.
+  await pool.query(`ALTER TABLE filas_centrais ADD COLUMN IF NOT EXISTS vagas_limite INTEGER DEFAULT 0`).catch(() => {});
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS filas_vagas_dia (
+      id SERIAL PRIMARY KEY,
+      central_id INTEGER REFERENCES filas_centrais(id) ON DELETE CASCADE,
+      cod_profissional VARCHAR(50) NOT NULL,
+      nome_profissional VARCHAR(255),
+      data_ref DATE NOT NULL,
+      ocupada_em TIMESTAMP DEFAULT NOW(),
+      liberada_em TIMESTAMP,
+      liberada_por_cod VARCHAR(50),
+      liberada_por_nome VARCHAR(255),
+      furou_trava BOOLEAN DEFAULT false,
+      UNIQUE(central_id, cod_profissional, data_ref)
+    )
+  `);
+  // O UNIQUE acima é a trava de verdade: a mesma pessoa não queima duas vagas no
+  // mesmo dia, nem se tocar "entrar" dez vezes. Mesmo padrão do
+  // garantido_registros, que já roda há meses.
+  //
+  // data_ref na chave é o que faz zerar sozinho à meia-noite: dia novo, linhas
+  // novas. Sem cron, sem job, sem nada pra esquecer de rodar.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_filas_vagas_dia_central_data ON filas_vagas_dia(central_id, data_ref) WHERE liberada_em IS NULL`).catch(() => {});
+  console.log('✅ Trava de vagas (filas_vagas_dia) verificada');
 }
 
 module.exports = { initFilasTables };

@@ -26,6 +26,9 @@ const { calcularDistanciaHaversine, compactarPosicoes, reordenarMotoboy, registr
 const { marcarMotoboyEmLoja } = require('../../disponibilidade/disponibilidade.shared');
 // 🆕 2026-05-31: integração filas → garantido (registra 1º ingresso do dia)
 const { registrarGarantidoIngresso } = require('../../garantido/garantido.shared');
+// FILAS_VAGAS_V1_AUTO_IMPORTS + DIARIA (17/07)
+const { registrarDiariaIngresso } = require('../../diaria/diaria.shared');
+const { verificarEOcuparVaga } = require('../filas-vagas.shared');
 // 🆕 2026-05-31: helpers de timezone Bahia (fronteira de dia independente da sessão)
 const { mesmoDiaBahiaSQL, inicioProximoDiaBahiaSQL } = require('../../../shared/utils/tzBahia');
 
@@ -179,6 +182,40 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         });
       }
 
+      // ══════════════════════════════════════════════════════════════════════
+      // FILAS_VAGAS_V1_AUTO_TRAVA — a trava mora AQUI, e o lugar não é acidental.
+      //
+      // DEPOIS do 409 de "já está na fila" (linha acima): quem já está dentro
+      // nem chega aqui.
+      //
+      // ANTES do INSERT em filas_posicoes: se ficasse depois, o motoboy entraria
+      // na fila e só então descobriria que não tinha vaga — e alguém teria que
+      // tirar ele de lá.
+      //
+      // A verificarEOcuparVaga() faz as duas coisas numa transação só (confere e
+      // ocupa). Separar em "confere" e "ocupa" abriria a corrida que o
+      // FOR UPDATE lá dentro existe pra fechar.
+      //
+      // Reentrada no MESMO dia (saiu e voltou) não consome outra vaga: a função
+      // vê que ele já tem registro hoje e devolve ja_tinha=true. É o ponto todo
+      // da regra — a vaga é dele desde o 1º ingresso, saia ele ou não.
+      // ══════════════════════════════════════════════════════════════════════
+      const vaga = await verificarEOcuparVaga(pool, {
+        central_id: central.central_id_resolved,
+        cod_profissional,
+        nome_profissional,
+      });
+      if (!vaga.ok) {
+        return res.status(409).json({
+          error: 'fila_cheia',
+          codigo_bloqueio: 'fila_cheia',
+          limite: vaga.limite,
+          // A mensagem diz o NÚMERO e diz QUANDO ZERA. "Fila cheia" sozinho gera
+          // ligação pro suporte; "15 por dia, zera meia-noite" não gera.
+          mensagem: `Esta central trabalha com ${vaga.limite} motos por dia e as ${vaga.limite} vagas já foram ocupadas hoje. As vagas zeram à meia-noite.`,
+        });
+      }
+
       // 5) Calcular nova posição (última + 1)
       const ultR = await pool.query(
         `SELECT COALESCE(MAX(posicao), 0) AS max_pos FROM filas_posicoes
@@ -229,6 +266,13 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         central_id: central.central_id_resolved, cod_profissional, nome_profissional,
       });
 
+      // DIARIA_V1_AUTO_ENTRADA: a diária é irmã do garantido — mesma trava de
+      // 1º ingresso, mesmo cálculo. Só uma das duas responde: a central é ou uma
+      // ou outra (CHECK no banco), então a que estiver desligada devolve null.
+      const diaria = await registrarDiariaIngresso(pool, {
+        central_id: central.central_id_resolved, cod_profissional, nome_profissional,
+      });
+
       res.json({
         success: true,
         posicao: novaPosicao,
@@ -237,6 +281,7 @@ function createFilasAutoRoutes(pool, verificarToken, verificarAdmin, registrarAu
         mensagem: 'Você entrou! O agente vai confirmar que está sem corrida ativa em alguns segundos.',
         agente_status: 'pendente',
         garantido,
+        diaria,
       });
 
       registrarAuditoria(req, 'FILA_AUTO_ENTRAR', 'user', 'filas_posicoes', null, {

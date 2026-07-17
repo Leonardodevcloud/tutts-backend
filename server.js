@@ -61,6 +61,9 @@ const { initLojaRoutes, initLojaTables } = require('./src/modules/loja');
 const { initRoteirizadorRoutes, initRoteirizadorTables } = require('./src/modules/roteirizador');
 const { initFilasRoutes, initFilasTables } = require('./src/modules/filas');
 const { initGarantidoRoutes, initGarantidoTables } = require('./src/modules/garantido');
+// DIARIA_V1_SERVER_IMPORT (17/07): irmã do garantido — mesma trava de 1º ingresso, mesmo
+// cálculo, mas com horário individual por motoboy. Mutuamente exclusivos (CHECK).
+const { initDiariaRoutes, initDiariaTables } = require('./src/modules/diaria');
 const { initConfigRoutes, initConfigTables } = require('./src/modules/config');
 const { initAuthRoutes, initAuthTables } = require('./src/modules/auth');
 // 🆕 2026-05: módulo perfil — cadastro obrigatório do motoboy (selfie + WhatsApp)
@@ -701,6 +704,8 @@ app.use('/api/geocode', geocodeRouter);
 // Filas
 app.use('/api/filas', initFilasRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 app.use('/api', initGarantidoRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
+// DIARIA_V1_SERVER_USE (17/07)
+app.use('/api', initDiariaRoutes(pool, verificarToken, verificarAdmin, registrarAuditoria));
 
 // Config, Auth, Disponibilidade, Financial, Solicitacao, BI, Todo, Misc
 // ⚠️ IMPORTANTE: Módulos montados em /api NÃO PODEM ter verificarAdmin no mount!
@@ -922,6 +927,10 @@ async function initDatabase() {
     try { await initLogisticsTables(pool); } catch (e) { console.error('Logistics tables error:', e.message); }
     try { await initFilasTables(pool); } catch (e) { console.error('⚠️ Filas tables error:', e.message); }
     try { await initGarantidoTables(pool); } catch (e) { console.error('⚠️ Garantido tables error:', e.message); }
+    // DIARIA_V1_SERVER_TABLES (17/07): DEPOIS do garantido de propósito — o CHECK
+    // (NOT (garantido_ativo AND diaria_ativa)) referencia a coluna garantido_ativo,
+    // e ela precisa existir antes.
+    try { await initDiariaTables(pool); } catch (e) { console.error('⚠️ Diária tables error:', e.message); }
     try { await initFeedbackTables(pool); } catch (e) { console.error('⚠️ Feedback tables error:', e.message); }
     try { await initConfirmaFacilTables(pool); } catch (e) { console.error('⚠️ ConfirmaFacil tables error:', e.message); }
     await createPerformanceIndices(pool);
