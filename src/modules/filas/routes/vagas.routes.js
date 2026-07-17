@@ -4,6 +4,15 @@
  * Entra como 4º sub-router do filas.routes.js — a trava é da FILA, não da
  * diária. Ela funciona numa central sem diária nenhuma, e por isso não pode
  * morar no módulo da diária.
+ *
+ * ATENÇÃO AO PREFIXO: este router é montado dentro do initFilasRoutes, que o
+ * server.js pendura em '/api/filas' (linha 702). Então os caminhos aqui são
+ * RELATIVOS: '/vagas/:id' vira '/api/filas/vagas/:id'.
+ *
+ * Escrever '/filas/vagas/:id' aqui produziria '/api/filas/filas/vagas/:id' — que
+ * nunca responde. Foi exatamente o erro que eu cometi na primeira versão deste
+ * arquivo, e que só apareceu quando conferi as rotas do front contra as do back.
+ * O módulo da diária NÃO tem esse problema porque ele é montado em '/api' puro.
  */
 'use strict';
 
@@ -15,7 +24,7 @@ function createFilasVagasRoutes(pool, verificarToken, verificarAdmin, registrarA
   const router = express.Router();
 
   // ── GET: contagem + quem ocupa ──
-  router.get('/filas/vagas/:central_id', verificarToken, verificarAdmin, async (req, res) => {
+  router.get('/vagas/:central_id', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const centralId = parseInt(req.params.central_id, 10);
       if (!centralId) return res.status(400).json({ erro: 'central_id inválido' });
@@ -65,7 +74,7 @@ function createFilasVagasRoutes(pool, verificarToken, verificarAdmin, registrarA
   });
 
   // ── PUT: limite ──
-  router.put('/filas/vagas/:central_id/limite', verificarToken, verificarAdmin, async (req, res) => {
+  router.put('/vagas/:central_id/limite', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const centralId = parseInt(req.params.central_id, 10);
       let limite = parseInt(req.body.vagas_limite, 10);
@@ -94,7 +103,7 @@ function createFilasVagasRoutes(pool, verificarToken, verificarAdmin, registrarA
   //
   // O único jeito de devolver uma vaga. Sair da fila NÃO devolve — é o ponto
   // inteiro da funcionalidade.
-  router.post('/filas/vagas/:id/liberar', verificarToken, verificarAdmin, async (req, res) => {
+  router.post('/vagas/:id/liberar', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
       if (!id) return res.status(400).json({ erro: 'id inválido' });
