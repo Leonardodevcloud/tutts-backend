@@ -376,109 +376,233 @@ function createHistoricoRoutes(pool, verificarAdmin) {
     }
   });
 
-  // GET /agent/analytics (admin)
+  // ══════════════════════════════════════════════════════════════════════════
+  // GET /agent/analytics (admin) — ANALYTICS_V2
+  //
+  // Reescrito inteiro. O que estava errado no anterior:
+  //
+  // 1. SO CONTAVA 'sucesso' E 'erro'. A tabela tem seis estados possiveis
+  //    (pendente, processando, sucesso, erro, falhou, barrado, bloqueado_cliente)
+  //    e o SQL conhecia dois. Na producao isso dava:
+  //
+  //        5777 total - 4652 sucesso - 576 erro - 6 pendentes = 543 SUMIDAS
+  //
+  //    543 correcoes (9,4%) que nao apareciam em lugar nenhum da tela. E as
+  //    barradas, que a gente comecou a gravar agora, cairiam no mesmo buraco.
+  //
+  // 2. QUATRO JANELAS NA MESMA TELA. O card "Total" era de SEMPRE (sem filtro de
+  //    data), o grafico de mes era 6 meses, o de semana 8 semanas, o de dia 7
+  //    dias. Quatro numeros que nao conversam, um do lado do outro.
+  //
+  // 3. NAO ACEITAVA PERIODO. Nao dava pra olhar "a semana passada" nem "depois do
+  //    deploy X" — que e a pergunta que se faz quando se muda uma regra.
+  //
+  // Agora: ?de=YYYY-MM-DD&ate=YYYY-MM-DD (ou ?dias=N), e TODA consulta usa a
+  // mesma janela. O front manda um periodo, a tela inteira responde por ele.
+  //
+  // Novidades que o dado novo permite:
+  //   - por_fase: agrupa fase_falha (COALESCE com etapa_atual, pra falha de RPA)
+  //   - gps: histograma de gps_accuracy — responde "o limite de 60m esta apertado?"
+  //   - anterior: os mesmos totais da janela imediatamente anterior, do mesmo
+  //     tamanho, pro delta "vs. periodo anterior"
+  // ══════════════════════════════════════════════════════════════════════════
   router.get('/analytics', verificarAdmin, async (req, res) => {
     try {
+      // ── Janela ──
+      //
+      // TUDO aqui trabalha com DATA (YYYY-MM-DD), nunca com timestamp, e os
+      // parametros vao pro Postgres como STRING. Dois motivos:
+      //
+      // 1. Se eu montasse a janela a partir do AGORA (18:32), o `dias=30` daria
+      //    "de 17/06 as 18:32". Mas o generate_series($1::date) do grafico corta
+      //    em meia-noite — o grafico contaria o dia 17 inteiro e o KPI so a partir
+      //    das 18:32. Dois numeros diferentes na mesma tela, que e exatamente o
+      //    problema que este arquivo esta consertando.
+      //
+      // 2. node-postgres serializa objeto Date COM fuso; a coluna criado_em e
+      //    TIMESTAMP sem fuso. A conversao acontece calada e desloca tudo em 3h.
+      //    String 'YYYY-MM-DD' o Postgres faz cast pra meia-noite e pronto.
+      //
+      // `ate` e inclusivo pro usuario (quem digita 16/07 quer o dia 16 inteiro),
+      // entao as queries comparam com < ateExc, que e o dia seguinte.
+      const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const parseData = (s) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+        if (!m) return null;
+        const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      let de  = parseData(req.query.de);
+      let ate = parseData(req.query.ate);
+
+      if (!de || !ate) {
+        const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 30, 1), 730);
+        const hoje = new Date();
+        ate = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate()); // meia-noite de hoje
+        de  = new Date(ate);
+        de.setDate(de.getDate() - (dias - 1)); // inclusivo: dias=1 -> so hoje
+      }
+      if (de > ate) { const t = de; de = ate; ate = t; }
+
+      const MS_DIA     = 86400000;
+      const diasJanela = Math.max(1, Math.round((ate - de) / MS_DIA) + 1);
+
+      const ateExc = new Date(ate);  ateExc.setDate(ateExc.getDate() + 1);
+      // Janela anterior do MESMO tamanho, colada na atual (sem sobrepor nem pular).
+      const dePrev = new Date(de);   dePrev.setDate(dePrev.getDate() - diasJanela);
+
+      const P_DE = fmt(de), P_ATE = fmt(ate), P_ATE_EXC = fmt(ateExc), P_DE_PREV = fmt(dePrev);
+
+      // Um SELECT de totais serve pra janela atual e pra anterior — o mesmo texto
+      // com parametros diferentes. Se um dia mudar o que e "corrigida", muda aqui
+      // e os dois lados mudam juntos.
+      const SQL_TOTAIS = `
+        SELECT
+          COUNT(*)                                                          AS total,
+          COUNT(*) FILTER (WHERE status = 'sucesso')                        AS corrigidas,
+          COUNT(*) FILTER (WHERE status = 'barrado')                        AS barradas,
+          COUNT(*) FILTER (WHERE status IN ('erro', 'falhou'))              AS falhas,
+          COUNT(*) FILTER (WHERE status = 'bloqueado_cliente')              AS bloqueadas,
+          COUNT(*) FILTER (WHERE status IN ('pendente', 'processando'))     AS na_fila,
+          COUNT(*) FILTER (WHERE validado_por IS NOT NULL)                  AS validados
+        FROM ajustes_automaticos
+        WHERE criado_em >= $1 AND criado_em < $2
+      `;
+
       const [
         totaisRes,
-        porMesRes,
-        porSemanaRes,
+        anteriorRes,
         porDiaRes,
-        topProfissionaisRes,
-        topValidadoresRes,
-        redFlagsRes,
+        porFaseRes,
+        gpsRes,
+        profissionaisRes,
       ] = await Promise.all([
+        pool.query(SQL_TOTAIS, [P_DE, P_ATE_EXC]),
+        pool.query(SQL_TOTAIS, [P_DE_PREV, P_DE]),
+
+        // Serie diaria. generate_series preenche o dia que teve ZERO tentativa —
+        // sem isso o grafico "pula" o buraco e some com a informacao mais
+        // interessante que existe: o dia em que ninguem conseguiu corrigir nada.
         pool.query(`
           SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro,
-            COUNT(*) FILTER (WHERE status = 'pendente' OR status = 'processando') AS pendentes,
-            COUNT(*) FILTER (WHERE validado_por IS NOT NULL) AS validados
-          FROM ajustes_automaticos
-        `),
+            TO_CHAR(d.dia, 'YYYY-MM-DD')                                       AS dia,
+            COALESCE(COUNT(a.id), 0)                                           AS total,
+            COALESCE(COUNT(a.id) FILTER (WHERE a.status = 'sucesso'), 0)       AS corrigidas,
+            COALESCE(COUNT(a.id) FILTER (WHERE a.status = 'barrado'), 0)       AS barradas,
+            COALESCE(COUNT(a.id) FILTER (WHERE a.status IN ('erro','falhou')), 0) AS falhas
+          FROM generate_series($1::date, $2::date, '1 day') AS d(dia)
+          LEFT JOIN ajustes_automaticos a
+            ON a.criado_em >= d.dia AND a.criado_em < d.dia + INTERVAL '1 day'
+          GROUP BY d.dia
+          ORDER BY d.dia ASC
+        `, [P_DE, P_ATE]),
+
+        // Onde as tentativas morrem.
+        //
+        // COALESCE(fase_falha, etapa_atual): fase_falha e escrita pela rota quando
+        // ela recusa; falha do RPA (que ja entrou na fila) nao tem fase_falha, mas
+        // tem etapa_atual dizendo onde o Playwright quebrou. Os dois respondem a
+        // mesma pergunta — "onde morreu" — entao vao na mesma lista.
         pool.query(`
           SELECT
-            TO_CHAR(criado_em, 'YYYY-MM') AS mes,
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro
-          FROM ajustes_automaticos
-          WHERE criado_em >= NOW() - INTERVAL '6 months'
-          GROUP BY mes
-          ORDER BY mes DESC
-        `),
-        pool.query(`
-          SELECT
-            TO_CHAR(DATE_TRUNC('week', criado_em), 'DD/MM') AS semana_inicio,
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro
-          FROM ajustes_automaticos
-          WHERE criado_em >= NOW() - INTERVAL '8 weeks'
-          GROUP BY DATE_TRUNC('week', criado_em)
-          ORDER BY DATE_TRUNC('week', criado_em) DESC
-        `),
-        pool.query(`
-          SELECT
-            TO_CHAR(criado_em::date, 'DD/MM') AS dia,
-            criado_em::date AS dia_ordem,
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro
-          FROM ajustes_automaticos
-          WHERE criado_em >= NOW() - INTERVAL '7 days'
-          GROUP BY criado_em::date
-          ORDER BY dia_ordem ASC
-        `),
-        pool.query(`
-          SELECT
-            usuario_nome,
-            cod_profissional,
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro
-          FROM ajustes_automaticos
-          WHERE usuario_nome IS NOT NULL
-          GROUP BY usuario_nome, cod_profissional
-          ORDER BY total DESC
-          LIMIT 15
-        `),
-        pool.query(`
-          SELECT
-            validado_por,
+            COALESCE(fase_falha, etapa_atual, 'sem_fase') AS fase,
             COUNT(*) AS total
           FROM ajustes_automaticos
-          WHERE validado_por IS NOT NULL
-          GROUP BY validado_por
+          WHERE criado_em >= $1 AND criado_em < $2
+            AND status NOT IN ('sucesso', 'pendente', 'processando')
+          GROUP BY 1
           ORDER BY total DESC
-          LIMIT 10
-        `),
+        `, [P_DE, P_ATE_EXC]),
+
+        // Histograma da precisao do GPS. Responde direto: "o limite de 60m esta
+        // apertado demais?". As faixas espelham as do cruzar-validacoes
+        // (GPS_ACC_BOM=30, GPS_ACC_LIMITE=60) pra leitura ser imediata.
+        pool.query(`
+          SELECT
+            CASE
+              WHEN gps_accuracy <= 15  THEN '0-15'
+              WHEN gps_accuracy <= 30  THEN '16-30'
+              WHEN gps_accuracy <= 60  THEN '31-60'
+              WHEN gps_accuracy <= 100 THEN '61-100'
+              ELSE '100+'
+            END AS faixa,
+            COUNT(*) AS total
+          FROM ajustes_automaticos
+          WHERE criado_em >= $1 AND criado_em < $2
+            AND gps_accuracy IS NOT NULL
+          GROUP BY 1
+        `, [P_DE, P_ATE_EXC]),
+
+        // Profissionais. O "red_flags" separado morreu: era a MESMA tabela,
+        // filtrada por volume, num bloco vermelho proprio. Agora e uma coluna
+        // (aproveitamento) na lista unica — quem esta fora da curva o front marca.
+        // Volume alto com aproveitamento bom nao e red flag, e um cara que
+        // trabalha muito; o bloco antigo acusava os dois igual.
         pool.query(`
           SELECT
             usuario_nome,
             cod_profissional,
-            COUNT(*) AS total_semana,
-            COUNT(*) FILTER (WHERE status = 'sucesso') AS sucesso,
-            COUNT(*) FILTER (WHERE status = 'erro') AS erro
+            COUNT(*)                                                   AS total,
+            COUNT(*) FILTER (WHERE status = 'sucesso')                 AS corrigidas,
+            COUNT(*) FILTER (WHERE status = 'barrado')                 AS barradas,
+            COUNT(*) FILTER (WHERE status IN ('erro','falhou'))        AS falhas
           FROM ajustes_automaticos
-          WHERE criado_em >= NOW() - INTERVAL '7 days'
+          WHERE criado_em >= $1 AND criado_em < $2
             AND usuario_nome IS NOT NULL
           GROUP BY usuario_nome, cod_profissional
-          HAVING COUNT(*) > 10
-          ORDER BY total_semana DESC
-        `),
+          ORDER BY total DESC
+          LIMIT 50
+        `, [P_DE, P_ATE_EXC]),
       ]);
 
+      // Mediana da accuracy. Vai separado porque percentile_cont em cima de um
+      // GROUP BY de faixa nao devolve a mediana da amostra, e a mediana e o numero
+      // que a gente lê primeiro.
+      const medRes = await pool.query(`
+        SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gps_accuracy) AS mediana
+        FROM ajustes_automaticos
+        WHERE criado_em >= $1 AND criado_em < $2 AND gps_accuracy IS NOT NULL
+      `, [P_DE, P_ATE_EXC]);
+
+      const num = (o) => Object.fromEntries(
+        Object.entries(o).map(([k, v]) => [k, v === null ? 0 : Number(v)])
+      );
+
       return res.json({
-        totais: totaisRes.rows[0],
-        por_mes: porMesRes.rows,
-        por_semana: porSemanaRes.rows,
-        por_dia: porDiaRes.rows,
-        top_profissionais: topProfissionaisRes.rows,
-        top_validadores: topValidadoresRes.rows,
-        red_flags: redFlagsRes.rows,
+        periodo: {
+          de:   P_DE,
+          ate:  P_ATE,
+          dias: diasJanela,
+          anterior: { de: P_DE_PREV, ate: P_DE },
+        },
+        totais:   num(totaisRes.rows[0]),
+        anterior: num(anteriorRes.rows[0]),
+        por_dia:  porDiaRes.rows.map(num_dia),
+        por_fase: porFaseRes.rows.map(r => ({ fase: r.fase, total: Number(r.total) })),
+        gps: {
+          faixas:  Object.fromEntries(gpsRes.rows.map(r => [r.faixa, Number(r.total)])),
+          mediana: medRes.rows[0].mediana === null ? null : Math.round(Number(medRes.rows[0].mediana)),
+        },
+        profissionais: profissionaisRes.rows.map(r => ({
+          usuario_nome:     r.usuario_nome,
+          cod_profissional: r.cod_profissional,
+          total:            Number(r.total),
+          corrigidas:       Number(r.corrigidas),
+          barradas:         Number(r.barradas),
+          falhas:           Number(r.falhas),
+        })),
       });
+
+      function num_dia(r) {
+        return {
+          dia:        r.dia,
+          total:      Number(r.total),
+          corrigidas: Number(r.corrigidas),
+          barradas:   Number(r.barradas),
+          falhas:     Number(r.falhas),
+        };
+      }
     } catch (err) {
       console.error('[agent/analytics]', err.message);
       return res.status(500).json({ erro: 'Erro ao carregar analytics.' });
