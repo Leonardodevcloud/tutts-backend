@@ -351,10 +351,29 @@ async function fazerLogin(page, overrides) {
   // decisao pro codigo abaixo, que ja sabe distinguir "sem sessao" de "sessao
   // presa na tela de feriados" e produz a mensagem certa. Este patch troca o
   // sleep pela espera — nao mexe em quem decide.
+  // RPA_ESPERAS_V4_LOGIN — o `null` do meio nao e enfeite.
+  //
+  // A assinatura e:  page.waitForFunction(pageFunction[, arg, options])
+  //
+  // A v1 escreveu waitForFunction(fn, { timeout: TIMEOUT }) — e o {timeout} foi
+  // parar no lugar do ARG (o argumento que o Playwright serializa e entrega pra
+  // funcao rodar dentro do Chromium). As options ficaram undefined, e o Playwright
+  // caiu no default dele: 30 segundos.
+  //
+  // O lab pegou em 16/07:
+  //     30000ms  "fora do ar, os DOIS devem falhar"  ->  NOVO passou 30028ms
+  // Eu tinha previsto falha. Passou porque esperou 30s, nao 25s.
+  //
+  // Custo em producao: todo job condenado ficava ~30s pendurado em CADA um dos 3
+  // pontos. 90s de slot ocupado por job que ia morrer de qualquer jeito.
+  //
+  // O comentario fica AQUI FORA de proposito: o que esta dentro do () => {} roda
+  // no Chromium, nao no Node. Explicacao sobre a API do Playwright nao tem nada
+  // que fazer la dentro.
   await page.waitForFunction(() => {
     const el = document.querySelector('#loginEmail');
     return (el && el.offsetParent !== null) || !location.href.includes('loginFuncionarioNovo');
-  }, { timeout: TIMEOUT }).catch(() => {});
+  }, null, { timeout: TIMEOUT }).catch(() => {});
 
   const temEmail = await page.locator('#loginEmail').isVisible().catch(() => false);
   if (!temEmail) {
@@ -568,8 +587,40 @@ async function executarCorrecaoEndereco(params) {
       log('🔍 Botão não encontrado no DOM — usando pesquisa...');
 
       // Clicar na barra "Pesquisar serviços" para expandir
+      //
+      // RPA_ESPERAS_V4_BARRA — ESTE E O ASSASSINO DOS 120 'localizando'.
+      //
+      // A linha era:
+      //     const barraVisivel = await barraPesquisa.isVisible().catch(() => false);
+      //
+      // isVisible() e uma foto do instante. E a sequencia inteira era:
+      //
+      //   1. o robo chega na tela de acompanhamento
+      //   2. pergunta "a barra 'Pesquisar servicos' esta visivel?" -> NAO (a pagina
+      //      ainda esta renderizando)
+      //   3. PULA A EXPANSAO (o `if (barraVisivel)` e falso)
+      //   4. espera 8s pelo #search-autocomplete-input... que NAO EXISTE ate alguem
+      //      clicar na barra pra expandir
+      //   5. conclui "sessao expirada", forca re-login, tenta de novo
+      //   6. grava "OS 1260753 nao localizada na busca do sistema externo.
+      //      Pode estar concluida/cancelada."
+      //
+      // A OS estava viva. A sessao estava viva. A barra estava a caminho. O robo
+      // so perguntou cedo demais, uma vez, e desistiu de perguntar.
+      //
+      // Os 10s nao sao chute: a MEDICAO da Mapp real (lab, 16/07) deu 3507ms so
+      // pro page.goto responder com domcontentloaded. Uma pagina que leva 3,5s pra
+      // comecar a existir nao tem como ter a barra pronta no instante zero.
+      //
+      // O `if (barraVisivel)` embaixo continua igual: se a barra realmente nao
+      // existir (ex: ja expandida), ele pula, como antes. Isto aqui so garante que
+      // "nao existe" signifique "esperei 10s e nao veio", e nao "olhei antes dela
+      // chegar".
       const barraPesquisa = page.locator('text=Pesquisar serviços').first();
-      const barraVisivel = await barraPesquisa.isVisible().catch(() => false);
+      const barraVisivel = await barraPesquisa
+        .waitFor({ state: 'visible', timeout: 10000 })
+        .then(() => true)
+        .catch(() => false);
       if (barraVisivel) {
         await barraPesquisa.click();
         await page.waitForTimeout(500);
@@ -577,8 +628,22 @@ async function executarCorrecaoEndereco(params) {
       }
 
       // Selecionar "Serviço" no select #search-type (classe custom-select)
+      //
+      // RPA_ESPERAS_V4_SELECT: mesmo bug do patch 04, um passo depois. O #search-type so
+      // nasce DEPOIS que o clique acima expande a barra — e um isVisible() logo em
+      // seguida do clique olha no meio da animacao do Bootstrap.
+      //
+      // Se pulasse, o tipo de pesquisa continuaria no default (que nao e
+      // "Servico") e a busca procuraria o numero da OS no campo errado. Isso
+      // tambem termina em "OS nao localizada" — pela mesma mentira.
+      //
+      // 5s aqui, e nao 10s: neste ponto a pagina JA esta carregada (o patch 07
+      // esperou por ela). O que se espera agora e so a animacao de expandir.
       const selectPesquisa = page.locator('#search-type');
-      const selectVisivel = await selectPesquisa.isVisible().catch(() => false);
+      const selectVisivel = await selectPesquisa
+        .waitFor({ state: 'visible', timeout: 5000 })
+        .then(() => true)
+        .catch(() => false);
       if (selectVisivel) {
         await selectPesquisa.selectOption({ label: 'Serviço' });
         await page.waitForTimeout(500);
@@ -657,8 +722,19 @@ async function executarCorrecaoEndereco(params) {
       // realmente nao vir (OS inexistente de verdade): a decisao continua sendo do
       // codigo abaixo, intacto. Este patch so garante que ele decida com a resposta
       // do AJAX na mao, em vez de decidir antes dela chegar.
+      // RPA_ESPERAS_V4_AUTOCOMPLETE: mesmo bug de assinatura do patch 01 — sem o
+      // `null`, este {timeout: 10000} ia como argumento pra funcao do browser e a
+      // espera virava 30s.
+      //
+      // Nota honesta: a MEDICAO da Mapp real (3 rodadas, 16/07) mostrou o
+      // autocomplete respondendo em 472ms de mediana, 797ms no pior caso. O sleep
+      // de 1500ms que estava aqui tinha folga de 3x e teria matado 0 de 3. Ou
+      // seja: eu acusei o autocomplete de matar 4 de cada 12 jobs e estava ERRADO.
+      // Esta espera fica como higiene (esperar e sempre melhor que dormir), nao
+      // como conserto. Quem conserta os 120 'localizando' e o patch 04 (a barra).
       await page.waitForFunction(
         () => document.querySelectorAll('.ui-menu-item .ui-menu-item-wrapper, .ui-menu-item-wrapper').length > 0,
+        null,
         { timeout: 10000 }
       ).catch(() => {});
 
@@ -1014,10 +1090,37 @@ async function executarCorrecaoEndereco(params) {
     //
     // Agora espera ate 8s o input de Latitude ficar visivel. O reclique embaixo
     // continua existindo pro caso do clique realmente nao ter pegado.
+    // RPA_ESPERAS_V4_FORM — assinatura + 15s + o re-clique. Tres coisas, e a
+    // terceira e a pior:
+    //
+    // 1. ASSINATURA: sem o `null`, os 8000 iam como argumento e a espera virava
+    //    30s (o default do Playwright). Mesmo bug do patch 01.
+    //
+    // 2. 8s ERA POUCO. O lab mostrou a v2 falhando com 9s de latencia. A MEDICAO
+    //    da Mapp real deu 3540ms so pro page.goto responder — um AJAX de modal
+    //    nesse sistema passa de 8s num dia ruim. Agora 15s. O custo de esperar
+    //    mais so e pago em job que ia falhar de qualquer jeito.
+    //
+    // 3. O RE-CLIQUE E O VENENO. Modal de Bootstrap/jQuery e TOGGLE: o segundo
+    //    clique FECHA. Entao, quando o modal so estava LENTO:
+    //
+    //        clica -> modal comeca a abrir -> a espera estoura -> count()=0
+    //              -> CLICA DE NOVO -> fecha o modal que estava abrindo
+    //              -> "form de correcao nao abriu"
+    //
+    //    O re-clique nunca foi o conserto. Era o comeco do problema. O lab prova:
+    //    com 1200ms de latencia o codigo original ja falhava, POR CAUSA do proprio
+    //    conserto.
+    //
+    //    Ele CONTINUA existindo — pro caso do clique realmente nao ter registrado,
+    //    que e o que ele foi escrito pra resolver. Mas agora, depois dele,
+    //    espera-se de verdade em vez de dormir 1000ms e olhar: se o re-clique
+    //    fechou um modal que estava abrindo, pelo menos o robo da a ele a chance
+    //    de reabrir.
     await page.waitForFunction(() => {
       const el = document.querySelector('input[placeholder="Latitude"]');
       return !!(el && el.offsetParent !== null);
-    }, { timeout: 8000 }).catch(() => {});
+    }, null, { timeout: 15000 }).catch(() => {});
 
     // Verificar se o form de correção abriu (inputs de lat/lng devem estar visíveis)
     const formAbriu = await page.locator('input[placeholder="Latitude"]:visible').count().catch(() => 0);
@@ -1025,7 +1128,10 @@ async function executarCorrecaoEndereco(params) {
       // Tentar clicar novamente
       log('⚠️ Form não abriu, tentando clicar novamente...');
       await page.click(`.btn-corrigir-endereco[data-ponto="${ponto}"]`);
-      await page.waitForTimeout(1000);
+      await page.waitForFunction(() => {
+        const el = document.querySelector('input[placeholder="Latitude"]');
+        return !!(el && el.offsetParent !== null);
+      }, null, { timeout: 8000 }).catch(() => {});
     }
 
     // ── Passo 5: Preencher lat/lng e validar ─────────────────────────────────
