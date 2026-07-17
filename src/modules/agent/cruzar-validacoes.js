@@ -223,6 +223,7 @@ function cruzarValidacoes({
   // ROTA_CEP_V1_SIG — a segunda perna. Ver o bloco da decisão lá embaixo.
   cep_receita,
   cep_gps,
+  nomes_gps, // ROTA_NOME_V1_SIG — terceira perna. Ver o bloco da decisão.
 }) {
   const scores = {};
 
@@ -307,8 +308,58 @@ function cruzarValidacoes({
   const cepConfirma = !temDistancia && !gpsImpreciso && cepComparavel && cepR === cepG;
   if (cepComparavel) scores.cep_receita_vs_gps = cepR === cepG ? 90 : 0;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ROTA_NOME_V1_DECISAO — a terceira perna.
+  //
+  // A pergunta: existe um estabelecimento com o nome desta empresa em 100m do
+  // motoboy? Se existe, ele está lá. É a evidência mais direta das três — o CEP
+  // diz "mesmo quarteirão", isto diz "esta loja, aqui".
+  //
+  // Compara os DOIS nomes da Receita (razão social e nome fantasia) contra TODOS
+  // os estabelecimentos que o Places achou. Basta um par bater.
+  //
+  //   "DULTRA CAMINHOES PECAS E SERVICOS LTDA"  (razão social)
+  //   "DULTRA CAMINHOES"                        (nome fantasia)
+  //   vs
+  //   "Dultra Caminhões" no Google              -> 100 no fantasia
+  //
+  // O CORTE É 85, e ele é alto de propósito.
+  //
+  // O scoreSimilaridade é Levenshtein + substring. Num raio de 100m numa rua
+  // comercial há dezenas de lojas, e quanto mais lojas, maior a chance de uma
+  // bater por acaso. Com corte baixo, "AUTO PECAS SILVA" casaria com "AUTO PECAS
+  // SANTOS" — e aí a rota vira gerador de falso positivo, que é pior que rota
+  // nenhuma: libera errado E ninguém percebe.
+  //
+  // 85 exige praticamente o mesmo nome, com folga só pra acento, LTDA, ME e
+  // afins — que é o que o normalizar() já tira.
+  //
+  // Mesmas travas das outras pernas:
+  //   - só quando NÃO há distância (o nome não desmente uma medição boa)
+  //   - só quando o CEP não resolveu (não paga Places à toa)
+  //   - !gpsImpreciso: com GPS de +-96m o Places busca em volta do lugar errado
+  // ══════════════════════════════════════════════════════════════════════════
+  const _nomesReceita = [];
+  if (receita && receita.nome_fantasia) _nomesReceita.push(receita.nome_fantasia);
+  if (receita && receita.razao_social) _nomesReceita.push(receita.razao_social);
+  const _nomesGps = Array.isArray(nomes_gps) ? nomes_gps.filter(Boolean) : [];
+
+  let nomeScore = 0;
+  let nomeVencedor = null;
+  if (_nomesReceita.length > 0 && _nomesGps.length > 0) {
+    for (const nR of _nomesReceita) {
+      for (const nG of _nomesGps) {
+        const s = scoreSimilaridade(nR, nG);
+        if (s > nomeScore) { nomeScore = s; nomeVencedor = nG; }
+      }
+    }
+    scores.nome_receita_vs_google = nomeScore;
+  }
+  const NOME_CORTE = 85;
+  const nomeConfirma = !temDistancia && !gpsImpreciso && !cepConfirma && nomeScore >= NOME_CORTE;
+
   const liberadoPorDistancia = temDistancia && !gpsImpreciso && distancia <= DIST_LIBERA_METROS;
-  const liberado = liberadoPorDistancia || cepConfirma;
+  const liberado = liberadoPorDistancia || cepConfirma || nomeConfirma;
   const barrar = !liberado;
 
   // A Receita respondeu que esse CNPJ não existe (as duas bases concordaram) ou o
@@ -331,7 +382,14 @@ function cruzarValidacoes({
   // Sem esta linha, o cara levaria "Não conseguimos consultar os dados agora,
   // tente de novo em um minuto" quando na verdade a gente conseguiu conferir e
   // reprovou. Ele tentaria pra sempre.
-  const indisponivel = barrar && !temDistancia && !cepComparavel && !cnpjNaoEncontrado && !gpsImpreciso;
+  // ROTA_NOME_V1_INDISP — `!nomeAvaliavel` entra na conta.
+  //
+  // Se o Places achou lojas em volta dele e nenhuma tem o nome da empresa, isso é
+  // MEDIÇÃO, não indisponibilidade: a gente conseguiu olhar e não achou. Vira
+  // 'presenca'. Só é 'indisponivel' quando nenhuma das três pernas conseguiu
+  // sequer produzir um número.
+  const nomeAvaliavel = _nomesReceita.length > 0 && _nomesGps.length > 0;
+  const indisponivel = barrar && !temDistancia && !cepComparavel && !nomeAvaliavel && !cnpjNaoEncontrado && !gpsImpreciso;
 
   // codigo_bloqueio: contrato pra tela. O front escolhe título/ícone/instrução por
   // este campo — nunca farejando o texto do motivo, que é copy e muda.
@@ -353,7 +411,8 @@ function cruzarValidacoes({
       // disponível) diria pro motoboy que a conferência não rodou — e ela rodou,
       // e ele passou. Mostrar 'nd' numa tela de sucesso é confuso e faz o suporte
       // achar que tem bug.
-      status: cepConfirma ? 'ok' : (!temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou')),
+      // ROTA_NOME_V1_CHECK: aprovado por qualquer perna é 'ok'.
+      status: (cepConfirma || nomeConfirma) ? 'ok' : (!temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou')),
     },
   ];
 
@@ -373,7 +432,10 @@ function cruzarValidacoes({
   // "Presença confirmada (nullm, limite 100m)" no log e no painel, porque não
   // existe distância nesse caminho. O admin leria "null" e desconfiaria do
   // registro inteiro — com razão.
-  const caminho_aprovacao = (!liberadoPorDistancia && cepConfirma)
+  // ROTA_NOME_V1_CAMINHO
+  const caminho_aprovacao = nomeConfirma
+    ? `Presença confirmada pelo nome (${nomeScore}%: "${nomeVencedor}") — sem geocode nem CEP`
+    : (!liberadoPorDistancia && cepConfirma)
     ? `Presença confirmada pelo CEP (${cepR}) — sem geocode do endereço`
     : liberado
     ? `Presença confirmada (${distancia}m, limite ${DIST_LIBERA_METROS}m)`

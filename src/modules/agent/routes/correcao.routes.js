@@ -13,7 +13,19 @@ const express = require('express');
 // localizacao sobra so a busca de estabelecimentos proximos, que alimenta o
 // Path C e nao depende de foto nenhuma. O arquivo continua existindo porque o
 // modulo coletaEnderecos ainda usa o caminho com foto.
-// VALIDACAO_B_UNICA_V1: os dois imports do Google sairam.
+// ROTA_NOME_V1_IMPORT — o Places volta, mas só como TERCEIRA perna.
+//
+// Ele saiu no VALIDACAO_B_UNICA_V1 com uma razão boa: era a única parte paga da
+// rota (~US$0.032 por miss de cache) e somava latência no caminho do motoboy.
+//
+// O que muda agora: ele não roda mais em TODA correção. Roda quando a distância
+// e o CEP já falharam — que é a minoria da minoria. O custo médio por correção
+// continua praticamente zero, e o `buscarEstabelecimentosProximos` já tem cache
+// regional por tile de ~110m, então região repetida nem chega no Google.
+const { buscarEstabelecimentosProximos } = require('../validar-localizacao');
+
+// VALIDACAO_B_UNICA_V1: os dois imports do Google sairam. (O Places voltou acima,
+// so pra cascata — ver ROTA_NOME_V1_IMPORT.)
 //
 // buscarEstabelecimentosProximos (Places) e precisaConsultarGoogle (o gate de
 // custo dele) nao tem mais chamador: a decisao e so a distancia. O arquivo
@@ -487,11 +499,49 @@ function createCorrecaoRoutes(pool) {
         // quebrado, que é a minoria. No caminho normal, zero chamadas novas e zero
         // latência a mais pro motoboy.
         // ══════════════════════════════════════════════════════════════════════
-        let cepGps = null;
+        let cepGps = null; // ROTA_NOME_V1_CASCATA
         const _semDistancia = distanciaReceitaGps === undefined || distanciaReceitaGps === null;
         if (_semDistancia && receita && receita.ok && receita.cep) {
           cepGps = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
           console.log(`[agent] 📮 Sem distância — rota do CEP: Receita=${receita.cep} GPS=${cepGps || 'nao-obtido'} ${cepGps && cepGps === receita.cep ? '✅ BATE' : '❌'}`);
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ROTA_NOME_V1_CASCATA — a terceira perna, e a mais cara.
+        //
+        // O Path C respondia: "existe um estabelecimento com o nome desta empresa
+        // bem onde o motoboy está?". Isso é evidência MAIS FORTE que o CEP — o CEP
+        // diz "mesmo quarteirão", o nome diz "esta loja, aqui".
+        //
+        // A CASCATA, em ordem de custo:
+        //
+        //   1. distância  (forward geocode, cacheado)      ~US$0
+        //   2. CEP        (reverse geocode)                 ~US$0.005
+        //   3. nome       (Places nearby)                   ~US$0.032
+        //
+        // Cada perna só roda quando a anterior não conseguiu decidir. Quem tem
+        // geocode bom — a maioria — nunca chega aqui e não paga nada. O
+        // VALIDACAO_B_UNICA_V1 tirou o Places porque ele rodava em TODA correção;
+        // rodando só no resto do resto, o custo médio some.
+        //
+        // O cache regional do buscarEstabelecimentosProximos (tile de ~110m) faz o
+        // segundo motoboy da mesma rua nem chegar no Google.
+        //
+        // Raio de 100m: o mesmo DIST_LIBERA_METROS. Não é coincidência — a
+        // pergunta é a mesma ("ele está na loja?"), só muda o instrumento.
+        // ══════════════════════════════════════════════════════════════════════
+        let nomesGps = [];
+        const _cepResolveu = cepGps && receita && receita.cep && cepGps === receita.cep;
+        if (_semDistancia && !_cepResolveu && receita && receita.ok) {
+          try {
+            const lugares = await buscarEstabelecimentosProximos(motoboy_lat, motoboy_lng, 100);
+            nomesGps = (lugares || []).map(l => l && l.nome).filter(Boolean);
+            console.log(`[agent] 🏪 Sem distância e sem CEP — rota do nome: ${nomesGps.length} estabelecimentos em 100m: ${nomesGps.slice(0, 5).join(' | ') || '(nenhum)'}`);
+          } catch (errPlaces) {
+            // Fail-safe: sem nomes, a rota do nome não pontua. Um apagão do Places
+            // não pode virar acusação contra o motoboy.
+            console.warn('[agent] buscarEstabelecimentosProximos falhou (nao-bloqueante):', errPlaces.message);
+          }
         }
 
         cruzamento = cruzarValidacoes({
@@ -501,8 +551,10 @@ function createCorrecaoRoutes(pool) {
           distancia_receita_gps: distanciaReceitaGps,
           // ROTA_CEP_V1_ARGS: null quando a distância resolveu — o cruzamento nem
           // considera a rota do CEP nesse caso.
-          cep_receita: (receita && receita.ok && receita.cep) || null,
+          cep_receita: (receita && receita.ok && receita.cep) || null, // ROTA_NOME_V1_ARGS
           cep_gps: cepGps,
+          //: vazio quando a distância ou o CEP resolveram.
+          nomes_gps: nomesGps,
           // GPS_ACC_BACKEND_V1: a precisao decide se a distancia PODE decidir.
           // A regra mora no cruzar-validacoes junto com o DIST_LIBERA_METROS —
           // nao no celular, onde bloqueava sem deixar rastro e exigia deploy da
