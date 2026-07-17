@@ -220,6 +220,9 @@ function cruzarValidacoes({
   motoboy_lng,
   distancia_receita_gps,
   gps_accuracy,
+  // ROTA_CEP_V1_SIG — a segunda perna. Ver o bloco da decisão lá embaixo.
+  cep_receita,
+  cep_gps,
 }) {
   const scores = {};
 
@@ -254,7 +257,58 @@ function cruzarValidacoes({
   // não decide.
   const gpsImpreciso = acc !== null && acc > GPS_ACC_LIMITE && !claramenteLonge;
 
-  const liberado = temDistancia && !gpsImpreciso && distancia <= DIST_LIBERA_METROS;
+  // ══════════════════════════════════════════════════════════════════════════
+  // ROTA_CEP_V1_DECISAO — a segunda perna.
+  //
+  // A distância continua sendo a regra. Isto aqui é rede, e ela só é acionada
+  // quando a régua principal não existe.
+  //
+  //   temDistancia  -> a distância decide, sozinha, como sempre decidiu.
+  //   !temDistancia -> NOSSO geocode falhou. O motoboy não tem culpa disso e não
+  //                    tem o que digitar diferente. Antes ele era barrado; agora
+  //                    o CEP responde, se conseguir.
+  //
+  // O CEP NUNCA sobrepõe uma medição boa. Se a distância diz 5km, o cara está a
+  // 5km — um CEP igual não desmente isso, e nem deveria. Por isso o
+  // `!temDistancia` na condição, e não um `||` solto.
+  //
+  // 8 DÍGITOS EXATOS. Nada de comparar os 5 primeiros: o prefixo é a sub-região
+  // (bairro inteiro, às vezes meia cidade). Isso não é evidência de presença, é
+  // evidência de estar na mesma zona — e transformaria a rede num buraco.
+  //
+  // O QUE ISTO CUSTA EM SEGURANÇA, dito na cara porque a decisão é sua:
+  //
+  //   Um CEP urbano cobre tipicamente uma rua ou um trecho dela — 100 a 300m.
+  //   Comparável ao DIST_LIBERA_METROS de 100m, um pouco mais frouxo.
+  //
+  //   MAS em cidade pequena um único CEP cobre o município inteiro (os que
+  //   terminam em -000 costumam ser assim). Nesses lugares, esta rota aprova
+  //   qualquer um que esteja na cidade.
+  //
+  //   Ela só roda quando o geocode falhou, então a exposição é pequena. E a
+  //   alternativa hoje é barrar 100% dessa fatia — gente honesta, que não tem o
+  //   que fazer pra resolver.
+  //
+  //   Se aparecer fraude, o log `📮 rota do CEP` no correcao.routes.js lista
+  //   cada uma. Dá pra medir antes de decidir.
+  // ══════════════════════════════════════════════════════════════════════════
+  const cepR = String(cep_receita || '').replace(/\D/g, '');
+  const cepG = String(cep_gps || '').replace(/\D/g, '');
+  const cepComparavel = cepR.length === 8 && cepG.length === 8;
+  //
+  // O  aqui é deliberado e foi acrescentado depois de rodar a
+  // tabela-verdade: sem ele, um GPS com +-96m de erro liberava pelo CEP. Com essa
+  // imprecisão o reverse-geocode pode cair num CEP vizinho ou no certo por sorte —
+  // cara ou coroa, que é precisamente o que o gpsImpreciso existe pra impedir na
+  // rota da distância. Se ele bloqueia uma perna, bloqueia as duas.
+  //
+  // Esse cara leva 'gps_impreciso', que tem ação própria e funciona: chegar perto
+  // da porta. Bem melhor que um sim/não sorteado.
+  const cepConfirma = !temDistancia && !gpsImpreciso && cepComparavel && cepR === cepG;
+  if (cepComparavel) scores.cep_receita_vs_gps = cepR === cepG ? 90 : 0;
+
+  const liberadoPorDistancia = temDistancia && !gpsImpreciso && distancia <= DIST_LIBERA_METROS;
+  const liberado = liberadoPorDistancia || cepConfirma;
   const barrar = !liberado;
 
   // A Receita respondeu que esse CNPJ não existe (as duas bases concordaram) ou o
@@ -267,7 +321,17 @@ function cruzarValidacoes({
   // indisponivel: barrou por FALTA DE DADO, não por culpa do motoboy. Sem
   // distância não há como checar presença, e não existe nada que ele possa
   // digitar diferente pra resolver.
-  const indisponivel = barrar && !temDistancia && !cnpjNaoEncontrado && !gpsImpreciso;
+  // ROTA_CEP_V1_INDISP — `!cepComparavel` entra na conta.
+  //
+  // "indisponivel" quer dizer "não consegui medir nada". Com a rota do CEP, isso
+  // deixa de ser verdade automática quando falta a distância: se o CEP era
+  // comparável e NÃO bateu, a gente mediu, sim — e a medida diz que ele não está
+  // lá. Isso é 'presenca', não indisponibilidade.
+  //
+  // Sem esta linha, o cara levaria "Não conseguimos consultar os dados agora,
+  // tente de novo em um minuto" quando na verdade a gente conseguiu conferir e
+  // reprovou. Ele tentaria pra sempre.
+  const indisponivel = barrar && !temDistancia && !cepComparavel && !cnpjNaoEncontrado && !gpsImpreciso;
 
   // codigo_bloqueio: contrato pra tela. O front escolhe título/ícone/instrução por
   // este campo — nunca farejando o texto do motivo, que é copy e muda.
@@ -285,7 +349,11 @@ function cruzarValidacoes({
       id: 'B',
       chave: 'endereco_receita_vs_gps',
       label: 'Você está no endereço desse CNPJ',
-      status: !temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou'),
+      // ROTA_CEP_V1_CHECK: aprovado pelo CEP é 'ok', não 'nd'. O `nd` (não
+      // disponível) diria pro motoboy que a conferência não rodou — e ela rodou,
+      // e ele passou. Mostrar 'nd' numa tela de sucesso é confuso e faz o suporte
+      // achar que tem bug.
+      status: cepConfirma ? 'ok' : (!temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou')),
     },
   ];
 
@@ -301,7 +369,13 @@ function cruzarValidacoes({
     endereco_receita_vs_gps: 'Endereço Receita↔GPS',
   };
 
-  const caminho_aprovacao = liberado
+  // ROTA_CEP_V1_CAMINHO — sem isto, aprovar pelo CEP escreveria
+  // "Presença confirmada (nullm, limite 100m)" no log e no painel, porque não
+  // existe distância nesse caminho. O admin leria "null" e desconfiaria do
+  // registro inteiro — com razão.
+  const caminho_aprovacao = (!liberadoPorDistancia && cepConfirma)
+    ? `Presença confirmada pelo CEP (${cepR}) — sem geocode do endereço`
+    : liberado
     ? `Presença confirmada (${distancia}m, limite ${DIST_LIBERA_METROS}m)`
     : null;
 

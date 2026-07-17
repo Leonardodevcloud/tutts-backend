@@ -32,7 +32,14 @@ const { consultarReceita } = require('../consultar-receita');
 // Agora: passa pelo geocodeHelper centralizado.
 // AGENTE_BCE_V1 (geocode): so o forward. O geocodeReverse era usado unicamente
 // pela reverseGeocodeCep, que saiu junto com o Path F.
-const { geocodeForward } = require('../../../shared/geocodeHelper');
+// ROTA_CEP_V1_IMPORT — o geocodeReverse volta.
+//
+// Ele saiu no AGENTE_BCE_V1 com a justificativa de que "alimentava o Path F, que
+// morreu". A justificativa era circular: a rota do CEP não foi removida por ser
+// ruim — foi removida na simplificação pra uma rota só. E aí a simplificação
+// virou ponto único de falha: quando o geocode do endereço não resolve, o
+// sistema não tem NADA e barra um motoboy que está na porta da loja.
+const { geocodeForward, geocodeReverse } = require('../../../shared/geocodeHelper');
 
 async function geocodarEndereco(pool, enderecoTexto) {
   // GEOCODE_PRECISO_V1_ROTA: aceita o chute do Google. Use geocodarEnderecoPreciso().
@@ -64,7 +71,42 @@ async function geocodarEnderecoPreciso(pool, enderecoTexto) {
   return { lat: r.latitude, lng: r.longitude, location_type: r.location_type };
 }
 
-// AGENTE_BCE_V1 (cep morto) — reverseGeocodeCep() foi removida.
+/**
+ * ROTA_CEP_V1_FN — CEP do lugar onde o motoboy está, pelo GPS.
+ *
+ * Devolve 8 dígitos ou null.
+ *
+ * Por que isto é a segunda perna e não mais um remendo: ele NÃO geocodifica
+ * endereço nenhum. O endereço da Receita — que vem escrito como
+ * "CONDE CRESPI ESQ. C/ RUA ANTONIO CRISPIM, 619, QUADRAM LOTE 10" — não entra
+ * nesta conta. Só entram as coordenadas do motoboy, que sempre existem, e o CEP
+ * da Receita, que vem estruturado e limpo da BrasilAPI.
+ *
+ * É imune exatamente ao que quebrou hoje.
+ *
+ * O CEP sai do endereco_formatado do Google (padrão "..., 74463-030, Goiânia").
+ * Não é o jeito mais bonito, mas é o que o helper expõe, e o formato do Google
+ * é estável há anos.
+ */
+async function reverseGeocodeCep(pool, lat, lng) {
+  if (!Number.isFinite(parseFloat(lat)) || !Number.isFinite(parseFloat(lng))) return null;
+  try {
+    const r = await geocodeReverse(pool, lat, lng, {
+      source: 'agent-correcao-cep',
+      // ~33m. Apertado de propósito: este CEP vai DECIDIR se o cara trabalha.
+      // O cache padrão de ~55m é bom pra mostrar endereço na tela; não pra isto.
+      tolerancia_graus: 0.0003,
+    });
+    if (!r || !r.endereco_formatado) return null;
+    const m = String(r.endereco_formatado).match(/(\d{5})-?(\d{3})/);
+    return m ? m[1] + m[2] : null;
+  } catch (e) {
+    // Fail-safe: sem CEP, a rota do CEP não pontua e a decisão fica com a
+    // distância. Nunca o contrário.
+    console.warn('[agent] reverseGeocodeCep falhou (nao-bloqueante):', e.message);
+    return null;
+  }
+}
 //
 // Ela existia por dois motivos, e os dois morreram junto com a reforma:
 //   1. alimentar o Path F (CEP Receita == CEP do GPS), que saiu da regra;
@@ -419,11 +461,48 @@ function createCorrecaoRoutes(pool) {
         // (endereco da Receita caindo no centroide do CEP erra 200m e barra quem
         // esta na porta). Nao ha mais rede. O unico botao e o DIST_LIBERA_METROS,
         // no topo do cruzar-validacoes.js.
+        // ══════════════════════════════════════════════════════════════════════
+        // ROTA_CEP_V1_CHAMADA — a rede que o comentário acima diz que não existe.
+        //
+        // O comentário do VALIDACAO_B_UNICA_V1, logo aí em cima, previu isto com
+        // precisão: "o C resgatava quem o geocoder jogava longe (endereço da
+        // Receita caindo no centroide erra 200m e barra quem está na porta). Não
+        // há mais rede."
+        //
+        // Em 17/07 aconteceu. O geocode do endereço da Receita — que vem escrito
+        // como "CONDE CRESPI ESQ. C/ RUA ANTONIO CRISPIM, 619, QUADRAM LOTE 10" —
+        // caía no centro da cidade, e o log mediu 6014m, 11869m, 12699m contra
+        // motoboys que estavam na porta da loja.
+        //
+        // SÓ RODA QUANDO NÃO HÁ DISTÂNCIA. Isso não é economia, é a regra:
+        //
+        //   - se a distância existe, ela DECIDE. O CEP não opina, não sobrepõe,
+        //     não resgata ninguém que está a 5km. Um CEP não pode desmentir uma
+        //     medição boa.
+        //   - se a distância não existe (nosso geocode falhou), aí sim o CEP é a
+        //     única evidência que sobrou — e ela é boa: não depende de
+        //     geocodificar endereço nenhum.
+        //
+        // Efeito colateral bom: o custo (~US$5/1000 no reverse) só é pago no caso
+        // quebrado, que é a minoria. No caminho normal, zero chamadas novas e zero
+        // latência a mais pro motoboy.
+        // ══════════════════════════════════════════════════════════════════════
+        let cepGps = null;
+        const _semDistancia = distanciaReceitaGps === undefined || distanciaReceitaGps === null;
+        if (_semDistancia && receita && receita.ok && receita.cep) {
+          cepGps = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
+          console.log(`[agent] 📮 Sem distância — rota do CEP: Receita=${receita.cep} GPS=${cepGps || 'nao-obtido'} ${cepGps && cepGps === receita.cep ? '✅ BATE' : '❌'}`);
+        }
+
         cruzamento = cruzarValidacoes({
-          receita,
+          receita, // ROTA_CEP_V1_CHAMADA
           motoboy_lat: parseFloat(motoboy_lat),
           motoboy_lng: parseFloat(motoboy_lng),
           distancia_receita_gps: distanciaReceitaGps,
+          // ROTA_CEP_V1_ARGS: null quando a distância resolveu — o cruzamento nem
+          // considera a rota do CEP nesse caso.
+          cep_receita: (receita && receita.ok && receita.cep) || null,
+          cep_gps: cepGps,
           // GPS_ACC_BACKEND_V1: a precisao decide se a distancia PODE decidir.
           // A regra mora no cruzar-validacoes junto com o DIST_LIBERA_METROS —
           // nao no celular, onde bloqueava sem deixar rastro e exigia deploy da
