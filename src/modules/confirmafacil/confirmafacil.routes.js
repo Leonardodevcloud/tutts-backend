@@ -949,7 +949,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       const sqlCount = `
         SELECT COUNT(*) AS total,
           COUNT(*) FILTER (WHERE c.status_cf = 'A_EMBARCAR')  AS a_embarcar,
-          COUNT(*) FILTER (WHERE c.status_cf = 'EM_TRANSITO') AS em_transito,
+          COUNT(*) FILTER (WHERE c.status_cf = 'NAO ENTREGUE') AS em_transito,
           COUNT(*) FILTER (WHERE c.status_cf = 'ENTREGUE')    AS entregue,
           COUNT(*) FILTER (WHERE c.status_cf = 'REENTREGA')   AS reentrega,
           COUNT(*) FILTER (WHERE c.status_cf = 'DEVOLVIDO')   AS devolvido,
@@ -1250,6 +1250,73 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
+
+  // ══════════════════════════════════════════════════
+  // [cf-cancelar-local-v1] Cancelar corrida SO na nossa central
+  // ══════════════════════════════════════════════════
+  // NAO toca na Mapp — apenas marca solicitacoes_corrida.status = 'cancelado'
+  // para nivelar corridas antigas/zumbi. Uso: corridas ja resolvidas fora do
+  // sistema que ficaram "vivas" no nosso banco.
+  //
+  // PROTECAO CONTRA RECRIACAO: alem de cancelar a corrida, marca o cache do CF
+  // como ARQUIVADO. Sem isso, a limpeza de vinculos orfaos apagaria o vinculo
+  // (status LIKE '%cancel%') e o _processarPendentesDoCache recriaria a corrida
+  // no proximo ciclo (so olha status_cf='A_EMBARCAR'). Mesma logica do
+  // _tratarCancelada. NAO remover.
+  router.post('/corrida/:solicitacaoId/cancelar-local', verificarToken, verificarAdmin, async (req, res, next) => {
+    const solicitacaoId = parseInt(req.params.solicitacaoId, 10);
+    if (!solicitacaoId) return res.status(400).json({ error: 'solicitacaoId invalido' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows: [sc] } = await client.query(
+        'SELECT id, status, tutts_os_numero FROM solicitacoes_corrida WHERE id = $1 FOR UPDATE',
+        [solicitacaoId]
+      );
+      if (!sc) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Corrida nao encontrada' }); }
+
+      const st = String(sc.status || '').toLowerCase();
+      if (st === 'cancelado' || st === 'finalizado') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Corrida ja esta ' + sc.status, status: sc.status });
+      }
+
+      await client.query(`
+        UPDATE solicitacoes_corrida
+           SET status = 'cancelado', cancelado_em = NOW(),
+               atualizado_em = NOW(), ultima_atualizacao = NOW()
+         WHERE id = $1
+      `, [solicitacaoId]);
+
+      // Marca o cache do CF como ARQUIVADO para o poller NAO recriar a corrida.
+      await client.query(`
+        UPDATE confirmafacil_nfs_cache
+           SET status_cf = 'ARQUIVADO'
+         WHERE id_embarque IN (
+           SELECT id_embarque FROM confirmafacil_vinculos WHERE solicitacao_id = $1
+         )
+      `, [solicitacaoId]).catch(() => {});
+
+      await client.query('COMMIT');
+
+      try {
+        if (typeof registrarAuditoria === 'function') {
+          await registrarAuditoria(req, 'cf.cancelar_corrida_local', 'admin', 'solicitacoes_corrida',
+            solicitacaoId, { os: sc.tutts_os_numero, status_anterior: sc.status, obs: 'cancelado so na central (Mapp intocada)' });
+        }
+      } catch (_) { /* best-effort */ }
+
+      res.json({ ok: true, solicitacao_id: solicitacaoId, status: 'cancelado',
+        mensagem: 'Corrida cancelada apenas na central. A OS na Mapp NAO foi tocada.' });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
 
   // ══════════════════════════════════════════════════
   // [cf-badge-canceladas-v1] Badge de notas canceladas no CF
