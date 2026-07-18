@@ -35,7 +35,45 @@ const CRIADO_BRT   = `((COALESCE(sc.created_at, v.criado_em) AT TIME ZONE 'UTC')
 const INICIO_BRT   = `(CASE WHEN ${CRIADO_BRT}::time > TIME '16:30'
                             THEN ((date(${CRIADO_BRT}) + 1) + TIME '08:00')
                             ELSE ${CRIADO_BRT} END)`;
-const DEADLINE_UTC = `((${INICIO_BRT} + INTERVAL '2 hours') AT TIME ZONE 'America/Sao_Paulo')`;
+
+// ── 2026-07 [cf-sla-prev-v1] O DEADLINE AGORA VEM DO CF ──────────────────
+// O CF calcula a previsao e nos ENTREGA em EmbarqueDTO.dataPrevisao — e o
+// _salvarCache ja grava isso em confirmafacil_nfs_cache.data_previsao desde
+// sempre. O dado estava no banco, sem uso.
+//
+// Medido nas 45 notas reais: dataPrevisao = dataEmissao + 120 min em 37 delas.
+// E o mesmo SLA de 2h. Os 8 outliers revelaram a regra completa do CF:
+//
+//   NF  13759  emissao qua 03/06 17:21 -> previsao sex 05/06 10:00
+//   NF  20069  emissao sex 12/06 16:33 -> previsao seg 15/06 10:00
+//   NF 227685  emissao qui 11/06 23:04 -> previsao sex 12/06 10:00
+//
+// Apos as 16:30 -> proximo DIA UTIL as 10:00. A 20069 pula o fim de semana.
+// A 13759 pula a quinta 04/06 = Corpus Christi. O calendario do CF conhece
+// feriado.
+//
+// O calculo antigo (mantido abaixo como fallback) diverge em DOIS pontos:
+//   1) ANCORA: contava de sc.created_at (criacao da CORRIDA). O CF conta de
+//      dataEmissao (emissao da NOTA). A diferenca e a nossa latencia de
+//      despacho (poller + backoff + janela 07:30-18:20) — ou seja, o painel
+//      tirava o nosso proprio atraso da nossa propria regua.
+//   2) CALENDARIO: fazia date+1 (dia corrido). O CF vai pro proximo dia UTIL.
+//      Sexta 16:33 -> nosso deadline caia num sabado; o do cliente e segunda.
+//
+// FUSO: a API do CF devolve timestamp naive em hora de parede BRT
+// ("2026-06-03T10:43:00"), e o poller grava com new Date(...) num servidor em
+// UTC, preservando a parede. Por isso interpretamos como America/Sao_Paulo.
+// Se a validacao do LEIA-ME mostrar o contrario, use CF_PREVISAO_TZ=UTC.
+const CF_PREVISAO_TZ = process.env.CF_PREVISAO_TZ || 'America/Sao_Paulo';
+
+// Deadline calculado por nos — vira FALLBACK (nota sem data_previsao no CF).
+const DEADLINE_CALC = `((${INICIO_BRT} + INTERVAL '2 hours') AT TIME ZONE 'America/Sao_Paulo')`;
+// Deadline oficial do CF.
+const DEADLINE_CF   = `(c.data_previsao AT TIME ZONE '${CF_PREVISAO_TZ}')`;
+// Kill-switch: CF_SLA_USA_PREVISAO=false volta a usar so o calculo antigo.
+const DEADLINE_UTC  = String(process.env.CF_SLA_USA_PREVISAO || 'true') === 'false'
+  ? DEADLINE_CALC
+  : `COALESCE(${DEADLINE_CF}, ${DEADLINE_CALC})`;
 // Entrega real -> timestamptz. Prioriza o horario CF-owned (finalizado_em,
 // que respeita a correcao manual de horario); se ausente, cai no MAX(data_finalizado)
 // do Tutts. Ambos sao UTC naive -> AT TIME ZONE 'UTC'.
@@ -55,6 +93,12 @@ async function _buscarClassificado(pool, dataRef = null) {
         c.nome_embarcador,
         c.status_cf,
         COALESCE(c.dias_atraso, 0) AS dias_atraso,
+        -- [cf-sla-prev-v1] veredito do proprio CF sobre a entrega.
+        -- Campo REAL da API e statusNota (o Swagger documenta como notaStatus,
+        -- mas a resposta traz statusNota — confirmado 45/45). O _salvarCache
+        -- ja gravava isso em status_nota; nunca foi usado.
+        UPPER(COALESCE(c.status_nota, '')) AS status_nota,
+        (c.data_previsao IS NOT NULL) AS tem_previsao_cf,
         c.destinatario_nome, c.destinatario_cidade, c.destinatario_uf,
         c.numero_nf, c.serie_nf,
         v.solicitacao_id,
@@ -83,8 +127,19 @@ async function _buscarClassificado(pool, dataRef = null) {
       CASE
         WHEN entregue_em IS NOT NULL
           THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
+        -- [cf-sla-prev-v1] Entrega sem data_finalizado nossa: usa o veredito do
+        -- CF. O dias_atraso vira ULTIMO recurso porque a granularidade dele e
+        -- em DIAS — inutil para um SLA de 2 HORAS: nota entregue 90 minutos
+        -- atrasada tem diasAtraso = 0 e era contada como 'no_prazo', inflando
+        -- o percentual do painel.
+        -- ENTREGUE_JUSTIFICADO conta como no_prazo: e a contabilidade do
+        -- proprio CF (atraso justificado nao pesa contra a transportadora).
         WHEN status_cf = 'ENTREGUE'
-          THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
+          THEN CASE
+                 WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
+                 WHEN status_nota IN ('ENTREGUE_NO_PRAZO', 'ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
+                 ELSE CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
+               END
         WHEN now() > deadline THEN 'estourada'
         WHEN (deadline - now()) <= INTERVAL '${RISCO_MIN} minutes' THEN 'em_risco'
         ELSE 'em_rota'
