@@ -856,7 +856,12 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   router.get('/nfs-lista', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       const { embarcador_cnpj, tem_corrida, status_cf, sla,
-              de, ate, busca, page = '0', size = '100' } = req.query;
+              de, ate, busca, page = '0', size = '100',
+              modo_data } = req.query;
+      // [cf-data-hoje-v1] modo_data='previsao_ou_emissao' -> o range de/ate casa
+      // se a NF foi EMITIDA no periodo OU tem PREVISAO no periodo (uniao).
+      // Ausente/qualquer outro valor -> comportamento antigo (so data_previsao).
+      const dataUniao = modo_data === 'previsao_ou_emissao';
 
       const pg = Math.max(0, Number(page));
       const sz = Math.min(500, Math.max(1, Number(size)));
@@ -869,8 +874,23 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         params.push(embarcador_cnpj);
         wheres.push(`REGEXP_REPLACE(c.cnpj_embarcador,'[^0-9]','','g') = REGEXP_REPLACE($${params.length},'[^0-9]','','g')`);
       }
-      if (de)  { params.push(de);  wheres.push(`c.data_previsao >= $${params.length}`); }
-      if (ate) { params.push(ate); wheres.push(`c.data_previsao <= $${params.length}`); }
+      if (dataUniao && (de || ate)) {
+        // Uniao: (previsao no range) OR (emissao no range). Cada lado respeita
+        // o de/ate que existir. Uma NF entra se QUALQUER das duas datas bater.
+        const orParts = [];
+        const prevCond = [];
+        const emisCond = [];
+        if (de)  { params.push(de);  prevCond.push(`c.data_previsao >= $${params.length}`); }
+        if (ate) { params.push(ate); prevCond.push(`c.data_previsao <= $${params.length}`); }
+        if (de)  { params.push(de);  emisCond.push(`c.data_emissao  >= $${params.length}`); }
+        if (ate) { params.push(ate); emisCond.push(`c.data_emissao  <= $${params.length}`); }
+        if (prevCond.length) orParts.push('(' + prevCond.join(' AND ') + ')');
+        if (emisCond.length) orParts.push('(' + emisCond.join(' AND ') + ')');
+        if (orParts.length) wheres.push('(' + orParts.join(' OR ') + ')');
+      } else {
+        if (de)  { params.push(de);  wheres.push(`c.data_previsao >= $${params.length}`); }
+        if (ate) { params.push(ate); wheres.push(`c.data_previsao <= $${params.length}`); }
+      }
       if (tem_corrida === 'sim') wheres.push('v.solicitacao_id IS NOT NULL');
       if (tem_corrida === 'nao') wheres.push('v.solicitacao_id IS NULL');
       if (busca) {
