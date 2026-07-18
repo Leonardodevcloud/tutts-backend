@@ -108,7 +108,16 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   router.post('/embarcadores', verificarToken, verificarAdmin, async (req, res, next) => {
     try {
       const { cliente_id, cnpj_embarcador, nome_embarcador,
-              endereco_texto, coleta_lat, coleta_lng, centro_custo_mapp } = req.body;
+              endereco_texto, coleta_lat, coleta_lng, centro_custo_mapp,
+              categoria_mapp } = req.body;
+
+      // 2026-07 [cf-cat-emb-v1] Categoria de frete fixa por embarcador (filial).
+      // Normaliza pra MAIUSCULA/trim. Tanto o poller (confirmafacil.poller.js
+      // ~linha 537) quanto a criacao manual (POST /criar-corrida ~linha 535)
+      // leem confirmafacil_embarcadores.categoria_mapp pra montar payloadTutts.categoria.
+      const categoriaNorm = (categoria_mapp && String(categoria_mapp).trim())
+        ? String(categoria_mapp).trim().toUpperCase()
+        : null;
 
       if (!cliente_id || !cnpj_embarcador || !endereco_texto)
         throw new AppError('cliente_id, cnpj_embarcador e endereco_texto são obrigatórios', 400);
@@ -162,8 +171,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
            coleta_rua, coleta_numero, coleta_bairro,
            coleta_cidade, coleta_uf, coleta_cep,
            coleta_lat, coleta_lng, coleta_nome_fantasia,
-           centro_custo_mapp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           centro_custo_mapp, categoria_mapp)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (config_id, cnpj_embarcador) DO UPDATE SET
           nome_embarcador     = EXCLUDED.nome_embarcador,
           coleta_rua          = EXCLUDED.coleta_rua,
@@ -175,14 +184,16 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           coleta_lat          = EXCLUDED.coleta_lat,
           coleta_lng          = EXCLUDED.coleta_lng,
           coleta_nome_fantasia= EXCLUDED.coleta_nome_fantasia,
-          centro_custo_mapp   = EXCLUDED.centro_custo_mapp
+          centro_custo_mapp   = EXCLUDED.centro_custo_mapp,
+          categoria_mapp      = EXCLUDED.categoria_mapp
         RETURNING *
       `, [cfg[0].id, cnpj_embarcador, nome_embarcador,
           coleta_rua, coleta_numero, coleta_bairro,
           coleta_cidade, coleta_uf, coleta_cep,
           lat || null, lng || null,
           nome_embarcador || null,
-          centro_custo_mapp || null]);
+          centro_custo_mapp || null,
+          categoriaNorm]);
 
       res.json({ ok: true, embarcador: rows[0] });
     } catch (err) { next(err); }
@@ -559,8 +570,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           cliente_id, numero_pedido, centro_custo, usuario_solicitante,
           forma_pagamento, retorno, tutts_os_numero, tutts_distancia,
           tutts_duracao, tutts_valor, tutts_url_rastreamento,
-          status, provider_usado
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          status, provider_usado, categoria_usada
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         RETURNING id
       `, [
         cliente_id,
@@ -576,6 +587,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         resultado.detalhes?.urlRastreamento || null,
         'enviado',
         'tutts',
+        payloadTutts.categoria || null,
       ]);
 
       const solicitacaoId = solic.id;
@@ -803,6 +815,23 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
       `, [codCliente]);
 
       res.json({ centros: rows.map(r => r.centro_custo), cod_cliente: codCliente, total: rows.length });
+    } catch (err) { next(err); }
+  });
+
+  // ── [cf-cat-emb-v1] Categorias de frete do cliente ──────────────
+  // Reusa clientes_solicitacao.categorias_disponiveis (mesma lista JSONB
+  // [{sigla, nome}] usada pelo modulo Solicitacao) pra alimentar o dropdown
+  // de categoria no cadastro de embarcador. Lista vazia => campo vira texto livre.
+  router.get('/categorias/:clienteId', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const { rows: [cli] } = await pool.query(
+        'SELECT categorias_disponiveis FROM clientes_solicitacao WHERE id = $1',
+        [req.params.clienteId]
+      );
+      const lista = (cli && Array.isArray(cli.categorias_disponiveis))
+        ? cli.categorias_disponiveis
+        : [];
+      res.json({ categorias: lista, total: lista.length });
     } catch (err) { next(err); }
   });
 
