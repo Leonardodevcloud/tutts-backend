@@ -185,6 +185,15 @@ async function initConfirmaFacilTables(pool) {
   `).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_canc_detectado ON confirmafacil_cancelamentos (detectado_em DESC)`).catch(() => {});
 
+  // [cf-fix-cancelado-em-v1] Em producao a tabela solicitacoes_corrida foi criada
+  // ANTES de cancelado_em existir no CREATE, e nao havia ALTER para ela — entao a
+  // coluna nunca existiu no banco (CREATE TABLE IF NOT EXISTS nao altera tabela
+  // existente). Garantimos aqui, idempotente. (ultima_atualizacao ja tem ALTER no
+  // modulo solicitacao; cancelado_em nao tinha.)
+  await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS cancelado_em TIMESTAMP`).catch(() => {});
+  await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS cancelado_por VARCHAR(255)`).catch(() => {});
+  await pool.query(`ALTER TABLE solicitacoes_corrida ADD COLUMN IF NOT EXISTS motivo_cancelamento TEXT`).catch(() => {});
+
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
 

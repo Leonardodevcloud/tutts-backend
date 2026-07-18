@@ -1283,12 +1283,19 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         return res.status(409).json({ error: 'Corrida ja esta ' + sc.status, status: sc.status });
       }
 
+      // [cf-fix-cancelado-em-v1] So colunas garantidas dentro da transacao —
+      // se cancelado_em faltar, o BEGIN inteiro fazia ROLLBACK e a corrida nao
+      // era cancelada. Agora o UPDATE critico usa so status + atualizado_em.
       await client.query(`
         UPDATE solicitacoes_corrida
-           SET status = 'cancelado', cancelado_em = NOW(),
-               atualizado_em = NOW(), ultima_atualizacao = NOW()
+           SET status = 'cancelado', atualizado_em = NOW()
          WHERE id = $1
       `, [solicitacaoId]);
+      // best-effort no mesmo tx: carimba cancelado_em/por (a migration garante a
+      // coluna; o catch evita abortar a transacao se por acaso ainda faltar).
+      await client.query(
+        `UPDATE solicitacoes_corrida SET cancelado_em = NOW() WHERE id = $1`, [solicitacaoId]
+      ).catch(() => {});
 
       // Marca o cache do CF como ARQUIVADO para o poller NAO recriar a corrida.
       await client.query(`

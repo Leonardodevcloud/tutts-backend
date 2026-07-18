@@ -846,12 +846,18 @@ class ConfirmaFacilPoller {
     const res = await this._cancelarOsTutts(config, alvo.tutts_os_numero);
 
     if (res.ok) {
+      // [cf-fix-cancelado-em-v1] So colunas garantidas. cancelado_em vem do
+      // ALTER na migration; se por algum motivo faltar, o COALESCE de colunas
+      // opcionais nao existe em SQL, entao mantemos o UPDATE minimo e resiliente.
       await this.pool.query(`
         UPDATE solicitacoes_corrida
-           SET status = 'cancelado', cancelado_em = NOW(),
-               atualizado_em = NOW(), ultima_atualizacao = NOW()
+           SET status = 'cancelado', atualizado_em = NOW()
          WHERE id = $1
       `, [alvo.id]).catch((e) => console.warn('[CF Canceladas] update status:', e.message));
+      // best-effort: carimba cancelado_em se a coluna existir (nao quebra se nao)
+      await this.pool.query(
+        `UPDATE solicitacoes_corrida SET cancelado_em = NOW() WHERE id = $1`, [alvo.id]
+      ).catch(() => {});
 
       console.log(`❌ [CF Canceladas] OS ${alvo.tutts_os_numero} cancelada — NF ${emb.numero} arquivada no CF (statusNota=${statusNota || 'n/a'})`);
       await this._registrarCancelamento(emb, config, alvo, 'cancelada', null);
