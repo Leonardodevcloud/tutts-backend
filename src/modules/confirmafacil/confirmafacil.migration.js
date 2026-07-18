@@ -156,6 +156,35 @@ async function initConfirmaFacilTables(pool) {
     )
   `).catch(() => {});
 
+  // [cf-badge-canceladas-v1] Resultado do cancelamento automatico de OS quando
+  // a NF vira ARQUIVADO no CF. Uma linha por NF cancelada, alimenta o badge.
+  // resultado: 'cancelada' (OS cancelada na Mapp com sucesso),
+  //            'alocado'   (Tutts recusou: motoboy ja alocado),
+  //            'falhou'    (erro real na Tutts, ver erro_msg),
+  //            'nada'      (ARQUIVADO sem OS viva — nada a cancelar),
+  //            'manual'    (operador marcou "cancelei na mao na Mapp").
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS confirmafacil_cancelamentos (
+      id_embarque     BIGINT PRIMARY KEY,
+      cliente_id      INT,
+      numero_nf       VARCHAR(30),
+      serie_nf        VARCHAR(10),
+      nome_embarcador VARCHAR(200),
+      solicitacao_id  INT,
+      os_numero       VARCHAR(30),
+      status_corrida  VARCHAR(30),
+      status_nota     VARCHAR(50),
+      resultado       VARCHAR(20) NOT NULL,
+      erro_msg        TEXT,
+      tentativas      INT DEFAULT 0,
+      resolvido       BOOLEAN DEFAULT FALSE,
+      resolvido_por   VARCHAR(120),
+      detectado_em    TIMESTAMP DEFAULT NOW(),
+      atualizado_em   TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cf_canc_detectado ON confirmafacil_cancelamentos (detectado_em DESC)`).catch(() => {});
+
   console.log('✅ [confirmafacil] tabelas verificadas');
 }
 

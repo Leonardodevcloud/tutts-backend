@@ -1251,6 +1251,60 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
   });
 
 
+  // ══════════════════════════════════════════════════
+  // [cf-badge-canceladas-v1] Badge de notas canceladas no CF
+  // ══════════════════════════════════════════════════
+
+  // Lista os cancelamentos para o badge. Default: ultimos 3 dias.
+  // ?dias=N amplia a janela (opcao "ver mais antigas" no front).
+  router.get('/canceladas', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const dias = Math.min(parseInt(req.query.dias, 10) > 0 ? parseInt(req.query.dias, 10) : 3, 90);
+      const { rows } = await pool.query(`
+        SELECT id_embarque, numero_nf, serie_nf, nome_embarcador,
+               os_numero, status_corrida, status_nota,
+               resultado, erro_msg, tentativas, resolvido, resolvido_por,
+               detectado_em, atualizado_em
+          FROM confirmafacil_cancelamentos
+         WHERE detectado_em > NOW() - ($1 || ' days')::interval
+         ORDER BY (resolvido = FALSE AND resultado IN ('falhou','alocado')) DESC,
+                  detectado_em DESC
+      `, [String(dias)]);
+
+      // resumo por resultado (ignora resolvidos na contagem de pendencia)
+      const resumo = { total: rows.length, cancelada: 0, alocado: 0, falhou: 0, nada: 0, manual: 0, pendentes: 0 };
+      for (const r of rows) {
+        resumo[r.resultado] = (resumo[r.resultado] || 0) + 1;
+        if (!r.resolvido && (r.resultado === 'falhou' || r.resultado === 'alocado')) resumo.pendentes++;
+      }
+      res.json({ dias, resumo, itens: rows });
+    } catch (err) { next(err); }
+  });
+
+  // Marca que o operador cancelou a OS manualmente na Mapp (ou resolveu o caso).
+  // Vira resultado='manual', resolvido=TRUE — sai da contagem de pendencias.
+  router.post('/canceladas/:idEmbarque/resolver', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const quem = (req.usuario && (req.usuario.nome || req.usuario.email)) || 'operador';
+      const { rows } = await pool.query(`
+        UPDATE confirmafacil_cancelamentos
+           SET resultado = 'manual', resolvido = TRUE, resolvido_por = $2, atualizado_em = NOW()
+         WHERE id_embarque = $1
+         RETURNING id_embarque, numero_nf, resultado, resolvido, resolvido_por
+      `, [req.params.idEmbarque, quem]);
+      if (!rows.length) return res.status(404).json({ error: 'Cancelamento nao encontrado' });
+
+      try {
+        if (typeof registrarAuditoria === 'function') {
+          await registrarAuditoria(req, 'cf.cancelamento_manual', 'admin', 'confirmafacil',
+            req.params.idEmbarque, { numero_nf: rows[0].numero_nf });
+        }
+      } catch (_) { /* auditoria best-effort */ }
+
+      res.json({ ok: true, item: rows[0] });
+    } catch (err) { next(err); }
+  });
+
   return router;
 }
 

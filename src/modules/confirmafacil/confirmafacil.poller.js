@@ -115,6 +115,34 @@ function _minutosAteJanela(d = new Date()) {
   return (1440 - agora) + CF_JANELA_INICIO_MIN;                          // passou do FIM -> amanha 07:30
 }
 
+// ── 2026-07 [cf-corte-diautil-v1] Corte por DIA UTIL usando a previsao do CF ──
+// Regra pedida: nota fora do horario OU no fim de semana OU em vespera de
+// feriado nao gera corrida no mesmo dia — gera no proximo DIA UTIL as 08:00
+// (sexta a noite -> segunda; vespera de feriado -> depois do feriado).
+//
+// NAO recriamos calendario de feriado. O CF ja entrega isso pronto em
+// EmbarqueDTO.dataPrevisao — que e "proximo dia util as 10:00" e comprovadamente
+// pula fim de semana E feriado (NF 13759: qua 03/06 -> sex 05/06, pulando
+// Corpus Christi na quinta). Adiamos a criacao para 2h ANTES dessa previsao
+// (as 08:00 do dia que o CF definiu), preservando a folga de 2h do SLA.
+//
+// Fuso: dataPrevisao vem naive em parede BRT ("2026-06-05T10:00:00").
+// Interpretamos com o mesmo CF_JANELA_TZ do resto do arquivo.
+const CF_CORTE_USA_PREVISAO = process.env.CF_CORTE_USA_PREVISAO !== 'false';
+
+// Minutos de AGORA ate as 08:00 (parede BRT) do dia da dataPrevisao do CF.
+// Retorna 0 se nao houver previsao utilizavel (cai no corte por horario puro)
+// ou se o alvo ja passou (nota antiga: gera agora, respeitando so o horario).
+function _minutosAtePrevisaoCF(dataPrevisao, d = new Date()) {
+  if (!dataPrevisao) return 0;
+  const m = String(dataPrevisao).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return 0;
+  // Alvo = 08:00 BRT (= 11:00 UTC, Bahia UTC-3 sem horario de verao) do dia da previsao.
+  const alvoUtcMs = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 11, 0, 0);
+  const diffMin = Math.round((alvoUtcMs - d.getTime()) / 60000);
+  return diffMin > 0 ? diffMin : 0;
+}
+
 // ── 🕒 2026-06 (v2): horario de funcionamento do FULL SCAN (rede ampla) ──
 // Fora desta janela, o full scan NAO roda; id-tailing + ocorrencia + cache
 // seguem 24/7 a cada 60s (captacao de NF nova nunca para). TZ = CF_JANELA_TZ.
@@ -516,15 +544,35 @@ class ConfirmaFacilPoller {
     );
     if (_bk.length > 0) { this._puladosBackoff = (this._puladosBackoff || 0) + 1; return; }
 
-    // 🕒 2026-06: janela de criacao (SO poller automatico). Fora de 07:30-18:20
-    // (Bahia), adia a criacao na MAPP pro proximo 07:30 reusando o backoff.
-    // O vinculo NAO e criado aqui, entao quando a janela abrir a NF e criada normal.
+    // 🕒 2026-06: janela de criacao (SO poller automatico).
+    // [cf-corte-diautil-v1] Duas camadas de corte, nesta ordem:
+    //   1) DIA UTIL: se a nota esta fora do horario / fim de semana / vespera de
+    //      feriado, o proximo dia util as 08:00 (via dataPrevisao do CF) esta no
+    //      futuro -> adia pra la. Cobre "sexta a noite -> segunda" e feriados.
+    //   2) HORARIO puro (fallback): se nao houver dataPrevisao utilizavel, cai no
+    //      corte antigo por _minutosAteJanela (proximo 07:30, sem pular fim de semana).
     if (CF_JANELA_CRIACAO_ATIVA) {
-      const _minJanela = _minutosAteJanela();
-      if (_minJanela > 0) {
-        const _horas = (_minJanela / 60).toFixed(1);
-        console.log(`🕒 [CF Poller] fora da janela (07:30-18:20) — adiando NF ${numeroNF} (idEmbarque ${idEmbarque}) por ~${_horas}h (proximo 07:30)`);
-        await this._agendarParaJanela(config.id, idEmbarque, _minJanela);
+      let _minAdiar = 0;
+      let _motivo   = '';
+
+      if (CF_CORTE_USA_PREVISAO) {
+        const _minPrev = _minutosAtePrevisaoCF(item.dataPrevisao);
+        if (_minPrev > 0) {
+          _minAdiar = _minPrev;
+          _motivo   = `dia util (previsao CF ${item.dataPrevisao})`;
+        }
+      }
+      // Fallback / reforco: mesmo com previsao no passado, respeita o horario do dia.
+      const _minHorario = _minutosAteJanela();
+      if (_minHorario > _minAdiar) {
+        _minAdiar = _minHorario;
+        _motivo   = 'fora do horario (07:30-18:20)';
+      }
+
+      if (_minAdiar > 0) {
+        const _horas = (_minAdiar / 60).toFixed(1);
+        console.log(`🕒 [CF Poller] adiando NF ${numeroNF} (idEmbarque ${idEmbarque}) por ~${_horas}h — ${_motivo}`);
+        await this._agendarParaJanela(config.id, idEmbarque, _minAdiar, _motivo);
         return;
       }
     }
@@ -784,9 +832,16 @@ class ConfirmaFacilPoller {
        WHERE v.id_embarque = $1
     `, [idEmb]);
 
-    if (!alvo || !alvo.tutts_os_numero) return out;
+    if (!alvo || !alvo.tutts_os_numero) {
+      await this._registrarCancelamento(emb, config, alvo, 'nada', null);
+      return out;
+    }
     const st = String(alvo.status || '').toLowerCase();
-    if (st === 'finalizado' || st.includes('cancel')) return out; // nada a fazer
+    if (st === 'finalizado' || st.includes('cancel')) {
+      // ja finalizada/cancelada: registra como 'nada' (nao ha o que cancelar)
+      await this._registrarCancelamento(emb, config, alvo, 'nada', null);
+      return out;
+    }
 
     const res = await this._cancelarOsTutts(config, alvo.tutts_os_numero);
 
@@ -799,6 +854,7 @@ class ConfirmaFacilPoller {
       `, [alvo.id]).catch((e) => console.warn('[CF Canceladas] update status:', e.message));
 
       console.log(`❌ [CF Canceladas] OS ${alvo.tutts_os_numero} cancelada — NF ${emb.numero} arquivada no CF (statusNota=${statusNota || 'n/a'})`);
+      await this._registrarCancelamento(emb, config, alvo, 'cancelada', null);
       out.cancelou = true;
       return out;
     }
@@ -807,6 +863,7 @@ class ConfirmaFacilPoller {
       // Motoboy ja alocado: a Tutts recusa o cancelamento. NAO forcamos —
       // cancelar aqui deixaria a mercadoria orfa com o profissional.
       out.alocado = true;
+      await this._registrarCancelamento(emb, config, alvo, 'alocado', 'Tutts: Alocado (motoboy em execucao)');
       const msg = `🗄️ *CF: nota cancelada com motoboy alocado*\n\nNF ${emb.numero}/${emb.serie} — ${(emb.embarcador && emb.embarcador.nome) || ''}\nOS ${alvo.tutts_os_numero} (status: ${alvo.status})\n\nA nota foi ARQUIVADA no ConfirmaFacil mas ja tem profissional na corrida. A Tutts recusou o cancelamento (Alocado). Avaliar manualmente.`;
       console.warn(`⚠️ [CF Canceladas] OS ${alvo.tutts_os_numero} ALOCADA — NF ${emb.numero} cancelada no CF mas nao da pra cancelar a OS`);
       await this._alertarWhats(msg);
@@ -814,7 +871,42 @@ class ConfirmaFacilPoller {
     }
 
     console.warn(`⚠️ [CF Canceladas] falha ao cancelar OS ${alvo.tutts_os_numero}: ${res.erro}`);
+    await this._registrarCancelamento(emb, config, alvo, 'falhou', res.erro);
     return out;
+  }
+
+  // [cf-badge-canceladas-v1] Persiste o resultado do cancelamento pro badge.
+  // Idempotente por id_embarque. tentativas so incrementa em 'falhou'.
+  async _registrarCancelamento(emb, config, alvo, resultado, erroMsg) {
+    const idEmb = emb.idEmbarque || emb.id;
+    if (!idEmb) return;
+    try {
+      await this.pool.query(`
+        INSERT INTO confirmafacil_cancelamentos
+          (id_embarque, cliente_id, numero_nf, serie_nf, nome_embarcador,
+           solicitacao_id, os_numero, status_corrida, status_nota,
+           resultado, erro_msg, tentativas, detectado_em, atualizado_em)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW(), NOW())
+        ON CONFLICT (id_embarque) DO UPDATE SET
+          resultado      = EXCLUDED.resultado,
+          erro_msg       = EXCLUDED.erro_msg,
+          status_corrida = EXCLUDED.status_corrida,
+          tentativas     = confirmafacil_cancelamentos.tentativas
+                           + (CASE WHEN EXCLUDED.resultado = 'falhou' THEN 1 ELSE 0 END),
+          atualizado_em  = NOW()
+      `, [
+        idEmb, config.cliente_id, emb.numero, emb.serie || null,
+        (emb.embarcador && emb.embarcador.nome) || null,
+        alvo ? alvo.id : null,
+        alvo ? alvo.tutts_os_numero : null,
+        alvo ? alvo.status : null,
+        String(emb.statusNota || '').toUpperCase() || null,
+        resultado, erroMsg || null,
+        resultado === 'falhou' ? 1 : 0,
+      ]);
+    } catch (e) {
+      console.warn('[CF Canceladas] _registrarCancelamento:', e.message);
+    }
   }
 
   // Cancelamento na Tutts. Mesma mecanica de solicitacao/routes/cliente.routes.js
@@ -1338,18 +1430,20 @@ class ConfirmaFacilPoller {
       .catch((e) => console.warn('[CF Poller] _registrarFalhaRetry:', e.message));
   }
 
-  async _agendarParaJanela(configId, idEmbarque, minutos) {
+  async _agendarParaJanela(configId, idEmbarque, minutos, motivo) {
     // Adia a criacao reusando o backoff: proximo_retry = NOW() + minutos.
     // NAO mexe em 'tentativas' (nao e falha) — so reagenda. Upsert idempotente.
+    // [cf-corte-diautil-v1] motivo dinamico (dia util vs horario) para o log/debug.
+    const _msg = 'adiado: ' + (motivo || 'fora da janela de criacao');
     await this.pool.query(`
       INSERT INTO confirmafacil_poller_retry
         (config_id, id_embarque, tentativas, ultimo_erro, proximo_retry, atualizado_em)
-      VALUES ($1, $2, 0, 'adiado: fora da janela de criacao (07:30-18:20)', NOW() + ($3 || ' minutes')::interval, NOW())
+      VALUES ($1, $2, 0, $4, NOW() + ($3 || ' minutes')::interval, NOW())
       ON CONFLICT (config_id, id_embarque) DO UPDATE SET
-        ultimo_erro   = 'adiado: fora da janela de criacao (07:30-18:20)',
+        ultimo_erro   = $4,
         proximo_retry = NOW() + ($3 || ' minutes')::interval,
         atualizado_em = NOW()
-    `, [configId, idEmbarque, String(minutos)])
+    `, [configId, idEmbarque, String(minutos), _msg])
       .catch((e) => console.warn('[CF Poller] _agendarParaJanela:', e.message));
   }
 
