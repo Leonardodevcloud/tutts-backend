@@ -124,22 +124,25 @@ async function _buscarClassificado(pool, dataRef = null) {
       numero_nf, serie_nf,
       solicitacao_id, tutts_os_numero, deadline, entregue_em,
       (status_cf = 'ENTREGUE' OR entregue_em IS NOT NULL) AS entregue,
+      -- [cf-sla-statusnota-v1] O VEREDITO DO CF MANDA. status_nota vem PRIMEIRO.
+      -- Bug anterior: 'entregue_em <= deadline' vinha antes e capturava quase
+      -- tudo (pontos.data_finalizado quase sempre existe), comparando fusos
+      -- desalinhados (previsao BRT vs entrega UTC) — jogava ~97% em 'estourada'.
+      -- Provado em Campinas: CF diz 2232 no prazo / 947 atraso = 70%, mas o
+      -- ramo do timestamp dava 3%. O CF ja calculou certo (inclui dia util e
+      -- feriado); so precisamos LER o status_nota, nao recalcular.
+      --   ENTREGUE_NO_PRAZO / ENTREGUE_JUSTIFICADO -> no_prazo
+      --   ENTREGUE_EM_ATRASO                       -> estourada
+      -- Fallback (994 entregas antigas sem status_nota, todas dias_atraso=0):
+      -- usa dias_atraso do CF — a prova de fuso, sem comparar timestamp.
+      -- So se nem status_nota nem dias_atraso existirem cai no timestamp.
       CASE
+        WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
+        WHEN status_nota IN ('ENTREGUE_NO_PRAZO', 'ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
+        WHEN status_cf = 'ENTREGUE'
+          THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
         WHEN entregue_em IS NOT NULL
           THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
-        -- [cf-sla-prev-v1] Entrega sem data_finalizado nossa: usa o veredito do
-        -- CF. O dias_atraso vira ULTIMO recurso porque a granularidade dele e
-        -- em DIAS — inutil para um SLA de 2 HORAS: nota entregue 90 minutos
-        -- atrasada tem diasAtraso = 0 e era contada como 'no_prazo', inflando
-        -- o percentual do painel.
-        -- ENTREGUE_JUSTIFICADO conta como no_prazo: e a contabilidade do
-        -- proprio CF (atraso justificado nao pesa contra a transportadora).
-        WHEN status_cf = 'ENTREGUE'
-          THEN CASE
-                 WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
-                 WHEN status_nota IN ('ENTREGUE_NO_PRAZO', 'ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
-                 ELSE CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
-               END
         WHEN now() > deadline THEN 'estourada'
         WHEN (deadline - now()) <= INTERVAL '${RISCO_MIN} minutes' THEN 'em_risco'
         ELSE 'em_rota'
@@ -363,31 +366,35 @@ async function calcularHistorico(pool, { de, ate, cnpj = null } = {}) {
         c.status_cf,
         COALESCE(c.dias_atraso, 0) AS dias_atraso,
         UPPER(COALESCE(c.status_nota, '')) AS status_nota,
-        date(${CRIADO_BRT}) AS dia_brt,
+        -- [cf-sla-statusnota-v1] Agrupa pelo dia da PREVISAO do CF, nao pelo dia
+        -- de criacao da corrida. Motivos:
+        --  1) fim de semana some sozinho (o CF nunca poe previsao em sab/dom)
+        --  2) cada dia mede as entregas cujo PRAZO era aquele dia (nota emitida
+        --     sexta com previsao segunda conta na segunda, nao na sexta)
+        -- Fallback pra data de criacao quando nao ha previsao (raro).
+        date(COALESCE(c.data_previsao, ${CRIADO_BRT})) AS dia_brt,
         ${DEADLINE_UTC} AS deadline,
         ${ENTREGA_UTC}  AS entregue_em
       FROM confirmafacil_nfs_cache c
       JOIN confirmafacil_vinculos v
         ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
       JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
-      WHERE date(${CRIADO_BRT}) >= COALESCE($1::date, date_trunc('month', ${hojeBRT})::date)
-        AND date(${CRIADO_BRT}) <= COALESCE($2::date, ${hojeBRT})
+      -- [cf-sla-statusnota-v1] range aplicado sobre a PREVISAO (mesmo eixo do agrupamento)
+      WHERE date(COALESCE(c.data_previsao, ${CRIADO_BRT})) >= COALESCE($1::date, date_trunc('month', ${hojeBRT})::date)
+        AND date(COALESCE(c.data_previsao, ${CRIADO_BRT})) <= COALESCE($2::date, ${hojeBRT})
         AND ($3::text IS NULL OR REGEXP_REPLACE(c.cnpj_embarcador,'[^0-9]','','g') = $3)
         AND COALESCE(c.status_cf, '') NOT IN ('ARQUIVADO', 'DEVOLVIDO')
     ),
     classificado AS (
       SELECT cnpj_embarcador, nome_embarcador, dia_brt,
         (status_cf = 'ENTREGUE' OR entregue_em IS NOT NULL) AS entregue,
+        -- [cf-sla-statusnota-v1] Mesma regra do painel: veredito do CF primeiro.
         CASE
-          WHEN entregue_em IS NOT NULL
-            THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
+          WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
+          WHEN status_nota IN ('ENTREGUE_NO_PRAZO','ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
           WHEN status_cf = 'ENTREGUE'
-            THEN CASE
-                   WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
-                   WHEN status_nota IN ('ENTREGUE_NO_PRAZO','ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
-                   ELSE CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
-                 END
-          ELSE NULL  -- ainda nao finalizada: nao entra no historico
+            THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
+          ELSE NULL  -- ainda nao finalizada (sem veredito): fora da conta
         END AS bucket
       FROM base
     )
