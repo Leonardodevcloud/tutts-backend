@@ -904,7 +904,8 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
         else if (sla === 'iminente')  cond = `NOW() >= ${inicioUtc} AND NOW() < ${deadlineUtc} AND (${deadlineUtc} - NOW()) <= INTERVAL '15 minutes'`;
         else if (sla === 'atencao')   cond = `NOW() >= ${inicioUtc} AND (${deadlineUtc} - NOW()) > INTERVAL '15 minutes' AND (${deadlineUtc} - NOW()) <= INTERVAL '30 minutes'`;
         else if (sla === 'no_prazo')  cond = `NOW() >= ${inicioUtc} AND (${deadlineUtc} - NOW()) > INTERVAL '30 minutes'`;
-        if (cond) slaClause = ` AND COALESCE(sc.created_at, v.criado_em) IS NOT NULL AND c.status_cf NOT IN ('ENTREGUE','CANCELADO','DEVOLVIDO') AND (${cond})`;
+        // [cf-canc-v1] 'CANCELADO' nao existe no CF — nota cancelada e ARQUIVADO.
+        if (cond) slaClause = ` AND COALESCE(sc.created_at, v.criado_em) IS NOT NULL AND c.status_cf NOT IN ('ENTREGUE','ARQUIVADO','DEVOLVIDO') AND (${cond})`;
       }
 
       const where = whereCount + statusClause + slaClause;
@@ -952,7 +953,7 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
           COUNT(*) FILTER (WHERE c.status_cf = 'ENTREGUE')    AS entregue,
           COUNT(*) FILTER (WHERE c.status_cf = 'REENTREGA')   AS reentrega,
           COUNT(*) FILTER (WHERE c.status_cf = 'DEVOLVIDO')   AS devolvido,
-          COUNT(*) FILTER (WHERE c.status_cf = 'CANCELADO')   AS cancelado,
+          COUNT(*) FILTER (WHERE c.status_cf = 'ARQUIVADO')   AS cancelado,
           COUNT(*) FILTER (WHERE v.solicitacao_id IS NULL)    AS sem_os
         FROM confirmafacil_nfs_cache c
         LEFT JOIN confirmafacil_vinculos v ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id

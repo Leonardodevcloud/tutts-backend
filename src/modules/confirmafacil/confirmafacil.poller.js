@@ -26,6 +26,58 @@ const TUTTS_API_URL  = 'https://tutts.com.br/integracao';
 const TUTTS_WEBHOOK  = 'https://tutts-backend-production.up.railway.app/api/webhook/tutts';
 const PAGE_SIZE      = 50;
 
+// ── 2026-07 [cf-stage-v1] Filtros como QUERY PARAM (o filtroDTO e ignorado) ──
+// Sondagem na API de consulta do CF (GET /filter/embarque) provou que o CF
+// ignora o filtroDTO INTEIRO — nao so page/size, como o comentario antigo dizia:
+//
+//   numero=137057   DENTRO do filtroDTO -> 20300 registros (todos!)
+//   numero=137057   como query param    -> 1 registro
+//   De/Ate janela 1 dia DENTRO          -> 20300
+//   De/Ate janela 1 dia como param      -> 1237
+//   stage=CANCELADAS DENTRO             -> 20300 (e devolve A_EMBARCAR)
+//   stage=CANCELADAS como param         -> 45 (ARQUIVADO)   <- correto
+//   stage=A_EMBARCAR como param         -> 598
+//
+// Consequencia: de/ate/cnpjTransportadora NUNCA filtraram nada, e o
+// CF_POLLER_DIAS_JANELA era PLACEBO (o CF sempre devolveu o default dele:
+// ultimos 6 meses). Agora promovemos de/ate/stage a query params soltos.
+//
+// ATENCAO: com isso o CF_POLLER_DIAS_JANELA passa a funcionar DE VERDADE pela
+// primeira vez. Antes a janela era ignorada e a busca varria tudo (o que, por
+// acidente, era abrangente). Comece com 7 dias e observe. O fallback de cache
+// (_processarPendentesDoCache) e o id-tailing cobrem o que ficar fora.
+//
+// Kill-switch: CF_USE_STAGE_PARAM=false volta ao comportamento antigo.
+const CF_USE_STAGE_PARAM = process.env.CF_USE_STAGE_PARAM !== 'false';
+
+// ── 2026-07 [cf-canc-v1] Poll de notas CANCELADAS ────────────────────────
+// O CF NAO notifica cancelamento, e a listagem padrao do /filter/embarque
+// EXCLUI as canceladas. Provado pela aritmetica da sondagem:
+//   stage=A_EMBARCAR   598
+//   stage=EM_TRANSITO  163   -> EM_ABERTO 761 (598+163, exato)
+//   stage=ENTREGUES  19539   -> 761 + 19539 = 20300 = total sem filtro (exato)
+//   stage=CANCELADAS    45   -> FORA da conta. Nunca aparece por acidente.
+// A unica forma de ver uma nota cancelada e pedir com ?stage=CANCELADAS.
+//
+// CF_POLL_CANCELADAS=false        desliga o poll inteiro
+// CF_CANCELADAS_CANCELA_OS=false  so marca no cache, nao cancela OS na Mapp
+// CF_CANCELADAS_ALERTA_WHATS=true liga alerta no grupo (default: off, so log)
+// CF_CANCELADAS_CICLOS=N          roda 1x a cada N ciclos (default 10 = ~10min)
+const CF_POLL_CANCELADAS       = process.env.CF_POLL_CANCELADAS !== 'false';
+const CF_CANCELADAS_CANCELA_OS = process.env.CF_CANCELADAS_CANCELA_OS !== 'false';
+const CF_CANCELADAS_ALERTA_WHATS = String(process.env.CF_CANCELADAS_ALERTA_WHATS || 'false') === 'true';
+const CF_CANCELADAS_CICLOS     = parseInt(process.env.CF_CANCELADAS_CICLOS, 10) > 0
+  ? parseInt(process.env.CF_CANCELADAS_CICLOS, 10) : 10;
+
+// statusNota que significam "ja foi entregue" — nota ARQUIVADO com um destes
+// e arquivamento de ROTINA (entregue e encerrada), NAO cancelamento.
+// Da sondagem real das 45 canceladas: 10 vieram ENTREGUE_NO_PRAZO (diasAtraso 0,
+// com Cod.1) e 35 vieram ATRASADO (22-32 dias, 25 sem ocorrencia nenhuma).
+// Cancelar OS baseado so em ARQUIVADO cancelaria as 10 entregues. NAO FACA ISSO.
+const CF_STATUSNOTA_ENTREGUE = [
+  'ENTREGUE_NO_PRAZO', 'ENTREGUE_EM_ATRASO', 'ENTREGUE_JUSTIFICADO',
+];
+
 // ── 🕒 2026-06: Janela de criacao de corrida na MAPP (SO poller automatico) ──
 // Fora de [INICIO, FIM) no fuso America/Bahia, a criacao na MAPP e ADIADA pro
 // proximo INICIO (07:30). Reusa o backoff existente (proximo_retry futuro): NAO
@@ -271,7 +323,9 @@ class ConfirmaFacilPoller {
       }
 
       const lista = resp.respostas || resp.content || [];
-      console.log(`[CF Poller] pg ${page}: ${lista.length} NFs | totalCount=${resp.totalCount} totalPages=${resp.totalPages}`);
+      // [cf-stage-v1] totalCount deve cair de ~20.300 para a janela real.
+      // Se continuar 20.300, o CF_USE_STAGE_PARAM esta off ou o CF mudou.
+      console.log(`[CF Poller] pg ${page}: ${lista.length} NFs | totalCount=${resp.totalCount} totalPages=${resp.totalPages} | janela=${DIAS_JANELA}d params=${CF_USE_STAGE_PARAM ? 'on' : 'OFF'}`);
       if (!Array.isArray(lista) || lista.length === 0) break;
 
       for (const item of lista) {
@@ -345,6 +399,14 @@ class ConfirmaFacilPoller {
       if (criadasCache > 0) totalProcessadas += criadasCache;
     } catch (e) {
       console.error('[CF Poller] erro no fallback de cache:', e.message);
+    }
+
+    // [cf-canc-v1] Poll de canceladas. Roda 1x a cada CF_CANCELADAS_CICLOS
+    // ciclos (default 10 = ~10min) porque sao ~45 registros e nao mudam rapido.
+    try {
+      await this._pollCanceladas(config);
+    } catch (e) {
+      console.error('[CF Poller] erro no poll de canceladas:', e.message);
     }
 
     // Atualizar timestamp do último polling
@@ -638,6 +700,176 @@ class ConfirmaFacilPoller {
   // HELPERS
   // ══════════════════════════════════════════════════
 
+  // ══════════════════════════════════════════════════
+  // [cf-canc-v1] NOTAS CANCELADAS (stage=CANCELADAS -> statusEmbarque ARQUIVADO)
+  // ══════════════════════════════════════════════════
+
+  async _pollCanceladas(config) {
+    if (!CF_POLL_CANCELADAS) return 0;
+
+    // throttle por ciclo
+    this._cicloCanc = (this._cicloCanc || 0) + 1;
+    if (this._cicloCanc % CF_CANCELADAS_CICLOS !== 1 && CF_CANCELADAS_CICLOS > 1) return 0;
+
+    let marcadas = 0, canceladas = 0, alocadas = 0, page = 0;
+    const MAX_PAGES = 5;
+
+    while (page < MAX_PAGES) {
+      // stage vai como query param via _buscarEmbarques (o filtroDTO e ignorado).
+      const resp = await this._buscarEmbarques({ stage: 'CANCELADAS' }, page, config);
+      if (!resp) break;
+
+      const lista = resp.respostas || resp.content || [];
+      if (!Array.isArray(lista) || lista.length === 0) break;
+      if (page === 0) {
+        console.log(`🗄️ [CF Canceladas] cliente ${config.cliente_id}: totalCount=${resp.totalCount}`);
+      }
+
+      for (const emb of lista) {
+        try {
+          const r = await this._tratarCancelada(emb, config);
+          if (r.marcou)   marcadas++;
+          if (r.cancelou) canceladas++;
+          if (r.alocado)  alocadas++;
+        } catch (err) {
+          console.error(`⚠️ [CF Canceladas] erro NF ${emb && emb.numero}:`, err.message);
+        }
+      }
+
+      if (lista.length < PAGE_SIZE) break;
+      page++;
+    }
+
+    if (marcadas > 0 || canceladas > 0 || alocadas > 0) {
+      console.log(`🗄️ [CF Canceladas] cliente ${config.cliente_id}: ${marcadas} marcada(s), ${canceladas} OS cancelada(s), ${alocadas} alocada(s) (nao cancelada)`);
+    }
+    return canceladas;
+  }
+
+  async _tratarCancelada(emb, config) {
+    const out = { marcou: false, cancelou: false, alocado: false };
+    const idEmb = emb.idEmbarque || emb.id;
+    if (!idEmb) return out;
+
+    // Guard: so mexe em nota da NOSSA transportadora.
+    const cnpjTransp = String((emb.transportadora && emb.transportadora.cnpj) || '').replace(/\D/g, '');
+    const cnpjNosso  = String(config.cnpj_transportadora || '').replace(/\D/g, '');
+    if (cnpjNosso && cnpjTransp && cnpjTransp !== cnpjNosso) return out;
+
+    // ─────────────────────────────────────────────────────────────────
+    // ORDEM OBRIGATORIA: marca o cache como ARQUIVADO **ANTES** de cancelar.
+    //
+    // Se cancelar primeiro, a limpeza de vinculos orfaos (no topo do _ciclo)
+    // apaga o vinculo assim que ve `status LIKE '%cancel%'`, a NF volta a ser
+    // elegivel, e o _processarPendentesDoCache RECRIA a corrida (ele so olha
+    // status_cf = 'A_EMBARCAR'). Com o cache ja em ARQUIVADO, nao recria.
+    // NAO INVERTA ESTA ORDEM.
+    // ─────────────────────────────────────────────────────────────────
+    await this._salvarCache(emb, config.cliente_id);
+    out.marcou = true;
+
+    if (!CF_CANCELADAS_CANCELA_OS) return out;
+
+    // ARQUIVADO e AMBIGUO: pode ser "entregue e arquivada por rotina".
+    // O discriminador e o statusNota (campo REAL da API — o Swagger documenta
+    // como notaStatus, mas a resposta traz statusNota. Confirmado: 45/45).
+    const statusNota = String(emb.statusNota || '').toUpperCase();
+    if (CF_STATUSNOTA_ENTREGUE.includes(statusNota)) return out; // rotina, nao cancelamento
+
+    // Tem corrida viva nossa?
+    const { rows: [alvo] } = await this.pool.query(`
+      SELECT sc.id, sc.tutts_os_numero, sc.status
+        FROM confirmafacil_vinculos v
+        JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+       WHERE v.id_embarque = $1
+    `, [idEmb]);
+
+    if (!alvo || !alvo.tutts_os_numero) return out;
+    const st = String(alvo.status || '').toLowerCase();
+    if (st === 'finalizado' || st.includes('cancel')) return out; // nada a fazer
+
+    const res = await this._cancelarOsTutts(config, alvo.tutts_os_numero);
+
+    if (res.ok) {
+      await this.pool.query(`
+        UPDATE solicitacoes_corrida
+           SET status = 'cancelado', cancelado_em = NOW(),
+               atualizado_em = NOW(), ultima_atualizacao = NOW()
+         WHERE id = $1
+      `, [alvo.id]).catch((e) => console.warn('[CF Canceladas] update status:', e.message));
+
+      console.log(`❌ [CF Canceladas] OS ${alvo.tutts_os_numero} cancelada — NF ${emb.numero} arquivada no CF (statusNota=${statusNota || 'n/a'})`);
+      out.cancelou = true;
+      return out;
+    }
+
+    if (res.alocado) {
+      // Motoboy ja alocado: a Tutts recusa o cancelamento. NAO forcamos —
+      // cancelar aqui deixaria a mercadoria orfa com o profissional.
+      out.alocado = true;
+      const msg = `🗄️ *CF: nota cancelada com motoboy alocado*\n\nNF ${emb.numero}/${emb.serie} — ${(emb.embarcador && emb.embarcador.nome) || ''}\nOS ${alvo.tutts_os_numero} (status: ${alvo.status})\n\nA nota foi ARQUIVADA no ConfirmaFacil mas ja tem profissional na corrida. A Tutts recusou o cancelamento (Alocado). Avaliar manualmente.`;
+      console.warn(`⚠️ [CF Canceladas] OS ${alvo.tutts_os_numero} ALOCADA — NF ${emb.numero} cancelada no CF mas nao da pra cancelar a OS`);
+      await this._alertarWhats(msg);
+      return out;
+    }
+
+    console.warn(`⚠️ [CF Canceladas] falha ao cancelar OS ${alvo.tutts_os_numero}: ${res.erro}`);
+    return out;
+  }
+
+  // Cancelamento na Tutts. Mesma mecanica de solicitacao/routes/cliente.routes.js
+  // (PATCH /solicitacao/corrida/:id/cancelar): o token de cancelamento e o de
+  // gravacao com sufixo '-cancelar' no lugar de '-gravar'.
+  async _cancelarOsTutts(config, osNumero) {
+    let token = String(config.tutts_token_api || '');
+    if (token.includes('-gravar')) token = token.replace('-gravar', '-cancelar');
+    else if (!token.includes('-cancelar')) token = token + '-cancelar';
+
+    if (!token || !config.tutts_codigo_cliente) {
+      return { ok: false, erro: 'sem token/codCliente', alocado: false };
+    }
+
+    try {
+      const resp = await httpRequest(TUTTS_API_URL, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          token,
+          codCliente: config.tutts_codigo_cliente,
+          OS:         String(osNumero),
+        }),
+      });
+      const data = resp.json();
+      if (data && (data.Sucesso || data.sucesso)) return { ok: true, erro: null, alocado: false };
+
+      const erro = String((data && (data.Erro || data.erro)) || 'resposta inesperada');
+      // 'Alocado' = servico em execucao. E a trava de seguranca da propria Tutts.
+      return { ok: false, erro, alocado: erro.toLowerCase() === 'alocado' };
+    } catch (err) {
+      return { ok: false, erro: err.message, alocado: false };
+    }
+  }
+
+  // Alerta opcional. Default OFF — a reconciliacao ja teve o alerta de WhatsApp
+  // desativado a pedido; nao reintroduzimos barulho sem opt-in explicito.
+  async _alertarWhats(texto) {
+    if (!CF_CANCELADAS_ALERTA_WHATS) return;
+    const baseUrl   = String(process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+    const apiKey    = process.env.EVOLUTION_API_KEY;
+    const instancia = process.env.EVOLUTION_INSTANCE;
+    const grupoId   = String(process.env.EVOLUTION_GROUP_ID_DISP || '').trim();
+    if (!baseUrl || !apiKey || !instancia || !grupoId) return;
+    try {
+      await fetch(`${baseUrl}/message/sendText/${instancia}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', apikey: apiKey },
+        body:    JSON.stringify({ number: grupoId, text: texto }),
+      });
+    } catch (e) {
+      console.warn('[CF Canceladas] alerta whats falhou:', e.message);
+    }
+  }
+
   async _salvarCache(nf, clienteId) {
     try {
       const end = nf.destinatario?.endereco || nf.endereco || {};
@@ -701,6 +933,20 @@ class ConfirmaFacilPoller {
       page:      String(page),
       size:      String(PAGE_SIZE),
     });
+
+    // [cf-stage-v1] Promove os filtros a query param — dentro do filtroDTO o CF
+    // ignora tudo (ver bloco de comentario no topo do arquivo). O filtroDTO
+    // continua sendo enviado porque o Swagger o declara required:true.
+    // Nomes na wire: stage, De, Ate (Spring binda case-insensitive).
+    // TipoDta NAO e enviado: testado, o CF aceita e ignora (EMISSAO e
+    // DATA_ATUALIZACAO devolvem resultado identico) — mandar so daria a falsa
+    // impressao de que o eixo de data e configuravel.
+    if (CF_USE_STAGE_PARAM) {
+      if (filtro && filtro.stage) params.set('stage', String(filtro.stage));
+      if (filtro && filtro.de)    params.set('De',    String(filtro.de));
+      if (filtro && filtro.ate)   params.set('Ate',   String(filtro.ate));
+    }
+
     const url    = `${CF_FILTER_URL}?${params}`;
     const MAX_TENTATIVAS = 5;
 

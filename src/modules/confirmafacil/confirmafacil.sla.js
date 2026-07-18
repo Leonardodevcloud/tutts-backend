@@ -66,7 +66,13 @@ async function _buscarClassificado(pool, dataRef = null) {
         ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
       JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
       WHERE date(${CRIADO_BRT}) = COALESCE($1::date, (now() AT TIME ZONE 'America/Sao_Paulo')::date)
-        AND COALESCE(c.status_cf, '') NOT IN ('CANCELADO', 'DEVOLVIDO')
+        -- [cf-canc-v1] 'CANCELADO' NUNCA existiu no CF: sondagem em 20.347 NFs
+        -- devolveu so 4 valores de statusEmbarque.nome — ENTREGUE, A_EMBARCAR,
+        -- NAO ENTREGUE e ARQUIVADO. Nota cancelada vem como ARQUIVADO. Esta
+        -- exclusao era codigo morto e deixava as canceladas contarem no SLA.
+        -- 'NAO ENTREGUE' NAO entra aqui: significa "em transito, ainda nao
+        -- entregue" (stage=EM_TRANSITO), que e o estado normal de voo.
+        AND COALESCE(c.status_cf, '') NOT IN ('ARQUIVADO', 'DEVOLVIDO')
     )
     SELECT
       cnpj_embarcador, nome_embarcador, status_cf,
