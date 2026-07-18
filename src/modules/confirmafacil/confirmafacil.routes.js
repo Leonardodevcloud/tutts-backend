@@ -41,6 +41,22 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
     } catch (err) { next(err); }
   });
 
+  // [cf-sla-historico-v1] SLA histórico por periodo (mensal/semanal).
+  //   GET /confirmafacil/sla-historico?de=YYYY-MM-DD&ate=YYYY-MM-DD&cnpj=...
+  // Sem de/ate: mes corrente. cnpj opcional filtra uma filial.
+  // Devolve { de, ate, filiais:[{ nome, cnpj, meta, no_prazo, estourada, total,
+  //           pct, serie:[{dia, no_prazo, estourada, pct}] }] }.
+  // O front agrega semana/mes a partir da serie diaria.
+  router.get('/sla-historico', verificarToken, verificarAdmin, async (req, res, next) => {
+    try {
+      const dt = (v) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
+      const de   = dt(req.query.de);
+      const ate  = dt(req.query.ate);
+      const cnpj = req.query.cnpj ? String(req.query.cnpj) : null;
+      res.json(await slaMod.calcularHistorico(pool, { de, ate, cnpj }));
+    } catch (err) { next(err); }
+  });
+
   // ── CF: reconciliação manual (reenvia entregas não confirmadas no CF) ──
   router.post('/reconciliar', verificarToken, verificarAdmin, async (req, res, next) => {
     try {

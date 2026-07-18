@@ -333,4 +333,109 @@ async function enviarTeste(texto) {
   return { ...res, mensagem: msg };
 }
 
-module.exports = { metaPorCnpj, calcularPainel, verificarRiscosEAlertar, enviarTeste };
+// ══════════════════════════════════════════════════
+// [cf-sla-historico-v1] Histórico de SLA por período (mensal/semanal)
+// ══════════════════════════════════════════════════
+// Agrega as corridas de um RANGE de datas, classificando cada uma pelo mesmo
+// criterio do painel diario (deadline do CF via DEADLINE_UTC + statusNota).
+// Devolve, por filial: totais do periodo, e uma serie temporal (por dia) do %
+// no prazo — para o grafico de tendencia.
+//
+// Reusa DEADLINE_UTC/ENTREGA_UTC/CRIADO_BRT ja definidos acima, entao o
+// deadline segue a previsao do CF igual ao painel diario.
+async function calcularHistorico(pool, { de, ate, cnpj = null } = {}) {
+  // Sem range explicito: mes corrente.
+  const hojeBRT = `(now() AT TIME ZONE 'America/Sao_Paulo')::date`;
+  const deExpr  = de  ? '$1::date' : `date_trunc('month', ${hojeBRT})::date`;
+  const ateExpr = ate ? '$2::date' : hojeBRT;
+
+  const params = [];
+  // Mantemos posicoes fixas $1=de $2=ate $3=cnpj mesmo quando nulos, com COALESCE.
+  params.push(de || null);
+  params.push(ate || null);
+  params.push(cnpj ? cnpj.replace(/\D/g, '') : null);
+
+  const sql = `
+    WITH base AS (
+      SELECT
+        c.cnpj_embarcador,
+        c.nome_embarcador,
+        c.status_cf,
+        COALESCE(c.dias_atraso, 0) AS dias_atraso,
+        UPPER(COALESCE(c.status_nota, '')) AS status_nota,
+        date(${CRIADO_BRT}) AS dia_brt,
+        ${DEADLINE_UTC} AS deadline,
+        ${ENTREGA_UTC}  AS entregue_em
+      FROM confirmafacil_nfs_cache c
+      JOIN confirmafacil_vinculos v
+        ON v.id_embarque = c.id_embarque AND v.cliente_id = c.cliente_id
+      JOIN solicitacoes_corrida sc ON sc.id = v.solicitacao_id
+      WHERE date(${CRIADO_BRT}) >= COALESCE($1::date, date_trunc('month', ${hojeBRT})::date)
+        AND date(${CRIADO_BRT}) <= COALESCE($2::date, ${hojeBRT})
+        AND ($3::text IS NULL OR REGEXP_REPLACE(c.cnpj_embarcador,'[^0-9]','','g') = $3)
+        AND COALESCE(c.status_cf, '') NOT IN ('ARQUIVADO', 'DEVOLVIDO')
+    ),
+    classificado AS (
+      SELECT cnpj_embarcador, nome_embarcador, dia_brt,
+        (status_cf = 'ENTREGUE' OR entregue_em IS NOT NULL) AS entregue,
+        CASE
+          WHEN entregue_em IS NOT NULL
+            THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
+          WHEN status_cf = 'ENTREGUE'
+            THEN CASE
+                   WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
+                   WHEN status_nota IN ('ENTREGUE_NO_PRAZO','ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
+                   ELSE CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
+                 END
+          ELSE NULL  -- ainda nao finalizada: nao entra no historico
+        END AS bucket
+      FROM base
+    )
+    SELECT cnpj_embarcador, nome_embarcador, dia_brt,
+      COUNT(*) FILTER (WHERE bucket = 'no_prazo')  AS no_prazo,
+      COUNT(*) FILTER (WHERE bucket = 'estourada') AS estourada
+    FROM classificado
+    WHERE bucket IS NOT NULL
+    GROUP BY cnpj_embarcador, nome_embarcador, dia_brt
+    ORDER BY nome_embarcador, dia_brt
+  `;
+  const { rows } = await pool.query(sql, params);
+
+  // Monta por filial: totais + serie diaria
+  const porFilial = {};
+  for (const r of rows) {
+    const key = soDigitos(r.cnpj_embarcador);
+    if (!porFilial[key]) {
+      porFilial[key] = {
+        cnpj: r.cnpj_embarcador,
+        nome: r.nome_embarcador || r.cnpj_embarcador || 'Sem nome',
+        meta: metaPorCnpj(key),
+        no_prazo: 0, estourada: 0,
+        serie: [],
+      };
+    }
+    const f = porFilial[key];
+    const np = Number(r.no_prazo), es = Number(r.estourada);
+    f.no_prazo += np;
+    f.estourada += es;
+    const fin = np + es;
+    f.serie.push({
+      dia: (r.dia_brt instanceof Date) ? r.dia_brt.toISOString().slice(0, 10) : String(r.dia_brt),
+      no_prazo: np, estourada: es,
+      pct: fin ? Math.round((np / fin) * 1000) / 10 : null,
+    });
+  }
+
+  const filiais = Object.values(porFilial).map((f) => {
+    const fin = f.no_prazo + f.estourada;
+    return {
+      ...f,
+      total: fin,
+      pct: fin ? Math.round((f.no_prazo / fin) * 1000) / 10 : null,
+    };
+  }).sort((a, b) => a.nome.localeCompare(b.nome));
+
+  return { de: de || null, ate: ate || null, filiais };
+}
+
+module.exports = { metaPorCnpj, calcularPainel, calcularHistorico, verificarRiscosEAlertar, enviarTeste };
