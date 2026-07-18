@@ -224,6 +224,10 @@ function cruzarValidacoes({
   cep_receita,
   cep_gps,
   nomes_gps, // ROTA_NOME_V1_SIG — terceira perna. Ver o bloco da decisão.
+  // ROTA_ENDERECO_V1_SIG — quarta perna. Campos, não blob.
+  receita_logradouro,
+  receita_numero,
+  endereco_gps,
 }) {
   const scores = {};
 
@@ -355,11 +359,104 @@ function cruzarValidacoes({
     }
     scores.nome_receita_vs_google = nomeScore;
   }
-  const NOME_CORTE = 85;
+  const NOME_CORTE = 85; // ROTA_ENDERECO_V1_DECISAO abaixo
   const nomeConfirma = !temDistancia && !gpsImpreciso && !cepConfirma && nomeScore >= NOME_CORTE;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ROTA_ENDERECO_V1_DECISAO — quarta perna: rua E número.
+  //
+  // Os dois lados vêm do GPS. O da Receita, da BrasilAPI; o do motoboy, do Google
+  // revertendo as coordenadas DELE, no servidor. Nada é digitado — pra passar
+  // aqui ele precisa estar no lugar.
+  //
+  // ═══ POR QUE CAMPO A CAMPO, E NÃO SIMILARIDADE DE TEXTO ═══
+  //
+  // A primeira versão disto comparava as strings inteiras com scoreEndereco().
+  // Reprovou no teste, e feio:
+  //
+  //   "Alvaro Santos, 74, Brotas"  x  "Alvaro Santana, 74 - Brotas"    -> 87%
+  //        ruas DIFERENTES, podem estar a 2km. Liberava.
+  //
+  //   "CAPELA, VINHEDO, SP"  x  "R. Juliana Von Zuben Degelo, 42 - Capela"  -> 90%
+  //        o CNPJ só tem o BAIRRO. Qualquer GPS dentro da Capela reverte pra uma
+  //        string que contém "Capela, Vinhedo". Liberava o bairro inteiro.
+  //
+  // E a segunda é pior do que parece: endereço curto na Receita é EXATAMENTE o
+  // motivo do geocode ter falhado, que é exatamente quando esta rota é chamada.
+  // A rota era pior justamente quando era mais necessária.
+  //
+  // Nenhum corte separava: o caso bom ("Av. T-63, 1296") dava 88%, os falsos
+  // positivos davam 87% e 90%. Se cruzam. Não é ajuste de constante — é a
+  // ferramenta errada.
+  //
+  // ═══ AS TRÊS TRAVAS DESTA VERSÃO ═══
+  //
+  // 1. SEM LOGRADOURO NA RECEITA, A ROTA NEM RODA.
+  //    Mata o caso "CAPELA, VINHEDO, SP" na raiz: não há rua pra comparar, então
+  //    não há o que afirmar. Silêncio é a resposta honesta.
+  //
+  // 2. O NÚMERO É ELIMINATÓRIO, e comparado como NÚMERO.
+  //    74 != 740. 74 != 76. Não existe "quase o mesmo número" — é outra porta.
+  //    Isto sozinho derruba o "Álvaro Santana": mesmo que a rua passasse por
+  //    parecida, o número teria que bater exato.
+  //
+  // 3. A RUA PRECISA DE 90, não 85.
+  //    "Alvaro Santos" x "Alvaro Santana" = 87. O corte fica acima disso, de
+  //    propósito, e o número ainda tem que bater junto.
+  //
+  // Comparo só o nome da rua — não o blob com bairro/cidade/CEP, que era o que
+  // inflava o score com palavras que todo endereço da região tem em comum.
+  // ══════════════════════════════════════════════════════════════════════════
+  // ROTA_ENDERECO_V1_NORM — "AVENIDA T 63" e "Av. T-63" são a mesma avenida.
+  //
+  // O normalizar() do scoreSimilaridade não sabe disso: sem isto, esse par dava
+  // 58% e a rota barrava um motoboy que estava na porta. Falso negativo é menos
+  // grave que falso positivo (ele ainda cai na rota do nome), mas é burrice
+  // deixar passar quando o conserto é uma tabela.
+  //
+  // CANONIZA o tipo, não remove. Remover faria "RUA CENTRAL" casar 100% com
+  // "AVENIDA CENTRAL" — ruas diferentes, e o número poderia bater por acaso.
+  const _canonRua = (r) => String(r || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[.\-]/g, ' ')
+    .replace(/\b(AVENIDA|AVE|AV)\b/g, 'AVENIDA')
+    .replace(/\b(RUA|R)\b/g, 'RUA')
+    .replace(/\b(PRACA|PCA|PC)\b/g, 'PRACA')
+    .replace(/\b(TRAVESSA|TRV|TV)\b/g, 'TRAVESSA')
+    .replace(/\b(ALAMEDA|ALA|AL)\b/g, 'ALAMEDA')
+    .replace(/\b(RODOVIA|ROD)\b/g, 'RODOVIA')
+    .replace(/\b(ESTRADA|EST)\b/g, 'ESTRADA')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const _ruaReceita = String(receita_logradouro || '').trim();
+  const _numReceita = String(receita_numero || '').replace(/\D/g, '');
+  let endScore = 0;
+  let endNumBate = false;
+  let endRuaGps = null;
+
+  if (_ruaReceita && _numReceita && endereco_gps) {
+    // O Google formata "R. Álvaro Santos, 74 - Brotas, Salvador - BA, 40280-120".
+    // A primeira vírgula separa rua do resto; o número vem logo depois dela.
+    const _partes = String(endereco_gps).split(',');
+    endRuaGps = (_partes[0] || '').trim();
+    const _mNum = (_partes[1] || '').match(/\d+/);
+    const _numGps = _mNum ? _mNum[0] : null;
+
+    endScore = scoreSimilaridade(_canonRua(_ruaReceita), _canonRua(endRuaGps));
+    endNumBate = !!_numGps && parseInt(_numGps, 10) === parseInt(_numReceita, 10);
+    scores.rua_receita_vs_gps = endScore;
+  }
+
+  const RUA_CORTE = 90;
+  const enderecoConfirma =
+    !temDistancia && !gpsImpreciso &&
+    endScore >= RUA_CORTE && endNumBate;
+
   const liberadoPorDistancia = temDistancia && !gpsImpreciso && distancia <= DIST_LIBERA_METROS;
-  const liberado = liberadoPorDistancia || cepConfirma || nomeConfirma;
+  // ROTA_ENDERECO_V1_LIBERADO — quatro pernas.
+  const liberado = liberadoPorDistancia || cepConfirma || enderecoConfirma || nomeConfirma;
   const barrar = !liberado;
 
   // A Receita respondeu que esse CNPJ não existe (as duas bases concordaram) ou o
@@ -388,8 +485,11 @@ function cruzarValidacoes({
   // MEDIÇÃO, não indisponibilidade: a gente conseguiu olhar e não achou. Vira
   // 'presenca'. Só é 'indisponivel' quando nenhuma das três pernas conseguiu
   // sequer produzir um número.
+  // ROTA_ENDERECO_V1_INDISP: se deu pra comparar os textos, a gente MEDIU.
+  // Reprovar depois de medir é 'presenca', não indisponibilidade.
   const nomeAvaliavel = _nomesReceita.length > 0 && _nomesGps.length > 0;
-  const indisponivel = barrar && !temDistancia && !cepComparavel && !nomeAvaliavel && !cnpjNaoEncontrado && !gpsImpreciso;
+  const enderecoAvaliavel = !!(_ruaReceita && _numReceita && endereco_gps);
+  const indisponivel = barrar && !temDistancia && !cepComparavel && !enderecoAvaliavel && !nomeAvaliavel && !cnpjNaoEncontrado && !gpsImpreciso;
 
   // codigo_bloqueio: contrato pra tela. O front escolhe título/ícone/instrução por
   // este campo — nunca farejando o texto do motivo, que é copy e muda.
@@ -412,7 +512,8 @@ function cruzarValidacoes({
       // e ele passou. Mostrar 'nd' numa tela de sucesso é confuso e faz o suporte
       // achar que tem bug.
       // ROTA_NOME_V1_CHECK: aprovado por qualquer perna é 'ok'.
-      status: (cepConfirma || nomeConfirma) ? 'ok' : (!temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou')),
+      // ROTA_ENDERECO_V1_CHECK
+      status: (cepConfirma || enderecoConfirma || nomeConfirma) ? 'ok' : (!temDistancia ? 'nd' : (liberado ? 'ok' : 'falhou')),
     },
   ];
 
@@ -455,7 +556,13 @@ function cruzarValidacoes({
   // onde veio. Liberar errado custa uma corrida; gravar errado custa um endereço.
   const _forteDistancia = temDistancia && (scores.endereco_receita_vs_gps || 0) >= 90;
   const _forteNome = (scores.nome_receita_vs_google || 0) >= 90;
-  const pelo_menos_um_90 = _forteDistancia || _forteNome;
+  // ROTA_ENDERECO_V1_FORTE — endereço >= 90 é evidência forte e VIRA FAVORITO.
+  //
+  // Diferente do CEP, que fica de fora: o CEP só diz "mesma faixa" (100-300m, ou
+  // a cidade inteira em município pequeno). O endereço batendo a 90% quer dizer
+  // mesma rua E mesmo número. Isso é a porta, e é gravável.
+  const _forteEndereco = (scores.rua_receita_vs_gps || 0) >= 90 && enderecoConfirma;
+  const pelo_menos_um_90 = _forteDistancia || _forteNome || _forteEndereco;
   const receita_ativa = !!(receita && receita.ok && receita.ativa);
   // Salva o endereço nos favoritos só com prova forte: score 90 = <=15m.
   const pode_salvar_no_banco = pelo_menos_um_90;
@@ -469,7 +576,10 @@ function cruzarValidacoes({
   // existe distância nesse caminho. O admin leria "null" e desconfiaria do
   // registro inteiro — com razão.
   // ROTA_NOME_V1_CAMINHO
-  const caminho_aprovacao = nomeConfirma
+  // ROTA_ENDERECO_V1_CAMINHO
+  const caminho_aprovacao = enderecoConfirma
+    ? `Presença confirmada pelo endereço (${endScore}%) — sem geocode do CNPJ`
+    : nomeConfirma
     ? `Presença confirmada pelo nome (${nomeScore}%: "${nomeVencedor}") — sem geocode nem CEP`
     : (!liberadoPorDistancia && cepConfirma)
     ? `Presença confirmada pelo CEP (${cepR}) — sem geocode do endereço`

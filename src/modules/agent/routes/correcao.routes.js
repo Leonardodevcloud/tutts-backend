@@ -109,9 +109,21 @@ async function reverseGeocodeCep(pool, lat, lng) {
       // O cache padrão de ~55m é bom pra mostrar endereço na tela; não pra isto.
       tolerancia_graus: 0.0003,
     });
+    // ROTA_ENDERECO_V1_DEVOLVE — para de jogar fora o endereço.
+    //
+    // Este código pedia o endereço formatado inteiro ao Google, extraía 8 dígitos
+    // de CEP e DESCARTAVA a rua, o número e o bairro. Tudo isso já estava pago e
+    // na memória.
+    //
+    // Visto em produção (OS 1262730): a rota do CEP morreu por UM dígito —
+    // Receita 13280001 contra GPS 13280-000 — e o motoboy só não foi barrado
+    // porque a rota do nome pegou. Se a gente tivesse olhado a RUA, teria
+    // acertado sem depender do Places.
+    //
+    // Agora devolve os dois. Zero chamada nova, zero latência.
     if (!r || !r.endereco_formatado) return null;
     const m = String(r.endereco_formatado).match(/(\d{5})-?(\d{3})/);
-    return m ? m[1] + m[2] : null;
+    return { cep: m ? m[1] + m[2] : null, endereco: r.endereco_formatado };
   } catch (e) {
     // Fail-safe: sem CEP, a rota do CEP não pontua e a decisão fica com a
     // distância. Nunca o contrário.
@@ -499,11 +511,17 @@ function createCorrecaoRoutes(pool) {
         // quebrado, que é a minoria. No caminho normal, zero chamadas novas e zero
         // latência a mais pro motoboy.
         // ══════════════════════════════════════════════════════════════════════
-        let cepGps = null; // ROTA_NOME_V1_CASCATA
+        // ROTA_ENDERECO_V1_CHAMADOR
+        let cepGps = null;
+        let enderecoGps = null;
         const _semDistancia = distanciaReceitaGps === undefined || distanciaReceitaGps === null;
-        if (_semDistancia && receita && receita.ok && receita.cep) {
-          cepGps = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
-          console.log(`[agent] 📮 Sem distância — rota do CEP: Receita=${receita.cep} GPS=${cepGps || 'nao-obtido'} ${cepGps && cepGps === receita.cep ? '✅ BATE' : '❌'}`);
+        // A condição perdeu o `&& receita.cep`: agora esta chamada serve DUAS
+        // rotas, e a do endereço funciona mesmo quando a Receita não tem CEP.
+        if (_semDistancia && receita && receita.ok) {
+          const rev = await reverseGeocodeCep(pool, motoboy_lat, motoboy_lng);
+          cepGps = (rev && rev.cep) || null;
+          enderecoGps = (rev && rev.endereco) || null;
+          console.log(`[agent] 📮 Sem distância — CEP: Receita=${receita.cep || '(sem)'} GPS=${cepGps || '(nao-obtido)'} ${cepGps && receita.cep && cepGps === receita.cep ? '✅' : '❌'} | endereço do GPS: ${enderecoGps ? enderecoGps.slice(0, 55) : '(nao-obtido)'}`);
         }
 
         // ══════════════════════════════════════════════════════════════════════
@@ -552,9 +570,22 @@ function createCorrecaoRoutes(pool) {
           // ROTA_CEP_V1_ARGS: null quando a distância resolveu — o cruzamento nem
           // considera a rota do CEP nesse caso.
           cep_receita: (receita && receita.ok && receita.cep) || null, // ROTA_NOME_V1_ARGS
-          cep_gps: cepGps,
+          cep_gps: cepGps, // ROTA_ENDERECO_V1_ARGS
           //: vazio quando a distância ou o CEP resolveram.
           nomes_gps: nomesGps,
+          // ROTA_ENDERECO_V1_ARGS — os CAMPOS, não o texto montado.
+          //
+          // Mandar receita.endereco (o blob "RUA X, 74, BAIRRO, CIDADE, UF") e
+          // comparar por similaridade de string NÃO funciona — eu testei:
+          //   "Alvaro Santos, 74" x "Alvaro Santana, 74"  -> 87%  (ruas diferentes!)
+          //   "CAPELA, VINHEDO, SP" x qualquer rua da Capela -> 90%
+          // Levenshtein mede "quanto as frases se parecem". Endereço não é frase:
+          // é rua + número, e o número não admite "quase".
+          //
+          // Por isso vão os campos separados. Quem compara decide o peso de cada um.
+          receita_logradouro: (receita && receita.ok && receita.logradouro) || null,
+          receita_numero: (receita && receita.ok && receita.numero) || null,
+          endereco_gps: enderecoGps,
           // GPS_ACC_BACKEND_V1: a precisao decide se a distancia PODE decidir.
           // A regra mora no cruzar-validacoes junto com o DIST_LIBERA_METROS —
           // nao no celular, onde bloqueava sem deixar rastro e exigia deploy da
