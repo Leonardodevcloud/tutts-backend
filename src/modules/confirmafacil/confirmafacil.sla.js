@@ -139,10 +139,18 @@ async function _buscarClassificado(pool, dataRef = null) {
       CASE
         WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
         WHEN status_nota IN ('ENTREGUE_NO_PRAZO', 'ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
-        WHEN status_cf = 'ENTREGUE'
-          THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
+        -- [cf-sla-fallback-v1] Sem status_nota mas COM data de entrega: compara
+        -- entrega vs deadline (ambos ja em timestamptz, fuso resolvido por
+        -- ENTREGA_UTC/DEADLINE_UTC). dias_atraso NAO serve de fallback: conta
+        -- em DIAS, entao atraso de 2h vira 0 e mascarava como no_prazo
+        -- (OS 1257503: venceu 10:21, entregou 12:21 BRT, dias_atraso=0 ->
+        -- marcava no_prazo indevidamente).
         WHEN entregue_em IS NOT NULL
           THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
+        -- Entregue no CF mas sem data de entrega nossa E sem status_nota:
+        -- ultimo recurso, dias_atraso (granularidade grossa, mas melhor que nada).
+        WHEN status_cf = 'ENTREGUE'
+          THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
         WHEN now() > deadline THEN 'estourada'
         WHEN (deadline - now()) <= INTERVAL '${RISCO_MIN} minutes' THEN 'em_risco'
         ELSE 'em_rota'
@@ -392,6 +400,11 @@ async function calcularHistorico(pool, { de, ate, cnpj = null } = {}) {
         CASE
           WHEN status_nota = 'ENTREGUE_EM_ATRASO' THEN 'estourada'
           WHEN status_nota IN ('ENTREGUE_NO_PRAZO','ENTREGUE_JUSTIFICADO') THEN 'no_prazo'
+          -- [cf-sla-fallback-v1] sem status_nota mas COM entrega: timestamp
+          -- (fuso resolvido). dias_atraso mascarava atraso de horas como 0.
+          WHEN entregue_em IS NOT NULL
+            THEN CASE WHEN entregue_em <= deadline THEN 'no_prazo' ELSE 'estourada' END
+          -- entregue no CF, sem data nossa e sem status_nota: ultimo recurso.
           WHEN status_cf = 'ENTREGUE'
             THEN CASE WHEN dias_atraso > 0 THEN 'estourada' ELSE 'no_prazo' END
           ELSE NULL  -- ainda nao finalizada (sem veredito): fora da conta
