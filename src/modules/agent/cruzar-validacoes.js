@@ -417,9 +417,45 @@ function cruzarValidacoes({
   ];
 
   // ── Compat: campos que o resto do módulo já lê ──
-  const score_max = temDistancia ? scores.endereco_receita_vs_gps : 0;
+  // ══════════════════════════════════════════════════════════════════════════
+  // SCORE_MAX_V1_CALC — o score_max só sabia da distância.
+  //
+  // Era:  const score_max = temDistancia ? scores.endereco_receita_vs_gps : 0;
+  //
+  // Correto quando existia UMA rota. Com a cascata (distância → CEP → nome) ele
+  // virou mentira: uma correção aprovada pelo nome com 100% mostrava "Máx: 0%"
+  // no painel — visto em produção na OS 1262730, aprovada com
+  // "Presença confirmada pelo nome (100%)" e exibindo Máx: 0%.
+  //
+  // Pior que o display: `pelo_menos_um_90` sai daqui, e ele controla o
+  // `pode_salvar_no_banco` — se o endereço corrigido vira favorito. Com score_max
+  // travado em 0, TODA correção aprovada pelo CEP ou pelo nome parava de
+  // alimentar a base de favoritos. Calado.
+  //
+  // Agora é o maior de todos os scores calculados. Honesto com o que a tela mostra.
+  const _todosScores = Object.values(scores).filter(v => typeof v === 'number');
+  const score_max = _todosScores.length ? Math.max(..._todosScores) : 0;
   const receita_max = score_max;
-  const pelo_menos_um_90 = score_max >= 90;
+
+  // `pelo_menos_um_90` NÃO pode ser `score_max >= 90` — e essa distinção é o
+  // ponto todo deste patch.
+  //
+  // Ele decide se o endereço vira FAVORITO, ou seja, se a gente passa a confiar
+  // nele pra próximas entregas. Isso pede evidência forte, e as três pernas não
+  // são igualmente fortes:
+  //
+  //   distância >= 90  ->  <= 15m. É a porta. Confia.
+  //   nome >= 90       ->  o nome exato da empresa, a menos de 100m. Confia.
+  //   CEP = 90         ->  MESMO CEP. Isso é 100-300m numa cidade, e o município
+  //                        inteiro numa cidade pequena. Serve pra liberar o cara
+  //                        (é melhor que barrar quem está certo), mas NÃO serve
+  //                        pra gravar coordenada como verdade permanente.
+  //
+  // Um favorito errado envenena as entregas seguintes, e ninguém vai saber de
+  // onde veio. Liberar errado custa uma corrida; gravar errado custa um endereço.
+  const _forteDistancia = temDistancia && (scores.endereco_receita_vs_gps || 0) >= 90;
+  const _forteNome = (scores.nome_receita_vs_google || 0) >= 90;
+  const pelo_menos_um_90 = _forteDistancia || _forteNome;
   const receita_ativa = !!(receita && receita.ok && receita.ativa);
   // Salva o endereço nos favoritos só com prova forte: score 90 = <=15m.
   const pode_salvar_no_banco = pelo_menos_um_90;
