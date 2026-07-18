@@ -64,6 +64,13 @@ const STATUS_EM_TRANSITO = [
   'PICKED_UP',
   'DROPOFF_EN_ROUTE',
   'ARRIVED_DROPOFF',
+  // [cf-returncode-poll-v1] RETURNING (sendback = devolucao EM ANDAMENTO) precisa
+  // continuar sendo pollado: o return_handover_code so e gerado pela 99 DURANTE a
+  // devolucao (status sendback), depois que a entrega falhou. Sem RETURNING aqui,
+  // o poller parava de consultar o /detail antes de a 99 emitir o codigo, e as
+  // devolucoes ficavam com return_code NULL (27 casos no periodo). O status-map
+  // ja documentava 'poller segue capturando codigo' — mas a lista nao incluia.
+  'RETURNING',
 ];
 
 /**
