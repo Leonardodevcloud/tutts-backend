@@ -27,6 +27,7 @@ const { createLogisticsRastreioRouter } = require('./routes/rastreio.routes');
 const { initChat99Tables } = require('./chat99.migration');
 // EXTRAVIADOS_V1: marcador de extravio (colunas extraviado_*).
 const { initLogisticsExtraviadosTables } = require('./logistics.migration-extraviados');
+const { initLogisticsFalhaCienteTables } = require('./logistics.migration-falha-ciente');
 // Portal do cliente (loja): colunas de acesso na regra + router read-only isolado.
 const { initLogisticsPortalTables } = require('./logistics.migration-portal');
 const { createLogisticsPortalRouter } = require('./routes/portal.routes');
@@ -79,6 +80,11 @@ async function initLogisticsTables(pool) {
   // Marker: EXTRAVIADOS_MIGRATION_V1
   await initLogisticsExtraviadosTables(pool).catch(err => {
     console.error('[logistics] migration extraviados falhou:', err.message);
+  });
+
+  // [hub-falha-alerta-v1] colunas falha_ciente_*. Idempotente.
+  await initLogisticsFalhaCienteTables(pool).catch(err => {
+    console.error('[logistics] migration falha-ciente falhou:', err.message);
   });
 
   // Portal do cliente (loja): colunas portal_* na regra. Idempotente, trivial.

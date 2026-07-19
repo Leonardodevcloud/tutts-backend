@@ -177,6 +177,9 @@ function mapearCanonicoParaLegado(ld) {
     extraviado_em:      ld.extraviado_em     || null,
     extraviado_por:     ld.extraviado_por    || null,
     extraviado_motivo:  ld.extraviado_motivo || null,
+    // [hub-falha-alerta-v1] estado "ciente" da falha (dispara/silencia o modal)
+    falha_ciente_em:    ld.falha_ciente_em   || null,
+    falha_ciente_por:   ld.falha_ciente_por  || null,
     pickup_code:        ld.pickup_code   || null,  // 🆕 codigo de coleta (99/Uber)
     dropoff_code:       ld.dropoff_code  || null,  // 🆕 codigo de entrega (99/Uber)
     return_code:        ld.return_code   || null,  // 🆕 codigo de devolucao (99)
@@ -793,6 +796,46 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       res.json({ success: true, entrega: upd[0] });
     } catch (err) {
       console.error('[logistics/routes] POST /extraviar erro:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // [hub-falha-alerta-v1] POST /deliveries/:id/falha-ciente
+  // Marca que um admin viu o alerta de falha. Vale pra todos (o modal nao
+  // reabre pra ninguem) e registra quem confirmou. Idempotente: se ja tiver
+  // ciente, mantem o primeiro que confirmou (COALESCE).
+  router.post('/deliveries/:id/falha-ciente', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'id invalido' });
+
+      const { rows } = await pool.query(
+        'SELECT id, codigo_os, falha_ciente_em FROM logistics_deliveries WHERE id = $1',
+        [id]
+      );
+      const ent = rows[0];
+      if (!ent) return res.status(404).json({ error: 'Entrega nao encontrada' });
+
+      const quem = (req.user && (req.user.nome || req.user.email)) || 'admin';
+      const { rows: upd } = await pool.query(
+        `UPDATE logistics_deliveries
+            SET falha_ciente_em  = COALESCE(falha_ciente_em, NOW()),
+                falha_ciente_por = COALESCE(falha_ciente_por, $2),
+                updated_at = NOW()
+          WHERE id = $1
+      RETURNING id, codigo_os, falha_ciente_em, falha_ciente_por`,
+        [id, quem]
+      );
+
+      if (registrarAuditoria) {
+        await registrarAuditoria(req, 'FALHA_CIENTE_LOGISTICS', 'operacional',
+          'logistics_deliveries', id, { codigo_os: ent.codigo_os })
+          .catch(() => {});
+      }
+      console.log(`[logistics] OS ${ent.codigo_os} falha confirmada ciente por ${quem}`);
+      res.json({ success: true, entrega: upd[0] });
+    } catch (err) {
+      console.error('[logistics/routes] POST /falha-ciente erro:', err.message);
       res.status(500).json({ error: err.message });
     }
   });
