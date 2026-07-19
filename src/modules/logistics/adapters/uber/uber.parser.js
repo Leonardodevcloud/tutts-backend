@@ -45,6 +45,27 @@ function montarEnderecoUber(stringEndereco, cepFallback) {
   return JSON.stringify(parsed);
 }
 
+// 🔧 2026-07 (Uber cert dropoff): igual ao montarEnderecoUber, mas devolve TAMBEM
+// o complemento que o parser tirou do street_address (quadra/lote/bloco/apto...).
+// O body junta esse complemento na nota (pickup_notes/dropoff_notes), pra o
+// street_address ficar so com rua+numero+bairro como a Uber exige.
+function montarEnderecoUberComNota(stringEndereco, cepFallback) {
+  const parsed = parsearEnderecoBrasileiro(stringEndereco);
+  if (cepFallback && (!parsed.zip_code || String(parsed.zip_code).replace(/\D/g, '').length < 8)) {
+    parsed.zip_code = String(cepFallback);
+  }
+  const complemento = parsed.complemento_extraido || '';
+  // nao serializa o campo interno pra Uber
+  const semInterno = {
+    street_address: parsed.street_address,
+    city: parsed.city,
+    state: parsed.state,
+    zip_code: parsed.zip_code,
+    country: parsed.country,
+  };
+  return { json: JSON.stringify(semInterno), complemento: complemento };
+}
+
 /**
  * 🔧 2026-07 (Uber cert item 4): evita placeholders no nome que o entregador ve no
  * pickup/dropoff. Filtra strings curtas ou repetitivas ("eeee", "xx", "aaaa") e
@@ -120,6 +141,12 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     montarManifestItem(truncarTexto(req.itemDescription || 'Encomenda', 100), config, manifestValueCents),
   ];
 
+  // 🔧 2026-07 (Uber cert dropoff): monta endereco + extrai complemento (quadra/
+  // lote/bloco...) de coleta e entrega. O complemento vai pra nota; o street_address
+  // fica so rua+numero+bairro.
+  const _pickupEnd  = montarEnderecoUberComNota(req.pickup.address, req.pickup.cep);
+  const _dropoffEnd = montarEnderecoUberComNota(req.dropoff.address, req.dropoff.cep);
+
   const body = {
     quote_id: quoteId,
     external_id: `OS-${req.externalRef}-${Date.now()}`,
@@ -128,22 +155,22 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
     // external_store_id: unico por endereco de retirada/loja (REQUIRED).
     external_store_id: montarExternalStoreId(req, config),
 
-    pickup_address: montarEnderecoUber(req.pickup.address, req.pickup.cep),
+    pickup_address: _pickupEnd.json,
     pickup_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
     pickup_phone_number: pickupPhone,
     pickup_business_name: truncarTexto(nomeRealOuFallback(req.pickup.name, 'Loja'), 100),
-    // pickup_notes: instrucoes do ponto -> aviso POR CLIENTE (perfil de mensagem,
-    // injetado pelo Orchestrator via req.avisoEntregador) -> aviso global. Alinha
-    // a Uber com a 99: farmacia nao recebe mais o texto generico de autopecas.
-    pickup_notes: truncarTexto(req.pickup.instructions || req.avisoEntregador || resolverAvisoEntregador(config), 280),
+    // pickup_notes: complemento extraido do endereco (quadra/lote/bloco...) +
+    // instrucoes do ponto -> aviso POR CLIENTE -> aviso global.
+    pickup_notes: truncarTexto([_pickupEnd.complemento, req.pickup.instructions || req.avisoEntregador || resolverAvisoEntregador(config)].filter(Boolean).join(' - '), 280),
 
-    dropoff_address: montarEnderecoUber(req.dropoff.address, req.dropoff.cep),
+    dropoff_address: _dropoffEnd.json,
     dropoff_name: truncarTexto(nomeRealOuFallback(req.dropoff.name, 'Cliente'), 100),
     dropoff_phone_number: dropoffPhone,
-    // 🔧 2026-07 (Uber cert item 2): dropoff_notes = complemento (sala/apto/portaria/
-    // referencia) + instrucoes de entrega. Antes usava so o complement e ignorava
-    // as instrucoes (entrega.obs), por isso vinha vazio em varias OS.
-    dropoff_notes: truncarTexto([req.dropoff.complement, req.dropoff.instructions].filter(Boolean).join(' - '), 280) || undefined,
+    // 🔧 2026-07 (Uber cert dropoff): dropoff_notes = complemento EXTRAIDO do
+    // endereco (quadra/lote/bloco/apto — tirado do street_address) + complemento
+    // manual + instrucoes. Assim o street_address fica so rua+numero+bairro, e a
+    // Uber para de sobrescrever as coordenadas.
+    dropoff_notes: truncarTexto([_dropoffEnd.complemento, req.dropoff.complement, req.dropoff.instructions].filter(Boolean).join(' - '), 280) || undefined,
 
     manifest_items: manifestItems,
     manifest_total_value: manifestValueCents,

@@ -124,10 +124,22 @@ function parsearEnderecoBrasileiro(str) {
 
   const street = partes.length > 0 ? partes.join(', ') : antes;
 
+  // 🔧 2026-07 (Uber cert item dropoff): SEPARAR complemento do logradouro.
+  // A Uber exige street_address = [RUA+NUMERO, BAIRRO] e NADA MAIS. Quadra, lote,
+  // bloco, apto, sala etc. tem que ir pra nota (dropoff_notes/pickup_notes), senao
+  // o geocoder da Uber se perde e sobrescreve as coordenadas (erro de >1km ->
+  // reprova). Critico em Goiania e Brasilia, onde o endereco vem cheio desses
+  // tokens (ex: "AV GOIAS 4057Q25 LT 3 4057", "SQN 415 Bloco C").
+  // extrairComplementoBR devolve { logradouro, complemento } — o complemento vai
+  // pro campo complemento_extraido no retorno, pra o adapter juntar na nota.
+  var _extr = extrairComplementoBR(street);
+  var streetSemComp = _extr.logradouro;
+  var complementoExtraido = _extr.complemento;
+
   // 🔧 2026-06 (Uber cert): street_address em ATÉ 2 posições [RUA+NÚMERO, BAIRRO]
   // e remove "N"/"Nº"/"No" antes do número — o "N" atrapalha a normalização de
   // geolocalização da Uber. Bairro vai na 2ª posição (pode ser omitida).
-  var streetLimpo = String(street || '').replace(/\b[Nn][º°o]?\.?\s+(?=\d)/g, '').replace(/\s{2,}/g, ' ').trim();
+  var streetLimpo = String(streetSemComp || '').replace(/\b[Nn][º°o]?\.?\s+(?=\d)/g, '').replace(/\s{2,}/g, ' ').trim();
   var segs = streetLimpo.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
   var streetArr;
   if (segs.length <= 1) {
@@ -153,7 +165,50 @@ function parsearEnderecoBrasileiro(str) {
     state: uf,
     zip_code: cep,
     country: DEFAULT_COUNTRY,
+    // 🔧 2026-07 (Uber): complemento removido do street_address (quadra/lote/bloco/
+    // apto/sala). O adapter que quiser junta isso na nota. Campo ADITIVO — quem
+    // nao usa (ex: 99) simplesmente ignora.
+    complemento_extraido: complementoExtraido || '',
   };
+}
+
+/**
+ * 🔧 2026-07 (Uber cert): separa complemento (quadra, lote, bloco, apto, sala,
+ * conjunto, casa, loja, andar) de um logradouro brasileiro. A Uber exige que o
+ * street_address tenha SO rua+numero — o resto vai pra nota, senao o geocoder
+ * erra e reprova. Foco em GO/DF, onde esses tokens sao a norma.
+ *
+ * @param {string} street  logradouro bruto (pode ter numero + complementos)
+ * @returns {{ logradouro: string, complemento: string }}
+ */
+function extrairComplementoBR(street) {
+  var s = String(street == null ? '' : street).trim();
+  if (!s) return { logradouro: '', complemento: '' };
+
+  // 1. Descola numero grudado na quadra: "4057Q25" -> "4057 Q25".
+  s = s.replace(/\b(\d+)\s*([Qq]\s*\.?\s*\d+[A-Za-z]?)\b/g, '$1 $2');
+
+  // 2. Tokens de complemento (rotulo + valor). Ordem importa: mais especificos
+  //    primeiro. Cada match sai do logradouro e entra na lista de complementos.
+  var re = /\b((?:qd|quadra|q)\s*\.?\s*\d+[a-z]?|(?:lt|lote)\s*\.?\s*\d+[a-z]?|(?:bloco|blc|bl)\s*\.?\s*[a-z0-9]+|(?:apto|apartamento|ap)\s*\.?\s*\d+|(?:sala|sl)\s*\.?\s*\d+|(?:conjunto|conj|cj)\s*\.?\s*[a-z0-9]+|casa\s*\d*|loja\s*\d*|andar\s*\d*)\b/gi;
+
+  var comps = [];
+  var m;
+  while ((m = re.exec(s)) !== null) {
+    comps.push(m[1].replace(/\s{2,}/g, ' ').trim());
+  }
+  var logradouro = s.replace(re, ' ');
+
+  // 3. Limpa o logradouro: remove numero duplicado consecutivo ("4057 4057" ->
+  //    "4057"), espacos e virgulas orfas.
+  logradouro = logradouro
+    .replace(/\b(\d+)\b(?:\s+\1\b)+/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+,/g, ',')
+    .replace(/^[\s,\-]+|[\s,\-]+$/g, '')
+    .trim();
+
+  return { logradouro: logradouro, complemento: comps.join(', ') };
 }
 
 /**
@@ -215,6 +270,7 @@ function truncarTexto(str, max = 280) {
 
 module.exports = {
   parsearEnderecoBrasileiro,
+  extrairComplementoBR,
   formatarTelefoneE164,
   formatarTelefoneBR,
   truncarTexto,
