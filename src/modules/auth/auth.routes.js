@@ -496,7 +496,7 @@ router.post('/users/login', loginLimiter, async (req, res) => {
 
     // Buscar usuário no banco
     const result = await pool.query(
-      'SELECT id, cod_profissional, full_name, role, password, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs, COALESCE(cadastro_completo, false) as cadastro_completo FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
+      'SELECT id, cod_profissional, full_name, role, password, foto_thumb, COALESCE(allowed_modules, \'[]\') as allowed_modules, COALESCE(allowed_tabs, \'{}\') as allowed_tabs, COALESCE(cadastro_completo, false) as cadastro_completo FROM users WHERE LOWER(cod_profissional) = LOWER($1)',
       [codProfissional]
     );
 
@@ -665,7 +665,7 @@ router.post('/users/refresh-token', async (req, res) => {
     
     // Buscar dados atualizados do usuário
     const result = await pool.query(
-      `SELECT id, cod_profissional, full_name, role, 
+      `SELECT id, cod_profissional, full_name, role, foto_thumb,
               COALESCE(allowed_modules, '[]') as allowed_modules, 
               COALESCE(allowed_tabs, '{}') as allowed_tabs,
               COALESCE(cadastro_completo, false) as cadastro_completo
@@ -726,6 +726,7 @@ router.post('/users/refresh-token', async (req, res) => {
         cod_profissional: user.cod_profissional,
         full_name: user.full_name,
         role: user.role,
+        foto_thumb: user.foto_thumb || null, // [foto-motoboy-v1] avatar no header
         allowed_modules: user.allowed_modules,
         allowed_tabs: user.allowed_tabs,
         cadastro_completo: user.cadastro_completo === true
@@ -1003,7 +1004,7 @@ router.post('/users/2fa/authenticate', async (req, res) => {
     
     // 2FA válido - completar login
     const userResult = await pool.query(
-      `SELECT id, cod_profissional, full_name, role, 
+      `SELECT id, cod_profissional, full_name, role, foto_thumb,
               COALESCE(allowed_modules, '[]') as allowed_modules, 
               COALESCE(allowed_tabs, '{}') as allowed_tabs,
               COALESCE(cadastro_completo, false) as cadastro_completo
