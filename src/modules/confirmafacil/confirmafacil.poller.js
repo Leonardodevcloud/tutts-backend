@@ -137,6 +137,41 @@ function _minutosAtePrevisaoCF(dataPrevisao, d = new Date()) {
   if (!dataPrevisao) return 0;
   const m = String(dataPrevisao).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return 0;
+
+  // [cf-corte-diautil-v2] So adia se a previsao for DEPOIS DE AMANHA.
+  // Regra pedida: nota que chega em dia util dentro do horario com previsao
+  // pra HOJE ou AMANHA e criada hoje (respeitando so a janela 07:30-18:20).
+  // So adiamos quando a previsao do CF pula 2+ dias — que e exatamente o que
+  // acontece em fim de semana (sex->seg) e vespera de feriado (o CF ja embute
+  // isso na dataPrevisao). Assim o adiamento continua cobrindo fds/feriado,
+  // mas para de segurar nota de dia normal cuja entrega e amanha.
+  //
+  // Comparacao por DATA DE CALENDARIO no fuso CF_JANELA_TZ (nao por horas),
+  // pra "amanha 23:00" contar como amanha, nao como depois de amanha.
+  const _ymdTz = (dt) => {
+    try {
+      const p = new Intl.DateTimeFormat('en-CA', {
+        timeZone: CF_JANELA_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(dt);
+      const y = p.find(x => x.type === 'year').value;
+      const mo = p.find(x => x.type === 'month').value;
+      const da = p.find(x => x.type === 'day').value;
+      return `${y}-${mo}-${da}`;
+    } catch (_) {
+      return dt.toISOString().slice(0, 10);
+    }
+  };
+  // dias corridos entre HOJE (no fuso) e a data da previsao.
+  const hojeYmd = _ymdTz(d);
+  const prevYmd = `${m[1]}-${m[2]}-${m[3]}`;
+  const hojeMs = Date.UTC(...hojeYmd.split('-').map((v, i) => i === 1 ? Number(v) - 1 : Number(v)));
+  const prevMs = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const diasCorridos = Math.round((prevMs - hojeMs) / 86400000);
+
+  // Previsao hoje (0) ou amanha (1) -> NAO adia por previsao (cria hoje, so horario).
+  // Previsao a 2+ dias -> adia pra 08:00 do dia da previsao (fds/feriado).
+  if (diasCorridos <= 1) return 0;
+
   // Alvo = 08:00 BRT (= 11:00 UTC, Bahia UTC-3 sem horario de verao) do dia da previsao.
   const alvoUtcMs = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 11, 0, 0);
   const diffMin = Math.round((alvoUtcMs - d.getTime()) / 60000);
