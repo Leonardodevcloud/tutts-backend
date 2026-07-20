@@ -1496,6 +1496,153 @@ async function listarCorridasMotoboy(pool, { codProf, de, ate } = {}) {
   return { corridas };
 }
 
+// ============================================================
+// 🆕 2026-07: GRID DE CORRIDAS AO VIVO (Score corridas por motoboy)
+// ============================================================
+// Le a bi_entregas AO VIVO (mesma fonte do BI, mesmo instante) — por isso os
+// numeros batem com o BI. Total = corridas ponto>=2 (igual BI). O prazo de
+// cada corrida usa data_hora_alocado (aceite) ate finalizado, comparado com a
+// regua por distancia. Corridas sem aceite/finalizado/distancia sao "sem
+// dados": contam no total mas ficam fora do % (nao da pra medir).
+
+// Monta o filtro de janela por data_solicitado (DATE). de/ate 'YYYY-MM-DD'.
+// Sem ate = hoje. Sem de = ate - 6 dias (janela padrao de 7 dias).
+function _janelaCorridas(de, ate) {
+  const ateFim = ate || null;
+  const deIni = de || null;
+  return { deIni, ateFim };
+}
+
+/**
+ * Grid ESQUERDO: motoboys de uma praca com total de corridas, avaliaveis e
+ * % no prazo, no periodo. Le ao vivo.
+ */
+async function listarMotoboysComCorridas(pool, { regiao, de, ate } = {}) {
+  if (!regiao) return { periodo: { de, ate }, motoboys: [] };
+  const { deIni, ateFim } = _janelaCorridas(de, ate);
+
+  // motoboys da praca (mesmo criterio do aproveitamento)
+  const mb = await pool.query(
+    `SELECT cod_prof, nome_prof FROM score_nivel_motoboy
+      WHERE ${SQL_NORM_REGIAO('regiao')} = ${SQL_NORM_REGIAO('$1::text')}`,
+    [regiao]
+  );
+  if (mb.rows.length === 0) return { periodo: { de: deIni, ate: ateFim }, motoboys: [] };
+
+  const codigos = mb.rows.map(r => parseInt(r.cod_prof, 10)).filter(Number.isFinite);
+  if (codigos.length === 0) return { periodo: { de: deIni, ate: ateFim }, motoboys: [] };
+
+  // janela: ate = ateFim OU hoje; de = deIni OU (ate - 6 dias)
+  const fimSQL = ateFim ? '$2::date' : 'CURRENT_DATE';
+  const iniSQL = deIni ? '$3::date' : `(${fimSQL} - INTERVAL '6 days')::date`;
+  const params = [codigos];
+  if (ateFim) params.push(ateFim);
+  if (deIni) params.push(deIni);
+
+  const r = await pool.query(`
+    WITH base AS (
+      SELECT
+        cod_prof, nome_prof,
+        distancia,
+        ${PRAZO_REGUA_SQL} AS prazo_regua,
+        (${TEMPO_PROF_MIN_SQL}) AS tempo_prof_min,
+        (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
+      FROM bi_entregas
+      WHERE cod_prof = ANY($1)
+        AND COALESCE(ponto, 1) >= 2
+        AND data_solicitado >= ${iniSQL}
+        AND data_solicitado <= ${fimSQL}
+    )
+    SELECT
+      cod_prof,
+      MAX(nome_prof) AS nome_prof,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE avaliavel)::int AS avaliaveis,
+      COUNT(*) FILTER (WHERE avaliavel AND tempo_prof_min <= prazo_regua)::int AS no_prazo
+    FROM base
+    GROUP BY cod_prof
+    HAVING COUNT(*) > 0
+    ORDER BY MAX(nome_prof)
+  `, params);
+  // (ordenacao final por % no prazo desc e feita apos montar, abaixo)
+
+  const motoboys = r.rows.map(row => {
+    const total = parseInt(row.total, 10) || 0;
+    const avaliaveis = parseInt(row.avaliaveis, 10) || 0;
+    const noPrazo = parseInt(row.no_prazo, 10) || 0;
+    return {
+      cod_prof: row.cod_prof,
+      nome_prof: row.nome_prof,
+      total,
+      avaliaveis,
+      no_prazo: noPrazo,
+      fora: avaliaveis - noPrazo,
+      pct: avaliaveis > 0 ? Math.round((10000 * noPrazo) / avaliaveis) / 100 : null,
+    };
+  });
+  // 🆕 ordena do MAIOR % no prazo pro menor (melhores no topo). Sem avaliavel (pct null) vai pro fim.
+  motoboys.sort((a, b) => {
+    if (a.pct == null && b.pct == null) return (a.nome_prof || '').localeCompare(b.nome_prof || '');
+    if (a.pct == null) return 1;
+    if (b.pct == null) return -1;
+    return b.pct - a.pct;
+  });
+  return { periodo: { de: deIni, ate: ateFim }, motoboys };
+}
+
+/**
+ * Grid DIREITO: todas as corridas (ponto>=2) de um motoboy no periodo, com
+ * criacao, alocacao, finalizado e status de prazo. Le ao vivo.
+ */
+async function listarCorridasMotoboy(pool, { codProf, de, ate } = {}) {
+  const codInt = parseInt(codProf, 10);
+  if (!Number.isFinite(codInt)) return { corridas: [] };
+  const { deIni, ateFim } = _janelaCorridas(de, ate);
+
+  const fimSQL = ateFim ? '$2::date' : 'CURRENT_DATE';
+  const iniSQL = deIni ? '$3::date' : `(${fimSQL} - INTERVAL '6 days')::date`;
+  const params = [codInt];
+  if (ateFim) params.push(ateFim);
+  if (deIni) params.push(deIni);
+
+  const r = await pool.query(`
+    SELECT
+      os,
+      data_hora            AS criacao,
+      data_hora_alocado    AS alocacao,
+      finalizado,
+      distancia,
+      ${PRAZO_REGUA_SQL}   AS prazo_regua,
+      (${TEMPO_PROF_MIN_SQL}) AS tempo_prof_min,
+      (${ENTREGA_AVALIAVEL_SQL}) AS avaliavel
+    FROM bi_entregas
+    WHERE cod_prof = $1
+      AND COALESCE(ponto, 1) >= 2
+      AND data_solicitado >= ${iniSQL}
+      AND data_solicitado <= ${fimSQL}
+    ORDER BY data_hora DESC NULLS LAST, os DESC
+  `, params);
+
+  const corridas = r.rows.map(row => {
+    const avaliavel = row.avaliavel === true;
+    let status = 'sem_dados';
+    if (avaliavel) {
+      status = (parseFloat(row.tempo_prof_min) <= parseFloat(row.prazo_regua)) ? 'no_prazo' : 'fora';
+    }
+    return {
+      os: row.os,
+      criacao: row.criacao,
+      alocacao: row.alocacao,
+      finalizado: row.finalizado,
+      distancia: row.distancia != null ? parseFloat(row.distancia) : null,
+      prazo_regua: row.prazo_regua != null ? parseInt(row.prazo_regua, 10) : null,
+      tempo_prof_min: row.tempo_prof_min != null ? Math.round(parseFloat(row.tempo_prof_min)) : null,
+      status,
+    };
+  });
+  return { corridas };
+}
+
 module.exports = {
   // Constantes
   NIVEL_2,
