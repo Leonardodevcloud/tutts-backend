@@ -38,6 +38,8 @@ const {
   buscarMeuAvisoAproveitamento,
   marcarAvisoAproveitamentoVisto,
   avaliarAproveitamentoSemanal,
+  listarMotoboysComCorridas,
+  listarCorridasMotoboy,
 } = require('../score-v2.service');
 // 🚀 helper compartilhado: regioes do CRM + Planilha Sheets
 const { listarRegioes: listarRegioesCompletas } = require('../../../shared/utils/profissionaisLookup');
@@ -152,6 +154,34 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
     } catch (err) {
       console.error('❌ [Score v2] /admin/alertas-aproveitamento:', err.message);
       res.status(500).json({ error: 'Erro ao listar alertas', details: err.message });
+    }
+  });
+
+  // 🆕 2026-07: grid ESQUERDO — motoboys da praca com total/avaliaveis/%prazo (ao vivo)
+  router.get('/score-v2/admin/corridas-motoboys', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { regiao, de, ate } = req.query;
+      const r = await listarMotoboysComCorridas(pool, {
+        regiao: regiao || null, de: de || null, ate: ate || null,
+      });
+      res.json(r);
+    } catch (err) {
+      console.error('❌ [Score v2] /admin/corridas-motoboys:', err.message);
+      res.status(500).json({ error: 'Erro ao listar motoboys', details: err.message });
+    }
+  });
+
+  // 🆕 2026-07: grid DIREITO — corridas de um motoboy no periodo (ao vivo)
+  router.get('/score-v2/admin/corridas-motoboy/:codProf', verificarToken, verificarAdmin, async (req, res) => {
+    try {
+      const { de, ate } = req.query;
+      const r = await listarCorridasMotoboy(pool, {
+        codProf: req.params.codProf, de: de || null, ate: ate || null,
+      });
+      res.json(r);
+    } catch (err) {
+      console.error('❌ [Score v2] /admin/corridas-motoboy:', err.message);
+      res.status(500).json({ error: 'Erro ao listar corridas', details: err.message });
     }
   });
 
