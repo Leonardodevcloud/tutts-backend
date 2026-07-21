@@ -1066,13 +1066,22 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
             const ateStr = (() => { const n = new Date(); const p = x => String(x).padStart(2,'0');
               return `${n.getFullYear()}/${p(n.getMonth()+1)}/${p(n.getDate())} 23:59:59`; })();
 
+            const SYNC_PAGE_SIZE = 100;
             while (true) {
-              const filtro = { page: pg2, size: 100,
+              // [cf-sync-paginacao-v1] page/size vao FORA do filtroDTO, como query
+              // params separados. O CF IGNORA page/size dentro do filtroDTO — por
+              // isso vinha 10 por pagina (default) e a paginacao nao avancava de
+              // verdade, reciclando dados ate totalPages (2000+ paginas).
+              const filtro = {
                 de:  '2024/01/01 00:00:00',
                 ate: ateStr,
                 cnpjTransportadora: [config.cnpj_transportadora] };
 
-              const params = new URLSearchParams({ filtroDTO: JSON.stringify(filtro) });
+              const params = new URLSearchParams({
+                filtroDTO: JSON.stringify(filtro),
+                page:      String(pg2),
+                size:      String(SYNC_PAGE_SIZE),
+              });
               const resp = await httpRequest(
                 'https://utilities.confirmafacil.com.br/filter/embarque?' + params,
                 { method: 'GET', headers: { Authorization: token, accept: 'application/json' } }
@@ -1128,8 +1137,20 @@ function createConfirmaFacilRouter(pool, verificarToken, verificarAdmin, registr
                 total++;
               }
 
-              // Para só se vier página vazia — nunca para por ter menos de 100
+              // [cf-sync-paginacao-v1] Guardas de parada:
+              //  1. pagina vazia (fim normal)
+              //  2. menos que uma pagina cheia = ultima pagina real
+              //  3. teto de seguranca (o CF recicla no fim em vez de mandar vazio)
               if (nfs.length === 0) break;
+              if (nfs.length < SYNC_PAGE_SIZE) {
+                console.log(`[CF Sync] ultima pagina real (pg ${pg2}, ${nfs.length} < ${SYNC_PAGE_SIZE})`);
+                break;
+              }
+              const TETO_PAGINAS = 500; // ~50k NFs; alem disso e reciclagem do CF
+              if (pg2 + 1 >= TETO_PAGINAS) {
+                console.warn(`[CF Sync] TETO de ${TETO_PAGINAS} paginas — abortando (evita loop de reciclagem)`);
+                break;
+              }
               pg2++;
             }
             console.log(`✅ [CF Sync] cliente ${config.cliente_id}: ${total} NFs sincronizadas`);
