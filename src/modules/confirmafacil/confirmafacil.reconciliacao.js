@@ -56,7 +56,8 @@ async function reconciliarEntregas(pool) {
   const cfService = getConfirmaFacilService(pool);
 
   const { rows: candidatos } = await pool.query(`
-    SELECT DISTINCT sc.id AS solicitacao_id, sc.tutts_os_numero AS os_numero
+    SELECT DISTINCT sc.id AS solicitacao_id, sc.tutts_os_numero AS os_numero,
+           MAX(sp.data_finalizado) OVER (PARTITION BY sc.id) AS data_finalizado_real
     FROM solicitacoes_corrida sc
     JOIN confirmafacil_vinculos v ON v.solicitacao_id = sc.id
     JOIN solicitacoes_pontos sp ON sp.solicitacao_id = sc.id AND sp.ordem > 1
@@ -115,6 +116,19 @@ async function reconciliarEntregas(pool) {
         osNumero:      c.os_numero,
         novoStatus:    'finalizado',
         pontoStatus:   'finalizado_ponto', // mapeia para Cod.1
+        // [cf-envio-retry-v1] CRITICO: passa o horario REAL da entrega (quando o
+        // motoboy finalizou), NAO o do reenvio. Sem isto o CF registraria o
+        // horario do reprocessamento e o SLA seria injustamente penalizado.
+        // data_finalizado e UTC-naive no banco; interpretamos como UTC.
+        dataOcorrencia: (() => {
+          const df = c.data_finalizado_real;
+          if (!df) return undefined;
+          // pg pode retornar Date (ja com tz) ou string UTC-naive. Normaliza pra
+          // uma Date que represente o mesmo instante-parede da entrega.
+          if (df instanceof Date) return df;
+          const s = String(df);
+          return new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s.replace(' ', 'T') + 'Z');
+        })(),
       });
     } catch (e) {
       console.error(`[CF Reconc] erro ao reenviar OS ${c.os_numero}:`, e.message);

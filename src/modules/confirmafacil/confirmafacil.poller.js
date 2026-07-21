@@ -249,11 +249,14 @@ class ConfirmaFacilPoller {
       catch (err) { console.error('❌ [CF SLA] erro na verificação de risco:', err.message); }
     }, 60 * 1000);
 
-    // 🔁 Reconciliação: reenvia entregas que não chegaram ao CF (a cada 3 min)
+    // 🔁 Reconciliação: reenvia entregas que não chegaram ao CF (a cada 1 min)
+    // [cf-envio-retry-v1] acelerado de 3min -> 1min: quando o CF volta do ar,
+    // a entrega perdida (HTTP 0) e reenviada em ate 1 minuto, com o horario
+    // REAL da entrega (nao o do reenvio).
     setInterval(async () => {
       try { await reconcMod.reconciliarEntregas(this.pool); }
       catch (err) { console.error('❌ [CF Reconc] erro na reconciliação:', err.message); }
-    }, 3 * 60 * 1000);
+    }, 60 * 1000);
   }
 
   // ══════════════════════════════════════════════════

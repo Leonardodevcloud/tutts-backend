@@ -33,30 +33,53 @@ class ConfirmaFacilClient {
 
     for (let i = 0; i < itens.length; i += CHUNK_SIZE) {
       const lote = itens.slice(i, i + CHUNK_SIZE);
-      try {
-        const resp = await httpRequest(CF_EMBARQUE_URL, {
-          method:  'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token,
-          },
-          body: JSON.stringify(lote),
-        });
+      const numLote = i / CHUNK_SIZE + 1;
+      // [cf-envio-retry-v1] retry na hora: HTTP 0 (falha de conexao/timeout) e
+      // 5xx (erro do servidor CF) sao transitorios -> tenta de novo com backoff
+      // 2s, 4s, 8s, 16s, 30s. Erros 4xx (payload/regra) NAO re-tentam (nao
+      // adianta insistir num pedido invalido).
+      const ESPERAS_MS = [2000, 4000, 8000, 16000, 30000];
+      let resultado = null;
+      for (let tentativa = 0; tentativa <= ESPERAS_MS.length; tentativa++) {
+        try {
+          const resp = await httpRequest(CF_EMBARQUE_URL, {
+            method:  'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': token,
+            },
+            body: JSON.stringify(lote),
+          });
 
-        const status = resp.status;
-        let body = null;
-        try { body = resp.json(); } catch (_) { body = resp.text(); }
+          const status = resp.status;
+          let body = null;
+          try { body = resp.json(); } catch (_) { body = resp.text(); }
 
-        const ok = status >= 200 && status < 300;
-        resultados.push({ ok, status, body, lote: i / CHUNK_SIZE + 1 });
+          const ok = status >= 200 && status < 300;
+          resultado = { ok, status, body, lote: numLote };
 
-        if (!ok) {
-          console.warn(`⚠️ [CF Client] /embarque lote ${i / CHUNK_SIZE + 1} retornou ${status}:`, JSON.stringify(body).slice(0, 200));
+          // sucesso OU erro definitivo (4xx) -> para de tentar
+          if (ok || (status >= 400 && status < 500)) {
+            if (!ok) {
+              console.warn(`⚠️ [CF Client] /embarque lote ${numLote} retornou ${status} (nao re-tenta):`, JSON.stringify(body).slice(0, 200));
+            } else if (tentativa > 0) {
+              console.log(`✅ [CF Client] /embarque lote ${numLote} OK na tentativa ${tentativa + 1}`);
+            }
+            break;
+          }
+          // status 0 (conexao) ou 5xx -> transitorio, vai re-tentar
+          console.warn(`⚠️ [CF Client] /embarque lote ${numLote} status ${status} (transitorio, tentativa ${tentativa + 1})`);
+        } catch (err) {
+          resultado = { ok: false, status: 0, body: null, erro: err.message, lote: numLote };
+          console.error(`❌ [CF Client] /embarque lote ${numLote} falhou (tentativa ${tentativa + 1}):`, err.message);
         }
-      } catch (err) {
-        resultados.push({ ok: false, status: 0, body: null, erro: err.message, lote: i / CHUNK_SIZE + 1 });
-        console.error(`❌ [CF Client] /embarque lote ${i / CHUNK_SIZE + 1} falhou:`, err.message);
+
+        // se ainda ha tentativas, espera o backoff antes da proxima
+        if (tentativa < ESPERAS_MS.length) {
+          await new Promise(r => setTimeout(r, ESPERAS_MS[tentativa]));
+        }
       }
+      resultados.push(resultado);
     }
 
     return resultados;
