@@ -930,8 +930,15 @@ router.put('/admin/solicitacao/clientes/:id/provedores', verificarToken, async (
         return res.status(400).json({ error: 'Provedor inválido: ' + p + '. Válidos: ' + VALIDOS.join(', ') });
       }
     }
-    // tutts sempre presente
-    if (!provedores.includes('tutts')) provedores = ['tutts', ...provedores];
+    // [provedor-tutts-opcional-v1] O Tutts DEIXOU de ser obrigatorio: ha
+    // operacoes que usam so o Hub (99/Uber). Forcar o tutts aqui fazia o
+    // portal do cliente abrir sempre com ele selecionado, mesmo quando o
+    // admin desmarcava na tela.
+    // A unica regra que fica: nao pode salvar ZERO provedor — sem nenhum,
+    // o cliente nao consegue despachar nada.
+    if (provedores.length === 0) {
+      return res.status(400).json({ error: 'Selecione ao menos um provedor' });
+    }
     const { rows } = await pool.query(
       'UPDATE clientes_solicitacao SET provedores_habilitados = $1 WHERE id = $2 RETURNING id',
       [JSON.stringify(provedores), req.params.id]
