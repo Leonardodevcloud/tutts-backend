@@ -1916,15 +1916,38 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
              sc.profissional_nome, sc.tutts_distancia, sc.tutts_valor, sc.valor_rota_servico,
              ld.distancia_km, ld.valor_servico, ld.endereco_coleta AS hub_coleta,
              ld.endereco_entrega AS hub_entrega, ld.courier_data, ld.status_canonico,
-             pc.endereco AS tutts_coleta, pe.endereco AS tutts_entrega
+             pc.endereco AS tutts_coleta, pe.endereco AS tutts_entrega,
+             -- [relatorio-duracao-v1] Duracao TOTAL em minutos: da criacao ate a
+             -- ultima entrega. Duas fontes, pega a MAIOR:
+             --   pf.fim  -> data_finalizado dos pontos (corrida do motoboy da casa)
+             --   ld.entregue_at / finalizado_at -> Hub (99/Uber): quem finaliza e
+             --                                     o webhook do provedor, e os
+             --                                     pontos ficam sem data_finalizado
+             -- Calculado no SQL pra a TELA e o CSV sairem iguais (o CSV e gerado
+             -- aqui no backend).
+             -- Descarta marcos ANTERIORES a criacao (alguns pontos sao gravados
+             -- com o relogio de parede do sistema externo, convencao diferente).
+             (
+               SELECT GREATEST(
+                        COALESCE(pf.fim,            'epoch'::timestamp),
+                        COALESCE(ld.entregue_at::timestamp,   'epoch'::timestamp),
+                        COALESCE(ld.finalizado_at::timestamp, 'epoch'::timestamp)
+                      )
+             ) AS fim_calc,
+             pf.fim AS fim_pontos
       FROM solicitacoes_corrida sc
       LEFT JOIN LATERAL (
         SELECT distancia_km, valor_servico, endereco_coleta, endereco_entrega,
-               courier_data, status_canonico
+               courier_data, status_canonico, entregue_at, finalizado_at
         FROM logistics_deliveries d
         WHERE d.codigo_os::text = trim(sc.tutts_os_numero)
         ORDER BY d.created_at DESC LIMIT 1
       ) ld ON true
+      LEFT JOIN LATERAL (
+        SELECT MAX(data_finalizado) AS fim
+        FROM solicitacoes_pontos
+        WHERE solicitacao_id = sc.id AND data_finalizado >= sc.criado_em
+      ) pf ON true
       LEFT JOIN LATERAL (
         SELECT COALESCE(NULLIF(endereco_completo,''), NULLIF(concat_ws(', ', rua, numero, bairro),'')) AS endereco
         FROM solicitacoes_pontos WHERE solicitacao_id = sc.id ORDER BY ordem ASC LIMIT 1
@@ -1943,6 +1966,17 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
     let corridas = rows.map(r => {
       const canalRow = classificarCanal(r.provider_usado);
       const courier = r.courier_data || {};
+      // [relatorio-duracao-v1] minutos entre criacao e o ultimo marco de entrega.
+      // fim_calc vem do GREATEST(pontos, hub). 'epoch' = nenhuma fonte tinha data.
+      const _duracaoMin = (() => {
+        if (!r.fim_calc || !r.criado_em) return null;
+        const fim = new Date(r.fim_calc).getTime();
+        const ini = new Date(r.criado_em).getTime();
+        if (!Number.isFinite(fim) || !Number.isFinite(ini)) return null;
+        if (fim <= 0 || new Date(r.fim_calc).getUTCFullYear() < 2000) return null; // epoch = sem dado
+        const m = Math.round((fim - ini) / 60000);
+        return (m >= 0 && m <= 43200) ? m : null;   // teto de 30 dias
+      })();
       let km, valor, origem, motoboy, coleta, entrega, status;
 
       if (canalRow === 'hub') {
@@ -1990,6 +2024,9 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         valor_origem: origem,
         status: statusNorm,
         data: r.criado_em,
+        // [relatorio-duracao-v1] minutos da criacao ate a ultima entrega
+        // (null quando a corrida ainda nao terminou ou nao ha marco)
+        duracao_min: _duracaoMin,
       };
     });
 
@@ -2003,13 +2040,43 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
     }
 
     if (String(formato).toLowerCase() === 'csv') {
-      const headers = ['OS', 'Canal', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data'];
-      const linhas = corridas.map(c => [
-        c.os, c.canal, c.endereco_coleta, c.endereco_entrega, c.motoboy || '',
-        c.km != null ? String(c.km).replace('.', ',') : '',
-        formatarBRL(c.valor), c.status,
-        c.data ? new Date(c.data).toISOString() : '',
-      ]);
+      // [relatorio-duracao-v1] + coluna Duracao. A Data virou Data/Hora
+      // legiveis (dd/mm/aaaa e HH:MM:SS separados) — o ISO cru nao filtrava
+      // nem virava tabela dinamica no Excel.
+      const _fmtDur = (min) => {
+        if (min == null) return '';
+        if (min < 60) return min + 'min';
+        if (min < 1440) {
+          const h = Math.floor(min / 60), r = min % 60;
+          return h + 'h' + (r > 0 ? ' ' + String(r).padStart(2, '0') : '');
+        }
+        const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60);
+        return d + 'd' + (h > 0 ? ' ' + h + 'h' : '');
+      };
+      const _fmtDataHora = (v) => {
+        if (!v) return ['', ''];
+        const d = new Date(v);
+        if (isNaN(d.getTime())) return ['', ''];
+        const p = new Intl.DateTimeFormat('pt-BR', {
+          timeZone: 'America/Bahia',
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        }).formatToParts(d);
+        const g = (t) => { const x = p.find(i => i.type === t); return x ? x.value : ''; };
+        return [`${g('day')}/${g('month')}/${g('year')}`, `${g('hour')}:${g('minute')}:${g('second')}`];
+      };
+      const headers = ['OS', 'Canal', 'Coleta', 'Entrega', 'Motoboy', 'KM', 'Valor (R$)', 'Status', 'Data', 'Hora', 'Duracao', 'Duracao (min)'];
+      const linhas = corridas.map(c => {
+        const [_dt, _hr] = _fmtDataHora(c.data);
+        return [
+          c.os, c.canal, c.endereco_coleta, c.endereco_entrega, c.motoboy || '',
+          c.km != null ? String(c.km).replace('.', ',') : '',
+          formatarBRL(c.valor), c.status,
+          _dt, _hr,
+          _fmtDur(c.duracao_min),
+          c.duracao_min != null ? String(c.duracao_min) : '',
+        ];
+      });
       const csv = montarCSV(headers, linhas);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="minhas-corridas.csv"');

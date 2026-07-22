@@ -47,6 +47,12 @@ async function buscarHubPorOS(pool, osNumeros) {
     SELECT d.codigo_os, d.provider_code, d.status_canonico, d.status_native,
            d.courier_data, d.tracking_url, d.rastreio_token,
            d.pickup_code, d.dropoff_code, d.return_code,
+           -- [duracao-hub-v1] timestamps do ciclo da entrega no Hub. Nas corridas
+           -- despachadas pro provedor (99/Uber) quem finaliza e o webhook dele,
+           -- entao solicitacoes_pontos.data_finalizado costuma ficar vazio — a
+           -- tela do cliente nao tinha como calcular a duracao. Estes campos
+           -- resolvem isso.
+           d.entregue_at, d.finalizado_at, d.coletado_at, d.atribuido_at,
            d.latitude_coleta, d.longitude_coleta, d.latitude_entrega, d.longitude_entrega,
            d.ultima_lat, d.ultima_lng,
            t.latitude  AS pos_lat,
@@ -86,6 +92,14 @@ async function buscarHubPorOS(pool, osNumeros) {
       // deve ser usado na tela (não o link cru do provedor).
       rastreio_token: r.rastreio_token || null,
       rastreio_url: r.rastreio_token ? `${RASTREIO_BASE_URL}/r/${r.rastreio_token}` : null,
+      // [duracao-hub-v1] marcos de tempo da entrega (ISO). Servem pra tela do
+      // cliente calcular a duracao quando a corrida saiu pelo Hub.
+      tempos: {
+        atribuido:  r.atribuido_at  || null,
+        coletado:   r.coletado_at   || null,
+        entregue:   r.entregue_at   || null,
+        finalizado: r.finalizado_at || null,
+      },
       // codigos de verificacao do Hub (99/Uber) — pro cliente ver na corrida ativa.
       codigos: {
         coleta:    r.pickup_code  || null,
