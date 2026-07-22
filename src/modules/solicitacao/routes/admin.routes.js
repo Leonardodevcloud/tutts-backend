@@ -1045,6 +1045,9 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           d.codigo_os, d.provider_code, d.distancia_km, d.valor_servico,
           d.endereco_coleta, d.endereco_entrega, d.courier_data,
           d.status_canonico, d.created_at,
+          -- [relatorio-retorno-v1] marca de que o adicional de retorno FOI
+          -- cobrado nesta corrida (gravada pelo WebhookDispatcher no RETURNING).
+          d.retorno_cobrado_em,
           -- RELATORIO_CLIENTE_V1
           -- regra_id: e daqui que o card da loja tira o nome do cliente. O
           -- relatorio usava so solicitacoes_corrida, que existe apenas pra
@@ -1096,7 +1099,9 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
              -- define o valor do Hub; o valor_servico gravado nao serve porque
              -- o dispatch nunca chega a aplicar a tabela (opts.regra fica
              -- undefined la), entao ele guarda o valor da Mapp.
-             dr.preco_valor_fixo, dr.preco_km_base, dr.preco_valor_km_adicional
+             dr.preco_valor_fixo, dr.preco_km_base, dr.preco_valor_km_adicional,
+             -- [relatorio-retorno-v1] adicional fixo por devolucao (por cliente)
+             dr.preco_retorno_valor
       FROM ld
       LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
@@ -1269,6 +1274,22 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           valor = _rv.valor; origem = _rv.origem;
         }
       }
+      // [relatorio-retorno-v1] Adicional por devolucao. Soma ao valor da linha
+      // quando a corrida REALMENTE foi cobrada por retorno (retorno_cobrado_em
+      // preenchido pelo WebhookDispatcher no RETURNING). Usamos a marca em vez
+      // do status porque ela e o registro do que de fato foi cobrado — corrida
+      // devolvida antes desta feature (ou sem valor configurado na regra) nao
+      // ganha cobranca retroativa no relatorio.
+      let _adicRetorno = 0;
+      if (r.retorno_cobrado_em && r.preco_retorno_valor != null && valor != null) {
+        const _ad = Number(r.preco_retorno_valor);
+        if (Number.isFinite(_ad) && _ad > 0) {
+          _adicRetorno = _ad;
+          valor = Math.round((Number(valor) + _ad) * 100) / 100;
+          origem = origem + '+retorno';
+        }
+      }
+
       // Cancelamento consistente: qualquer sinal (status_canonico ou "motoboy"
       // vindo como "Cancelado") cancela -> zera motoboy, km e valor.
       const cancelada = [r.status_canonico, motoboy]
@@ -1322,6 +1343,9 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         km,
         valor,
         valor_origem: origem,
+        // [relatorio-retorno-v1] quanto do valor veio do adicional de devolucao
+        // (0/null = sem retorno). O 'valor' acima JA inclui isso.
+        adicional_retorno: _adicRetorno > 0 ? _adicRetorno : null,
         status: statusNorm,
         data: r.created_at,
       };
