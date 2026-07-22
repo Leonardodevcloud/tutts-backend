@@ -131,6 +131,12 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_fixo         DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_km_base            DECIMAL(5,1)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_km_adicional DECIMAL(10,2)`).catch(() => {});
+  // [preco-retorno-v1] Adicional fixo cobrado quando a entrega vira devolucao
+  // (status RETURNING). NULL = nao cobra retorno pra este cliente.
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_retorno_valor DECIMAL(10,2)`).catch(() => {});
+  // Marca de idempotencia: uma corrida so recebe o adicional UMA vez, mesmo
+  // passando por RETURNING e depois RETURNED.
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS retorno_cobrado_em TIMESTAMP`).catch(() => {});
   // Toggle POR REGRA: muda o valor do cliente na Mapp (alterarValores). Default true.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS alterar_valor_mapp_ativo BOOLEAN DEFAULT true`).catch(() => {});
   // Perfil de mensagem pro entregador (99) POR REGRA. Vazio = usa Cliente API / global.

@@ -310,6 +310,15 @@ class WebhookDispatcher {
       ).catch(() => {});
     }
 
+    // [preco-retorno-v1] Devolucao INICIADA (RETURNING) -> cobra o adicional de
+    // retorno configurado na regra do cliente. Idempotente: retorno_cobrado_em
+    // garante uma cobranca so, mesmo passando por RETURNING e depois RETURNED.
+    if (novoStatusCanonico === CanonicalStatus.RETURNING) {
+      await this._cobrarAdicionalRetorno(codigoOS, entrega).catch(err =>
+        console.warn(`⚠️ [WebhookDispatcher] adicional de retorno OS ${codigoOS}: ${err.message}`)
+      );
+    }
+
     // Audita mudança de status
     this.events.log({
       providerCode,
@@ -350,6 +359,62 @@ class WebhookDispatcher {
    *    o serviço é encerrado corretamente.
    * @private
    */
+  /**
+   * [preco-retorno-v1] Soma o adicional de retorno ao valor da corrida quando a
+   * entrega vira devolucao (RETURNING).
+   *
+   * - O valor vem da REGRA do cliente (preco_retorno_valor). Regra efetiva =
+   *   COALESCE(regra_id_manual, regra_id), o mesmo padrao do resto do modulo.
+   *   Sem valor configurado -> nao cobra nada (sai em silencio).
+   * - IDEMPOTENTE: o UPDATE so aplica se retorno_cobrado_em IS NULL. Se a
+   *   corrida passar por RETURNING mais de uma vez (ou depois por RETURNED),
+   *   a segunda vez nao cobra.
+   * - Respeita o toggle alterar_valor_mapp_ativo da regra: se desligado,
+   *   atualiza so o banco e nao mexe na Mapp.
+   *
+   * @param {string|number} codigoOS
+   * @param {object} entrega - linha de logistics_deliveries (SELECT *)
+   * @private
+   */
+  async _cobrarAdicionalRetorno(codigoOS, entrega) {
+    if (entrega.retorno_cobrado_em) return; // ja cobrado (checagem barata)
+
+    const regraId = entrega.regra_id_manual || entrega.regra_id;
+    if (!regraId) return; // sem regra = sem tabela de preco = nada a cobrar
+
+    const { rows } = await this.pool.query(
+      'SELECT preco_retorno_valor, alterar_valor_mapp_ativo FROM logistics_dispatch_rules WHERE id = $1',
+      [regraId]
+    );
+    const regra = rows[0];
+    if (!regra || regra.preco_retorno_valor == null) return; // cliente nao cobra retorno
+
+    const adicional = parseFloat(regra.preco_retorno_valor);
+    if (!Number.isFinite(adicional) || adicional <= 0) return;
+
+    const valorAtual = parseFloat(entrega.valor_servico) || 0;
+    const novoValor = Math.round((valorAtual + adicional) * 100) / 100;
+
+    // UPDATE condicional = a idempotencia de verdade (protege contra corrida
+    // entre dois webhooks simultaneos). rowCount 0 = outro ja cobrou.
+    const upd = await this.pool.query(
+      `UPDATE logistics_deliveries
+          SET valor_servico = $1, retorno_cobrado_em = NOW(), updated_at = NOW()
+        WHERE id = $2 AND retorno_cobrado_em IS NULL`,
+      [novoValor, entrega.id]
+    );
+    if (upd.rowCount === 0) return; // ja cobrado por outro evento
+
+    console.log(`💰 [WebhookDispatcher] OS ${codigoOS}: devolucao — adicional R$${adicional.toFixed(2)} (R$${valorAtual.toFixed(2)} -> R$${novoValor.toFixed(2)})`);
+
+    // Reflete na Mapp (mesmo toggle usado no preco por distancia)
+    if (regra.alterar_valor_mapp_ativo !== false) {
+      this.mapp.alterarValores(codigoOS, novoValor, null).catch(e =>
+        console.warn(`⚠️ [WebhookDispatcher] alterarValores retorno OS ${codigoOS}: ${e.message}`)
+      );
+    }
+  }
+
   async _dispararAcaoMapp(codigoOS, entrega, evento, statusCanonico) {
     // skipMappAction: grava o status_canonico (ex: RETURNED no SendBack, pra
     // mostrar no kanban) mas NAO dispara nenhuma acao na Mapp. Usado quando a

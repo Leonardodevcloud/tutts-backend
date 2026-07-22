@@ -107,6 +107,50 @@ function limparRegra(r) {
 }
 
 /**
+ * [preco-retorno-v1] Aplica os campos de PRECO da regra via UPDATE separado.
+ * Mesmo padrao do aplicarPortalNaRegra: fica fora do INSERT/UPDATE principal
+ * pra nao mexer na contagem de placeholders daquelas queries.
+ *
+ * Resolve tambem um bug antigo: o preco por regra so era gravado no POST
+ * (criar). Editar a tabela de preco de um cliente existente nao persistia
+ * (havia ate um comentario no PUT dizendo "sera tratado a parte"). Agora
+ * persiste na criacao E na edicao.
+ *
+ * Semantica por campo: undefined = nao mexe | '' ou null = limpa (volta pro
+ * global) | numero = grava.
+ */
+async function aplicarPrecoNaRegra(pool, regraId, body) {
+  const CAMPOS = [
+    'preco_valor_fixo',
+    'preco_km_base',
+    'preco_valor_km_adicional',
+    'preco_retorno_valor',
+  ];
+  const sets = [];
+  const params = [];
+  let p = 1;
+
+  for (const campo of CAMPOS) {
+    if (body[campo] === undefined) continue; // nao veio no body -> nao mexe
+    const bruto = body[campo];
+    let valor = null;
+    if (bruto !== '' && bruto !== null) {
+      const n = parseFloat(String(bruto).replace(',', '.'));
+      valor = Number.isFinite(n) && n >= 0 ? n : null;
+    }
+    sets.push(`${campo} = $${p++}`);
+    params.push(valor);
+  }
+  if (sets.length === 0) return;
+
+  params.push(regraId);
+  await pool.query(
+    `UPDATE logistics_dispatch_rules SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${p}`,
+    params
+  );
+}
+
+/**
  * Aplica os campos de acesso do portal (login / senha / ativo) via UPDATE
  * separado. De proposito NAO entra no INSERT/UPDATE principal pra nao mexer
  * na contagem de placeholders daquelas queries.
@@ -283,6 +327,9 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       let regraFinal = regra;
       try {
         await aplicarPortalNaRegra(pool, regra.id, req.body || {});
+        // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
+        await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
         if (rf[0]) regraFinal = rf[0];
       } catch (ePortal) {
@@ -405,6 +452,9 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       let regraFinal = regra;
       try {
         await aplicarPortalNaRegra(pool, regra.id, req.body || {});
+        // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
+        await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
         if (rf[0]) regraFinal = rf[0];
       } catch (ePortal) {
