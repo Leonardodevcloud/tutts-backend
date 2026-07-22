@@ -7,7 +7,10 @@ const bcrypt = require('bcrypt');
 const httpRequest = require('../../../shared/utils/httpRequest');
 const { validarWhatsApp, enviarRastreioCliente } = require('../whatsapp-rastreio.service');
 const { buscarHubPorOS } = require('../hub-status.shared');
-const { resolverValorCorrida, classificarCanal, parseKm, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
+// [cotacao-hub-v1] + normalizarTabelaCliente e calcularPrecoDistancia:
+// usados pelo POST /solicitacao/cotar pra precificar pela tabela do cliente.
+const { resolverValorCorrida, classificarCanal, parseKm, normalizarStatus, montarCSV, formatarBRL,
+        normalizarTabelaCliente, calcularPrecoDistancia } = require('../preco-hub.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -774,6 +777,110 @@ router.get('/solicitacao/corrida/:id', verificarTokenSolicitacao, async (req, re
   } catch (err) {
     console.error('❌ Erro ao buscar solicitação:', err);
     res.status(500).json({ error: 'Erro ao buscar solicitação' });
+  }
+});
+
+
+// ────────────────────────────────────────────────────────────────
+// [cotacao-hub-v1] POST /solicitacao/cotar
+// Cota uma corrida do Hub ANTES de criar qualquer coisa. Nada e gravado:
+// se o cliente recusar, nao sobra OS nem registro.
+//
+// Body: { pontos: [{ rua, latitude, longitude, complemento?, cep?, nome?, telefone? }, ...] }
+// Retorna: { cotou: true, valor, km, eta_minutos, provider, provider_label }
+//       ou { cotou: false, motivo } -> o front segue o fluxo normal, sem modal
+//
+// O valor devolvido e SEMPRE o do CLIENTE (tabela preco_hub, cadastrada no
+// modulo Config > Clientes API). O custo do provedor NAO sai daqui.
+// ────────────────────────────────────────────────────────────────
+router.post('/solicitacao/cotar', verificarTokenSolicitacao, async (req, res) => {
+  try {
+    const cli = req.clienteSolicitacao;
+    const pontos = Array.isArray(req.body?.pontos) ? req.body.pontos : [];
+
+    if (pontos.length < 2) {
+      return res.json({ cotou: false, motivo: 'pontos_insuficientes' });
+    }
+
+    // 1) Tabela de preco do cliente. Sem tabela = nao da pra dizer quanto custa
+    //    -> segue o fluxo normal (decisao: nao bloquear o cliente).
+    const tabela = normalizarTabelaCliente(cli.preco_hub);
+    if (!tabela) {
+      return res.json({ cotou: false, motivo: 'sem_tabela_preco' });
+    }
+
+    // 2) Provedor: o primeiro habilitado pro cliente (99 ou Uber).
+    const habil = Array.isArray(cli.provedores_habilitados)
+      ? cli.provedores_habilitados.map(p => String(p).toLowerCase())
+      : [];
+    const providerCode = habil.includes('99') || habil.includes('noventanove')
+      ? 'noventanove'
+      : (habil.includes('uber') ? 'uber' : null);
+    if (!providerCode) {
+      return res.json({ cotou: false, motivo: 'sem_provedor_hub' });
+    }
+
+    // 3) Monta a requisicao canonica direto dos pontos do formulario.
+    //    Nao passa pela Mapp: e por isso que da pra cotar sem OS.
+    const pc = pontos[0], pe = pontos[pontos.length - 1];
+    const num = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+    const quoteReq = {
+      pickup: {
+        address:     pc.endereco_completo || pc.rua || '',
+        complement:  pc.complemento || null,
+        cep:         pc.cep || null,
+        name:        pc.apelido || pc.nome || 'Loja',
+        phone:       pc.telefone || null,
+        instructions: pc.observacao || null,
+        latitude:    num(pc.latitude),
+        longitude:   num(pc.longitude),
+      },
+      dropoff: {
+        address:     pe.endereco_completo || pe.rua || '',
+        complement:  pe.complemento || null,
+        cep:         pe.cep || null,
+        name:        pe.apelido || pe.nome || 'Cliente',
+        phone:       pe.telefone || null,
+        instructions: pe.observacao || null,
+        latitude:    num(pe.latitude),
+        longitude:   num(pe.longitude),
+      },
+      vehicleType: null,
+      externalRef: `cot-${cli.id}-${Date.now()}`,   // provisorio: nao vira OS
+      itemDescription: 'Cotacao',
+    };
+
+    // 4) Cota no provedor
+    const { getDispatchOrchestrator } = require('../../logistics/core/DispatchOrchestrator');
+    const orch = getDispatchOrchestrator(pool);
+    const adapter = orch._getAdapterOrThrow(providerCode);
+    const quote = await adapter.createQuote(quoteReq);
+
+    // 5) km: preferimos o da rota do provedor. Sem ele, nao da pra precificar
+    //    pela tabela por distancia.
+    const km = quote.distanciaKm != null ? Number(quote.distanciaKm) : null;
+    if (km == null || !Number.isFinite(km)) {
+      return res.json({ cotou: false, motivo: 'sem_distancia' });
+    }
+
+    // 6) Valor do CLIENTE (nunca o custo do provedor)
+    const valor = calcularPrecoDistancia(km, tabela);
+    if (valor == null) {
+      return res.json({ cotou: false, motivo: 'tabela_incompleta' });
+    }
+
+    return res.json({
+      cotou: true,
+      valor,
+      km: Math.round(km * 10) / 10,
+      eta_minutos: quote.etaMinutos != null ? quote.etaMinutos : null,
+      provider: providerCode,
+      provider_label: providerCode === 'uber' ? 'Uber' : '99',
+    });
+  } catch (err) {
+    // Cotacao e best-effort: qualquer falha -> segue o fluxo normal sem modal.
+    console.error('[solicitacao/cotar] falhou:', err.message);
+    return res.json({ cotou: false, motivo: 'erro', detalhe: err.message });
   }
 });
 
