@@ -1274,14 +1274,19 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           valor = _rv.valor; origem = _rv.origem;
         }
       }
-      // [relatorio-retorno-v1] Adicional por devolucao. Soma ao valor da linha
-      // quando a corrida REALMENTE foi cobrada por retorno (retorno_cobrado_em
-      // preenchido pelo WebhookDispatcher no RETURNING). Usamos a marca em vez
-      // do status porque ela e o registro do que de fato foi cobrado — corrida
-      // devolvida antes desta feature (ou sem valor configurado na regra) nao
-      // ganha cobranca retroativa no relatorio.
+      // [relatorio-retorno-v3] Adicional por devolucao — base STATUS (retroativo).
+      // Toda corrida com status de devolucao soma o adicional configurado na
+      // regra do cliente, INCLUSIVE as anteriores a esta feature. Por isso
+      // olhamos o status_canonico e nao a marca retorno_cobrado_em (que so
+      // existe pras devolucoes novas).
+      //
+      // Cobrimos RETURNED (devolucao concluida) e RETURNING (em andamento):
+      // o normalizarStatus so mapeia 'returned', entao checamos o valor bruto.
       let _adicRetorno = 0;
-      if (r.retorno_cobrado_em && r.preco_retorno_valor != null && valor != null) {
+      const _stRaw = String(r.status_canonico || '').trim().toUpperCase();
+      const _ehDevolucao = _stRaw === 'RETURNED' || _stRaw === 'RETURNING'
+        || ['DEVOLVIDO', 'RETURN'].includes(_stRaw);
+      if (_ehDevolucao && r.preco_retorno_valor != null && valor != null) {
         const _ad = Number(r.preco_retorno_valor);
         if (Number.isFinite(_ad) && _ad > 0) {
           _adicRetorno = _ad;
