@@ -264,6 +264,175 @@ function createLogisticsPortalRouter(pool) {
     }
   });
 
+  // ─────────────────────────────────────────────────────────────
+  // [portal-relatorio-v1] GET /portal/relatorio
+  // Relatorio da loja: corridas do periodo com duracao, km, valor e prazo.
+  //
+  // Query: ?de=YYYY-MM-DD&ate=YYYY-MM-DD&status=todos|entregue|cancelado|devolvido
+  //        &formato=json|csv
+  //
+  // VALOR: devolve ld.valor_servico — o que a LOJA paga. Nunca valor_provider
+  // nem margem (o mapearPortal continua sem financeiro; aqui e explicito e
+  // so este campo).
+  //
+  // PRAZO: vem do sla_monitor_snapshot (mesma fonte do painel admin).
+  // finalizada_em <= deadline -> no prazo. Sem deadline -> "sem dados".
+  // ─────────────────────────────────────────────────────────────
+  router.get('/relatorio', verificarPortalToken, async (req, res) => {
+    try {
+      const { de, ate, status, formato } = req.query;
+
+      // Janela: default = ultimos 30 dias
+      const hoje = new Date();
+      const ateStr = (ate && /^\d{4}-\d{2}-\d{2}$/.test(ate)) ? ate : hoje.toISOString().slice(0, 10);
+      const deDefault = new Date(hoje.getTime() - 30 * 86400000).toISOString().slice(0, 10);
+      const deStr = (de && /^\d{4}-\d{2}-\d{2}$/.test(de)) ? de : deDefault;
+
+      const { rows } = await pool.query(
+        `SELECT ld.id, ld.codigo_os, ld.status_canonico, ld.provider_code,
+                ld.endereco_coleta, ld.endereco_entrega,
+                ld.distancia_km, ld.valor_servico,
+                ld.created_at, ld.coletado_at, ld.entregue_at, ld.finalizado_at,
+                ld.courier_data,
+                sm.deadline, sm.finalizada_em, sm.prazo_min, sm.prazo_origem
+           FROM logistics_deliveries ld
+           LEFT JOIN LATERAL (
+             SELECT deadline, finalizada_em, prazo_min, prazo_origem
+               FROM sla_monitor_snapshot
+              WHERE os_numero = ld.codigo_os::text
+              LIMIT 1
+           ) sm ON true
+          WHERE COALESCE(ld.regra_id_manual, ld.regra_id) = $1
+            AND ld.created_at >= $2::date
+            AND ld.created_at <  ($3::date + INTERVAL '1 day')
+          ORDER BY ld.id DESC
+          LIMIT 2000`,
+        [req.portal.regra_id, deStr, ateStr]
+      );
+
+      // Consolida por OS (mesma regra do quadro): cada re-despacho cria um
+      // registro novo; no relatorio interessa o estado ATUAL da corrida.
+      const porOs = new Map();
+      for (const r of rows) {
+        const atual = porOs.get(r.codigo_os);
+        if (!atual || Number(r.id) > Number(atual.id)) porOs.set(r.codigo_os, r);
+      }
+
+      const STATUS_ROTULO = {
+        DELIVERED: 'Entregue', CANCELED: 'Cancelado', RETURNED: 'Devolvido',
+        RETURNING: 'Em devolucao', FAILED: 'Falha', FALLBACK_QUEUE: 'Falha',
+      };
+
+      let corridas = Array.from(porOs.values()).map(r => {
+        const courier = r.courier_data || {};
+        const st = String(r.status_canonico || '').toUpperCase();
+
+        // Duracao: da criacao ate o fim (entregue/finalizado). Minutos.
+        const fimTs = r.entregue_at || r.finalizado_at || r.finalizada_em || null;
+        let duracaoMin = null;
+        if (fimTs && r.created_at) {
+          const d = Math.round((new Date(fimTs).getTime() - new Date(r.created_at).getTime()) / 60000);
+          if (Number.isFinite(d) && d >= 0 && d <= 43200) duracaoMin = d;
+        }
+
+        // Prazo: mesma regra do painel admin (finalizada_em vs deadline).
+        let prazo = 'sem_dados';
+        const fimPrazo = r.finalizada_em || r.entregue_at || r.finalizado_at;
+        if (r.deadline && fimPrazo) {
+          prazo = new Date(fimPrazo) <= new Date(r.deadline) ? 'no_prazo' : 'fora';
+        }
+
+        return {
+          os: r.codigo_os,
+          status: STATUS_ROTULO[st] || (st ? st.charAt(0) + st.slice(1).toLowerCase() : '—'),
+          status_canonico: st,
+          provider: r.provider_code === 'noventanove' ? '99' : (r.provider_code === 'uber' ? 'Uber' : r.provider_code),
+          endereco_coleta: r.endereco_coleta,
+          endereco_entrega: r.endereco_entrega,
+          entregador: courier.name || null,
+          km: r.distancia_km != null ? Number(r.distancia_km) : null,
+          valor: r.valor_servico != null ? Number(r.valor_servico) : null,
+          duracao_min: duracaoMin,
+          prazo,
+          prazo_min: r.prazo_min != null ? Number(r.prazo_min) : null,
+          criado_em: r.created_at,
+          entregue_em: fimTs,
+        };
+      });
+
+      // Filtro por status (rotulo)
+      if (status && status !== 'todos') {
+        const alvo = String(status).toLowerCase();
+        corridas = corridas.filter(c => String(c.status).toLowerCase() === alvo);
+      }
+
+      // ── CSV (abre no Excel) ──
+      if (String(formato).toLowerCase() === 'csv') {
+        const fmtDur = (m) => {
+          if (m == null) return '';
+          if (m < 60) return m + 'min';
+          const h = Math.floor(m / 60), r2 = m % 60;
+          return h + 'h' + (r2 > 0 ? ' ' + String(r2).padStart(2, '0') : '');
+        };
+        const fmtDataHora = (v) => {
+          if (!v) return ['', ''];
+          const d = new Date(v);
+          if (isNaN(d.getTime())) return ['', ''];
+          const p = new Intl.DateTimeFormat('pt-BR', {
+            timeZone: 'America/Bahia', day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+          }).formatToParts(d);
+          const g = (t) => { const x = p.find(i => i.type === t); return x ? x.value : ''; };
+          return [`${g('day')}/${g('month')}/${g('year')}`, `${g('hour')}:${g('minute')}:${g('second')}`];
+        };
+        const PRAZO_ROTULO = { no_prazo: 'No prazo', fora: 'Fora do prazo', sem_dados: '' };
+        const esc = (v) => {
+          const s = v == null ? '' : String(v);
+          return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+        };
+        const headers = ['OS', 'Status', 'Provedor', 'Coleta', 'Entrega', 'Entregador',
+                         'KM', 'Duracao', 'Duracao (min)', 'Prazo', 'Valor (R$)',
+                         'Data', 'Hora', 'Data entrega', 'Hora entrega'];
+        const linhas = corridas.map(c => {
+          const [dC, hC] = fmtDataHora(c.criado_em);
+          const [dE, hE] = fmtDataHora(c.entregue_em);
+          return [
+            c.os, c.status, c.provider, c.endereco_coleta, c.endereco_entrega, c.entregador || '',
+            c.km != null ? String(c.km).replace('.', ',') : '',
+            fmtDur(c.duracao_min), c.duracao_min != null ? String(c.duracao_min) : '',
+            PRAZO_ROTULO[c.prazo] || '',
+            c.valor != null ? c.valor.toFixed(2).replace('.', ',') : '',
+            dC, hC, dE, hE,
+          ].map(esc).join(';');
+        });
+        const csv = '\uFEFF' + [headers.join(';')].concat(linhas).join('\r\n');
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="relatorio-${deStr}_a_${ateStr}.csv"`);
+        return res.send(csv);
+      }
+
+      // ── JSON (tela) ──
+      const totais = corridas.reduce((a, c) => {
+        a.corridas += 1;
+        if (c.km != null) a.km += c.km;
+        if (c.valor != null) a.valor += c.valor;
+        if (c.prazo === 'no_prazo') a.no_prazo += 1;
+        if (c.prazo === 'fora') a.fora += 1;
+        return a;
+      }, { corridas: 0, km: 0, valor: 0, no_prazo: 0, fora: 0 });
+      totais.km = Math.round(totais.km * 10) / 10;
+      totais.valor = Math.round(totais.valor * 100) / 100;
+      totais.pct_prazo = (totais.no_prazo + totais.fora) > 0
+        ? Math.round((10000 * totais.no_prazo) / (totais.no_prazo + totais.fora)) / 100
+        : null;
+
+      res.json({ success: true, periodo: { de: deStr, ate: ateStr }, totais, corridas });
+    } catch (err) {
+      console.error('[portal/relatorio] erro:', err.message);
+      res.status(500).json({ error: 'Erro ao gerar relatorio' });
+    }
+  });
+
   router.get('/deliveries', verificarPortalToken, async (req, res) => {
     try {
       const temData = !!(req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data));
