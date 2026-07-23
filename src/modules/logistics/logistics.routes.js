@@ -412,9 +412,11 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
 
       const orch = getDispatchOrchestrator(pool);
 
-      // Busca servico Mapp
-      const servicos = await getMappClient(pool).listarServicos(0, 0);
-      const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+      // [mapp-os-presa-v1] Usa o _buscarServicoMapp do orchestrator, que tem o
+      // fallback pro caso da OS estar presa fora da fila (status 1 na Mapp por
+      // um despacho anterior que falhou). Antes chamava listarServicos direto
+      // e devolvia 404 mesmo com a OS existindo.
+      const servico = await orch._buscarServicoMapp(codigoOS);
       if (!servico) {
         return res.status(404).json({ error: `OS ${codigoOS} não encontrada na Mapp ou já despachada` });
       }

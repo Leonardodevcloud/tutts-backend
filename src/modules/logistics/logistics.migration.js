@@ -103,6 +103,9 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS coletado_at TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS entregue_at TIMESTAMPTZ`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS atribuido_at TIMESTAMPTZ`).catch(() => {});
+  // [mapp-os-presa-v1] marca quando a reabertura na Mapp falhou apos o despacho
+  // dar erro: a OS pode ter ficado presa em status 1 (fora da fila).
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS mapp_presa_em TIMESTAMPTZ`).catch(() => {});
   // 99Entrega: reconciliacao de preco final (price_info do /detail, em reais)
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS valor_provider_final DECIMAL(10,2)`).catch(() => {});
 

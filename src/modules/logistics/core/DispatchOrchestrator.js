@@ -693,10 +693,37 @@ class DispatchOrchestrator {
         WHERE id = $2
       `, [erro.message, registro.id]);
 
-      // Reabre na Mapp pra fila interna
-      await this.mapp.alterarStatus(codigoOS, 0).catch(e =>
-        console.error(`❌ [Orchestrator] Falha ao reabrir OS ${codigoOS} na Mapp:`, e.message)
-      );
+      // [mapp-os-presa-v1] Reabre na Mapp pra fila interna — COM RETRY.
+      //
+      // POR QUE O RETRY: o despacho reserva a OS (status 0 -> 1). Se o
+      // despacho falha e a reabertura (1 -> 0) TAMBEM falha, a OS fica presa
+      // em 1 pra sempre: listarServicos(0) so devolve OS na fila, entao nem o
+      // worker nem o despacho manual voltam a enxergar ela. Era uma tentativa
+      // unica; qualquer instabilidade de rede travava a corrida em definitivo.
+      //
+      // 3 tentativas com espera crescente. E se ainda assim nao conseguir,
+      // marca no proprio registro pra dar pra achar depois (e pro fallback do
+      // despacho manual saber que a OS existe mesmo fora da fila da Mapp).
+      let _reaberta = false;
+      for (let _t = 1; _t <= 3; _t++) {
+        try {
+          const _r = await this.mapp.alterarStatus(codigoOS, 0);
+          if (this.mapp.respostaOK(_r)) { _reaberta = true; break; }
+          console.warn(`⚠️ [Orchestrator] reabrir OS ${codigoOS} tentativa ${_t}: resposta nao OK`);
+        } catch (e) {
+          console.warn(`⚠️ [Orchestrator] reabrir OS ${codigoOS} tentativa ${_t}: ${e.message}`);
+        }
+        if (_t < 3) await new Promise(r => setTimeout(r, _t * 2000));
+      }
+      if (_reaberta) {
+        console.log(`✅ [Orchestrator] OS ${codigoOS} reaberta na Mapp (volta pra fila)`);
+      } else {
+        console.error(`❌ [Orchestrator] OS ${codigoOS} NAO reaberta apos 3 tentativas — pode estar presa em status 1 na Mapp`);
+        await this.pool.query(
+          `UPDATE logistics_deliveries SET mapp_presa_em = NOW() WHERE id = $1`,
+          [registro.id]
+        ).catch(() => {});
+      }
 
       this.events.logError(providerCode, erro, {
         eventSource,
@@ -1539,9 +1566,74 @@ class DispatchOrchestrator {
     return adapter;
   }
 
+  /**
+   * [mapp-os-presa-v1] Busca o servico na Mapp COM FALLBACK.
+   *
+   * O PROBLEMA: listarServicos(0) so devolve OS que estao NA FILA (status 0).
+   * Se um despacho anterior reservou a OS (0 -> 1) e falhou sem conseguir
+   * reabrir, ela some da listagem — e tanto o despacho manual quanto a cotacao
+   * respondiam "OS nao encontrada na Mapp ou ja despachada", mesmo com a OS
+   * existindo e o cliente esperando.
+   *
+   * O FALLBACK: reconstroi o servico a partir do registro que o proprio Hub
+   * gravou no despacho anterior (pontos, valores originais e obs sao a copia
+   * do que a Mapp mandou). E a mesma tecnica que o redespacho ja usava —
+   * agora vale pro caminho manual tambem.
+   *
+   * Tenta ainda REABRIR a OS na Mapp antes de usar o fallback: se conseguir,
+   * a proxima listagem ja a traz normalmente e tudo volta ao normal.
+   */
   async _buscarServicoMapp(codigoOS) {
     const servicos = await this.mapp.listarServicos(0, 0);
-    return servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+    const achado = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
+    if (achado) return achado;
+
+    // Nao esta na fila. Pode ser OS presa em status 1 por um despacho que
+    // falhou. Procura o ultimo registro do Hub pra essa OS.
+    const { rows } = await this.pool.query(
+      `SELECT codigo_os, pontos, obs,
+              valor_servico, valor_profissional,
+              valor_servico_mapp_original, valor_profissional_mapp_original
+         FROM logistics_deliveries
+        WHERE codigo_os = $1
+        ORDER BY id DESC LIMIT 1`,
+      [codigoOS]
+    ).catch(() => ({ rows: [] }));
+
+    const reg = rows[0];
+    if (!reg) return undefined;   // OS realmente desconhecida: erro legitimo
+
+    let pontos = reg.pontos;
+    if (typeof pontos === 'string') {
+      try { pontos = JSON.parse(pontos); } catch (_) { pontos = null; }
+    }
+    if (!Array.isArray(pontos) || pontos.length < 2) return undefined;
+
+    // Tenta devolver a OS pra fila (best-effort). Se der certo, o proximo
+    // ciclo ja a encontra normalmente pela Mapp.
+    try {
+      const r = await this.mapp.alterarStatus(codigoOS, 0);
+      if (this.mapp.respostaOK(r)) {
+        console.log(`♻️ [Orchestrator] OS ${codigoOS} estava fora da fila — reaberta na Mapp`);
+        await this.pool.query(
+          `UPDATE logistics_deliveries SET mapp_presa_em = NULL WHERE codigo_os = $1`, [codigoOS]
+        ).catch(() => {});
+      }
+    } catch (e) {
+      console.warn(`⚠️ [Orchestrator] nao consegui reabrir OS ${codigoOS}: ${e.message}`);
+    }
+
+    const num = (v) => (v == null ? null : Number(v));
+    console.warn(`♻️ [Orchestrator] OS ${codigoOS} fora da fila da Mapp — usando o registro do Hub (fallback)`);
+    return {
+      codigoOS: reg.codigo_os,
+      endereco: pontos,
+      valorServico: num(reg.valor_servico_mapp_original) != null
+        ? num(reg.valor_servico_mapp_original) : num(reg.valor_servico),
+      valorProfissional: num(reg.valor_profissional_mapp_original) != null
+        ? num(reg.valor_profissional_mapp_original) : num(reg.valor_profissional),
+      obs: reg.obs || '',
+    };
   }
 
   /**
