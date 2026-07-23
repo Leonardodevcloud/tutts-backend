@@ -1588,10 +1588,21 @@ class DispatchOrchestrator {
     const achado = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
     if (achado) return achado;
 
-    // Nao esta na fila. Pode ser OS presa em status 1 por um despacho que
-    // falhou. Procura o ultimo registro do Hub pra essa OS.
+    // [mapp-os-presa-v2] CORRECAO DE UM ERRO MEU NA v1:
+    //
+    // A v1 fazia alterarStatus(codigoOS, 0) AQUI — ou seja, um efeito colateral
+    // (reabrir a OS na Mapp) dentro de uma funcao de LEITURA. Como quote() e
+    // quoteMultiple() chamam esta funcao ao abrir o modal de cotacao, qualquer
+    // OS legitimamente EM ANDAMENTO (status 1, entregador a caminho) era
+    // devolvida pra fila. Isso bagunçou corridas que estavam OK.
+    //
+    // Agora: a busca NUNCA altera nada na Mapp. E o fallback so vale pra OS
+    // sabidamente PRESA — a ultima tentativa dela falhou (FAILED) ou ficou
+    // marcada em mapp_presa_em. OS em andamento nao entra aqui: pra ela, o
+    // certo e continuar retornando "nao encontrada" (ela nao esta disponivel
+    // pra despacho mesmo).
     const { rows } = await this.pool.query(
-      `SELECT codigo_os, pontos, obs,
+      `SELECT codigo_os, pontos, obs, status_canonico, status_native,
               valor_servico, valor_profissional,
               valor_servico_mapp_original, valor_profissional_mapp_original
          FROM logistics_deliveries
@@ -1603,25 +1614,21 @@ class DispatchOrchestrator {
     const reg = rows[0];
     if (!reg) return undefined;   // OS realmente desconhecida: erro legitimo
 
+    // GUARDA: so a OS que FALHOU pode usar o fallback. Se a ultima tentativa
+    // esta ativa (DISPATCHED, PICKED_UP, etc), a OS esta em andamento de
+    // verdade — nao e caso de destravar, e sim de nao mexer.
+    const _st = String(reg.status_canonico || '').toUpperCase();
+    const _presa = ['FAILED', 'CANCELED'].includes(_st) || reg.mapp_presa_em != null;
+    if (!_presa) {
+      console.log(`[Orchestrator] OS ${codigoOS} fora da fila mas com entrega ${_st} — em andamento, sem fallback`);
+      return undefined;
+    }
+
     let pontos = reg.pontos;
     if (typeof pontos === 'string') {
       try { pontos = JSON.parse(pontos); } catch (_) { pontos = null; }
     }
     if (!Array.isArray(pontos) || pontos.length < 2) return undefined;
-
-    // Tenta devolver a OS pra fila (best-effort). Se der certo, o proximo
-    // ciclo ja a encontra normalmente pela Mapp.
-    try {
-      const r = await this.mapp.alterarStatus(codigoOS, 0);
-      if (this.mapp.respostaOK(r)) {
-        console.log(`♻️ [Orchestrator] OS ${codigoOS} estava fora da fila — reaberta na Mapp`);
-        await this.pool.query(
-          `UPDATE logistics_deliveries SET mapp_presa_em = NULL WHERE codigo_os = $1`, [codigoOS]
-        ).catch(() => {});
-      }
-    } catch (e) {
-      console.warn(`⚠️ [Orchestrator] nao consegui reabrir OS ${codigoOS}: ${e.message}`);
-    }
 
     const num = (v) => (v == null ? null : Number(v));
     console.warn(`♻️ [Orchestrator] OS ${codigoOS} fora da fila da Mapp — usando o registro do Hub (fallback)`);
