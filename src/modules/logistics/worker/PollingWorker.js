@@ -173,6 +173,7 @@ function startPollingWorker(pool) {
 
         let maiorId = ultimoId;
         let despachadas = 0, puladas_janela = 0, puladas_regra = 0, erros = 0;
+        let nao_encontradas = 0;   // [worker-servico-v1]
 
         for (const servico of servicos) {
           try {
@@ -188,8 +189,13 @@ function startPollingWorker(pool) {
             }
 
             // Delega ao Orchestrator: ele faz rule match + margem + cotação + despacho
+            // [worker-servico-v1] passa o servico que ACABAMOS de buscar. Sem
+            // isso o orchestrator refazia listarServicos(0,0) e nao achava as
+            // OS novas (a Mapp limita o retorno e a listagem do zero traz as
+            // antigas) — todas caiam em 'os_nao_encontrada', silenciosamente.
             const resultado = await orchestrator.tryDispatchByOS(servico.codigoOS, {
               eventSource: EventSource.WORKER,
+              servicoMapp: servico,
             });
 
             if (resultado.decision === 'despachado') {
@@ -198,8 +204,15 @@ function startPollingWorker(pool) {
               puladas_regra++;
             } else if (resultado.decision === 'cotacao_falhou' || resultado.decision === 'despacho_falhou_ou_duplicado') {
               erros++;
+            } else if (resultado.decision === 'os_nao_encontrada') {
+              // [worker-servico-v1] Antes isso era ignorado EM SILENCIO: nao
+              // incrementava contador nenhum, entao o resumo do ciclo (que so
+              // loga se algum contador > 0) nem aparecia. Quando todas as OS
+              // caiam aqui, o worker ficava mudo e ninguem via que nada estava
+              // despachando. Agora conta e loga.
+              nao_encontradas++;
+              console.warn(`⚠️ [PollingWorker] OS ${servico.codigoOS}: nao encontrada na Mapp no momento do despacho`);
             }
-            // os_nao_encontrada: a OS sumiu da Mapp entre o listarServicos e o tryDispatch — ignora
           } catch (err) {
             erros++;
             console.error(`❌ [PollingWorker] erro processando OS ${servico.codigoOS}:`, err.message);
@@ -217,9 +230,11 @@ function startPollingWorker(pool) {
           await marcarCiclo();
         }
 
-        if (despachadas > 0 || puladas_janela > 0 || puladas_regra > 0 || erros > 0) {
-          console.log(`📊 [PollingWorker] ciclo: ${despachadas} despachada(s), ${puladas_janela} fora da janela, ${puladas_regra} sem regra, ${erros} erro(s)`);
-        }
+        // [worker-servico-v1] o resumo agora SEMPRE sai quando houve servico no
+        // ciclo, e inclui as nao encontradas. Antes so saia se algum dos 4
+        // contadores fosse > 0 — se todas caissem em 'nao encontrada', o
+        // worker processava e nao dizia nada.
+        console.log(`📊 [PollingWorker] ciclo: ${despachadas} despachada(s), ${puladas_janela} fora da janela, ${puladas_regra} sem regra, ${nao_encontradas} nao encontrada(s), ${erros} erro(s)`);
       } else {
         await marcarCiclo();
       }

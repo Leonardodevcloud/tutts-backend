@@ -1076,7 +1076,20 @@ class DispatchOrchestrator {
   async tryDispatchByOS(codigoOS, opts = {}) {
     const eventSource = opts.eventSource || EventSource.API;
 
-    const servico = await this._buscarServicoMapp(codigoOS);
+    // [worker-servico-v1] Aceita o servico JA BUSCADO por quem chamou.
+    //
+    // A RAIZ DO BUG: o PollingWorker busca com o checkpoint —
+    // listarServicos(0, ultimoId) — e ja tem o objeto do servico em maos. Mas
+    // passava so o numero da OS, e aqui a gente buscava DE NOVO com
+    // listarServicos(0, 0). Como a Mapp limita o retorno, a listagem do zero
+    // traz as OS mais ANTIGAS: as novas (ultimoId alto) nao estavam nela.
+    // Resultado: 'os_nao_encontrada' — e o worker ignora esse caso sem
+    // incrementar contador, entao nem o resumo do ciclo era logado. As
+    // corridas simplesmente sumiam, sem erro nenhum.
+    //
+    // Passando o servico adiante: some a segunda busca (que falhava), e ainda
+    // economiza uma chamada a Mapp por OS.
+    const servico = opts.servicoMapp || await this._buscarServicoMapp(codigoOS);
     if (!servico) {
       return { decision: 'os_nao_encontrada', erro: `OS ${codigoOS} não está na Mapp` };
     }
