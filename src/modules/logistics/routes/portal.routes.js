@@ -433,6 +433,225 @@ function createLogisticsPortalRouter(pool) {
     }
   });
 
+  // ─────────────────────────────────────────────────────────────
+  // [portal-relatorio-v1] GET /portal/relatorio
+  // Relatorio da loja: corridas do periodo com duracao, km, valor e prazo.
+  //
+  // Query: ?de=YYYY-MM-DD&ate=YYYY-MM-DD&status=todos|entregue|cancelado|devolvido
+  //        &formato=json|csv
+  //
+  // VALOR: devolve ld.valor_servico — o que a LOJA paga. Nunca valor_provider
+  // nem margem (o mapearPortal continua sem financeiro; aqui e explicito e
+  // so este campo).
+  //
+  // PRAZO: vem do sla_monitor_snapshot (mesma fonte do painel admin).
+  // finalizada_em <= deadline -> no prazo. Sem deadline -> "sem dados".
+  // ─────────────────────────────────────────────────────────────
+  router.get('/relatorio', verificarPortalToken, async (req, res) => {
+    try {
+      const { de, ate, status, formato } = req.query;
+
+      // Janela: default = ultimos 30 dias
+      const hoje = new Date();
+      const ateStr = (ate && /^\d{4}-\d{2}-\d{2}$/.test(ate)) ? ate : hoje.toISOString().slice(0, 10);
+      const deDefault = new Date(hoje.getTime() - 30 * 86400000).toISOString().slice(0, 10);
+      const deStr = (de && /^\d{4}-\d{2}-\d{2}$/.test(de)) ? de : deDefault;
+
+      const { rows } = await pool.query(
+        `SELECT ld.id, ld.codigo_os, ld.status_canonico, ld.provider_code,
+                ld.endereco_coleta, ld.endereco_entrega,
+                ld.distancia_km, ld.valor_servico,
+                ld.created_at, ld.coletado_at, ld.entregue_at, ld.finalizado_at,
+                ld.courier_data,
+                sm.deadline, sm.finalizada_em, sm.prazo_min, sm.prazo_origem
+           FROM logistics_deliveries ld
+           LEFT JOIN LATERAL (
+             SELECT deadline, finalizada_em, prazo_min, prazo_origem
+               FROM sla_monitor_snapshot
+              WHERE os_numero = ld.codigo_os::text
+              LIMIT 1
+           ) sm ON true
+          WHERE COALESCE(ld.regra_id_manual, ld.regra_id) = $1
+            AND ld.created_at >= $2::date
+            AND ld.created_at <  ($3::date + INTERVAL '1 day')
+          ORDER BY ld.id DESC
+          LIMIT 2000`,
+        [req.portal.regra_id, deStr, ateStr]
+      );
+
+      // Consolida por OS (mesma regra do quadro): cada re-despacho cria um
+      // registro novo; no relatorio interessa o estado ATUAL da corrida.
+      const porOs = new Map();
+      for (const r of rows) {
+        const atual = porOs.get(r.codigo_os);
+        if (!atual || Number(r.id) > Number(atual.id)) porOs.set(r.codigo_os, r);
+      }
+
+      const STATUS_ROTULO = {
+        DELIVERED: 'Entregue', CANCELED: 'Cancelado', RETURNED: 'Devolvido',
+        RETURNING: 'Em devolucao', FAILED: 'Falha', FALLBACK_QUEUE: 'Falha',
+      };
+
+      let corridas = Array.from(porOs.values()).map(r => {
+        const courier = r.courier_data || {};
+        const st = String(r.status_canonico || '').toUpperCase();
+
+        // Duracao: da criacao ate o fim (entregue/finalizado). Minutos.
+        const fimTs = r.entregue_at || r.finalizado_at || r.finalizada_em || null;
+        let duracaoMin = null;
+        if (fimTs && r.created_at) {
+          const d = Math.round((new Date(fimTs).getTime() - new Date(r.created_at).getTime()) / 60000);
+          if (Number.isFinite(d) && d >= 0 && d <= 43200) duracaoMin = d;
+        }
+
+        // Prazo: mesma regra do painel admin (finalizada_em vs deadline).
+        let prazo = 'sem_dados';
+        const fimPrazo = r.finalizada_em || r.entregue_at || r.finalizado_at;
+        if (r.deadline && fimPrazo) {
+          prazo = new Date(fimPrazo) <= new Date(r.deadline) ? 'no_prazo' : 'fora';
+        }
+
+        return {
+          os: r.codigo_os,
+          status: STATUS_ROTULO[st] || (st ? st.charAt(0) + st.slice(1).toLowerCase() : '—'),
+          status_canonico: st,
+          provider: r.provider_code === 'noventanove' ? '99' : (r.provider_code === 'uber' ? 'Uber' : r.provider_code),
+          endereco_coleta: r.endereco_coleta,
+          endereco_entrega: r.endereco_entrega,
+          entregador: courier.name || null,
+          km: r.distancia_km != null ? Number(r.distancia_km) : null,
+          valor: r.valor_servico != null ? Number(r.valor_servico) : null,
+          duracao_min: duracaoMin,
+          prazo,
+          prazo_min: r.prazo_min != null ? Number(r.prazo_min) : null,
+          criado_em: r.created_at,
+          entregue_em: fimTs,
+        };
+      });
+
+      // Filtro por status (rotulo)
+      if (status && status !== 'todos') {
+        const alvo = String(status).toLowerCase();
+        corridas = corridas.filter(c => String(c.status).toLowerCase() === alvo);
+      }
+
+      // ── [portal-relatorio-v2] Excel de verdade (.xlsx) ──
+      // Antes era CSV: o Excel convertia a data em numero serial e, como o CSV
+      // nao carrega largura de coluna, aparecia "########". Com xlsx a gente
+      // define a largura E manda a data como Date com formato dd/mm/aaaa —
+      // sai legivel e ainda da pra filtrar/ordenar como data de verdade.
+      if (['csv', 'xlsx', 'excel'].includes(String(formato).toLowerCase())) {
+        const XLSX = require('xlsx');
+
+        const fmtDurTxt = (m) => {
+          if (m == null) return '';
+          if (m < 60) return m + 'min';
+          const h = Math.floor(m / 60), r2 = m % 60;
+          return h + 'h' + (r2 > 0 ? ' ' + String(r2).padStart(2, '0') : '');
+        };
+        const PRAZO_ROTULO = { no_prazo: 'No prazo', fora: 'Fora do prazo', sem_dados: '' };
+
+        // Date "de parede" pro Excel: o xlsx converte pelo fuso local do
+        // servidor (UTC no Railway). Compensamos pra hora sair em Salvador.
+        const dataParaExcel = (v) => {
+          if (!v) return null;
+          const d = new Date(v);
+          if (isNaN(d.getTime())) return null;
+          try {
+            const p = new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'America/Bahia', year: 'numeric', month: '2-digit', day: '2-digit',
+              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+            }).formatToParts(d);
+            const g = (k) => { const x = p.find(i => i.type === k); return x ? Number(x.value) : 0; };
+            const hh = g('hour') === 24 ? 0 : g('hour');
+            return new Date(g('year'), g('month') - 1, g('day'), hh, g('minute'), g('second'));
+          } catch (_) { return d; }
+        };
+
+        const linhas = corridas.map(c => ({
+          'OS':             c.os,
+          'Data/Hora':      dataParaExcel(c.criado_em),
+          'Status':         c.status,
+          'Provedor':       c.provider,
+          'Coleta':         c.endereco_coleta || '',
+          'Entrega':        c.endereco_entrega || '',
+          'Entregador':     c.entregador || '',
+          'KM':             c.km != null ? Number(c.km) : null,
+          'Duracao':        fmtDurTxt(c.duracao_min),
+          'Duracao (min)':  c.duracao_min != null ? Number(c.duracao_min) : null,
+          'Prazo':          PRAZO_ROTULO[c.prazo] || '',
+          'Valor (R$)':     c.valor != null ? Number(c.valor) : null,
+          'Entregue em':    dataParaExcel(c.entregue_em),
+        }));
+
+        const ws = XLSX.utils.json_to_sheet(linhas, { cellDates: true });
+        // larguras (o que faltava no CSV — origem do "########")
+        ws['!cols'] = [
+          { wch: 10 },  // OS
+          { wch: 18 },  // Data/Hora
+          { wch: 12 },  // Status
+          { wch: 9 },   // Provedor
+          { wch: 46 },  // Coleta
+          { wch: 46 },  // Entrega
+          { wch: 28 },  // Entregador
+          { wch: 8 },   // KM
+          { wch: 10 },  // Duracao
+          { wch: 13 },  // Duracao (min)
+          { wch: 13 },  // Prazo
+          { wch: 12 },  // Valor
+          { wch: 18 },  // Entregue em
+        ];
+        // formato das colunas de data e do valor
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        for (let R = 1; R <= range.e.r; R++) {
+          for (const col of [1, 12]) {                       // Data/Hora, Entregue em
+            const cel = ws[XLSX.utils.encode_cell({ r: R, c: col })];
+            if (cel && cel.t === 'd') cel.z = 'dd/mm/yyyy hh:mm:ss';
+          }
+          const celV = ws[XLSX.utils.encode_cell({ r: R, c: 11 })];   // Valor
+          if (celV && celV.t === 'n') celV.z = '#,##0.00';
+        }
+        ws['!autofilter'] = { ref: ws['!ref'] };              // filtro no cabecalho
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Corridas');
+        const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="relatorio-${deStr}_a_${ateStr}.xlsx"`);
+        return res.send(buf);
+      }
+
+      // ── JSON (tela) ──
+      // [portal-relatorio-v2] Os KPIs somam so o que FATURA: Entregue e
+      // Devolvido. Cancelado aparece na tabela (a loja precisa ver) mas fica
+      // FORA da conta — senao o total mente (corrida cancelada nao gerou
+      // receita nem km rodado).
+      const STATUS_FATURAVEIS = ['DELIVERED', 'RETURNED'];
+      const somaveis = corridas.filter(c => STATUS_FATURAVEIS.includes(c.status_canonico));
+      const totais = somaveis.reduce((a, c) => {
+        a.corridas += 1;
+        if (c.km != null) a.km += c.km;
+        if (c.valor != null) a.valor += c.valor;
+        if (c.prazo === 'no_prazo') a.no_prazo += 1;
+        if (c.prazo === 'fora') a.fora += 1;
+        return a;
+      }, { corridas: 0, km: 0, valor: 0, no_prazo: 0, fora: 0 });
+      // quantas ficaram de fora (pra tela poder explicar o numero menor)
+      totais.nao_faturaveis = corridas.length - somaveis.length;
+      totais.km = Math.round(totais.km * 10) / 10;
+      totais.valor = Math.round(totais.valor * 100) / 100;
+      totais.pct_prazo = (totais.no_prazo + totais.fora) > 0
+        ? Math.round((10000 * totais.no_prazo) / (totais.no_prazo + totais.fora)) / 100
+        : null;
+
+      res.json({ success: true, periodo: { de: deStr, ate: ateStr }, totais, corridas });
+    } catch (err) {
+      console.error('[portal/relatorio] erro:', err.message);
+      res.status(500).json({ error: 'Erro ao gerar relatorio' });
+    }
+  });
+
   router.get('/deliveries', verificarPortalToken, async (req, res) => {
     try {
       const temData = !!(req.query.data && /^\d{4}-\d{2}-\d{2}$/.test(req.query.data));
