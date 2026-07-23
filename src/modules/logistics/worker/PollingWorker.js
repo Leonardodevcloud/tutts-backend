@@ -48,6 +48,20 @@ function startPollingWorker(pool) {
   let parado = false;
   let logStandbyContador = 0;  // pra não floodar log de "standby"
 
+  // [worker-autorecupera-v1] Ciclos seguidos em que a Mapp nao devolveu NADA.
+  //
+  // O PORQUE: a busca e `listarServicos(0, ultimoId)` — a Mapp so devolve OS
+  // com id MAIOR que o checkpoint. E o checkpoint avanca ate em OS rejeitada.
+  // Se ele pular pra um id alto, as OS que ficaram pra tras somem e, se nao
+  // chegar nada acima daquele numero, o worker fica MUDO pra sempre: o ramo
+  // "zero servicos" nao logava nada. Ninguem via que o despacho tinha parado.
+  //
+  // Com o contador o worker se cura sozinho: depois de CICLOS_ATE_RESET ciclos
+  // vazios, ele zera o checkpoint e volta a enxergar tudo. A janela temporal
+  // (30 min) continua protegendo de despachar OS velha, entao resetar e seguro.
+  let ciclosVazios = 0;
+  const CICLOS_ATE_RESET = 10;   // ~5 min com o intervalo padrao de 30s
+
   const orchestrator = getDispatchOrchestrator(pool);
   const events = getEventLogger(pool);
   const mapp = getMappClient(pool);
@@ -169,6 +183,7 @@ function startPollingWorker(pool) {
       const servicos = await mapp.listarServicos(0, ultimoId);
 
       if (servicos.length > 0) {
+        ciclosVazios = 0;   // [worker-autorecupera-v1] veio servico: zera o contador
         console.log(`🔍 [PollingWorker] ${servicos.length} serviço(s) da Mapp (ultimoId=${ultimoId}, janela=${janelaMin}min)`);
 
         let maiorId = ultimoId;
@@ -177,14 +192,21 @@ function startPollingWorker(pool) {
 
         for (const servico of servicos) {
           try {
-            // Atualiza ponteiro mesmo se a OS for rejeitada
-            if (Number(servico.codigoOS) > maiorId) {
-              maiorId = Number(servico.codigoOS);
-            }
+            // [worker-autorecupera-v1] O ponteiro NAO avanca mais cegamente.
+            //
+            // Antes ele subia "mesmo se a OS for rejeitada" — inclusive quando
+            // o despacho deu ERRO. Aquela OS ficava pra tras do checkpoint e
+            // nunca mais era tentada, sem ninguem saber. Agora so avanca no que
+            // e definitivo: despachada, sem regra, ou velha demais (fora da
+            // janela nunca mais vai valer). Erro NAO avanca — a OS volta no
+            // proximo ciclo, que e o comportamento util.
+            const _idOS = Number(servico.codigoOS);
+            const _avancar = () => { if (_idOS > maiorId) maiorId = _idOS; };
 
             // Filtro de janela temporal
             if (!dentroDaJanela(servico, janelaMin)) {
               puladas_janela++;
+              _avancar();   // velha demais: nunca mais vai ser despachada
               continue;
             }
 
@@ -200,10 +222,14 @@ function startPollingWorker(pool) {
 
             if (resultado.decision === 'despachado') {
               despachadas++;
+              _avancar();          // sucesso: pode passar
             } else if (String(resultado.decision).startsWith('rejeitado_')) {
               puladas_regra++;
+              _avancar();          // sem regra: nao muda no proximo ciclo
             } else if (resultado.decision === 'cotacao_falhou' || resultado.decision === 'despacho_falhou_ou_duplicado') {
               erros++;
+              // NAO avanca: erro pode ser transitorio (provedor fora, rede).
+              // Deixando o ponteiro pra tras, a OS volta no proximo ciclo.
             } else if (resultado.decision === 'os_nao_encontrada') {
               // [worker-servico-v1] Antes isso era ignorado EM SILENCIO: nao
               // incrementava contador nenhum, entao o resumo do ciclo (que so
@@ -236,7 +262,20 @@ function startPollingWorker(pool) {
         // worker processava e nao dizia nada.
         console.log(`📊 [PollingWorker] ciclo: ${despachadas} despachada(s), ${puladas_janela} fora da janela, ${puladas_regra} sem regra, ${nao_encontradas} nao encontrada(s), ${erros} erro(s)`);
       } else {
-        await marcarCiclo();
+        // [worker-autorecupera-v1] A Mapp nao devolveu nada. Antes isso era
+        // silencioso — agora fala, e se persistir, destrava sozinho.
+        ciclosVazios++;
+        if (ciclosVazios === 1 || ciclosVazios % 10 === 0) {
+          console.log(`🔍 [PollingWorker] 0 servico(s) da Mapp (ultimoId=${ultimoId}) — ciclo vazio ${ciclosVazios}`);
+        }
+
+        if (ciclosVazios >= CICLOS_ATE_RESET && ultimoId > 0) {
+          console.warn(`♻️ [PollingWorker] ${ciclosVazios} ciclos sem nenhuma OS — o checkpoint ${ultimoId} pode estar travado. Resetando pra 0.`);
+          await salvarCheckpoint(0);
+          ciclosVazios = 0;
+        } else {
+          await marcarCiclo();
+        }
       }
 
       // 2. Verificar timeouts
