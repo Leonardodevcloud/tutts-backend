@@ -13,7 +13,23 @@
 const { defineAgent } = require('../core/agent-base');
 const slaMonitorService = require('../sla-monitor.service');
 
-const CRON_DEFAULT = '*/2 8-18 * * 1-5';
+// 🆕 2026-07 janela-sabado: detector passa a rodar tambem no sabado.
+// Cron ampliado pra 1-6 (seg-sab). A janela fina (sabado ate 13h) e cortada
+// pelo guard dentroJanela() no tickGlobal, ja que o cron nao permite horas
+// diferentes por dia numa unica expressao.
+//   seg-sex: 08h-18h  |  sabado: 08h-13h  |  domingo: nao roda
+const CRON_DEFAULT = '*/2 8-18 * * 1-6';
+
+// Janela de operacao (hora local America/Bahia). Fonte de verdade mesmo que
+// SLA_DETECTOR_CRON seja sobrescrito no ambiente.
+function dentroJanela() {
+  const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+  const dia  = agora.getDay();   // 0=Dom, 1=Seg ... 6=Sab
+  const hora = agora.getHours();
+  if (dia === 0) return false;                    // domingo: nunca
+  if (dia === 6) return hora >= 8 && hora <= 13;  // sabado: 08h-13h
+  return hora >= 8 && hora <= 18;                 // seg-sex: 08h-18h
+}
 
 module.exports = defineAgent({
   nome: 'sla-detector',
@@ -31,6 +47,13 @@ module.exports = defineAgent({
   habilitado: () => (process.env.SLA_DETECTOR_ATIVO || 'false').toLowerCase() === 'true',
 
   tickGlobal: async (pool, ctx) => {
+    // 🆕 2026-07 janela-sabado: dorme fora da janela (America/Bahia).
+    if (!dentroJanela()) {
+      const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bahia' }));
+      ctx.log(`😴 Fora da janela (dia=${agora.getDay()}, ${agora.getHours()}h) — pulando tick.`);
+      return;
+    }
+
     ctx.log('🔍 Iniciando tick SLA (snapshot + detecção de rastreio)');
     // 🆕 2026-07: tickCompleto faz UMA coleta que alimenta:
     //   1. sla_monitor_snapshot (SLA server-side — substitui extensão v8)
