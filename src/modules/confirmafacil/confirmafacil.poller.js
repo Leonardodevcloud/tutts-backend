@@ -207,6 +207,50 @@ function _dentroHorarioFullScan(d = new Date()) {
   return min >= 7 * 60 && min < 19 * 60;                // seg-sex: 07-19
 }
 
+// -- 2026-07 [cf-fastscan-v1] FAST SCAN: so as A_EMBARCAR, TODO ciclo --------
+// Diagnostico (log de producao 27/07): NENHUMA corrida nascia fora do ciclo de
+// full scan. O full scan pagina TODAS as stages (654 NFs / 14 paginas) so pra
+// reconciliar cache, mas apenas ~45 sao A_EMBARCAR - que sao as unicas que
+// geram corrida. Com o throttle em 20min, o delay de captacao ficava entre 0 e
+// 20 minutos (media ~10). Aqui rodamos um scan barato com stage=A_EMBARCAR a
+// CADA ciclo (1 request), mantendo o full scan de 20min intacto so para a
+// reconciliacao de status. Delay de captacao cai para <=60s.
+//
+// SEGURANCA: mesmo se o CF ignorar o stage e devolver tudo, o guard de
+// statusNF impede criar corrida errada, e MAX_PAGES limita o custo. O log de
+// totalCount na pagina 0 valida o filtro no PRIMEIRO deploy:
+//   totalCount ~45  -> stage=A_EMBARCAR esta filtrando (esperado)
+//   totalCount ~650 -> stage IGNORADO pelo CF (aparece um WARN explicito)
+//
+// CF_FASTSCAN=false          desliga (volta ao comportamento antigo)
+// CF_FASTSCAN_MAX_PAGES=N    teto de paginas por ciclo (default 4)
+// CF_FASTSCAN_ALERTA=N       avisa se totalCount passar de N (default 300)
+const CF_FASTSCAN           = process.env.CF_FASTSCAN !== 'false';
+const CF_FASTSCAN_MAX_PAGES = parseInt(process.env.CF_FASTSCAN_MAX_PAGES, 10) > 0
+  ? parseInt(process.env.CF_FASTSCAN_MAX_PAGES, 10) : 4;
+const CF_FASTSCAN_ALERTA    = parseInt(process.env.CF_FASTSCAN_ALERTA, 10) > 0
+  ? parseInt(process.env.CF_FASTSCAN_ALERTA, 10) : 300;
+
+// -- 2026-07 [cf-idtail-diag-v1] Diagnostico + budget do id-tailing ----------
+// O id-tailing roda todo ciclo mas NUNCA logou nada em producao: o log final
+// era gated por (existentes > 0 || criadas > 0) e todo probe volta
+// {exists:false}. Sem log, sem erro, cursor parado - falha 100% silenciosa.
+// Estas flags tornam o resultado VISIVEL e permitem separar as 3 hipoteses:
+//   keys=["resposta"] ou similar  -> parse envelopado em _buscarEmbarqueUnitario
+//   httpStatus=404 em tudo        -> cursor alem da fronteira do hub
+//   httpStatus=200 + keys vazio   -> corpo vazio / scope por conta
+//
+// BUDGET: teto de tempo de parede. CF_IDTAILING_MAX_PER_CYCLE esta em 600 em
+// producao; se o id-tailing voltar a achar IDs, 600 requests SEQUENCIAIS
+// estouram o ciclo de 60s e o guard _rodando comeca a pular ciclos. O budget
+// corta o scan antes disso e o cursor retoma do mesmo ponto no ciclo seguinte.
+//
+// CF_IDTAILING_DIAG=false     silencia os logs de diagnostico
+// CF_IDTAILING_BUDGET_MS=N    teto de ms por ciclo (default 20000)
+const CF_IDTAILING_DIAG      = process.env.CF_IDTAILING_DIAG !== 'false';
+const CF_IDTAILING_BUDGET_MS = parseInt(process.env.CF_IDTAILING_BUDGET_MS, 10) > 0
+  ? parseInt(process.env.CF_IDTAILING_BUDGET_MS, 10) : 20000;
+
 class ConfirmaFacilPoller {
   constructor(pool) {
     this.pool    = pool;
@@ -427,6 +471,18 @@ class ConfirmaFacilPoller {
       console.log('[CF Poller] full scan adiado (throttle ' + _FULLSCAN_MIN + 'min) - proximo em ~' + _faltaMin + 'min; id-tailing/ocorrencia/cache seguem normais');
     }
 
+    // [cf-fastscan-v1] FAST SCAN: stage=A_EMBARCAR, todo ciclo, 1 request.
+    // E o unico caminho que capta NF nova em <=60s. NAO roda no mesmo ciclo do
+    // full scan (seria redundante: o full scan acabou de varrer as A_EMBARCAR).
+    if (CF_FASTSCAN && _emHorario && !_devesFullScan) {
+      try {
+        const criadasFast = await this._fastScanAEmbarcar(config, deStr, ateStr);
+        if (criadasFast > 0) totalProcessadas += criadasFast;
+      } catch (e) {
+        console.error('[CF FastScan] erro:', e.message);
+      }
+    }
+
     // Fallback via /filter/ocorrencia (endpoint que FUNCIONA e e SCOPED a nossa
     // conta). O /filter/embarque (lista) entra em erro Hibernate ("is closed")
     // no lado do GKO; o /ocorrencia continua 200 e so retorna ocorrencias do
@@ -487,6 +543,86 @@ class ConfirmaFacilPoller {
     if (this._puladosBackoff > 0) {
       console.log(`⏳ [CF Poller] cliente ${config.cliente_id}: ${this._puladosBackoff} NF(s) em backoff (serao re-tentadas mais tarde)`);
     }
+  }
+
+  // ══════════════════════════════════════════════════
+  // [cf-fastscan-v1] FAST SCAN: SO AS A_EMBARCAR, TODO CICLO
+  // ══════════════════════════════════════════════════
+  // Usa o MESMO mecanismo ja provado do CF_USE_STAGE_PARAM (stage promovido a
+  // query param solto). Retorna so o conjunto que realmente gera corrida
+  // (~45 NFs), em vez das 654 de todas as stages do full scan.
+  //
+  // Checa o vinculo ANTES de chamar _processarNF (mesmo padrao do fallback de
+  // ocorrencia), pra que o contador reflita NF realmente nova e o log nao
+  // fique poluido com as dezenas que ja tem corrida.
+  async _fastScanAEmbarcar(config, deStr, ateStr) {
+    let criadas = 0;
+    let vistas  = 0;
+    let page    = 0;
+
+    while (page < CF_FASTSCAN_MAX_PAGES) {
+      const filtro = {
+        de:    deStr,
+        ate:   ateStr,
+        stage: 'A_EMBARCAR',
+        cnpjTransportadora: [config.cnpj_transportadora],
+      };
+
+      const resp = await this._buscarEmbarques(filtro, page, config);
+      if (!resp) {
+        console.warn('[CF FastScan] pg ' + page + ': falha no CF apos retries - tentando no proximo ciclo');
+        break;
+      }
+
+      const lista = resp.respostas || resp.content || [];
+
+      if (page === 0) {
+        const tc = Number(resp.totalCount) || 0;
+        console.log('[CF FastScan] cliente ' + config.cliente_id + ': pg 0 com ' + lista.length
+          + ' NF(s) | totalCount=' + resp.totalCount + ' totalPages=' + resp.totalPages
+          + ' | stage=A_EMBARCAR');
+        if (tc > CF_FASTSCAN_ALERTA) {
+          console.warn('[CF FastScan] ATENCAO: totalCount=' + tc + ' acima de ' + CF_FASTSCAN_ALERTA
+            + ' - o CF provavelmente IGNOROU o stage=A_EMBARCAR. Nenhuma corrida errada e criada'
+            + ' (o guard de statusNF protege), mas o fast scan fica caro. Revisar o filtro.');
+        }
+      }
+
+      if (!Array.isArray(lista) || lista.length === 0) break;
+
+      for (const item of lista) {
+        try {
+          vistas++;
+          await this._salvarCache(item, config.cliente_id);
+
+          const statusNF = String((item.statusEmbarque && item.statusEmbarque.nome) || '').toUpperCase();
+          if (statusNF !== 'A_EMBARCAR') continue; // guard: so pendente gera corrida
+
+          const idEmb = item.idEmbarque || item.id;
+          if (!idEmb) continue;
+
+          const { rows: jaTem } = await this.pool.query(
+            'SELECT id FROM confirmafacil_vinculos WHERE id_embarque = $1', [idEmb]
+          );
+          if (jaTem.length > 0) continue; // ja tem corrida
+
+          await this._processarNF(item, config);
+          criadas++;
+        } catch (err) {
+          console.error('[CF FastScan] erro NF idEmbarque ' + (item && (item.idEmbarque || item.id))
+            + ': ' + err.message);
+        }
+      }
+
+      page++;
+      if (resp.totalPages && page >= Number(resp.totalPages)) break;
+    }
+
+    if (criadas > 0) {
+      console.log('[CF FastScan] cliente ' + config.cliente_id + ': ' + criadas
+        + ' NF(s) nova(s) despachada(s) de ' + vistas + ' A_EMBARCAR vista(s)');
+    }
+    return criadas;
   }
 
   // ══════════════════════════════════════════════════
@@ -1278,9 +1414,25 @@ class ConfirmaFacilPoller {
 
     let id = cursor, miss = 0, probes = 0, lastGood = cursor, criadas = 0, existentes = 0;
 
+    // [cf-idtail-diag-v1] teto de tempo de parede (ver comentario no topo).
+    const _tailIni = Date.now();
+    let _estourouBudget = false;
+
     while (probes < MAXP && miss < GAP) {
+      if (Date.now() - _tailIni > CF_IDTAILING_BUDGET_MS) { _estourouBudget = true; break; }
       id++; probes++;
       const r = await this._buscarEmbarqueUnitario(id, config);
+
+      // [cf-idtail-diag-v1] O 1o probe do ciclo e logado SEMPRE. E ele que
+      // separa as hipoteses (ver bloco de comentario no topo do arquivo).
+      if (probes === 1 && CF_IDTAILING_DIAG) {
+        console.log('[CF IdTail Diag] cliente ' + config.cliente_id
+          + ' cursor=' + cursor + ' probe=' + id
+          + ' exists=' + (r.exists === true) + ' error=' + (r.error === true)
+          + ' httpStatus=' + (r._status === undefined ? 'n/a' : r._status)
+          + ' keys=' + JSON.stringify(r._keys || [])
+          + ' corpo120=' + JSON.stringify(String(r._corpo || '').slice(0, 120)));
+      }
 
       if (r.error) {
         // Erro transitorio (is closed / 5xx / 401 / rede). NAO trata como
@@ -1314,8 +1466,14 @@ class ConfirmaFacilPoller {
 
     if (lastGood > cursor) await this._setCursor(config, lastGood);
 
-    if (existentes > 0 || criadas > 0) {
-      console.log(`[CF Poller] idtailing cliente ${config.cliente_id}: cursor ${cursor}->${lastGood} | ${probes} probes, ${existentes} existentes, ${criadas} despachada(s)`);
+    // [cf-idtail-diag-v1] Resumo SEMPRE. O gate antigo (existentes > 0) era
+    // exatamente o motivo do id-tailing ser invisivel no log quando falhava.
+    if (CF_IDTAILING_DIAG || existentes > 0 || criadas > 0) {
+      console.log('[CF IdTail] cliente ' + config.cliente_id
+        + ': cursor ' + cursor + '->' + lastGood
+        + ' | ' + probes + ' probes, ' + existentes + ' existentes, '
+        + criadas + ' despachada(s), miss=' + miss + '/' + GAP
+        + (_estourouBudget ? ' | BUDGET ESTOURADO (' + CF_IDTAILING_BUDGET_MS + 'ms)' : ''));
     }
     return criadas;
   }
@@ -1338,19 +1496,30 @@ class ConfirmaFacilPoller {
         let data = null;
         try { data = resp.json(); } catch (_) { data = null; }
 
-        if (resp.ok && data && (data.idEmbarque || data.id)) return { exists: true, data };
-        if (resp.ok) return { exists: false }; // 200 sem corpo valido => nao existe
+        // [cf-idtail-diag-v1] metadados SO para o log de diagnostico. Nao
+        // alteram nenhuma decisao: exists/error continuam identicos ao antes.
+        const _bodyTx = (typeof resp.text === 'function' ? resp.text() : '') || '';
+        const _keys   = (data && typeof data === 'object') ? Object.keys(data).slice(0, 12) : [];
+        const _dg     = { _status: resp.status, _keys: _keys, _corpo: _bodyTx };
 
-        const corpo = (typeof resp.text === 'function' ? resp.text() : '') || JSON.stringify(data || '');
+        if (resp.ok && data && (data.idEmbarque || data.id)) {
+          return Object.assign({ exists: true, data: data }, _dg);
+        }
+        // 200 sem corpo valido => nao existe. ATENCAO: se o CF devolver o objeto
+        // ENVELOPADO (ex.: { resposta: {...} }), cai aqui e vira falso negativo.
+        // O _keys no log de diagnostico denuncia exatamente esse caso.
+        if (resp.ok) return Object.assign({ exists: false }, _dg);
+
+        const corpo = _bodyTx || JSON.stringify(data || '');
         const txt = String(corpo);
         const transitorio = resp.status >= 500 || resp.status === 401
           || /is closed|closed|Deadlock|LockAcquisition/i.test(txt);
 
-        if (resp.status === 404) return { exists: false };
+        if (resp.status === 404) return Object.assign({ exists: false }, _dg);
         if (resp.status === 401) {
           token = await this.auth.obterToken(config.cliente_id, config, true);
         }
-        if (!transitorio && resp.status === 400) return { exists: false }; // id invalido => nao existe
+        if (!transitorio && resp.status === 400) return Object.assign({ exists: false }, _dg); // id invalido
         // transitorio => cai no retry
       } catch (err) {
         // erro de rede => retry
