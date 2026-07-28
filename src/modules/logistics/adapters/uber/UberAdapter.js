@@ -32,6 +32,8 @@ const { obterTokenUber } = require('./uber.auth');
 const {
   montarBodyQuote,
   montarBodyDelivery,
+  extrairCodigoColetaUber,
+  extrairPincodeUber,
 } = require('./uber.parser');
 const { nativeToCanonical } = require('./uber.status-map');
 const { classifyUberError } = require('./uber.errors');
@@ -288,6 +290,27 @@ class UberAdapter extends LogisticsProviderAdapter {
 
     console.log(`✅ [UberAdapter] entrega criada: ${data.id} | status=${data.status}`);
 
+    // [uber-codigo-coleta-v1] CODIGO DE COLETA — nativo da Uber.
+    // Nao geramos nada: derivamos dos 5 ultimos do workflow UUID que vem no
+    // tracking_url. E esse valor que o app do motoboy pede na loja. Gravado em
+    // pickup_code pelo Orchestrator (passo 6b), que ja dispara o WhatsApp pra
+    // loja — exatamente o mesmo caminho da 99. Sem mudanca no Orchestrator.
+    const _pickupCodeUber = extrairCodigoColetaUber(data.tracking_url);
+    if (_pickupCodeUber) {
+      console.log(`🔑 [UberAdapter] codigo de coleta (nativo Uber): ${_pickupCodeUber} | OS ${req.externalRef}`);
+    } else {
+      console.warn(`⚠️ [UberAdapter] OS ${req.externalRef}: sem tracking_url utilizavel — codigo de`
+        + ' coleta ficara VAZIO. Sem fallback de proposito: os 5 ultimos do del_... dao codigo errado.');
+    }
+
+    // [uber-codigo-coleta-v1] PIN DE ENTREGA — quando pincode esta ligado, quem
+    // gera os 4 digitos e a Uber. Le da resposta; se nao vier, fica null (antes
+    // inventavamos 6 digitos que a Uber nao conhecia).
+    const _dropoffCodeUber = extrairPincodeUber(data);
+    if (_dropoffCodeUber) {
+      console.log(`🔐 [UberAdapter] pincode de entrega (gerado pela Uber): ${_dropoffCodeUber} | OS ${req.externalRef}`);
+    }
+
     // CanonicalDelivery — inclui códigos de verificação para o Orchestrator salvar
     return {
       externalDeliveryId: data.id,
@@ -297,8 +320,8 @@ class UberAdapter extends LogisticsProviderAdapter {
       trackingUrl: data.tracking_url || null,
       courier: data.courier ? this._extractCourier(data.courier) : null,
       rawProvider: data,
-      pickupCode:  pickupCode  || null,   // PIN de coleta (gerado por nós)
-      dropoffCode: dropoffCode || null,   // PIN de entrega (gerado por nós, se tipo='codigo')
+      pickupCode:  _pickupCodeUber  || pickupCode  || null,   // nativo Uber (5 ultimos do workflow UUID)
+      dropoffCode: _dropoffCodeUber || dropoffCode || null,   // pincode gerado pela Uber
     };
   }
 

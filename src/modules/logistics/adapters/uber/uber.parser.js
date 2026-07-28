@@ -184,31 +184,46 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
   // provider (uber_pickup_ready_offset_min, uber_dropoff_deadline_offset_min...).
   Object.assign(body, montarJanelasUber(config));
 
-  // ── Códigos de verificação — gerados aqui e retornados ao caller ──────────
+  // ── Códigos de verificação ─────────────────────────────────────
+  // [uber-codigo-coleta-v1] Nenhum dos dois e mais gerado AQUI:
+  //   pickupCode  -> derivado do tracking_url em UberAdapter.createDelivery
+  //   dropoffCode -> gerado pela Uber (pincode) e lido da resposta
   let pickupCode  = null;
   let dropoffCode = null;
 
-  // Verificação de COLETA — PIN de 6 dígitos que o atendente da loja informa
-  // ao motoboy antes de entregar o pacote. Habilitado via verificacao_coleta_habilitada.
+  // ⚠️ COLETA — NAO ENVIAR pickup_verification. NUNCA.
+  //
+  // Confirmado com o suporte da Uber (07/2026): o codigo de coleta e NATIVO da
+  // plataforma (5 ultimos do workflow UUID) e o app do motoboy pede ele na loja.
+  // O PRE-REQUISITO e nao mandar NENHUMA verificacao de coleta: se enviarmos
+  // qualquer pickup_verification, a Uber entende que queremos verificacao
+  // customizada e DESLIGA o fluxo nativo do codigo.
+  //
+  // O que existia aqui antes estava errado por dois motivos:
+  //   1) mandava barcodes: [{ type: 'pin' }] — 'pin' nao e tipo de barcode valido
+  //      na doc da Uber (o documentado e CODE39); pincode e um objeto SEPARADO,
+  //      nao um tipo de barcode, e so existe no dropoff;
+  //   2) barcode exige o motoboy ESCANEAR, nao digitar — o PIN de 6 digitos que
+  //      mandavamos por WhatsApp pra loja era inescaneavel.
   if (config && (config.verificacao_coleta_habilitada || config.need_pickup_code)) {
-    pickupCode = String(Math.floor(100000 + Math.random() * 900000));
-    body.pickup_verification = {
-      barcodes: [{ type: 'pin', value: pickupCode }],
-    };
-    console.log(`[Uber] Verificação de COLETA habilitada para OS ${req.externalRef} — PIN: ${pickupCode}`);
+    console.warn('[Uber] OS ' + req.externalRef + ': verificacao_coleta_habilitada esta LIGADO'
+      + ' mas foi IGNORADO de proposito. A Uber usa codigo de coleta NATIVO (5 ultimos do'
+      + ' workflow UUID) e ele so funciona se NAO enviarmos pickup_verification.'
+      + ' Desligue esse toggle no painel da Uber.');
   }
 
-  // Verificação de ENTREGA — dois modos configuráveis via verificacao_entrega_tipo:
-  //   'codigo'    → PIN de 6 dígitos. Destinatário recebe via WhatsApp e informa ao motoboy.
-  //   'assinatura'→ Assinatura digital coletada no app do motoboy (padrão se não configurado).
+  // Verificação de ENTREGA — dois modos via verificacao_entrega_tipo:
+  //   'pincode' (alias legado: 'codigo') → PIN de 4 digitos GERADO PELA UBER.
+  //        Volta em verification_requirements.pincode.value; o UberAdapter le e
+  //        devolve como dropoffCode. Doc: pincode existe SO no dropoff.
+  //   'assinatura' → assinatura digital no app do motoboy (default).
   if (config && (config.verificacao_entrega_habilitada || config.need_dropoff_code)) {
-    const tipo = config.verificacao_entrega_tipo || 'assinatura';
-    if (tipo === 'codigo') {
-      dropoffCode = String(Math.floor(100000 + Math.random() * 900000));
-      body.dropoff_verification = {
-        barcodes: [{ type: 'pin', value: dropoffCode }],
-      };
-      console.log(`[Uber] Verificação de ENTREGA (PIN) habilitada para OS ${req.externalRef} — PIN: ${dropoffCode}`);
+    const tipo = String(config.verificacao_entrega_tipo || 'assinatura').toLowerCase();
+    if (tipo === 'pincode' || tipo === 'codigo') {
+      // NAO geramos o valor: quem gera e a Uber. Antes inventavamos 6 digitos
+      // que a Uber nao conhecia e mandavamos por WhatsApp pro destinatario.
+      body.dropoff_verification = { pincode: { enabled: true } };
+      console.log(`[Uber] Verificação de ENTREGA (pincode Uber) habilitada para OS ${req.externalRef}`);
     } else {
       // Modo padrão: assinatura digital (não gera código, só comprovante visual)
       body.dropoff_verification = {
@@ -227,16 +242,19 @@ function montarBodyDelivery(quoteId, req, config, sandboxMode = false) {
   // provider: uber_pickup_picture, uber_dropoff_picture, uber_return_picture.
   // ATENÇÃO (doc Uber): no dropoff a foto NÃO combina com assinatura/ID — quando
   // a foto está ligada ela tem PRECEDÊNCIA e o dropoff_verification vira só foto.
+  // [uber-codigo-coleta-v1] ⚠️ Ligar foto na COLETA MATA o codigo de coleta nativo
+  // (qualquer pickup_verification enviado desliga o fluxo nativo da Uber).
+  // Mantido funcional porque e uma escolha legitima — mas e um OU exclusivo.
   if (config && config.uber_pickup_picture) {
     body.pickup_verification = Object.assign({}, body.pickup_verification, { picture: true });
-    console.log(`[Uber] Verificação por FOTO na COLETA habilitada (OS ${req.externalRef})`);
+    console.warn('[Uber] OS ' + req.externalRef + ': FOTO na coleta habilitada — isso DESLIGA o'
+      + ' codigo de coleta nativo da Uber. Sao mutuamente exclusivos: ou foto, ou codigo.');
   }
+  // [uber-codigo-coleta-v1] Foto no dropoff agora faz MERGE em vez de substituir.
+  // A doc do pincode diz que ele combina com foto, barcode, assinatura e sobriety
+  // check — o replace anterior apagava o pincode/assinatura silenciosamente.
   if (config && config.uber_dropoff_picture) {
-    if (body.dropoff_verification && body.dropoff_verification.signature_requirement) {
-      console.warn(`[Uber] dropoff OS ${req.externalRef}: foto tem precedência sobre assinatura (a Uber não combina os dois)`);
-    }
-    body.dropoff_verification = { picture: true };  // foto pura
-    dropoffCode = null;                              // foto substitui PIN/assinatura no dropoff
+    body.dropoff_verification = Object.assign({}, body.dropoff_verification, { picture: true });
     console.log(`[Uber] Verificação por FOTO na ENTREGA habilitada (OS ${req.externalRef})`);
   }
   if (config && config.uber_return_picture) {
@@ -315,9 +333,59 @@ function servicoMappToCanonicalQuoteRequest(servico) {
   };
 }
 
+// ── 2026-07 [uber-codigo-coleta-v1] Codigo de coleta NATIVO da Uber ─────────
+// Confirmado com o suporte da Uber (07/2026): o codigo que o app do motoboy
+// pede na loja e os 5 ULTIMOS caracteres do workflow UUID, que e justamente o
+// UUID que aparece no tracking_url:
+//
+//   https://delivery.uber.com/br/orders/04362cf0-...-dae18926dbeb?tenancy...
+//                                                            ^^^^^  -> "6DBEB"
+//
+// Mesma regra que o front ja usava no banner do modal (modulo-logistica.js).
+// Aqui ela sobe pro backend pra gravar em logistics_deliveries.pickup_code, que
+// o kanban, os cards e o portal do cliente ja renderizam (5 pontos no front).
+//
+// ATENCAO - sem fallback proposital: se nao houver tracking_url, retorna null.
+// Nao usar os 5 ultimos do delivery_id (del_...) — isso produzia codigos errados
+// tipo "WDRUW"/"BDBVA" (ver comentario historico no modulo-logistica.js). Melhor
+// a loja nao ver codigo nenhum do que ver um codigo que nao funciona.
+function extrairCodigoColetaUber(trackingUrl) {
+  if (!trackingUrl) return null;
+  try {
+    // Ancorado em /orders/ de proposito: a URL tambem carrega um segundo UUID
+    // no tenancyOverride, que NAO e o workflow uuid.
+    const m = String(trackingUrl).match(
+      /\/orders\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/
+    );
+    if (m && m[1]) return m[1].slice(-5).toUpperCase();
+  } catch (_e) { /* url malformada => sem codigo */ }
+  return null;
+}
+
+// ── [uber-codigo-coleta-v1] PIN de entrega gerado PELA UBER ────────────────
+// Quando dropoff_verification.pincode.enabled = true, quem gera os 4 digitos e
+// a Uber. O valor volta em verification_requirements.pincode.value. A doc nao
+// deixa 100% claro o aninhamento (ora sob dropoff, ora na raiz), entao tentamos
+// os caminhos conhecidos em ordem.
+function extrairPincodeUber(data) {
+  if (!data || typeof data !== 'object') return null;
+  const cands = [
+    data.dropoff && data.dropoff.verification_requirements,
+    data.verification_requirements,
+    data.dropoff_verification,
+  ];
+  for (const c of cands) {
+    const v = c && c.pincode && c.pincode.value;
+    if (v) return String(v);
+  }
+  return null;
+}
+
 module.exports = {
   montarEnderecoUber,
   montarBodyQuote,
   montarBodyDelivery,
   servicoMappToCanonicalQuoteRequest,
+  extrairCodigoColetaUber,
+  extrairPincodeUber,
 };
