@@ -231,6 +231,28 @@ const CF_FASTSCAN_MAX_PAGES = parseInt(process.env.CF_FASTSCAN_MAX_PAGES, 10) > 
 const CF_FASTSCAN_ALERTA    = parseInt(process.env.CF_FASTSCAN_ALERTA, 10) > 0
   ? parseInt(process.env.CF_FASTSCAN_ALERTA, 10) : 300;
 
+// -- 2026-07 [cf-janela-fastscan-v2] Janela de data PROPRIA do fast scan -----
+// CF_POLLER_DIAS_JANELA alimenta os DOIS scans. Alargar ela para cobrir
+// A_EMBARCAR antiga alargaria tambem o FULL scan, que pagina TODAS as stages:
+//   1 dia -> 686 NFs / 14 paginas
+//   7 dias-> ~4.800 NFs / ~96 paginas, a cada 20min
+// Que e exatamente a regressao ja documentada na janela do _processarCliente
+// (busca crescendo sem limite, ciclo travando, NF nova deixando de ser
+// alcancada). Como o fast scan filtra por stage=A_EMBARCAR, 7 dias nele custa
+// ~1-2 paginas. Logo: fast scan LARGO (cobertura), full scan CURTO (barato).
+//
+// DEFAULT = 1 (identico ao de hoje). Subir para 7 e um ato DELIBERADO: no
+// primeiro ciclo apos a mudanca, toda A_EMBARCAR sem vinculo dos ultimos 7
+// dias vira corrida. Se houver nota velha parada, isso e uma avalanche. Por
+// isso o cap abaixo existe.
+//
+// CF_FASTSCAN_DIAS_JANELA=N  janela do fast scan em dias (default 1)
+// CF_FASTSCAN_MAX_NOVAS=N    teto de corridas NOVAS por ciclo (default 10)
+const CF_FASTSCAN_DIAS_JANELA = parseInt(process.env.CF_FASTSCAN_DIAS_JANELA, 10) > 0
+  ? parseInt(process.env.CF_FASTSCAN_DIAS_JANELA, 10) : 1;
+const CF_FASTSCAN_MAX_NOVAS   = parseInt(process.env.CF_FASTSCAN_MAX_NOVAS, 10) > 0
+  ? parseInt(process.env.CF_FASTSCAN_MAX_NOVAS, 10) : 10;
+
 // -- 2026-07 [cf-idtail-diag-v1] Diagnostico + budget do id-tailing ----------
 // O id-tailing roda todo ciclo mas NUNCA logou nada em producao: o log final
 // era gated por (existentes > 0 || criadas > 0) e todo probe volta
@@ -476,7 +498,7 @@ class ConfirmaFacilPoller {
     // full scan (seria redundante: o full scan acabou de varrer as A_EMBARCAR).
     if (CF_FASTSCAN && _emHorario && !_devesFullScan) {
       try {
-        const criadasFast = await this._fastScanAEmbarcar(config, deStr, ateStr);
+        const criadasFast = await this._fastScanAEmbarcar(config);
         if (criadasFast > 0) totalProcessadas += criadasFast;
       } catch (e) {
         console.error('[CF FastScan] erro:', e.message);
@@ -555,10 +577,25 @@ class ConfirmaFacilPoller {
   // Checa o vinculo ANTES de chamar _processarNF (mesmo padrao do fallback de
   // ocorrencia), pra que o contador reflita NF realmente nova e o log nao
   // fique poluido com as dezenas que ja tem corrida.
-  async _fastScanAEmbarcar(config, deStr, ateStr) {
+  // [cf-janela-fastscan-v2] Janela de data propria (ver comentario no topo).
+  // Mesma formatacao/fuso do _processarCliente, so muda o numero de dias.
+  _janelaFastScan() {
+    const agora  = new Date();
+    const p      = (n) => String(n).padStart(2, '0');
+    const inicio = new Date(agora.getTime() - CF_FASTSCAN_DIAS_JANELA * 24 * 60 * 60 * 1000);
+    return {
+      de:  `${inicio.getFullYear()}/${p(inicio.getMonth() + 1)}/${p(inicio.getDate())} 00:00:00`,
+      ate: `${agora.getFullYear()}/${p(agora.getMonth() + 1)}/${p(agora.getDate())} 23:59:59`,
+    };
+  }
+
+  async _fastScanAEmbarcar(config) {
+    const { de: deStr, ate: ateStr } = this._janelaFastScan();
+
     let criadas = 0;
     let vistas  = 0;
     let page    = 0;
+    let capAtingido = false;
 
     while (page < CF_FASTSCAN_MAX_PAGES) {
       const filtro = {
@@ -580,7 +617,7 @@ class ConfirmaFacilPoller {
         const tc = Number(resp.totalCount) || 0;
         console.log('[CF FastScan] cliente ' + config.cliente_id + ': pg 0 com ' + lista.length
           + ' NF(s) | totalCount=' + resp.totalCount + ' totalPages=' + resp.totalPages
-          + ' | stage=A_EMBARCAR');
+          + ' | stage=A_EMBARCAR janela=' + CF_FASTSCAN_DIAS_JANELA + 'd');
         if (tc > CF_FASTSCAN_ALERTA) {
           console.warn('[CF FastScan] ATENCAO: totalCount=' + tc + ' acima de ' + CF_FASTSCAN_ALERTA
             + ' - o CF provavelmente IGNOROU o stage=A_EMBARCAR. Nenhuma corrida errada e criada'
@@ -606,6 +643,20 @@ class ConfirmaFacilPoller {
           );
           if (jaTem.length > 0) continue; // ja tem corrida
 
+          // [cf-janela-fastscan-v2] Valvula de seguranca. Sem ela, subir o
+          // CF_FASTSCAN_DIAS_JANELA faria o ciclo seguinte criar de uma vez
+          // TODA A_EMBARCAR sem vinculo da janela nova. Com o cap, o backlog
+          // pinga no ritmo do ciclo (60s) e fica VISIVEL no log antes de virar
+          // avalanche. Operacao normal (1-8 novas/ciclo) nao encosta nisso.
+          if (criadas >= CF_FASTSCAN_MAX_NOVAS) {
+            capAtingido = true;
+            console.warn('[CF FastScan] cap de ' + CF_FASTSCAN_MAX_NOVAS
+              + ' corrida(s) nova(s)/ciclo atingido - o resto sai no proximo ciclo (60s).'
+              + ' Se isso repetir, ha BACKLOG de A_EMBARCAR antiga: investigue antes'
+              + ' de manter CF_FASTSCAN_DIAS_JANELA alto.');
+            break;
+          }
+
           await this._processarNF(item, config);
           criadas++;
         } catch (err) {
@@ -614,13 +665,17 @@ class ConfirmaFacilPoller {
         }
       }
 
+      if (capAtingido) break; // [cf-janela-fastscan-v2] para a paginacao tambem
+
       page++;
       if (resp.totalPages && page >= Number(resp.totalPages)) break;
     }
 
     if (criadas > 0) {
       console.log('[CF FastScan] cliente ' + config.cliente_id + ': ' + criadas
-        + ' NF(s) nova(s) despachada(s) de ' + vistas + ' A_EMBARCAR vista(s)');
+        + ' NF(s) nova(s) despachada(s) de ' + vistas + ' A_EMBARCAR vista(s)'
+        + ' | janela=' + CF_FASTSCAN_DIAS_JANELA + 'd'
+        + (capAtingido ? ' | CAP ATINGIDO' : ''));
     }
     return criadas;
   }
