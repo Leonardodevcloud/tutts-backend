@@ -164,10 +164,41 @@ function montarCSV(headers, linhas) {
   return '\uFEFF' + head + '\n' + body + '\n';
 }
 
+/**
+ * [solicitacao-retorno-v1] Adicional fixo cobrado quando a corrida vira
+ * devolucao, na tabela do cliente de solicitacao (preco_hub.retorno_valor).
+ *
+ * Espelha o preco_retorno_valor da regra do Hub, mas mora no JSONB preco_hub
+ * porque cliente de solicitacao nao tem linha em logistics_dispatch_rules.
+ *
+ * IMPORTANTE - respeita o `ativo`, e isso NAO e detalhe:
+ * com a tabela desligada, resolverValorCorrida cai no fallback `valorGravado`
+ * (= logistics_deliveries.valor_servico), que o WebhookDispatcher JA
+ * incrementou com o adicional. Se lessemos o retorno aqui de qualquer jeito, o
+ * relatorio somaria o adicional DE NOVO por cima de um valor que ja o continha.
+ * Tabela desligada => sem adicional, nos dois lados. Mesmo gate do
+ * normalizarTabelaCliente, de proposito.
+ *
+ * @param {object|string|null} precoHub - conteudo de clientes_solicitacao.preco_hub
+ * @returns {number} adicional em R$ (0 = nao cobra)
+ */
+function resolverAdicionalRetorno(precoHub) {
+  if (!precoHub) return 0;
+  let obj = precoHub;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj); } catch (_e) { return 0; }
+  }
+  if (typeof obj !== 'object') return 0;
+  if (obj.ativo === false) return 0;
+  const v = Number(obj.retorno_valor);
+  return (Number.isFinite(v) && v > 0) ? Math.round(v * 100) / 100 : 0;
+}
+
 module.exports = {
   normalizarTabelaCliente,
   calcularPrecoDistancia,
   resolverValorCorrida,
+  resolverAdicionalRetorno,
   classificarCanal,
   parseKm,
   normalizarStatus,

@@ -10,7 +10,8 @@ const { buscarHubPorOS } = require('../hub-status.shared');
 // [cotacao-hub-v1] + normalizarTabelaCliente e calcularPrecoDistancia:
 // usados pelo POST /solicitacao/cotar pra precificar pela tabela do cliente.
 const { resolverValorCorrida, classificarCanal, parseKm, normalizarStatus, montarCSV, formatarBRL,
-        normalizarTabelaCliente, calcularPrecoDistancia } = require('../preco-hub.shared');
+        normalizarTabelaCliente, calcularPrecoDistancia,
+        resolverAdicionalRetorno } = require('../preco-hub.shared');
 
 function createClienteRoutes(pool, helpers) {
   const router = express.Router();
@@ -2090,6 +2091,23 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         km = r.distancia_km != null ? Number(r.distancia_km) : null;
         const v = resolverValorCorrida({ distanciaKm: km, precoHub, valorGravado: r.valor_servico });
         valor = v.valor; origem = v.origem;
+
+        // [solicitacao-retorno-v1] Adicional por devolucao.
+        // Ate aqui o relatorio DO CLIENTE nao tinha logica de retorno nenhuma:
+        // so o relatorio admin somava. Os dois numeros divergiam.
+        //
+        // Base STATUS e RETROATIVO, mesmo criterio do admin, pra que batam.
+        // Consequencia assumida (decisao 1a): ao configurar o valor, as
+        // devolucoes JA existentes passam a aparecer com o adicional aqui.
+        const _adRet = resolverAdicionalRetorno(precoHub);
+        if (_adRet > 0 && valor != null) {
+          const _st = String(r.status_canonico || '').trim().toUpperCase();
+          if (_st === 'RETURNED' || _st === 'RETURNING' || _st === 'DEVOLVIDO' || _st === 'RETURN') {
+            valor = Math.round((Number(valor) + _adRet) * 100) / 100;
+            origem = origem + '+retorno';
+          }
+        }
+
         motoboy = courier.name || r.profissional_nome || null;
         coleta = r.hub_coleta || r.tutts_coleta || '';
         entrega = r.hub_entrega || r.tutts_entrega || '';

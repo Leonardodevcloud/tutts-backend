@@ -379,18 +379,55 @@ class WebhookDispatcher {
   async _cobrarAdicionalRetorno(codigoOS, entrega) {
     if (entrega.retorno_cobrado_em) return; // ja cobrado (checagem barata)
 
+    // [solicitacao-retorno-v1] Duas fontes, nesta ordem:
+    //   1) regra do Hub (logistics_dispatch_rules.preco_retorno_valor)
+    //   2) tabela do cliente de solicitacao (clientes_solicitacao.preco_hub)
+    // O `if (!regraId) return` de antes fazia o cliente de solicitacao NUNCA
+    // ser cobrado, porque ele nao tem linha em logistics_dispatch_rules.
+    // Precedencia identica a do relatorio.
+    //
+    // require tardio: preco-hub.shared vive no modulo solicitacao e so e
+    // necessario neste caminho — evita acoplar o boot do logistics a ele.
+    const { resolverAdicionalRetorno } = require('../../solicitacao/preco-hub.shared');
+
     const regraId = entrega.regra_id_manual || entrega.regra_id;
-    if (!regraId) return; // sem regra = sem tabela de preco = nada a cobrar
 
-    const { rows } = await this.pool.query(
-      'SELECT preco_retorno_valor, alterar_valor_mapp_ativo FROM logistics_dispatch_rules WHERE id = $1',
-      [regraId]
-    );
-    const regra = rows[0];
-    if (!regra || regra.preco_retorno_valor == null) return; // cliente nao cobra retorno
+    let adicional = 0;
+    let mappAtivo = true;   // sem regra = sem toggle = reflete na Mapp
+    let fonte = 'regra';
 
-    const adicional = parseFloat(regra.preco_retorno_valor);
-    if (!Number.isFinite(adicional) || adicional <= 0) return;
+    if (regraId) {
+      const { rows } = await this.pool.query(
+        'SELECT preco_retorno_valor, alterar_valor_mapp_ativo FROM logistics_dispatch_rules WHERE id = $1',
+        [regraId]
+      );
+      const regra = rows[0];
+      if (regra) {
+        mappAtivo = regra.alterar_valor_mapp_ativo !== false;
+        const v = parseFloat(regra.preco_retorno_valor);
+        if (Number.isFinite(v) && v > 0) adicional = v;
+      }
+    }
+
+    if (adicional <= 0) {
+      // Fallback: tabela do cliente de solicitacao, achada pela OS.
+      // Mesmo caminho de join do relatorio (solicitacoes_corrida -> cliente).
+      const { rows: cli } = await this.pool.query(
+        `SELECT cs.preco_hub
+           FROM solicitacoes_corrida sc
+           JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+          WHERE trim(sc.tutts_os_numero) = $1
+          ORDER BY sc.id DESC
+          LIMIT 1`,
+        [String(codigoOS).trim()]
+      );
+      if (cli.length) {
+        adicional = resolverAdicionalRetorno(cli[0].preco_hub);
+        if (adicional > 0) fonte = 'preco_hub';
+      }
+    }
+
+    if (!Number.isFinite(adicional) || adicional <= 0) return; // ninguem cobra retorno
 
     const valorAtual = parseFloat(entrega.valor_servico) || 0;
     const novoValor = Math.round((valorAtual + adicional) * 100) / 100;
@@ -405,10 +442,12 @@ class WebhookDispatcher {
     );
     if (upd.rowCount === 0) return; // ja cobrado por outro evento
 
-    console.log(`💰 [WebhookDispatcher] OS ${codigoOS}: devolucao — adicional R$${adicional.toFixed(2)} (R$${valorAtual.toFixed(2)} -> R$${novoValor.toFixed(2)})`);
+    console.log(`💰 [WebhookDispatcher] OS ${codigoOS}: devolucao — adicional R$${adicional.toFixed(2)}`
+      + ` (R$${valorAtual.toFixed(2)} -> R$${novoValor.toFixed(2)}) | fonte=${fonte}`);
 
-    // Reflete na Mapp (mesmo toggle usado no preco por distancia)
-    if (regra.alterar_valor_mapp_ativo !== false) {
+    // Reflete na Mapp (mesmo toggle usado no preco por distancia).
+    // [solicitacao-retorno-v1] mappAtivo ja resolveu a ausencia de regra.
+    if (mappAtivo) {
       this.mapp.alterarValores(codigoOS, novoValor, null).catch(e =>
         console.warn(`⚠️ [WebhookDispatcher] alterarValores retorno OS ${codigoOS}: ${e.message}`)
       );

@@ -4,7 +4,8 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 // RELATORIO_PRECO_REGRA_V1: + calcularPrecoDistancia (identica a do dispatch)
-const { resolverValorCorrida, calcularPrecoDistancia, classificarCanal, normalizarStatus, montarCSV, formatarBRL } = require('../preco-hub.shared');
+const { resolverValorCorrida, calcularPrecoDistancia, classificarCanal, normalizarStatus, montarCSV, formatarBRL,
+        resolverAdicionalRetorno } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
   const router = express.Router();
@@ -994,6 +995,8 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
     const valorFixo = num(b.valor_fixo);
     const kmBase = num(b.km_base);
     const valorKmAdic = num(b.valor_km_adicional);
+    // [solicitacao-retorno-v1] adicional fixo por devolucao
+    const retornoValor = num(b.retorno_valor);
 
     if (valorFixo === null || valorFixo < 0) {
       return res.status(400).json({ error: 'valor_fixo é obrigatório e deve ser >= 0' });
@@ -1004,12 +1007,19 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
     if (valorKmAdic !== null && valorKmAdic < 0) {
       return res.status(400).json({ error: 'valor_km_adicional deve ser >= 0' });
     }
+    if (retornoValor !== null && retornoValor < 0) {
+      return res.status(400).json({ error: 'retorno_valor deve ser >= 0' });
+    }
 
+    // [solicitacao-retorno-v1] retorno_valor entra AQUI de proposito: este
+    // objeto e reconstruido do zero a cada PUT, entao chave que nao for listada
+    // explicitamente e descartada em silencio no save.
     const tabela = {
       ativo: b.ativo === false ? false : true,
       valor_fixo: valorFixo,
       km_base: kmBase != null ? kmBase : 0,
       valor_km_adicional: valorKmAdic != null ? valorKmAdic : 0,
+      retorno_valor: (retornoValor != null && retornoValor > 0) ? retornoValor : null,
     };
 
     const { rows } = await pool.query(
@@ -1293,8 +1303,15 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       const _stRaw = String(r.status_canonico || '').trim().toUpperCase();
       const _ehDevolucao = _stRaw === 'RETURNED' || _stRaw === 'RETURNING'
         || ['DEVOLVIDO', 'RETURN'].includes(_stRaw);
-      if (_ehDevolucao && r.preco_retorno_valor != null && valor != null) {
-        const _ad = Number(r.preco_retorno_valor);
+      if (_ehDevolucao && valor != null) {
+        // [solicitacao-retorno-v1] Duas fontes, nesta ordem:
+        //   1) regra do Hub (dr.preco_retorno_valor)
+        //   2) tabela do cliente de solicitacao (cs.preco_hub.retorno_valor)
+        // Mesma precedencia que o modal ja promete pra mensagem do entregador
+        // ("A regra do Hub, se houver, tem prioridade"). Cliente de solicitacao
+        // nao tem regra, entao cai sempre na segunda fonte.
+        let _ad = Number(r.preco_retorno_valor);
+        if (!Number.isFinite(_ad) || _ad <= 0) _ad = resolverAdicionalRetorno(r.preco_hub);
         if (Number.isFinite(_ad) && _ad > 0) {
           _adicRetorno = _ad;
           valor = Math.round((Number(valor) + _ad) * 100) / 100;
