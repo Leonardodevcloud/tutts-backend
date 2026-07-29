@@ -5,7 +5,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 // RELATORIO_PRECO_REGRA_V1: + calcularPrecoDistancia (identica a do dispatch)
 const { resolverValorCorrida, calcularPrecoDistancia, classificarCanal, normalizarStatus, montarCSV, formatarBRL,
-        resolverAdicionalRetorno } = require('../preco-hub.shared');
+        resolverAdicionalRetorno, calcularAdicionalRetorno } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
   const router = express.Router();
@@ -997,6 +997,8 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
     const valorKmAdic = num(b.valor_km_adicional);
     // [solicitacao-retorno-v1] adicional fixo por devolucao
     const retornoValor = num(b.retorno_valor);
+    // [retorno-percentual-v1] alternativa: percentual sobre o valor da corrida
+    const retornoPct = num(b.retorno_percentual);
 
     if (valorFixo === null || valorFixo < 0) {
       return res.status(400).json({ error: 'valor_fixo é obrigatório e deve ser >= 0' });
@@ -1010,6 +1012,9 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
     if (retornoValor !== null && retornoValor < 0) {
       return res.status(400).json({ error: 'retorno_valor deve ser >= 0' });
     }
+    if (retornoPct !== null && (retornoPct < 0 || retornoPct > 100)) {
+      return res.status(400).json({ error: 'retorno_percentual deve estar entre 0 e 100' });
+    }
 
     // [solicitacao-retorno-v1] retorno_valor entra AQUI de proposito: este
     // objeto e reconstruido do zero a cada PUT, entao chave que nao for listada
@@ -1020,6 +1025,9 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
       km_base: kmBase != null ? kmBase : 0,
       valor_km_adicional: valorKmAdic != null ? valorKmAdic : 0,
       retorno_valor: (retornoValor != null && retornoValor > 0) ? retornoValor : null,
+      // [retorno-percentual-v1] percentual tem precedencia sobre o fixo no
+      // calculo; o modal manda um OU outro (radio), nunca os dois.
+      retorno_percentual: (retornoPct != null && retornoPct > 0) ? retornoPct : null,
     };
 
     const { rows } = await pool.query(
@@ -1118,7 +1126,8 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
              -- undefined la), entao ele guarda o valor da Mapp.
              dr.preco_valor_fixo, dr.preco_km_base, dr.preco_valor_km_adicional,
              -- [relatorio-retorno-v1] adicional fixo por devolucao (por cliente)
-             dr.preco_retorno_valor
+             -- [retorno-percentual-v1] + a alternativa percentual
+             dr.preco_retorno_valor, dr.preco_retorno_percentual
       FROM ld
       LEFT JOIN sc_os sc ON sc.os_txt = ld.codigo_os::text
       LEFT JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
@@ -1310,8 +1319,14 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         // Mesma precedencia que o modal ja promete pra mensagem do entregador
         // ("A regra do Hub, se houver, tem prioridade"). Cliente de solicitacao
         // nao tem regra, entao cai sempre na segunda fonte.
-        let _ad = Number(r.preco_retorno_valor);
-        if (!Number.isFinite(_ad) || _ad <= 0) _ad = resolverAdicionalRetorno(r.preco_hub);
+        // [retorno-percentual-v1] `valor` aqui e o valor faturado ANTES do
+        // adicional — exatamente a base que o percentual precisa.
+        let _ad = calcularAdicionalRetorno({
+          valorBase: valor,
+          retornoValor: r.preco_retorno_valor,
+          retornoPercentual: r.preco_retorno_percentual,
+        });
+        if (_ad <= 0) _ad = resolverAdicionalRetorno(r.preco_hub, valor);
         if (Number.isFinite(_ad) && _ad > 0) {
           _adicRetorno = _ad;
           valor = Math.round((Number(valor) + _ad) * 100) / 100;

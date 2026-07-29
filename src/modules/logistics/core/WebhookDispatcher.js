@@ -388,43 +388,64 @@ class WebhookDispatcher {
     //
     // require tardio: preco-hub.shared vive no modulo solicitacao e so e
     // necessario neste caminho — evita acoplar o boot do logistics a ele.
-    const { resolverAdicionalRetorno } = require('../../solicitacao/preco-hub.shared');
+    const { resolverAdicionalRetorno, calcularAdicionalRetorno } =
+      require('../../solicitacao/preco-hub.shared');
 
     const regraId = entrega.regra_id_manual || entrega.regra_id;
 
-    let adicional = 0;
     let mappAtivo = true;   // sem regra = sem toggle = reflete na Mapp
-    let fonte = 'regra';
+    let regra = null;
 
     if (regraId) {
       const { rows } = await this.pool.query(
-        'SELECT preco_retorno_valor, alterar_valor_mapp_ativo FROM logistics_dispatch_rules WHERE id = $1',
+        `SELECT preco_retorno_valor, preco_retorno_percentual, alterar_valor_mapp_ativo,
+                preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+           FROM logistics_dispatch_rules WHERE id = $1`,
         [regraId]
       );
-      const regra = rows[0];
-      if (regra) {
-        mappAtivo = regra.alterar_valor_mapp_ativo !== false;
-        const v = parseFloat(regra.preco_retorno_valor);
-        if (Number.isFinite(v) && v > 0) adicional = v;
-      }
+      regra = rows[0] || null;
+      if (regra) mappAtivo = regra.alterar_valor_mapp_ativo !== false;
     }
 
-    if (adicional <= 0) {
-      // Fallback: tabela do cliente de solicitacao, achada pela OS.
-      // Mesmo caminho de join do relatorio (solicitacoes_corrida -> cliente).
-      const { rows: cli } = await this.pool.query(
-        `SELECT cs.preco_hub
-           FROM solicitacoes_corrida sc
-           JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
-          WHERE trim(sc.tutts_os_numero) = $1
-          ORDER BY sc.id DESC
-          LIMIT 1`,
-        [String(codigoOS).trim()]
-      );
-      if (cli.length) {
-        adicional = resolverAdicionalRetorno(cli[0].preco_hub);
-        if (adicional > 0) fonte = 'preco_hub';
-      }
+    // Tabela do cliente de solicitacao, achada pela OS. Mesmo caminho de join
+    // do relatorio. Serve pra DUAS coisas: base do percentual e 2a fonte do
+    // proprio adicional.
+    let precoHub = null;
+    const { rows: cli } = await this.pool.query(
+      `SELECT cs.preco_hub
+         FROM solicitacoes_corrida sc
+         JOIN clientes_solicitacao cs ON cs.id = sc.cliente_id
+        WHERE trim(sc.tutts_os_numero) = $1
+        ORDER BY sc.id DESC
+        LIMIT 1`,
+      [String(codigoOS).trim()]
+    );
+    if (cli.length) precoHub = cli[0].preco_hub;
+
+    // [retorno-percentual-v1] BASE do percentual (decisao B).
+    //
+    // NAO usar entrega.valor_servico: pro cliente de solicitacao ele guarda o
+    // preco da tabela GLOBAL (o Orchestrator nao conhece preco_hub), enquanto o
+    // relatorio fatura pela tabela do cliente. Com adicional fixo isso passava
+    // batido — somava o mesmo R$ dos dois lados. Com percentual, base diferente
+    // = adicional diferente, e a Mapp receberia um numero que voce nao fatura.
+    //
+    // Entao resolvemos a base pela MESMA cascata do relatorio admin.
+    const _base = await this._resolverValorFaturado(entrega, regra, precoHub);
+
+    let adicional = 0;
+    let fonte = 'regra';
+
+    if (regra) {
+      adicional = calcularAdicionalRetorno({
+        valorBase: _base.valor,
+        retornoValor: regra.preco_retorno_valor,
+        retornoPercentual: regra.preco_retorno_percentual,
+      });
+    }
+    if (adicional <= 0 && precoHub) {
+      adicional = resolverAdicionalRetorno(precoHub, _base.valor);
+      if (adicional > 0) fonte = 'preco_hub';
     }
 
     if (!Number.isFinite(adicional) || adicional <= 0) return; // ninguem cobra retorno
@@ -443,7 +464,8 @@ class WebhookDispatcher {
     if (upd.rowCount === 0) return; // ja cobrado por outro evento
 
     console.log(`💰 [WebhookDispatcher] OS ${codigoOS}: devolucao — adicional R$${adicional.toFixed(2)}`
-      + ` (R$${valorAtual.toFixed(2)} -> R$${novoValor.toFixed(2)}) | fonte=${fonte}`);
+      + ` (R$${valorAtual.toFixed(2)} -> R$${novoValor.toFixed(2)})`
+      + ` | fonte=${fonte} base=R$${Number(_base.valor || 0).toFixed(2)}[${_base.origem}]`);
 
     // Reflete na Mapp (mesmo toggle usado no preco por distancia).
     // [solicitacao-retorno-v1] mappAtivo ja resolveu a ausencia de regra.
@@ -452,6 +474,62 @@ class WebhookDispatcher {
         console.warn(`⚠️ [WebhookDispatcher] alterarValores retorno OS ${codigoOS}: ${e.message}`)
       );
     }
+  }
+
+  /**
+   * [retorno-percentual-v1] Valor FATURADO da corrida, pela mesma cascata do
+   * relatorio admin: regra -> global -> tabela do cliente -> valor gravado.
+   *
+   * Existe porque o percentual precisa incidir sobre o que o cliente paga, e
+   * entrega.valor_servico nem sempre e esse numero (ver comentario no
+   * _cobrarAdicionalRetorno).
+   *
+   * @param {object} entrega - linha de logistics_deliveries
+   * @param {object|null} regra - linha de logistics_dispatch_rules (ou null)
+   * @param {object|string|null} precoHub - clientes_solicitacao.preco_hub
+   * @returns {Promise<{valor:number|null, origem:string}>}
+   * @private
+   */
+  async _resolverValorFaturado(entrega, regra, precoHub) {
+    const { calcularPrecoDistancia, resolverValorCorrida } =
+      require('../../solicitacao/preco-hub.shared');
+
+    const km = entrega.distancia_km != null ? Number(entrega.distancia_km) : null;
+
+    // 1) tabela da regra
+    if (regra && regra.preco_valor_fixo != null) {
+      const v = calcularPrecoDistancia(km, {
+        valorFixo: Number(regra.preco_valor_fixo),
+        kmBase: regra.preco_km_base != null ? Number(regra.preco_km_base) : 0,
+        valorKmAdicional: regra.preco_valor_km_adicional != null ? Number(regra.preco_valor_km_adicional) : 0,
+      });
+      if (v != null) return { valor: v, origem: 'regra' };
+    }
+
+    // 2) tabela global
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+           FROM logistics_config_global WHERE id = 1`
+      );
+      const c = rows[0];
+      if (c && c.tabela_preco_ativa && c.preco_valor_fixo != null) {
+        const v = calcularPrecoDistancia(km, {
+          valorFixo: Number(c.preco_valor_fixo),
+          kmBase: c.preco_km_base != null ? Number(c.preco_km_base) : 0,
+          valorKmAdicional: c.preco_valor_km_adicional != null ? Number(c.preco_valor_km_adicional) : 0,
+        });
+        if (v != null) return { valor: v, origem: 'global' };
+      }
+    } catch (e) {
+      console.warn('[WebhookDispatcher] tabela global indisponivel:', e.message);
+    }
+
+    // 3) tabela do cliente de solicitacao -> valor gravado
+    const r = resolverValorCorrida({
+      distanciaKm: km, precoHub, valorGravado: entrega.valor_servico,
+    });
+    return { valor: r.valor, origem: r.origem };
   }
 
   async _dispararAcaoMapp(codigoOS, entrega, evento, statusCanonico) {

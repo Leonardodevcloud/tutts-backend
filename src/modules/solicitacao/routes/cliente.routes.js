@@ -2099,7 +2099,8 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         // Base STATUS e RETROATIVO, mesmo criterio do admin, pra que batam.
         // Consequencia assumida (decisao 1a): ao configurar o valor, as
         // devolucoes JA existentes passam a aparecer com o adicional aqui.
-        const _adRet = resolverAdicionalRetorno(precoHub);
+        // [retorno-percentual-v1] `valor` e a base (valor faturado antes do adicional)
+        const _adRet = resolverAdicionalRetorno(precoHub, valor);
         if (_adRet > 0 && valor != null) {
           const _st = String(r.status_canonico || '').trim().toUpperCase();
           if (_st === 'RETURNED' || _st === 'RETURNING' || _st === 'DEVOLVIDO' || _st === 'RETURN') {

@@ -137,6 +137,17 @@ async function initLogisticsTables(pool) {
   // [preco-retorno-v1] Adicional fixo cobrado quando a entrega vira devolucao
   // (status RETURNING). NULL = nao cobra retorno pra este cliente.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_retorno_valor DECIMAL(10,2)`).catch(() => {});
+  // [retorno-percentual-v1] Alternativa ao valor fixo: percentual sobre o valor
+  // faturado da corrida. Ex.: corrida R$50 + 50% => adicional R$25 => total R$75.
+  //
+  // Coluna SEPARADA de proposito, em vez de um campo "tipo" reaproveitando o
+  // preco_retorno_valor: se um unico ponto do codigo esquecesse de ler o tipo,
+  // um preco_retorno_valor = 50 viraria 50% em vez de R$ 50. Com colunas
+  // separadas, esquecer de ler esta significa apenas "sem percentual" e cai no
+  // comportamento fixo de sempre. Falha pro lado seguro.
+  //
+  // Precedencia: percentual > 0 ganha; senao usa o valor fixo.
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_retorno_percentual DECIMAL(5,2)`).catch(() => {});
   // Marca de idempotencia: uma corrida so recebe o adicional UMA vez, mesmo
   // passando por RETURNING e depois RETURNED.
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS retorno_cobrado_em TIMESTAMP`).catch(() => {});

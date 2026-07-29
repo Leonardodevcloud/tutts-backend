@@ -182,7 +182,7 @@ function montarCSV(headers, linhas) {
  * @param {object|string|null} precoHub - conteudo de clientes_solicitacao.preco_hub
  * @returns {number} adicional em R$ (0 = nao cobra)
  */
-function resolverAdicionalRetorno(precoHub) {
+function resolverAdicionalRetorno(precoHub, valorBase) {
   if (!precoHub) return 0;
   let obj = precoHub;
   if (typeof obj === 'string') {
@@ -190,8 +190,45 @@ function resolverAdicionalRetorno(precoHub) {
   }
   if (typeof obj !== 'object') return 0;
   if (obj.ativo === false) return 0;
-  const v = Number(obj.retorno_valor);
-  return (Number.isFinite(v) && v > 0) ? Math.round(v * 100) / 100 : 0;
+  return calcularAdicionalRetorno({
+    valorBase: valorBase,
+    retornoValor: obj.retorno_valor,
+    retornoPercentual: obj.retorno_percentual,
+  });
+}
+
+/**
+ * [retorno-percentual-v1] Resolve o adicional de retorno: percentual OU fixo.
+ *
+ * Regra unica usada pelos tres lugares que cobram retorno (relatorio admin,
+ * relatorio do cliente e WebhookDispatcher), pra que os tres cheguem sempre no
+ * mesmo numero.
+ *
+ * PRECEDENCIA: percentual > 0 ganha. Senao, valor fixo.
+ * Colunas/chaves separadas (nao um campo "tipo") de proposito: se algum ponto
+ * esquecer de ler o percentual, cai no fixo — nunca interpreta R$ 50 como 50%.
+ *
+ * BASE do percentual = valor FATURADO da corrida, antes do adicional.
+ * Ex.: corrida R$ 50,00 + 50% => adicional R$ 25,00 => total R$ 75,00.
+ *
+ * Sem base valida (null/0) o percentual devolve 0 em vez de chutar: melhor nao
+ * cobrar do que cobrar sobre um numero errado.
+ *
+ * @param {object} args
+ * @param {number|null} args.valorBase - valor faturado ANTES do adicional
+ * @param {number|string|null} args.retornoValor - adicional fixo em R$
+ * @param {number|string|null} args.retornoPercentual - adicional em % (0-100)
+ * @returns {number} adicional em R$, 2 casas (0 = nao cobra)
+ */
+function calcularAdicionalRetorno({ valorBase, retornoValor, retornoPercentual }) {
+  const pct = Number(retornoPercentual);
+  if (Number.isFinite(pct) && pct > 0) {
+    const base = Number(valorBase);
+    if (!Number.isFinite(base) || base <= 0) return 0;
+    return Math.round(base * (pct / 100) * 100) / 100;
+  }
+  const fixo = Number(retornoValor);
+  return (Number.isFinite(fixo) && fixo > 0) ? Math.round(fixo * 100) / 100 : 0;
 }
 
 module.exports = {
@@ -199,6 +236,7 @@ module.exports = {
   calcularPrecoDistancia,
   resolverValorCorrida,
   resolverAdicionalRetorno,
+  calcularAdicionalRetorno,
   classificarCanal,
   parseKm,
   normalizarStatus,

@@ -125,6 +125,8 @@ async function aplicarPrecoNaRegra(pool, regraId, body) {
     'preco_km_base',
     'preco_valor_km_adicional',
     'preco_retorno_valor',
+    // [retorno-percentual-v1] alternativa ao fixo (percentual sobre o valor)
+    'preco_retorno_percentual',
   ];
   const sets = [];
   const params = [];
