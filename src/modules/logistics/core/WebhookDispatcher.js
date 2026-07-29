@@ -506,7 +506,16 @@ class WebhookDispatcher {
       if (v != null) return { valor: v, origem: 'regra' };
     }
 
-    // 2) tabela global
+    // 2) [cascata-cliente-v1] tabela do CLIENTE, antes da global — mesma ordem
+    //    do relatorio admin, pra que a base do percentual bata com a fatura.
+    const { normalizarTabelaCliente } = require('../../solicitacao/preco-hub.shared');
+    const _tabCli = normalizarTabelaCliente(precoHub);
+    if (_tabCli) {
+      const v = calcularPrecoDistancia(km, _tabCli);
+      if (v != null) return { valor: v, origem: 'cliente' };
+    }
+
+    // 3) tabela global
     try {
       const { rows } = await this.pool.query(
         `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional
@@ -525,7 +534,7 @@ class WebhookDispatcher {
       console.warn('[WebhookDispatcher] tabela global indisponivel:', e.message);
     }
 
-    // 3) tabela do cliente de solicitacao -> valor gravado
+    // 4) valor gravado (ultimo recurso)
     const r = resolverValorCorrida({
       distanciaKm: km, precoHub, valorGravado: entrega.valor_servico,
     });

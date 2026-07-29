@@ -605,7 +605,9 @@ class DispatchOrchestrator {
           console.log(`📏 [Orchestrator] OS ${codigoOS}: distancia ${_distKm.toFixed(2)}km (origem=${_distOrigem}${_distMetros != null ? ', ' + _distMetros + 'm' : ''})`);
 
           const _valorProvider2 = parseFloat(quote.valor) || 0;
-          const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(_regraObj); // DISPATCH_REGRA_OBJ_V1
+          // [cascata-cliente-v1] a tabela do cliente entra na cascata
+          const _precoHubCli = await this._buscarPrecoHubDaOS(codigoOS);
+          const { tabela: _tabPreco, origem: _origemPreco } = await this._resolverTabelaPreco(_regraObj, _precoHubCli); // DISPATCH_REGRA_OBJ_V1
           const _novoValorServico = calcularPrecoDistancia(_distKm, _tabPreco);
 
           // Toggle POR REGRA: cada cliente liga/desliga "alterar valor na Mapp"
@@ -945,7 +947,32 @@ class DispatchOrchestrator {
    * @param {object|null} regra - logistics_dispatch_rules
    * @returns {Promise<{tabela: {valorFixo:number,kmBase:number,valorKmAdicional:number}|null, origem: string}>}
    */
-  async _resolverTabelaPreco(regra) {
+  /**
+   * [cascata-cliente-v1] Tabela de preco do cliente de solicitacao (preco_hub),
+   * achada pela OS. Mesmo join que o _resolverPerfilMensagem ja usa.
+   * @param {string|number} codigoOS
+   * @returns {Promise<object|null>} conteudo de clientes_solicitacao.preco_hub
+   * @private
+   */
+  async _buscarPrecoHubDaOS(codigoOS) {
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT c.preco_hub
+          FROM solicitacoes_corrida s
+          JOIN clientes_solicitacao c ON c.id = s.cliente_id
+         WHERE s.tutts_os_numero = $1
+         ORDER BY s.id DESC
+         LIMIT 1
+      `, [String(codigoOS)]);
+      return rows.length ? rows[0].preco_hub : null;
+    } catch (err) {
+      // fail-open: nao trava o despacho por causa da tabela de preco
+      console.error('\u26a0\ufe0f [Orchestrator] erro ao ler preco_hub do cliente:', err.message);
+      return null;
+    }
+  }
+
+  async _resolverTabelaPreco(regra, precoHub) {
     // 1) Regra do cliente definiu tabela propria -> override total.
     if (regra && regra.preco_valor_fixo != null) {
       return {
@@ -958,7 +985,29 @@ class DispatchOrchestrator {
       };
     }
 
-    // 2) Sem tabela na regra -> tenta a config global (se ativa).
+    // 2) [cascata-cliente-v1] Tabela do CLIENTE de solicitacao, ANTES da global.
+    //
+    // Antes o Orchestrator so conhecia regra e global. Com a global INATIVA (o
+    // caso de voces) e sem regra, ele devolvia tabela=null -> _novoValorServico
+    // ficava null -> o UPDATE nem rodava. Resultado: valor_servico e a Mapp
+    // nunca recebiam o preco do cliente, enquanto o relatorio faturava por ele.
+    //
+    // A ordem tambem importa: o que vale e o que esta configurado em cada
+    // cliente e em cada regra; a global e so o piso de quem nao configurou.
+    const { normalizarTabelaCliente } = require('../../solicitacao/preco-hub.shared');
+    const _tabCli = normalizarTabelaCliente(precoHub);
+    if (_tabCli) {
+      return {
+        tabela: {
+          valorFixo: _tabCli.valorFixo,
+          kmBase: _tabCli.kmBase,
+          valorKmAdicional: _tabCli.valorKmAdicional,
+        },
+        origem: 'cliente',
+      };
+    }
+
+    // 3) Sem tabela na regra nem no cliente -> tenta a config global (se ativa).
     try {
       const cfg = await lerConfigGlobal(this.pool);
       if (cfg && cfg.tabela_preco_ativa && cfg.preco_valor_fixo != null) {

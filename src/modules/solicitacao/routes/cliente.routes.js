@@ -2008,6 +2008,26 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
   try {
     const clienteId = req.clienteSolicitacao.id;
     const precoHub = req.clienteSolicitacao.preco_hub || null;
+
+    // [cascata-cliente-v1] tabela global lida UMA vez, igual o relatorio admin.
+    // So e usada como piso quando o cliente nao tem preco_hub proprio.
+    let _tabGlobalRel = null;
+    try {
+      const { rows: _cg } = await pool.query(
+        `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+           FROM logistics_config_global WHERE id = 1`
+      );
+      const _c = _cg[0];
+      if (_c && _c.tabela_preco_ativa && _c.preco_valor_fixo != null) {
+        _tabGlobalRel = {
+          valorFixo: Number(_c.preco_valor_fixo),
+          kmBase: _c.preco_km_base != null ? Number(_c.preco_km_base) : 0,
+          valorKmAdicional: _c.preco_valor_km_adicional != null ? Number(_c.preco_valor_km_adicional) : 0,
+        };
+      }
+    } catch (e) {
+      console.warn('[relatorio cliente] tabela global indisponivel:', e.message);
+    }
     const { de, ate, canal, status, formato } = req.query;
 
     const where = [
@@ -2089,8 +2109,23 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
 
       if (canalRow === 'hub') {
         km = r.distancia_km != null ? Number(r.distancia_km) : null;
-        const v = resolverValorCorrida({ distanciaKm: km, precoHub, valorGravado: r.valor_servico });
-        valor = v.valor; origem = v.origem;
+        // [cascata-cliente-v1] preco_hub -> global -> gravado. A global entra
+        // como PISO de quem nao tem tabela propria, na mesma ordem do admin.
+        // Antes este relatorio nem consultava a global, entao um cliente sem
+        // preco_hub caia direto no valor gravado e divergia do admin.
+        const _tabCliRel = normalizarTabelaCliente(precoHub);
+        const _vCliRel = _tabCliRel ? calcularPrecoDistancia(km, _tabCliRel) : null;
+        if (_vCliRel != null) {
+          valor = _vCliRel; origem = 'cliente';
+        } else {
+          const _vGlobalRel = _tabGlobalRel ? calcularPrecoDistancia(km, _tabGlobalRel) : null;
+          if (_vGlobalRel != null) {
+            valor = _vGlobalRel; origem = 'global';
+          } else {
+            const v = resolverValorCorrida({ distanciaKm: km, precoHub, valorGravado: r.valor_servico });
+            valor = v.valor; origem = v.origem;
+          }
+        }
 
         // [solicitacao-retorno-v1] Adicional por devolucao.
         // Ate aqui o relatorio DO CLIENTE nao tinha logica de retorno nenhuma:

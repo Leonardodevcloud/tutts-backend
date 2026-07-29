@@ -5,6 +5,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 // RELATORIO_PRECO_REGRA_V1: + calcularPrecoDistancia (identica a do dispatch)
 const { resolverValorCorrida, calcularPrecoDistancia, classificarCanal, normalizarStatus, montarCSV, formatarBRL,
+        normalizarTabelaCliente,
         resolverAdicionalRetorno, calcularAdicionalRetorno } = require('../preco-hub.shared');
 
 function createSolicitacaoAdminRoutes(pool, verificarToken, helpers) {
@@ -1288,16 +1289,33 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       if (_vRegra != null) {
         valor = _vRegra; origem = 'regra';
       } else {
-        const _vGlobal = _tabGlobal ? calcularPrecoDistancia(km, _tabGlobal) : null;
-        if (_vGlobal != null) {
-          valor = _vGlobal; origem = 'global';
+        // [cascata-cliente-v1] A tabela do CLIENTE passa na frente da global.
+        //
+        // Antes a ordem era regra -> global -> preco_hub. Com a tabela global
+        // ATIVA, o preco_hub do cliente nunca era alcancado — contrariando o
+        // que o proprio modal promete ("Usar tabela propria deste cliente /
+        // Desligado: herda a tabela global"). Hoje a global esta inativa, entao
+        // o bug esta dormindo: bastaria alguem liga-la pra que os clientes com
+        // tabela propria perdessem o preco deles em silencio.
+        //
+        // Ordem correta: o que esta configurado em cada regra e em cada cliente
+        // manda; a global e so o piso de quem nao configurou nada.
+        const _tabCli = normalizarTabelaCliente(r.preco_hub);
+        const _vCli = _tabCli ? calcularPrecoDistancia(km, _tabCli) : null;
+        if (_vCli != null) {
+          valor = _vCli; origem = 'cliente';
         } else {
-          const _rv = resolverValorCorrida({
-            distanciaKm: km,
-            precoHub: r.preco_hub,
-            valorGravado: r.valor_servico,
-          });
-          valor = _rv.valor; origem = _rv.origem;
+          const _vGlobal = _tabGlobal ? calcularPrecoDistancia(km, _tabGlobal) : null;
+          if (_vGlobal != null) {
+            valor = _vGlobal; origem = 'global';
+          } else {
+            const _rv = resolverValorCorrida({
+              distanciaKm: km,
+              precoHub: r.preco_hub,
+              valorGravado: r.valor_servico,
+            });
+            valor = _rv.valor; origem = _rv.origem;
+          }
         }
       }
       // [relatorio-retorno-v3] Adicional por devolucao — base STATUS (retroativo).
