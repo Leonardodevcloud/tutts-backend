@@ -879,6 +879,7 @@ class ConfirmaFacilPoller {
     }
 
     console.log(`📤 [CF Poller] criando corrida para NF ${numeroNF} (idEmbarque ${idEmbarque}) categoria=${payloadTutts.categoria || '(nenhuma)'}`);
+    console.log(`📦 [CF Poller] payload NF ${numeroNF}:`, JSON.stringify({ ...payloadTutts, token: '***', codCliente: '***' }));
 
     // Chamar API Tutts
     const respTutts = await httpRequest(TUTTS_API_URL, {
