@@ -1127,6 +1127,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
              -- o dispatch nunca chega a aplicar a tabela (opts.regra fica
              -- undefined la), entao ele guarda o valor da Mapp.
              dr.preco_valor_fixo, dr.preco_km_base, dr.preco_valor_km_adicional,
+             dr.preco_faixas_km,
              -- [relatorio-retorno-v1] adicional fixo por devolucao (por cliente)
              -- [retorno-percentual-v1] + a alternativa percentual
              dr.preco_retorno_valor, dr.preco_retorno_percentual
@@ -1175,7 +1176,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
     let _tabGlobal = null;
     try {
       const { rows: _cg } = await pool.query(
-        `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+        `SELECT tabela_preco_ativa, preco_valor_fixo, preco_km_base, preco_valor_km_adicional, preco_faixas_km
            FROM logistics_config_global WHERE id = 1`
       );
       const _c = _cg[0];
@@ -1184,6 +1185,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           valorFixo: Number(_c.preco_valor_fixo),
           kmBase: _c.preco_km_base != null ? Number(_c.preco_km_base) : 0,
           valorKmAdicional: _c.preco_valor_km_adicional != null ? Number(_c.preco_valor_km_adicional) : 0,
+          faixas: _c.preco_faixas_km != null ? _c.preco_faixas_km : null,
         };
       }
     } catch (e) {
@@ -1201,7 +1203,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
       // cliente mas nao ganhava preco -> caia no valor da Mapp.
       const { rows: _rr } = await pool.query(
         `SELECT cliente_nome, trecho_endereco, cliente_identificador,
-                preco_valor_fixo, preco_km_base, preco_valor_km_adicional
+                preco_valor_fixo, preco_km_base, preco_valor_km_adicional, preco_faixas_km
            FROM logistics_dispatch_rules ORDER BY id ASC`
       );
       _regrasMatch = _rr.map(rg => ({
@@ -1210,6 +1212,7 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
         ident: normalizarEnderecoParaMatch(rg.cliente_identificador || ''),
         precoValorFixo: rg.preco_valor_fixo,
         precoKmBase: rg.preco_km_base,
+        precoFaixasKm: rg.preco_faixas_km,
         precoValorKmAdicional: rg.preco_valor_km_adicional,
       }));
       var _normEnd = normalizarEnderecoParaMatch;
@@ -1277,12 +1280,14 @@ router.get('/admin/relatorio/hub-corridas', verificarToken, async (req, res) => 
           valorFixo: Number(r.preco_valor_fixo),
           kmBase: r.preco_km_base != null ? Number(r.preco_km_base) : 0,
           valorKmAdicional: r.preco_valor_km_adicional != null ? Number(r.preco_valor_km_adicional) : 0,
+          faixas: r.preco_faixas_km != null ? r.preco_faixas_km : null,
         };
       } else if (_regraEnd && _regraEnd.precoValorFixo != null) {
         _tabRegra = {
           valorFixo: Number(_regraEnd.precoValorFixo),
           kmBase: _regraEnd.precoKmBase != null ? Number(_regraEnd.precoKmBase) : 0,
           valorKmAdicional: _regraEnd.precoValorKmAdicional != null ? Number(_regraEnd.precoValorKmAdicional) : 0,
+          faixas: _regraEnd.precoFaixasKm != null ? _regraEnd.precoFaixasKm : null,
         };
       }
 
