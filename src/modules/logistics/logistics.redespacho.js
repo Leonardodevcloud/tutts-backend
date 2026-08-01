@@ -123,6 +123,31 @@ async function redespacharEntrega(pool, entregaId, opts = {}) {
     };
   }
 
+  // REDESPACHO_PREFLIGHT_V1: se o operador escolheu um provedor DIFERENTE do
+  // atual, cota nele ANTES de cancelar a corrida. Se ele nao cobre a rota (ex:
+  // Uber fora do raio de entrega), aborta SEM cancelar -- a corrida atual segue
+  // viva. Sem isso, redespachar 99 -> Uber matava a corrida da 99 quando a Uber
+  // recusava por cobertura.
+  if (provReq && String(provReq).toLowerCase() !== String(original.provider_code || '').toLowerCase()) {
+    const servicoPre = servicoDoRegistro(original);
+    if (servicoPre) {
+      try {
+        await orch.quote(codigoOS, {
+          providerCode,
+          vehicleType,
+          servicoMapp: servicoPre,
+          eventSource: EventSource.API,
+        });
+      } catch (e) {
+        return {
+          ok: false,
+          status: 409,
+          error: `O provedor escolhido nao cobre essa corrida (${e.message}). A corrida atual foi mantida.`,
+        };
+      }
+    }
+  }
+
   // REDESPACHO_EXCLUSAO_V1 — exclui o entregador atual DESTA OS.
   //
   // Sem isso o provedor pode devolver o mesmo cara e o botao vira enfeite:
