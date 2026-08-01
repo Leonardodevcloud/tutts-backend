@@ -73,16 +73,19 @@ function calcularPrecoDistancia(distKm, tabela) {
       })
       .filter(function (f) { return Number.isFinite(f.taxa) && f.taxa >= 0 && (f.ate === Infinity || Number.isFinite(f.ate)); })
       .sort(function (a, b) { return a.ate - b.ate; });
+    // FAIXAS_CEIL_V1: distancia quebrada sobe pro km cheio de cima (ceil).
+    // Ex: 2,4km conta como 3km. Decisao do cliente 2026-08.
+    const dCeil = Math.ceil(d);
     let total = vf;
     let prev = base;
     for (let i = 0; i < norm.length; i++) {
       const faixa = norm[i];
-      if (d <= prev) break;
-      const topo = Math.min(d, faixa.ate);
+      if (dCeil <= prev) break;
+      const topo = Math.min(dCeil, faixa.ate);
       const kmNaFaixa = Math.max(0, topo - prev);
       total += kmNaFaixa * faixa.taxa;
       prev = faixa.ate;
-      if (d <= faixa.ate) break;
+      if (dCeil <= faixa.ate) break;
     }
     return Math.round(total * 100) / 100;
   }
