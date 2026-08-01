@@ -39,6 +39,7 @@ function normalizarTabelaCliente(precoHub) {
     valorFixo: vf,
     kmBase: Number.isFinite(Number(obj.km_base)) ? Number(obj.km_base) : 0,
     valorKmAdicional: Number.isFinite(Number(obj.valor_km_adicional)) ? Number(obj.valor_km_adicional) : 0,
+    faixas: obj.faixas_km != null ? obj.faixas_km : null, // FAIXAS_NORMCLI_V1
   };
 }
 
@@ -55,9 +56,40 @@ function calcularPrecoDistancia(distKm, tabela) {
   const d = Number(distKm);
   if (!Number.isFinite(d) || d < 0) return null;
   const base = Number.isFinite(Number(tabela.kmBase)) ? Number(tabela.kmBase) : 0;
+  const vf = Number(tabela.valorFixo);
+
+  // FAIXAS_CALC_V1: com faixas de km, cada km do excedente e cobrado pela taxa
+  // da banda em que cai (fracionario). Faixa {ate_km:null} = aberta ("acima de
+  // X"). Sem faixas -> taxa unica (comportamento antigo).
+  let faixas = tabela.faixas;
+  if (typeof faixas === 'string') { try { faixas = JSON.parse(faixas); } catch (_e) { faixas = null; } }
+  if (Array.isArray(faixas) && faixas.length > 0) {
+    const norm = faixas
+      .map(function (f) {
+        return {
+          ate: (f.ate_km == null || f.ate_km === '') ? Infinity : Number(f.ate_km),
+          taxa: Number(f.valor_km),
+        };
+      })
+      .filter(function (f) { return Number.isFinite(f.taxa) && f.taxa >= 0 && (f.ate === Infinity || Number.isFinite(f.ate)); })
+      .sort(function (a, b) { return a.ate - b.ate; });
+    let total = vf;
+    let prev = base;
+    for (let i = 0; i < norm.length; i++) {
+      const faixa = norm[i];
+      if (d <= prev) break;
+      const topo = Math.min(d, faixa.ate);
+      const kmNaFaixa = Math.max(0, topo - prev);
+      total += kmNaFaixa * faixa.taxa;
+      prev = faixa.ate;
+      if (d <= faixa.ate) break;
+    }
+    return Math.round(total * 100) / 100;
+  }
+
   const adic = Number.isFinite(Number(tabela.valorKmAdicional)) ? Number(tabela.valorKmAdicional) : 0;
   const excedenteKm = Math.max(0, d - base);
-  const total = Number(tabela.valorFixo) + (excedenteKm * adic);
+  const total = vf + (excedenteKm * adic);
   return Math.round(total * 100) / 100;
 }
 

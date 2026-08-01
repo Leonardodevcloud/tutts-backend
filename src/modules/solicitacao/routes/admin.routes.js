@@ -1029,6 +1029,7 @@ router.put('/admin/solicitacao/clientes/:id/preco-hub', verificarToken, async (r
       // [retorno-percentual-v1] percentual tem precedencia sobre o fixo no
       // calculo; o modal manda um OU outro (radio), nunca os dois.
       retorno_percentual: (retornoPct != null && retornoPct > 0) ? retornoPct : null,
+      faixas_km: Array.isArray(b.faixas_km) ? b.faixas_km : null, // FAIXAS_KM_CLIENTE_V1
     };
 
     const { rows } = await pool.query(

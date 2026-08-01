@@ -157,6 +157,20 @@ async function aplicarPrecoNaRegra(pool, regraId, body) {
  * separado. De proposito NAO entra no INSERT/UPDATE principal pra nao mexer
  * na contagem de placeholders daquelas queries.
  */
+async function aplicarFaixasNaRegra(pool, regraId, body) {
+  // FAIXAS_APLICAR_FN_V1: preco_faixas_km e JSONB (array de {ate_km, valor_km}),
+  // entao fica fora do aplicarPrecoNaRegra (que trata tudo como numero).
+  if (body.preco_faixas_km === undefined) return;
+  let faixas = body.preco_faixas_km;
+  if (faixas === null || faixas === '') faixas = null;
+  else if (typeof faixas === 'string') { try { faixas = JSON.parse(faixas); } catch (_e) { faixas = null; } }
+  if (faixas != null && !Array.isArray(faixas)) faixas = null;
+  await pool.query(
+    'UPDATE logistics_dispatch_rules SET preco_faixas_km = $1::jsonb, updated_at = NOW() WHERE id = $2',
+    [faixas != null ? JSON.stringify(faixas) : null, regraId]
+  );
+}
+
 async function aplicarPortalNaRegra(pool, regraId, body) {
   const temLogin = body.portal_login !== undefined;
   const temSenha = body.portal_senha !== undefined && body.portal_senha !== null && String(body.portal_senha) !== '';
@@ -332,6 +346,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
         await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
+        await aplicarFaixasNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarFaixasNaRegra:', e.message)); // FAIXAS_APLICAR_CALL_V1
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
         if (rf[0]) regraFinal = rf[0];
       } catch (ePortal) {
@@ -457,6 +473,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
         await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
+        await aplicarFaixasNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarFaixasNaRegra:', e.message)); // FAIXAS_APLICAR_CALL_V1
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
         if (rf[0]) regraFinal = rf[0];
       } catch (ePortal) {

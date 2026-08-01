@@ -83,18 +83,11 @@ function haversineKm(lat1, lon1, lat2, lon2) {
  * @returns {number|null} valor em R$ (2 casas) ou null
  */
 function calcularPrecoDistancia(distKm, tabela) {
-  if (!tabela || tabela.valorFixo == null || !Number.isFinite(Number(tabela.valorFixo))) {
-    return null;
-  }
-  const d = Number(distKm);
-  if (!Number.isFinite(d) || d < 0) return null;
-  const base = Number.isFinite(Number(tabela.kmBase)) ? Number(tabela.kmBase) : 0;
-  const adic = Number.isFinite(Number(tabela.valorKmAdicional)) ? Number(tabela.valorKmAdicional) : 0;
-  const excedenteKm = Math.max(0, d - base);
-  const total = Number(tabela.valorFixo) + (excedenteKm * adic);
-  return Math.round(total * 100) / 100;
+  // FAIXAS_DELEGATE_V1: fonte unica do calculo (inclui faixas de km) e o
+  // preco-hub.shared. Aqui so delega, pra os dois lados nunca divergirem.
+  const { calcularPrecoDistancia: _calcShared } = require('../../solicitacao/preco-hub.shared');
+  return _calcShared(distKm, tabela);
 }
-
 class DispatchOrchestrator {
   /**
    * @param {import('pg').Pool} pool
@@ -980,6 +973,7 @@ class DispatchOrchestrator {
           valorFixo: parseFloat(regra.preco_valor_fixo),
           kmBase: regra.preco_km_base != null ? parseFloat(regra.preco_km_base) : 0,
           valorKmAdicional: regra.preco_valor_km_adicional != null ? parseFloat(regra.preco_valor_km_adicional) : 0,
+          faixas: regra.preco_faixas_km != null ? regra.preco_faixas_km : null,
         },
         origem: 'regra',
       };
@@ -1002,6 +996,7 @@ class DispatchOrchestrator {
           valorFixo: _tabCli.valorFixo,
           kmBase: _tabCli.kmBase,
           valorKmAdicional: _tabCli.valorKmAdicional,
+          faixas: _tabCli.faixas != null ? _tabCli.faixas : null,
         },
         origem: 'cliente',
       };
@@ -1016,6 +1011,7 @@ class DispatchOrchestrator {
             valorFixo: parseFloat(cfg.preco_valor_fixo),
             kmBase: cfg.preco_km_base != null ? parseFloat(cfg.preco_km_base) : 0,
             valorKmAdicional: cfg.preco_valor_km_adicional != null ? parseFloat(cfg.preco_valor_km_adicional) : 0,
+            faixas: cfg.preco_faixas_km != null ? cfg.preco_faixas_km : null,
           },
           origem: 'global',
         };
