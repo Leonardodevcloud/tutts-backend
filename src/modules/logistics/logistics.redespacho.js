@@ -99,6 +99,14 @@ async function redespacharEntrega(pool, entregaId, opts = {}) {
   const original = rows[0];
   const codigoOS = original.codigo_os;
 
+  // UBER_NO_REDISPATCH_V1: corrida na Uber nao redespacha -- so cancela.
+  // Enquanto a assinatura do webhook da Uber nao estiver correta, o backend nao
+  // recebe o courier_assigned e o fallback mata a corrida; redespachar la so
+  // recria o problema. Na Uber: cancele e solicite de novo.
+  if (String(original.provider_code || '').toLowerCase() === 'uber') {
+    return { ok: false, status: 409, error: 'Corrida na Uber nao pode ser redespachada. Cancele e solicite novamente.' };
+  }
+
   // REDESPACHO_EXCLUSAO_V1: providerCode NAO tem default 'uber'.
   //
   // Era bug: uma corrida despachada na 99 e redespachada sem body ia parar na
