@@ -64,28 +64,26 @@ function calcularPrecoDistancia(distKm, tabela) {
   let faixas = tabela.faixas;
   if (typeof faixas === 'string') { try { faixas = JSON.parse(faixas); } catch (_e) { faixas = null; } }
   if (Array.isArray(faixas) && faixas.length > 0) {
+    // FAIXAS_APARTIRDE_V2: cada faixa e "a partir de {inicio_km} km, taxa Y".
+    // Conta por km cheio (ceil): cada km do excedente pega a taxa da faixa com
+    // maior inicio_km <= km. Ex: a partir de 3=1,50, de 7=1,80, de 11=1,90.
     const norm = faixas
       .map(function (f) {
-        return {
-          ate: (f.ate_km == null || f.ate_km === '') ? Infinity : Number(f.ate_km),
-          taxa: Number(f.valor_km),
-        };
+        return { inicio: Number(f.inicio_km), taxa: Number(f.valor_km) };
       })
-      .filter(function (f) { return Number.isFinite(f.taxa) && f.taxa >= 0 && (f.ate === Infinity || Number.isFinite(f.ate)); })
-      .sort(function (a, b) { return a.ate - b.ate; });
-    // FAIXAS_CEIL_V1: distancia quebrada sobe pro km cheio de cima (ceil).
-    // Ex: 2,4km conta como 3km. Decisao do cliente 2026-08.
+      .filter(function (f) { return Number.isFinite(f.taxa) && f.taxa >= 0 && Number.isFinite(f.inicio); })
+      .sort(function (a, b) { return a.inicio - b.inicio; });
+    if (norm.length === 0) {
+      const adic0 = Number.isFinite(Number(tabela.valorKmAdicional)) ? Number(tabela.valorKmAdicional) : 0;
+      return Math.round((vf + Math.max(0, Math.ceil(d) - base) * adic0) * 100) / 100;
+    }
     const dCeil = Math.ceil(d);
+    const bInt = Math.floor(base);
     let total = vf;
-    let prev = base;
-    for (let i = 0; i < norm.length; i++) {
-      const faixa = norm[i];
-      if (dCeil <= prev) break;
-      const topo = Math.min(dCeil, faixa.ate);
-      const kmNaFaixa = Math.max(0, topo - prev);
-      total += kmNaFaixa * faixa.taxa;
-      prev = faixa.ate;
-      if (dCeil <= faixa.ate) break;
+    for (let k = bInt + 1; k <= dCeil; k++) {
+      let taxa = 0;
+      for (let i = 0; i < norm.length; i++) { if (norm[i].inicio <= k) taxa = norm[i].taxa; }
+      total += taxa;
     }
     return Math.round(total * 100) / 100;
   }
