@@ -449,10 +449,28 @@ class UberAdapter extends LogisticsProviderAdapter {
    * @returns {Promise<boolean>}
    */
   async validateWebhookSignature(req) {
-    const result = validarAssinaturaUber(req, {
+    let result = validarAssinaturaUber(req, {
       webhookSecret: this.webhookSecret,
       sandboxMode: this.sandboxMode,
     });
+    // UBER_WEBHOOK_CLIENT_SECRET_V1: a Uber Direct assina o webhook com o
+    // client_secret do app (nao um secret separado). Se a coluna webhook_secret
+    // estiver vazia ou desatualizada, tudo cai em assinatura_invalida e o
+    // fallback mata a corrida. Aqui, se o webhook_secret nao bater, tentamos o
+    // client_secret de producao (logistics_providers.config.client_secret).
+    if (!result.valid
+        && result.motivo !== 'header_assinatura_ausente'
+        && result.motivo !== 'raw_body_nao_capturado'
+        && result.motivo !== 'sandbox_aceita_tudo') {
+      const _cs = this.config && this.config.client_secret;
+      if (_cs && _cs !== this.webhookSecret) {
+        const _alt = validarAssinaturaUber(req, { webhookSecret: _cs, sandboxMode: this.sandboxMode });
+        if (_alt.valid) {
+          console.log('[UberAdapter] webhook validado pelo client_secret (webhook_secret nao bateu)');
+          result = _alt;
+        }
+      }
+    }
     if (!result.valid) {
       console.warn(`⚠️ [UberAdapter] webhook rejeitado: ${result.motivo}`);
     } else if (result.sandbox) {
