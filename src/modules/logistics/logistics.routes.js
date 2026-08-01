@@ -523,7 +523,7 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
-        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra,
+        `SELECT ld.*, r.cliente_nome AS cliente_nome_regra, r.providers_preferidos AS regra_providers_preferidos,
                 sc.cliente_cod AS cliente_cod_rastreio,
                 sc.pontos_json AS pontos_rastreio
          FROM logistics_deliveries ld
