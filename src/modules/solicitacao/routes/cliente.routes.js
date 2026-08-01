@@ -2309,46 +2309,24 @@ router.get('/solicitacao/relatorio', verificarTokenSolicitacao, async (req, res)
         });
       }
 
-      const { getDispatchOrchestrator } = require('../../logistics/core/DispatchOrchestrator');
-      const { getMappClient } = require('../../logistics/core/MappClient');
-      const { EventSource } = require('../../logistics/contracts/EventTypes');
-      const orch = getDispatchOrchestrator(pool);
-
-      // 4. Exclui o entregador atual DESTA OS (senao o provedor devolve o mesmo)
-      if (original.courier_data) {
-        const { excluirCourierDaOS } = require('../../logistics/logistics.bloqueados');
-        await excluirCourierDaOS(pool, codigoOS, original.courier_data, {
-          motivo: 'redespacho pelo cliente',
-          criadoPor: `cliente:${req.clienteSolicitacao.id}`,
-        }).catch((e) => console.warn('[redespachar/cliente] falha ao excluir entregador:', e.message));
-      }
-
-      // 5. Cancela sem reabrir a Mapp — vamos despachar de novo agora
-      if (!['cancelado', 'canceled', 'delivered', 'fallback_fila'].includes(original.status_native)) {
-        await orch.cancel(original.id, {
-          motivo: 'Redespacho solicitado pelo cliente',
-          canceladoPor: 'cliente',
-          reabrirMapp: false,
-          eventSource: EventSource.API,
-        });
-      }
-
-      // 6. Redespacha no MESMO provedor da corrida original
-      const servicos = await getMappClient(pool).listarServicos(0, 0);
-      const servico = servicos.find(s => Number(s.codigoOS) === Number(codigoOS));
-      if (!servico) {
-        await getMappClient(pool).alterarStatus(codigoOS, 0).catch(() => {});
-        return res.status(409).json({ error: 'Corrida nao esta mais disponivel para redespacho' });
-      }
-
-      const novo = await orch.dispatch(servico, {
-        providerCode: original.provider_code,
-        vehicleType: null,
-        regraId: original.regra_id || null,
-        eventSource: EventSource.API,
+      // 4-6. REDESPACHO_CLIENTE_SHARED_V1 - redespacho via funcao compartilhada
+      //    (logistics.redespacho.js). Mesma regra do admin e do portal da loja:
+      //    UMA fonte de verdade, sem copia inline divergindo.
+      //
+      //    A funcao ja faz, na ordem certa: exclusao do entregador atual DESTA OS,
+      //    cancelamento, REABERTURA da OS na Mapp (alterarStatus 0) ANTES de
+      //    redespachar -- o passo que faltava aqui e travava o redespacho do
+      //    cliente em "nao disponivel" -- fallback reconstruindo o servico do
+      //    proprio registro, e COALESCE(regra_id_manual, regra_id) pra nao perder
+      //    a atribuicao manual e a tabela de preco da loja no reprecificar.
+      const { redespacharEntrega } = require('../../logistics/logistics.redespacho');
+      const r = await redespacharEntrega(pool, original.id, {
+        motivo: 'redespacho pelo cliente',
+        excluirEntregador: true,
+        criadoPor: `cliente:${req.clienteSolicitacao.id}`,
       });
-      if (!novo) {
-        return res.status(409).json({ error: 'Nao foi possivel chamar outro entregador agora' });
+      if (!r.ok) {
+        return res.status(r.status || 409).json({ error: r.error });
       }
 
       res.json({ success: true, mensagem: 'Chamando outro entregador' });
