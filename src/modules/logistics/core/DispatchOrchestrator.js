@@ -351,21 +351,6 @@ class DispatchOrchestrator {
       return null;
     }
 
-    // TRAVA_CANCEL_MANUAL_GUARD_V1: no AUTOMATICO (poller), nao re-despacha OS
-    // cujo ULTIMO despacho foi cancelado manualmente. Redespacho/despacho MANUAL
-    // (eventSource != WORKER) ignora a trava e cria entrega nova -> destrava.
-    if (opts.eventSource === EventSource.WORKER) {
-      const { rows: _ult } = await this.pool.query(
-        `SELECT cancelado_manual FROM logistics_deliveries
-          WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1`,
-        [codigoOS]
-      );
-      if (_ult[0] && _ult[0].cancelado_manual === true) {
-        console.log(`⛔ [Orchestrator] OS ${codigoOS}: cancelada manualmente -- auto-despacho bloqueado`);
-        return null;
-      }
-    }
-
     // 2. Reservar na Mapp (status 0 → 1)
     const respReserva = await this.mapp.alterarStatus(codigoOS, 1);
     if (!this.mapp.respostaOK(respReserva)) {
@@ -1154,6 +1139,23 @@ class DispatchOrchestrator {
     const servico = opts.servicoMapp || await this._buscarServicoMapp(codigoOS);
     if (!servico) {
       return { decision: 'os_nao_encontrada', erro: `OS ${codigoOS} não está na Mapp` };
+    }
+
+    // TRAVA_CANCEL_MANUAL_V2: no AUTOMATICO (poller), se o ULTIMO despacho da OS
+    // foi cancelado manualmente, pula AQUI -- antes de cotar -- e devolve uma
+    // decisao que o poller entende (rejeitado_*): sem crashar, sem gastar cotacao,
+    // e avancando o checkpoint. Redespacho/despacho MANUAL usa outro caminho
+    // (redespacharEntrega -> dispatch) e nao passa por aqui, entao destrava.
+    if (eventSource === EventSource.WORKER) {
+      const { rows: _canc } = await this.pool.query(
+        `SELECT cancelado_manual FROM logistics_deliveries
+          WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1`,
+        [String(codigoOS)]
+      );
+      if (_canc[0] && _canc[0].cancelado_manual === true) {
+        console.log(`⛔ [Orchestrator] OS ${codigoOS}: cancelada manualmente -- auto-despacho pulado`);
+        return { decision: 'rejeitado_cancelado_manual' };
+      }
     }
 
     // 🆕 2026-07: RE-DESPACHO FORCADO (ex: reatribuicao por entregador bloqueado).
