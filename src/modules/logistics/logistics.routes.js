@@ -196,6 +196,48 @@ function mapearCanonicoParaLegado(ld) {
   };
 }
 
+// CANCEL_ESCOPO_TUTTS_V1: cancela a OS de verdade na Tutts (nao so na central).
+// Resolve token/codCliente do cliente pela OS (solicitacoes_corrida ->
+// clientes_solicitacao). OS sem esse vinculo (ex: veio direto da Mapp) nao tem
+// token -> retorna {ok:false, motivo:'sem_cliente_vinculado'}.
+async function cancelarOSNaTutts(pool, entregaId) {
+  const { rows: dRows } = await pool.query(
+    'SELECT codigo_os FROM logistics_deliveries WHERE id = $1', [entregaId]
+  );
+  if (!dRows[0]) return { ok: false, motivo: 'entrega_nao_encontrada' };
+  const codigoOS = String(dRows[0].codigo_os);
+
+  const { rows: cRows } = await pool.query(
+    `SELECT c.tutts_token_api, c.tutts_codigo_cliente
+       FROM solicitacoes_corrida s
+       JOIN clientes_solicitacao c ON c.id = s.cliente_id
+      WHERE trim(s.tutts_os_numero) = $1
+      ORDER BY s.id DESC LIMIT 1`,
+    [codigoOS]
+  );
+  const cli = cRows[0];
+  if (!cli || !cli.tutts_token_api || !cli.tutts_codigo_cliente) {
+    return { ok: false, motivo: 'sem_cliente_vinculado' };
+  }
+
+  let token = cli.tutts_token_api;
+  if (token.includes('-gravar')) token = token.replace('-gravar', '-cancelar');
+  else if (!token.includes('-cancelar')) token = token + '-cancelar';
+
+  try {
+    const resp = await fetch('https://tutts.com.br/integracao', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, codCliente: cli.tutts_codigo_cliente, OS: codigoOS }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (data.Sucesso || data.sucesso) return { ok: true };
+    return { ok: false, motivo: (data.Erro || data.erro || 'erro_desconhecido') };
+  } catch (e) {
+    return { ok: false, motivo: e.message };
+  }
+}
+
 function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAuditoria) {
   const router = express.Router();
   const registry = getProviderRegistry(pool);
@@ -734,12 +776,27 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
   router.post('/deliveries/:id/cancel', verificarToken, verificarAdmin, async (req, res) => {
     try {
       const orch = getDispatchOrchestrator(pool);
-      const result = await orch.cancel(parseInt(req.params.id, 10), {
+      const id = parseInt(req.params.id, 10);
+      const escopo = req.body?.escopo === 'ambos' ? 'ambos' : 'central';
+
+      // CANCEL_ESCOPO_V1: "ambos" cancela tambem na Tutts. Se cancelou la, NAO
+      // reabre a Mapp (a OS sai de vez). Se nao deu (sem cliente / erro), reabre
+      // pra nao deixar a OS presa reservada, e devolve o motivo.
+      let tutts = null;
+      if (escopo === 'ambos') {
+        tutts = await cancelarOSNaTutts(pool, id).catch(e => ({ ok: false, motivo: e.message }));
+      }
+      const reabrir = escopo === 'ambos'
+        ? !(tutts && tutts.ok)
+        : (req.body?.reabrir_mapp !== false);
+
+      const result = await orch.cancel(id, {
         motivo: req.body?.motivo || 'Cancelado via API',
-        reabrirMapp: req.body?.reabrir_mapp !== false,
+        reabrirMapp: reabrir,
+        canceladoManual: true, // TRAVA_CANCEL_MANUAL_ENDPOINT_V1
         eventSource: EventSource.API,
       });
-      res.json({ success: true, ...result });
+      res.json({ success: true, escopo, tutts, ...result });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }

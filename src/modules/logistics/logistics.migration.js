@@ -183,6 +183,7 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_metros INTEGER`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_segundos INTEGER`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS rota_calculada_at TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS cancelado_manual BOOLEAN DEFAULT false`).catch(() => {}); // TRAVA_CANCEL_MANUAL_MIG_V1
 
   console.log('✅ [logistics] tabela logistics_deliveries verificada');
 

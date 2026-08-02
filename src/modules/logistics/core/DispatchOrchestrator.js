@@ -351,6 +351,21 @@ class DispatchOrchestrator {
       return null;
     }
 
+    // TRAVA_CANCEL_MANUAL_GUARD_V1: no AUTOMATICO (poller), nao re-despacha OS
+    // cujo ULTIMO despacho foi cancelado manualmente. Redespacho/despacho MANUAL
+    // (eventSource != WORKER) ignora a trava e cria entrega nova -> destrava.
+    if (opts.eventSource === EventSource.WORKER) {
+      const { rows: _ult } = await this.pool.query(
+        `SELECT cancelado_manual FROM logistics_deliveries
+          WHERE codigo_os = $1 ORDER BY id DESC LIMIT 1`,
+        [codigoOS]
+      );
+      if (_ult[0] && _ult[0].cancelado_manual === true) {
+        console.log(`⛔ [Orchestrator] OS ${codigoOS}: cancelada manualmente -- auto-despacho bloqueado`);
+        return null;
+      }
+    }
+
     // 2. Reservar na Mapp (status 0 → 1)
     const respReserva = await this.mapp.alterarStatus(codigoOS, 1);
     if (!this.mapp.respostaOK(respReserva)) {
@@ -803,9 +818,11 @@ class DispatchOrchestrator {
     await this.pool.query(`
       UPDATE logistics_deliveries
       SET status_canonico = 'CANCELED', status_native = 'cancelado',
-          cancelado_por = $1, cancelado_motivo = $2, updated_at = NOW()
+          cancelado_por = $1, cancelado_motivo = $2,
+          cancelado_manual = (cancelado_manual = true OR $4 = true),
+          updated_at = NOW()
       WHERE id = $3
-    `, [canceladoPor, motivo, entregaId]);
+    `, [canceladoPor, motivo, entregaId, opts.canceladoManual === true]); // TRAVA_CANCEL_MANUAL_V1
 
     // Reabre Mapp se solicitado
     if (reabrirMapp) {
