@@ -790,23 +790,23 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       const id = parseInt(req.params.id, 10);
       const escopo = req.body?.escopo === 'ambos' ? 'ambos' : 'central';
 
-      // CANCEL_ESCOPO_V1: "ambos" cancela tambem na Tutts. Se cancelou la, NAO
-      // reabre a Mapp (a OS sai de vez). Se nao deu (sem cliente / erro), reabre
-      // pra nao deixar a OS presa reservada, e devolve o motivo.
+      // CANCEL_ESCOPO_V2: a Tutts NAO cancela OS com motoboy associado. Entao,
+      // pra "ambos", PRIMEIRO cancelamos o provider e reabrimos a OS na Mapp
+      // (status 0) -- o que TIRA o motoboy da OS -- e SO DEPOIS cancelamos na
+      // Tutts. Se a Tutts cancelar, a OS sai de vez; se nao (sem cliente / erro /
+      // ainda alocada), ela fica aberta na Mapp, marcada cancelado_manual (o Hub
+      // nao re-aciona), e o motivo volta em { tutts }.
+      const result = await orch.cancel(id, {
+        motivo: req.body?.motivo || 'Cancelado via API',
+        reabrirMapp: escopo === 'ambos' ? true : (req.body?.reabrir_mapp !== false),
+        canceladoManual: true, // TRAVA_CANCEL_MANUAL_ENDPOINT_V1
+        eventSource: EventSource.API,
+      });
+
       let tutts = null;
       if (escopo === 'ambos') {
         tutts = await cancelarOSNaTutts(pool, id).catch(e => ({ ok: false, motivo: e.message }));
       }
-      const reabrir = escopo === 'ambos'
-        ? !(tutts && tutts.ok)
-        : (req.body?.reabrir_mapp !== false);
-
-      const result = await orch.cancel(id, {
-        motivo: req.body?.motivo || 'Cancelado via API',
-        reabrirMapp: reabrir,
-        canceladoManual: true, // TRAVA_CANCEL_MANUAL_ENDPOINT_V1
-        eventSource: EventSource.API,
-      });
       res.json({ success: true, escopo, tutts, ...result });
     } catch (err) {
       res.status(400).json({ error: err.message });
