@@ -201,11 +201,14 @@ function mapearCanonicoParaLegado(ld) {
 // clientes_solicitacao). OS sem esse vinculo (ex: veio direto da Mapp) nao tem
 // token -> retorna {ok:false, motivo:'sem_cliente_vinculado'}.
 async function cancelarOSNaTutts(pool, entregaId) {
+  // CANCEL_TUTTS_LOG_V1: logs de diagnostico pra ver por que o cancelamento na
+  // Tutts nao funcionou (achou cliente? qual payload? qual resposta crua?).
   const { rows: dRows } = await pool.query(
     'SELECT codigo_os FROM logistics_deliveries WHERE id = $1', [entregaId]
   );
-  if (!dRows[0]) return { ok: false, motivo: 'entrega_nao_encontrada' };
+  if (!dRows[0]) { console.log('[CANCELAR TUTTS] entrega', entregaId, 'nao encontrada'); return { ok: false, motivo: 'entrega_nao_encontrada' }; }
   const codigoOS = String(dRows[0].codigo_os);
+  console.log('[CANCELAR TUTTS] OS', codigoOS, '(entregaId ' + entregaId + ') -> resolvendo cliente...');
 
   const { rows: cRows } = await pool.query(
     `SELECT c.tutts_token_api, c.tutts_codigo_cliente
@@ -217,6 +220,7 @@ async function cancelarOSNaTutts(pool, entregaId) {
   );
   const cli = cRows[0];
   if (!cli || !cli.tutts_token_api || !cli.tutts_codigo_cliente) {
+    console.log('[CANCELAR TUTTS] OS', codigoOS, '-> SEM cliente vinculado (nao veio pelo portal, ou sem token/codCliente).');
     return { ok: false, motivo: 'sem_cliente_vinculado' };
   }
 
@@ -224,16 +228,23 @@ async function cancelarOSNaTutts(pool, entregaId) {
   if (token.includes('-gravar')) token = token.replace('-gravar', '-cancelar');
   else if (!token.includes('-cancelar')) token = token + '-cancelar';
 
+  const payload = { token, codCliente: cli.tutts_codigo_cliente, OS: codigoOS };
+  console.log('[CANCELAR TUTTS] enviando:', JSON.stringify({ token: token.slice(0, 10) + '...', codCliente: cli.tutts_codigo_cliente, OS: codigoOS }));
+
   try {
     const resp = await fetch('https://tutts.com.br/integracao', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, codCliente: cli.tutts_codigo_cliente, OS: codigoOS }),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json().catch(() => ({}));
-    if (data.Sucesso || data.sucesso) return { ok: true };
-    return { ok: false, motivo: (data.Erro || data.erro || 'erro_desconhecido') };
+    console.log('[CANCELAR TUTTS] resposta HTTP', resp.status, ':', JSON.stringify(data));
+    if (data.Sucesso || data.sucesso) { console.log('[CANCELAR TUTTS] OS', codigoOS, 'cancelada na Tutts OK'); return { ok: true }; }
+    const motivo = (data.Erro || data.erro || 'erro_desconhecido');
+    console.log('[CANCELAR TUTTS] OS', codigoOS, 'NAO cancelou. motivo:', motivo);
+    return { ok: false, motivo };
   } catch (e) {
+    console.log('[CANCELAR TUTTS] OS', codigoOS, 'EXCECAO:', e.message);
     return { ok: false, motivo: e.message };
   }
 }
