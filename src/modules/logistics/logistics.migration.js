@@ -134,6 +134,7 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_fixo         DECIMAL(10,2)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_km_base            DECIMAL(5,1)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_valor_km_adicional DECIMAL(10,2)`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS cod_cliente_tutts VARCHAR(255)`).catch(() => {}); // COD_CLIENTE_TUTTS_MIG_V1
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS preco_faixas_km JSONB`).catch(() => {}); // FAIXAS_MIGRATION_V1
   // [preco-retorno-v1] Adicional fixo cobrado quando a entrega vira devolucao
   // (status RETURNING). NULL = nao cobra retorno pra este cliente.

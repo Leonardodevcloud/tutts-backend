@@ -201,14 +201,20 @@ function mapearCanonicoParaLegado(ld) {
 // clientes_solicitacao). OS sem esse vinculo (ex: veio direto da Mapp) nao tem
 // token -> retorna {ok:false, motivo:'sem_cliente_vinculado'}.
 async function cancelarOSNaTutts(pool, entregaId) {
-  // CANCEL_TUTTS_LOG_V1: logs de diagnostico pra ver por que o cancelamento na
-  // Tutts nao funcionou (achou cliente? qual payload? qual resposta crua?).
+  // CANCEL_TUTTS_REGRA_V1: resolve token+codCliente pra cancelar na Tutts.
+  //  1) OS do portal (solicitacoes_corrida) -> token + codCliente do cliente.
+  //  2) fallback: OS da Mapp -> codCliente vem da REGRA (cod_cliente_tutts) e o
+  //     token vem da env TUTTS_CANCEL_TOKEN (universal).
   const { rows: dRows } = await pool.query(
     'SELECT codigo_os FROM logistics_deliveries WHERE id = $1', [entregaId]
   );
   if (!dRows[0]) { console.log('[CANCELAR TUTTS] entrega', entregaId, 'nao encontrada'); return { ok: false, motivo: 'entrega_nao_encontrada' }; }
   const codigoOS = String(dRows[0].codigo_os);
-  console.log('[CANCELAR TUTTS] OS', codigoOS, '(entregaId ' + entregaId + ') -> resolvendo cliente...');
+  console.log('[CANCELAR TUTTS] OS', codigoOS, '(entregaId ' + entregaId + ') -> resolvendo...');
+
+  let token = null;
+  let codCliente = null;
+  let origem = null;
 
   const { rows: cRows } = await pool.query(
     `SELECT c.tutts_token_api, c.tutts_codigo_cliente
@@ -218,28 +224,46 @@ async function cancelarOSNaTutts(pool, entregaId) {
       ORDER BY s.id DESC LIMIT 1`,
     [codigoOS]
   );
-  const cli = cRows[0];
-  if (!cli || !cli.tutts_token_api || !cli.tutts_codigo_cliente) {
-    console.log('[CANCELAR TUTTS] OS', codigoOS, '-> SEM cliente vinculado (nao veio pelo portal, ou sem token/codCliente).');
+  if (cRows[0] && cRows[0].tutts_token_api && cRows[0].tutts_codigo_cliente) {
+    token = cRows[0].tutts_token_api;
+    codCliente = cRows[0].tutts_codigo_cliente;
+    origem = 'portal';
+  } else {
+    const { rows: rRows } = await pool.query(
+      `SELECT dr.cod_cliente_tutts
+         FROM logistics_deliveries d
+         JOIN logistics_dispatch_rules dr ON dr.id = COALESCE(d.regra_id_manual, d.regra_id)
+        WHERE d.id = $1`,
+      [entregaId]
+    );
+    const codRegra = rRows[0] && rRows[0].cod_cliente_tutts;
+    const tokenEnv = process.env.TUTTS_CANCEL_TOKEN;
+    if (codRegra && tokenEnv) {
+      token = tokenEnv;
+      codCliente = codRegra;
+      origem = 'regra';
+    }
+  }
+
+  if (!token || !codCliente) {
+    console.log('[CANCELAR TUTTS] OS', codigoOS, '-> sem token/codCliente (nem portal, nem regra+env TUTTS_CANCEL_TOKEN).');
     return { ok: false, motivo: 'sem_cliente_vinculado' };
   }
 
-  let token = cli.tutts_token_api;
   if (token.includes('-gravar')) token = token.replace('-gravar', '-cancelar');
   else if (!token.includes('-cancelar')) token = token + '-cancelar';
 
-  const payload = { token, codCliente: cli.tutts_codigo_cliente, OS: codigoOS };
-  console.log('[CANCELAR TUTTS] enviando:', JSON.stringify({ token: token.slice(0, 10) + '...', codCliente: cli.tutts_codigo_cliente, OS: codigoOS }));
+  console.log('[CANCELAR TUTTS] OS', codigoOS, 'via', origem, '-> codCliente', codCliente, '| token', token.slice(0, 10) + '...');
 
   try {
     const resp = await fetch('https://tutts.com.br/integracao', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ token, codCliente, OS: codigoOS }),
     });
     const data = await resp.json().catch(() => ({}));
     console.log('[CANCELAR TUTTS] resposta HTTP', resp.status, ':', JSON.stringify(data));
-    if (data.Sucesso || data.sucesso) { console.log('[CANCELAR TUTTS] OS', codigoOS, 'cancelada na Tutts OK'); return { ok: true }; }
+    if (data.Sucesso || data.sucesso) { console.log('[CANCELAR TUTTS] OS', codigoOS, 'cancelada OK'); return { ok: true }; }
     const motivo = (data.Erro || data.erro || 'erro_desconhecido');
     console.log('[CANCELAR TUTTS] OS', codigoOS, 'NAO cancelou. motivo:', motivo);
     return { ok: false, motivo };

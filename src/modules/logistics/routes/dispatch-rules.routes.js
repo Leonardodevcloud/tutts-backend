@@ -171,6 +171,19 @@ async function aplicarFaixasNaRegra(pool, regraId, body) {
   );
 }
 
+async function aplicarCodClienteNaRegra(pool, regraId, body) {
+  // COD_CLIENTE_TUTTS_FN_V1: codigo do cliente na Tutts, usado pra cancelar OS
+  // que vieram direto da Mapp (sem vinculo do portal). String simples.
+  if (body.cod_cliente_tutts === undefined) return;
+  let cod = body.cod_cliente_tutts;
+  if (cod === null) cod = null;
+  else { cod = String(cod).trim(); if (cod === '') cod = null; }
+  await pool.query(
+    'UPDATE logistics_dispatch_rules SET cod_cliente_tutts = $1, updated_at = NOW() WHERE id = $2',
+    [cod, regraId]
+  );
+}
+
 async function aplicarPortalNaRegra(pool, regraId, body) {
   const temLogin = body.portal_login !== undefined;
   const temSenha = body.portal_senha !== undefined && body.portal_senha !== null && String(body.portal_senha) !== '';
@@ -346,6 +359,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
         await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
+        await aplicarCodClienteNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarCodClienteNaRegra:', e.message)); // COD_CLIENTE_TUTTS_CALL_V1
         await aplicarFaixasNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarFaixasNaRegra:', e.message)); // FAIXAS_APLICAR_CALL_V1
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
@@ -473,6 +488,8 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         // [preco-retorno-v1] persiste preco (inclusive o adicional de retorno)
         await aplicarPrecoNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarPrecoNaRegra:', e.message));
+        await aplicarCodClienteNaRegra(pool, regra.id, req.body || {}).catch(e =>
+          console.warn('[dispatch-rules] aplicarCodClienteNaRegra:', e.message)); // COD_CLIENTE_TUTTS_CALL_V1
         await aplicarFaixasNaRegra(pool, regra.id, req.body || {}).catch(e =>
           console.warn('[dispatch-rules] aplicarFaixasNaRegra:', e.message)); // FAIXAS_APLICAR_CALL_V1
         const { rows: rf } = await pool.query('SELECT * FROM logistics_dispatch_rules WHERE id = $1', [regra.id]);
