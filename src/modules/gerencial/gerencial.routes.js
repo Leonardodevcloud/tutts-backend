@@ -686,11 +686,14 @@ function createGerencialRouter(pool, verificarToken) {
         var fatLiq = r2((parseFloat(r.valor_total)||0) - (parseFloat(r.valor_prof)||0));
         var existing = clMap[ckey].s[sem];
         if (existing) {
-          // Consolidar: somar entregas e faturamento
+          // TICKET_FIX_V1: soma os CCs SEM clampar no meio. O Math.max por passo
+          // dependia da ORDEM dos CCs e superestimava o consolidado quando algum
+          // CC tinha semana de margem negativa. Agora e soma pura (mesma base
+          // liquida do KPI geral), reconciliando os dois.
           existing.e += parseInt(r.entregas) || 0;
-          existing.f = Math.max(0, existing.f + fatLiq);
+          existing.f = existing.f + fatLiq;
         } else {
-          clMap[ckey].s[sem] = { e: parseInt(r.entregas)||0, f: Math.max(0, fatLiq) };
+          clMap[ckey].s[sem] = { e: parseInt(r.entregas)||0, f: fatLiq };
         }
       });
       var sem4 = Array.from(sem4Set).sort().slice(-4);
@@ -709,7 +712,7 @@ function createGerencialRouter(pool, verificarToken) {
         var li = tRow.semanas.length - 1;
         if (dRow.semanas.some(function(v) { return v > 0; })) {
           var pt = tRow.semanas[li-1], ct = tRow.semanas[li];
-          tRow.variacao = pt && ct ? r2((ct-pt)/pt*100) : null;
+          tRow.variacao = (pt != null && ct != null && pt !== 0) ? r2((ct-pt)/Math.abs(pt)*100) : null; // TICKET_FIX_V1: base abs p/ semana negativa nao inverter o sinal
           var pd = dRow.semanas[li-1], cd = dRow.semanas[li];
           dRow.variacao = pd > 0 ? r2((cd-pd)/pd*100) : null;
           ticketCl.push(tRow); demandaCl.push(dRow);
