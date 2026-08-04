@@ -615,19 +615,19 @@ class DispatchOrchestrator {
               [_novoValorServico, registro.id]
             );
             if (_alterarMapp) {
-              this.mapp.alterarValores(codigoOS, _novoValorServico, _valorProvider2 || null).catch(e =>
+              // MAPP_SO_CLIENTE_V1: altera SO o valor do CLIENTE na Mapp. O valor do
+              // motoboy fica intacto (null = campo omitido no payload = Mapp mantem).
+              this.mapp.alterarValores(codigoOS, _novoValorServico, null).catch(e =>
                 console.warn(`⚠️ [Orchestrator] alterarValores preço OS ${codigoOS}: ${e.message}`)
               );
             } else {
               console.log(`⏸️ [Orchestrator] OS ${codigoOS}: muda valor na Mapp DESATIVADO (toggle) — Mapp inalterado`);
             }
           } else if (_valorProvider2 > 0) {
-            // Sem tabela de preço — só atualiza o custo do provider
-            if (_alterarMapp) {
-              this.mapp.alterarValores(codigoOS, null, _valorProvider2).catch(e =>
-                console.warn(`⚠️ [Orchestrator] alterarValores custo OS ${codigoOS}: ${e.message}`)
-              );
-            }
+            // MAPP_SO_CLIENTE_V1: sem tabela de preço = nao ha valor de cliente pra
+            // atualizar. Antes atualizava o valor do MOTOBOY aqui; agora nunca mexemos
+            // no valor do motoboy, entao nao chamamos a Mapp.
+            console.log(`ℹ️ [Orchestrator] OS ${codigoOS}: sem tabela de preço — Mapp inalterada (valor do motoboy preservado)`);
           }
         }
       } catch (_errPreco) {
