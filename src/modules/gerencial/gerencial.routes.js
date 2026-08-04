@@ -16,13 +16,16 @@ var EU = "SELECT * FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2";
 
 // Para faturamento: PBI usa SUMMARIZE por OS → FIRSTNONBLANK(Valor)
 // Equivale a pegar 1 valor por OS (o primeiro não-nulo)
-// EU_FAT_POR_LINHA_V1: faturamento somado POR LINHA (todas as linhas ponto>=2),
-// igual ao sistema-fonte que gera o relatorio. Antes era DISTINCT ON (os) --
-// 1 valor por OS, estilo PBI FIRSTNONBLANK -- o que DESCARTAVA o valor das linhas
-// extras de uma mesma OS (ex: a linha de retorno) e SUBcontava o faturamento
-// (ex: cliente 680, semana 27/07: 73,60 em vez de 85,80). Agora o numerador
-// (soma por linha) e o divisor (contagem por linha) tem a mesma granularidade.
-var EU_FAT = "SELECT os, valor, valor_prof, cod_cliente, centro_custo, data_solicitado, categoria, nome_fantasia FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND os IS NOT NULL";
+// EU_FAT_OS_DISTINCT_V1: faturamento por OS somando os VALORES DISTINTOS.
+// Resolve os DOIS padroes do bi_entregas de uma vez:
+//   - OS multi-ponto com valor REPETIDO (ex: cliente 860 -- 5 pontos, todos
+//     82,50) -> SUM(DISTINCT) conta 1x (82,50), nao multiplica pelo nro de pontos.
+//   - OS com linha de RETORNO de valor proprio (ex: cliente 680) -> SUM(DISTINCT)
+//     inclui o retorno (85,80).
+// SUM(DISTINCT valor) e SUM(DISTINCT valor_prof) sao calculados por coluna (nao
+// por par), agrupando por OS. Descritivos via MAX (consistentes por OS). O
+// DIVISOR (entregas) continua por ponto/linha (EU), como o ticket exige.
+var EU_FAT = "SELECT os, SUM(DISTINCT valor) as valor, SUM(DISTINCT valor_prof) as valor_prof, MAX(cod_cliente) as cod_cliente, MAX(centro_custo) as centro_custo, MAX(data_solicitado) as data_solicitado, MAX(categoria) as categoria, MAX(nome_fantasia) as nome_fantasia FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND os IS NOT NULL GROUP BY os";
 
 function createGerencialRouter(pool, verificarToken) {
   var router = express.Router();
