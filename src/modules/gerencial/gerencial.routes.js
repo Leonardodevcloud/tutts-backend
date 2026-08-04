@@ -16,7 +16,13 @@ var EU = "SELECT * FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2";
 
 // Para faturamento: PBI usa SUMMARIZE por OS → FIRSTNONBLANK(Valor)
 // Equivale a pegar 1 valor por OS (o primeiro não-nulo)
-var EU_FAT = "SELECT DISTINCT ON (os) os, valor, valor_prof, cod_cliente, centro_custo, data_solicitado, categoria, nome_fantasia FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND os IS NOT NULL ORDER BY os, ponto ASC";
+// EU_FAT_POR_LINHA_V1: faturamento somado POR LINHA (todas as linhas ponto>=2),
+// igual ao sistema-fonte que gera o relatorio. Antes era DISTINCT ON (os) --
+// 1 valor por OS, estilo PBI FIRSTNONBLANK -- o que DESCARTAVA o valor das linhas
+// extras de uma mesma OS (ex: a linha de retorno) e SUBcontava o faturamento
+// (ex: cliente 680, semana 27/07: 73,60 em vez de 85,80). Agora o numerador
+// (soma por linha) e o divisor (contagem por linha) tem a mesma granularidade.
+var EU_FAT = "SELECT os, valor, valor_prof, cod_cliente, centro_custo, data_solicitado, categoria, nome_fantasia FROM bi_entregas WHERE COALESCE(ponto, 1) >= 2 AND os IS NOT NULL";
 
 function createGerencialRouter(pool, verificarToken) {
   var router = express.Router();
