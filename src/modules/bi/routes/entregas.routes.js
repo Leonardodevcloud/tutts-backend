@@ -60,12 +60,20 @@ router.post('/bi/entregas/upload', async (req, res) => {
     // ============================================
     // PASSO 3: Filtrar apenas entregas com OS novas
     // ============================================
+    // UPLOAD_OVERWRITE_V1: re-upload SOBRESCREVE em vez de ignorar. As OS que ja
+    // existem sao APAGADAS e reinseridas com os dados frescos da planilha (ex: as
+    // colunas de dinamica). Antes o upload descartava as OS existentes como
+    // duplicadas, entao re-subir a planilha nunca atualizava nada.
+    if (osExistentes.size > 0) {
+      await pool.query('DELETE FROM bi_entregas WHERE os = ANY($1::int[])', [osDoExcel]);
+      console.log('[UPLOAD_OVERWRITE] ' + osExistentes.size + ' OS existentes apagadas para reinsercao');
+    }
     const entregasNovas = entregas.filter(e => {
       const os = parseInt(e.os);
-      return os && !isNaN(os) && !osExistentes.has(os);
+      return os && !isNaN(os);
     });
     
-    const osIgnoradas = osDoExcel.filter(os => osExistentes.has(os));
+    const osIgnoradas = [];
     console.log(`✅ Entregas novas para inserir: ${entregasNovas.length}`);
     console.log(`⏭️ Linhas ignoradas (OS já existe): ${entregas.length - entregasNovas.length}`);
     
