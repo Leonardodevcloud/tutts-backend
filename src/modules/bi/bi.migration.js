@@ -207,6 +207,7 @@ async function initBiTables(pool) {
     // Colunas de coordenadas para mapa de calor
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8)`).catch(() => {});
     await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS longitude DECIMAL(11,8)`).catch(() => {});
+    await pool.query(`ALTER TABLE bi_entregas ADD COLUMN IF NOT EXISTS valor_adic_prof DECIMAL(10,2)`).catch(() => {}); // VALOR_ADIC_PROF_V1
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_bi_entregas_coords ON bi_entregas(latitude, longitude) WHERE latitude IS NOT NULL`).catch(() => {});
     console.log('✅ Colunas latitude/longitude verificadas');
 
