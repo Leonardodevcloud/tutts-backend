@@ -848,6 +848,76 @@ function createGerencialRouter(pool, verificarToken) {
     }
   });
 
+  // GERENCIAL_DINAMICA_V1: clientes que tiveram dinamica aplicada na semana.
+  // Soma por OS com SUM(DISTINCT) (multi-ponto nao infla), consolidando CCs por cliente.
+  router.get('/gerencial/dinamica', verificarToken, async function(req, res) {
+    try {
+      var di = req.query.data_inicio, df = req.query.data_fim;
+      if (!di || !df) return res.status(400).json({ error: 'data_inicio e data_fim obrigatorios' });
+      var q = await pool.query(
+        "WITH por_os AS (" +
+        "  SELECT cod_cliente, MAX(nome_fantasia) as nome, os," +
+        "    SUM(DISTINCT COALESCE(valor_adic_prof,0))    as incent," +
+        "    SUM(DISTINCT COALESCE(preco_dinamico,0))     as dyn," +
+        "    SUM(DISTINCT COALESCE(valor_adic_cliente,0)) as adc_cli," +
+        "    (SUM(DISTINCT COALESCE(valor,0)) - SUM(DISTINCT COALESCE(valor_prof,0))) as liquido" +
+        "  FROM bi_entregas" +
+        "  WHERE COALESCE(ponto,1) >= 2 AND os IS NOT NULL AND cod_cliente IS NOT NULL" +
+        "    AND data_solicitado >= $1 AND data_solicitado <= $2 AND " + CAT_FILTER +
+        "  GROUP BY cod_cliente, os" +
+        ") SELECT cod_cliente, MAX(nome) as nome," +
+        "   COUNT(*) FILTER (WHERE incent > 0) as os_incent," +
+        "   ROUND(SUM(incent)::numeric,2)  as incentivo," +
+        "   ROUND(SUM(dyn)::numeric,2)     as preco_dinamico," +
+        "   ROUND(SUM(adc_cli)::numeric,2) as adic_cliente," +
+        "   ROUND(SUM(liquido)::numeric,2) as liquido" +
+        " FROM por_os GROUP BY cod_cliente HAVING SUM(incent) > 0 ORDER BY SUM(incent) DESC",
+        [di, df]
+      );
+      var qFat = await pool.query(
+        "WITH os_fat AS (SELECT os, (SUM(DISTINCT COALESCE(valor,0)) - SUM(DISTINCT COALESCE(valor_prof,0))) as liq" +
+        " FROM bi_entregas WHERE COALESCE(ponto,1)>=2 AND os IS NOT NULL" +
+        " AND data_solicitado >= $1 AND data_solicitado <= $2 AND " + CAT_FILTER + " GROUP BY os)" +
+        " SELECT ROUND(SUM(liq)::numeric,2) as liquido FROM os_fat",
+        [di, df]
+      );
+      var liquidoSemana = parseFloat(qFat.rows[0] && qFat.rows[0].liquido) || 0;
+      var clientes = q.rows.map(function(r){
+        var inc = parseFloat(r.incentivo)||0, liq = parseFloat(r.liquido)||0;
+        return {
+          cod_cliente: r.cod_cliente,
+          nome: r.nome || ('Cliente ' + r.cod_cliente),
+          os_incent: parseInt(r.os_incent)||0,
+          incentivo: inc,
+          preco_dinamico: parseFloat(r.preco_dinamico)||0,
+          adic_cliente: parseFloat(r.adic_cliente)||0,
+          liquido: liq,
+          pct: liq > 0 ? Math.round(inc/liq*1000)/10 : null
+        };
+      });
+      var tot = clientes.reduce(function(a,c){
+        a.incentivo += c.incentivo; a.preco_dinamico += c.preco_dinamico;
+        a.adic_cliente += c.adic_cliente; a.os_incent += c.os_incent;
+        return a;
+      }, { incentivo:0, preco_dinamico:0, adic_cliente:0, os_incent:0 });
+      res.json({
+        clientes: clientes,
+        totais: {
+          incentivo: Math.round(tot.incentivo*100)/100,
+          preco_dinamico: Math.round(tot.preco_dinamico*100)/100,
+          adic_cliente: Math.round(tot.adic_cliente*100)/100,
+          os_incent: tot.os_incent,
+          clientes: clientes.length,
+          liquido_semana: liquidoSemana,
+          pct: liquidoSemana > 0 ? Math.round(tot.incentivo/liquidoSemana*1000)/10 : null
+        }
+      });
+    } catch (e) {
+      console.error('[gerencial/dinamica]', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   return router;
 }
 

@@ -403,6 +403,8 @@ router.post('/bi/entregas/upload', async (req, res) => {
             valor_prof: parseNum(e.valor_prof),
             // VALOR_ADIC_PROF_V1: mapeia a coluna "Valor adicionado (profissional)" da planilha.
             valor_adic_prof: parseNum(e.valor_adic_prof || e['Valor adicionado (profissional)'] || e['Valor Adicionado (Profissional)'] || e['Valor adicionado profissional'] || e['Valor Adicionado Profissional'] || e['valor_adicionado_profissional']),
+            preco_dinamico: parseNum(e.preco_dinamico), // DINAMICA_V1
+            valor_adic_cliente: parseNum(e.valor_adic_cliente),
             execucao_comp: truncar(e.execucao_comp ? String(e.execucao_comp) : null, 50),
             execucao_espera: truncar(e.execucao_espera ? String(e.execucao_espera) : null, 50),
             status: truncar(e.status, 100),
@@ -460,8 +462,8 @@ router.post('/bi/entregas/upload', async (req, res) => {
                 cpf_cnpj, solicitante, filial, obs_endereco, num_nota, valor_nota,
                 agendado, info, obs_os, assinatura_nome, assinatura_rg,
                 valor_liquido, tempo_espera_minutos, valor_espera,
-                execucao_espera_p1, nota, tipo_pagamento, upload_id, valor_adic_prof
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61)
+                execucao_espera_p1, nota, tipo_pagamento, upload_id, valor_adic_prof, preco_dinamico, valor_adic_cliente
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63)
             `, [
               d.os, d.ponto, d.num_pedido, d.cod_cliente, d.nome_cliente, d.empresa,
               d.nome_fantasia, d.centro_custo, d.cidade_p1, d.endereco,
@@ -476,7 +478,7 @@ router.post('/bi/entregas/upload', async (req, res) => {
               d.cpf_cnpj, d.solicitante, d.filial, d.obs_endereco, d.num_nota, d.valor_nota,
               d.agendado, d.info, d.obs_os, d.assinatura_nome, d.assinatura_rg,
               d.valor_liquido, d.tempo_espera_minutos, d.valor_espera,
-              d.execucao_espera_p1, d.nota, d.tipo_pagamento, d.upload_id, d.valor_adic_prof
+              d.execucao_espera_p1, d.nota, d.tipo_pagamento, d.upload_id, d.valor_adic_prof, d.preco_dinamico, d.valor_adic_cliente
             ]);
             inseridos++;
           } catch (singleErr) {
