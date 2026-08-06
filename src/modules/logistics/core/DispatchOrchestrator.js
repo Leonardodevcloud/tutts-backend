@@ -823,9 +823,21 @@ class DispatchOrchestrator {
       // MAPP_RESTAURA_VALOR_V1: ao cancelar (central + provedor), devolve os valores
       // ORIGINAIS que a OS tinha na Mapp antes do Hub alterar -- valor da loja (cliente)
       // e do motoboy. Sem original salvo (ex: OS antiga), nao mexe.
+      // RESTAURAR_CANCEL_TOGGLE_V1: gate por regra. Se a regra tem
+      // restaurar_valor_cancel_ativo = false, nao devolve os valores originais.
+      let _restaurarOk = true;
+      const _regraIdEnt = entrega.regra_id_manual || entrega.regra_id;
+      if (_regraIdEnt) {
+        try {
+          const { rows: _rrc } = await this.pool.query('SELECT restaurar_valor_cancel_ativo FROM logistics_dispatch_rules WHERE id = $1', [_regraIdEnt]);
+          if (_rrc[0] && _rrc[0].restaurar_valor_cancel_ativo === false) _restaurarOk = false;
+        } catch (_) { /* best-effort: na duvida, restaura */ }
+      }
       const _vServOrig = entrega.valor_servico_mapp_original != null ? parseFloat(entrega.valor_servico_mapp_original) : null;
       const _vProfOrig = entrega.valor_profissional_mapp_original != null ? parseFloat(entrega.valor_profissional_mapp_original) : null;
-      if (_vServOrig != null || _vProfOrig != null) {
+      if (!_restaurarOk) {
+        console.log(`⏸️ [Orchestrator] OS ${entrega.codigo_os}: restauracao de valores DESATIVADA (toggle) — Mapp mantem os valores do Hub`);
+      } else if (_vServOrig != null || _vProfOrig != null) {
         await this.mapp.alterarValores(entrega.codigo_os, _vServOrig, _vProfOrig).catch(e =>
           console.error(`⚠️ [Orchestrator] Falha ao restaurar valores originais OS ${entrega.codigo_os} na Mapp:`, e.message)
         );

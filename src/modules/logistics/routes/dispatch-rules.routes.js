@@ -265,6 +265,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         margem_minima_aceita, margem_pct_minima,
         preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
         alterar_valor_mapp_ativo,
+        restaurar_valor_cancel_ativo,
         // perfil de mensagem pro entregador (99) — por cliente
         nome_remetente, package_type, package_weight, aviso_entregador,
         // compat: aceita usar_uber do formato legado
@@ -301,6 +302,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
       const precoKmAdic = _numPreco(preco_valor_km_adicional);
       // Toggle por regra (default true se nao enviado).
       const _alterarValorMapp = (alterar_valor_mapp_ativo === false) ? false : true;
+      const _restaurarValorCancel = (restaurar_valor_cancel_ativo === false) ? false : true;
 
       // Perfil de mensagem por cliente ('' ou fora do enum -> null = usa global).
       const _nomeRem  = normalizarTextoPerfil(nome_remetente, 100) ?? null;
@@ -317,9 +319,10 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           margem_minima_aceita, margem_pct_minima,
           preco_valor_fixo, preco_km_base, preco_valor_km_adicional,
           alterar_valor_mapp_ativo,
-          nome_remetente, package_type, package_weight, aviso_entregador
+          nome_remetente, package_type, package_weight, aviso_entregador,
+          restaurar_valor_cancel_ativo
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
         RETURNING *
       `, [
         cliente_nome.trim(),
@@ -344,6 +347,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         _pkgType,
         _pkgWeight,
         _avisoEnt,
+        _restaurarValorCancel,
       ]);
 
       if (registrarAuditoria) {
@@ -390,6 +394,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         regioes_permitidas, ativo,
         margem_minima_aceita, margem_pct_minima,
         alterar_valor_mapp_ativo,
+        restaurar_valor_cancel_ativo,
         nome_remetente, package_type, package_weight, aviso_entregador,
         usar_uber,
       } = req.body || {};
@@ -449,8 +454,9 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
           package_type           = CASE WHEN $20::boolean THEN $21 ELSE package_type END,
           package_weight         = CASE WHEN $22::boolean THEN $23 ELSE package_weight END,
           aviso_entregador       = CASE WHEN $24::boolean THEN $25 ELSE aviso_entregador END,
+          restaurar_valor_cancel_ativo = COALESCE($26, restaurar_valor_cancel_ativo),
           updated_at             = NOW()
-        WHERE id = $26
+        WHERE id = $27
         RETURNING *
       `, [
         cliente_nome ? cliente_nome.trim() : null,
@@ -470,6 +476,7 @@ function createDispatchRulesRoutes(pool, verificarToken, verificarAdmin, registr
         _pkgType   !== undefined, _pkgType   === undefined ? null : _pkgType,
         _pkgWeight !== undefined, _pkgWeight === undefined ? null : _pkgWeight,
         _avisoEnt  !== undefined, _avisoEnt  === undefined ? null : _avisoEnt,
+        typeof restaurar_valor_cancel_ativo === 'boolean' ? restaurar_valor_cancel_ativo : null,
         id,
       ]);
 

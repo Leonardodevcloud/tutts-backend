@@ -155,6 +155,7 @@ async function initLogisticsTables(pool) {
   await pool.query(`ALTER TABLE logistics_deliveries ADD COLUMN IF NOT EXISTS retorno_cobrado_em TIMESTAMP`).catch(() => {});
   // Toggle POR REGRA: muda o valor do cliente na Mapp (alterarValores). Default true.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS alterar_valor_mapp_ativo BOOLEAN DEFAULT true`).catch(() => {});
+  await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS restaurar_valor_cancel_ativo BOOLEAN DEFAULT true`).catch(() => {}); // RESTAURAR_CANCEL_TOGGLE_V1
   // Perfil de mensagem pro entregador (99) POR REGRA. Vazio = usa Cliente API / global.
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS nome_remetente     VARCHAR(100)`).catch(() => {});
   await pool.query(`ALTER TABLE logistics_dispatch_rules ADD COLUMN IF NOT EXISTS package_type       VARCHAR(20)`).catch(() => {});
