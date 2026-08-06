@@ -717,6 +717,8 @@ async function avaliarMotoboy(pool, codProf) {
     sorteio_valor_n3: regiaoConfig?.sorteio_valor_n3 != null ? Number(regiaoConfig.sorteio_valor_n3) : 150,
     saque_teto_n2: regiaoConfig?.saque_teto_n2 != null ? Number(regiaoConfig.saque_teto_n2) : 500,
     saque_teto_n3: regiaoConfig?.saque_teto_n3 != null ? Number(regiaoConfig.saque_teto_n3) : 500,
+    saque_qtd_n2: regiaoConfig?.saque_qtd_n2 != null ? Number(regiaoConfig.saque_qtd_n2) : 1,
+    saque_qtd_n3: regiaoConfig?.saque_qtd_n3 != null ? Number(regiaoConfig.saque_qtd_n3) : 1,
     mudou: persistencia.mudou,
     subiu: persistencia.subiu,
     desceu: persistencia.desceu,

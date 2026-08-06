@@ -85,6 +85,12 @@ async function initScoreV2Tables(pool) {
       ADD COLUMN IF NOT EXISTS dias_pico_ouro INT DEFAULT 18,
       ADD COLUMN IF NOT EXISTS hora_corte_pico INT DEFAULT 16
   `).catch(e => console.log('⚠️ modelo_nivel:', e.message));
+  // 🆕 SAQUE_QTD_V1: quantidade de saques gratis por categoria (Prata mensal, Ouro semanal).
+  await pool.query(`
+    ALTER TABLE score_config_regiao
+      ADD COLUMN IF NOT EXISTS saque_qtd_n2 INT DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS saque_qtd_n3 INT DEFAULT 1
+  `).catch(e => console.log('⚠️ saque_qtd:', e.message));
   console.log('  ✅ score_config_regiao');
 
   // ============================================================
