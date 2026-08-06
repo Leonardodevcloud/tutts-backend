@@ -322,6 +322,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           sorteio_valor_n2, sorteio_valor_n3,
           saque_teto_n2, saque_teto_n3,
           saque_qtd_n2, saque_qtd_n3,
+          bonus_extras,
           n2_min_entregas, n2_min_dias_16h, n2_min_pct_prazo,
           n3_min_entregas, n3_min_dias_16h, n3_min_pct_prazo,
           regra_aproveitamento_ativa, pct_min_aproveitamento,
@@ -374,6 +375,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         saque_teto_n3 = 500,
         saque_qtd_n2 = 1,
         saque_qtd_n3 = 1,
+        bonus_extras = { n2: [], n3: [] },
         // 🚀 2026-05: thresholds configuráveis (defaults se não vier)
         n2_min_entregas = 80,
         n2_min_dias_16h = 15,
@@ -414,6 +416,19 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         return Number.isFinite(n) && n >= 0 && n <= 100 ? n : fb;
       };
 
+      // BONUS_EXTRAS_V1: sanitiza a lista de bonus extras por categoria.
+      const _sanitizeExtras = (bx) => {
+        const norm = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 20).map((x) => ({
+          tipo: (x && ['valor', 'item', 'texto'].includes(x.tipo)) ? x.tipo : 'texto',
+          titulo: String((x && x.titulo) || '').slice(0, 120),
+          valor: (x && x.valor != null && Number.isFinite(parseFloat(x.valor))) ? parseFloat(x.valor) : null,
+          descricao: String((x && x.descricao) || '').slice(0, 300),
+        })).filter((x) => x.titulo.trim());
+        const src = (bx && typeof bx === 'object') ? bx : {};
+        return { n2: norm(src.n2), n3: norm(src.n3) };
+      };
+      const _bonusExtras = _sanitizeExtras(bonus_extras);
+
       const result = await pool.query(`
         INSERT INTO score_config_regiao (
           regiao, ativo, niveis_ativos,
@@ -425,8 +440,9 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           min_entregas_elegivel, pct_prata, pct_ouro,
           dias_pico_prata, dias_pico_ouro, hora_corte_pico,
           saque_qtd_n2, saque_qtd_n3,
+          bonus_extras,
           criado_por
-        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25)
         ON CONFLICT (regiao) DO UPDATE SET
           ativo = EXCLUDED.ativo,
           niveis_ativos = EXCLUDED.niveis_ativos,
@@ -436,6 +452,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
           saque_teto_n3 = EXCLUDED.saque_teto_n3,
           saque_qtd_n2 = EXCLUDED.saque_qtd_n2,
           saque_qtd_n3 = EXCLUDED.saque_qtd_n3,
+          bonus_extras = EXCLUDED.bonus_extras,
           n2_min_entregas = EXCLUDED.n2_min_entregas,
           n2_min_dias_16h = EXCLUDED.n2_min_dias_16h,
           n2_min_pct_prazo = EXCLUDED.n2_min_pct_prazo,
@@ -462,6 +479,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         intMin0(min_entregas_elegivel, 40), pct(pct_prata, 85), pct(pct_ouro, 92),
         intMin0(dias_pico_prata, 12), intMin0(dias_pico_ouro, 18), intMin0(hora_corte_pico, 16),
         intMin0(saque_qtd_n2, 1), intMin0(saque_qtd_n3, 1),
+        JSON.stringify(_bonusExtras),
         req.user.userId || req.user.email || 'admin',
       ]);
 

@@ -91,6 +91,12 @@ async function initScoreV2Tables(pool) {
       ADD COLUMN IF NOT EXISTS saque_qtd_n2 INT DEFAULT 1,
       ADD COLUMN IF NOT EXISTS saque_qtd_n3 INT DEFAULT 1
   `).catch(e => console.log('⚠️ saque_qtd:', e.message));
+  // 🆕 BONUS_EXTRAS_V1: bonus livres por categoria { n2:[...], n3:[...] }.
+  // Cada item: { tipo:'valor'|'item'|'texto', titulo, valor?, descricao? }
+  await pool.query(`
+    ALTER TABLE score_config_regiao
+      ADD COLUMN IF NOT EXISTS bonus_extras JSONB DEFAULT '{"n2":[],"n3":[]}'::jsonb
+  `).catch(e => console.log('⚠️ bonus_extras:', e.message));
   console.log('  ✅ score_config_regiao');
 
   // ============================================================
