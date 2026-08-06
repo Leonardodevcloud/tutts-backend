@@ -820,6 +820,17 @@ class DispatchOrchestrator {
       await this.mapp.alterarStatus(entrega.codigo_os, 0).catch(e =>
         console.error(`⚠️ [Orchestrator] Falha ao reabrir OS ${entrega.codigo_os} na Mapp:`, e.message)
       );
+      // MAPP_RESTAURA_VALOR_V1: ao cancelar (central + provedor), devolve os valores
+      // ORIGINAIS que a OS tinha na Mapp antes do Hub alterar -- valor da loja (cliente)
+      // e do motoboy. Sem original salvo (ex: OS antiga), nao mexe.
+      const _vServOrig = entrega.valor_servico_mapp_original != null ? parseFloat(entrega.valor_servico_mapp_original) : null;
+      const _vProfOrig = entrega.valor_profissional_mapp_original != null ? parseFloat(entrega.valor_profissional_mapp_original) : null;
+      if (_vServOrig != null || _vProfOrig != null) {
+        await this.mapp.alterarValores(entrega.codigo_os, _vServOrig, _vProfOrig).catch(e =>
+          console.error(`⚠️ [Orchestrator] Falha ao restaurar valores originais OS ${entrega.codigo_os} na Mapp:`, e.message)
+        );
+        console.log(`↩️ [Orchestrator] OS ${entrega.codigo_os}: valores originais restaurados na Mapp (cliente=${_vServOrig}, motoboy=${_vProfOrig})`);
+      }
     }
 
     this.events.log({
