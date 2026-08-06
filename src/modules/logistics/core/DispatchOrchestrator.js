@@ -606,7 +606,13 @@ class DispatchOrchestrator {
           // Toggle POR REGRA: cada cliente liga/desliga "alterar valor na Mapp"
           // na sua regra de despacho. Default = ativo (regra sem a flag = mantem).
           // Como "sem regra = sem despacho automatico", a regra sempre existe aqui.
-          const _alterarMapp = !(_regraObj && _regraObj.alterar_valor_mapp_ativo === false); // DISPATCH_REGRA_OBJ_V1
+          // MAPP_TOGGLE_CLIENTE_V1: o toggle do CLIENTE de solicitacao
+          // (preco_hub.alterar_mapp) tem PRIORIDADE sobre o da regra. Ausente no
+          // cliente -> cai na regra -> default true.
+          const _pjAlterar = (_precoHubCli && typeof _precoHubCli === 'object') ? _precoHubCli.alterar_mapp : undefined;
+          const _alterarMapp = (_pjAlterar === false) ? false
+            : (_pjAlterar === true) ? true
+            : !(_regraObj && _regraObj.alterar_valor_mapp_ativo === false); // DISPATCH_REGRA_OBJ_V1
 
           if (_novoValorServico != null) {
             console.log(`💰 [Orchestrator] OS ${codigoOS}: preço por km [${_origemPreco}] — ${_distKm.toFixed(1)}km → cliente=R$${_novoValorServico.toFixed(2)} provider=R$${_valorProvider2.toFixed(2)}`);
@@ -823,15 +829,23 @@ class DispatchOrchestrator {
       // MAPP_RESTAURA_VALOR_V1: ao cancelar (central + provedor), devolve os valores
       // ORIGINAIS que a OS tinha na Mapp antes do Hub alterar -- valor da loja (cliente)
       // e do motoboy. Sem original salvo (ex: OS antiga), nao mexe.
-      // RESTAURAR_CANCEL_TOGGLE_V1: gate por regra. Se a regra tem
-      // restaurar_valor_cancel_ativo = false, nao devolve os valores originais.
+      // RESTAURAR_CANCEL_TOGGLE_V1 + MAPP_TOGGLE_CLIENTE_V1: prioridade CLIENTE > regra > default.
       let _restaurarOk = true;
-      const _regraIdEnt = entrega.regra_id_manual || entrega.regra_id;
-      if (_regraIdEnt) {
-        try {
-          const { rows: _rrc } = await this.pool.query('SELECT restaurar_valor_cancel_ativo FROM logistics_dispatch_rules WHERE id = $1', [_regraIdEnt]);
-          if (_rrc[0] && _rrc[0].restaurar_valor_cancel_ativo === false) _restaurarOk = false;
-        } catch (_) { /* best-effort: na duvida, restaura */ }
+      let _pjRest;
+      try {
+        const _pjc = await this._buscarPrecoHubDaOS(entrega.codigo_os);
+        if (_pjc && typeof _pjc === 'object') _pjRest = _pjc.restaurar_cancel;
+      } catch (_) { /* best-effort */ }
+      if (_pjRest === false) {
+        _restaurarOk = false;
+      } else if (_pjRest !== true) {
+        const _regraIdEnt = entrega.regra_id_manual || entrega.regra_id;
+        if (_regraIdEnt) {
+          try {
+            const { rows: _rrc } = await this.pool.query('SELECT restaurar_valor_cancel_ativo FROM logistics_dispatch_rules WHERE id = $1', [_regraIdEnt]);
+            if (_rrc[0] && _rrc[0].restaurar_valor_cancel_ativo === false) _restaurarOk = false;
+          } catch (_) { /* best-effort: na duvida, restaura */ }
+        }
       }
       const _vServOrig = entrega.valor_servico_mapp_original != null ? parseFloat(entrega.valor_servico_mapp_original) : null;
       const _vProfOrig = entrega.valor_profissional_mapp_original != null ? parseFloat(entrega.valor_profissional_mapp_original) : null;
