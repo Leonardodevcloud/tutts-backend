@@ -795,10 +795,14 @@ async function rodarSorteiosMensais(pool, mesRef, opts = {}) {
 
     for (const nivel of niveis) {
       try {
-        // Pega valor configurado
-        const valor = nivel === 3
-          ? parseFloat(r.sorteio_valor_n3) || 150
-          : parseFloat(r.sorteio_valor_n2) || 50;
+        // SORTEIO_EXTRA_V1: valor vem da config (derivado do bonus extra tipo sorteio).
+        // valor 0 / nao configurado = sorteio DESLIGADO nessa praca/nivel (nao usa default).
+        const _vRaw = nivel === 3 ? parseFloat(r.sorteio_valor_n3) : parseFloat(r.sorteio_valor_n2);
+        const valor = Number.isFinite(_vRaw) ? _vRaw : 0;
+        if (!(valor > 0)) {
+          console.log(`  ⏭️ ${r.regiao} N${nivel}: sorteio nao configurado (valor 0), pulando`);
+          continue;
+        }
 
         // Lista candidatos: motoboys da região no nível há SORTEIO_DIAS_MIN_NIVEL+ dias.
         // 🆕 2026-05 v4: nivel_desde garante que só concorre quem está ESTÁVEL

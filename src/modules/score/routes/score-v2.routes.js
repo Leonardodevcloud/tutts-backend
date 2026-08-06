@@ -419,7 +419,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
       // BONUS_EXTRAS_V1: sanitiza a lista de bonus extras por categoria.
       const _sanitizeExtras = (bx) => {
         const norm = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 20).map((x) => ({
-          tipo: (x && ['valor', 'item', 'texto'].includes(x.tipo)) ? x.tipo : 'texto',
+          tipo: (x && ['valor', 'item', 'texto', 'sorteio'].includes(x.tipo)) ? x.tipo : 'texto',
           titulo: String((x && x.titulo) || '').slice(0, 120),
           valor: (x && x.valor != null && Number.isFinite(parseFloat(x.valor))) ? parseFloat(x.valor) : null,
           descricao: String((x && x.descricao) || '').slice(0, 300),
@@ -428,6 +428,14 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         return { n2: norm(src.n2), n3: norm(src.n3) };
       };
       const _bonusExtras = _sanitizeExtras(bonus_extras);
+      // SORTEIO_EXTRA_V1: sorteio deixou de ser campo fixo -> deriva do extra tipo 'sorteio'.
+      // Se nao houver, valor 0 = sorteio desligado nessa categoria.
+      const _valorSorteio = (arr) => {
+        const s = (arr || []).find((x) => x.tipo === 'sorteio' && x.valor != null && x.valor > 0);
+        return s ? parseFloat(s.valor) : 0;
+      };
+      const _sorteioN2 = _valorSorteio(_bonusExtras.n2);
+      const _sorteioN3 = _valorSorteio(_bonusExtras.n3);
 
       const result = await pool.query(`
         INSERT INTO score_config_regiao (
@@ -471,7 +479,7 @@ function createScoreV2Routes(pool, verificarToken, verificarAdmin) {
         RETURNING *
       `, [
         regiao.trim(), ativo, JSON.stringify(niveisValidos),
-        parseFloat(sorteio_valor_n2), parseFloat(sorteio_valor_n3),
+        _sorteioN2, _sorteioN3, // SORTEIO_EXTRA_V1 (derivado dos extras)
         parseFloat(saque_teto_n2), parseFloat(saque_teto_n3),
         intMin0(n2_min_entregas, 80), intMin0(n2_min_dias_16h, 15), pct(n2_min_pct_prazo, 80),
         intMin0(n3_min_entregas, 150), intMin0(n3_min_dias_16h, 20), pct(n3_min_pct_prazo, 88),
