@@ -44,6 +44,7 @@ const { lerConfigGlobal } = require('../routes/config-global.routes');
 const { enviarCodigoColeta, enviarCodigoEntrega, normalizarTelefone } = require('../logistics.whatsapp');
 const { servicoMappToCanonicalQuoteRequest } = require('../adapters/uber/uber.parser');
 const { resolverDestinoViaPonte } = require('./PonteRastreioCliente');
+const httpRequest = require('../../../shared/utils/httpRequest'); // [dist-cascata-v1] ORS route
 
 // Status terminais (status_native) — não devem ser re-despachados
 const STATUS_TERMINAL = ['cancelado', 'canceled', 'delivered', 'fallback_fila'];
@@ -72,6 +73,30 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   const s = Math.sin(dLat / 2) ** 2 +
             Math.cos(rad(a1)) * Math.cos(rad(a2)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+/**
+ * [dist-cascata-v1] Distancia de ROTA real (km) via OpenRouteService (driving-car).
+ * Usada quando o provider nao devolve distancia na cotacao (ex: Uber Direct, cuja
+ * cotacao NAO tem campo distance). Best-effort: retorna null em qualquer falha,
+ * pra cair no haversine sem quebrar o despacho.
+ */
+async function distanciaRotaOrsKm(lat1, lon1, lat2, lon2) {
+  if ([lat1, lon1, lat2, lon2].some((v) => v == null || v === '')) return null;
+  const a1 = Number(lat1), o1 = Number(lon1), a2 = Number(lat2), o2 = Number(lon2);
+  if (![a1, o1, a2, o2].every((n) => Number.isFinite(n))) return null;
+  const key = process.env.ORS_API_KEY;
+  if (!key) return null;
+  const resp = await httpRequest('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': key },
+    body: JSON.stringify({ coordinates: [[o1, a1], [o2, a2]] }),
+  });
+  if (!resp || !resp.ok) return null;
+  const data = resp.json();
+  const m = data && data.features && data.features[0] && data.features[0].properties
+    && data.features[0].properties.summary && data.features[0].properties.summary.distance;
+  return (m != null && Number.isFinite(Number(m)) && Number(m) > 0) ? Number(m) / 1000 : null;
 }
 
 /**
@@ -577,18 +602,41 @@ class DispatchOrchestrator {
       //     Distância: provider quote (mais preciso) → haversine (fallback).
       //     Best-effort: falha não aborta o despacho.
       try {
-        const _veioDoProvider = quote.distanciaKm != null && quote.distanciaKm > 0;
-        const _distKm = _veioDoProvider
-          ? quote.distanciaKm
-          : haversineKm(
-              coleta.latitude, coleta.longitude,
-              entrega.latitude, entrega.longitude
+        // [dist-cascata-v1] fonte da distancia, do mais confiavel ao ultimo recurso:
+        //   1) provider deu rota real (99) | 2) irmao: mesma OS ja com km bom
+        //   3) ORS rota real (driving-car) | 4) haversine (linha reta) = ultimo recurso.
+        // Motivo: a cotacao da Uber Direct NAO devolve distance -> antes caia sempre
+        // no haversine e subestimava o km (e o preco por km).
+        let _distKm = null, _distOrigem = null, _distMetros = null;
+        if (quote.distanciaKm != null && quote.distanciaKm > 0) {
+          _distKm = quote.distanciaKm;
+          _distOrigem = 'provider';
+          _distMetros = quote.distanciaMetros != null ? Math.round(Number(quote.distanciaMetros)) : null;
+        } else {
+          // 2) km de rota ja conhecido na MESMA OS (ex: cotou/despachou na 99 antes)
+          try {
+            const _irmao = await this.pool.query(
+              "SELECT distancia_km, distancia_metros FROM logistics_deliveries WHERE codigo_os = $1 AND distancia_origem IN ('provider', 'provider_irmao', 'ors') AND distancia_km > 0 AND id <> $2 ORDER BY id DESC LIMIT 1",
+              [codigoOS, registro.id]
             );
-        // 🆕 rastro: de onde veio a distancia + metros crus do provider
-        const _distOrigem = _veioDoProvider ? 'provider' : 'haversine';
-        const _distMetros = _veioDoProvider && quote.distanciaMetros != null
-          ? Math.round(Number(quote.distanciaMetros))
-          : null;
+            if (_irmao.rows.length) {
+              _distKm = Number(_irmao.rows[0].distancia_km);
+              _distMetros = _irmao.rows[0].distancia_metros != null ? Math.round(Number(_irmao.rows[0].distancia_metros)) : null;
+              _distOrigem = 'provider_irmao';
+            }
+          } catch (_e) { /* segue pra ORS */ }
+          // 3) ORS rota real
+          if (!(_distKm > 0)) {
+            const _ors = await distanciaRotaOrsKm(coleta.latitude, coleta.longitude, entrega.latitude, entrega.longitude);
+            if (_ors != null && _ors > 0) { _distKm = _ors; _distMetros = Math.round(_ors * 1000); _distOrigem = 'ors'; }
+          }
+          // 4) haversine (ultimo recurso)
+          if (!(_distKm > 0)) {
+            _distKm = haversineKm(coleta.latitude, coleta.longitude, entrega.latitude, entrega.longitude);
+            _distOrigem = 'haversine';
+            _distMetros = null;
+          }
+        }
 
         if (_distKm != null && _distKm > 0) {
           await this.pool.query(
