@@ -541,7 +541,22 @@ function createLogisticsPortalRouter(pool) {
       }
 
       res.set('Cache-Control', 'no-store');
-      res.json({ success: true, total: rows.length, entregas: rows.map(mapearPortal) });
+
+      // MOTO_PROPRIA_V1: anexa as corridas de moto propria (nao-Hub) da loja,
+      // casadas pela MESMA regra do token. So na visao ao vivo (sem data
+      // passada) — sao corridas em execucao agora. Best-effort.
+      let _entregasPortal = rows.map(mapearPortal);
+      if (!temData) {
+        try {
+          const { listarMotoProprias } = require('../core/MotoPropriaResolver');
+          const proprias = await listarMotoProprias(pool, { regraId: req.portal.regra_id });
+          if (Array.isArray(proprias) && proprias.length > 0) _entregasPortal = _entregasPortal.concat(proprias);
+        } catch (eMp) {
+          console.warn('[logistics/portal] moto propria falhou:', eMp.message);
+        }
+      }
+
+      res.json({ success: true, total: _entregasPortal.length, entregas: _entregasPortal });
     } catch (e) {
       console.error('[logistics/portal] erro /deliveries:', e.message);
       res.status(500).json({ erro: 'erro_interno' });

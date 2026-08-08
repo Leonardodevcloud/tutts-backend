@@ -35,6 +35,14 @@ async function initSlaCaptureTables(pool) {
     );
   `);
 
+  // MOTO_PROPRIA_V1: texto do ponto 1 (endereço de coleta) — usado pra casar a
+  // regra de despacho da OS (mesmo match do Hub) e mapear a moto própria pra
+  // loja certa no portal. NULL nas capturas antigas; preenchido a partir daqui.
+  await pool.query(`
+    ALTER TABLE sla_capturas
+      ADD COLUMN IF NOT EXISTS coleta_texto TEXT
+  `).catch(e => console.warn('[sla-capture] coleta_texto:', e.message));
+
   // Índice pra busca do worker
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_sla_capturas_pendentes

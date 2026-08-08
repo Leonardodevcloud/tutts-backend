@@ -624,10 +624,24 @@ function createLogisticsRouter(pool, verificarToken, verificarAdmin, registrarAu
       // MESMA funcao de normalizacao — uma implementacao so.
       await resolverClienteEmLote(pool, rows);
 
+      // MOTO_PROPRIA_V1: opcionalmente anexa as corridas de moto propria (nao-Hub)
+      // no MESMO shape do card. So quando o painel pede (?incluir_proprios=1).
+      // Read-only e best-effort: nunca derruba a lista do Hub se falhar.
+      let _entregas = rows.map(mapearCanonicoParaLegado);
+      if (['1', 'true', 'sim'].includes(String(req.query.incluir_proprios || '').toLowerCase())) {
+        try {
+          const { listarMotoProprias } = require('./core/MotoPropriaResolver');
+          const proprias = await listarMotoProprias(pool);
+          if (Array.isArray(proprias) && proprias.length > 0) _entregas = _entregas.concat(proprias);
+        } catch (eMp) {
+          console.warn('[logistics/routes] moto propria (admin) falhou:', eMp.message);
+        }
+      }
+
       res.json({
         success: true,
         total: parseInt(countRows[0].total, 10),
-        entregas: rows.map(mapearCanonicoParaLegado),
+        entregas: _entregas,
       });
     } catch (err) {
       console.error('[logistics/routes] GET /deliveries erro:', err.message);

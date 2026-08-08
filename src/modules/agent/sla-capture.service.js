@@ -528,16 +528,22 @@ async function processarCaptura(pool, registro) {
     }
 
     // 4. Marca como enviado
+    // MOTO_PROPRIA_V1: guarda o ponto 1 (endereço de coleta) pra casar a regra
+    // de despacho da OS e mapear a moto própria pro portal certo.
+    const _coletaTexto = (resultado && resultado.debugInfo && Array.isArray(resultado.debugInfo.pontosBrutos))
+      ? ((resultado.debugInfo.pontosBrutos.find((p) => Number(p && p.numero) === 1) || {}).texto || null)
+      : null;
     await pool.query(
       `UPDATE sla_capturas
        SET status = 'enviado',
            tentativas = $1,
            pontos_json = $2,
            mensagem_enviada = $3,
+           coleta_texto = COALESCE($5, coleta_texto),
            enviado_em = NOW(),
            atualizado_em = NOW()
        WHERE id = $4`,
-      [tentativaAtual, JSON.stringify(pontos), texto, id]
+      [tentativaAtual, JSON.stringify(pontos), texto, id, _coletaTexto]
     );
 
     log(`✅ OS ${os_numero} enviada no grupo ${cliente_cod}`);
