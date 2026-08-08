@@ -12,8 +12,15 @@
 //
 // QUEM E "MOTO PROPRIA":
 //   snapshot em_execucao=TRUE, situacao='em_execucao' (JA tem motoboy) E a OS
-//   NAO existe em logistics_deliveries (nao passou pelo Hub). O JOIN com
-//   sla_capturas garante que so entram OS de cliente rastreado (com dado rico).
+//   NAO tem uma corrida do Hub ATIVA. O JOIN com sla_capturas garante que so
+//   entram OS de cliente rastreado (com dado rico).
+//
+//   IMPORTANTE (fluxo real): a maioria das moto proprias JA PASSOU pelo Hub —
+//   o Hub nao achou motoboy, o operador CANCELOU e relancou com moto propria.
+//   Logo a OS TEM linha em logistics_deliveries, mas CANCELED/FAILED/RETURNED.
+//   Por isso NAO excluimos quem so tem linha terminal: excluimos apenas quem
+//   tem uma linha do Hub ATIVA (ainda rodando no Hub) ou DELIVERED (entregue
+//   pelo Hub). Assim recuperamos as corridas que caiu no moto proprio.
 //
 // CASAMENTO DE REGRA (portal): reusa normalizarEnderecoParaMatch + a MESMA
 // regra de substring do DispatchRuleMatcher (cliente_identificador >=4 /
@@ -100,16 +107,26 @@ async function listarMotoProprias(pool, opts = {}) {
               s.cod_profissional, s.link_rastreio, s.cod_rastreio,
               s.deadline, s.prazo_min, s.distancia_km, s.centro_custo,
               s.horario_inicio, s.primeira_vista_em, s.ultima_vista_em,
-              c.pontos_json, c.coleta_texto
+              c.pontos_json, c.coleta_texto,
+              EXISTS (
+                SELECT 1 FROM logistics_deliveries ld2
+                 WHERE ld2.codigo_os::text = s.os_numero
+                   AND COALESCE(ld2.status_canonico,'') IN ('CANCELED','FAILED','RETURNED')
+              ) AS veio_do_hub
          FROM sla_monitor_snapshot s
          JOIN sla_capturas c ON c.os_numero = s.os_numero
         WHERE s.em_execucao = TRUE
           AND s.situacao = 'em_execucao'
           AND s.cod_profissional IS NOT NULL
           AND s.cod_profissional <> ''
+          -- Exclui apenas se existe corrida do Hub ATIVA (ainda rodando) ou
+          -- DELIVERED (entregue pelo Hub). CANCELED/FAILED/RETURNED = o Hub
+          -- desistiu -> a OS pode ter saido com moto propria -> ELEGIVEL.
           AND NOT EXISTS (
             SELECT 1 FROM logistics_deliveries ld
              WHERE ld.codigo_os::text = s.os_numero
+               AND ld.cancelado_por IS NULL
+               AND COALESCE(ld.status_canonico,'') NOT IN ('CANCELED','FAILED','RETURNED')
           )
         ORDER BY s.primeira_vista_em DESC
         LIMIT ${LIMITE}`
@@ -141,6 +158,9 @@ async function listarMotoProprias(pool, opts = {}) {
       // marcadores da moto propria
       is_moto_propria:    true,
       provider_code:      'proprio',
+      // true = ja tentou o Hub antes (cancelada/falhou) e caiu no moto proprio.
+      // Serve pro card mostrar um selo tipo "tentou Hub" (opcional no front).
+      veio_do_hub:        row.veio_do_hub === true,
 
       // id sintetico (nao ha linha em logistics_deliveries) — key estavel no
       // React; nenhuma acao de Hub aceita este id (o front esconde as acoes).
