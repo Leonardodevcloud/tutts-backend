@@ -610,7 +610,8 @@ class DispatchOrchestrator {
         let _distKm = null, _distOrigem = null, _distMetros = null;
         if (quote.distanciaKm != null && quote.distanciaKm > 0) {
           _distKm = quote.distanciaKm;
-          _distOrigem = 'provider';
+          // [km-irmao-v1] se o km veio emprestado de outra cotacao, rotula a origem
+          _distOrigem = quote.distanciaKmDeIrmao ? ('cotacao_' + quote.distanciaKmDeIrmao) : 'provider';
           _distMetros = quote.distanciaMetros != null ? Math.round(Number(quote.distanciaMetros)) : null;
         } else {
           // 2) km de rota ja conhecido na MESMA OS (ex: cotou/despachou na 99 antes)

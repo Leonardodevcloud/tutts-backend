@@ -190,6 +190,21 @@ class StrategySelector {
     const vencedor = sucesso[0];
     const cotV = vencedor.resultado;
 
+    // [km-irmao-v1] Se o vencedor nao trouxe km de rota (ex: Uber, cuja cotacao
+    // NAO tem campo distance), pega emprestado o km de rota de uma cotacao IRMA
+    // que trouxe (ex: 99 cotada na mesma corrida). Rota real, zero custo, sem ORS.
+    if (!(cotV.cotacao && cotV.cotacao.distanciaKm > 0)) {
+      const _irmaoComKm = sucesso.find((s) => s.resultado && s.resultado.cotacao && s.resultado.cotacao.distanciaKm > 0);
+      if (_irmaoComKm && cotV.cotacao) {
+        cotV.cotacao.distanciaKm = _irmaoComKm.resultado.cotacao.distanciaKm;
+        cotV.cotacao.distanciaMetros = _irmaoComKm.resultado.cotacao.distanciaMetros != null
+          ? _irmaoComKm.resultado.cotacao.distanciaMetros
+          : Math.round(_irmaoComKm.resultado.cotacao.distanciaKm * 1000);
+        cotV.cotacao.distanciaKmDeIrmao = _irmaoComKm.providerCode; // rastro da origem
+        console.log(`📐 [StrategySelector] OS ${codigoOS}: ${vencedor.providerCode} sem km na cotacao -> emprestado de ${_irmaoComKm.providerCode} (${cotV.cotacao.distanciaKm}km)`);
+      }
+    }
+
     // Log da decisão comparativa
     const comparativo = sucesso.map(s => ({
       provider: s.providerCode,
